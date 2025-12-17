@@ -905,6 +905,7 @@ class SchedulerEngine(QObject):
         comment = (entry.get("comment") or "").strip()
         vfo_raw = (entry.get("vfo") or "A").strip().upper()
         vfo: Optional[str] = vfo_raw if vfo_raw in ("A", "B") else None
+        auto_tune = bool(entry.get("auto_tune"))
 
         # Update internal state regardless of whether we can actually
         # command the rig. This allows UI elements (Net Control tabs,
@@ -1049,11 +1050,18 @@ class SchedulerEngine(QObject):
         if ok:
             if control_mode == "FLRIG":
                 # Optionally key the tuner if the rig supports it.
-                try:
-                    if hasattr(self.rig, "tune"):
-                        self.rig.tune()
-                except Exception as e:
-                    log.error("SchedulerEngine: error invoking rig.tune(): %s", e)
+                if auto_tune:
+                    try:
+                        if hasattr(self.rig, "tune"):
+                            self.rig.tune()
+                    except Exception as e:
+                        log.error("SchedulerEngine: error invoking rig.tune(): %s", e)
+                # Keep JS8Call dial in sync even when FLRig controls the rig
+                if self.js8:
+                    try:
+                        self.js8.set_frequency(freq_hz, offset_hz=js8_tune or 0)
+                    except Exception as e:
+                        log.debug("SchedulerEngine: JS8Call set_frequency (FLRig control) failed: %s", e)
 
             self._last_entry_key = entry_key
             self._last_source = source
