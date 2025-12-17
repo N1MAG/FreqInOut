@@ -29,6 +29,7 @@ DAY_NAMES = [
     "Friday",
     "Saturday",
 ]
+DAY_NAMES_UPPER = [d.upper() for d in DAY_NAMES]
 
 
 class FreqPlannerTab(QWidget):
@@ -161,6 +162,50 @@ class FreqPlannerTab(QWidget):
         hour_end = hour * 60 + 59
         return not (end_min < hour_start or start_min > hour_end)
 
+    def _next_day(self, day_name_upper: str) -> str:
+        try:
+            idx = DAY_NAMES_UPPER.index(day_name_upper)
+            return DAY_NAMES[(idx + 1) % 7]
+        except Exception:
+            return DAY_NAMES[0]
+
+    def _expand_hours_for_day(self, day_val: str, start_min: int, end_min: int, *, early: int = 0) -> List[tuple[str, int]]:
+        """
+        Expand a schedule row into (day_name, hour) tuples, handling ALL and overnight spans.
+        Times are in minutes from 00:00 UTC. early applies only to net rows (already adjusted).
+        """
+        targets: List[str] = []
+        day_txt = (day_val or "ALL").strip().upper()
+        if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER:
+            targets = DAY_NAMES[:]  # all days in Title case
+        else:
+            # Title-case version from canonical list
+            targets = [DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]]
+
+        hours: List[tuple[str, int]] = []
+        smin = start_min
+        emin = end_min
+        overnight = smin > emin
+
+        for day_name in targets:
+            day_upper = day_name.upper()
+            if not overnight:
+                for h in range(24):
+                    if self._hour_overlaps(smin, emin, h):
+                        hours.append((day_name, h))
+            else:
+                # Segment 1: from start to 23:59 on current day
+                for h in range(24):
+                    if self._hour_overlaps(smin, 23 * 60 + 59, h):
+                        hours.append((day_name, h))
+                # Segment 2: from 00:00 to end on next day
+                next_day = self._next_day(day_upper)
+                for h in range(24):
+                    if self._hour_overlaps(0, emin, h):
+                        hours.append((next_day, h))
+
+        return hours
+
     # ------------- core rebuild ------------- #
 
     def rebuild_table(self):
@@ -190,32 +235,28 @@ class FreqPlannerTab(QWidget):
         for row in net_sched:
             try:
                 day = row.get("day_utc", "")
-                if day not in DAY_NAMES:
-                    continue
                 smin = self._parse_hhmm(row.get("start_utc", ""))
                 emin = self._parse_hhmm(row.get("end_utc", ""))
                 if smin is None or emin is None:
                     continue
                 early = int(row.get("early_checkin", "0") or 0)
                 smin = max(0, smin - early)
-                for hour in range(24):
-                    if self._hour_overlaps(smin, emin, hour):
-                        key = (day, hour)
-                        net_by_day_hour.setdefault(key, []).append(row)
+                for dname, hour in self._expand_hours_for_day(day, smin, emin, early=early):
+                    net_by_day_hour.setdefault((dname, hour), []).append(row)
             except Exception:
                 continue
 
-        # Precompute hf schedule by hour (applies to all days)
-        hf_by_hour: Dict[int, List[Dict]] = {}
+        # Precompute hf schedule by (day, hour) honoring overnight
+        hf_by_day_hour: Dict[tuple, List[Dict]] = {}
         for row in hf_sched:
             try:
                 smin = self._parse_hhmm(row.get("start_utc", ""))
                 emin = self._parse_hhmm(row.get("end_utc", ""))
                 if smin is None or emin is None:
                     continue
-                for hour in range(24):
-                    if self._hour_overlaps(smin, emin, hour):
-                        hf_by_hour.setdefault(hour, []).append(row)
+                day = row.get("day_utc", "")
+                for dname, hour in self._expand_hours_for_day(day, smin, emin):
+                    hf_by_day_hour.setdefault((dname, hour), []).append(row)
             except Exception:
                 continue
 
@@ -276,6 +317,20 @@ class FreqPlannerTab(QWidget):
             for col in range(self.COL_DAY_OFFSET, 9):
                 day_name = DAY_NAMES[col - self.COL_DAY_OFFSET]
                 nets_here = net_by_day_hour.get((day_name, hour), [])
+                hf_rows = hf_by_day_hour.get((day_name, hour), [])
+                bands = []
+                for r in hf_rows:
+                    b = (r.get("band") or "").strip()
+                    if b:
+                        bands.append(b)
+                seen = set()
+                bands_uniq = []
+                for b in bands:
+                    if b not in seen:
+                        seen.add(b)
+                        bands_uniq.append(b)
+                band_label = " / ".join(bands_uniq)
+
                 net_names = []
                 for n in nets_here:
                     nn = (n.get("net_name") or "").strip()
