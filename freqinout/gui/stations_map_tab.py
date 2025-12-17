@@ -366,6 +366,8 @@ class StationsMapTab(QWidget):
                 self._last_js8_load_ts = float(self.settings.get("js8_links_last_load_utc", 0) or 0)
         except Exception:
             self._last_js8_load_ts = 0.0
+        self._js8_timer: Optional[QTimer] = None
+        self._refresh_timer: Optional[QTimer] = None
 
         self._build_ui()
         self._load_operator_history()
@@ -386,6 +388,8 @@ class StationsMapTab(QWidget):
         self._js8_timer.setInterval(5 * 60 * 1000)  # 5 minutes
         self._js8_timer.timeout.connect(lambda: self._auto_ingest_and_refresh(initial=False))
         self._js8_timer.start()
+        # Start display refresh timer (separate from ingest) using selected interval
+        self._start_refresh_timer()
 
     def _record_exit_time(self):
         try:
@@ -423,6 +427,22 @@ class StationsMapTab(QWidget):
         """
         self._ingest_js8_logs()
         self._render_map(preserve_view=True)
+
+    def _start_refresh_timer(self):
+        try:
+            interval_min = int(self.auto_refresh_combo.currentData())
+        except Exception:
+            interval_min = 15
+        if self._refresh_timer is None:
+            self._refresh_timer = QTimer(self)
+        self._refresh_timer.stop()
+        self._refresh_timer.setInterval(max(1, interval_min) * 60 * 1000)
+        self._refresh_timer.timeout.connect(lambda: self._render_map(preserve_view=True))
+        self._refresh_timer.start()
+
+    def _on_auto_refresh_changed(self, idx: int):
+        # restart timer with new interval
+        self._start_refresh_timer()
 
     @staticmethod
     def _parse_link_selection(data) -> tuple[str, str]:
@@ -519,6 +539,16 @@ class StationsMapTab(QWidget):
             completer.setCaseSensitivity(Qt.CaseInsensitive)
         ctrl_row.addWidget(self.relay_target_combo)
         ctrl_row.addWidget(self.show_regions_chk)
+
+        # Auto-refresh interval for links
+        ctrl_row.addWidget(QLabel("Auto-refresh"))
+        self.auto_refresh_combo = QComboBox()
+        self._auto_refresh_options = [5, 15, 30, 60]
+        for minutes in self._auto_refresh_options:
+            self.auto_refresh_combo.addItem(f"{minutes} min", minutes)
+        self.auto_refresh_combo.setCurrentIndex(1)  # default 15
+        self.auto_refresh_combo.currentIndexChanged.connect(self._on_auto_refresh_changed)
+        ctrl_row.addWidget(self.auto_refresh_combo)
 
         # Manual refresh for platforms where signals may not fire reliably
         refresh_btn = QPushButton("Refresh Links")
