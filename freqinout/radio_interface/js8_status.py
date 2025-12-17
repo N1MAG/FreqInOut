@@ -169,10 +169,6 @@ class JS8ControlClient(JS8StatusClient):
                 except BaseException as e:
                     log.warning("JS8ControlClient failed to set offset=%s: %s", offset_hz, e)
             log.info("JS8ControlClient set dial=%d Hz%s", dial_hz, "" if offset_hz is None else f" offset={offset_hz} Hz")
-            try:
-                client.stop()
-            except BaseException:
-                pass
             return True
         except BaseException as e:
             log.error("JS8ControlClient failed to set frequency: %s", e)
@@ -187,10 +183,6 @@ class JS8ControlClient(JS8StatusClient):
             if client is None:
                 return None
             hz = client.settings.get_freq()
-            try:
-                client.stop()
-            except BaseException:
-                pass
             return int(hz) if hz is not None else None
         except BaseException as e:
             log.debug("JS8ControlClient get_frequency failed: %s", e)
@@ -205,10 +197,6 @@ class JS8ControlClient(JS8StatusClient):
             if client is None:
                 return None
             off = client.settings.get_offset()
-            try:
-                client.stop()
-            except BaseException:
-                pass
             return int(off) if off is not None else None
         except BaseException as e:
             log.debug("JS8ControlClient get_offset failed: %s", e)
@@ -225,10 +213,6 @@ class JS8ControlClient(JS8StatusClient):
             offset_hz = int(offset_hz)
             client.settings.set_offset(offset_hz)
             log.info("JS8ControlClient set offset=%d Hz", offset_hz)
-            try:
-                client.stop()
-            except BaseException:
-                pass
             return True
         except BaseException as e:
             log.error("JS8ControlClient failed to set offset: %s", e)
