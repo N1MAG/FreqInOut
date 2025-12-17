@@ -762,6 +762,13 @@ class StationsMapTab(QWidget):
             log.error("StationsMap: failed to load js8_links: %s", e)
             return links, {}
 
+        # Defensive recency filter in Python too (covers odd SQLite typing differences across platforms)
+        if ts_cut:
+            before = len(rows)
+            rows = [r for r in rows if r and len(r) > 0 and isinstance(r[0], (int, float)) and r[0] >= ts_cut]
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("StationsMap: recency filter %s removed %s rows", max_age_sec, before - len(rows))
+
         # keep best SNR per pair with filters
         best: Dict[tuple[str, str], Optional[float]] = {}
         stat: Dict[str, Dict] = {}
