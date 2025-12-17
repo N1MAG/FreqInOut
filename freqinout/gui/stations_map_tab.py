@@ -363,6 +363,15 @@ class StationsMapTab(QWidget):
         self._refresh_band_options()
         self._render_map()
 
+    @staticmethod
+    def _parse_link_selection(data) -> tuple[str, str]:
+        """
+        Normalize link-mode selection from the combo. PySide may return list/tuple.
+        """
+        if isinstance(data, (list, tuple)) and len(data) >= 2:
+            return str(data[0]), str(data[1])
+        return "off", ""
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
@@ -678,9 +687,7 @@ class StationsMapTab(QWidget):
         else:
             self.link_mode_combo.setCurrentIndex(0)
         self.link_mode_combo.blockSignals(False)
-        data = self.link_mode_combo.currentData()
-        if isinstance(data, tuple):
-            self.link_mode, self.link_value = data[0], data[1]
+        self.link_mode, self.link_value = self._parse_link_selection(self.link_mode_combo.currentData())
 
     def _refresh_relay_targets(self):
         calls = sorted({r.get("callsign", "") for r in self.operator_rows if r.get("callsign")})
@@ -717,7 +724,10 @@ class StationsMapTab(QWidget):
         for pt in self.stations:
             pos_map[pt.callsign.upper()] = (pt.lat, pt.lon)
 
-        mode, selection_value = link_selection if isinstance(link_selection, tuple) else ("off", "")
+        if isinstance(link_selection, (list, tuple)) and len(link_selection) >= 2:
+            mode, selection_value = link_selection[0], link_selection[1]
+        else:
+            mode, selection_value = "off", ""
         selection_value = (selection_value or "").upper() if mode == "region" else (selection_value or "")
         relay_target = (relay_target or "").strip().upper()
         if mode == "off" and not relay_target:
@@ -956,7 +966,9 @@ class StationsMapTab(QWidget):
             links: List[Dict] = []
             if self._links_active():
                 band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
-                selection = self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
+                selection = self._parse_link_selection(
+                    self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
+                )
                 my_call = ""
                 try:
                     my_call = (self.settings.get("operator_callsign", "") or "").upper()
@@ -1572,10 +1584,7 @@ function addGridLabels(res, level, bounds) {
 
     def _on_link_mode_changed(self, idx: int):
         data = self.link_mode_combo.itemData(idx) if hasattr(self, "link_mode_combo") else ("off", "")
-        if isinstance(data, tuple):
-            self.link_mode, self.link_value = data[0], data[1]
-        else:
-            self.link_mode, self.link_value = "off", ""
+        self.link_mode, self.link_value = self._parse_link_selection(data)
         if self.link_mode == "off":
             self.relay_target = ""
             try:
