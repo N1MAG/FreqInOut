@@ -1538,6 +1538,10 @@ function addGridLabels(res, level, bounds) {
       document.getElementById('map').innerHTML = '<h3>Leaflet failed to load.</h3>';
     }} else {{
     const map = L.map('map', {{maxZoom: {max_zoom}}}).setView([{init_lat}, {init_lon}], {init_zoom});
+    // Dedicated pane for stations to keep them above overlays
+    map.createPane('stationsPane');
+    map.getPane('stationsPane').style.zIndex = 650;
+    map.getPane('stationsPane').style.pointerEvents = 'auto';
     window._leafletMap = map;
     window._lastView = {{lat: {init_lat}, lon: {init_lon}, zoom: {init_zoom}}};
     {tile_layer}
@@ -1612,7 +1616,8 @@ function addGridLabels(res, level, bounds) {
         color: '#1976d2',
         weight: 1,
         fillColor: '#4FC3F7',
-        fillOpacity: 0.8
+        fillOpacity: 0.8,
+        pane: 'stationsPane'
       }}).addTo(map);
       const tipText = (m.tooltip || m.title || '') +
         (m.last_seen ? '<br/><b>Last seen:</b> ' + m.last_seen : '') +
@@ -1633,12 +1638,12 @@ function addGridLabels(res, level, bounds) {
           className: 'label-text',
           html: m.label
         }});
-        const labelMarker = L.marker([m.lat, m.lon], {{icon}}).addTo(map);
+        const labelMarker = L.marker([m.lat, m.lon], {{icon, pane:'stationsPane'}}).addTo(map);
         labelMarker.on('mouseover', function() {{
-          if ({str(self.show_callsigns).lower()}) {{ showDetail(tipText); }}
+          showDetail(tipText);
         }});
         labelMarker.on('click', function() {{
-          if ({str(self.show_callsigns).lower()}) {{ showDetail(tipText); }}
+          showDetail(tipText);
         }});
       }}
     }});
