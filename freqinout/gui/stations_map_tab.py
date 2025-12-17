@@ -370,6 +370,14 @@ class StationsMapTab(QWidget):
         """
         if isinstance(data, (list, tuple)) and len(data) >= 2:
             return str(data[0]), str(data[1])
+        if isinstance(data, str):
+            txt = data.strip()
+            # Accept stringified tuple/list e.g. "('all', '')" or "['all', '']"
+            if txt.startswith(("(", "[")) and "," in txt:
+                inner = txt.strip("()[]")
+                parts = [p.strip().strip("'\"") for p in inner.split(",")]
+                if len(parts) >= 2:
+                    return parts[0], parts[1]
         return "off", ""
 
     def _build_ui(self):
@@ -936,7 +944,7 @@ class StationsMapTab(QWidget):
         combo_mode, _ = self._parse_link_selection(
             self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
         )
-        return (combo_mode and combo_mode != "off") or bool((self.relay_target or "").strip())
+        return (combo_mode and combo_mode.lower() != "off") or bool((self.relay_target or "").strip())
 
     # ------------- Map rendering ------------- #
     def _render_map(self, preserve_view: bool = True):
@@ -1595,7 +1603,7 @@ function addGridLabels(res, level, bounds) {
     def _on_link_mode_changed(self, idx: int):
         data = self.link_mode_combo.itemData(idx) if hasattr(self, "link_mode_combo") else ("off", "")
         self.link_mode, self.link_value = self._parse_link_selection(data)
-        if self.link_mode == "off":
+        if (self.link_mode or "").lower() == "off":
             self.relay_target = ""
             try:
                 self.relay_target_combo.blockSignals(True)
