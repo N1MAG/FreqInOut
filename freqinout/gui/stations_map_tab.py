@@ -1863,14 +1863,78 @@ class JS8LogLinkIndexer:
         if not rows:
             return 0
 
+        def _freq_to_band(freq_hz: Optional[float]) -> Optional[str]:
+            if freq_hz is None:
+                return None
+            try:
+                mhz = float(freq_hz) / 1_000_000.0
+            except Exception:
+                return None
+            bands = [
+                ("160M", 1.8, 2.0),
+                ("80M", 3.5, 4.0),
+                ("60M", 5.0, 5.5),
+                ("40M", 7.0, 7.3),
+                ("30M", 10.1, 10.15),
+                ("20M", 14.0, 14.35),
+                ("17M", 18.068, 18.168),
+                ("15M", 21.0, 21.45),
+                ("12M", 24.89, 24.99),
+                ("10M", 28.0, 29.7),
+                ("6M", 50.0, 54.0),
+                ("2M", 144.0, 148.0),
+            ]
+            for name, lo, hi in bands:
+                if lo <= mhz <= hi:
+                    return name
+            return None
+
+        # De-duplicate by station pair + band, averaging SNR and keeping the newest timestamp/frequency.
+        agg: Dict[tuple, Dict] = {}
+        for ts, origin, dest, snr, freq_hz in rows:
+            a = (origin or "").strip().upper()
+            b = (dest or "").strip().upper()
+            if not a or not b:
+                continue
+            band = _freq_to_band(freq_hz)
+            key = (tuple(sorted((a, b))), band)
+            entry = agg.setdefault(key, {"last_ts": ts, "snr_sum": 0.0, "snr_count": 0, "freq_hz": freq_hz})
+            if ts and (entry["last_ts"] is None or ts > entry["last_ts"]):
+                entry["last_ts"] = ts
+                if freq_hz is not None:
+                    entry["freq_hz"] = freq_hz
+            try:
+                if snr is not None:
+                    entry["snr_sum"] += float(snr)
+                    entry["snr_count"] += 1
+            except Exception:
+                pass
+            if entry["freq_hz"] is None and freq_hz is not None:
+                entry["freq_hz"] = freq_hz
+
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         try:
             self._ensure_table(conn)
             self._clear_table(conn)
-            payload = [
-                (ts, origin, dest, snr, None, freq_hz, 0, None, 0) for ts, origin, dest, snr, freq_hz in rows
-            ]
+            payload = []
+            for key, entry in agg.items():
+                pair, band = key
+                origin, dest = pair
+                avg_snr = entry["snr_sum"] / entry["snr_count"] if entry["snr_count"] else None
+                payload.append(
+                    (
+                        entry["last_ts"],
+                        origin,
+                        dest,
+                        avg_snr,
+                        band,
+                        entry.get("freq_hz"),
+                        0,
+                        None,
+                        0,
+                    )
+                )
             conn.executemany(
                 """
                 INSERT INTO js8_links
