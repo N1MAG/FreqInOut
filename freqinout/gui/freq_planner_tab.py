@@ -297,22 +297,6 @@ class FreqPlannerTab(QWidget):
             local_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(hour, self.COL_LOCAL, local_item)
 
-            # HF bands applying at this hour
-            hf_rows = hf_by_hour.get(hour, [])
-            bands = []
-            for r in hf_rows:
-                b = (r.get("band") or "").strip()
-                if b:
-                    bands.append(b)
-            # unique preserve order
-            seen = set()
-            bands_uniq = []
-            for b in bands:
-                if b not in seen:
-                    seen.add(b)
-                    bands_uniq.append(b)
-            band_label = " / ".join(bands_uniq)
-
             # Day columns 2..8
             for col in range(self.COL_DAY_OFFSET, 9):
                 day_name = DAY_NAMES[col - self.COL_DAY_OFFSET]
