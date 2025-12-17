@@ -933,7 +933,10 @@ class StationsMapTab(QWidget):
         return 7.0 <= lat <= 83.0 and -172.0 <= lon <= -50.0
 
     def _links_active(self) -> bool:
-        return (self.link_mode and self.link_mode != "off") or bool((self.relay_target or "").strip())
+        combo_mode, _ = self._parse_link_selection(
+            self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
+        )
+        return (combo_mode and combo_mode != "off") or bool((self.relay_target or "").strip())
 
     # ------------- Map rendering ------------- #
     def _render_map(self, preserve_view: bool = True):
@@ -1609,8 +1612,7 @@ function addGridLabels(res, level, bounds) {
 
     def _on_band_changed(self, idx: int):
         self.selected_band = self.band_combo.itemText(idx)
-        if self._links_active():
-            self._render_map()
+        self._render_map()
 
     def _on_recency_changed(self, idx: int):
         val = self.recency_combo.itemText(idx)
@@ -1626,8 +1628,7 @@ function addGridLabels(res, level, bounds) {
             "7d": 7 * 24 * 60 * 60,
         }
         self.recency_seconds = mapping.get(val, None)
-        if self._links_active():
-            self._render_map()
+        self._render_map()
 
     def _on_relay_target_changed(self, text: str):
         self.relay_target = (text or "").strip().upper()
