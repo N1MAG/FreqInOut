@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Set
 import math
 import time
+import logging
 
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtWidgets import (
