@@ -13,7 +13,7 @@ import math
 import time
 import logging
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QUrl, Qt, QTimer, QCoreApplication
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -360,10 +360,68 @@ class StationsMapTab(QWidget):
         except Exception:
             self.settings = None
 
+        self._last_js8_load_ts: float = 0.0
+        try:
+            if self.settings:
+                self._last_js8_load_ts = float(self.settings.get("js8_links_last_load_utc", 0) or 0)
+        except Exception:
+            self._last_js8_load_ts = 0.0
+
         self._build_ui()
         self._load_operator_history()
         self._refresh_band_options()
         self._render_map()
+        self._start_js8_ingest_timer()
+        # Initial ingest to catch up since last run (looks back to last exit time if available)
+        QTimer.singleShot(500, lambda: self._auto_ingest_and_refresh(initial=True))
+
+    def _start_js8_ingest_timer(self):
+        try:
+            app = QCoreApplication.instance()
+            if app:
+                app.aboutToQuit.connect(self._record_exit_time)
+        except Exception:
+            pass
+        self._js8_timer = QTimer(self)
+        self._js8_timer.setInterval(5 * 60 * 1000)  # 5 minutes
+        self._js8_timer.timeout.connect(lambda: self._auto_ingest_and_refresh(initial=False))
+        self._js8_timer.start()
+
+    def _record_exit_time(self):
+        try:
+            if self.settings:
+                self.settings.set("last_exit_utc", time.time())
+        except Exception:
+            pass
+
+    def _ingest_js8_logs(self) -> int:
+        """
+        Run JS8 log ingestion (DIRECTED/ALL) and persist last load timestamp.
+        """
+        if not self.settings:
+            return 0
+        try:
+            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            indexer = JS8LogLinkIndexer(self.settings, db_path)
+            count = indexer.update()
+            ts = time.time()
+            self._last_js8_load_ts = ts
+            try:
+                self.settings.set("js8_links_last_load_utc", ts)
+            except Exception:
+                pass
+            log.info("StationsMap: JS8 traffic ingested (%s rows)", count)
+            return count
+        except Exception as e:
+            log.error("StationsMap: JS8 log ingest failed: %s", e)
+            return 0
+
+    def _auto_ingest_and_refresh(self, initial: bool = False):
+        """
+        Background ingest and refresh map. Used on timer and manual refresh.
+        """
+        self._ingest_js8_logs()
+        self._render_map(preserve_view=True)
 
     @staticmethod
     def _parse_link_selection(data) -> tuple[str, str]:
@@ -463,7 +521,7 @@ class StationsMapTab(QWidget):
 
         # Manual refresh for platforms where signals may not fire reliably
         refresh_btn = QPushButton("Refresh Links")
-        refresh_btn.clicked.connect(lambda: self._render_map(preserve_view=True))
+        refresh_btn.clicked.connect(lambda: self._auto_ingest_and_refresh(initial=False))
         ctrl_row.addWidget(refresh_btn)
 
         ctrl_row.addStretch()
