@@ -404,10 +404,11 @@ class StationsMapTab(QWidget):
             db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
             indexer = JS8LogLinkIndexer(self.settings, db_path)
             count = indexer.update()
-            ts = time.time()
-            self._last_js8_load_ts = ts
+            # Track the most recent timestamp from the ingested data if available
+            latest_ts = max(indexer._ensure_latest_ts(last_default=time.time()), time.time())
+            self._last_js8_load_ts = latest_ts
             try:
-                self.settings.set("js8_links_last_load_utc", ts)
+                self.settings.set("js8_links_last_load_utc", latest_ts)
             except Exception:
                 pass
             log.info("StationsMap: JS8 traffic ingested (%s rows)", count)
@@ -1928,6 +1929,21 @@ class JS8LogLinkIndexer:
         conn.execute("DELETE FROM js8_links")
         conn.commit()
 
+    def _ensure_latest_ts(self, last_default: float = 0.0) -> float:
+        """
+        Return the latest timestamp from js8_links or provided default.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.execute("SELECT MAX(ts) FROM js8_links")
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0]:
+                return float(row[0])
+        except Exception:
+            pass
+        return float(last_default or 0.0)
+
     # -------- public API -------- #
     def update(self) -> int:
         """
@@ -1980,12 +1996,21 @@ class JS8LogLinkIndexer:
             return None
 
         # De-duplicate by station pair + band, averaging SNR and keeping the newest timestamp/frequency.
+        last_seen: Dict[str, float] = {}
         agg: Dict[tuple, Dict] = {}
         for ts, origin, dest, snr, freq_hz in rows:
             a = (origin or "").strip().upper()
             b = (dest or "").strip().upper()
             if not a or not b:
                 continue
+            try:
+                if ts:
+                    if ts > last_seen.get(a, 0):
+                        last_seen[a] = ts
+                    if ts > last_seen.get(b, 0):
+                        last_seen[b] = ts
+            except Exception:
+                pass
             band = _freq_to_band(freq_hz)
             key = (tuple(sorted((a, b))), band)
             entry = agg.setdefault(key, {"last_ts": ts, "snr_sum": 0.0, "snr_count": 0, "freq_hz": freq_hz})
@@ -2033,6 +2058,18 @@ class JS8LogLinkIndexer:
                 """,
                 payload,
             )
+            # Update last_seen_utc per callsign using most recent ts from source logs
+            try:
+                for cs, ts_val in last_seen.items():
+                    if not cs or not ts_val:
+                        continue
+                    iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
+                    conn.execute(
+                        "UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?",
+                        (iso, cs, cs),
+                    )
+            except Exception as e:
+                log.debug("JS8LogLinkIndexer: failed to stamp last_seen_utc: %s", e)
             conn.commit()
             return len(payload)
         finally:
