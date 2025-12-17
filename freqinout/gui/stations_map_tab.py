@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QCheckBox,
     QComboBox,
+    QPushButton,
 )
 
 try:
@@ -458,6 +459,11 @@ class StationsMapTab(QWidget):
             completer.setCaseSensitivity(Qt.CaseInsensitive)
         ctrl_row.addWidget(self.relay_target_combo)
         ctrl_row.addWidget(self.show_regions_chk)
+
+        # Manual refresh for platforms where signals may not fire reliably
+        refresh_btn = QPushButton("Refresh Links")
+        refresh_btn.clicked.connect(lambda: self._render_map(preserve_view=True))
+        ctrl_row.addWidget(refresh_btn)
 
         ctrl_row.addStretch()
         layout.addLayout(ctrl_row)
