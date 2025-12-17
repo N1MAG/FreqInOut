@@ -733,6 +733,12 @@ class JS8CallNetControlTab(QWidget):
         try:
             client = pyjs8call.Client(port=port)
             client.start()
+            try:
+                if hasattr(client, "stop"):
+                    client._stop_noop = client.stop
+                    client.stop = lambda *a, **k: None
+            except Exception:
+                pass
             self._js8_client = client
             return client
         except BaseException as e:

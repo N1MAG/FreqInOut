@@ -1583,7 +1583,7 @@ function addGridLabels(res, level, bounds) {
     const detailPanel = L.control({{position: 'topright'}});
     detailPanel.onAdd = function() {{
       this._div = L.DomUtil.create('div', 'detail-panel');
-      this._div.innerHTML = '<b>Station Detail</b><br/>Enable Show Callsigns to Display.';
+      this._div.innerHTML = '<b>Station Detail</b><br/>Hover Over Stations to Display.';
       return this._div;
     }};
     detailPanel.addTo(map);
@@ -1621,11 +1621,11 @@ function addGridLabels(res, level, bounds) {
         (m.max_snr !== undefined && m.max_snr !== null ? '<br/><b>Max SNR:</b> ' + m.max_snr.toFixed(1) : '');
       circle.on('mouseover', function() {{
         this.bringToFront();
-        if ({str(self.show_callsigns).lower()}) {{ showDetail(tipText); }}
+        showDetail(tipText);
       }});
       circle.on('click', function() {{
         this.bringToFront();
-        if ({str(self.show_callsigns).lower()}) {{ showDetail(tipText); }}
+        showDetail(tipText);
       }});
       // Permanent label only when show_callsigns is on
       if (m.label) {{

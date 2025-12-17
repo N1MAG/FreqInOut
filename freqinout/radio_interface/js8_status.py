@@ -147,6 +147,13 @@ class JS8ControlClient(JS8StatusClient):
         client = self._pyjs8call.Client(host=self.host, port=self._get_port())
         try:
             client.start()
+            # Ensure client.stop() (or __del__) will not attempt to close JS8Call
+            try:
+                if hasattr(client, "stop"):
+                    client._stop_noop = client.stop  # keep ref
+                    client.stop = lambda *a, **k: None
+            except Exception:
+                pass
             return client
         except BaseException as e:  # catch SystemExit from pyjs8call too
             log.warning("JS8ControlClient failed to start: %s", e)
