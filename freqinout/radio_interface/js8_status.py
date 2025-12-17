@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 import socket
 import time
 from typing import Optional
@@ -88,17 +87,12 @@ class JS8StatusClient:
             return False
 class JS8ControlClient(JS8StatusClient):
     """
-    pyjs8call-backed JS8Call controller. Reuses one client instance and exposes
-    dial/offset setters. Call set_frequency() from your rig-control path when
-    control_via == 'JS8Call'.
+    pyjs8call-backed JS8Call controller. Uses one-shot clients for dial/offset setters.
+    Call set_frequency() from your rig-control path when control_via == 'JS8Call'.
     """
 
     def __init__(self, host: str = "127.0.0.1"):
         super().__init__(host=host)
-        self._client = None
-        self._lock = threading.Lock()
-        self._last_start_failure: Optional[float] = None
-        self._backoff_seconds: float = 5.0
         try:
             import pyjs8call  # type: ignore
             self._pyjs8call = pyjs8call
@@ -137,31 +131,28 @@ class JS8ControlClient(JS8StatusClient):
         return False
 
     def _ensure_client(self):
+        # Deprecated; replaced by one-shot clients
+        return self._new_client()
+
+    def _new_client(self):
+        """
+        Create a short-lived pyjs8call client, start it, and return it.
+        Caller should call stop().
+        """
         if self._pyjs8call is None:
             raise RuntimeError("pyjs8call is not installed")
-        with self._lock:
-            if self._client:
-                return self._client
-            if self._last_start_failure:
-                elapsed = time.time() - self._last_start_failure
-                if elapsed < self._backoff_seconds:
-                    raise RuntimeError("Previous pyjs8call start failed; backing off")
-            if not self._js8call_running():
-                log.info("JS8ControlClient: JS8Call not running; skipping client start.")
-                return None
-            client = self._pyjs8call.Client(host=self.host, port=self._get_port())
-            try:
-                client.start()
-                self._client = client
-                self._last_start_failure = None
-                log.info("JS8ControlClient started on %s:%s", self.host, self._get_port())
-                return client
-            except BaseException as e:  # catch SystemExit from pyjs8call too
-                self._last_start_failure = time.time()
-                log.warning("JS8ControlClient failed to start: %s", e)
-                return None
+        if not self._js8call_running():
+            log.info("JS8ControlClient: JS8Call not running; skipping client start.")
+            return None
+        client = self._pyjs8call.Client(host=self.host, port=self._get_port())
+        try:
+            client.start()
+            return client
+        except BaseException as e:  # catch SystemExit from pyjs8call too
+            log.warning("JS8ControlClient failed to start: %s", e)
+            return None
 
-    def set_frequency(self, dial_hz: int, offset_hz: int = 0) -> bool:
+    def set_frequency(self, dial_hz: int, offset_hz: Optional[int] = None) -> bool:
         """
         Set JS8Call dial (and optional audio offset) via pyjs8call.
         """
@@ -170,14 +161,18 @@ class JS8ControlClient(JS8StatusClient):
             if client is None:
                 return False
             dial_hz = int(dial_hz)
-            offset_hz = int(offset_hz)
             client.settings.set_freq(dial_hz)
-            # Always set offset to enforce scheduled value (even 0)
+            if offset_hz is not None:
+                try:
+                    offset_hz = int(offset_hz)
+                    client.settings.set_offset(offset_hz)
+                except BaseException as e:
+                    log.warning("JS8ControlClient failed to set offset=%s: %s", offset_hz, e)
+            log.info("JS8ControlClient set dial=%d Hz%s", dial_hz, "" if offset_hz is None else f" offset={offset_hz} Hz")
             try:
-                client.settings.set_offset(offset_hz)
-            except BaseException as e:
-                log.warning("JS8ControlClient failed to set offset=%s: %s", offset_hz, e)
-            log.info("JS8ControlClient set dial=%d Hz offset=%d Hz", dial_hz, offset_hz)
+                client.stop()
+            except BaseException:
+                pass
             return True
         except BaseException as e:
             log.error("JS8ControlClient failed to set frequency: %s", e)
@@ -192,6 +187,10 @@ class JS8ControlClient(JS8StatusClient):
             if client is None:
                 return None
             hz = client.settings.get_freq()
+            try:
+                client.stop()
+            except BaseException:
+                pass
             return int(hz) if hz is not None else None
         except BaseException as e:
             log.debug("JS8ControlClient get_frequency failed: %s", e)
@@ -206,6 +205,10 @@ class JS8ControlClient(JS8StatusClient):
             if client is None:
                 return None
             off = client.settings.get_offset()
+            try:
+                client.stop()
+            except BaseException:
+                pass
             return int(off) if off is not None else None
         except BaseException as e:
             log.debug("JS8ControlClient get_offset failed: %s", e)
@@ -222,19 +225,18 @@ class JS8ControlClient(JS8StatusClient):
             offset_hz = int(offset_hz)
             client.settings.set_offset(offset_hz)
             log.info("JS8ControlClient set offset=%d Hz", offset_hz)
+            try:
+                client.stop()
+            except BaseException:
+                pass
             return True
         except BaseException as e:
             log.error("JS8ControlClient failed to set offset: %s", e)
             return False
 
     def stop(self):
-        with self._lock:
-            if self._client:
-                try:
-                    self._client.stop()
-                except BaseException as e:
-                    log.warning("JS8ControlClient stop failed: %s", e)
-                self._client = None
+        # No persistent client to stop in one-shot mode
+        pass
 
 
 

@@ -771,6 +771,7 @@ class SchedulerEngine(QObject):
             return None
 
         weekday_name = _python_weekday_to_day_name(now_utc.weekday())
+        weekday_upper = weekday_name.upper()
         now_min = now_utc.hour * 60 + now_utc.minute
 
         best: Optional[Dict] = None
@@ -778,7 +779,7 @@ class SchedulerEngine(QObject):
 
         for row in hf_sched:
             try:
-                day = (row.get("day_utc") or "").strip()
+                day = (row.get("day_utc") or "ALL").strip().upper()
 
                 smin = _parse_hhmm_to_minutes(row.get("start_utc", ""))
                 emin = _parse_hhmm_to_minutes(row.get("end_utc", ""))
@@ -786,10 +787,10 @@ class SchedulerEngine(QObject):
                     continue
 
                 overnight = smin > emin
-                prev_day = _prev_day_name(weekday_name)
+                prev_day = _prev_day_name(weekday_name).upper()
 
                 active = False
-                if day == "ALL" or day == weekday_name:
+                if day == "ALL" or day == weekday_upper:
                     if not overnight:
                         active = smin <= now_min < emin
                     else:
@@ -818,6 +819,7 @@ class SchedulerEngine(QObject):
             return None
 
         weekday_name = _python_weekday_to_day_name(now_utc.weekday())
+        weekday_upper = weekday_name.upper()
         now_min = now_utc.hour * 60 + now_utc.minute
 
         best: Optional[Dict] = None
@@ -825,7 +827,7 @@ class SchedulerEngine(QObject):
 
         for row in net_sched:
             try:
-                day = (row.get("day_utc") or "").strip()
+                day = (row.get("day_utc") or "ALL").strip().upper()
 
                 smin = _parse_hhmm_to_minutes(row.get("start_utc", ""))
                 emin = _parse_hhmm_to_minutes(row.get("end_utc", ""))
@@ -835,10 +837,10 @@ class SchedulerEngine(QObject):
                 early = int(row.get("early_checkin", 0) or 0)
                 window_start = max(0, smin - early)
                 overnight = smin > emin
-                prev_day = _prev_day_name(weekday_name)
+                prev_day = _prev_day_name(weekday_name).upper()
 
                 active = False
-                if day == weekday_name:
+                if day == weekday_upper:
                     if not overnight:
                         active = window_start <= now_min < emin
                     else:
@@ -900,7 +902,6 @@ class SchedulerEngine(QObject):
         band = (entry.get("band") or "").strip().upper()
         freq_text = (entry.get("frequency") or "").strip()
         fldigi_offset_text = (entry.get("fldigi_offset") or "").strip()
-        js8_offset_text = (entry.get("js8_offset") or "").strip()
         js8_group = (entry.get("primary_js8call_group") or "").strip()
         comment = (entry.get("comment") or "").strip()
         vfo_raw = (entry.get("vfo") or "A").strip().upper()
@@ -966,11 +967,6 @@ class SchedulerEngine(QObject):
                 fldigi_center = int(float(fldigi_offset_text))
         except Exception:
             fldigi_center = None
-        try:
-            if js8_offset_text:
-                js8_tune = int(float(js8_offset_text))
-        except Exception:
-            js8_tune = None
 
         current_freq_hz = self._current_rig_frequency()
 
@@ -1002,27 +998,9 @@ class SchedulerEngine(QObject):
 
         ok = False
         if control_mode == "JS8CALL":
-            offset = js8_tune or 0
             try:
                 if self.js8:
-                    ok = self.js8.set_frequency(freq_hz, offset_hz=offset)
-                    # Always attempt to enforce offset explicitly
-                    if hasattr(self.js8, "set_offset"):
-                        try:
-                            self.js8.set_offset(offset)  # type: ignore[attr-defined]
-                        except Exception as e:
-                            log.debug("SchedulerEngine: JS8Call set_offset failed: %s", e)
-                    if hasattr(self.js8, "get_offset"):
-                        try:
-                            current_off = self.js8.get_offset()  # type: ignore[attr-defined]
-                            if current_off is not None and abs(current_off - offset) > 1:
-                                log.warning(
-                                    "SchedulerEngine: JS8Call offset mismatch (wanted %s, got %s)",
-                                    offset,
-                                    current_off,
-                                )
-                        except Exception as e:
-                            log.debug("SchedulerEngine: JS8Call offset verification failed: %s", e)
+                    ok = self.js8.set_frequency(freq_hz, offset_hz=None)
             except Exception as e:
                 log.error("SchedulerEngine: error sending set_frequency to JS8Call: %s", e)
         else:
@@ -1030,7 +1008,7 @@ class SchedulerEngine(QObject):
                 band=band,
                 rig_hz=freq_hz,
                 fldigi_center_hz=fldigi_center,
-                js8_tune_hz=js8_tune,
+                js8_tune_hz=None,
                 vfo=vfo,
                 js8_group=js8_group or None,
             )
@@ -1039,13 +1017,6 @@ class SchedulerEngine(QObject):
                     ok = self.rig.set_frequency(cmd)
             except Exception as e:
                 log.error("SchedulerEngine: error sending set_frequency to FLRig: %s", e)
-
-            # Even when FLRig drives the dial, push JS8Call offset if provided
-            if js8_tune is not None and self.js8 and hasattr(self.js8, "set_offset"):
-                try:
-                    self.js8.set_offset(js8_tune)
-                except Exception as e:
-                    log.debug("SchedulerEngine: JS8Call set_offset failed (FLRig control): %s", e)
 
         if ok:
             if control_mode == "FLRIG":

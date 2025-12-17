@@ -31,6 +31,28 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 
 
+def _normalize_date_only(val: Optional[str]) -> Optional[str]:
+    """
+    Normalize a date/datetime string to YYYYMMDD. Returns None on empty input.
+    """
+    if not val:
+        return None
+    txt = str(val).strip()
+    if not txt:
+        return None
+    if len(txt) == 8 and txt.isdigit():
+        return txt
+    try:
+        dt = datetime.datetime.fromisoformat(txt.replace("Z", ""))
+        return dt.strftime("%Y%m%d")
+    except Exception:
+        pass
+    digits = "".join(ch for ch in txt if ch.isdigit())
+    if len(digits) >= 8:
+        return digits[:8]
+    return None
+
+
 class OperatorHistoryTab(QWidget):
     """
     Operator history viewer.
@@ -732,8 +754,8 @@ class OperatorHistoryTab(QWidget):
             trusted = row.get("trusted")
             if trusted is None:
                 trusted = 1 if existing_trusted else 0
-            first_seen = row.get("first_seen_utc") or existing_first
-            last_seen = row.get("last_seen_utc") or existing_last
+            first_seen = _normalize_date_only(row.get("first_seen_utc") or existing_first)
+            last_seen = _normalize_date_only(row.get("last_seen_utc") or existing_last)
 
             cur.execute(
                 """
@@ -752,8 +774,8 @@ class OperatorHistoryTab(QWidget):
                     g2,
                     g3,
                     row.get("group_role", existing_role or ""),
-                    first_seen or last_seen or datetime.datetime.utcnow().isoformat(timespec="seconds"),
-                    last_seen or datetime.datetime.utcnow().isoformat(timespec="seconds"),
+                    first_seen or last_seen or datetime.datetime.utcnow().strftime("%Y%m%d"),
+                    last_seen or datetime.datetime.utcnow().strftime("%Y%m%d"),
                     row.get("last_net", existing_last_net or ""),
                     row.get("last_role", existing_last_role or ""),
                     cs,
