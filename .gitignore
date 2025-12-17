@@ -1,0 +1,40 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE / editor
+.idea/
+.vscode/
+*.code-workspace
+
+# OS cruft
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local app data
+config/config.json
+config/*.db
+__pycache__/
+*.pyc
+freqinout/config/config.json
+freqinout/config/freqinout_nets.db
+freqinout/config/freqinout.db
+freqinout/logs/
+venv/
+*.log
+
