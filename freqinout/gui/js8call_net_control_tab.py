@@ -807,6 +807,13 @@ class JS8CallNetControlTab(QWidget):
                 self._waiting_for_completion = True
                 self._current_query = (call, msg_id)
                 log.info("JS8CallNetControl: auto-queried MSG ID %s from %s", msg_id, call)
+            elif hasattr(client, "send_message"):
+                # Fallback for js8net: send explicit QUERY MSG <id>
+                client.send_message(f"{call}: QUERY MSG {msg_id}")  # type: ignore[attr-defined]
+                self._queried_msg_ids.add(key)
+                self._waiting_for_completion = True
+                self._current_query = (call, msg_id)
+                log.info("JS8CallNetControl: auto-queried MSG ID %s from %s via send_message", msg_id, call)
             else:
                 log.info("JS8CallNetControl: js8net does not support query_message_id; skipping auto-query.")
         except Exception as e:
