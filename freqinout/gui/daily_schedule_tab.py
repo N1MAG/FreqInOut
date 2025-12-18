@@ -156,7 +156,8 @@ class DailyScheduleTab(QWidget):
         self.local_label = QLabel()
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
-        self.time_toggle_btn = QPushButton("View: UTC")
+        self.time_toggle_btn = QPushButton("Showing: UTC")
+        self.time_toggle_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: 600;")
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
@@ -310,7 +311,7 @@ class DailyScheduleTab(QWidget):
         self.local_label.setText(
             now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {ui_abbr}")
         )
-        self.time_toggle_btn.setText("View: Local" if self._show_local else "View: UTC")
+        self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
 
     def _set_headers(self):
         headers = [
