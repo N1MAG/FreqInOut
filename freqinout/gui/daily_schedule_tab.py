@@ -332,6 +332,15 @@ class DailyScheduleTab(QWidget):
         monday = now_utc - datetime.timedelta(days=now_utc.weekday())  # Monday=0
         return monday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=datetime.timezone.utc)
 
+    def _week_anchor_local(self) -> datetime.datetime:
+        """
+        Monday 00:00 in the configured local timezone.
+        """
+        _, tz = self._current_timezone()
+        now_local = datetime.datetime.now(tz)
+        monday = now_local - datetime.timedelta(days=now_local.weekday())  # Monday=0
+        return monday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=tz)
+
     def _convert_day_time(self, day: str, hhmm: str, to_local: bool) -> Tuple[str, str]:
         """
         Convert (day, HH:MM) between UTC and local time using current timezone.
@@ -350,16 +359,15 @@ class DailyScheduleTab(QWidget):
             day_idx = DAY_OPTIONS.index(day) if day in DAY_OPTIONS else 0
         except Exception:
             day_idx = 0
-        anchor = self._week_anchor_utc()
-        _, tz = self._current_timezone()
         if to_local:
+            anchor = self._week_anchor_utc()
+            _, tz = self._current_timezone()
             dt_utc = anchor + datetime.timedelta(days=day_idx, hours=hour, minutes=minute)
             dt_loc = dt_utc.astimezone(tz)
             return dt_loc.strftime("%A"), dt_loc.strftime("%H:%M")
         else:
-            dt_loc = (anchor + datetime.timedelta(days=day_idx)).astimezone(tz).replace(
-                hour=hour, minute=minute, second=0, microsecond=0
-            )
+            anchor_loc = self._week_anchor_local()
+            dt_loc = anchor_loc + datetime.timedelta(days=day_idx, hours=hour, minutes=minute)
             dt_utc = dt_loc.astimezone(datetime.timezone.utc)
             return dt_utc.strftime("%A"), dt_utc.strftime("%H:%M")
 
