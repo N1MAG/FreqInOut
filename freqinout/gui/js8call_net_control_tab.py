@@ -831,14 +831,17 @@ class JS8CallNetControlTab(QWidget):
                 try:
                     p = msg.get("params", {}) if isinstance(msg, dict) else {}
                     txt = str(p.get("TEXT") or "").upper()
+                    cmd_txt = str(p.get("CMD") or "").upper()
+                    extra_txt = str(p.get("EXTRA") or "").upper()
+                    combined = " ".join([txt, cmd_txt, extra_txt]).strip()
                     frm = (p.get("FROM") or "").strip().upper()
                     snr_val = None
                     try:
                         snr_val = float(p.get("SNR")) if p.get("SNR") not in (None, "") else None
                     except Exception:
                         snr_val = None
-                    if self.auto_query_msg_id and not self._net_lockout_active() and "YES MSG ID" in txt:
-                        ids = re.findall(r"\b(\d+)\b", txt)
+                    if self.auto_query_msg_id and not self._net_lockout_active() and "YES MSG" in combined:
+                        ids = re.findall(r"\b(\d+)\b", combined)
                         for mid in ids:
                             if frm:
                                 self._queue_auto_query(frm, mid, snr=snr_val)
