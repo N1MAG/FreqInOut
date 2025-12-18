@@ -703,11 +703,21 @@ class SettingsTab(QWidget):
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
+        hosts = []
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                return True
+            host_cfg = (self.settings.get("js8_host", "") or "").strip()
+            if host_cfg:
+                hosts.append(host_cfg)
         except Exception:
-            return False
+            pass
+        hosts.extend(["127.0.0.1", "::1"])
+        for host in hosts:
+            try:
+                with socket.create_connection((host, port), timeout=0.75):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _program_autostart_enabled(self, program_name: str) -> bool:
         if program_name not in {"FLDigi", "FLMsg", "FLAmp", "JS8Call"}:
