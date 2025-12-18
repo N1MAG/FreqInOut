@@ -806,14 +806,14 @@ class JS8CallNetControlTab(QWidget):
                 self._queried_msg_ids.add(key)
                 self._waiting_for_completion = True
                 self._current_query = (call, msg_id)
-                log.info("JS8CallNetControl: auto-queried MSG ID %s from %s", msg_id, call)
+                log.info("JS8CallNetControl: auto-queried MSG ID %s from %s via query_message_id", msg_id, call)
             elif hasattr(client, "send_message"):
                 # Fallback for js8net: send explicit QUERY MSG <id>
                 client.send_message(f"{call}: QUERY MSG {msg_id}")  # type: ignore[attr-defined]
                 self._queried_msg_ids.add(key)
                 self._waiting_for_completion = True
                 self._current_query = (call, msg_id)
-                log.info("JS8CallNetControl: auto-queried MSG ID %s from %s via send_message", msg_id, call)
+                log.info("JS8CallNetControl: auto-queried MSG ID %s from %s via send_message fallback", msg_id, call)
             else:
                 log.info("JS8CallNetControl: js8net does not support query_message_id; skipping auto-query.")
         except Exception as e:
@@ -847,11 +847,15 @@ class JS8CallNetControlTab(QWidget):
                         snr_val = float(p.get("SNR")) if p.get("SNR") not in (None, "") else None
                     except Exception:
                         snr_val = None
-                    if self.auto_query_msg_id and not self._net_lockout_active() and "YES MSG" in combined:
-                        ids = re.findall(r"\b(\d+)\b", combined)
-                        for mid in ids:
-                            if frm:
-                                self._queue_auto_query(frm, mid, snr=snr_val)
+                    if self.auto_query_msg_id:
+                        if self._net_lockout_active():
+                            log.info("JS8CallNetControl: skipping auto-query (net lockout active)")
+                        elif "YES MSG" in combined:
+                            ids = re.findall(r"\b(\d+)\b", combined)
+                            for mid in ids:
+                                if frm:
+                                    log.info("JS8CallNetControl: detected YES MSG %s from %s (snr=%s)", mid, frm, snr_val)
+                                    self._queue_auto_query(frm, mid, snr=snr_val)
                     # Passive grid capture
                     grid_val = (p.get("GRID") or "").strip()
                     if grid_val and frm:
@@ -885,6 +889,7 @@ class JS8CallNetControlTab(QWidget):
         self._current_query = None
         # After a message completes, ask that station if more messages exist
         if call:
+            log.info("JS8CallNetControl: message completion detected; querying MSGS from %s", call)
             self._send_query_msgs(call)
         self._maybe_process_next_query()
 
