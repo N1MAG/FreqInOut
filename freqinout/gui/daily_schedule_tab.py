@@ -40,6 +40,7 @@ DAY_OPTIONS = [
     "Friday",
     "Saturday",
 ]
+DAY_CANON = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
 BAND_OPTIONS = [
     "20M",
@@ -327,19 +328,30 @@ class DailyScheduleTab(QWidget):
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
-    def _week_anchor_utc(self) -> datetime.datetime:
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        monday = now_utc - datetime.timedelta(days=now_utc.weekday())  # Monday=0
-        return monday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=datetime.timezone.utc)
-
-    def _week_anchor_local(self) -> datetime.datetime:
+    def _day_offset(self, day_name: str) -> int:
         """
-        Monday 00:00 in the configured local timezone.
+        Return 0-6 offset for canonical day names (Sunday=0). Defaults to 0 on unknown.
+        """
+        try:
+            return DAY_CANON.index(day_name)
+        except Exception:
+            return 0
+
+    def _anchor_utc_sunday(self) -> datetime.datetime:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        delta = (now_utc.weekday() + 1) % 7  # Sunday=0, Monday=1, ...
+        sunday = now_utc - datetime.timedelta(days=delta)
+        return sunday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=datetime.timezone.utc)
+
+    def _anchor_local_sunday(self) -> datetime.datetime:
+        """
+        Sunday 00:00 in the configured local timezone.
         """
         _, tz = self._current_timezone()
         now_local = datetime.datetime.now(tz)
-        monday = now_local - datetime.timedelta(days=now_local.weekday())  # Monday=0
-        return monday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=tz)
+        delta = (now_local.weekday() + 1) % 7
+        sunday = now_local - datetime.timedelta(days=delta)
+        return sunday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=tz)
 
     def _convert_day_time(self, day: str, hhmm: str, to_local: bool) -> Tuple[str, str]:
         """
@@ -355,18 +367,16 @@ class DailyScheduleTab(QWidget):
             minute = int(minute)
         except Exception:
             return day, hhmm
-        try:
-            day_idx = DAY_OPTIONS.index(day) if day in DAY_OPTIONS else 0
-        except Exception:
-            day_idx = 0
+        # Map day to canonical offset (Sunday=0)
+        day_idx = self._day_offset(day)
         if to_local:
-            anchor = self._week_anchor_utc()
+            anchor = self._anchor_utc_sunday()
             _, tz = self._current_timezone()
             dt_utc = anchor + datetime.timedelta(days=day_idx, hours=hour, minutes=minute)
             dt_loc = dt_utc.astimezone(tz)
             return dt_loc.strftime("%A"), dt_loc.strftime("%H:%M")
         else:
-            anchor_loc = self._week_anchor_local()
+            anchor_loc = self._anchor_local_sunday()
             dt_loc = anchor_loc + datetime.timedelta(days=day_idx, hours=hour, minutes=minute)
             dt_utc = dt_loc.astimezone(datetime.timezone.utc)
             return dt_utc.strftime("%A"), dt_utc.strftime("%H:%M")
