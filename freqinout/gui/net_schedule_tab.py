@@ -557,7 +557,8 @@ class NetScheduleTab(QWidget):
 
     def _format_freq(self, freq: str | float) -> str:
         try:
-            return f"{float(freq):.4f}".rstrip("0").rstrip(".")
+            # Keep at least 3 decimal places (e.g., .110 stays .110)
+            return f"{float(freq):.3f}"
         except Exception:
             try:
                 return str(freq).strip()
