@@ -271,7 +271,7 @@ class NetScheduleTab(QWidget):
                 "Net Name",
             ]
         )
-        self.time_toggle_btn.setText("Showing: Local" if not self._show_local else "Showing: UTC")
+        self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
 
     # --------- time conversion helpers --------- #
     def _day_offset(self, day_name: str) -> int:
