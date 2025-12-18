@@ -356,10 +356,10 @@ class DailyScheduleTab(QWidget):
     def _convert_day_time(self, day: str, hhmm: str, to_local: bool) -> Tuple[str, str]:
         """
         Convert (day, HH:MM) between UTC and local time using current timezone.
-        Returns (day_name, hh:mm) in target zone. 'ALL' passes through unchanged.
+        Returns (day_name, hh:mm) in target zone. 'ALL' keeps day as ALL but still converts time.
         """
         day = (day or "ALL").strip()
-        if day.upper() == "ALL" or not hhmm:
+        if not hhmm:
             return day, hhmm
         try:
             hour, minute = hhmm.split(":")
@@ -368,18 +368,19 @@ class DailyScheduleTab(QWidget):
         except Exception:
             return day, hhmm
         # Map day to canonical offset (Sunday=0)
-        day_idx = self._day_offset(day)
+        day_upper = day.upper()
+        day_idx = 0 if day_upper == "ALL" else self._day_offset(day)
         if to_local:
             anchor = self._anchor_utc_sunday()
             _, tz = self._current_timezone()
             dt_utc = anchor + datetime.timedelta(days=day_idx, hours=hour, minutes=minute)
             dt_loc = dt_utc.astimezone(tz)
-            return dt_loc.strftime("%A"), dt_loc.strftime("%H:%M")
+            return ("ALL" if day_upper == "ALL" else dt_loc.strftime("%A")), dt_loc.strftime("%H:%M")
         else:
             anchor_loc = self._anchor_local_sunday()
             dt_loc = anchor_loc + datetime.timedelta(days=day_idx, hours=hour, minutes=minute)
             dt_utc = dt_loc.astimezone(datetime.timezone.utc)
-            return dt_utc.strftime("%A"), dt_utc.strftime("%H:%M")
+            return ("ALL" if day_upper == "ALL" else dt_utc.strftime("%A")), dt_utc.strftime("%H:%M")
 
     # ---------------- Data load/save ---------------- #
 
