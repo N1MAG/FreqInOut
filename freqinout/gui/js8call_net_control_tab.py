@@ -112,6 +112,10 @@ class JS8CallNetControlTab(QWidget):
         self._pending_grid_queries: List[tuple[Optional[float], str]] = []
         self._grid_waiting: bool = False
         self._grid_last_rx_ts: float = 0.0
+        self._last_directed_size: int = 0
+        self._last_all_size: int = 0
+        self._last_query_tx_ts: float = 0.0
+        self._app_start_ts: float = time.time()
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -372,8 +376,12 @@ class JS8CallNetControlTab(QWidget):
         try:
             if self._directed_path:
                 self._last_directed_size = self._directed_path.stat().st_size
+                all_path = self._directed_path.parent / "ALL.TXT"
+                self._last_all_size = all_path.stat().st_size if all_path.exists() else 0
         except Exception:
             self._last_directed_size = 0
+            self._last_all_size = 0
+        self._last_query_tx_ts = 0.0
 
         if self._poll_timer:
             self._poll_timer.start()
@@ -449,6 +457,9 @@ class JS8CallNetControlTab(QWidget):
         if not self._net_in_progress or not self._directed_path:
             return
 
+        # First, scan ALL.TXT for recent QUERY MSG transmissions to gate auto-queries
+        self._poll_all_for_query_tx()
+
         try:
             size_now = self._directed_path.stat().st_size
         except Exception as e:
@@ -469,13 +480,19 @@ class JS8CallNetControlTab(QWidget):
                     line = line.strip()
                     if not line:
                         continue
+                    if not self._line_ts_after_start(line):
+                        continue
                     calls = self._extract_callsigns_from_line(line)
                     msg_ids = self._extract_message_ids(line)
                     # If multiple stations reported YES MSG <id>, query each
                     if msg_ids and calls:
-                        for c in calls:
-                            for mid in msg_ids:
-                                self._queue_auto_query(c, mid)
+                        if not self._saw_recent_query_tx():
+                            log.info("JS8CallNetControl: skipping YES MSG in DIRECTED (no recent query TX)")
+                        else:
+                            for c in calls:
+                                for mid in msg_ids:
+                                    log.info("JS8CallNetControl: queueing auto-query %s from DIRECTED line", mid)
+                                    self._queue_auto_query(c, mid)
                     call_primary = calls[0] if calls else ""
                     if not call_primary:
                         continue
@@ -509,6 +526,59 @@ class JS8CallNetControlTab(QWidget):
         # Flash border on new/late panel only when timer adds new calls
         if not self._initial_phase and new_calls:
             self._flash_new_late_border()
+
+    def _poll_all_for_query_tx(self):
+        """
+        Scan ALL.TXT for outgoing QUERY MSG(S) transmissions to enable auto-query from DIRECTED.
+        """
+        if not self._directed_path:
+            return
+        all_path = self._directed_path.parent / "ALL.TXT"
+        if not all_path.exists():
+            return
+        try:
+            size_now = all_path.stat().st_size
+        except Exception as e:
+            log.error("JS8CallNetControl: stat ALL.TXT failed: %s", e)
+            return
+        if size_now < self._last_all_size:
+            self._last_all_size = 0
+        try:
+            with all_path.open("r", encoding="utf-8", errors="ignore") as f:
+                if self._last_all_size > 0:
+                    f.seek(self._last_all_size)
+                for line in f:
+                    if "Transmitting" not in line:
+                        continue
+                    if not self._line_ts_after_start(line):
+                        continue
+                    if "QUERY MSG" not in line.upper():
+                        continue
+                    self._last_query_tx_ts = time.time()
+                    log.info("JS8CallNetControl: detected outgoing QUERY MSG in ALL.TXT: %s", line.strip())
+                self._last_all_size = f.tell()
+        except Exception as e:
+            log.error("JS8CallNetControl: failed reading ALL.TXT: %s", e)
+            return
+
+    def _saw_recent_query_tx(self, window_sec: int = 600) -> bool:
+        """
+        Return True if a QUERY MSG(S) transmit was seen in ALL.TXT within the last window.
+        """
+        if self._last_query_tx_ts <= 0:
+            return False
+        return (time.time() - self._last_query_tx_ts) <= window_sec
+
+    def _line_ts_after_start(self, line: str) -> bool:
+        """
+        Return True if the line begins with a timestamp after app start.
+        """
+        try:
+            ts_str = line[:19]
+            ts = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+            return ts > self._app_start_ts
+        except Exception:
+            return False
 
     def _append_line_to_text(self, text_widget: QTextEdit, line: str):
         if text_widget.toPlainText().strip():
