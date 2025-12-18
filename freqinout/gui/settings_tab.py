@@ -705,6 +705,7 @@ class SettingsTab(QWidget):
             port = int(port_txt) if port_txt else int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
+
         hosts = []
         try:
             host_cfg = (self.settings.get("js8_host", "") or "").strip()
@@ -712,13 +713,26 @@ class SettingsTab(QWidget):
                 hosts.append(host_cfg)
         except Exception:
             pass
-        hosts.extend(["127.0.0.1", "::1"])
+        hosts.extend(["127.0.0.1", "localhost", "::1"])
+
         for host in hosts:
             try:
-                with socket.create_connection((host, port), timeout=0.75):
+                with socket.create_connection((host, port), timeout=1.0):
                     return True
             except Exception:
                 continue
+
+        # Final probe: try js8net get_freq (if available) to confirm API responds
+        try:
+            from freqinout.radio_interface.js8_status import JS8ControlClient  # lazy import to avoid cycles
+
+            client = JS8ControlClient()
+            resp = client.get_frequency()
+            if resp:
+                return True
+        except Exception:
+            pass
+
         return False
 
     def _program_autostart_enabled(self, program_name: str) -> bool:
