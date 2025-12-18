@@ -715,12 +715,28 @@ class SettingsTab(QWidget):
             pass
         hosts.extend(["127.0.0.1", "localhost", "::1"])
 
-        for host in hosts:
+        def _probe(host: str, family=None) -> bool:
             try:
-                with socket.create_connection((host, port), timeout=1.0):
+                if family:
+                    s = socket.socket(family, socket.SOCK_STREAM)
+                    s.settimeout(2.0)
+                    s.connect((host, port))
+                    s.close()
                     return True
-            except Exception:
-                continue
+                with socket.create_connection((host, port), timeout=2.0):
+                    return True
+            except Exception as e:
+                log.debug("SettingsTab: JS8 API connect failed host=%s port=%s (%s)", host, port, e)
+                return False
+
+        for host in hosts:
+            if _probe(host):
+                return True
+            # Explicitly try IPv4/IPv6 families if create_connection failed
+            if _probe(host, socket.AF_INET):
+                return True
+            if _probe(host, socket.AF_INET6):
+                return True
 
         # Final probe: try js8net get_freq (if available) to confirm API responds
         try:
