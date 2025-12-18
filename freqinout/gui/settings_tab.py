@@ -192,7 +192,8 @@ class SettingsTab(QWidget):
         js8_status_lbl = QLabel()
         js8_status_lbl.setFixedSize(14, 14)
         js8_status_lbl.setStyleSheet("background-color: #555; border-radius: 7px;")
-        self.status_labels["JS8Call"] = js8_status_lbl
+        # Keep API indicator separate from the per-program row to avoid overwrites
+        self.status_labels["JS8Call_API"] = js8_status_lbl
         js8_status_row.addWidget(js8_status_lbl)
         js8_status_row.addStretch()
         js8_v.addLayout(js8_status_row)
@@ -677,19 +678,36 @@ class SettingsTab(QWidget):
         return any(any(t in entry for t in target_names) for entry in self._proc_snapshot)
 
     def _refresh_running_status(self):
+        running_js8 = self._program_is_running("JS8Call")
+        api_ok = self._js8_api_reachable()
+        # Update API indicator (header)
+        api_lbl = self.status_labels.get("JS8Call_API")
+        if api_lbl:
+            if api_ok:
+                api_lbl.setStyleSheet("background-color: #4CAF50; border-radius: 7px;")
+                api_lbl.setToolTip("API reachable")
+            elif running_js8:
+                api_lbl.setStyleSheet("background-color: #ff9800; border-radius: 7px;")
+                api_lbl.setToolTip("Process running, API unreachable")
+            else:
+                api_lbl.setStyleSheet("background-color: #555; border-radius: 7px;")
+                api_lbl.setToolTip("Not running")
+
+        # Update all other indicators
         for program_name, lbl in self.status_labels.items():
-            running = self._program_is_running(program_name)
+            if program_name == "JS8Call_API":
+                continue
+            running = running_js8 if program_name == "JS8Call" else self._program_is_running(program_name)
             if program_name == "JS8Call":
-                api_ok = self._js8_api_reachable()
                 if api_ok:
                     lbl.setStyleSheet("background-color: #4CAF50; border-radius: 7px;")
-                    lbl.setToolTip("Running (API reachable)")
+                    lbl.setToolTip("API reachable")
                 elif running:
                     lbl.setStyleSheet("background-color: #ff9800; border-radius: 7px;")
-                    lbl.setToolTip("Running (API unreachable)")
+                    lbl.setToolTip("Process running, API unreachable")
                 else:
                     lbl.setStyleSheet("background-color: #555; border-radius: 7px;")
-                    lbl.setToolTip("Not Running")
+                    lbl.setToolTip("Not running")
             else:
                 if running:
                     lbl.setStyleSheet("background-color: #4CAF50; border-radius: 7px;")
@@ -719,40 +737,28 @@ class SettingsTab(QWidget):
             pass
         hosts.extend(["127.0.0.1", "localhost", "::1"])
 
-        def _probe(host: str, family=None) -> bool:
+        # First try raw socket connect
+        for host in hosts:
             try:
-                if family:
-                    s = socket.socket(family, socket.SOCK_STREAM)
-                    s.settimeout(2.0)
-                    s.connect((host, port))
-                    s.close()
-                    return True
-                with socket.create_connection((host, port), timeout=2.0):
+                with socket.create_connection((host, port), timeout=1.5):
+                    log.debug("SettingsTab: JS8 API connect ok host=%s port=%s", host, port)
                     return True
             except Exception as e:
                 log.debug("SettingsTab: JS8 API connect failed host=%s port=%s (%s)", host, port, e)
-                return False
+                continue
 
-        for host in hosts:
-            if _probe(host):
-                return True
-            # Explicitly try IPv4/IPv6 families if create_connection failed
-            if _probe(host, socket.AF_INET):
-                return True
-            if _probe(host, socket.AF_INET6):
-                return True
-
-        # Final probe: try js8net get_freq (if available) to confirm API responds
+        # Fallback: try js8net get_freq (this also implicitly connects)
         try:
             from freqinout.radio_interface.js8_status import JS8ControlClient  # lazy import to avoid cycles
 
             client = JS8ControlClient()
             resp = client.get_frequency()
-            if resp:
+            if resp is not None:
+                log.debug("SettingsTab: JS8 API reachable via js8net get_frequency (resp=%s)", resp)
                 return True
-        except Exception:
-            pass
-
+            log.debug("SettingsTab: JS8 API js8net get_frequency returned None/False")
+        except Exception as e:
+            log.debug("SettingsTab: js8net probe failed: %s", e)
         return False
 
     def _program_autostart_enabled(self, program_name: str) -> bool:
