@@ -122,6 +122,8 @@ class DailyScheduleTab(QWidget):
         self.settings = SettingsManager()
         self.operating_groups: List[Dict] = self._load_operating_groups()
         self._operating_groups_sig = self._snapshot_operating_groups(self.operating_groups)
+        self._show_local: bool = False  # view toggle
+        self._raw_schedule: List[Dict] = []
 
         self._clock_timer: Optional[QTimer] = None
         self._opgroups_timer: Optional[QTimer] = None
@@ -153,24 +155,14 @@ class DailyScheduleTab(QWidget):
         self.local_label = QLabel()
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
+        self.time_toggle_btn = QPushButton("View: UTC")
+        self.time_toggle_btn.clicked.connect(self._toggle_time_view)
+        header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
 
         # Table
         self.table = QTableWidget()
-        headers = [
-            "",
-            "Day",
-            "Group Name",
-            "Mode",
-            "Band",
-            "VFO",
-            "Frequency (MHz)",
-            "Start (UTC HH:MM)",
-            "End (UTC HH:MM)",
-            "Auto-Tune",
-        ]
-        self.table.setColumnCount(len(headers))
-        self.table.setHorizontalHeaderLabels(headers)
+        self._set_headers()
 
         hv = self.table.horizontalHeader()
         hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
@@ -317,6 +309,59 @@ class DailyScheduleTab(QWidget):
         self.local_label.setText(
             now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {ui_abbr}")
         )
+        self.time_toggle_btn.setText("View: Local" if self._show_local else "View: UTC")
+
+    def _set_headers(self):
+        headers = [
+            "",
+            "Day",
+            "Group Name",
+            "Mode",
+            "Band",
+            "VFO",
+            "Frequency (MHz)",
+            f"Start ({'Local' if self._show_local else 'UTC'} HH:MM)",
+            f"End ({'Local' if self._show_local else 'UTC'} HH:MM)",
+            "Auto-Tune",
+        ]
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+
+    def _week_anchor_utc(self) -> datetime.datetime:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        monday = now_utc - datetime.timedelta(days=now_utc.weekday())  # Monday=0
+        return monday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=datetime.timezone.utc)
+
+    def _convert_day_time(self, day: str, hhmm: str, to_local: bool) -> Tuple[str, str]:
+        """
+        Convert (day, HH:MM) between UTC and local time using current timezone.
+        Returns (day_name, hh:mm) in target zone. 'ALL' passes through unchanged.
+        """
+        day = (day or "ALL").strip()
+        if day.upper() == "ALL" or not hhmm:
+            return day, hhmm
+        try:
+            hour, minute = hhmm.split(":")
+            hour = int(hour)
+            minute = int(minute)
+        except Exception:
+            return day, hhmm
+        try:
+            day_idx = DAY_OPTIONS.index(day) if day in DAY_OPTIONS else 0
+        except Exception:
+            day_idx = 0
+        anchor = self._week_anchor_utc()
+        _, tz = self._current_timezone()
+        if to_local:
+            dt_utc = anchor + datetime.timedelta(days=day_idx, hours=hour, minutes=minute)
+            dt_loc = dt_utc.astimezone(tz)
+            return dt_loc.strftime("%A"), dt_loc.strftime("%H:%M")
+        else:
+            dt_loc = (anchor + datetime.timedelta(days=day_idx)).astimezone(tz).replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
+            dt_utc = dt_loc.astimezone(datetime.timezone.utc)
+            return dt_utc.strftime("%A"), dt_utc.strftime("%H:%M")
 
     # ---------------- Data load/save ---------------- #
 
@@ -527,9 +572,10 @@ class DailyScheduleTab(QWidget):
                 hf_sched = []
 
         self.table.setRowCount(0)
+        self._raw_schedule = hf_sched
 
         for entry in hf_sched:
-            self._append_entry_row(entry)
+            self._append_entry_row(self._entry_for_display(entry))
 
         if self.table.rowCount() == 0:
             # Add a single empty row to start with
@@ -537,6 +583,7 @@ class DailyScheduleTab(QWidget):
 
         src = "DB" if loaded_from_db else "settings"
         log.info("HF Frequency Schedule loaded from %s: %d rows", src, self.table.rowCount())
+        self._set_headers()
         self._update_clock_labels()
 
     def _save_schedule(self):
@@ -559,11 +606,11 @@ class DailyScheduleTab(QWidget):
             band = self._get_combo_value(r, self.COL_BAND, default="")
             vfo = self._get_combo_value(r, self.COL_VFO, default="A")
             freq_text = self._get_text_value(r, self.COL_FREQ)
-            start_utc = self._get_text_value(r, self.COL_START)
-            end_utc = self._get_text_value(r, self.COL_END)
+            start_val = self._get_text_value(r, self.COL_START)
+            end_val = self._get_text_value(r, self.COL_END)
             auto_tune = self._get_checkbox_value(r, self.COL_AUTOTUNE)
 
-            if not group_name or not band or not freq_text or not start_utc or not end_utc:
+            if not group_name or not band or not freq_text or not start_val or not end_val:
                 continue
 
             # Enforce frequency validity for band/mode
@@ -572,13 +619,21 @@ class DailyScheduleTab(QWidget):
             freq_text = self._format_freq(freq_text)
 
             # Validate times
-            if not self._validate_time(start_utc) or not self._validate_time(end_utc):
+            if not self._validate_time(start_val) or not self._validate_time(end_val):
                 errors.append(f"Row {r+1}: Start/End must be HH:MM (24h)")
                 continue
 
+            if self._show_local:
+                day_utc, start_utc = self._convert_day_time(day, start_val, to_local=False)
+                _, end_utc = self._convert_day_time(day, end_val, to_local=False)
+            else:
+                day_utc = day
+                start_utc = start_val
+                end_utc = end_val
+
             rows.append(
                 {
-                    "day_utc": day,
+                    "day_utc": day_utc,
                     "band": band,
                     "mode": mode,
                     "vfo": vfo,
@@ -639,8 +694,32 @@ class DailyScheduleTab(QWidget):
 
         QMessageBox.information(self, "Saved", "HF Frequency Schedule saved.")
         log.info("HF Frequency Schedule saved: %d rows", len(rows))
+        self._raw_schedule = rows
 
     # ---------------- Row helpers ---------------- #
+
+    def _entry_for_display(self, entry: Dict) -> Dict:
+        d = dict(entry)
+        if self._show_local:
+            day_loc, start_loc = self._convert_day_time(d.get("day_utc", ""), d.get("start_utc", ""), to_local=True)
+            _, end_loc = self._convert_day_time(d.get("day_utc", ""), d.get("end_utc", ""), to_local=True)
+            d["day_utc"] = day_loc  # reuse column but reflects view
+            d["start_utc"] = start_loc
+            d["end_utc"] = end_loc
+        return d
+
+    def _rebuild_from_raw(self):
+        self.table.setRowCount(0)
+        for entry in self._raw_schedule:
+            self._append_entry_row(self._entry_for_display(entry))
+        if self.table.rowCount() == 0:
+            self._add_row()
+        self._set_headers()
+        self._update_clock_labels()
+
+    def _toggle_time_view(self):
+        self._show_local = not self._show_local
+        self._rebuild_from_raw()
 
     def _append_entry_row(self, entry: Dict):
         row = self.table.rowCount()
