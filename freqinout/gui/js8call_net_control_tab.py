@@ -126,6 +126,8 @@ class JS8CallNetControlTab(QWidget):
         self._setup_timer()
         self._update_clock_labels()
         self._setup_js8_rx_timer()
+        if self._poll_timer:
+            self._poll_timer.start()
 
         # Restore paused state for frequency changes
         paused = bool(self.settings.get("freq_change_paused", False))
@@ -454,7 +456,9 @@ class JS8CallNetControlTab(QWidget):
     # ---------------- POLLING DIRECTED.TXT ---------------- #
 
     def _poll_directed_file(self):
-        if not self._net_in_progress or not self._directed_path:
+        if not self._directed_path:
+            return
+        if not self._net_in_progress and not self.auto_query_msg_id:
             return
 
         # First, scan ALL.TXT for recent QUERY MSG transmissions to gate auto-queries
