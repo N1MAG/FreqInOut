@@ -201,6 +201,7 @@ class SchedulerEngine(QObject):
         self._last_band: Optional[str] = None
         self._scheduled_vfo: Optional[str] = None
         self._last_js8_sync_ts: float = 0.0
+        self._tx_inhibited: bool = False
 
         self.current_source: str = "NONE"
         self.current_schedule_entry: Dict = {}
@@ -209,6 +210,7 @@ class SchedulerEngine(QObject):
         self.timer = QTimer(self)
         self.timer.setInterval(poll_interval_ms)
         self.timer.timeout.connect(self._on_timer)
+        self._last_applied_entry: Dict = {}
 
         # If a rig was provided, we can optionally sanity-check it
         # (non-fatal if unavailable).
@@ -958,6 +960,9 @@ class SchedulerEngine(QObject):
         self.current_source = source
         self.current_schedule_entry = entry
         self._scheduled_vfo = vfo
+        if not hasattr(self, "_last_applied_entry") or entry != getattr(self, "_last_applied_entry", {}):
+            self._tx_inhibited = False
+            self._last_applied_entry = entry
 
         control_mode = self._control_mode()
         # If we're not in JS8CALL mode and have no rig backend, just update UI state.
@@ -1078,6 +1083,20 @@ class SchedulerEngine(QObject):
 
             # Notify listeners that we have a new active entry applied.
             self.active_entry_changed.emit(entry, source)
+            # If entering a NET window (including early check-in), inhibit JS8 TX to prevent auto replies
+            if source == "NET" and self.js8 and not self._tx_inhibited:
+                try:
+                    self.js8.inhibit_tx()
+                    self._tx_inhibited = True
+                except Exception as e:
+                    log.debug("SchedulerEngine: failed to inhibit JS8 TX: %s", e)
+            # If leaving a net and TX was inhibited, re-enable TX
+            elif source != "NET" and self.js8 and self._tx_inhibited:
+                try:
+                    self.js8.enable_tx()
+                except Exception as e:
+                    log.debug("SchedulerEngine: failed to re-enable JS8 TX: %s", e)
+                self._tx_inhibited = False
         else:
             log.warning("SchedulerEngine: %s set_frequency() reported failure.", control_mode)
             # Even if backend failed, we still update the UI state so that

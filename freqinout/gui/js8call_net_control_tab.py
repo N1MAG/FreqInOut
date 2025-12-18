@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import datetime
 import re
+import sqlite3
+import time
+import json
 from pathlib import Path
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -96,14 +99,18 @@ class JS8CallNetControlTab(QWidget):
         self._late_calls: Set[str] = set()
         self._all_calls_seen: Set[str] = set()
         self._queried_msg_ids: Set[str] = set()
-        self._pending_queries: List[tuple[str, str]] = []
+        self._pending_queries: List[tuple[Optional[float], str, str]] = []
         self._waiting_for_completion: bool = False
         self._current_query: tuple[str, str] | None = None
         self._js8_client = None
         self.auto_query_msg_id = bool(self.settings.get("js8_auto_query_msg_id", False))
+        self.auto_query_grids = bool(self.settings.get("js8_auto_query_grids", False))
         self._last_rx_ts: float = 0.0
         self._js8_rx_timer: QTimer | None = None
         self._last_rx_ts: float = 0.0
+        self._pending_grid_queries: List[tuple[Optional[float], str]] = []
+        self._grid_waiting: bool = False
+        self._grid_last_rx_ts: float = 0.0
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -809,7 +816,7 @@ class JS8CallNetControlTab(QWidget):
             self._maybe_process_next_query()
 
     def _poll_js8_rx_queue(self) -> None:
-        if not self.auto_query_msg_id or js8net is None:
+        if js8net is None:
             return
         client = self._get_js8_client()
         if client is None or not hasattr(js8net, "rx_queue"):
@@ -817,26 +824,42 @@ class JS8CallNetControlTab(QWidget):
         try:
             while True:
                 msg = js8net.rx_queue.get_nowait()
-                self._last_rx_ts = time.time()
+                now_ts = time.time()
+                self._last_rx_ts = now_ts
+                self._grid_last_rx_ts = now_ts
                 try:
                     p = msg.get("params", {}) if isinstance(msg, dict) else {}
                     txt = str(p.get("TEXT") or "").upper()
-                    if "YES MSG ID" in txt:
-                        ids = re.findall(r"\b(\d+)\b", txt)
-                        frm = (p.get("FROM") or "").strip().upper()
+                    frm = (p.get("FROM") or "").strip().upper()
+                    snr_val = None
+                    try:
+                        snr_val = float(p.get("SNR")) if p.get("SNR") not in (None, "") else None
+                    except Exception:
                         snr_val = None
-                        try:
-                            snr_val = float(p.get("SNR")) if p.get("SNR") not in (None, "") else None
-                        except Exception:
-                            snr_val = None
+                    if self.auto_query_msg_id and not self._net_lockout_active() and "YES MSG ID" in txt:
+                        ids = re.findall(r"\b(\d+)\b", txt)
                         for mid in ids:
                             if frm:
                                 self._queue_auto_query(frm, mid, snr=snr_val)
+                    # Passive grid capture
+                    grid_val = (p.get("GRID") or "").strip()
+                    if grid_val and frm:
+                        self._update_operator_grid(frm, grid_val, self._active_group_name())
+                    else:
+                        for token in txt.split():
+                            if 4 <= len(token) <= 6 and token[:2].isalpha() and token[2:4].isdigit():
+                                self._update_operator_grid(frm, token, self._active_group_name())
+                                break
+                    # Auto grid query when allowed
+                    if self.auto_query_grids and not self._net_lockout_active():
+                        if frm and self._operator_missing_grid(frm):
+                            self._maybe_queue_grid_query(frm, snr_val, msg_params=p, text=txt)
                 except Exception:
                     continue
         except queue.Empty:
             pass
         self._maybe_process_next_query()
+        self._maybe_process_next_grid()
 
     def _process_message_completion(self, line: str) -> None:
         """
@@ -870,6 +893,160 @@ class JS8CallNetControlTab(QWidget):
         except Exception as e:
             log.debug("JS8CallNetControl: failed sending QUERY MSGS to %s: %s", call, e)
 
+    # ---------------- Grid helpers ---------------- #
+
+    def _operator_missing_grid(self, callsign: str) -> bool:
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return False
+        try:
+            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            if not db_path.exists():
+                return True
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT grid FROM operator_checkins WHERE callsign=?", (cs,))
+            row = cur.fetchone()
+            conn.close()
+            if row is None:
+                return True
+            grid = row[0] or ""
+            return grid.strip() == ""
+        except Exception:
+            return True
+
+    def _update_operator_grid(self, callsign: str, grid: str, group_name: str = "") -> None:
+        cs = (callsign or "").strip().upper()
+        grid = (grid or "").strip().upper()
+        if not cs or not grid:
+            return
+        try:
+            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_checkins (
+                    callsign TEXT PRIMARY KEY,
+                    name TEXT,
+                    state TEXT,
+                    grid TEXT,
+                    group1 TEXT,
+                    group2 TEXT,
+                    group3 TEXT,
+                    group_role TEXT,
+                    first_seen_utc TEXT,
+                    last_seen_utc TEXT,
+                    last_net TEXT,
+                    last_role TEXT,
+                    checkin_count INTEGER DEFAULT 0,
+                    groups_json TEXT,
+                    trusted INTEGER DEFAULT 1
+                )
+                """
+            )
+            cur.execute("SELECT grid, group1, group2, group3, groups_json, trusted FROM operator_checkins WHERE callsign=?", (cs,))
+            row = cur.fetchone()
+            now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            if row is None:
+                groups = [g for g in [group_name.strip()] if g]
+                groups_json = json.dumps(groups) if groups else None
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO operator_checkins
+                    (callsign, grid, group1, group2, group3, group_role, first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted)
+                    VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, 1)
+                    """,
+                    (cs, grid, group_name or None, None, None, now_iso, now_iso, groups_json),
+                )
+            else:
+                old_grid, g1, g2, g3, groups_json, trusted = row
+                new_grid = old_grid or grid
+                g_list = [g1 or "", g2 or "", g3 or ""]
+                if group_name and group_name not in g_list:
+                    for idx, val in enumerate(g_list):
+                        if not val:
+                            g_list[idx] = group_name
+                            break
+                try:
+                    current_groups = json.loads(groups_json) if groups_json else []
+                    if group_name and group_name not in current_groups:
+                        current_groups.append(group_name)
+                    groups_json_out = json.dumps(current_groups) if current_groups else None
+                except Exception:
+                    groups_json_out = groups_json
+                cur.execute(
+                    """
+                    UPDATE operator_checkins
+                    SET grid=?, group1=?, group2=?, group3=?, last_seen_utc=?, groups_json=?, trusted=COALESCE(trusted, ?)
+                    WHERE callsign=?
+                    """,
+                    (new_grid, g_list[0] or None, g_list[1] or None, g_list[2] or None, now_iso, groups_json_out, trusted if trusted is not None else 1, cs),
+                )
+            conn.commit()
+        except Exception as e:
+            log.debug("JS8CallNetControl: failed to update operator grid for %s: %s", callsign, e)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _active_group_name(self) -> str:
+        entry = self._active_schedule()
+        if not entry:
+            return ""
+        return (entry.get("group_name") or "").strip()
+
+    def _maybe_queue_grid_query(self, callsign: str, snr: Optional[float], msg_params: Dict, text: str) -> None:
+        call = (callsign or "").strip().upper()
+        if not call:
+            return
+        # Require active schedule and group match: a AND (b OR c)
+        active = self._active_schedule()
+        if not active:
+            return
+        sched_group = (active.get("group_name") or "").strip().upper()
+        configured_groups = [g.strip().upper() for g in (self.settings.get("primary_js8_groups", []) or []) if g]
+        incoming_group = ""
+        for tok in text.split():
+            if tok.startswith("@") and len(tok) > 1:
+                incoming_group = tok[1:].upper()
+                break
+        if not configured_groups:
+            group_ok = True
+        else:
+            group_ok = sched_group in configured_groups or incoming_group in configured_groups
+        if not group_ok:
+            return
+        # Enqueue if not already queued
+        for _, queued_call in self._pending_grid_queries:
+            if queued_call == call:
+                return
+        self._pending_grid_queries.append((snr, call))
+
+    def _maybe_process_next_grid(self) -> None:
+        if not self._pending_grid_queries:
+            return
+        if time.time() - self._grid_last_rx_ts < 2.0:
+            return
+        if self._net_lockout_active():
+            return
+        client = self._get_js8_client()
+        if client is None:
+            return
+        # Weakest SNR first
+        self._pending_grid_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
+        snr_val, call = self._pending_grid_queries.pop(0)
+        try:
+            if hasattr(client, "send_message"):
+                client.send_message(f"{call}: GRID?")  # type: ignore[attr-defined]
+                log.info("JS8CallNetControl: auto grid query to %s", call)
+                self._grid_waiting = True
+        except Exception as e:
+            log.debug("JS8CallNetControl: failed GRID? to %s: %s", call, e)
+
     def _is_message_complete_line(self, line: str) -> bool:
         """
         Heuristic: treat lines containing the JS8Call end-of-message marker
@@ -881,6 +1058,189 @@ class JS8CallNetControlTab(QWidget):
         if "♢" in txt:
             return True
         return False
+
+    # ---------------- Schedule helpers ---------------- #
+
+    def _parse_hhmm_to_minutes(self, hhmm: str) -> Optional[int]:
+        txt = (hhmm or "").strip()
+        if not txt:
+            return None
+        try:
+            hh, mm = txt.split(":")
+            hh_i = int(hh)
+            mm_i = int(mm)
+            if 0 <= hh_i <= 23 and 0 <= mm_i <= 59:
+                return hh_i * 60 + mm_i
+        except Exception:
+            return None
+        return None
+
+    def _load_net_rows(self) -> List[Dict]:
+        data = []
+        try:
+            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            if db_path.exists():
+                conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT day_utc, frequency, start_utc, end_utc, early_checkin, group_name FROM net_schedule_tab"
+                )
+                for row in cur.fetchall():
+                    data.append(
+                        {
+                            "day_utc": row[0] or "",
+                            "frequency": row[1] or "",
+                            "start_utc": row[2] or "",
+                            "end_utc": row[3] or "",
+                            "early_checkin": int(row[4] or 0),
+                            "group_name": row[5] or "",
+                        }
+                    )
+                conn.close()
+        except Exception:
+            pass
+        if not data:
+            try:
+                raw = self.settings.get("net_schedule", [])
+                if isinstance(raw, list):
+                    data = [
+                        {
+                            "day_utc": r.get("day_utc", ""),
+                            "frequency": r.get("frequency", ""),
+                            "start_utc": r.get("start_utc", ""),
+                            "end_utc": r.get("end_utc", ""),
+                            "early_checkin": int(r.get("early_checkin", 0) or 0),
+                            "group_name": r.get("group_name", ""),
+                        }
+                        for r in raw
+                        if isinstance(r, dict)
+                    ]
+            except Exception:
+                data = []
+        return data
+
+    def _load_daily_rows(self) -> List[Dict]:
+        data = []
+        try:
+            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout.db"
+            if db_path.exists():
+                conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+                cur.execute("SELECT day_utc, frequency, start_utc, end_utc, group_name FROM daily_schedule_tab")
+                for row in cur.fetchall():
+                    data.append(
+                        {
+                            "day_utc": row[0] or "ALL",
+                            "frequency": row[1] or "",
+                            "start_utc": row[2] or "",
+                            "end_utc": row[3] or "",
+                            "group_name": row[4] or "",
+                        }
+                    )
+                conn.close()
+        except Exception:
+            pass
+        if not data:
+            try:
+                raw = self.settings.get("daily_schedule", [])
+                if isinstance(raw, list):
+                    data = [
+                        {
+                            "day_utc": r.get("day_utc", "ALL"),
+                            "frequency": r.get("frequency", ""),
+                            "start_utc": r.get("start_utc", ""),
+                            "end_utc": r.get("end_utc", ""),
+                            "group_name": r.get("group_name", ""),
+                        }
+                        for r in raw
+                        if isinstance(r, dict)
+                    ]
+            except Exception:
+                data = []
+        return data
+
+    def _day_matches(self, entry_day: str, now_day: str) -> bool:
+        d = (entry_day or "ALL").strip().upper()
+        if d == "ALL":
+            return True
+        return d.upper() == now_day.upper()
+
+    def _is_in_window(self, entry, now: datetime.datetime, allow_early: bool = False) -> bool:
+        day = entry.get("day_utc", "ALL")
+        start_txt = entry.get("start_utc", "")
+        end_txt = entry.get("end_utc", "")
+        early = int(entry.get("early_checkin", 0) or 0) if allow_early else 0
+        start_m = self._parse_hhmm_to_minutes(start_txt)
+        end_m = self._parse_hhmm_to_minutes(end_txt)
+        if start_m is None or end_m is None:
+            return False
+        start_m = max(0, start_m - early)
+        now_m = now.hour * 60 + now.minute
+        # Overnight handling
+        if start_m <= end_m:
+            return self._day_matches(day, now.strftime("%A")) and start_m <= now_m <= end_m
+        else:
+            # window crosses midnight
+            today_match = self._day_matches(day, now.strftime("%A")) and now_m >= start_m
+            prev_day = (now - datetime.timedelta(days=1)).strftime("%A")
+            overnight_match = self._day_matches(day, prev_day) and now_m <= end_m
+            return today_match or overnight_match
+
+    def _active_schedule(self) -> Optional[Dict]:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        # Prefer net schedule windows (respect early)
+        for row in self._load_net_rows():
+            if self._is_in_window(row, now, allow_early=True):
+                return row
+        for row in self._load_daily_rows():
+            if self._is_in_window(row, now, allow_early=False):
+                return row
+        return None
+
+    def _next_net_lockout(self) -> Optional[datetime.datetime]:
+        """
+        Return the UTC datetime when the next net window starts (start - early).
+        """
+        rows = self._load_net_rows()
+        if not rows:
+            return None
+        now = datetime.datetime.now(datetime.timezone.utc)
+        now_day = now.strftime("%A")
+        candidates: List[datetime.datetime] = []
+        for row in rows:
+            start_m = self._parse_hhmm_to_minutes(row.get("start_utc", ""))
+            end_m = self._parse_hhmm_to_minutes(row.get("end_utc", ""))
+            if start_m is None or end_m is None:
+                continue
+            early = int(row.get("early_checkin", 0) or 0)
+            window_start = max(0, start_m - early)
+            for day_offset in (0, 1):
+                dt = now + datetime.timedelta(days=day_offset)
+                if not self._day_matches(row.get("day_utc", ""), dt.strftime("%A")):
+                    continue
+                cand = dt.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(
+                    minutes=window_start
+                )
+                if cand >= now:
+                    candidates.append(cand)
+        if not candidates:
+            return None
+        return min(candidates)
+
+    def _net_lockout_active(self) -> bool:
+        """
+        True if within 5 minutes of a net window start (including early check-in)
+        or currently inside a net window.
+        """
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for row in self._load_net_rows():
+            if self._is_in_window(row, now, allow_early=True):
+                return True
+        nxt = self._next_net_lockout()
+        if nxt is None:
+            return False
+        delta = (nxt - now).total_seconds() / 60.0
+        return 0 <= delta <= 5
 
     def _dedupe_calls_from_text(self, text: str) -> List[str]:
         calls = []

@@ -164,6 +164,37 @@ class JS8ControlClient(JS8StatusClient):
             log.error("JS8ControlClient failed to set frequency: %s", e)
             return False
 
+    def inhibit_tx(self) -> None:
+        """
+        Best-effort TX halt/inhibit for JS8Call using js8net.
+        """
+        if js8net is None:
+            return
+        try:
+            if not self._ensure_net():
+                return
+            if hasattr(js8net, "queue_message"):
+                js8net.queue_message({"params": {}, "type": "TX.HALT", "value": ""})  # type: ignore[attr-defined]
+                js8net.queue_message({"params": {"ENABLE": False}, "type": "TX.ENABLE", "value": ""})  # type: ignore[attr-defined]
+                log.info("JS8ControlClient: issued TX.HALT / TX.ENABLE false to JS8Call")
+        except Exception as e:
+            log.debug("JS8ControlClient: inhibit_tx failed: %s", e)
+
+    def enable_tx(self) -> None:
+        """
+        Best-effort re-enable JS8Call TX after a net concludes.
+        """
+        if js8net is None:
+            return
+        try:
+            if not self._ensure_net():
+                return
+            if hasattr(js8net, "queue_message"):
+                js8net.queue_message({"params": {"ENABLE": True}, "type": "TX.ENABLE", "value": ""})  # type: ignore[attr-defined]
+                log.info("JS8ControlClient: re-enabled JS8Call TX")
+        except Exception as e:
+            log.debug("JS8ControlClient: enable_tx failed: %s", e)
+
     def get_frequency(self) -> Optional[int]:
         """
         Return current JS8Call dial frequency in Hz, or None on failure.
