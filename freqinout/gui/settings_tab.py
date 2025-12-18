@@ -655,14 +655,17 @@ class SettingsTab(QWidget):
         now_ts = datetime.datetime.now().timestamp()
         if now_ts - self._proc_snapshot_ts > 2.0:
             snap = []
-            for proc in psutil.process_iter(attrs=["name", "exe"]):
+            for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
                 try:
                     name = (proc.info.get("name") or "").lower()
                     exe = os.path.basename(proc.info.get("exe") or "").lower()
+                    cmdline = " ".join(proc.info.get("cmdline") or []).lower()
                     if name:
                         snap.append(name)
                     if exe and exe != name:
                         snap.append(exe)
+                    if cmdline:
+                        snap.append(cmdline)
                 except Exception:
                     continue
             self._proc_snapshot = snap
@@ -677,7 +680,8 @@ class SettingsTab(QWidget):
         for program_name, lbl in self.status_labels.items():
             running = self._program_is_running(program_name)
             if program_name == "JS8Call":
-                if running and self._js8_api_reachable():
+                api_ok = self._js8_api_reachable()
+                if api_ok:
                     lbl.setStyleSheet("background-color: #4CAF50; border-radius: 7px;")
                     lbl.setToolTip("Running (API reachable)")
                 elif running:
