@@ -12,6 +12,8 @@ from typing import List, Dict, Optional, Set
 import math
 import time
 import logging
+import sys
+import queue
 
 from PySide6.QtCore import QUrl, Qt, QTimer, QCoreApplication
 from PySide6.QtWidgets import (
@@ -29,6 +31,13 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     QWebEngineView = None
 
+JS8NET_PATH = Path(__file__).resolve().parents[2] / "third_party" / "js8net" / "js8net-main"
+if JS8NET_PATH.exists():
+    sys.path.insert(0, str(JS8NET_PATH))
+try:
+    import js8net  # type: ignore
+except Exception:
+    js8net = None
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 
@@ -361,13 +370,17 @@ class StationsMapTab(QWidget):
             self.settings = None
 
         self._last_js8_load_ts: float = 0.0
+        self._last_exit_ts: float = 0.0
         try:
             if self.settings:
                 self._last_js8_load_ts = float(self.settings.get("js8_links_last_load_utc", 0) or 0)
+                self._last_exit_ts = float(self.settings.get("last_exit_utc", 0) or 0)
         except Exception:
             self._last_js8_load_ts = 0.0
+            self._last_exit_ts = 0.0
         self._js8_timer: Optional[QTimer] = None
         self._refresh_timer: Optional[QTimer] = None
+        self._js8_rx_timer: Optional[QTimer] = None
 
         self._build_ui()
         self._load_operator_history()
@@ -390,15 +403,112 @@ class StationsMapTab(QWidget):
         self._js8_timer.start()
         # Start display refresh timer (separate from ingest) using selected interval
         self._start_refresh_timer()
+        # JS8 RX live ingestion timer
+        self._start_js8_rx_timer()
+
+    def _start_js8_rx_timer(self):
+        """
+        Attach to js8net and poll live RX queue to ingest traffic in real time.
+        """
+        if js8net is None:
+            return
+        if self._js8_rx_timer is None:
+            self._js8_rx_timer = QTimer(self)
+            self._js8_rx_timer.setInterval(1000)
+            self._js8_rx_timer.timeout.connect(self._poll_js8_rx_queue)
+        if self._js8_rx_timer.isActive():
+            return
+        try:
+            port = int(self.settings.get("js8_port", 2442) or 2442) if self.settings else 2442
+        except Exception:
+            port = 2442
+        try:
+            js8net.start_net("127.0.0.1", port)
+        except Exception as e:
+            log.debug("StationsMap: js8net start failed: %s", e)
+            return
+        self._js8_rx_timer.start()
+
+    def _poll_js8_rx_queue(self):
+        """
+        Consume js8net.rx_queue and upsert live observations into js8_links.
+        """
+        if js8net is None or not hasattr(js8net, "rx_queue"):
+            return
+        if not self.settings:
+            return
+        try:
+            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            indexer = JS8LogLinkIndexer(self.settings, db_path)
+        except Exception as e:
+            log.debug("StationsMap: js8net live ingest unavailable: %s", e)
+            return
+        try:
+            my_call = (self.settings.get("operator_callsign", "") or "").upper()
+        except Exception:
+            my_call = ""
+
+        updated = False
+        while True:
+            try:
+                msg = js8net.rx_queue.get_nowait()  # type: ignore[attr-defined]
+            except queue.Empty:
+                break
+            try:
+                ts = float(msg.get("time") or time.time()) if isinstance(msg, dict) else time.time()
+            except Exception:
+                ts = time.time()
+            params = msg.get("params", {}) if isinstance(msg, dict) else {}
+            mtype = (msg.get("type") or "").strip().upper() if isinstance(msg, dict) else ""
+            freq_hz = None
+            try:
+                fval = params.get("FREQ")
+                if fval not in (None, ""):
+                    freq_hz = float(fval)
+            except Exception:
+                freq_hz = None
+            origin = ""
+            dest = ""
+            snr = None
+            is_spotter = 0
+            if mtype == "RX.SPOT":
+                origin = str(params.get("CALL") or "").upper()
+                dest = my_call
+                snr = params.get("SNR")
+                is_spotter = 1
+            elif mtype == "RX.DIRECTED":
+                origin = str(params.get("FROM") or "").upper()
+                dest = str(params.get("TO") or params.get("CALL") or "").upper()
+                snr = params.get("SNR") or params.get("EXTRA")
+                if not dest:
+                    dest = my_call
+            else:
+                continue
+            if not origin or not dest:
+                continue
+            try:
+                snr_val = float(snr)
+            except Exception:
+                snr_val = None
+            try:
+                indexer.ingest_live(ts, origin, dest, snr_val, freq_hz, is_spotter=is_spotter)
+                updated = True
+            except Exception as e:
+                log.debug("StationsMap: live ingest failed for %s->%s: %s", origin, dest, e)
+        if updated:
+            self._last_js8_load_ts = max(self._last_js8_load_ts, time.time())
+            self._render_map(preserve_view=True)
 
     def _record_exit_time(self):
         try:
             if self.settings:
-                self.settings.set("last_exit_utc", time.time())
+                now_ts = time.time()
+                self.settings.set("last_exit_utc", now_ts)
+                self._last_exit_ts = now_ts
         except Exception:
             pass
 
-    def _ingest_js8_logs(self) -> int:
+    def _ingest_js8_logs(self, since_ts: Optional[float] = None) -> int:
         """
         Run JS8 log ingestion (DIRECTED/ALL) and persist last load timestamp.
         """
@@ -407,7 +517,7 @@ class StationsMapTab(QWidget):
         try:
             db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
             indexer = JS8LogLinkIndexer(self.settings, db_path)
-            count = indexer.update()
+            count = indexer.update(since_ts=since_ts)
             # Track the most recent timestamp from the ingested data if available
             latest_ts = max(indexer._ensure_latest_ts(last_default=time.time()), time.time())
             self._last_js8_load_ts = latest_ts
@@ -425,7 +535,10 @@ class StationsMapTab(QWidget):
         """
         Background ingest and refresh map. Used on timer and manual refresh.
         """
-        self._ingest_js8_logs()
+        since = None
+        if initial:
+            since = max(self._last_js8_load_ts, self._last_exit_ts)
+        self._ingest_js8_logs(since_ts=since)
         self._render_map(preserve_view=True)
 
     def _start_refresh_timer(self):
@@ -1859,6 +1972,32 @@ class JS8LogLinkIndexer:
         self.settings = settings
         self.db_path = db_path
 
+    def _freq_to_band(self, freq_hz: Optional[float]) -> Optional[str]:
+        if freq_hz is None:
+            return None
+        try:
+            mhz = float(freq_hz) / 1_000_000.0
+        except Exception:
+            return None
+        bands = [
+            ("160M", 1.8, 2.0),
+            ("80M", 3.5, 4.0),
+            ("60M", 5.0, 5.5),
+            ("40M", 7.0, 7.3),
+            ("30M", 10.1, 10.15),
+            ("20M", 14.0, 14.35),
+            ("17M", 18.068, 18.168),
+            ("15M", 21.0, 21.45),
+            ("12M", 24.89, 24.99),
+            ("10M", 28.0, 29.7),
+            ("6M", 50.0, 54.0),
+            ("2M", 144.0, 148.0),
+        ]
+        for name, lo, hi in bands:
+            if lo <= mhz <= hi:
+                return name
+        return None
+
     # -------- parsing helpers -------- #
     def _parse_directed_line(self, line: str) -> Optional[tuple]:
         """
@@ -1983,7 +2122,7 @@ class JS8LogLinkIndexer:
         return float(last_default or 0.0)
 
     # -------- public API -------- #
-    def update(self) -> int:
+    def update(self, since_ts: Optional[float] = None) -> int:
         """
         Rebuild js8_links from DIRECTED.TXT and ALL.TXT.
         Returns number of rows inserted.
@@ -2006,32 +2145,10 @@ class JS8LogLinkIndexer:
 
         if not rows:
             return 0
-
-        def _freq_to_band(freq_hz: Optional[float]) -> Optional[str]:
-            if freq_hz is None:
-                return None
-            try:
-                mhz = float(freq_hz) / 1_000_000.0
-            except Exception:
-                return None
-            bands = [
-                ("160M", 1.8, 2.0),
-                ("80M", 3.5, 4.0),
-                ("60M", 5.0, 5.5),
-                ("40M", 7.0, 7.3),
-                ("30M", 10.1, 10.15),
-                ("20M", 14.0, 14.35),
-                ("17M", 18.068, 18.168),
-                ("15M", 21.0, 21.45),
-                ("12M", 24.89, 24.99),
-                ("10M", 28.0, 29.7),
-                ("6M", 50.0, 54.0),
-                ("2M", 144.0, 148.0),
-            ]
-            for name, lo, hi in bands:
-                if lo <= mhz <= hi:
-                    return name
-            return None
+        if since_ts:
+            rows = [r for r in rows if r and len(r) > 0 and r[0] and r[0] >= since_ts]
+            if not rows:
+                return 0
 
         # De-duplicate by station pair + band, averaging SNR and keeping the newest timestamp/frequency.
         last_seen: Dict[str, float] = {}
@@ -2049,7 +2166,7 @@ class JS8LogLinkIndexer:
                         last_seen[b] = ts
             except Exception:
                 pass
-            band = _freq_to_band(freq_hz)
+            band = self._freq_to_band(freq_hz)
             key = (tuple(sorted((a, b))), band)
             entry = agg.setdefault(key, {"last_ts": ts, "snr_sum": 0.0, "snr_count": 0, "freq_hz": freq_hz})
             if ts and (entry["last_ts"] is None or ts > entry["last_ts"]):
@@ -2069,7 +2186,8 @@ class JS8LogLinkIndexer:
         conn = sqlite3.connect(self.db_path)
         try:
             self._ensure_table(conn)
-            self._clear_table(conn)
+            if since_ts is None:
+                self._clear_table(conn)
             payload = []
             for key, entry in agg.items():
                 pair, band = key
@@ -2088,6 +2206,15 @@ class JS8LogLinkIndexer:
                         0,
                     )
                 )
+            if since_ts is not None:
+                # delete any existing rows for same pair+band to avoid duplicates
+                for key, _ in agg.items():
+                    pair, band = key
+                    origin, dest = pair
+                    conn.execute(
+                        "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
+                        (origin, dest, dest, origin, band),
+                    )
             conn.executemany(
                 """
                 INSERT INTO js8_links
@@ -2115,6 +2242,49 @@ class JS8LogLinkIndexer:
 
     def query_links(self, *args, **kwargs):
         return []
+
+    def ingest_live(
+        self,
+        ts: float,
+        origin: str,
+        destination: str,
+        snr: Optional[float] = None,
+        freq_hz: Optional[float] = None,
+        is_spotter: int = 0,
+    ) -> None:
+        """
+        Incrementally upsert a single observation from js8net without rebuilding entire table.
+        """
+        origin = (origin or "").strip().upper()
+        destination = (destination or "").strip().upper()
+        if not origin or not destination:
+            return
+        band = self._freq_to_band(freq_hz)
+        ts_val = float(ts or time.time())
+        iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self._ensure_table(conn)
+            conn.execute(
+                "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
+                (origin, destination, destination, origin, band),
+            )
+            conn.execute(
+                """
+                INSERT INTO js8_links (ts, origin, destination, snr, band, freq_hz, is_relay, relay_via, is_spotter, last_seen_utc)
+                VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                """,
+                (ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso),
+            )
+            try:
+                conn.execute("UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?", (iso, origin, origin))
+                conn.execute("UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?", (iso, destination, destination))
+            except Exception:
+                pass
+            conn.commit()
+        finally:
+            conn.close()
 
     def _resolve_directed_path(self) -> Optional[Path]:
         path_txt = (self.settings.get("js8_directed_path", "") or "").strip()

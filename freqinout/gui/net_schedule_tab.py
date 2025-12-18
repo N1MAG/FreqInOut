@@ -151,6 +151,8 @@ class NetScheduleTab(QWidget):
         self._clock_timer: QTimer | None = None
         self._suppress_autostart: bool = True  # avoid auto-start during initial load
         self._biweekly_choice_cache: Dict[str, int] = {}
+        self._show_local: bool = False  # view toggle
+        self._raw_rows: List[Dict] = []
 
         self._build_ui()
         self._load()
@@ -170,27 +172,15 @@ class NetScheduleTab(QWidget):
         self.local_label = QLabel()
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
+        self.time_toggle_btn = QPushButton("View: UTC")
+        self.time_toggle_btn.clicked.connect(self._toggle_time_view)
+        header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
 
         # table
         self.table = QTableWidget()
         self.table.setColumnCount(12)
-        self.table.setHorizontalHeaderLabels(
-            [
-                "",
-                "Day (UTC)",
-                "Recurrence",
-                "Group Name",
-                "Mode",
-                "Band",
-                "VFO",
-                "Freq (MHz)",
-                "Start (UTC HH:MM)",
-                "End (UTC HH:MM)",
-                "Early (min)",
-                "Net Name",
-            ]
-        )
+        self._set_headers()
         self.table.setSortingEnabled(False)
         hv = self.table.horizontalHeader()
         hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
@@ -261,6 +251,102 @@ class NetScheduleTab(QWidget):
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._update_clock_labels)
         self._clock_timer.start(1000)
+        self._update_clock_labels()
+
+    def _set_headers(self):
+        self.table.setHorizontalHeaderLabels(
+            [
+                "",
+                f"Day ({'Local' if self._show_local else 'UTC'})",
+                "Recurrence",
+                "Group Name",
+                "Mode",
+                "Band",
+                "VFO",
+                "Freq (MHz)",
+                f"Start ({'Local' if self._show_local else 'UTC'} HH:MM)",
+                f"End ({'Local' if self._show_local else 'UTC'} HH:MM)",
+                "Early (min)",
+                "Net Name",
+            ]
+        )
+        self.time_toggle_btn.setText("View: Local" if not self._show_local else "View: UTC")
+
+    # --------- time conversion helpers --------- #
+    def _day_offset(self, day_name: str) -> int:
+        try:
+            return DAY_NAMES.index(day_name)
+        except Exception:
+            return 0
+
+    def _anchor_utc_sunday(self) -> datetime.datetime:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        delta = (now_utc.weekday() + 1) % 7  # Sunday=0
+        sunday = now_utc - datetime.timedelta(days=delta)
+        return sunday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=datetime.timezone.utc)
+
+    def _anchor_local_sunday(self) -> datetime.datetime:
+        tz = get_timezone(self.settings.get("timezone", "UTC") or "UTC")
+        now_local = datetime.datetime.now(tz)
+        delta = (now_local.weekday() + 1) % 7
+        sunday = now_local - datetime.timedelta(days=delta)
+        return sunday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=tz)
+
+    def _convert_day_time(self, day: str, hhmm: str, to_local: bool) -> tuple[str, str]:
+        """
+        Convert (day, HH:MM) between UTC and local using configured timezone.
+        Returns day name and hh:mm in target zone.
+        """
+        day = (day or "").strip()
+        if not day or day not in DAY_NAMES or not hhmm:
+            return day, hhmm
+        try:
+            h, m = hhmm.split(":")
+            h_i = int(h)
+            m_i = int(m)
+        except Exception:
+            return day, hhmm
+        idx = self._day_offset(day)
+        if to_local:
+            anchor = self._anchor_utc_sunday()
+            tz = get_timezone(self.settings.get("timezone", "UTC") or "UTC")
+            dt_utc = anchor + datetime.timedelta(days=idx, hours=h_i, minutes=m_i)
+            dt_loc = dt_utc.astimezone(tz)
+            return dt_loc.strftime("%A"), dt_loc.strftime("%H:%M")
+        anchor_loc = self._anchor_local_sunday()
+        dt_loc = anchor_loc + datetime.timedelta(days=idx, hours=h_i, minutes=m_i)
+        dt_utc = dt_loc.astimezone(datetime.timezone.utc)
+        return dt_utc.strftime("%A"), dt_utc.strftime("%H:%M")
+
+    def _to_view_row(self, row: Dict) -> Dict:
+        """
+        Convert a UTC row to current view (local if toggled), preserving other fields.
+        """
+        if not self._show_local:
+            return dict(row)
+        day, start_local = self._convert_day_time(row.get("day_utc", ""), row.get("start_utc", ""), to_local=True)
+        _, end_local = self._convert_day_time(row.get("day_utc", ""), row.get("end_utc", ""), to_local=True)
+        out = dict(row)
+        out["day_utc"] = day
+        out["start_utc"] = start_local
+        out["end_utc"] = end_local
+        return out
+
+    def _toggle_time_view(self):
+        """
+        Flip between UTC and Local view, converting current table contents back to UTC first.
+        """
+        try:
+            # Normalize current table to UTC before flipping
+            rows_utc = self._collect_rows()
+        except Exception:
+            rows_utc = self._raw_rows or []
+        self._raw_rows = rows_utc
+        self._show_local = not self._show_local
+        self._set_headers()
+        self.table.setRowCount(0)
+        for row in self._raw_rows:
+            self._add_row(self._to_view_row(row))
         self._update_clock_labels()
 
 
@@ -757,6 +843,12 @@ class NetScheduleTab(QWidget):
                     biweekly_offset = 0 if resp == QMessageBox.Yes else 1
                     self._biweekly_choice_cache[key] = biweekly_offset
 
+            # If viewing local, convert back to UTC before storing
+            if self._show_local:
+                orig_day = day
+                day, start_txt = self._convert_day_time(orig_day, start_txt, to_local=False)
+                _, end_txt = self._convert_day_time(orig_day, end_txt, to_local=False)
+
             row = {
                 "day_utc": day,
                 "recurrence": recurrence,
@@ -1023,6 +1115,8 @@ class NetScheduleTab(QWidget):
             return []
         finally:
             conn.close()
+        # Should not reach here
+        return []
 
     def _load(self):
         self.table.setRowCount(0)
@@ -1033,8 +1127,9 @@ class NetScheduleTab(QWidget):
             data = self.settings.get("net_schedule", [])
             if not isinstance(data, list):
                 data = []
-        for row in data:
-            self._add_row(row)
+        self._raw_rows = data
+        for row in self._raw_rows:
+            self._add_row(self._to_view_row(row))
         self._net_name_history = sorted(
             {r.get("net_name", "") for r in data if isinstance(r, dict) and r.get("net_name")}
         )
@@ -1048,6 +1143,7 @@ class NetScheduleTab(QWidget):
         except ValueError as e:
             QMessageBox.warning(self, "Invalid Net Schedule", str(e))
             return
+        self._raw_rows = rows
 
         # Save to JSON config
         self.settings.set("net_schedule", rows)
