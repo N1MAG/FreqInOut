@@ -1914,8 +1914,6 @@ class JS8LogLinkIndexer:
             msg_part = line.split(":", 1)[1]
         # Trim leading colon/space
         msg_part = msg_part.lstrip(": ").strip()
-        if ":" in msg_part:
-            msg_part = msg_part.split(":", 1)[1]
         origin, dest = self._extract_origin_dest(msg_part)
         if not origin or not dest:
             return None
