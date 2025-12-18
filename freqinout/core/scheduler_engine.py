@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -164,7 +165,7 @@ class SchedulerEngine(QObject):
           * Active Net schedule entry (if any).
           * The next transition time.
       - Optionally, drive FLRig (via FLRigClient) or JS8Call (via
-        pyjs8call wrapper) to set frequency based on 'control_via' setting.
+        js8net-backed wrapper) to set frequency based on 'control_via' setting.
 
     The engine does **not** own the event loop; it exposes a periodic
     QTimer and emits signals so tabs can reflect the current/next info.
@@ -199,6 +200,7 @@ class SchedulerEngine(QObject):
         self._last_freq_hz: Optional[int] = None
         self._last_band: Optional[str] = None
         self._scheduled_vfo: Optional[str] = None
+        self._last_js8_sync_ts: float = 0.0
 
         self.current_source: str = "NONE"
         self.current_schedule_entry: Dict = {}
@@ -273,7 +275,7 @@ class SchedulerEngine(QObject):
         Determine how (or if) we should control frequency:
           - MANUAL: compute schedule only, no rig commands.
           - FLRIG: use FLRigClient.
-          - JS8CALL: use JS8ControlClient via pyjs8call.
+          - JS8CALL: use JS8ControlClient via js8net.
           - NONE: requested backend unavailable.
         """
         mode = (self.settings.get("control_via", "FLRig") or "FLRig").upper()
@@ -284,6 +286,26 @@ class SchedulerEngine(QObject):
         if mode == "JS8CALL":
             return "JS8CALL" if self.js8 is not None else "NONE"
         return "NONE"
+
+    def _js8_offset_setting(self) -> int:
+        try:
+            val = int(self.settings.get("js8_offset_hz", 0) or 0)
+            return val
+        except Exception:
+            return 0
+
+    def _parse_freq_hz(self, freq_text: str) -> Optional[int]:
+        if not freq_text:
+            return None
+        try:
+            normalized = freq_text.replace(",", ".").replace(" ", "")
+            parts = normalized.split(".")
+            if len(parts) > 2:
+                normalized = parts[0] + "." + "".join(parts[1:])
+            freq_mhz = float(normalized)
+            return int(round(freq_mhz * 1_000_000))
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Public API
@@ -311,6 +333,26 @@ class SchedulerEngine(QObject):
         """
         self._evaluate(now_utc=datetime.datetime.now(datetime.timezone.utc), force=True)
 
+    def _maybe_resync_js8(self) -> None:
+        """
+        Every ~60s, ensure JS8Call dial/offset match the active schedule entry.
+        """
+        if not self.js8:
+            return
+        now_ts = time.time()
+        if now_ts - self._last_js8_sync_ts < 60:
+            return
+        entry = self.current_schedule_entry or {}
+        freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
+        if not freq_hz:
+            return
+        offset = self._js8_offset_setting()
+        try:
+            self.js8.set_frequency(freq_hz, offset_hz=offset)
+            self._last_js8_sync_ts = now_ts
+        except Exception as e:
+            log.debug("SchedulerEngine: js8 resync failed: %s", e)
+
     # ------------------------------------------------------------------
     # Internal evaluation
     # ------------------------------------------------------------------
@@ -319,6 +361,7 @@ class SchedulerEngine(QObject):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         try:
             self._evaluate(now_utc=now_utc)
+            self._maybe_resync_js8()
         except Exception as e:
             log.error("SchedulerEngine timer tick failed: %s", e)
 
@@ -948,17 +991,10 @@ class SchedulerEngine(QObject):
         if not freq_text:
             log.warning("SchedulerEngine: schedule entry missing 'frequency'; skipping.")
             return
-        try:
-            normalized = freq_text.replace(",", ".").replace(" ", "")
-            parts = normalized.split(".")
-            if len(parts) > 2:
-                normalized = parts[0] + "." + "".join(parts[1:])
-            freq_mhz = float(normalized)
-        except Exception:
+        freq_hz = self._parse_freq_hz(freq_text)
+        if freq_hz is None:
             log.error("SchedulerEngine: invalid frequency text '%s'; skipping.", freq_text)
             return
-
-        freq_hz = int(round(freq_mhz * 1_000_000))
 
         fldigi_center = None
         js8_tune = None
@@ -997,10 +1033,11 @@ class SchedulerEngine(QObject):
             )
 
         ok = False
+        js8_offset = self._js8_offset_setting()
         if control_mode == "JS8CALL":
             try:
                 if self.js8:
-                    ok = self.js8.set_frequency(freq_hz, offset_hz=None)
+                    ok = self.js8.set_frequency(freq_hz, offset_hz=js8_offset)
             except Exception as e:
                 log.error("SchedulerEngine: error sending set_frequency to JS8Call: %s", e)
         else:
@@ -1030,7 +1067,7 @@ class SchedulerEngine(QObject):
                 # Keep JS8Call dial in sync even when FLRig controls the rig
                 if self.js8:
                     try:
-                        self.js8.set_frequency(freq_hz, offset_hz=js8_tune or 0)
+                        self.js8.set_frequency(freq_hz, offset_hz=js8_offset)
                     except Exception as e:
                         log.debug("SchedulerEngine: JS8Call set_frequency (FLRig control) failed: %s", e)
 

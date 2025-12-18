@@ -26,6 +26,16 @@ from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
 import psutil
 
+# Vendored js8net (replacement for pyjs8call)
+JS8NET_PATH = Path(__file__).resolve().parents[2] / "third_party" / "js8net" / "js8net-main"
+if JS8NET_PATH.exists():
+    import sys
+    sys.path.insert(0, str(JS8NET_PATH))
+try:
+    import js8net  # type: ignore
+except Exception:
+    js8net = None
+
 
 class JS8CallNetControlTab(QWidget):
     """
@@ -91,14 +101,19 @@ class JS8CallNetControlTab(QWidget):
         self._current_query: tuple[str, str] | None = None
         self._js8_client = None
         self.auto_query_msg_id = bool(self.settings.get("js8_auto_query_msg_id", False))
+        self._last_rx_ts: float = 0.0
+        self._js8_rx_timer: QTimer | None = None
+        self._last_rx_ts: float = 0.0
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
+        self._js8_rx_timer: QTimer | None = None
 
         self._build_ui()
         self._load_settings()
         self._setup_timer()
         self._update_clock_labels()
+        self._setup_js8_rx_timer()
 
         # Restore paused state for frequency changes
         paused = bool(self.settings.get("freq_change_paused", False))
@@ -260,6 +275,12 @@ class JS8CallNetControlTab(QWidget):
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_directed_file)
         self._update_timer_interval()
+
+    def _setup_js8_rx_timer(self):
+        self._js8_rx_timer = QTimer(self)
+        self._js8_rx_timer.setInterval(1000)
+        self._js8_rx_timer.timeout.connect(self._poll_js8_rx_queue)
+        self._js8_rx_timer.start()
 
     def _update_timer_interval(self):
         if self._poll_timer:
@@ -704,10 +725,8 @@ class JS8CallNetControlTab(QWidget):
     def _get_js8_client(self):
         if self._js8_client:
             return self._js8_client
-        try:
-            import pyjs8call  # type: ignore
-        except BaseException as e:
-            log.warning("JS8CallNetControl: pyjs8call not available: %s", e)
+        if js8net is None:
+            log.warning("JS8CallNetControl: js8net not available")
             return None
         # Do not spawn JS8Call; only attach if it is already running
         try:
@@ -722,7 +741,7 @@ class JS8CallNetControlTab(QWidget):
                 except Exception:
                     continue
             if not running:
-                log.info("JS8CallNetControl: JS8Call not running; skipping pyjs8call attach.")
+                log.info("JS8CallNetControl: JS8Call not running; skipping js8net attach.")
                 return None
         except Exception:
             return None
@@ -731,18 +750,11 @@ class JS8CallNetControlTab(QWidget):
         except Exception:
             port = 2442
         try:
-            client = pyjs8call.Client(port=port)
-            client.start()
-            try:
-                if hasattr(client, "stop"):
-                    client._stop_noop = client.stop
-                    client.stop = lambda *a, **k: None
-            except Exception:
-                pass
-            self._js8_client = client
-            return client
+            js8net.start_net("127.0.0.1", port)
+            self._js8_client = js8net
+            return js8net
         except BaseException as e:
-            log.error("JS8CallNetControl: failed to start pyjs8call client: %s", e)
+            log.error("JS8CallNetControl: failed to start js8net: %s", e)
             return None
 
     def _queue_auto_query(self, call: str, msg_id: str) -> None:
@@ -762,6 +774,9 @@ class JS8CallNetControlTab(QWidget):
             return
         if not self._pending_queries:
             return
+        # Avoid querying while RX just occurred (idle gap)
+        if time.time() - self._last_rx_ts < 2.0:
+            return
         client = self._get_js8_client()
         if client is None:
             return
@@ -772,17 +787,45 @@ class JS8CallNetControlTab(QWidget):
             self._maybe_process_next_query()
             return
         try:
-            client.query_message_id(call, str(msg_id))
-            self._queried_msg_ids.add(key)
-            self._waiting_for_completion = True
-            self._current_query = (call, msg_id)
-            log.info("JS8CallNetControl: auto-queried MSG ID %s from %s", msg_id, call)
+            if hasattr(client, "query_message_id"):
+                client.query_message_id(call, str(msg_id))  # type: ignore[attr-defined]
+                self._queried_msg_ids.add(key)
+                self._waiting_for_completion = True
+                self._current_query = (call, msg_id)
+                log.info("JS8CallNetControl: auto-queried MSG ID %s from %s", msg_id, call)
+            else:
+                log.info("JS8CallNetControl: js8net does not support query_message_id; skipping auto-query.")
         except Exception as e:
             log.error("JS8CallNetControl: auto query failed for %s/%s: %s", call, msg_id, e)
             self._current_query = None
             self._waiting_for_completion = False
             # Try next one to avoid stall
             self._maybe_process_next_query()
+
+    def _poll_js8_rx_queue(self) -> None:
+        if not self.auto_query_msg_id or js8net is None:
+            return
+        client = self._get_js8_client()
+        if client is None or not hasattr(js8net, "rx_queue"):
+            return
+        try:
+            while True:
+                msg = js8net.rx_queue.get_nowait()
+                self._last_rx_ts = time.time()
+                try:
+                    p = msg.get("params", {}) if isinstance(msg, dict) else {}
+                    txt = str(p.get("TEXT") or "").upper()
+                    if "YES MSG ID" in txt:
+                        ids = re.findall(r"\b(\d+)\b", txt)
+                        frm = (p.get("FROM") or "").strip().upper()
+                        for mid in ids:
+                            if frm:
+                                self._queue_auto_query(frm, mid)
+                except Exception:
+                    continue
+        except queue.Empty:
+            pass
+        self._maybe_process_next_query()
 
     def _process_message_completion(self, line: str) -> None:
         """

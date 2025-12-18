@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 import psutil
@@ -12,16 +14,23 @@ from freqinout.core.settings_manager import SettingsManager
 
 log = logging.getLogger(__name__)
 
+# Add vendored js8net to import path
+JS8NET_PATH = Path(__file__).resolve().parents[2] / "third_party" / "js8net" / "js8net-main"
+if JS8NET_PATH.exists():
+    sys.path.insert(0, str(JS8NET_PATH))
+try:
+    import js8net  # type: ignore
+except Exception as e:  # pragma: no cover
+    js8net = None
+    log.warning("js8net not available: %s", e)
+
 
 class JS8StatusClient:
     """
     Very lightweight status client for JS8Call.
 
-    This is intentionally conservative: if JS8Call is unreachable or the
-    protocol is not as expected, we simply log and return "not busy".
-
-    A more complete implementation could maintain a persistent connection
-    and parse RX/TX frames per the official JS8Call API.
+    We keep is_busy() as a simple TCP probe to avoid spinning up js8net
+    for status checks.
     """
 
     def __init__(self, host: str = "127.0.0.1"):
@@ -55,8 +64,6 @@ class JS8StatusClient:
         port = self._get_port()
         try:
             with socket.create_connection((self.host, port), timeout=0.3) as s:
-                # Simple "STATUS" query; many JS8Call API examples use JSON lines.
-                # This is a minimal placeholder. Adjust to match your JS8Call version.
                 payload = json.dumps({"type": "STATUS"}) + "\n"
                 s.sendall(payload.encode("utf-8"))
 
@@ -65,7 +72,6 @@ class JS8StatusClient:
                 if not data:
                     return False
 
-                # Try to parse one JSON object per line
                 for line in data.splitlines():
                     line = line.strip()
                     if not line:
@@ -74,9 +80,6 @@ class JS8StatusClient:
                         msg = json.loads(line.decode("utf-8"))
                     except Exception:
                         continue
-
-                    # Heuristic: if we see something that looks like TX/RX state, treat as busy
-                    # Adjust keys based on your JS8Call API version.
                     state = msg.get("state") or msg.get("TRX")
                     if state in ("TX", "RX", "BUSY"):
                         log.debug("JS8Call reported busy state: %s", state)
@@ -85,20 +88,17 @@ class JS8StatusClient:
         except BaseException as e:
             log.debug("JS8Call status query failed (assuming not busy): %s", e)
             return False
+
+
 class JS8ControlClient(JS8StatusClient):
     """
-    pyjs8call-backed JS8Call controller. Uses one-shot clients for dial/offset setters.
+    js8net-backed JS8Call controller.
     Call set_frequency() from your rig-control path when control_via == 'JS8Call'.
     """
 
     def __init__(self, host: str = "127.0.0.1"):
         super().__init__(host=host)
-        try:
-            import pyjs8call  # type: ignore
-            self._pyjs8call = pyjs8call
-        except BaseException as e:  # pragma: no cover - runtime guard
-            self._pyjs8call = None
-            log.warning("pyjs8call not available: %s", e)
+        self._net_started = False
 
     def _get_port(self) -> int:
         # Prefer settings_tab key, fall back to legacy key
@@ -114,7 +114,7 @@ class JS8ControlClient(JS8StatusClient):
     @staticmethod
     def _js8call_running() -> bool:
         """
-        Lightweight process check to avoid spawning JS8Call via pyjs8call
+        Lightweight process check to avoid spawning JS8Call
         if it is not already running.
         """
         try:
@@ -130,52 +130,35 @@ class JS8ControlClient(JS8StatusClient):
             return False
         return False
 
-    def _ensure_client(self):
-        # Deprecated; replaced by one-shot clients
-        return self._new_client()
-
-    def _new_client(self):
-        """
-        Create a short-lived pyjs8call client, start it, and return it.
-        Caller should call stop().
-        """
-        if self._pyjs8call is None:
-            raise RuntimeError("pyjs8call is not installed")
+    def _ensure_net(self) -> bool:
+        if js8net is None:
+            log.error("JS8ControlClient: js8net not available")
+            return False
         if not self._js8call_running():
-            log.info("JS8ControlClient: JS8Call not running; skipping client start.")
-            return None
-        client = self._pyjs8call.Client(host=self.host, port=self._get_port())
-        try:
-            client.start()
-            # Ensure client.stop() (or __del__) will not attempt to close JS8Call
+            log.info("JS8ControlClient: JS8Call not running; skipping js8net start.")
+            return False
+        if not self._net_started:
             try:
-                if hasattr(client, "stop"):
-                    client._stop_noop = client.stop  # keep ref
-                    client.stop = lambda *a, **k: None
-            except Exception:
-                pass
-            return client
-        except BaseException as e:  # catch SystemExit from pyjs8call too
-            log.warning("JS8ControlClient failed to start: %s", e)
-            return None
+                js8net.start_net(self.host, self._get_port())
+                self._net_started = True
+                log.info("JS8ControlClient: js8net started on %s:%s", self.host, self._get_port())
+            except Exception as e:
+                log.warning("JS8ControlClient: failed to start js8net: %s", e)
+                self._net_started = False
+                return False
+        return True
 
     def set_frequency(self, dial_hz: int, offset_hz: Optional[int] = None) -> bool:
         """
-        Set JS8Call dial (and optional audio offset) via pyjs8call.
+        Set JS8Call dial (and optional audio offset) via js8net.
         """
         try:
-            client = self._ensure_client()
-            if client is None:
+            if not self._ensure_net():
                 return False
             dial_hz = int(dial_hz)
-            client.settings.set_freq(dial_hz)
-            if offset_hz is not None:
-                try:
-                    offset_hz = int(offset_hz)
-                    client.settings.set_offset(offset_hz)
-                except BaseException as e:
-                    log.warning("JS8ControlClient failed to set offset=%s: %s", offset_hz, e)
-            log.info("JS8ControlClient set dial=%d Hz%s", dial_hz, "" if offset_hz is None else f" offset={offset_hz} Hz")
+            off = int(offset_hz) if offset_hz is not None else 0
+            js8net.set_freq(dial_hz, off)
+            log.info("JS8ControlClient set dial=%d Hz%s", dial_hz, "" if offset_hz is None else f" offset={off} Hz")
             return True
         except BaseException as e:
             log.error("JS8ControlClient failed to set frequency: %s", e)
@@ -186,11 +169,13 @@ class JS8ControlClient(JS8StatusClient):
         Return current JS8Call dial frequency in Hz, or None on failure.
         """
         try:
-            client = self._ensure_client()
-            if client is None:
+            if not self._ensure_net():
                 return None
-            hz = client.settings.get_freq()
-            return int(hz) if hz is not None else None
+            resp = js8net.get_freq()
+            if not resp:
+                return None
+            hz = resp.get("dial") or resp.get("freq")
+            return int(hz) if hz else None
         except BaseException as e:
             log.debug("JS8ControlClient get_frequency failed: %s", e)
             return None
@@ -200,10 +185,12 @@ class JS8ControlClient(JS8StatusClient):
         Return current JS8Call audio offset in Hz, or None on failure.
         """
         try:
-            client = self._ensure_client()
-            if client is None:
+            if not self._ensure_net():
                 return None
-            off = client.settings.get_offset()
+            resp = js8net.get_freq()
+            if not resp:
+                return None
+            off = resp.get("offset")
             return int(off) if off is not None else None
         except BaseException as e:
             log.debug("JS8ControlClient get_offset failed: %s", e)
@@ -211,24 +198,20 @@ class JS8ControlClient(JS8StatusClient):
 
     def set_offset(self, offset_hz: int) -> bool:
         """
-        Explicitly set JS8Call audio offset.
+        Explicitly set JS8Call audio offset by reusing current dial.
         """
         try:
-            client = self._ensure_client()
-            if client is None:
+            cur = self.get_frequency()
+            if cur is None:
                 return False
-            offset_hz = int(offset_hz)
-            client.settings.set_offset(offset_hz)
-            log.info("JS8ControlClient set offset=%d Hz", offset_hz)
-            return True
+            return self.set_frequency(cur, offset_hz)
         except BaseException as e:
             log.error("JS8ControlClient failed to set offset: %s", e)
             return False
 
     def stop(self):
-        # No persistent client to stop in one-shot mode
+        # js8net has no explicit stop; rely on process exit
         pass
-
 
 
 class VarACStatusClient:

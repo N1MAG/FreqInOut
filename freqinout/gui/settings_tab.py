@@ -78,8 +78,7 @@ class SettingsTab(QWidget):
             "FLDigi": {"setting_key": "path_fldigi", "autostart_key": "autostart_fldigi"},
             "FLMsg": {"setting_key": "path_flmsg", "autostart_key": "autostart_flmsg"},
             "FLAmp": {"setting_key": "path_flamp", "autostart_key": "autostart_flamp"},
-            # JS8Call is status-only: no launch, no autostart, no path.
-            "JS8Call": {"setting_key": None, "autostart_key": None},
+            "JS8Call": {"setting_key": "path_js8call", "autostart_key": "autostart_js8call"},
         }
 
         self.radio_checkboxes: Dict[str, QCheckBox] = {}
@@ -206,6 +205,15 @@ class SettingsTab(QWidget):
         js8_port_row.addStretch()
         js8_v.addLayout(js8_port_row)
 
+        js8_offset_row = QHBoxLayout()
+        js8_offset_row.addWidget(QLabel("JS8 Offset (Hz):"))
+        self.js8_offset_edit = QLineEdit()
+        self.js8_offset_edit.setFixedWidth(80)
+        self.js8_offset_edit.setText("0")
+        js8_offset_row.addWidget(self.js8_offset_edit)
+        js8_offset_row.addStretch()
+        js8_v.addLayout(js8_offset_row)
+
         directed_row = QHBoxLayout()
         directed_row.addWidget(QLabel("JS8Call DIRECTED.TXT:"))
         self.js8_directed_edit = QLineEdit()
@@ -267,8 +275,6 @@ class SettingsTab(QWidget):
 
         for prog_name, meta in self.PROGRAMS.items():
             row = QHBoxLayout()
-            if prog_name == "JS8Call":
-                continue
             chk = QCheckBox(prog_name)
             self.radio_checkboxes[prog_name] = chk
             row.addWidget(chk)
@@ -345,6 +351,8 @@ class SettingsTab(QWidget):
 
         port_txt = str(data.get("js8_port", "2442") or "2442")
         self.js8_port_edit.setText(port_txt)
+        offset_txt = str(data.get("js8_offset_hz", "0") or "0")
+        self.js8_offset_edit.setText(offset_txt)
         flrig_port_txt = str(data.get("flrig_port", "12345") or "12345")
         self.flrig_port_edit.setText(flrig_port_txt)
 
@@ -411,6 +419,12 @@ class SettingsTab(QWidget):
             port_val = 2442
             self.js8_port_edit.setText("2442")
         data["js8_port"] = port_val
+        try:
+            offset_val = int(self.js8_offset_edit.text().strip() or "0")
+        except ValueError:
+            offset_val = 0
+            self.js8_offset_edit.setText("0")
+        data["js8_offset_hz"] = offset_val
 
         groups = [le.text().strip() for le in self.js8_groups_edits if le.text().strip()]
         data["primary_js8_groups"] = groups
@@ -444,6 +458,7 @@ class SettingsTab(QWidget):
                 "timezone": data["timezone"],
                 "control_via": data["control_via"],
                 "js8_port": data["js8_port"],
+                "js8_offset_hz": data.get("js8_offset_hz", 0),
                 "primary_js8_groups": data["primary_js8_groups"],
                 "js8_directed_path": data["js8_directed_path"],
                 "js8_auto_query_msg_id": data["js8_auto_query_msg_id"],
@@ -467,6 +482,7 @@ class SettingsTab(QWidget):
             self.settings.set("timezone", data["timezone"])
             self.settings.set("control_via", data["control_via"])
             self.settings.set("js8_port", data["js8_port"])
+            self.settings.set("js8_offset_hz", data.get("js8_offset_hz", 0))
             self.settings.set("primary_js8_groups", data["primary_js8_groups"])
             self.settings.set("js8_directed_path", data["js8_directed_path"])
             for prog_name, meta in self.PROGRAMS.items():
@@ -684,7 +700,7 @@ class SettingsTab(QWidget):
             return False
 
     def _program_autostart_enabled(self, program_name: str) -> bool:
-        if program_name not in {"FLDigi", "FLMsg", "FLAmp"}:
+        if program_name not in {"FLDigi", "FLMsg", "FLAmp", "JS8Call"}:
             return False
         meta = self.PROGRAMS.get(program_name)
         if not meta:
