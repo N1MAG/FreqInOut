@@ -464,6 +464,7 @@ class JS8CallNetControlTab(QWidget):
         log.info("JS8CallNetControl: polling DIRECTED/ALL (net_in_progress=%s)", self._net_in_progress)
         # First, scan ALL.TXT for recent QUERY MSG transmissions to gate auto-queries
         self._poll_all_for_query_tx()
+        log.info("JS8CallNetControl: last query TX ts=%s", self._last_query_tx_ts)
 
         try:
             size_now = self._directed_path.stat().st_size
@@ -496,7 +497,7 @@ class JS8CallNetControlTab(QWidget):
                         else:
                             for c in calls:
                                 for mid in msg_ids:
-                                    log.info("JS8CallNetControl: queueing auto-query %s from DIRECTED line", mid)
+                                    log.info("JS8CallNetControl: queueing auto-query %s from DIRECTED line (call=%s)", mid, c)
                                     self._queue_auto_query(c, mid)
                     call_primary = calls[0] if calls else ""
                     if not call_primary:
@@ -581,6 +582,7 @@ class JS8CallNetControlTab(QWidget):
         try:
             ts_str = line[:19]
             ts = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+            log.debug("JS8CallNetControl: parsed line ts=%s (app_start=%s)", ts, self._app_start_ts)
             return ts > self._app_start_ts
         except Exception:
             return False
@@ -854,6 +856,7 @@ class JS8CallNetControlTab(QWidget):
         except Exception:
             snr_val = None
         self._pending_queries.append((snr_val, call, msg_id))
+        log.info("JS8CallNetControl: queued auto-query call=%s id=%s (snr=%s) pending=%d", call, msg_id, snr_val, len(self._pending_queries))
         self._maybe_process_next_query()
 
     def _maybe_process_next_query(self) -> None:
@@ -870,6 +873,7 @@ class JS8CallNetControlTab(QWidget):
         # Prefer weakest SNR first (more negative first), unknowns last
         self._pending_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
         snr_val, call, msg_id = self._pending_queries.pop(0)
+        log.info("JS8CallNetControl: processing auto-query call=%s id=%s (snr=%s) remaining=%d", call, msg_id, snr_val, len(self._pending_queries))
         key = f"{call}:{msg_id}"
         if key in self._queried_msg_ids:
             # skip duplicates
