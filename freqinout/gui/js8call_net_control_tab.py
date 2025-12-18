@@ -461,6 +461,7 @@ class JS8CallNetControlTab(QWidget):
         if not self._net_in_progress and not self.auto_query_msg_id:
             return
 
+        log.info("JS8CallNetControl: polling DIRECTED/ALL (net_in_progress=%s)", self._net_in_progress)
         # First, scan ALL.TXT for recent QUERY MSG transmissions to gate auto-queries
         self._poll_all_for_query_tx()
 
