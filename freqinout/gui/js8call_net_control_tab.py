@@ -757,7 +757,7 @@ class JS8CallNetControlTab(QWidget):
             log.error("JS8CallNetControl: failed to start js8net: %s", e)
             return None
 
-    def _queue_auto_query(self, call: str, msg_id: str) -> None:
+    def _queue_auto_query(self, call: str, msg_id: str, snr: float | None = None) -> None:
         """
         Queue a query for MSG ID, and process one at a time when enabled.
         """
@@ -766,7 +766,11 @@ class JS8CallNetControlTab(QWidget):
         key = f"{call}:{msg_id}"
         if key in self._queried_msg_ids:
             return
-        self._pending_queries.append((call, msg_id))
+        try:
+            snr_val = float(snr) if snr is not None else None
+        except Exception:
+            snr_val = None
+        self._pending_queries.append((snr_val, call, msg_id))
         self._maybe_process_next_query()
 
     def _maybe_process_next_query(self) -> None:
@@ -780,7 +784,9 @@ class JS8CallNetControlTab(QWidget):
         client = self._get_js8_client()
         if client is None:
             return
-        call, msg_id = self._pending_queries.pop(0)
+        # Prefer weakest SNR first (more negative first), unknowns last
+        self._pending_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
+        snr_val, call, msg_id = self._pending_queries.pop(0)
         key = f"{call}:{msg_id}"
         if key in self._queried_msg_ids:
             # skip duplicates
@@ -818,9 +824,14 @@ class JS8CallNetControlTab(QWidget):
                     if "YES MSG ID" in txt:
                         ids = re.findall(r"\b(\d+)\b", txt)
                         frm = (p.get("FROM") or "").strip().upper()
+                        snr_val = None
+                        try:
+                            snr_val = float(p.get("SNR")) if p.get("SNR") not in (None, "") else None
+                        except Exception:
+                            snr_val = None
                         for mid in ids:
                             if frm:
-                                self._queue_auto_query(frm, mid)
+                                self._queue_auto_query(frm, mid, snr=snr_val)
                 except Exception:
                     continue
         except queue.Empty:
@@ -836,8 +847,28 @@ class JS8CallNetControlTab(QWidget):
         if not self._is_message_complete_line(line):
             return
         self._waiting_for_completion = False
+        call = self._current_query[0] if self._current_query else None
         self._current_query = None
+        # After a message completes, ask that station if more messages exist
+        if call:
+            self._send_query_msgs(call)
         self._maybe_process_next_query()
+
+    def _send_query_msgs(self, call: str) -> None:
+        """
+        Send QUERY MSGS to a specific station to discover additional messages.
+        """
+        if js8net is None:
+            return
+        client = self._get_js8_client()
+        if client is None:
+            return
+        try:
+            if hasattr(client, "send_message"):
+                client.send_message(f"{call}: QUERY MSGS")  # type: ignore[attr-defined]
+                log.info("JS8CallNetControl: queried additional messages from %s", call)
+        except Exception as e:
+            log.debug("JS8CallNetControl: failed sending QUERY MSGS to %s: %s", call, e)
 
     def _is_message_complete_line(self, line: str) -> bool:
         """
