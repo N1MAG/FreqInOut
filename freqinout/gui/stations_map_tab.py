@@ -1906,11 +1906,16 @@ class JS8LogLinkIndexer:
                 freq_hz = float(mhz_tok[0]) * 1_000_000.0
         except Exception:
             freq_hz = None
+        # Extract JS8 payload (origin: destination ...) after "JS8:" if present
         msg_part = ""
-        if ":" in line:
+        if "JS8:" in line:
+            msg_part = line.split("JS8:", 1)[1]
+        elif ":" in line:
             msg_part = line.split(":", 1)[1]
-            if ":" in msg_part:
-                msg_part = msg_part.split(":", 1)[1]
+        # Trim leading colon/space
+        msg_part = msg_part.lstrip(": ").strip()
+        if ":" in msg_part:
+            msg_part = msg_part.split(":", 1)[1]
         origin, dest = self._extract_origin_dest(msg_part)
         if not origin or not dest:
             return None
