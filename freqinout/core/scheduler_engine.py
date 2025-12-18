@@ -926,6 +926,27 @@ class SchedulerEngine(QObject):
             log.debug("SchedulerEngine: failed to read JS8Call frequency: %s", e)
         return None
 
+    def _maybe_inhibit_tx_for_net(self, source: str) -> None:
+        """
+        Inhibit JS8 TX when entering a net window; re-enable when leaving.
+        """
+        if not self.js8:
+            return
+        if source == "NET":
+            if not self._tx_inhibited:
+                try:
+                    self.js8.inhibit_tx()
+                    self._tx_inhibited = True
+                except Exception as e:
+                    log.debug("SchedulerEngine: failed to inhibit JS8 TX: %s", e)
+        else:
+            if self._tx_inhibited:
+                try:
+                    self.js8.enable_tx()
+                except Exception as e:
+                    log.debug("SchedulerEngine: failed to re-enable JS8 TX: %s", e)
+                self._tx_inhibited = False
+
     # ------------------------------------------------------------------
     # Apply entry to rig
     # ------------------------------------------------------------------
@@ -973,6 +994,7 @@ class SchedulerEngine(QObject):
         if control_mode == "MANUAL":
             log.debug("SchedulerEngine: manual control selected; no frequency commands sent.")
             self.active_entry_changed.emit(entry, source)
+            self._maybe_inhibit_tx_for_net(source)
             return
         if control_mode == "NONE":
             log.debug(
@@ -980,6 +1002,7 @@ class SchedulerEngine(QObject):
                 self.settings.get("control_via", "FLRig"),
             )
             self.active_entry_changed.emit(entry, source)
+            self._maybe_inhibit_tx_for_net(source)
             return
 
         log.info(
@@ -1083,22 +1106,10 @@ class SchedulerEngine(QObject):
 
             # Notify listeners that we have a new active entry applied.
             self.active_entry_changed.emit(entry, source)
-            # If entering a NET window (including early check-in), inhibit JS8 TX to prevent auto replies
-            if source == "NET" and self.js8 and not self._tx_inhibited:
-                try:
-                    self.js8.inhibit_tx()
-                    self._tx_inhibited = True
-                except Exception as e:
-                    log.debug("SchedulerEngine: failed to inhibit JS8 TX: %s", e)
-            # If leaving a net and TX was inhibited, re-enable TX
-            elif source != "NET" and self.js8 and self._tx_inhibited:
-                try:
-                    self.js8.enable_tx()
-                except Exception as e:
-                    log.debug("SchedulerEngine: failed to re-enable JS8 TX: %s", e)
-                self._tx_inhibited = False
+            self._maybe_inhibit_tx_for_net(source)
         else:
             log.warning("SchedulerEngine: %s set_frequency() reported failure.", control_mode)
             # Even if backend failed, we still update the UI state so that
             # Net control operator can see what *should* have happened.
             self.active_entry_changed.emit(entry, source)
+            self._maybe_inhibit_tx_for_net(source)
