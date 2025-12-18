@@ -699,8 +699,10 @@ class SettingsTab(QWidget):
         Lightweight check: attempt TCP connect to JS8Call API port.
         """
         import socket
+        # Prefer UI value (unsaved edits) to avoid stale settings.
         try:
-            port = int(self.settings.get("js8_port", 2442) or 2442)
+            port_txt = self.js8_port_edit.text().strip()
+            port = int(port_txt) if port_txt else int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
         hosts = []
