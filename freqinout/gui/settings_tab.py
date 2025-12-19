@@ -655,27 +655,25 @@ class SettingsTab(QWidget):
         # Cache process snapshot briefly to avoid multiple psutil walks
         now_ts = datetime.datetime.now().timestamp()
         if now_ts - self._proc_snapshot_ts > 2.0:
-            snap = []
+            snap: list[str] = []
             for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
                 try:
                     name = (proc.info.get("name") or "").lower()
                     exe = os.path.basename(proc.info.get("exe") or "").lower()
-                    cmdline = " ".join(proc.info.get("cmdline") or []).lower()
-                    if name:
-                        snap.append(name)
-                    if exe and exe != name:
-                        snap.append(exe)
-                    if cmdline:
-                        snap.append(cmdline)
+                    cmdline_list = proc.info.get("cmdline") or []
+                    first_arg = os.path.basename(cmdline_list[0]).lower() if cmdline_list else ""
+                    for token in (name, exe, first_arg):
+                        if token:
+                            snap.append(token)
                 except Exception:
                     continue
             self._proc_snapshot = snap
             self._proc_snapshot_ts = now_ts
         exe_path = self._get_saved_program_path(program_name)
-        target_names = [program_name.lower()]
+        target_names = {program_name.lower(), f"{program_name.lower()}.exe"}
         if exe_path:
-            target_names.append(exe_path.name.lower())
-        return any(any(t in entry for t in target_names) for entry in self._proc_snapshot)
+            target_names.add(exe_path.name.lower())
+        return any(entry in target_names for entry in self._proc_snapshot)
 
     def _refresh_running_status(self):
         running_js8 = self._program_is_running("JS8Call")
