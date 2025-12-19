@@ -160,6 +160,9 @@ class DailyScheduleTab(QWidget):
         self.time_toggle_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: 600;")
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.time_toggle_btn)
+        self.suspend_btn = QPushButton("QSY/Suspend")
+        self.suspend_btn.clicked.connect(self._on_suspend_clicked)
+        header.addWidget(self.suspend_btn)
         layout.addLayout(header)
 
         # Table
@@ -199,6 +202,7 @@ class DailyScheduleTab(QWidget):
 
         # Initialize clock labels once
         self._update_clock_labels()
+        self._update_suspend_state()
 
     def _load_operating_groups(self) -> List[Dict]:
         data = self.settings.all()
@@ -231,7 +235,7 @@ class DailyScheduleTab(QWidget):
 
     def _setup_clock_timer(self):
         self._clock_timer = QTimer(self)
-        self._clock_timer.timeout.connect(self._update_clock_labels)
+        self._clock_timer.timeout.connect(lambda: (self._update_clock_labels(), self._update_suspend_state()))
         self._clock_timer.start(1000)
 
     def _setup_operating_groups_timer(self):
@@ -740,6 +744,57 @@ class DailyScheduleTab(QWidget):
     def _toggle_time_view(self):
         self._show_local = not self._show_local
         self._rebuild_from_raw()
+        self._update_suspend_state()
+
+    # --------- Suspend (shared across tabs) --------- #
+
+    def _get_suspend_until(self) -> Optional[datetime.datetime]:
+        try:
+            ts = float(self.settings.get("schedule_suspend_until", 0) or 0)
+            if ts > 0:
+                return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+        except Exception:
+            return None
+        return None
+
+    def _set_suspend_until(self, dt: Optional[datetime.datetime]) -> None:
+        try:
+            if hasattr(self.settings, "set"):
+                self.settings.set("schedule_suspend_until", dt.timestamp() if dt else 0)
+        except Exception:
+            pass
+
+    def _suspend_active(self) -> bool:
+        dt = self._get_suspend_until()
+        return dt is not None and datetime.datetime.now(datetime.timezone.utc) < dt
+
+    def _set_suspend_button(self, active: bool):
+        if active:
+            self.suspend_btn.setText("Schedule Suspended for 30 Minutes")
+            self.suspend_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
+        else:
+            self.suspend_btn.setText("QSY/Suspend")
+            self.suspend_btn.setStyleSheet("QPushButton { background-color: gold; color: black; }")
+
+    def _update_suspend_state(self):
+        dt = self._get_suspend_until()
+        if dt and datetime.datetime.now(datetime.timezone.utc) < dt:
+            self._set_suspend_button(True)
+        else:
+            if dt:
+                self._set_suspend_until(None)
+            self._set_suspend_button(False)
+
+    def _on_suspend_clicked(self):
+        if self._suspend_active():
+            self._set_suspend_until(None)
+            self._set_suspend_button(False)
+            QMessageBox.information(self, "Scheduling", "Scheduling resumed.")
+        else:
+            new_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
+            self._set_suspend_until(new_until)
+            self._set_suspend_button(True)
+            QMessageBox.information(self, "Schedule Suspended", "Scheduling suspended for 30 minutes.")
 
     def _append_entry_row(self, entry: Dict):
         row = self.table.rowCount()
