@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QCheckBox,
 )
+from PySide6.QtGui import QFontMetrics
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
@@ -102,7 +103,6 @@ class FldigiNetControlTab(QWidget):
         self.net_name_combo.setEditable(True)
         self.net_name_combo.setInsertPolicy(QComboBox.NoInsert)
         self.net_name_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.net_name_combo.setMinimumWidth(320)
         top_row.addWidget(self.net_name_combo, stretch=1)
 
         top_row.addStretch()
@@ -635,6 +635,7 @@ class FldigiNetControlTab(QWidget):
 
         self._update_macro_hint()
         self._populate_net_name_from_schedule()
+        self._update_net_name_min_width()
 
     def _save_paths_to_settings(self):
         main_path = self.main_log_edit.text().strip()
@@ -752,6 +753,28 @@ class FldigiNetControlTab(QWidget):
                 self.net_name_combo.addItem(formatted)
                 idx = self.net_name_combo.count() - 1
             self.net_name_combo.setCurrentIndex(idx)
+            self._update_net_name_min_width()
+
+    def _update_net_name_min_width(self):
+        """
+        Set the minimum width based on the widest current entry plus space for ~10 extra characters.
+        """
+        metrics = QFontMetrics(self.net_name_combo.font())
+        pad = metrics.horizontalAdvance("0" * 10)
+        max_w = 0
+        for i in range(self.net_name_combo.count()):
+            txt = self.net_name_combo.itemText(i)
+            if not txt:
+                continue
+            w = metrics.horizontalAdvance(txt) + pad
+            if w > max_w:
+                max_w = w
+        if max_w > 0:
+            # Add a small safety margin
+            self.net_name_combo.setMinimumWidth(max_w + 8)
+        else:
+            # Fallback if no items exist yet
+            self.net_name_combo.setMinimumWidth(320)
 
     # ---------------- BROWSE / HINT ---------------- #
 

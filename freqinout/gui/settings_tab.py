@@ -4,6 +4,7 @@ import datetime
 import os
 import platform
 import subprocess
+import sqlite3
 from pathlib import Path
 from typing import Dict, Optional, List
 
@@ -148,9 +149,13 @@ class SettingsTab(QWidget):
         self.name_edit.setFixedWidth(200)
         self.state_edit = QLineEdit()
         self.state_edit.setFixedWidth(80)
+        self.grid6_edit = QLineEdit()
+        self.grid6_edit.setMaxLength(6)
+        self.grid6_edit.setFixedWidth(90)
         callsign_form.addRow("Call Sign:", self.callsign_edit)
         callsign_form.addRow("Name:", self.name_edit)
         callsign_form.addRow("State:", self.state_edit)
+        callsign_form.addRow("Grid 6:", self.grid6_edit)
         callsign_group.setLayout(callsign_form)
         left_col.addWidget(callsign_group)
 
@@ -263,7 +268,7 @@ class SettingsTab(QWidget):
         self.op_groups_table = QTableWidget(0, 5)
         self.op_groups_table.setHorizontalHeaderLabels(["", "Group", "Mode", "Band", "Freq (MHz)"])
         header = self.op_groups_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setStretchLastSection(True)
         self.op_groups_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
         self.op_groups_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -331,6 +336,7 @@ class SettingsTab(QWidget):
         self.callsign_edit.setText(data.get("operator_callsign", "") or "")
         self.name_edit.setText(data.get("operator_name", "") or "")
         self.state_edit.setText(data.get("operator_state", "") or "")
+        self.grid6_edit.setText(data.get("operator_grid6", "") or "")
 
         # Timezone: prefer stored; otherwise detect from system clock
         tz = data.get("timezone")
@@ -410,6 +416,8 @@ class SettingsTab(QWidget):
         data["operator_callsign"] = self.callsign_edit.text().strip()
         data["operator_name"] = self.name_edit.text().strip()
         data["operator_state"] = self.state_edit.text().strip()
+        data["operator_grid6"] = self.grid6_edit.text().strip().upper()
+        data["operator_grid6"] = self.grid6_edit.text().strip().upper()
 
         # Timezone is not user-editable; keep existing value (or detect if missing)
         tz = data.get("timezone")
@@ -464,6 +472,7 @@ class SettingsTab(QWidget):
                 "operator_callsign": data["operator_callsign"],
                 "operator_name": data["operator_name"],
                 "operator_state": data["operator_state"],
+                "operator_grid6": data["operator_grid6"],
                 "timezone": data["timezone"],
                 "control_via": data["control_via"],
                 "js8_port": data["js8_port"],
@@ -489,6 +498,7 @@ class SettingsTab(QWidget):
             self.settings.set("operator_callsign", data["operator_callsign"])
             self.settings.set("operator_name", data["operator_name"])
             self.settings.set("operator_state", data["operator_state"])
+            self.settings.set("operator_grid6", data["operator_grid6"])
             self.settings.set("timezone", data["timezone"])
             self.settings.set("control_via", data["control_via"])
             self.settings.set("js8_port", data["js8_port"])
@@ -514,6 +524,14 @@ class SettingsTab(QWidget):
         log.info("SettingsTab: settings saved.")
         if show_message:
             QMessageBox.information(self, "Settings", "Settings saved.")
+
+        # Persist operator grid into operator_checkins for map usage
+        self._persist_operator_grid_to_db(
+            data.get("operator_callsign", ""),
+            data.get("operator_grid6", ""),
+            data.get("operator_name", ""),
+            data.get("operator_state", ""),
+        )
 
     # ---------- TIME / TIMEZONE ---------- #
 
@@ -579,6 +597,57 @@ class SettingsTab(QWidget):
         self.local_label.setText(
             now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {ui_abbr}")
         )
+
+    def _persist_operator_grid_to_db(self, callsign: str, grid6: str, name: str, state: str) -> None:
+        """
+        Optionally upsert the operator's own grid into operator_checkins to ensure
+        stations map has a primary location for link rendering.
+        """
+        cs = (callsign or "").strip().upper()
+        grid = (grid6 or "").strip().upper()
+        if not cs or len(grid) < 4:
+            return
+        try:
+            root = Path(__file__).resolve().parents[2]  # repo root
+            db_path = root / "config" / "freqinout_nets.db"
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_checkins (
+                    callsign TEXT PRIMARY KEY,
+                    name TEXT,
+                    state TEXT,
+                    grid TEXT,
+                    group1 TEXT,
+                    group2 TEXT,
+                    group3 TEXT,
+                    groups_json TEXT,
+                    first_seen_utc TEXT,
+                    last_seen_utc TEXT,
+                    checkin_count INTEGER,
+                    trusted INTEGER
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO operator_checkins (callsign, name, state, grid, first_seen_utc, last_seen_utc, checkin_count, trusted)
+                VALUES (?, ?, ?, ?, COALESCE(first_seen_utc, strftime('%Y-%m-%d', 'now')), strftime('%Y-%m-%d', 'now'), COALESCE((SELECT checkin_count FROM operator_checkins WHERE callsign=?), 0), COALESCE((SELECT trusted FROM operator_checkins WHERE callsign=?), 0))
+                ON CONFLICT(callsign) DO UPDATE SET
+                    name=excluded.name,
+                    state=excluded.state,
+                    grid=excluded.grid,
+                    last_seen_utc=excluded.last_seen_utc,
+                    checkin_count=excluded.checkin_count,
+                    trusted=COALESCE(operator_checkins.trusted, excluded.trusted)
+                """,
+                (cs, name.strip(), state.strip().upper(), grid, cs, cs),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("SettingsTab: failed to persist operator grid to DB: %s", e)
 
     # ---------- RADIO PROGRAMS ---------- #
 
@@ -922,7 +991,7 @@ class SettingsTab(QWidget):
             table.setItem(row, 3, QTableWidgetItem(str(g.get("band", ""))))
             table.setItem(row, 4, QTableWidgetItem(self._format_freq(g.get("frequency", ""))))
         table.resizeColumnsToContents()
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
 
     def _table_to_operating_groups(self) -> List[Dict[str, str]]:
         result: List[Dict[str, str]] = []

@@ -185,17 +185,20 @@ class NetScheduleTab(QWidget):
         self.table.setSortingEnabled(False)
         hv = self.table.horizontalHeader()
         hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_DAY, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_RECURRENCE, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_GROUP, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_MODE, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_BAND, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_VFO, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_FREQ, QHeaderView.Stretch)
-        hv.setSectionResizeMode(self.COL_START, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_END, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_EARLY, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_NETNAME, QHeaderView.Stretch)
+        for col in (
+            self.COL_DAY,
+            self.COL_RECURRENCE,
+            self.COL_GROUP,
+            self.COL_MODE,
+            self.COL_BAND,
+            self.COL_VFO,
+            self.COL_FREQ,
+            self.COL_START,
+            self.COL_END,
+            self.COL_EARLY,
+            self.COL_NETNAME,
+        ):
+            hv.setSectionResizeMode(col, QHeaderView.Stretch)
         layout.addWidget(self.table)
 
         # buttons

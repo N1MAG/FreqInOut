@@ -101,8 +101,8 @@ class FreqPlannerTab(QWidget):
         )
 
         hv = self.table.horizontalHeader()
-        hv.setSectionResizeMode(self.COL_UTC, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_LOCAL, QHeaderView.ResizeToContents)
+        hv.setSectionResizeMode(self.COL_UTC, QHeaderView.Stretch)
+        hv.setSectionResizeMode(self.COL_LOCAL, QHeaderView.Stretch)
         for col in range(self.COL_DAY_OFFSET, 9):
             hv.setSectionResizeMode(col, QHeaderView.Stretch)
 

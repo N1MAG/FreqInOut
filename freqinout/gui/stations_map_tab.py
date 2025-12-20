@@ -729,11 +729,16 @@ class StationsMapTab(QWidget):
             self.stations = pts
             return
 
+        my_call = (self.settings.get("operator_callsign", "") or "").strip().upper()
+        my_grid = (self.settings.get("operator_grid6", "") or "").strip().upper()
+
         for cs, name, state, grid, g1, g2, g3, gj, trusted in rows:
             cs = (cs or "").strip().upper()
             if not cs:
                 continue
             grid = (grid or "").strip().upper()
+            if my_call and cs == my_call and my_grid:
+                grid = my_grid
             state = (state or "").strip().upper()
             latlon = None
             if grid:

@@ -156,18 +156,21 @@ class OperatorHistoryTab(QWidget):
         )
         hv = self.table.horizontalHeader()
         hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_CALLSIGN, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_NAME, QHeaderView.Stretch)
-        hv.setSectionResizeMode(self.COL_STATE, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_GRID, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_G1, QHeaderView.Stretch)
-        hv.setSectionResizeMode(self.COL_G2, QHeaderView.Stretch)
-        hv.setSectionResizeMode(self.COL_G3, QHeaderView.Stretch)
-        hv.setSectionResizeMode(self.COL_ROLE, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_FIRST_SEEN, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_LAST_SEEN, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_TRUSTED, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_COUNT, QHeaderView.ResizeToContents)
+        for col in (
+            self.COL_CALLSIGN,
+            self.COL_NAME,
+            self.COL_STATE,
+            self.COL_GRID,
+            self.COL_G1,
+            self.COL_G2,
+            self.COL_G3,
+            self.COL_ROLE,
+            self.COL_FIRST_SEEN,
+            self.COL_LAST_SEEN,
+            self.COL_TRUSTED,
+            self.COL_COUNT,
+        ):
+            hv.setSectionResizeMode(col, QHeaderView.Stretch)
 
         layout.addWidget(self.table)
 
@@ -445,6 +448,14 @@ class OperatorHistoryTab(QWidget):
             log.error("OperatorHistoryTab: failed to load from DB: %s", e)
             QMessageBox.warning(self, "DB Error", f"Failed to load operator history:\n{e}")
             rows = []
+
+        # Ensure the operator's own callsign appears at the top if present
+        my_call = (self.settings.get("operator_callsign", "") or "").strip().upper()
+        if my_call:
+            for idx, row in enumerate(rows):
+                if row.get("callsign") == my_call:
+                    rows.insert(0, rows.pop(idx))
+                    break
 
         self._rows = rows
         self._apply_filter()

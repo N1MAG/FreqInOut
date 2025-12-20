@@ -171,15 +171,18 @@ class DailyScheduleTab(QWidget):
 
         hv = self.table.horizontalHeader()
         hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_DAY, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_GROUP, QHeaderView.Stretch)
-        hv.setSectionResizeMode(self.COL_MODE, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_BAND, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_VFO, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_FREQ, QHeaderView.Stretch)
-        hv.setSectionResizeMode(self.COL_START, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_END, QHeaderView.ResizeToContents)
-        hv.setSectionResizeMode(self.COL_AUTOTUNE, QHeaderView.ResizeToContents)
+        for col in (
+            self.COL_DAY,
+            self.COL_GROUP,
+            self.COL_MODE,
+            self.COL_BAND,
+            self.COL_VFO,
+            self.COL_FREQ,
+            self.COL_START,
+            self.COL_END,
+            self.COL_AUTOTUNE,
+        ):
+            hv.setSectionResizeMode(col, QHeaderView.Stretch)
 
         layout.addWidget(self.table)
 
