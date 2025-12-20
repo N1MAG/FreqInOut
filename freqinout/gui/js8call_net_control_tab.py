@@ -61,7 +61,7 @@ class JS8CallNetControlTab(QWidget):
 
     Buttons (in this order):
         Start Net, Copy Initial Check-ins, Copy New Check-ins,
-        Merge Check-ins, Save Check-ins, End Net, Pause/Resume Freq Change
+        Merge Check-ins, Save Check-ins, End Net, QSY/Suspend (shared across tabs)
 
     - Copy Initial/New:
         * Parses callsigns
@@ -126,13 +126,9 @@ class JS8CallNetControlTab(QWidget):
         self._setup_timer()
         self._update_clock_labels()
         self._setup_js8_rx_timer()
+        self._update_suspend_state()
         if self._poll_timer:
             self._poll_timer.start()
-
-        # Restore paused state for frequency changes
-        paused = bool(self.settings.get("freq_change_paused", False))
-        self.pause_freq_btn.setChecked(paused)
-        self._on_pause_freq_toggled(paused)
 
     # ---------------- UI ---------------- #
 
@@ -209,11 +205,8 @@ class JS8CallNetControlTab(QWidget):
         btn_row.addWidget(self.save_btn)
         btn_row.addWidget(self.end_btn)
         btn_row.addStretch()
-
-        # Pause Freq Change at lower-right
-        self.pause_freq_btn = QPushButton("Pause Freq Change")
-        self.pause_freq_btn.setCheckable(True)
-        btn_row.addWidget(self.pause_freq_btn)
+        self.suspend_btn = QPushButton("QSY/Suspend")
+        btn_row.addWidget(self.suspend_btn)
 
         layout.addLayout(btn_row)
 
@@ -225,7 +218,7 @@ class JS8CallNetControlTab(QWidget):
         self.save_btn.clicked.connect(self._save_checkins)
         self.end_btn.clicked.connect(self._end_net)
         self.refresh_spin.valueChanged.connect(self._update_timer_interval)
-        self.pause_freq_btn.toggled.connect(self._on_pause_freq_toggled)
+        self.suspend_btn.clicked.connect(self._on_suspend_clicked)
 
         # Clock timer
         self._clock_timer = QTimer(self)
@@ -332,6 +325,57 @@ class JS8CallNetControlTab(QWidget):
         self.local_label.setText(
             now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {abbr}")
         )
+        self._update_suspend_state()
+
+    # --------- Suspend (shared across tabs) --------- #
+
+    def _get_suspend_until(self) -> Optional[datetime.datetime]:
+        try:
+            ts = float(self.settings.get("schedule_suspend_until", 0) or 0)
+            if ts > 0:
+                return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+        except Exception:
+            return None
+        return None
+
+    def _set_suspend_until(self, dt: Optional[datetime.datetime]) -> None:
+        try:
+            if hasattr(self.settings, "set"):
+                self.settings.set("schedule_suspend_until", dt.timestamp() if dt else 0)
+        except Exception:
+            pass
+
+    def _suspend_active(self) -> bool:
+        dt = self._get_suspend_until()
+        return dt is not None and datetime.datetime.now(datetime.timezone.utc) < dt
+
+    def _set_suspend_button(self, active: bool):
+        if active:
+            self.suspend_btn.setText("Schedule Suspended for 30 Minutes")
+            self.suspend_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
+        else:
+            self.suspend_btn.setText("QSY/Suspend")
+            self.suspend_btn.setStyleSheet("QPushButton { background-color: gold; color: black; }")
+
+    def _update_suspend_state(self):
+        dt = self._get_suspend_until()
+        if dt and datetime.datetime.now(datetime.timezone.utc) < dt:
+            self._set_suspend_button(True)
+        else:
+            if dt:
+                self._set_suspend_until(None)
+            self._set_suspend_button(False)
+
+    def _on_suspend_clicked(self):
+        if self._suspend_active():
+            self._set_suspend_until(None)
+            self._set_suspend_button(False)
+            QMessageBox.information(self, "Scheduling", "Scheduling resumed.")
+        else:
+            new_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
+            self._set_suspend_until(new_until)
+            self._set_suspend_button(True)
+            QMessageBox.information(self, "Schedule Suspended", "Scheduling suspended for 30 minutes.")
 
     # ---------------- START / END NET ---------------- #
 
@@ -343,7 +387,7 @@ class JS8CallNetControlTab(QWidget):
             QMessageBox.warning(self, "Missing Net Name", "Enter Net Name before starting the net.")
             return False
 
-        cs = (self.settings.get("callsign", "") or "").strip()
+        cs = self._my_callsign()
         if not cs:
             QMessageBox.warning(self, "Missing Callsign", "Configure your callsign in the Settings tab.")
             return False
@@ -497,7 +541,7 @@ class JS8CallNetControlTab(QWidget):
                         else:
                             for c in calls:
                                 for mid in msg_ids:
-                                    log.info("JS8CallNetControl: queueing auto-query %s from DIRECTED line (call=%s)", mid, c)
+                                    log.debug("JS8CallNetControl: queueing auto-query %s from DIRECTED line (call=%s)", mid, c)
                                     self._queue_auto_query(c, mid)
                     call_primary = calls[0] if calls else ""
                     if not call_primary:
@@ -516,6 +560,10 @@ class JS8CallNetControlTab(QWidget):
             return
 
         if not new_calls:
+            return
+
+        # Do not populate panels unless a net is in progress (auto-query can still run without one)
+        if not self._net_in_progress:
             return
 
         # Append new calls to appropriate panel
@@ -764,6 +812,13 @@ class JS8CallNetControlTab(QWidget):
             return None
         return None
 
+    def _my_callsign(self) -> str:
+        return (
+            (self.settings.get("operator_callsign", "") or self.settings.get("callsign", "") or "")
+            .strip()
+            .upper()
+        )
+
     def _extract_callsigns_from_line(self, line: str) -> List[str]:
         """
         JS8Check-in line examples:
@@ -781,7 +836,7 @@ class JS8CallNetControlTab(QWidget):
         if not line:
             return []
 
-        mycall = (self.settings.get("callsign", "") or "").strip().upper()
+        mycall = self._my_callsign()
 
         # Try F!103 pattern first
         if "F!103" in line:
@@ -856,7 +911,7 @@ class JS8CallNetControlTab(QWidget):
         except Exception:
             snr_val = None
         self._pending_queries.append((snr_val, call, msg_id))
-        log.info("JS8CallNetControl: queued auto-query call=%s id=%s (snr=%s) pending=%d", call, msg_id, snr_val, len(self._pending_queries))
+        log.debug("JS8CallNetControl: queued auto-query call=%s id=%s (snr=%s) pending=%d", call, msg_id, snr_val, len(self._pending_queries))
         self._maybe_process_next_query()
 
     def _maybe_process_next_query(self) -> None:
@@ -873,7 +928,7 @@ class JS8CallNetControlTab(QWidget):
         # Prefer weakest SNR first (more negative first), unknowns last
         self._pending_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
         snr_val, call, msg_id = self._pending_queries.pop(0)
-        log.info("JS8CallNetControl: processing auto-query call=%s id=%s (snr=%s) remaining=%d", call, msg_id, snr_val, len(self._pending_queries))
+        log.debug("JS8CallNetControl: processing auto-query call=%s id=%s (snr=%s) remaining=%d", call, msg_id, snr_val, len(self._pending_queries))
         key = f"{call}:{msg_id}"
         if key in self._queried_msg_ids:
             # skip duplicates
@@ -896,7 +951,7 @@ class JS8CallNetControlTab(QWidget):
                 self._current_query = (call, msg_id)
                 log.info("JS8CallNetControl: auto-queried MSG ID %s from %s via send_message fallback", msg_id, call)
             else:
-                log.info("JS8CallNetControl: js8net does not support query_message_id; skipping auto-query.")
+                log.debug("JS8CallNetControl: js8net does not support query_message_id; skipping auto-query.")
         except Exception as e:
             log.error("JS8CallNetControl: auto query failed for %s/%s: %s", call, msg_id, e)
             self._current_query = None
@@ -930,7 +985,7 @@ class JS8CallNetControlTab(QWidget):
                         snr_val = None
                     if self.auto_query_msg_id:
                         if self._net_lockout_active():
-                            log.info("JS8CallNetControl: skipping auto-query (net lockout active)")
+                            log.debug("JS8CallNetControl: skipping auto-query (net lockout active)")
                         elif "YES MSG" in combined:
                             ids = re.findall(r"\b(\d+)\b", combined)
                             for mid in ids:
@@ -1373,25 +1428,6 @@ class JS8CallNetControlTab(QWidget):
             else:
                 shorts.append(cs[-3:])
         return " ".join(shorts)
-
-    # ---------------- Pause Freq Change ---------------- #
-
-    def _on_pause_freq_toggled(self, checked: bool):
-        self.pause_freq_btn.setText("Resume Freq Change" if checked else "Pause Freq Change")
-        try:
-            if hasattr(self.settings, "set"):
-                self.settings.set("freq_change_paused", checked)
-                if hasattr(self.settings, "save"):
-                    self.settings.save()
-                elif hasattr(self.settings, "write"):
-                    self.settings.write()
-            else:
-                data = self.settings.all()
-                data["freq_change_paused"] = checked
-                if hasattr(self.settings, "_data"):
-                    self.settings._data = data  # type: ignore[attr-defined]
-        except Exception as e:
-            log.error("Failed to persist freq_change_paused setting: %s", e)
 
     # ---------------- Qt events ---------------- #
 

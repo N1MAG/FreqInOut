@@ -272,7 +272,7 @@ class SettingsTab(QWidget):
         right_col.addWidget(ops_group)
 
         # Radio software
-        radio_group = QGroupBox("FL Programs")
+        radio_group = QGroupBox("Radio Software")
         radio_v = QVBoxLayout()
         radio_group.setLayout(radio_v)
         left_col.addWidget(radio_group)

@@ -55,7 +55,6 @@ class FldigiNetControlTab(QWidget):
         # Next frequency change tracking
         self._next_change_utc: Optional[datetime.datetime] = None
         self._auto_end_done: bool = False
-        self._suspend_until: Optional[datetime.datetime] = None
         self._suspend_warned: bool = False
 
         self._start_btn_default_style: str = ""
@@ -66,11 +65,6 @@ class FldigiNetControlTab(QWidget):
         self._load_known_operators()
         self._setup_timers()
         self._set_net_button_styles(active=False)
-
-        # Restore paused state (if any)
-        paused = bool(self.settings.get("freq_change_paused", False))
-        self.pause_freq_btn.setChecked(paused)
-        self._on_pause_freq_toggled(paused)
 
     # ---------------- UI BUILD ---------------- #
 
@@ -220,11 +214,6 @@ class FldigiNetControlTab(QWidget):
         btn_row.addWidget(self.end_btn)
         btn_row.addStretch()
 
-        # Pause Freq Change button at lower-right, same row
-        self.pause_freq_btn = QPushButton("Pause Freq Change")
-        self.pause_freq_btn.setCheckable(True)
-        btn_row.addWidget(self.pause_freq_btn)
-
         layout.addLayout(btn_row)
 
         # Signals
@@ -238,8 +227,6 @@ class FldigiNetControlTab(QWidget):
 
         self.add_known_main_btn.clicked.connect(self._insert_known_into_main)
         self.add_known_late_btn.clicked.connect(self._insert_known_into_late)
-
-        self.pause_freq_btn.toggled.connect(self._on_pause_freq_toggled)
 
     def _set_net_button_styles(self, active: bool):
         """
@@ -299,25 +286,44 @@ class FldigiNetControlTab(QWidget):
 
     # --------- Next frequency change display / countdown --------- #
 
+    def _get_suspend_until(self) -> Optional[datetime.datetime]:
+        try:
+            ts = float(self.settings.get("schedule_suspend_until", 0) or 0)
+            if ts > 0:
+                return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+        except Exception:
+            return None
+        return None
+
+    def _set_suspend_until(self, dt: Optional[datetime.datetime]) -> None:
+        try:
+            if hasattr(self.settings, "set"):
+                self.settings.set("schedule_suspend_until", dt.timestamp() if dt else 0)
+        except Exception:
+            pass
+
     def _suspend_active(self) -> bool:
-        return self._suspend_until is not None and datetime.datetime.now(datetime.timezone.utc) < self._suspend_until
+        dt = self._get_suspend_until()
+        return dt is not None and datetime.datetime.now(datetime.timezone.utc) < dt
 
     def _update_suspend_state(self):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-        if self._suspend_until is None:
+        suspend_until = self._get_suspend_until()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        if suspend_until is None:
             self._suspend_warned = False
             self._set_suspend_button(active=False)
             return
 
-        if now_utc >= self._suspend_until:
+        if now_utc >= suspend_until:
             # Suspension expired
-            self._suspend_until = None
+            self._set_suspend_until(None)
             self._suspend_warned = False
             self._set_suspend_button(active=False)
             return
 
         # 5-minute warning prompt
-        remaining = (self._suspend_until - now_utc).total_seconds()
+        remaining = (suspend_until - now_utc).total_seconds()
         if remaining <= 300 and not self._suspend_warned:
             self._suspend_warned = True
             resp = QMessageBox.question(
@@ -329,13 +335,14 @@ class FldigiNetControlTab(QWidget):
             )
             if resp == QMessageBox.Yes:
                 # Extend by 30 minutes from the original expiry
-                self._suspend_until += datetime.timedelta(minutes=30)
+                new_until = suspend_until + datetime.timedelta(minutes=30)
+                self._set_suspend_until(new_until)
                 self._suspend_warned = False  # allow another warning near new expiry
         self._set_suspend_button(active=True)
 
     def _set_suspend_button(self, active: bool):
         if active:
-            self.suspend_btn.setText("Schedule Suspended")
+            self.suspend_btn.setText("Schedule Suspended for 30 Minutes")
             self.suspend_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
         else:
             self.suspend_btn.setText("QSY/Suspend")
@@ -345,12 +352,12 @@ class FldigiNetControlTab(QWidget):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         if self._suspend_active():
             # Resume immediately
-            self._suspend_until = None
+            self._set_suspend_until(None)
             self._suspend_warned = False
             self._set_suspend_button(active=False)
             QMessageBox.information(self, "Scheduling", "Scheduling resumed.")
         else:
-            self._suspend_until = now_utc + datetime.timedelta(minutes=30)
+            self._set_suspend_until(now_utc + datetime.timedelta(minutes=30))
             self._suspend_warned = False
             self._set_suspend_button(active=True)
             QMessageBox.information(
@@ -573,7 +580,8 @@ class FldigiNetControlTab(QWidget):
 
         # If schedule is suspended, show resume info and skip change handling
         if self._suspend_active():
-            resume_str = self._suspend_until.strftime("%H:%M UTC") if self._suspend_until else ""
+            su = self._get_suspend_until()
+            resume_str = su.strftime("%H:%M UTC") if su else ""
             suspended_text = f"Next Scheduled Net: (suspended until {resume_str})"
             suspended_text = f"{suspended_text} : {self._format_current_band(now_utc)}"
             self.next_change_label.setText(suspended_text)
@@ -602,7 +610,6 @@ class FldigiNetControlTab(QWidget):
             delta_sec is not None
             and delta_sec <= 0
             and self._net_in_progress
-            and not self.pause_freq_btn.isChecked()
             and not self._suspend_active()
             and not self._auto_end_done
         ):
@@ -1014,23 +1021,6 @@ class FldigiNetControlTab(QWidget):
         self._net_in_progress = False
         self._set_net_button_styles(active=False)
         log.info("FLDigi net ended: %s (%s)", net_name, role)
-
-    # ---------------- Pause Freq Change ---------------- #
-
-    def _on_pause_freq_toggled(self, checked: bool):
-        self.pause_freq_btn.setText("Resume Freq Change" if checked else "Pause Freq Change")
-        try:
-            if hasattr(self.settings, "set"):
-                self.settings.set("freq_change_paused", checked)
-                if hasattr(self.settings, "save"):
-                    self.settings.save()
-            else:
-                data = self.settings.all()
-                data["freq_change_paused"] = checked
-                if hasattr(self.settings, "_data"):
-                    self.settings._data = data  # type: ignore[attr-defined]
-        except Exception as e:
-            log.error("Failed to persist freq_change_paused setting: %s", e)
 
     # ---------------- INSERT KNOWN OPERATOR ---------------- #
 
