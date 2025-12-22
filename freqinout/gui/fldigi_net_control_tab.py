@@ -239,6 +239,14 @@ class FldigiNetControlTab(QWidget):
             self.start_btn.setStyleSheet(self._start_btn_default_style)
             self.save_btn.setStyleSheet(self._save_btn_default_style)
 
+    def _refresh_operator_history_views(self) -> None:
+        try:
+            parent = self.parent()
+            if parent and hasattr(parent, "refresh_operator_history_views"):
+                parent.refresh_operator_history_views()
+        except Exception:
+            pass
+
     # ---------------- TIMERS & CLOCKS ---------------- #
 
     def _setup_timers(self):
@@ -915,6 +923,7 @@ class FldigiNetControlTab(QWidget):
         self._net_start_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
         self._set_net_button_styles(active=True)
         log.info("FLDigi net started: %s (%s)", self.net_name_combo.currentText().strip(), self.role_combo.currentText())
+        self._refresh_operator_history_views()
 
     def _save_checkins(self):
         main_path = self.main_log_edit.text().strip()
@@ -928,6 +937,7 @@ class FldigiNetControlTab(QWidget):
         self._write_file(late_path, late_text)
 
         QMessageBox.information(self, "Saved", "Check-in logs saved.")
+        self._refresh_operator_history_views()
 
     def _merge_late_into_main(self):
         main_path = self.main_log_edit.text().strip()

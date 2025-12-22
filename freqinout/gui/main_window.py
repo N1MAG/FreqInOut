@@ -83,6 +83,29 @@ class MainWindow(QMainWindow):
 
         log.info("Main window initialized.")
 
+    def refresh_operator_history_views(self):
+        """
+        Reload operator history across tabs so new entries (e.g., CSV import, JS8 load)
+        are visible without restarting.
+        """
+        try:
+            if hasattr(self.operator_history_tab, "_load_data"):
+                self.operator_history_tab._load_data()
+        except Exception as e:
+            log.debug("MainWindow: operator_history_tab refresh failed: %s", e)
+        try:
+            if hasattr(self.stations_map_tab, "_load_operator_history"):
+                self.stations_map_tab._load_operator_history()
+                if hasattr(self.stations_map_tab, "_render_map"):
+                    self.stations_map_tab._render_map(preserve_view=True)
+        except Exception as e:
+            log.debug("MainWindow: stations_map_tab refresh failed: %s", e)
+        try:
+            if hasattr(self.fldigi_tab, "_load_known_operators"):
+                self.fldigi_tab._load_known_operators()
+        except Exception as e:
+            log.debug("MainWindow: fldigi_tab refresh failed: %s", e)
+
     # ------------------------------------------------------------------ #
     # Helpers                                                            #
     # ------------------------------------------------------------------ #

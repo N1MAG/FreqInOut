@@ -116,6 +116,8 @@ class JS8CallNetControlTab(QWidget):
         self._last_all_size: int = 0
         self._last_query_tx_ts: float = 0.0
         self._app_start_ts: float = time.time()
+        # Track inbound triggers to map replies to groups
+        self._last_inbound_triggers: Dict[str, tuple[str, float]] = {}
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -377,6 +379,14 @@ class JS8CallNetControlTab(QWidget):
             self._set_suspend_button(True)
             QMessageBox.information(self, "Schedule Suspended", "Scheduling suspended for 30 minutes.")
 
+    def _refresh_operator_history_views(self) -> None:
+        try:
+            parent = self.parent()
+            if parent and hasattr(parent, "refresh_operator_history_views"):
+                parent.refresh_operator_history_views()
+        except Exception:
+            pass
+
     # ---------------- START / END NET ---------------- #
 
     def _validate_before_start(self) -> bool:
@@ -433,6 +443,7 @@ class JS8CallNetControlTab(QWidget):
             self._poll_timer.start()
 
         log.info("JS8Call net started: %s (%s)", self.net_name_edit.text().strip(), self.role_combo.currentText())
+        self._refresh_operator_history_views()
 
     def _end_net(self):
         if not self._net_in_progress:
@@ -533,6 +544,7 @@ class JS8CallNetControlTab(QWidget):
                     if not self._line_ts_after_start(line):
                         continue
                     calls = self._extract_callsigns_from_line(line)
+                    self._maybe_record_inbound_trigger(line, calls)
                     msg_ids = self._extract_message_ids(line)
                     # If multiple stations reported YES MSG <id>, query each
                     if msg_ids and calls:
@@ -606,10 +618,12 @@ class JS8CallNetControlTab(QWidget):
                         continue
                     if not self._line_ts_after_start(line):
                         continue
-                    if "QUERY MSG" not in line.upper():
-                        continue
-                    self._last_query_tx_ts = time.time()
-                    log.info("JS8CallNetControl: detected outgoing QUERY MSG in ALL.TXT: %s", line.strip())
+                    up = line.upper()
+                    if "QUERY MSG" in up:
+                        self._last_query_tx_ts = time.time()
+                        log.info("JS8CallNetControl: detected outgoing QUERY MSG in ALL.TXT: %s", line.strip())
+                    # Track outbound direct transmissions to add untrusted operators
+                    self._maybe_register_outgoing_call(line)
                 self._last_all_size = f.tell()
         except Exception as e:
             log.error("JS8CallNetControl: failed reading ALL.TXT: %s", e)
@@ -696,6 +710,7 @@ class JS8CallNetControlTab(QWidget):
         mid-net file saves). For now it just acknowledges the check-ins are captured.
         """
         QMessageBox.information(self, "Saved", "Check-ins are ready and will be logged when the net ends.")
+        self._refresh_operator_history_views()
 
     # ---------------- LOG FILE WRITING ---------------- #
 
@@ -897,6 +912,137 @@ class JS8CallNetControlTab(QWidget):
             log.error("JS8CallNetControl: failed to start js8net: %s", e)
             return None
 
+    def _maybe_record_inbound_trigger(self, line: str, calls: List[str]) -> None:
+        """
+        Track the group that caused our potential autoreply so we can tag outbound inserts.
+        If message was to our callsign, store group = our callsign.
+        If message was to a configured @GROUP, store that group.
+        """
+        if not calls:
+            return
+        mycall = self._my_callsign()
+        upper = line.upper()
+        to_me = mycall and mycall in upper
+        groups_cfg = [g.strip().upper() for g in (self.settings.get("primary_js8_groups", []) or []) if g]
+        hit_group = None
+        for g in groups_cfg:
+            if f"@{g}" in upper:
+                hit_group = g
+                break
+        group_val = None
+        if hit_group:
+            group_val = hit_group
+        elif to_me:
+            group_val = mycall
+        if not group_val:
+            return
+        origin = calls[0]
+        self._last_inbound_triggers[origin] = (group_val, time.time())
+        # prune stale entries (older than 15 min)
+        now = time.time()
+        stale = [k for k, (_, ts) in self._last_inbound_triggers.items() if now - ts > 900]
+        for k in stale:
+            self._last_inbound_triggers.pop(k, None)
+
+    def _maybe_register_outgoing_call(self, line: str) -> None:
+        """
+        For any outgoing transmission to a callsign, add to operator_checkins as untrusted
+        if not already present. Use group from the triggering inbound if available.
+        """
+        # Parse timestamp
+        ts = None
+        try:
+            ts = datetime.datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+        except Exception:
+            ts = datetime.datetime.now(datetime.timezone.utc)
+        # Extract message after "JS8:"
+        if "JS8:" not in line:
+            return
+        try:
+            msg_part = line.split("JS8:", 1)[1].strip()
+        except Exception:
+            return
+        tokens = msg_part.split()
+        if not tokens:
+            return
+        # Skip @GROUP-only transmissions
+        if tokens[0].startswith("@"):
+            return
+        dest_call = None
+        if tokens[0].endswith(":") and len(tokens) > 1:
+            dest_call = tokens[1].strip().strip(":").upper()
+        else:
+            dest_call = tokens[0].strip().strip(":").upper()
+        if not dest_call:
+            return
+        # Determine group from last trigger if recent
+        group_val = ""
+        now = time.time()
+        trig = self._last_inbound_triggers.get(dest_call)
+        if trig and now - trig[1] <= 900:
+            group_val = trig[0]
+        elif self._my_callsign():
+            group_val = self._my_callsign()
+        self._maybe_insert_untrusted(dest_call, ts, group_val)
+
+    def _maybe_insert_untrusted(self, callsign: str, last_seen: datetime.datetime, group_val: str) -> None:
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return
+        try:
+            root = Path(__file__).resolve().parents[2]
+            db_path = root / "config" / "freqinout_nets.db"
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_checkins (
+                    callsign TEXT PRIMARY KEY,
+                    name TEXT,
+                    state TEXT,
+                    grid TEXT,
+                    group1 TEXT,
+                    group2 TEXT,
+                    group3 TEXT,
+                    group_role TEXT,
+                    first_seen_utc TEXT,
+                    last_seen_utc TEXT,
+                    checkin_count INTEGER,
+                    groups_json TEXT,
+                    trusted INTEGER
+                )
+                """
+            )
+            # check existing
+            cur.execute("SELECT trusted FROM operator_checkins WHERE callsign=?", (cs,))
+            row = cur.fetchone()
+            ts_str = last_seen.astimezone(datetime.timezone.utc).isoformat()
+            groups_json = json.dumps([group_val]) if group_val else None
+            if row is None:
+                cur.execute(
+                    """
+                    INSERT INTO operator_checkins (
+                        callsign, name, state, grid, group1, group2, group3, group_role,
+                        first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted
+                    ) VALUES (?, '', '', '', ?, '', '', '', ?, ?, 0, ?, 0)
+                    """,
+                    (cs, group_val, ts_str, ts_str, groups_json),
+                )
+            else:
+                trusted = int(row[0] or 0)
+                if trusted == 0:
+                    cur.execute(
+                        """
+                        UPDATE operator_checkins
+                        SET last_seen_utc=?, group1=COALESCE(NULLIF(group1,''), ?), groups_json=COALESCE(groups_json, ?)
+                        WHERE callsign=?
+                        """,
+                        (ts_str, group_val, groups_json, cs),
+                    )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("JS8CallNetControl: failed to upsert untrusted operator %s: %s", callsign, e)
     def _queue_auto_query(self, call: str, msg_id: str, snr: float | None = None) -> None:
         """
         Queue a query for MSG ID, and process one at a time when enabled.

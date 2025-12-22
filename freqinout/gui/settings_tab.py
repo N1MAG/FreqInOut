@@ -532,6 +532,7 @@ class SettingsTab(QWidget):
             data.get("operator_name", ""),
             data.get("operator_state", ""),
         )
+        self._refresh_operator_history_views()
 
     # ---------- TIME / TIMEZONE ---------- #
 
@@ -648,6 +649,17 @@ class SettingsTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("SettingsTab: failed to persist operator grid to DB: %s", e)
+
+    def _refresh_operator_history_views(self) -> None:
+        """
+        Ask the main window to reload operator history consumers (map, history, net controls).
+        """
+        try:
+            parent = self.parent()
+            if parent and hasattr(parent, "refresh_operator_history_views"):
+                parent.refresh_operator_history_views()
+        except Exception:
+            pass
 
     # ---------- RADIO PROGRAMS ---------- #
 
@@ -1176,6 +1188,7 @@ class SettingsTab(QWidget):
         """
         Manually ingest JS8 ALL.TXT and DIRECTED.TXT into the link index used by Stations Map.
         """
+        self._refresh_operator_history_views()
         directed_path = self.js8_directed_edit.text().strip()
         if not directed_path:
             QMessageBox.warning(self, "Missing path", "Please set JS8Call DIRECTED.TXT path first.")
@@ -1189,6 +1202,8 @@ class SettingsTab(QWidget):
             indexer = JS8LogLinkIndexer(self.settings, db_path)
             indexer.update()
             QMessageBox.information(self, "JS8 Traffic Loaded", "JS8 logs ingested successfully.")
+            self._refresh_operator_history_views()
         except Exception as e:
             log.error("SettingsTab: JS8 log ingest failed: %s", e)
             QMessageBox.critical(self, "Error", f"Failed to ingest JS8 logs:\n{e}")
+            self._refresh_operator_history_views()

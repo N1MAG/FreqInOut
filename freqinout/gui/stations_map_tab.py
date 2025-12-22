@@ -550,7 +550,7 @@ class StationsMapTab(QWidget):
             self._refresh_timer = QTimer(self)
         self._refresh_timer.stop()
         self._refresh_timer.setInterval(max(1, interval_min) * 60 * 1000)
-        self._refresh_timer.timeout.connect(lambda: self._render_map(preserve_view=True))
+        self._refresh_timer.timeout.connect(lambda: (self._load_operator_history(), self._render_map(preserve_view=True)))
         self._refresh_timer.start()
 
     def _on_auto_refresh_changed(self, idx: int):
