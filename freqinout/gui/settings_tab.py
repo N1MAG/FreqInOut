@@ -655,9 +655,10 @@ class SettingsTab(QWidget):
         Ask the main window to reload operator history consumers (map, history, net controls).
         """
         try:
-            parent = self.parent()
-            if parent and hasattr(parent, "refresh_operator_history_views"):
-                parent.refresh_operator_history_views()
+            # Prefer top-level window; parent() may be a layout wrapper
+            win = self.window()
+            if win and hasattr(win, "refresh_operator_history_views"):
+                win.refresh_operator_history_views()
         except Exception:
             pass
 

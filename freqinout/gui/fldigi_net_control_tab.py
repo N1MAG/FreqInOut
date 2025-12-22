@@ -241,9 +241,9 @@ class FldigiNetControlTab(QWidget):
 
     def _refresh_operator_history_views(self) -> None:
         try:
-            parent = self.parent()
-            if parent and hasattr(parent, "refresh_operator_history_views"):
-                parent.refresh_operator_history_views()
+            win = self.window()
+            if win and hasattr(win, "refresh_operator_history_views"):
+                win.refresh_operator_history_views()
         except Exception:
             pass
 
