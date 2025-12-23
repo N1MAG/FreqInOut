@@ -118,6 +118,7 @@ class JS8CallNetControlTab(QWidget):
         self._app_start_ts: float = time.time()
         # Track inbound triggers to map replies to groups
         self._last_inbound_triggers: Dict[str, tuple[str, float]] = {}
+        self._auto_inserted_callsigns: Set[str] = set()
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -965,15 +966,18 @@ class JS8CallNetControlTab(QWidget):
         tokens = msg_part.split()
         if not tokens:
             return
-        # Skip @GROUP-only transmissions
-        if tokens[0].startswith("@"):
+        # Require first token to be our callsign + colon, then dest callsign token
+        mycall = self._my_callsign()
+        first = tokens[0].strip()
+        if not mycall or not first.upper().startswith(mycall + ":"):
             return
-        dest_call = None
-        if tokens[0].endswith(":") and len(tokens) > 1:
-            dest_call = tokens[1].strip().strip(":").upper()
-        else:
-            dest_call = tokens[0].strip().strip(":").upper()
+        if len(tokens) < 2:
+            return
+        dest_call = tokens[1].strip().strip(":").upper()
         if not dest_call:
+            return
+        # Only proceed if dest looks like a normal callsign (avoid F!104, grids, etc.)
+        if not re.match(r"^[A-Z0-9]{3,}$", dest_call):
             return
         # Determine group from last trigger if recent
         group_val = ""
@@ -983,6 +987,10 @@ class JS8CallNetControlTab(QWidget):
             group_val = trig[0]
         elif self._my_callsign():
             group_val = self._my_callsign()
+        # Prevent multiple inserts for the same dest during this run
+        if dest_call in self._auto_inserted_callsigns:
+            return
+        self._auto_inserted_callsigns.add(dest_call)
         self._maybe_insert_untrusted(dest_call, ts, group_val)
 
     def _maybe_insert_untrusted(self, callsign: str, last_seen: datetime.datetime, group_val: str) -> None:
