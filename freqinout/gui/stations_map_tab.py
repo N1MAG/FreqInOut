@@ -2063,7 +2063,7 @@ class JS8LogLinkIndexer:
         Example:
         N7SHM: @AMRRON  ,DN28HH,5,...,{F%} ♢
         """
-        if "GRID?" in line.upper():
+        if "GRID?" in line.upper() or "..." in line:
             return
         parts = line.split("\t")
         if len(parts) < 5:
@@ -2107,6 +2107,8 @@ class JS8LogLinkIndexer:
         op_grp = self._lookup_operating_group(freq_hz)
         if op_grp:
             groups.append(op_grp)
+        if not groups:
+            return
         self._upsert_operator_info(origin, grid, groups, ts)
 
     def _upsert_operator_info(self, callsign: str, grid: str, group_val: str, ts: datetime.datetime) -> None:

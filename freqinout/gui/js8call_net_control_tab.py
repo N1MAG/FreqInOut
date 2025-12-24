@@ -1056,6 +1056,8 @@ class JS8CallNetControlTab(QWidget):
         """
         Capture GRID reports in DIRECTED.TXT lines (ignore GRID? queries).
         """
+        if "..." in line:
+            return
         parts = line.split("\t")
         if len(parts) < 5:
             return
@@ -1104,6 +1106,9 @@ class JS8CallNetControlTab(QWidget):
         op_group = self._lookup_operating_group(freq_hz)
         if op_group:
             groups.append(op_group)
+        # Require at least one group (explicit or via frequency)
+        if not groups:
+            return
         self._upsert_operator_info(origin, grid, groups, ts)
 
     def _lookup_operating_group(self, freq_hz: Optional[float]) -> str:
