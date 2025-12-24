@@ -376,7 +376,16 @@ class SettingsTab(QWidget):
         try:
             og = data.get("operating_groups", [])
             if isinstance(og, list):
-                self.operating_groups = [g for g in og if isinstance(g, dict)]
+                self.operating_groups = [
+                    {
+                        "group": str(g.get("group", "")).upper(),
+                        "mode": g.get("mode", ""),
+                        "band": g.get("band", ""),
+                        "frequency": g.get("frequency", ""),
+                    }
+                    for g in og
+                    if isinstance(g, dict)
+                ]
         except Exception:
             self.operating_groups = []
         self._refresh_operating_groups_table()
@@ -440,7 +449,7 @@ class SettingsTab(QWidget):
             self.js8_offset_edit.setText("0")
         data["js8_offset_hz"] = offset_val
 
-        groups = [le.text().strip() for le in self.js8_groups_edits if le.text().strip()]
+        groups = [le.text().strip().upper() for le in self.js8_groups_edits if le.text().strip()]
         data["primary_js8_groups"] = groups
 
         data["js8_directed_path"] = self.js8_directed_edit.text().strip()
@@ -967,6 +976,7 @@ class SettingsTab(QWidget):
 
     def _upsert_operating_group(self, name: str, mode: str, band: str, freq_mhz):
         # replace existing entry with same group+mode+band
+        name = name.strip().upper()
         freq_display = self._format_freq(freq_mhz)
         updated = False
         for g in self.operating_groups:
@@ -988,7 +998,15 @@ class SettingsTab(QWidget):
     def _refresh_operating_groups_table(self):
         # Sort display by Group asc, then Band asc
         self.operating_groups = sorted(
-            self.operating_groups,
+            [
+                {
+                    "group": str(g.get("group", "")).upper(),
+                    "mode": g.get("mode", ""),
+                    "band": g.get("band", ""),
+                    "frequency": g.get("frequency", ""),
+                }
+                for g in self.operating_groups
+            ],
             key=lambda g: (str(g.get("group", "")).lower(), str(g.get("band", "")).lower()),
         )
 
@@ -999,7 +1017,7 @@ class SettingsTab(QWidget):
             table.insertRow(row)
             sel_chk = QCheckBox()
             table.setCellWidget(row, 0, sel_chk)
-            table.setItem(row, 1, QTableWidgetItem(str(g.get("group", ""))))
+            table.setItem(row, 1, QTableWidgetItem(str(g.get("group", "")).upper()))
             table.setItem(row, 2, QTableWidgetItem(str(g.get("mode", ""))))
             table.setItem(row, 3, QTableWidgetItem(str(g.get("band", ""))))
             table.setItem(row, 4, QTableWidgetItem(self._format_freq(g.get("frequency", ""))))
@@ -1009,7 +1027,9 @@ class SettingsTab(QWidget):
     def _table_to_operating_groups(self) -> List[Dict[str, str]]:
         result: List[Dict[str, str]] = []
         for r in range(self.op_groups_table.rowCount()):
-            group = self.op_groups_table.item(r, 1).text().strip() if self.op_groups_table.item(r, 1) else ""
+            group = (
+                self.op_groups_table.item(r, 1).text().strip().upper() if self.op_groups_table.item(r, 1) else ""
+            )
             mode = self.op_groups_table.item(r, 2).text().strip() if self.op_groups_table.item(r, 2) else ""
             band = self.op_groups_table.item(r, 3).text().strip() if self.op_groups_table.item(r, 3) else ""
             freq_txt = self.op_groups_table.item(r, 4).text().strip() if self.op_groups_table.item(r, 4) else ""
