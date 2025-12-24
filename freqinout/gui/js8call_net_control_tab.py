@@ -1209,9 +1209,8 @@ class JS8CallNetControlTab(QWidget):
                 )
             else:
                 existing_grid, g1, g2, g3, gj, trusted = row
-                final_grid = grid
-                if existing_grid and len(existing_grid.strip()) >= len(grid):
-                    final_grid = existing_grid.strip().upper()
+                # Keep existing grid if already set; do not replace with new reports
+                final_grid = existing_grid.strip().upper() if existing_grid else grid
                 # merge groups into slots then json
                 slots = [g1 or "", g2 or "", g3 or ""]
                 slot_set = {s.strip().upper() for s in slots if s}
