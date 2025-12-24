@@ -2127,7 +2127,8 @@ class JS8LogLinkIndexer:
 
     def _valid_grid(self, grid: str) -> bool:
         import re
-        return bool(re.match(r"^[A-R]{2}[0-9]{2}([A-X]{2}([0-9]{2})?)?$", grid.upper()))
+        # Maidenhead: 4-char (LLDD) or 6-char (LLDDLL)
+        return bool(re.match(r"^[A-R]{2}[0-9]{2}([A-X]{2})?$", grid.upper()))
 
     def _upsert_operator_info(self, callsign: str, grid: str, group_val: str, ts: datetime.datetime) -> None:
         # Reuse js8call tab helpers not available here; implement lightweight upsert
