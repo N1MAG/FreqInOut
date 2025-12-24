@@ -437,8 +437,8 @@ class OperatorHistoryTab(QWidget):
                         "group3": (g3 or "").strip(),
                         "groups": groups,
                         "group_role": (role or "").strip(),
-                        "first_seen_utc": (first_seen or "").strip(),
-                        "last_seen_utc": (last_seen or "").strip(),
+                        "first_seen_utc": _normalize_date_only(first_seen) or (first_seen or "").strip(),
+                        "last_seen_utc": _normalize_date_only(last_seen) or (last_seen or "").strip(),
                         "checkin_count": int(count or 0),
                         "trusted": 1 if int(trusted or 0) else 0,
                     }
@@ -634,15 +634,10 @@ class OperatorHistoryTab(QWidget):
             set_item(self.COL_G2, r.get("group2", ""))
             set_item(self.COL_G3, r.get("group3", ""))
             set_item(self.COL_ROLE, r.get("group_role", ""))
-            first_fmt = r.get("first_seen_utc", "")
-            try:
-                if first_fmt:
-                    dt = datetime.datetime.fromisoformat(first_fmt.replace("Z", "+00:00"))
-                    first_fmt = dt.strftime("%Y%m%d")
-            except Exception:
-                pass
+            first_fmt = _normalize_date_only(r.get("first_seen_utc", "") or "") or ""
+            last_fmt = _normalize_date_only(r.get("last_seen_utc", "") or "") or ""
             set_item(self.COL_FIRST_SEEN, first_fmt)
-            set_item(self.COL_LAST_SEEN, r.get("last_seen_utc", ""))
+            set_item(self.COL_LAST_SEEN, last_fmt)
             set_item(self.COL_TRUSTED, "Yes" if r.get("trusted") else "No")
             set_item(self.COL_COUNT, str(r["checkin_count"]))
             # Highlight untrusted rows
