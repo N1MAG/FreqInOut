@@ -544,6 +544,7 @@ class JS8CallNetControlTab(QWidget):
                         continue
                     if not self._line_ts_after_start(line):
                         continue
+                    self._maybe_capture_grid_report(line)
                     calls = self._extract_callsigns_from_line(line)
                     self._maybe_record_inbound_trigger(line, calls)
                     msg_ids = self._extract_message_ids(line)
@@ -1051,6 +1052,196 @@ class JS8CallNetControlTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("JS8CallNetControl: failed to upsert untrusted operator %s: %s", callsign, e)
+    def _maybe_capture_grid_report(self, line: str) -> None:
+        """
+        Capture GRID reports in DIRECTED.TXT lines (ignore GRID? queries).
+        """
+        parts = line.split("\t")
+        if len(parts) < 5:
+            return
+        if "GRID?" in line.upper():
+            return
+        msg = parts[4]
+        if "GRID" not in msg.upper():
+            return
+        try:
+            ts = datetime.datetime.strptime(parts[0][:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+        except Exception:
+            ts = datetime.datetime.now(datetime.timezone.utc)
+        freq_hz = None
+        try:
+            freq_hz = float(parts[1]) * 1_000_000.0
+        except Exception:
+            freq_hz = None
+        # Parse origin and tokens
+        if ":" not in msg:
+            return
+        origin, rest = msg.split(":", 1)
+        origin = origin.strip().upper()
+        tokens = rest.strip().replace(",", " ").split()
+        if not tokens:
+            return
+        # Look for GRID token
+        try:
+            idx = [t.upper() for t in tokens].index("GRID")
+        except ValueError:
+            return
+        if idx + 1 >= len(tokens):
+            return
+        grid = tokens[idx + 1].strip().upper()
+        if not grid or "?" in grid:
+            return
+        # Choose longest grid compared to existing later
+        grp = ""
+        # explicit @GROUP if present
+        for t in tokens:
+            if t.startswith("@"):
+                grp = t.lstrip("@").upper()
+                break
+        groups = []
+        if grp:
+            groups.append(grp)
+        op_group = self._lookup_operating_group(freq_hz)
+        if op_group:
+            groups.append(op_group)
+        self._upsert_operator_info(origin, grid, groups, ts)
+
+    def _lookup_operating_group(self, freq_hz: Optional[float]) -> str:
+        try:
+            ops = self.settings.get("operating_groups", []) or []
+        except Exception:
+            return ""
+        if not freq_hz:
+            return ""
+        mhz = round(freq_hz / 1_000_000.0, 3)
+        for row in ops:
+            try:
+                ftxt = str(row.get("frequency", "")).strip()
+                if not ftxt:
+                    continue
+                if abs(float(ftxt) - mhz) < 0.0005:
+                    grp = str(row.get("group", "")).strip()
+                    if grp:
+                        return grp.upper()
+            except Exception:
+                continue
+        return ""
+
+    def _upsert_operator_info(self, callsign: str, grid: str, groups: List[str], ts: datetime.datetime) -> None:
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return
+        ts_str = ts.astimezone(datetime.timezone.utc).isoformat()
+        try:
+            root = Path(__file__).resolve().parents[2]
+            db_path = root / "config" / "freqinout_nets.db"
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_checkins (
+                    callsign TEXT PRIMARY KEY,
+                    name TEXT,
+                    state TEXT,
+                    grid TEXT,
+                    group1 TEXT,
+                    group2 TEXT,
+                    group3 TEXT,
+                    group_role TEXT,
+                    first_seen_utc TEXT,
+                    last_seen_utc TEXT,
+                    checkin_count INTEGER,
+                    groups_json TEXT,
+                    trusted INTEGER
+                )
+                """
+            )
+            cur.execute(
+                "SELECT grid, group1, group2, group3, groups_json, trusted FROM operator_checkins WHERE callsign=?",
+                (cs,),
+            )
+            row = cur.fetchone()
+            groups = [g.strip().upper() for g in groups if g]
+            groups = [g for g in groups if g]
+            groups_json = json.dumps(groups) if groups else None
+            if row is None:
+                cur.execute(
+                    """
+                    INSERT INTO operator_checkins (
+                        callsign, name, state, grid, group1, group2, group3, group_role,
+                        first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted
+                    ) VALUES (?, '', '', ?, ?, ?, ?, '', ?, ?, 0, ?, 0)
+                    """,
+                    (
+                        cs,
+                        grid,
+                        groups[0] if len(groups) > 0 else "",
+                        groups[1] if len(groups) > 1 else "",
+                        groups[2] if len(groups) > 2 else "",
+                        ts_str,
+                        ts_str,
+                        groups_json,
+                    ),
+                )
+            else:
+                existing_grid, g1, g2, g3, gj, trusted = row
+                final_grid = grid
+                if existing_grid and len(existing_grid.strip()) >= len(grid):
+                    final_grid = existing_grid.strip().upper()
+                # merge groups into slots then json
+                slots = [g1 or "", g2 or "", g3 or ""]
+                slot_set = {s.strip().upper() for s in slots if s}
+                merged = slot_set.copy()
+                merged.update(groups)
+                # fill slots first
+                slots_filled = []
+                for s in slots:
+                    val = s.strip().upper()
+                    if val:
+                        slots_filled.append(val)
+                for g in groups:
+                    if len(slots_filled) < 3 and g not in slots_filled:
+                        slots_filled.append(g)
+                while len(slots_filled) < 3:
+                    slots_filled.append("")
+                extra = merged - set(slots_filled) if merged else set()
+                extra_json = []
+                if gj:
+                    try:
+                        prev = json.loads(gj)
+                        if isinstance(prev, list):
+                            extra_json.extend([str(x).upper() for x in prev])
+                    except Exception:
+                        pass
+                for g in extra:
+                    if g and g not in extra_json:
+                        extra_json.append(g)
+                cur.execute(
+                    """
+                    UPDATE operator_checkins
+                    SET
+                        grid=?,
+                        group1=?,
+                        group2=?,
+                        group3=?,
+                        groups_json=?,
+                        last_seen_utc=?
+                    WHERE callsign=?
+                    """,
+                    (
+                        final_grid,
+                        slots_filled[0],
+                        slots_filled[1],
+                        slots_filled[2],
+                        json.dumps(extra_json) if extra_json else gj,
+                        ts_str,
+                        cs,
+                    ),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("JS8CallNetControl: failed to upsert operator info %s: %s", callsign, e)
     def _queue_auto_query(self, call: str, msg_id: str, snr: float | None = None) -> None:
         """
         Queue a query for MSG ID, and process one at a time when enabled.

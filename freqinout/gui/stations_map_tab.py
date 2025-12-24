@@ -2030,6 +2030,166 @@ class JS8LogLinkIndexer:
             snr = None
         return (ts, origin, dest, snr, freq_hz)
 
+    def _maybe_capture_group_grid(self, line: str) -> None:
+        """
+        Capture group/grid info from group messages ending with '%} ♢' and upsert into operator_checkins.
+        Example:
+        N7SHM: @AMRRON  ,DN28HH,5,...,{F%} ♢
+        """
+        if "GRID?" in line.upper():
+            return
+        parts = line.split("\t")
+        if len(parts) < 5:
+            return
+        try:
+            ts_str = parts[0][:19]
+            ts = datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+        except Exception:
+            ts = datetime.datetime.now(datetime.timezone.utc)
+        msg = parts[4]
+        if ":" not in msg or "GRID" not in msg.upper():
+            return
+        origin, rest = msg.split(":", 1)
+        origin = origin.strip().upper()
+        # tokens for parsing
+        tokens = rest.strip().replace(",", " ").split()
+        if not tokens:
+            return
+        try:
+            idx = [t.upper() for t in tokens].index("GRID")
+        except ValueError:
+            return
+        if idx + 1 >= len(tokens):
+            return
+        grid = tokens[idx + 1].strip().upper()
+        if not grid or "?" in grid:
+            return
+        grp = ""
+        for t in tokens:
+            if t.startswith("@"):
+                grp = t.lstrip("@").upper()
+                break
+        freq_hz = None
+        try:
+            freq_hz = float(parts[1]) * 1_000_000.0
+        except Exception:
+            freq_hz = None
+        groups = []
+        if grp:
+            groups.append(grp)
+        op_grp = self._lookup_operating_group(freq_hz)
+        if op_grp:
+            groups.append(op_grp)
+        self._upsert_operator_info(origin, grid, groups, ts)
+
+    def _upsert_operator_info(self, callsign: str, grid: str, group_val: str, ts: datetime.datetime) -> None:
+        # Reuse js8call tab helpers not available here; implement lightweight upsert
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return
+        ts_str = ts.astimezone(datetime.timezone.utc).isoformat()
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_checkins (
+                    callsign TEXT PRIMARY KEY,
+                    name TEXT,
+                    state TEXT,
+                    grid TEXT,
+                    group1 TEXT,
+                    group2 TEXT,
+                    group3 TEXT,
+                    group_role TEXT,
+                    first_seen_utc TEXT,
+                    last_seen_utc TEXT,
+                    checkin_count INTEGER,
+                    groups_json TEXT,
+                    trusted INTEGER
+                )
+                """
+            )
+            cur.execute(
+                "SELECT grid, group1, group2, group3, groups_json, trusted FROM operator_checkins WHERE callsign=?",
+                (cs,),
+            )
+            row = cur.fetchone()
+            groups = [group_val] if isinstance(group_val, str) else list(group_val or [])
+            groups = [g.strip().upper() for g in groups if g]
+            if row is None:
+                cur.execute(
+                    """
+                    INSERT INTO operator_checkins (
+                        callsign, name, state, grid, group1, group2, group3, group_role,
+                        first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted
+                    ) VALUES (?, '', '', ?, ?, ?, ?, '', ?, ?, 0, ?, 0)
+                    """,
+                    (
+                        cs,
+                        grid,
+                        groups[0] if len(groups) > 0 else "",
+                        groups[1] if len(groups) > 1 else "",
+                        groups[2] if len(groups) > 2 else "",
+                        ts_str,
+                        ts_str,
+                        json.dumps(groups) if groups else None,
+                    ),
+                )
+            else:
+                existing_grid, g1, g2, g3, gj, trusted = row
+                final_grid = grid
+                if existing_grid and len(existing_grid.strip()) >= len(grid):
+                    final_grid = existing_grid.strip().upper()
+                slots = [g1 or "", g2 or "", g3 or ""]
+                slot_set = {s.strip().upper() for s in slots if s}
+                merged = slot_set.copy()
+                merged.update(groups)
+                slots_filled = [s.strip().upper() for s in slots if s.strip()]
+                for g in groups:
+                    if len(slots_filled) < 3 and g not in slots_filled:
+                        slots_filled.append(g)
+                while len(slots_filled) < 3:
+                    slots_filled.append("")
+                extra = merged - set(slots_filled) if merged else set()
+                extra_json = []
+                if gj:
+                    try:
+                        prev = json.loads(gj)
+                        if isinstance(prev, list):
+                            extra_json.extend([str(x).upper() for x in prev])
+                    except Exception:
+                        pass
+                for g in extra:
+                    if g and g not in extra_json:
+                        extra_json.append(g)
+                cur.execute(
+                    """
+                    UPDATE operator_checkins
+                    SET
+                        grid=?,
+                        group1=?,
+                        group2=?,
+                        group3=?,
+                        groups_json=?,
+                        last_seen_utc=?
+                    WHERE callsign=?
+                    """,
+                    (
+                        final_grid,
+                        slots_filled[0],
+                        slots_filled[1],
+                        slots_filled[2],
+                        json.dumps(extra_json) if extra_json else gj,
+                        ts_str,
+                        cs,
+                    ),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("JS8LogLinkIndexer: failed to upsert operator info %s: %s", callsign, e)
+
     def _parse_all_line(self, line: str) -> Optional[tuple]:
         """
         ALL.TXT lines of interest contain "Transmitting":
@@ -2138,6 +2298,7 @@ class JS8LogLinkIndexer:
         rows: List[tuple] = []
         if directed_path and directed_path.exists():
             for line in directed_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                self._maybe_capture_group_grid(line)
                 parsed = self._parse_directed_line(line)
                 if parsed:
                     rows.append(parsed)
