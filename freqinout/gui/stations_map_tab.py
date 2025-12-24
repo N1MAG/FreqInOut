@@ -2003,6 +2003,33 @@ class JS8LogLinkIndexer:
                 return name
         return None
 
+    def _lookup_operating_group(self, freq_hz: Optional[float]) -> str:
+        """
+        Map an exact frequency (MHz) to an operating group name from settings (one-to-one).
+        """
+        try:
+            ops = self.settings.get("operating_groups", []) or []
+        except Exception:
+            return ""
+        if not freq_hz:
+            return ""
+        try:
+            mhz = round(float(freq_hz) / 1_000_000.0, 3)
+        except Exception:
+            return ""
+        for row in ops:
+            try:
+                ftxt = str(row.get("frequency", "")).strip()
+                if not ftxt:
+                    continue
+                if abs(float(ftxt) - mhz) < 0.0005:
+                    grp = str(row.get("group", "")).strip()
+                    if grp:
+                        return grp.upper()
+            except Exception:
+                continue
+        return ""
+
     # -------- parsing helpers -------- #
     def _parse_directed_line(self, line: str) -> Optional[tuple]:
         """
