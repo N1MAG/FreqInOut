@@ -152,7 +152,7 @@ class SettingsTab(QWidget):
         self.grid6_edit = QLineEdit()
         self.grid6_edit.setMaxLength(6)
         self.grid6_edit.setFixedWidth(90)
-        callsign_form.addRow("Call Sign:", self.callsign_edit)
+        callsign_form.addRow("Callsign:", self.callsign_edit)
         callsign_form.addRow("Name:", self.name_edit)
         callsign_form.addRow("State:", self.state_edit)
         callsign_form.addRow("Grid 6:", self.grid6_edit)

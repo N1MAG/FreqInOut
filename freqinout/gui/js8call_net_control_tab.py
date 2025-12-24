@@ -966,18 +966,18 @@ class JS8CallNetControlTab(QWidget):
         tokens = msg_part.split()
         if not tokens:
             return
-        # Require first token to be our callsign + colon, then dest callsign token
+        # Require first token to be exactly our callsign + colon, then dest callsign token
         mycall = self._my_callsign()
         first = tokens[0].strip()
-        if not mycall or not first.upper().startswith(mycall + ":"):
+        if not mycall or first.upper() != (mycall + ":"):
             return
         if len(tokens) < 2:
             return
         dest_call = tokens[1].strip().strip(":").upper()
         if not dest_call:
             return
-        # Only proceed if dest looks like a normal callsign (avoid F!104, grids, etc.)
-        if not re.match(r"^[A-Z0-9]{3,}$", dest_call):
+        # Only proceed if dest looks like a normal callsign (must contain a letter; avoid pure digits/macros)
+        if not re.match(r"^(?=.*[A-Z])[A-Z0-9]{3,}$", dest_call):
             return
         # Determine group from last trigger if recent
         group_val = ""
