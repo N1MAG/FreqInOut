@@ -775,7 +775,7 @@ class OperatorHistoryTab(QWidget):
                     cs,
                     row.get("name", existing_name or ""),
                     row.get("state", existing_state or ""),
-                    row.get("grid", existing_grid or ""),
+                    row.get("grid", "") or "",
                     g1,
                     g2,
                     g3,
