@@ -570,11 +570,12 @@ class JS8CallNetControlTab(QWidget):
                     calls = self._extract_callsigns_from_line(line)
                     self._maybe_record_inbound_trigger(line, calls)
                     msg_ids = self._extract_message_ids(line)
-                    # If multiple stations reported YES MSG <id>, query each
+                    # If multiple stations reported YES MSG <id>, query each (only when addressed to us)
+                    mycall = self._my_callsign()
                     if msg_ids and calls:
-                        if not self._saw_recent_query_tx():
-                            log.info("JS8CallNetControl: skipping YES MSG in DIRECTED (no recent query TX)")
-                        else:
+                        dest_match = re.search(r":[ ]*([A-Z0-9/]+)", line.upper())
+                        dest_cs = dest_match.group(1).strip().upper() if dest_match else ""
+                        if mycall and dest_cs == mycall:
                             for c in calls:
                                 for mid in msg_ids:
                                     log.debug("JS8CallNetControl: queueing auto-query %s from DIRECTED line (call=%s)", mid, c)
@@ -902,7 +903,7 @@ class JS8CallNetControlTab(QWidget):
         Look for all patterns like 'YES MSG 123' in a JS8Call line and
         return numeric message IDs as strings.
         """
-        return re.findall(r"\bYES\s+MSG\s+(\d+)", line, flags=re.IGNORECASE)
+        return re.findall(r"\bYES\s+MSG(?:\s+ID)?\s+(\d+)", line, flags=re.IGNORECASE)
 
     def _get_js8_client(self):
         if self._js8_client:
