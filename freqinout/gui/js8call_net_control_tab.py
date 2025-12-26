@@ -575,7 +575,19 @@ class JS8CallNetControlTab(QWidget):
                     if msg_ids and calls:
                         dest_match = re.search(r":[ ]*([A-Z0-9/]+)", line.upper())
                         dest_cs = dest_match.group(1).strip().upper() if dest_match else ""
-                        if mycall and dest_cs == mycall:
+                        if not mycall:
+                            log.info("JS8CallNetControl: YES MSG line but no mycall set; skipping: %s", line.strip())
+                        elif dest_cs != mycall:
+                            log.info(
+                                "JS8CallNetControl: YES MSG line addressed to %s (not %s); skipping",
+                                dest_cs or "(unknown)",
+                                mycall,
+                            )
+                        elif not self._saw_recent_query_tx():
+                            log.info(
+                                "JS8CallNetControl: skipping YES MSG (no recent QUERY MSG TX): %s", line.strip()
+                            )
+                        else:
                             for c in calls:
                                 for mid in msg_ids:
                                     log.info(
