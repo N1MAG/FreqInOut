@@ -117,6 +117,7 @@ class JS8CallNetControlTab(QWidget):
         self._last_all_size: int = 0
         self._last_query_tx_ts: float = 0.0
         self._app_start_ts: float = time.time()
+        self._last_tx_ts: float = 0.0
         # Track inbound triggers to map replies to groups
         self._last_inbound_triggers: Dict[str, tuple[str, float]] = {}
         self._auto_inserted_callsigns: Set[str] = set()
@@ -147,6 +148,7 @@ class JS8CallNetControlTab(QWidget):
         try:
             with socket.create_connection((host, port), timeout=3) as sock:
                 sock.sendall(payload.encode("utf-8"))
+            self._last_tx_ts = time.time()
             log.debug("JS8CallNetControl: sent TX.SEND_MESSAGE to %s:%s text=%s", host, port, text)
             return True
         except Exception as e:
@@ -641,6 +643,9 @@ class JS8CallNetControlTab(QWidget):
                     if not self._line_ts_after_start(line):
                         continue
                     up = line.upper()
+                    mycall = self._my_callsign()
+                    if mycall and f"{mycall}:" in up:
+                        self._last_tx_ts = time.time()
                     if "QUERY MSG" in up:
                         self._last_query_tx_ts = time.time()
                         log.info("JS8CallNetControl: detected outgoing QUERY MSG in ALL.TXT: %s", line.strip())
@@ -1557,6 +1562,9 @@ class JS8CallNetControlTab(QWidget):
         if time.time() - self._grid_last_rx_ts < 2.0:
             return
         if self._net_lockout_active():
+            return
+        # Defer while our own transmission recently occurred (e.g., auto-reply in progress)
+        if time.time() - self._last_tx_ts < 5.0:
             return
         # Weakest SNR first
         self._pending_grid_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
