@@ -6,6 +6,7 @@ import sqlite3
 import time
 import json
 import queue
+import socket
 from pathlib import Path
 from typing import List, Dict, Set, Optional
 
@@ -132,6 +133,25 @@ class JS8CallNetControlTab(QWidget):
         self._update_suspend_state()
         if self._poll_timer:
             self._poll_timer.start()
+
+    def _send_js8_message(self, text: str) -> bool:
+        """
+        Send a one-shot TX.SEND_MESSAGE to JS8Call over the TCP API.
+        """
+        host = "127.0.0.1"
+        try:
+            port = int(self.settings.get("js8_port", 2442) or 2442)
+        except Exception:
+            port = 2442
+        payload = json.dumps({"params": {}, "type": "TX.SEND_MESSAGE", "value": text}) + "\n"
+        try:
+            with socket.create_connection((host, port), timeout=3) as sock:
+                sock.sendall(payload.encode("utf-8"))
+            log.debug("JS8CallNetControl: sent TX.SEND_MESSAGE to %s:%s text=%s", host, port, text)
+            return True
+        except Exception as e:
+            log.debug("JS8CallNetControl: failed TX.SEND_MESSAGE to %s:%s text=%s err=%s", host, port, text, e)
+            return False
 
     # ---------------- UI ---------------- #
 
@@ -1290,9 +1310,6 @@ class JS8CallNetControlTab(QWidget):
         # Avoid querying while RX just occurred (idle gap)
         if time.time() - self._last_rx_ts < 2.0:
             return
-        client = self._get_js8_client()
-        if client is None:
-            return
         # Prefer weakest SNR first (more negative first), unknowns last
         self._pending_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
         snr_val, call, msg_id = self._pending_queries.pop(0)
@@ -1302,29 +1319,17 @@ class JS8CallNetControlTab(QWidget):
             # skip duplicates
             self._maybe_process_next_query()
             return
-        try:
-            if hasattr(client, "query_message_id"):
-                log.info("JS8CallNetControl: sending query_message_id(%s, %s) to JS8Call", call, msg_id)
-                client.query_message_id(call, str(msg_id))  # type: ignore[attr-defined]
-                self._queried_msg_ids.add(key)
-                self._waiting_for_completion = True
-                self._current_query = (call, msg_id)
-                log.info("JS8CallNetControl: auto-queried MSG ID %s from %s via query_message_id", msg_id, call)
-            elif hasattr(client, "send_message"):
-                # Fallback for js8net: send explicit QUERY MSG <id>
-                log.info("JS8CallNetControl: sending QUERY MSG %s to %s via send_message", msg_id, call)
-                client.send_message(f"{call}: QUERY MSG {msg_id}")  # type: ignore[attr-defined]
-                self._queried_msg_ids.add(key)
-                self._waiting_for_completion = True
-                self._current_query = (call, msg_id)
-                log.info("JS8CallNetControl: auto-queried MSG ID %s from %s via send_message fallback", msg_id, call)
-            else:
-                log.debug("JS8CallNetControl: js8net does not support query_message_id; skipping auto-query.")
-        except Exception as e:
-            log.error("JS8CallNetControl: auto query failed for %s/%s: %s", call, msg_id, e)
+        query_text = f"{call} QUERY MSG {msg_id}"
+        sent = self._send_js8_message(query_text)
+        if sent:
+            self._queried_msg_ids.add(key)
+            self._waiting_for_completion = True
+            self._current_query = (call, msg_id)
+            log.info("JS8CallNetControl: auto-queried MSG ID %s from %s via TX.SEND_MESSAGE", msg_id, call)
+        else:
+            log.error("JS8CallNetControl: auto query send failed for %s/%s", call, msg_id)
             self._current_query = None
             self._waiting_for_completion = False
-            # Try next one to avoid stall
             self._maybe_process_next_query()
 
     def _poll_js8_rx_queue(self) -> None:
@@ -1553,19 +1558,15 @@ class JS8CallNetControlTab(QWidget):
             return
         if self._net_lockout_active():
             return
-        client = self._get_js8_client()
-        if client is None:
-            return
         # Weakest SNR first
         self._pending_grid_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
         snr_val, call = self._pending_grid_queries.pop(0)
-        try:
-            if hasattr(client, "send_message"):
-                client.send_message(f"{call}: GRID?")  # type: ignore[attr-defined]
-                log.info("JS8CallNetControl: auto grid query to %s", call)
-                self._grid_waiting = True
-        except Exception as e:
-            log.debug("JS8CallNetControl: failed GRID? to %s: %s", call, e)
+        query_text = f"{call} GRID?"
+        if self._send_js8_message(query_text):
+            log.info("JS8CallNetControl: auto grid query to %s", call)
+            self._grid_waiting = True
+        else:
+            log.debug("JS8CallNetControl: failed GRID? to %s", call)
 
     def _is_message_complete_line(self, line: str) -> bool:
         """
