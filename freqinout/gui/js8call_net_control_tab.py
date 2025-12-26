@@ -149,10 +149,10 @@ class JS8CallNetControlTab(QWidget):
             with socket.create_connection((host, port), timeout=3) as sock:
                 sock.sendall(payload.encode("utf-8"))
             self._last_tx_ts = time.time()
-            log.debug("JS8CallNetControl: sent TX.SEND_MESSAGE to %s:%s text=%s", host, port, text)
+            log.info("JS8CallNetControl: sent TX.SEND_MESSAGE to %s:%s text=%s", host, port, text)
             return True
         except Exception as e:
-            log.debug("JS8CallNetControl: failed TX.SEND_MESSAGE to %s:%s text=%s err=%s", host, port, text, e)
+            log.error("JS8CallNetControl: failed TX.SEND_MESSAGE to %s:%s text=%s err=%s", host, port, text, e)
             return False
 
     # ---------------- UI ---------------- #
@@ -1326,6 +1326,7 @@ class JS8CallNetControlTab(QWidget):
             self._maybe_process_next_query()
             return
         query_text = f"{call} QUERY MSG {msg_id}"
+        log.info("JS8CallNetControl: attempting auto-query TX to %s msg_id=%s text=\"%s\"", call, msg_id, query_text)
         sent = self._send_js8_message(query_text)
         if sent:
             self._queried_msg_ids.add(key)
@@ -1571,11 +1572,12 @@ class JS8CallNetControlTab(QWidget):
         self._pending_grid_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
         snr_val, call = self._pending_grid_queries.pop(0)
         query_text = f"{call} GRID?"
+        log.info("JS8CallNetControl: attempting auto grid query to %s text=\"%s\"", call, query_text)
         if self._send_js8_message(query_text):
             log.info("JS8CallNetControl: auto grid query to %s", call)
             self._grid_waiting = True
         else:
-            log.debug("JS8CallNetControl: failed GRID? to %s", call)
+            log.error("JS8CallNetControl: failed GRID? to %s", call)
 
     def _is_message_complete_line(self, line: str) -> bool:
         """
