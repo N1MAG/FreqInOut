@@ -578,7 +578,9 @@ class JS8CallNetControlTab(QWidget):
                         if mycall and dest_cs == mycall:
                             for c in calls:
                                 for mid in msg_ids:
-                                    log.debug("JS8CallNetControl: queueing auto-query %s from DIRECTED line (call=%s)", mid, c)
+                                    log.info(
+                                        "JS8CallNetControl: queueing auto-query id=%s from %s (dest=%s)", mid, c, dest_cs
+                                    )
                                     self._queue_auto_query(c, mid)
                     call_primary = calls[0] if calls else ""
                     if not call_primary:
@@ -1310,11 +1312,14 @@ class JS8CallNetControlTab(QWidget):
 
     def _maybe_process_next_query(self) -> None:
         if self._waiting_for_completion:
+            log.debug("JS8CallNetControl: waiting_for_completion; skipping process_next_query")
             return
         if not self._pending_queries:
+            log.debug("JS8CallNetControl: no pending queries to process")
             return
         # Avoid querying while RX just occurred (idle gap)
         if time.time() - self._last_rx_ts < 2.0:
+            log.debug("JS8CallNetControl: RX idle gap not met; deferring auto-query")
             return
         # Prefer weakest SNR first (more negative first), unknowns last
         self._pending_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
