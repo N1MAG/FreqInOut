@@ -1347,7 +1347,8 @@ class JS8CallNetControlTab(QWidget):
             # skip duplicates
             self._maybe_process_next_query()
             return
-        query_text = f"{call} QUERY MSG {msg_id}"
+        mycall = self._my_callsign() or ""
+        query_text = f"{mycall}: {call} QUERY MSG {msg_id}".strip()
         log.info("JS8CallNetControl: attempting auto-query TX to %s msg_id=%s text=\"%s\"", call, msg_id, query_text)
         sent = self._send_js8_message(query_text)
         if sent:
@@ -1593,7 +1594,8 @@ class JS8CallNetControlTab(QWidget):
         # Weakest SNR first
         self._pending_grid_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
         snr_val, call = self._pending_grid_queries.pop(0)
-        query_text = f"{call} GRID?"
+        mycall = self._my_callsign() or ""
+        query_text = f"{mycall}: {call} GRID?".strip()
         log.info("JS8CallNetControl: attempting auto grid query to %s text=\"%s\"", call, query_text)
         if self._send_js8_message(query_text):
             log.info("JS8CallNetControl: auto grid query to %s", call)
