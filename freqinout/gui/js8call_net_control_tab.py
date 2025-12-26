@@ -573,8 +573,13 @@ class JS8CallNetControlTab(QWidget):
                     # If multiple stations reported YES MSG <id>, query each (only when addressed to us)
                     mycall = self._my_callsign()
                     if msg_ids and calls:
-                        dest_match = re.search(r":[ ]*([A-Z0-9/]+)", line.upper())
-                        dest_cs = dest_match.group(1).strip().upper() if dest_match else ""
+                        dest_cs = ""
+                        try:
+                            msg_field = line.split("\t", 4)[4]
+                            if ":" in msg_field:
+                                dest_cs = msg_field.split(":", 1)[1].strip().split()[0].strip().upper()
+                        except Exception:
+                            dest_cs = ""
                         if not mycall:
                             log.info("JS8CallNetControl: YES MSG line but no mycall set; skipping: %s", line.strip())
                         elif dest_cs != mycall:
