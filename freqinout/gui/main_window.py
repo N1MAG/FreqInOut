@@ -1,6 +1,17 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QTabWidget
+from PySide6.QtWidgets import (
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QStackedWidget,
+    QVBoxLayout,
+    QPushButton,
+    QButtonGroup,
+    QSizePolicy,
+    QLabel,
+)
 
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
@@ -41,14 +52,12 @@ class MainWindow(QMainWindow):
         self.settings = SettingsManager()
         self.setWindowTitle("FreqInOut")
 
-        # Central widget with a vertical layout containing the tab widget
+        # Central widget with sidebar navigation + stacked pages
         central = QWidget()
-        layout = QVBoxLayout(central)
-        self.tabs = QTabWidget()
-        layout.addWidget(self.tabs)
+        layout = QHBoxLayout(central)
         self.setCentralWidget(central)
 
-        # Instantiate tabs
+        # Instantiate screens
         self.settings_tab = SettingsTab(self)
         self.hf_schedule_tab = DailyScheduleTab(self)  # this tab is labeled "HF Frequency Schedule"
         self.net_tab = NetScheduleTab(self)
@@ -60,17 +69,51 @@ class MainWindow(QMainWindow):
         self.log_tab = LogViewerTab(self)
         self.stations_map_tab = StationsMapTab(self)
 
-        # Add tabs with user-facing labels
-        self.tabs.addTab(self.settings_tab, "Settings")
-        self.tabs.addTab(self.hf_schedule_tab, "HF Frequency Schedule")
-        self.tabs.addTab(self.net_tab, "Net Schedule")
-        self.tabs.addTab(self.fldigi_tab, "FLDigi Net Control")
-        self.tabs.addTab(self.js8_tab, "JS8Call Net Control")
-        self.tabs.addTab(self.freq_planner_tab, "FreqPlanner")
-        self.tabs.addTab(self.operator_history_tab, "Operator History")
-        self.tabs.addTab(self.message_viewer_tab, "Message Viewer")
-        self.tabs.addTab(self.stations_map_tab, "Stations Map")
-        self.tabs.addTab(self.log_tab, "Logs")
+        # Sidebar navigation order (as requested)
+        self._screens = [
+            ("FreqPlanner", self.freq_planner_tab),
+            ("Message Viewer", self.message_viewer_tab),
+            ("FLDigi Net Control", self.fldigi_tab),
+            ("JS8Call Net Control", self.js8_tab),
+            ("Operator History", self.operator_history_tab),
+            ("Stations Map", self.stations_map_tab),
+            ("HF Frequency Schedule", self.hf_schedule_tab),
+            ("Net Schedule", self.net_tab),
+            ("Settings", self.settings_tab),
+            ("Logs", self.log_tab),
+        ]
+
+        # Build sidebar
+        nav_widget = QWidget()
+        nav_layout = QVBoxLayout(nav_widget)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
+        self.nav_buttons = []
+        self.button_group = QButtonGroup(self)
+        self.button_group.setExclusive(True)
+        for idx, (label, _w) in enumerate(self._screens):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            btn.clicked.connect(lambda _=False, i=idx: self._set_screen(i))
+            self.button_group.addButton(btn, idx)
+            self.nav_buttons.append(btn)
+            nav_layout.addWidget(btn)
+        nav_layout.addStretch()
+
+        # Stacked content
+        self.stack = QStackedWidget()
+        for _label, widget in self._screens:
+            self.stack.addWidget(widget)
+
+        # Layout composition
+        layout.addWidget(nav_widget)
+        layout.addWidget(self.stack, stretch=1)
+
+        # Default selection
+        if self.nav_buttons:
+            self.nav_buttons[0].setChecked(True)
+            self.stack.setCurrentIndex(0)
 
         # Optional: apply callsign to tab captions if already configured
         self._apply_callsign_to_tab_titles()
@@ -112,37 +155,28 @@ class MainWindow(QMainWindow):
 
     def _apply_callsign_to_tab_titles(self):
         """
-        Append the configured callsign to each tab title, if available.
-
+        Append the configured callsign to each navigation label, if available.
         This is a helper so the Settings tab can call back into the main
         window (e.g., after saving a new callsign) by doing:
-
             self.parent()._apply_callsign_to_tab_titles()
-
-        If you don't want callsign in tab titles, you can remove or ignore this.
         """
         data = self.settings.all()
         callsign = (data.get("callsign") or "").strip().upper()
         if not callsign:
             # Reset to base titles if no callsign is set
-            self.tabs.setTabText(self.tabs.indexOf(self.settings_tab), "Settings")
-            self.tabs.setTabText(self.tabs.indexOf(self.hf_schedule_tab), "HF Frequency Schedule")
-            self.tabs.setTabText(self.tabs.indexOf(self.net_tab), "Net Schedule")
-            self.tabs.setTabText(self.tabs.indexOf(self.fldigi_tab), "FLDigi Net Control")
-            self.tabs.setTabText(self.tabs.indexOf(self.js8_tab), "JS8Call Net Control")
-            self.tabs.setTabText(self.tabs.indexOf(self.freq_planner_tab), "FreqPlanner")
-            self.tabs.setTabText(self.tabs.indexOf(self.operator_history_tab), "Operator History")
-            self.tabs.setTabText(self.tabs.indexOf(self.log_tab), "Logs")
+            for idx, (base, _w) in enumerate(self._screens):
+                if idx < len(self.nav_buttons):
+                    self.nav_buttons[idx].setText(base)
             return
 
         def label(base: str) -> str:
             return f"{base} [{callsign}]"
 
-        self.tabs.setTabText(self.tabs.indexOf(self.settings_tab), label("Settings"))
-        self.tabs.setTabText(self.tabs.indexOf(self.hf_schedule_tab), label("HF Frequency Schedule"))
-        self.tabs.setTabText(self.tabs.indexOf(self.net_tab), label("Net Schedule"))
-        self.tabs.setTabText(self.tabs.indexOf(self.fldigi_tab), label("FLDigi Net Control"))
-        self.tabs.setTabText(self.tabs.indexOf(self.js8_tab), label("JS8Call Net Control"))
-        self.tabs.setTabText(self.tabs.indexOf(self.freq_planner_tab), label("FreqPlanner"))
-        self.tabs.setTabText(self.tabs.indexOf(self.operator_history_tab), label("Operator History"))
-        self.tabs.setTabText(self.tabs.indexOf(self.log_tab), label("Logs"))
+        for idx, (base, _w) in enumerate(self._screens):
+            lbl = label(base)
+            if idx < len(self.nav_buttons):
+                self.nav_buttons[idx].setText(lbl)
+
+    def _set_screen(self, index: int) -> None:
+        if 0 <= index < self.stack.count():
+            self.stack.setCurrentIndex(index)
