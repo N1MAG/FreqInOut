@@ -121,6 +121,7 @@ class JS8CallNetControlTab(QWidget):
         # Track inbound triggers to map replies to groups
         self._last_inbound_triggers: Dict[str, tuple[str, float]] = {}
         self._auto_inserted_callsigns: Set[str] = set()
+        self._awaiting_ack_for: Optional[str] = None
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -669,6 +670,20 @@ class JS8CallNetControlTab(QWidget):
                     if "QUERY MSG" in up:
                         self._last_query_tx_ts = time.time()
                         log.info("JS8CallNetControl: detected outgoing QUERY MSG in ALL.TXT: %s", line.strip())
+                    # Detect outbound ACK to release pending QUERY MSGS
+                    if "ACK" in up and mycall and f"{mycall}:" in up:
+                        dest = ""
+                        try:
+                            msg_part = line.split("JS8:", 1)[1]
+                            rest = msg_part.split(":", 1)[1]
+                            dest = rest.strip().split()[0].strip().upper()
+                        except Exception:
+                            dest = ""
+                        if dest and self._awaiting_ack_for and dest == self._awaiting_ack_for:
+                            log.info("JS8CallNetControl: ACK sent to %s; issuing follow-up QUERY MSGS", dest)
+                            self._awaiting_ack_for = None
+                            self._send_query_msgs(dest)
+                            self._maybe_process_next_query()
                     # Track outbound direct transmissions to add untrusted operators
                     self._maybe_register_outgoing_call(line)
                 self._last_all_size = f.tell()
@@ -1426,27 +1441,23 @@ class JS8CallNetControlTab(QWidget):
         self._waiting_for_completion = False
         call = self._current_query[0] if self._current_query else None
         self._current_query = None
-        # After a message completes, ask that station if more messages exist
+        # After a message completes, wait for our ACK to be sent before querying for more
         if call:
-            log.info("JS8CallNetControl: message completion detected; querying MSGS from %s", call)
-            self._send_query_msgs(call)
+            self._awaiting_ack_for = call
+            log.info("JS8CallNetControl: message completion detected; waiting for ACK before querying MSGS from %s", call)
         self._maybe_process_next_query()
 
     def _send_query_msgs(self, call: str) -> None:
         """
         Send QUERY MSGS to a specific station to discover additional messages.
         """
-        if js8net is None:
-            return
-        client = self._get_js8_client()
-        if client is None:
-            return
-        try:
-            if hasattr(client, "send_message"):
-                client.send_message(f"{call}: QUERY MSGS")  # type: ignore[attr-defined]
-                log.info("JS8CallNetControl: queried additional messages from %s", call)
-        except Exception as e:
-            log.debug("JS8CallNetControl: failed sending QUERY MSGS to %s: %s", call, e)
+        mycall = self._my_callsign() or ""
+        text = f"{mycall}: {call} QUERY MSGS".strip()
+        sent = self._send_js8_message(text)
+        if sent:
+            log.info("JS8CallNetControl: queried additional messages from %s", call)
+        else:
+            log.error("JS8CallNetControl: failed sending QUERY MSGS to %s", call)
 
     # ---------------- Grid helpers ---------------- #
 
