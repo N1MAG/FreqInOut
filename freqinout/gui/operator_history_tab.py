@@ -156,6 +156,8 @@ class OperatorHistoryTab(QWidget):
         )
         hv = self.table.horizontalHeader()
         hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
+        hv.setMinimumSectionSize(50)
+        hv.setDefaultSectionSize(100)
         for col in (
             self.COL_CALLSIGN,
             self.COL_NAME,

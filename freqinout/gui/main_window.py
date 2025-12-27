@@ -85,8 +85,10 @@ class MainWindow(QMainWindow):
 
         # Build sidebar
         nav_widget = QWidget()
+        nav_widget.setMinimumWidth(140)
+        nav_widget.setMaximumWidth(200)
         nav_layout = QVBoxLayout(nav_widget)
-        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setContentsMargins(4, 4, 4, 4)
         nav_layout.setSpacing(4)
         self.nav_buttons = []
         self.button_group = QButtonGroup(self)
@@ -95,6 +97,7 @@ class MainWindow(QMainWindow):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            btn.setMinimumWidth(120)
             btn.clicked.connect(lambda _=False, i=idx: self._set_screen(i))
             self.button_group.addButton(btn, idx)
             self.nav_buttons.append(btn)
@@ -109,6 +112,10 @@ class MainWindow(QMainWindow):
         # Layout composition
         layout.addWidget(nav_widget)
         layout.addWidget(self.stack, stretch=1)
+        self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # Suggest a modest minimum size
+        self.setMinimumSize(900, 600)
 
         # Default selection
         if self.nav_buttons:

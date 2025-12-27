@@ -779,7 +779,7 @@ class FldigiNetControlTab(QWidget):
                 max_w = w
         if max_w > 0:
             # Add a small safety margin
-            self.net_name_combo.setMinimumWidth(max_w + 8)
+            self.net_name_combo.setMinimumWidth(min(max_w + 8, 300))
         else:
             # Fallback if no items exist yet
             self.net_name_combo.setMinimumWidth(320)
