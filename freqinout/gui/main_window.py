@@ -72,12 +72,12 @@ class MainWindow(QMainWindow):
         # Sidebar navigation order (as requested)
         self._screens = [
             ("FreqPlanner", self.freq_planner_tab),
-            ("Message Viewer", self.message_viewer_tab),
-            ("FLDigi Net Control", self.fldigi_tab),
-            ("JS8Call Net Control", self.js8_tab),
-            ("Operator History", self.operator_history_tab),
-            ("Stations Map", self.stations_map_tab),
-            ("HF Frequency Schedule", self.hf_schedule_tab),
+            ("Messages", self.message_viewer_tab),
+            ("FLDigi NCS", self.fldigi_tab),
+            ("JS8 NCS", self.js8_tab),
+            ("Operators", self.operator_history_tab),
+            ("Map", self.stations_map_tab),
+            ("HF Schedule", self.hf_schedule_tab),
             ("Net Schedule", self.net_tab),
             ("Settings", self.settings_tab),
             ("Logs", self.log_tab),

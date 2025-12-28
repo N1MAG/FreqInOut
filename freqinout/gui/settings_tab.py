@@ -1173,7 +1173,7 @@ class SettingsTab(QWidget):
             self,
             "Select JS8Call DIRECTED.TXT",
             "",
-            "Text Files (*.txt);;All Files (*)",
+            "All Files (*);;Text Files (*.txt)",
         )
         if not fn:
             return
