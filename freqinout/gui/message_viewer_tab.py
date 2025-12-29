@@ -72,6 +72,7 @@ class JS8Message:
     raw_text: str
     decoded_text: str
     state: str  # UNREAD / READ
+    read_ts: float = 0.0
 
     def display_line(self) -> str:
         return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
@@ -213,9 +214,9 @@ class MessageViewerTab(QWidget):
         body.addWidget(left_widget, 1)
 
         self.list_js8 = self._make_list_section(left, "JS8 Messages", "js8", allow_paths=False)
-        self.list_flmsg = self._make_list_section(left, "FLMSG Files", "flmsg")
-        self.list_flamp = self._make_list_section(left, "FLAMP Files", "flamp")
-        self.list_varac = self._make_list_section(left, "VarAC Files", "varac")
+        self.list_flmsg = self._make_list_section(left, "FLMSG Files", "flmsg", allow_remove=False)
+        self.list_flamp = self._make_list_section(left, "FLAMP Files", "flamp", allow_remove=False)
+        self.list_varac = self._make_list_section(left, "VarAC Files", "varac", allow_remove=False)
 
         right = QVBoxLayout()
         body.addLayout(right, 3)
@@ -229,11 +230,13 @@ class MessageViewerTab(QWidget):
         self.viewer.setAcceptRichText(False)
         right.addWidget(self.viewer, 1)
 
-    def _make_list_section(self, parent_layout: QVBoxLayout, title: str, origin: str, allow_paths: bool = True) -> QListWidget:
+    def _make_list_section(self, parent_layout: QVBoxLayout, title: str, origin: str, allow_paths: bool = True, allow_remove: bool = True) -> QListWidget:
         box = QGroupBox(title)
         v = QVBoxLayout()
         lst = QListWidget()
         lst.itemSelectionChanged.connect(self._on_selection_changed)
+        lst.itemClicked.connect(self._on_selection_changed)
+        lst.setSelectionMode(QListWidget.SingleSelection)
         v.addWidget(lst)
         if allow_paths:
             # Paths controls under the list
@@ -243,10 +246,11 @@ class MessageViewerTab(QWidget):
             row.addWidget(self.paths_labels[origin], 1)
             add_btn = QPushButton("Browse")
             add_btn.clicked.connect(lambda _, o=origin: self._add_path(o))
-            rem_btn = QPushButton("Remove Selected Path")
-            rem_btn.clicked.connect(lambda _, o=origin: self._remove_path(o))
             row.addWidget(add_btn)
-            row.addWidget(rem_btn)
+            if allow_remove:
+                rem_btn = QPushButton("Remove Selected Path")
+                rem_btn.clicked.connect(lambda _, o=origin: self._remove_path(o))
+                row.addWidget(rem_btn)
             v.addLayout(row)
         box.setLayout(v)
         parent_layout.addWidget(box)
@@ -343,97 +347,15 @@ class MessageViewerTab(QWidget):
         self._populate_lists()
 
     def _refresh_js8_messages(self):
-        msgs: List[JS8Message] = []
-        inbox_path = self._inbox_path()
-        if not inbox_path or not inbox_path.exists():
-            self.js8_messages = msgs
-            self._populate_lists()
-            return
+        # First ingest any new messages into local cache, then load from local cache for display
         try:
-            conn = sqlite3.connect(inbox_path)
-            cur = conn.cursor()
-            # Try common inbox schemas
-            queries = [
-                ("inbox_v1", "id, json, type, value"),
-                ("inbox_v1", "rowid as id, json, type, value"),
-                ("inbox_v1", "id, message, type, value"),
-                ("inbox_v1", "id, blob"),  # observed schema: id, blob
-                ("inbox", "id, json, type, value"),
-                ("inbox", "rowid as id, json, type, value"),
-                ("inbox", "id, message, type, value"),
-            ]
-            rows = []
-            for table, cols in queries:
-                try:
-                    cur.execute(f"SELECT {cols} FROM {table}")
-                    rows = cur.fetchall()
-                    break
-                except Exception:
-                    rows = []
-            conn.close()
-            if not rows:
-                self.js8_messages = msgs
-                self._populate_lists()
-                return
+            self._ingest_js8_messages()
         except Exception as e:
-            log.error("MessageViewer: failed to read JS8 inbox: %s", e)
-            rows = []
-
-        now_ts = time.time()
-        for row in rows:
-            rid = row[0] if len(row) > 0 else 0
-            blob = row[1] if len(row) > 1 else ""
-            state = row[2] if len(row) > 2 else ""
-            # When only id, blob exist, parse blob for params/type/value
-            js = blob
-            try:
-                parsed = json.loads(js or "{}")
-                # If blob contained params plus type/value, honor that
-                if "params" not in parsed and len(row) >= 4:
-                    parsed = {"params": parsed, "type": row[2] if len(row) > 2 else "", "value": row[3] if len(row) > 3 else ""}
-                params = parsed.get("params", {})
-                if not state:
-                    state = parsed.get("type", "") or parsed.get("TYPE", "")
-            except Exception:
-                params = {}
-            text = (params.get("TEXT") or "").strip()
-            from_call = (params.get("FROM") or "").strip().upper()
-            to_call = (params.get("TO") or "").strip()
-            utc_str = (params.get("UTC") or "").strip()
-            try:
-                from datetime import datetime
-
-                utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
-            except Exception:
-                utc_ts = 0.0
-            if utc_ts and (now_ts - utc_ts) > JS8_MAX_AGE_SECONDS:
-                continue  # skip older than 30 days
-            msg_type = "MSG"
-            decoded = text
-            if text.startswith("F!"):
-                parts = text.split()
-                form_part = parts[0][2:] if parts else ""
-                resp = parts[1] if len(parts) > 1 else ""
-                comment = " ".join(parts[2:]) if len(parts) > 2 else ""
-                msg_type = f"F!{form_part}" if form_part else "MSG"
-                decoded = self._decode_form(form_part, resp, comment, raw=text)
-            msgs.append(
-                JS8Message(
-                    msg_id=rid,
-                    from_call=from_call,
-                    to_call=to_call,
-                    msg_type=msg_type,
-                    utc_str=utc_str,
-                    utc_ts=utc_ts,
-                    raw_text=text,
-                    decoded_text=decoded,
-                    state=(state or "").upper(),
-                )
-            )
-
-        msgs.sort(key=lambda m: (m.state != "UNREAD", m.utc_ts))
-        self.js8_messages = msgs
-        self._populate_lists()
+            log.debug("MessageViewer: JS8 ingest failed: %s", e)
+        try:
+            self._load_js8_from_local()
+        except Exception as e:
+            log.debug("MessageViewer: JS8 local load failed: %s", e)
 
     def _populate_lists(self):
         mapping = {
@@ -474,6 +396,12 @@ class MessageViewerTab(QWidget):
         sender = self.sender()
         if not isinstance(sender, QListWidget):
             return
+        # Clear selection in other lists so only one message is highlighted
+        for lst in [self.list_js8, self.list_flmsg, self.list_flamp, self.list_varac]:
+            if lst is not sender:
+                lst.blockSignals(True)
+                lst.clearSelection()
+                lst.blockSignals(False)
         item = sender.currentItem()
         if not item:
             return
@@ -551,21 +479,29 @@ class MessageViewerTab(QWidget):
                 return c
         return candidates[0]
 
+    def _local_js8_db(self) -> Path | None:
+        try:
+            root = Path(__file__).resolve().parents[2]
+            return root / "config" / "freqinout_nets.db"
+        except Exception as e:
+            log.debug("MessageViewer: failed to resolve local JS8 DB path: %s", e)
+            return None
+
     # ---------- JS8 Helpers ----------
 
     def _mark_js8_read(self, msg: JS8Message):
         if msg.state.upper() == "READ":
             return
-        inbox_path = self._inbox_path()
-        if not inbox_path or not inbox_path.exists():
-            return
+        ts = time.time()
+        # Persist read state in local app DB (do not modify JS8Call inbox)
         try:
-            # Some inbox schemas (e.g., id + blob) do not store a type column.
-            # Avoid rewriting blobs; just flag in-memory and refresh UI.
-            msg.state = "READ"
-            self._populate_lists()
+            self._save_js8_state(msg.msg_id, "READ", msg.utc_ts, read_ts=ts)
+            self._update_local_read(msg.msg_id, ts)
         except Exception as e:
-            log.debug("MessageViewer: failed to mark JS8 message read: %s", e)
+            log.debug("MessageViewer: failed to persist JS8 READ state: %s", e)
+        msg.state = "READ"
+        msg.read_ts = ts
+        self._populate_lists()
 
     def _decode_form(self, form_id: str, responses: str, comment: str, raw: str = "") -> str:
         form_id = form_id.strip()
@@ -590,6 +526,19 @@ class MessageViewerTab(QWidget):
             out_lines.append("Comment:")
             out_lines.append(comment.strip())
         return "\n".join(out_lines).strip() or (raw or responses)
+
+    @staticmethod
+    def _parse_form_parts(text: str) -> tuple[str, str, str]:
+        """
+        Split an F!### message into (form_id, response_string, comment)
+        """
+        parts = (text or "").split()
+        if not parts or not parts[0].startswith("F!"):
+            return "", "", ""
+        form_part = parts[0][2:] if len(parts[0]) > 2 else ""
+        resp = parts[1] if len(parts) > 1 else ""
+        comment = " ".join(parts[2:]) if len(parts) > 2 else ""
+        return form_part, resp, comment
 
     def _load_form_definition(self, form_id: str) -> List[Dict]:
         if form_id in self._form_cache:
@@ -624,6 +573,306 @@ class MessageViewerTab(QWidget):
             questions = []
         self._form_cache[form_id] = questions
         return questions
+
+    # ---------- JS8 state persistence (local DB) ---------- #
+
+    def _load_js8_state_map(self) -> Dict[int, Tuple[str, float]]:
+        db_path = self._local_js8_db()
+        if not db_path or not db_path.exists():
+            return {}
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
+            )
+            cur.execute("SELECT id, state, read_ts FROM js8_inbox_state")
+            rows = cur.fetchall()
+            conn.close()
+            return {int(r[0]): ((r[1] or "").upper(), float(r[2] or 0.0)) for r in rows if r and r[0] is not None}
+        except Exception as e:
+            log.debug("MessageViewer: failed to load js8 state map: %s", e)
+            return {}
+
+    def _save_js8_state(self, msg_id: int, state: str, last_seen_ts: float = 0.0, read_ts: float = 0.0) -> None:
+        db_path = self._local_js8_db()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
+            )
+            cur.execute(
+                "INSERT INTO js8_inbox_state (id, state, last_seen, read_ts) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET state=excluded.state, last_seen=excluded.last_seen, read_ts=excluded.read_ts",
+                (int(msg_id), state.upper(), float(last_seen_ts or 0.0), float(read_ts or 0.0)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to save js8 state: %s", e)
+
+    # ---------- JS8 message cache (local) ---------- #
+
+    def _ensure_local_js8_tables(self) -> None:
+        db_path = self._local_js8_db()
+        if not db_path:
+            return
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS js8_messages (
+                id INTEGER PRIMARY KEY,
+                from_call TEXT,
+                to_call TEXT,
+                msg_type TEXT,
+                utc_str TEXT,
+                utc_ts REAL,
+                raw_text TEXT,
+                decoded_text TEXT,
+                state TEXT,
+                read_ts REAL
+            )
+            """
+        )
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
+        )
+        # Add columns if missing
+        try:
+            cur.execute("ALTER TABLE js8_messages ADD COLUMN read_ts REAL")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN read_ts REAL")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN last_ingested_id INTEGER")
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+
+    def _local_max_js8_id(self) -> int:
+        db_path = self._local_js8_db()
+        if not db_path or not db_path.exists():
+            return 0
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(id) FROM js8_messages")
+            row = cur.fetchone()
+            conn.close()
+            return int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            return 0
+
+    def _insert_js8_local(self, msg: JS8Message) -> None:
+        db_path = self._local_js8_db()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO js8_messages (id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (
+                    msg.msg_id,
+                    msg.from_call,
+                    msg.to_call,
+                    msg.msg_type,
+                    msg.utc_str,
+                    msg.utc_ts,
+                    msg.raw_text,
+                    msg.decoded_text,
+                    msg.state,
+                    msg.read_ts,
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to insert local js8 message: %s", e)
+
+    def _update_local_decoded(self, msg_id: int, decoded: str) -> None:
+        db_path = self._local_js8_db()
+        if not db_path or not Path(db_path).exists():
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("UPDATE js8_messages SET decoded_text=? WHERE id=?", (decoded, int(msg_id)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to update local decoded text: %s", e)
+
+    def _update_local_read(self, msg_id: int, read_ts: float) -> None:
+        db_path = self._local_js8_db()
+        if not db_path or not Path(db_path).exists():
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("UPDATE js8_messages SET state='READ', read_ts=? WHERE id=?", (float(read_ts), int(msg_id)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to update local read state: %s", e)
+
+    def _load_js8_from_local(self) -> None:
+        self._ensure_local_js8_tables()
+        db_path = self._local_js8_db()
+        msgs: List[JS8Message] = []
+        if not db_path or not Path(db_path).exists():
+            self.js8_messages = msgs
+            self._populate_lists()
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts
+                FROM js8_messages
+                WHERE utc_ts IS NULL OR utc_ts >= ?
+                """,
+                (time.time() - JS8_MAX_AGE_SECONDS,),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to load local js8 messages: %s", e)
+            rows = []
+        for r in rows:
+            msg = JS8Message(
+                msg_id=int(r[0]),
+                from_call=(r[1] or ""),
+                to_call=(r[2] or ""),
+                msg_type=(r[3] or ""),
+                utc_str=(r[4] or ""),
+                utc_ts=float(r[5] or 0.0),
+                raw_text=(r[6] or ""),
+                decoded_text=(r[7] or ""),
+                state=(r[8] or "UNREAD").upper(),
+                read_ts=float(r[9] or 0.0),
+            )
+            # If older than retention and read, skip
+            now_ts = time.time()
+            if msg.state == "READ" and msg.read_ts and (now_ts - msg.read_ts) > (24 * 60 * 60):
+                continue
+            # Re-decode forms if previously stored without decoded text (e.g., forms path was missing)
+            if msg.msg_type.startswith("F!") and (not msg.decoded_text or msg.decoded_text == msg.raw_text):
+                form_id, resp, comment = self._parse_form_parts(msg.raw_text)
+                if form_id:
+                    new_decoded = self._decode_form(form_id, resp, comment, raw=msg.raw_text)
+                    if new_decoded:
+                        msg.decoded_text = new_decoded
+                        self._update_local_decoded(msg.msg_id, new_decoded)
+            msgs.append(msg)
+        msgs.sort(key=lambda m: (m.state != "UNREAD", m.utc_ts))
+        self.js8_messages = msgs
+        self._populate_lists()
+
+    def _ingest_js8_messages(self) -> None:
+        inbox_path = self._inbox_path()
+        if not inbox_path or not inbox_path.exists():
+            return
+        self._ensure_local_js8_tables()
+        max_local_id = self._local_max_js8_id()
+        try:
+            conn = sqlite3.connect(inbox_path)
+            cur = conn.cursor()
+            queries = [
+                ("inbox_v1", "id, json, type, value"),
+                ("inbox_v1", "rowid as id, json, type, value"),
+                ("inbox_v1", "id, message, type, value"),
+                ("inbox_v1", "id, blob"),
+                ("inbox", "id, json, type, value"),
+                ("inbox", "rowid as id, json, type, value"),
+                ("inbox", "id, message, type, value"),
+            ]
+            rows = []
+            for table, cols in queries:
+                try:
+                    cur.execute(f"SELECT {cols} FROM {table} WHERE id > ?", (max_local_id,))
+                    rows = cur.fetchall()
+                    break
+                except Exception:
+                    rows = []
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: JS8 ingest read failed: %s", e)
+            rows = []
+
+        state_map = self._load_js8_state_map()
+        now_ts = time.time()
+        for row in rows:
+            rid = row[0] if len(row) > 0 else 0
+            if rid <= max_local_id:
+                continue
+            blob = row[1] if len(row) > 1 else ""
+            state = row[2] if len(row) > 2 else ""
+            js = blob
+            try:
+                parsed = json.loads(js or "{}")
+                if "params" not in parsed and len(row) >= 4:
+                    parsed = {"params": parsed, "type": row[2] if len(row) > 2 else "", "value": row[3] if len(row) > 3 else ""}
+                params = parsed.get("params", {})
+                if not state:
+                    state = parsed.get("type", "") or parsed.get("TYPE", "")
+            except Exception:
+                params = {}
+            text = (params.get("TEXT") or "").strip()
+            from_call = (params.get("FROM") or "").strip().upper()
+            to_call = (params.get("TO") or "").strip()
+            utc_str = (params.get("UTC") or "").strip()
+            try:
+                from datetime import datetime
+
+                utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
+            except Exception:
+                utc_ts = 0.0
+            if utc_ts and (now_ts - utc_ts) > JS8_MAX_AGE_SECONDS:
+                continue
+            msg_type = "MSG"
+            decoded = text
+            if text.startswith("F!"):
+                parts = text.split()
+                form_part = parts[0][2:] if parts else ""
+                resp = parts[1] if len(parts) > 1 else ""
+                comment = " ".join(parts[2:]) if len(parts) > 2 else ""
+                msg_type = f"F!{form_part}" if form_part else "MSG"
+                decoded = self._decode_form(form_part, resp, comment, raw=text)
+            # Apply stored state if present
+            saved_state = state_map.get(rid)
+            if saved_state:
+                eff_state = saved_state[0]
+                read_ts = saved_state[1]
+            else:
+                eff_state = (state or "").upper() or "UNREAD"
+                read_ts = 0.0
+            msg = JS8Message(
+                msg_id=rid,
+                from_call=from_call,
+                to_call=to_call,
+                msg_type=msg_type,
+                utc_str=utc_str,
+                utc_ts=utc_ts,
+                raw_text=text,
+                decoded_text=decoded,
+                state=eff_state,
+                read_ts=read_ts,
+            )
+            self._insert_js8_local(msg)
 
     # ---------- Actions ----------
 
