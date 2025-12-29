@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
+    QGroupBox,
     QCheckBox,
     QComboBox,
     QPushButton,
@@ -383,12 +384,73 @@ class StationsMapTab(QWidget):
         self._js8_rx_timer: Optional[QTimer] = None
 
         self._build_ui()
+        self._load_display_preferences()
         self._load_operator_history()
         self._refresh_band_options()
         self._render_map()
         self._start_js8_ingest_timer()
         # Initial ingest to catch up since last run (looks back to last exit time if available)
         QTimer.singleShot(500, lambda: self._auto_ingest_and_refresh(initial=True))
+
+    def _bool_setting(self, key: str, default: bool = False) -> bool:
+        if not self.settings:
+            return default
+        try:
+            val = self.settings.get(key, default)
+        except Exception:
+            return default
+        if isinstance(val, bool):
+            return val
+        if val is None:
+            return default
+        sval = str(val).strip().lower()
+        return sval in ("1", "true", "yes", "on")
+
+    def _load_display_preferences(self):
+        if not self.settings:
+            return
+        def apply_chk(chk: QCheckBox, attr: str, key: str, default: bool = False):
+            val = self._bool_setting(key, default)
+            setattr(self, attr, val)
+            chk.blockSignals(True)
+            chk.setChecked(val)
+            chk.blockSignals(False)
+
+        apply_chk(self.show_calls_chk, "show_callsigns", "map_show_callsigns", False)
+        apply_chk(self.show_regions_chk, "show_regions", "map_show_regions", False)
+        apply_chk(self.show_states_chk, "show_states", "map_show_states", False)
+        apply_chk(self.show_cities_chk, "show_cities", "map_show_cities", False)
+        apply_chk(self.show_grid_labels_chk, "show_grids", "map_show_grids", False)
+        # show_grid_labels mirrors show_grids
+        self.show_grid_labels = self.show_grids
+
+        try:
+            idx = int(self.settings.get("map_city_pop_idx", 4) or 4)
+        except Exception:
+            idx = 4
+        idx = max(0, min(idx, self.city_pop_combo.count() - 1))
+        self.city_pop_combo.blockSignals(True)
+        self.city_pop_combo.setCurrentIndex(idx)
+        self.city_pop_combo.blockSignals(False)
+        try:
+            self.city_pop_min = int(self.city_pop_combo.itemData(idx))
+        except Exception:
+            pass
+        self.city_pop_combo.setEnabled(self.show_cities)
+        self.show_city_labels = self.show_cities
+
+    def _save_display_preferences(self):
+        if not self.settings:
+            return
+        try:
+            self.settings.set("map_show_callsigns", int(self.show_calls_chk.isChecked()))
+            self.settings.set("map_show_regions", int(self.show_regions_chk.isChecked()))
+            self.settings.set("map_show_states", int(self.show_states_chk.isChecked()))
+            self.settings.set("map_show_cities", int(self.show_cities_chk.isChecked()))
+            self.settings.set("map_show_grids", int(self.show_grid_labels_chk.isChecked()))
+            self.settings.set("map_city_pop_idx", self.city_pop_combo.currentIndex())
+        except Exception:
+            pass
 
     def _start_js8_ingest_timer(self):
         try:
@@ -576,41 +638,50 @@ class StationsMapTab(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 8)
+
+        # Compact vertical "Show" block (kept hidden on this tab; sidebar uses its own proxies)
+        show_group = QGroupBox("Show")
+        show_group.setParent(self)  # retain ownership even if reparented
+        show_group.setMaximumWidth(160)
+        show_group.hide()
+        show_layout = QVBoxLayout(show_group)
+        show_layout.setContentsMargins(8, 4, 8, 8)
 
         # Top controls
         ctrl_row = QHBoxLayout()
-        self.show_calls_chk = QCheckBox("Show callsigns")
+        self.show_calls_chk = QCheckBox("Callsigns")
         self.show_calls_chk.setChecked(False)
         self.show_calls_chk.stateChanged.connect(self._on_show_calls_changed)
-        ctrl_row.addWidget(self.show_calls_chk)
+        show_layout.addWidget(self.show_calls_chk)
 
-        self.show_regions_chk = QCheckBox("Show regions")
+        self.show_regions_chk = QCheckBox("Regions")
         self.show_regions_chk.setChecked(False)
         self.show_regions_chk.stateChanged.connect(self._on_show_regions_changed)
-        ctrl_row.addWidget(self.show_regions_chk)
+        show_layout.addWidget(self.show_regions_chk)
 
-        self.show_states_chk = QCheckBox("Show states")
+        self.show_states_chk = QCheckBox("States")
         self.show_states_chk.setChecked(False)
         self.show_states_chk.stateChanged.connect(self._on_show_states_changed)
-        ctrl_row.addWidget(self.show_states_chk)
+        show_layout.addWidget(self.show_states_chk)
 
-        self.show_cities_chk = QCheckBox("Show cities")
+        self.show_cities_chk = QCheckBox("Cities")
         self.show_cities_chk.setChecked(False)
         self.show_cities_chk.stateChanged.connect(self._on_show_cities_changed)
-        ctrl_row.addWidget(self.show_cities_chk)
+        show_layout.addWidget(self.show_cities_chk)
 
         self.city_pop_combo = QComboBox()
         self._city_pop_options = [
-            ("≥1M", 1_000_000),
-            ("≥750k", 750_000),
-            ("≥500k", 500_000),
-            ("≥250k", 250_000),
-            ("≥100k", 100_000),
-            ("≥75k", 75_000),
-            ("≥50k", 50_000),
-            ("≥25k", 25_000),
-            ("≥10k", 10_000),
-            ("≥5k", 5_000),
+            ("1M+", 1_000_000),
+            ("750k+", 750_000),
+            ("500k+", 500_000),
+            ("250k+", 250_000),
+            ("100k+", 100_000),
+            ("75k+", 75_000),
+            ("50k+", 50_000),
+            ("25k+", 25_000),
+            ("10k+", 10_000),
+            ("5k+", 5_000),
             ("<5k", 0),
         ]
         for label, val in self._city_pop_options:
@@ -618,17 +689,26 @@ class StationsMapTab(QWidget):
         self.city_pop_combo.setCurrentIndex(4)  # default ≥100k
         self.city_pop_combo.setEnabled(False)
         self.city_pop_combo.currentIndexChanged.connect(self._on_city_pop_changed)
-        ctrl_row.addWidget(self.city_pop_combo)
 
-        self.show_grid_labels_chk = QCheckBox("Show grids")
-        self.show_grid_labels_chk.setChecked(False)
-        self.show_grid_labels_chk.stateChanged.connect(self._on_show_grid_labels_changed)
-        ctrl_row.addWidget(self.show_grid_labels_chk)
+        pop_row = QHBoxLayout()
+        pop_row.setContentsMargins(0, 0, 0, 0)
+        pop_row.addWidget(QLabel('Pop.'))
+        pop_row.addWidget(self.city_pop_combo)
+        show_layout.addLayout(pop_row)
 
         # JS8 link controls
         ctrl_row.addWidget(QLabel("Show Paths"))
         self.link_mode_combo = QComboBox()
         ctrl_row.addWidget(self.link_mode_combo)
+        self.link_mode_combo.addItem("Off", ("off", ""))
+        self.link_mode_combo.addItem("My Station", ("my_station", ""))
+        self.link_mode_combo.addItem("All", ("all", ""))
+        self.link_mode_combo.addItem("Bidirectional", ("bidirectional", ""))
+        self.link_mode_combo.addItem("One-way", ("oneway", ""))
+        self.link_mode_combo.addItem("Relays", ("relays", ""))
+        # Default to My Station so the filter is applied immediately
+        self.link_mode_combo.setCurrentText("My Station")
+        self.link_mode_combo.currentIndexChanged.connect(self._on_link_mode_changed)
 
         self.band_combo = QComboBox()
         ctrl_row.addWidget(QLabel("Band/Freq"))
@@ -639,6 +719,8 @@ class StationsMapTab(QWidget):
         self.recency_combo.addItems(
             ["Any", "15m", "30m", "1h", "3h", "6h", "12h", "24h", "7d"]
         )
+        self.recency_combo.setCurrentText("3h")
+        self.recency_seconds = 3 * 60 * 60
         ctrl_row.addWidget(self.recency_combo)
 
         ctrl_row.addWidget(QLabel("Show Paths to:"))
@@ -652,6 +734,11 @@ class StationsMapTab(QWidget):
             completer.setCaseSensitivity(Qt.CaseInsensitive)
         ctrl_row.addWidget(self.relay_target_combo)
         ctrl_row.addWidget(self.show_regions_chk)
+
+        self.show_grid_labels_chk = QCheckBox("Grids")
+        self.show_grid_labels_chk.setChecked(False)
+        self.show_grid_labels_chk.stateChanged.connect(self._on_show_grid_labels_changed)
+        ctrl_row.addWidget(self.show_grid_labels_chk)
 
         # Auto-refresh interval for links
         ctrl_row.addWidget(QLabel("Auto-refresh"))
@@ -684,6 +771,12 @@ class StationsMapTab(QWidget):
         self.band_combo.currentIndexChanged.connect(self._on_band_changed)
         self.recency_combo.currentIndexChanged.connect(self._on_recency_changed)
         self.relay_target_combo.currentTextChanged.connect(self._on_relay_target_changed)
+        # Apply default selections so filters take effect immediately
+        try:
+            self._on_link_mode_changed(self.link_mode_combo.currentIndex())
+        except Exception:
+            pass
+        # Note: show_group is placed in the sidebar by MainWindow when this tab is active
 
     # ------------- Data helpers ------------- #
     def _load_operator_history(self):
@@ -1787,16 +1880,19 @@ function addGridLabels(res, level, bounds) {
     # ------------- UI handlers ------------- #
     def _on_show_calls_changed(self, state):
         self.show_callsigns = bool(state)
+        self._save_display_preferences()
         self._render_map()
 
     def _on_show_states_changed(self, state):
         self.show_states = bool(state)
+        self._save_display_preferences()
         self._render_map()
 
     def _on_show_cities_changed(self, state):
         self.show_cities = bool(state)
         self.city_pop_combo.setEnabled(self.show_cities)
         self.show_city_labels = self.show_cities
+        self._save_display_preferences()
         self._render_map()
 
     def _on_show_grid_labels_changed(self, state):
@@ -1804,10 +1900,12 @@ function addGridLabels(res, level, bounds) {
         enabled = bool(state)
         self.show_grids = enabled
         self.show_grid_labels = enabled
+        self._save_display_preferences()
         self._render_map()
 
     def _on_show_regions_changed(self, state):
         self.show_regions = bool(state)
+        self._save_display_preferences()
         self._render_map()
 
     def _on_city_pop_changed(self, idx: int):
@@ -1818,6 +1916,7 @@ function addGridLabels(res, level, bounds) {
         self.city_pop_min = val
         if self.show_cities:
             self._render_map()
+        self._save_display_preferences()
 
     def _on_link_mode_changed(self, idx: int):
         data = self.link_mode_combo.itemData(idx) if hasattr(self, "link_mode_combo") else ("off", "")

@@ -11,6 +11,9 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QSizePolicy,
     QLabel,
+    QCheckBox,
+    QComboBox,
+    QGroupBox,
 )
 
 from freqinout.core.logger import log
@@ -102,6 +105,14 @@ class MainWindow(QMainWindow):
             self.button_group.addButton(btn, idx)
             self.nav_buttons.append(btn)
             nav_layout.addWidget(btn)
+        # Placeholder for map filters (shown only on Map view)
+        self.map_filters_container = QWidget()
+        self.map_filters_container.setMinimumWidth(120)
+        self.map_filters_container.setMaximumWidth(200)
+        self.map_filters_layout = QVBoxLayout(self.map_filters_container)
+        self.map_filters_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.addWidget(self.map_filters_container)
+        self._init_map_filters()
         nav_layout.addStretch()
 
         # Stacked content
@@ -121,6 +132,7 @@ class MainWindow(QMainWindow):
         if self.nav_buttons:
             self.nav_buttons[0].setChecked(True)
             self.stack.setCurrentIndex(0)
+            self._update_map_filters_visibility(0)
 
         # Optional: apply callsign to tab captions if already configured
         self._apply_callsign_to_tab_titles()
@@ -132,6 +144,8 @@ class MainWindow(QMainWindow):
         self.scheduler.start()
 
         log.info("Main window initialized.")
+        # Sync sidebar filters initially
+        self._sync_map_filters_from_tab()
 
     def refresh_operator_history_views(self):
         """
@@ -155,6 +169,132 @@ class MainWindow(QMainWindow):
                 self.fldigi_tab._load_known_operators()
         except Exception as e:
             log.debug("MainWindow: fldigi_tab refresh failed: %s", e)
+
+    def _init_map_filters(self) -> None:
+        """
+        Build a static sidebar panel for map display filters (no reparenting).
+        """
+        box = QGroupBox("Map Filters")
+        box.setCheckable(False)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(4, 4, 4, 4)
+        self.map_cb_callsigns = QCheckBox("Callsigns")
+        self.map_cb_states = QCheckBox("States")
+        self.map_cb_cities = QCheckBox("Cities")
+        self.map_cb_grids = QCheckBox("Grids")
+        self.map_cb_regions = QCheckBox("Regions")
+        for cb in (
+            self.map_cb_callsigns,
+            self.map_cb_states,
+            self.map_cb_cities,
+            self.map_cb_grids,
+            self.map_cb_regions,
+        ):
+            v.addWidget(cb)
+            cb.stateChanged.connect(self._on_sidebar_map_filter_changed)
+
+        # Population threshold
+        self.map_pop_combo = QComboBox()
+        self.map_pop_options = [
+            ("1M+", 1_000_000),
+            ("750k+", 750_000),
+            ("500k+", 500_000),
+            ("250k+", 250_000),
+            ("100k+", 100_000),
+            ("75k+", 75_000),
+            ("50k+", 50_000),
+            ("25k+", 25_000),
+            ("10k+", 10_000),
+            ("5k+", 5_000),
+            ("<5k", 0),
+        ]
+        for label, val in self.map_pop_options:
+            self.map_pop_combo.addItem(label, val)
+        self.map_pop_combo.currentIndexChanged.connect(self._on_sidebar_map_filter_changed)
+        v.addWidget(QLabel("City Pop."))
+        v.addWidget(self.map_pop_combo)
+        v.addStretch()
+        self.map_filters_layout.addWidget(box)
+
+    def _sync_map_filters_from_tab(self) -> None:
+        """
+        Update sidebar controls from current map tab state.
+        """
+        tab = getattr(self, "stations_map_tab", None)
+        if not tab:
+            return
+        block = [
+            self.map_cb_callsigns,
+            self.map_cb_states,
+            self.map_cb_cities,
+            self.map_cb_grids,
+            self.map_cb_regions,
+        ]
+        for cb in block:
+            cb.blockSignals(True)
+        self.map_cb_callsigns.setChecked(bool(getattr(tab, "show_callsigns", False)))
+        self.map_cb_states.setChecked(bool(getattr(tab, "show_states", False)))
+        self.map_cb_cities.setChecked(bool(getattr(tab, "show_cities", False)))
+        self.map_cb_grids.setChecked(bool(getattr(tab, "show_grids", False)))
+        self.map_cb_regions.setChecked(bool(getattr(tab, "show_regions", False)))
+        for cb in block:
+            cb.blockSignals(False)
+        # Pop combo sync
+        try:
+            current_min = int(getattr(tab, "city_pop_min", 100000))
+        except Exception:
+            current_min = 100000
+        idx = self.map_pop_combo.findData(current_min)
+        if idx < 0:
+            idx = 4  # default 100k+
+        self.map_pop_combo.blockSignals(True)
+        self.map_pop_combo.setCurrentIndex(idx)
+        self.map_pop_combo.blockSignals(False)
+
+    def _on_sidebar_map_filter_changed(self, _=None) -> None:
+        """
+        Push sidebar filter changes into the map tab and refresh the map.
+        """
+        tab = getattr(self, "stations_map_tab", None)
+        if not tab:
+            return
+        tab.show_callsigns = self.map_cb_callsigns.isChecked()
+        tab.show_states = self.map_cb_states.isChecked()
+        tab.show_cities = self.map_cb_cities.isChecked()
+        tab.show_grids = self.map_cb_grids.isChecked()
+        tab.show_grid_labels = tab.show_grids
+        tab.show_regions = self.map_cb_regions.isChecked()
+        # Pop min
+        try:
+            pop_val = int(self.map_pop_combo.currentData())
+        except Exception:
+            pop_val = 100000
+        tab.city_pop_min = pop_val
+        # Mirror into map tab's own combo for consistency
+        if hasattr(tab, "city_pop_combo"):
+            try:
+                idx = tab.city_pop_combo.findData(pop_val)
+                if idx >= 0:
+                    tab.city_pop_combo.blockSignals(True)
+                    tab.city_pop_combo.setCurrentIndex(idx)
+                    tab.city_pop_combo.blockSignals(False)
+            except Exception:
+                pass
+        # Persist and redraw
+        if hasattr(tab, "_save_display_preferences"):
+            tab._save_display_preferences()
+        if hasattr(tab, "_render_map"):
+            tab._render_map()
+    def _update_map_filters_visibility(self, index: int) -> None:
+        """
+        Show the stations-map 'Show' filters in the sidebar only when the Map view is active.
+        """
+        is_map = 0 <= index < len(self._screens) and self._screens[index][1] is self.stations_map_tab
+        if not is_map or self.map_filters_layout is None:
+            self.map_filters_container.setVisible(False)
+            return
+        self.map_filters_container.setVisible(True)
+        self._sync_map_filters_from_tab()
 
     # ------------------------------------------------------------------ #
     # Helpers                                                            #
@@ -187,3 +327,4 @@ class MainWindow(QMainWindow):
     def _set_screen(self, index: int) -> None:
         if 0 <= index < self.stack.count():
             self.stack.setCurrentIndex(index)
+            self._update_map_filters_visibility(index)
