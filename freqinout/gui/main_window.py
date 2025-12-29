@@ -15,6 +15,9 @@ from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
 )
+from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt
+from pathlib import Path
 
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
@@ -93,6 +96,18 @@ class MainWindow(QMainWindow):
         nav_layout = QVBoxLayout(nav_widget)
         nav_layout.setContentsMargins(4, 4, 4, 4)
         nav_layout.setSpacing(4)
+
+        # Logo above nav buttons (optional if file exists)
+        logo_path = Path(r"C:\Users\billd\RadioCode\FreqInOut_logo.png")
+        if logo_path.exists():
+            logo_lbl = QLabel()
+            pix = QPixmap(str(logo_path))
+            if not pix.isNull():
+                pix = pix.scaledToWidth(160, Qt.SmoothTransformation)
+                logo_lbl.setPixmap(pix)
+                logo_lbl.setAlignment(Qt.AlignCenter)
+                nav_layout.addWidget(logo_lbl)
+
         self.nav_buttons = []
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)

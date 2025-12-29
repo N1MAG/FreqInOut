@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import xml.dom.minidom
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -43,6 +44,7 @@ DEFAULT_WATCH_DIRS = [
 
 SCAN_CHOICES = [1, 15, 30, 60]  # minutes
 JS8_POLL_SECONDS = 180  # 3 minutes
+JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
 
 @dataclass
@@ -206,14 +208,14 @@ class MessageViewerTab(QWidget):
         layout.addLayout(body)
 
         left_widget = QWidget()
-        left_widget.setMaximumWidth(280)
+        left_widget.setMaximumWidth(340)
         left = QVBoxLayout(left_widget)
         body.addWidget(left_widget, 1)
 
-        self.list_varac = self._make_list_section(left, "VarAC Files", "varac")
+        self.list_js8 = self._make_list_section(left, "JS8 Messages", "js8", allow_paths=False)
         self.list_flmsg = self._make_list_section(left, "FLMSG Files", "flmsg")
         self.list_flamp = self._make_list_section(left, "FLAMP Files", "flamp")
-        self.list_js8 = self._make_list_section(left, "JS8 Messages", "js8", allow_paths=False)
+        self.list_varac = self._make_list_section(left, "VarAC Files", "varac")
 
         right = QVBoxLayout()
         body.addLayout(right, 3)
@@ -377,6 +379,7 @@ class MessageViewerTab(QWidget):
             log.error("MessageViewer: failed to read JS8 inbox: %s", e)
             rows = []
 
+        now_ts = time.time()
         for row in rows:
             rid = row[0] if len(row) > 0 else 0
             blob = row[1] if len(row) > 1 else ""
@@ -403,6 +406,8 @@ class MessageViewerTab(QWidget):
                 utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
             except Exception:
                 utc_ts = 0.0
+            if utc_ts and (now_ts - utc_ts) > JS8_MAX_AGE_SECONDS:
+                continue  # skip older than 30 days
             msg_type = "MSG"
             decoded = text
             if text.startswith("F!"):
