@@ -351,14 +351,14 @@ class MessageViewerTab(QWidget):
             conn = sqlite3.connect(inbox_path)
             cur = conn.cursor()
             # Try common inbox schemas
-        queries = [
-            "SELECT id, json, type, value FROM inbox_v1",
-            "SELECT rowid, json, type, value FROM inbox_v1",
-            "SELECT id, message, type, value FROM inbox_v1",
-            "SELECT id, json, type, value FROM inbox",
-            "SELECT rowid, json, type, value FROM inbox",
-            "SELECT id, message, type, value FROM inbox",
-        ]
+            queries = [
+                "SELECT id, json, type, value FROM inbox_v1",
+                "SELECT rowid, json, type, value FROM inbox_v1",
+                "SELECT id, message, type, value FROM inbox_v1",
+                "SELECT id, json, type, value FROM inbox",
+                "SELECT rowid, json, type, value FROM inbox",
+                "SELECT id, message, type, value FROM inbox",
+            ]
             rows = []
             for q in queries:
                 try:
@@ -382,25 +382,25 @@ class MessageViewerTab(QWidget):
                 params = parsed.get("params", {})
             except Exception:
                 params = {}
-        text = (params.get("TEXT") or "").strip()
-        from_call = (params.get("FROM") or "").strip().upper()
-        to_call = (params.get("TO") or "").strip()
-        utc_str = (params.get("UTC") or "").strip()
-        try:
-            from datetime import datetime
+            text = (params.get("TEXT") or "").strip()
+            from_call = (params.get("FROM") or "").strip().upper()
+            to_call = (params.get("TO") or "").strip()
+            utc_str = (params.get("UTC") or "").strip()
+            try:
+                from datetime import datetime
 
-            utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
-        except Exception:
-            utc_ts = 0.0
-        msg_type = "MSG"
-        decoded = text
-        if text.startswith("F!"):
-            parts = text.split()
-            form_part = parts[0][2:] if parts else ""
-            resp = parts[1] if len(parts) > 1 else ""
-            comment = " ".join(parts[2:]) if len(parts) > 2 else ""
-            msg_type = f"F!{form_part}" if form_part else "MSG"
-            decoded = self._decode_form(form_part, resp, comment, raw=text)
+                utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
+            except Exception:
+                utc_ts = 0.0
+            msg_type = "MSG"
+            decoded = text
+            if text.startswith("F!"):
+                parts = text.split()
+                form_part = parts[0][2:] if parts else ""
+                resp = parts[1] if len(parts) > 1 else ""
+                comment = " ".join(parts[2:]) if len(parts) > 2 else ""
+                msg_type = f"F!{form_part}" if form_part else "MSG"
+                decoded = self._decode_form(form_part, resp, comment, raw=text)
             msgs.append(
                 JS8Message(
                     msg_id=rid,
