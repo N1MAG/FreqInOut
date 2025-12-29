@@ -205,10 +205,6 @@ class MessageViewerTab(QWidget):
         self.export_btn.clicked.connect(self._export_pdf)
         header.addWidget(self.export_btn)
 
-        self.save_btn = QPushButton("Save Settings")
-        self.save_btn.clicked.connect(self._save_settings)
-        header.addWidget(self.save_btn)
-
         layout.addLayout(header)
 
         # Split left/right
@@ -919,12 +915,11 @@ class MessageViewerTab(QWidget):
     def _save_settings(self):
         try:
             data = self.settings.get("message_viewer", {}) or {}
-            data["watch_dirs"] = self.watch_dirs
+            # Persist only legacy scan interval; paths now come from Settings tab
             data["scan_minutes"] = self.scan_minutes
             if hasattr(self.settings, "set"):
                 self.settings.set("message_viewer", data)
                 if hasattr(self.settings, "save"):
                     self.settings.save()
-            self._save_paths_to_db()
         except Exception as e:
             log.error("MessageViewer: failed to save settings: %s", e)
