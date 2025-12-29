@@ -351,11 +351,14 @@ class MessageViewerTab(QWidget):
             conn = sqlite3.connect(inbox_path)
             cur = conn.cursor()
             # Try common inbox schemas
-            queries = [
-                "SELECT id, json, type, value FROM inbox",
-                "SELECT rowid, json, type, value FROM inbox",
-                "SELECT id, message, type, value FROM inbox",
-            ]
+        queries = [
+            "SELECT id, json, type, value FROM inbox_v1",
+            "SELECT rowid, json, type, value FROM inbox_v1",
+            "SELECT id, message, type, value FROM inbox_v1",
+            "SELECT id, json, type, value FROM inbox",
+            "SELECT rowid, json, type, value FROM inbox",
+            "SELECT id, message, type, value FROM inbox",
+        ]
             rows = []
             for q in queries:
                 try:
@@ -521,6 +524,7 @@ class MessageViewerTab(QWidget):
             p.parent / "inbox_v1",
             p.parent / "inbox_v1.sqlite",
             p.parent / "inbox_v1.db",
+            p.parent / "inbox.db3",
         ]
         for c in candidates:
             if c.exists():
@@ -542,7 +546,10 @@ class MessageViewerTab(QWidget):
         try:
             conn = sqlite3.connect(inbox_path)
             cur = conn.cursor()
-            cur.execute("UPDATE inbox SET type='READ' WHERE id=?", (msg.msg_id,))
+            try:
+                cur.execute("UPDATE inbox_v1 SET type='READ' WHERE id=?", (msg.msg_id,))
+            except Exception:
+                cur.execute("UPDATE inbox SET type='READ' WHERE id=?", (msg.msg_id,))
             conn.commit()
             conn.close()
             msg.state = "READ"
