@@ -174,7 +174,7 @@ class MainWindow(QMainWindow):
         """
         Build a static sidebar panel for map display filters (no reparenting).
         """
-        box = QGroupBox("Map Filters")
+        box = QGroupBox("Map Layers")
         box.setCheckable(False)
         v = QVBoxLayout(box)
         v.setContentsMargins(4, 4, 4, 4)
