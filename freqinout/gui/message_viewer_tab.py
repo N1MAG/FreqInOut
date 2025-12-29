@@ -351,22 +351,23 @@ class MessageViewerTab(QWidget):
             conn = sqlite3.connect(inbox_path)
             cur = conn.cursor()
             # Try common inbox schemas
-            queries = [
-                "SELECT id, json, type, value FROM inbox_v1",
-                "SELECT rowid, json, type, value FROM inbox_v1",
-                "SELECT id, message, type, value FROM inbox_v1",
-                "SELECT id, json, type, value FROM inbox",
-                "SELECT rowid, json, type, value FROM inbox",
-                "SELECT id, message, type, value FROM inbox",
-            ]
-            rows = []
-            for q in queries:
-                try:
-                    cur.execute(q)
-                    rows = cur.fetchall()
-                    break
-                except Exception:
-                    rows = []
+        queries = [
+            ("inbox_v1", "id, json, type, value"),
+            ("inbox_v1", "rowid as id, json, type, value"),
+            ("inbox_v1", "id, message, type, value"),
+            ("inbox_v1", "id, blob"),  # observed schema: id, blob
+            ("inbox", "id, json, type, value"),
+            ("inbox", "rowid as id, json, type, value"),
+            ("inbox", "id, message, type, value"),
+        ]
+        rows = []
+        for table, cols in queries:
+            try:
+                cur.execute(f"SELECT {cols} FROM {table}")
+                rows = cur.fetchall()
+                break
+            except Exception:
+                rows = []
             conn.close()
             if not rows:
                 self.js8_messages = msgs
@@ -376,10 +377,20 @@ class MessageViewerTab(QWidget):
             log.error("MessageViewer: failed to read JS8 inbox: %s", e)
             rows = []
 
-        for rid, js, state, _val in rows:
+        for row in rows:
+            rid = row[0] if len(row) > 0 else 0
+            blob = row[1] if len(row) > 1 else ""
+            state = row[2] if len(row) > 2 else ""
+            # When only id, blob exist, parse blob for params/type/value
+            js = blob
             try:
                 parsed = json.loads(js or "{}")
+                # If blob contained params plus type/value, honor that
+                if "params" not in parsed and len(row) >= 4:
+                    parsed = {"params": parsed, "type": row[2] if len(row) > 2 else "", "value": row[3] if len(row) > 3 else ""}
                 params = parsed.get("params", {})
+                if not state:
+                    state = parsed.get("type", "") or parsed.get("TYPE", "")
             except Exception:
                 params = {}
             text = (params.get("TEXT") or "").strip()
@@ -544,14 +555,8 @@ class MessageViewerTab(QWidget):
         if not inbox_path or not inbox_path.exists():
             return
         try:
-            conn = sqlite3.connect(inbox_path)
-            cur = conn.cursor()
-            try:
-                cur.execute("UPDATE inbox_v1 SET type='READ' WHERE id=?", (msg.msg_id,))
-            except Exception:
-                cur.execute("UPDATE inbox SET type='READ' WHERE id=?", (msg.msg_id,))
-            conn.commit()
-            conn.close()
+            # Some inbox schemas (e.g., id + blob) do not store a type column.
+            # Avoid rewriting blobs; just flag in-memory and refresh UI.
             msg.state = "READ"
             self._populate_lists()
         except Exception as e:
