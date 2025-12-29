@@ -697,7 +697,7 @@ class StationsMapTab(QWidget):
         show_layout.addLayout(pop_row)
 
         # JS8 link controls
-        ctrl_row.addWidget(QLabel("Show Paths"))
+        ctrl_row.addWidget(QLabel("Paths"))
         self.link_mode_combo = QComboBox()
         ctrl_row.addWidget(self.link_mode_combo)
         self.link_mode_combo.addItem("Off", ("off", ""))
@@ -711,10 +711,10 @@ class StationsMapTab(QWidget):
         self.link_mode_combo.currentIndexChanged.connect(self._on_link_mode_changed)
 
         self.band_combo = QComboBox()
-        ctrl_row.addWidget(QLabel("Band/Freq"))
+        ctrl_row.addWidget(QLabel("Band"))
         ctrl_row.addWidget(self.band_combo)
 
-        ctrl_row.addWidget(QLabel("Link recency"))
+        ctrl_row.addWidget(QLabel("Recency"))
         self.recency_combo = QComboBox()
         self.recency_combo.addItems(
             ["Any", "15m", "30m", "1h", "3h", "6h", "12h", "24h", "7d"]
@@ -723,7 +723,7 @@ class StationsMapTab(QWidget):
         self.recency_seconds = 3 * 60 * 60
         ctrl_row.addWidget(self.recency_combo)
 
-        ctrl_row.addWidget(QLabel("Show Paths to:"))
+        ctrl_row.addWidget(QLabel("Paths to:"))
         self.relay_target_combo = QComboBox()
         self.relay_target_combo.setEditable(True)
         self.relay_target_combo.setInsertPolicy(QComboBox.NoInsert)
