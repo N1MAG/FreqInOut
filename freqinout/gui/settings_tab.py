@@ -141,7 +141,7 @@ class SettingsTab(QWidget):
 
         # Identity group
         callsign_group = QGroupBox("Operator Information")
-        callsign_form = QFormLayout()
+        callsign_layout = QVBoxLayout()
         self.callsign_edit = QLineEdit()
         self.callsign_edit.setMaxLength(16)
         self.callsign_edit.setFixedWidth(150)
@@ -152,11 +152,21 @@ class SettingsTab(QWidget):
         self.grid6_edit = QLineEdit()
         self.grid6_edit.setMaxLength(6)
         self.grid6_edit.setFixedWidth(90)
-        callsign_form.addRow("Callsign:", self.callsign_edit)
-        callsign_form.addRow("Name:", self.name_edit)
-        callsign_form.addRow("State:", self.state_edit)
-        callsign_form.addRow("Grid 6:", self.grid6_edit)
-        callsign_group.setLayout(callsign_form)
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Callsign:"))
+        row1.addWidget(self.callsign_edit)
+        row1.addSpacing(12)
+        row1.addWidget(QLabel("Name:"))
+        row1.addWidget(self.name_edit)
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("State:"))
+        row2.addWidget(self.state_edit)
+        row2.addWidget(QLabel("Grid 6:"))
+        row2.addWidget(self.grid6_edit)
+        row2.addStretch()
+        callsign_layout.addLayout(row1)
+        callsign_layout.addLayout(row2)
+        callsign_group.setLayout(callsign_layout)
         left_col.addWidget(callsign_group)
 
         # Operation settings (control)
@@ -167,21 +177,18 @@ class SettingsTab(QWidget):
 
         # control mode (no timezone dropdown anymore)
         ctrl_row = QHBoxLayout()
-        ctrl_row.addWidget(QLabel("Control frequency via:"))
+        ctrl_row.addWidget(QLabel("Frequency Control:"))
         self.control_combo = QComboBox()
         self.control_combo.addItems(["FLRig", "JS8Call", "Manual"])
         ctrl_row.addWidget(self.control_combo)
-        ctrl_row.addStretch()
-        op_layout.addLayout(ctrl_row)
-
-        flrig_port_row = QHBoxLayout()
-        flrig_port_row.addWidget(QLabel("FLRig XMLRPC Port:"))
+        ctrl_row.addSpacing(12)
+        ctrl_row.addWidget(QLabel("FLRig XMLRPC Port:"))
         self.flrig_port_edit = QLineEdit()
         self.flrig_port_edit.setFixedWidth(80)
         self.flrig_port_edit.setText("12345")
-        flrig_port_row.addWidget(self.flrig_port_edit)
-        flrig_port_row.addStretch()
-        op_layout.addLayout(flrig_port_row)
+        ctrl_row.addWidget(self.flrig_port_edit)
+        ctrl_row.addStretch()
+        op_layout.addLayout(ctrl_row)
 
         # RIGHT column
         right_col = QVBoxLayout()
@@ -193,7 +200,7 @@ class SettingsTab(QWidget):
         js8_group.setLayout(js8_v)
 
         js8_status_row = QHBoxLayout()
-        js8_status_row.addWidget(QLabel("JS8Call status:"))
+        js8_status_row.addWidget(QLabel("JS8Call API"))
         js8_status_lbl = QLabel()
         js8_status_lbl.setFixedSize(14, 14)
         js8_status_lbl.setStyleSheet("background-color: #555; border-radius: 7px;")
@@ -204,22 +211,19 @@ class SettingsTab(QWidget):
         js8_v.addLayout(js8_status_row)
 
         js8_port_row = QHBoxLayout()
-        js8_port_row.addWidget(QLabel("JS8Call TCP Port:"))
+        js8_port_row.addWidget(QLabel("TCP Port"))
         self.js8_port_edit = QLineEdit()
         self.js8_port_edit.setFixedWidth(80)
         self.js8_port_edit.setText("2442")
         js8_port_row.addWidget(self.js8_port_edit)
-        js8_port_row.addStretch()
-        js8_v.addLayout(js8_port_row)
-
-        js8_offset_row = QHBoxLayout()
-        js8_offset_row.addWidget(QLabel("JS8 Offset (Hz):"))
+        js8_port_row.addSpacing(12)
+        js8_port_row.addWidget(QLabel("Offset (Hz)"))
         self.js8_offset_edit = QLineEdit()
         self.js8_offset_edit.setFixedWidth(80)
         self.js8_offset_edit.setText("0")
-        js8_offset_row.addWidget(self.js8_offset_edit)
-        js8_offset_row.addStretch()
-        js8_v.addLayout(js8_offset_row)
+        js8_port_row.addWidget(self.js8_offset_edit)
+        js8_port_row.addStretch()
+        js8_v.addLayout(js8_port_row)
 
         directed_row = QHBoxLayout()
         directed_row.addWidget(QLabel("JS8Call DIRECTED.TXT:"))
@@ -257,6 +261,27 @@ class SettingsTab(QWidget):
         js8_v.addLayout(load_links_row)
 
         left_col.addWidget(js8_group)
+
+        # Message Paths (for Message Viewer)
+        msg_paths_group = QGroupBox("Message Paths")
+        msg_paths_layout = QFormLayout()
+        # Match tighter spacing like Radio Software
+        msg_paths_layout.setHorizontalSpacing(6)
+        msg_paths_layout.setVerticalSpacing(4)
+        self.msg_paths_edits = {}
+        for origin, label in [("varac", "VarAC folder"), ("flmsg", "FLMSG folder"), ("flamp", "FLAMP folder")]:
+            edit = QLineEdit()
+            browse = QPushButton("Browse…")
+            browse.clicked.connect(lambda _, o=origin, e=edit: self._choose_msg_path(o, e))
+            row = QHBoxLayout()
+            row.addWidget(edit, 1)
+            row.addWidget(browse)
+            container = QWidget()
+            container.setLayout(row)
+            msg_paths_layout.addRow(label + ":", container)
+            self.msg_paths_edits[origin] = edit
+        msg_paths_group.setLayout(msg_paths_layout)
+        right_col.addWidget(msg_paths_group)
 
         # Operating Groups panel (right column)
         ops_group = QGroupBox("Operating Groups")
@@ -374,6 +399,10 @@ class SettingsTab(QWidget):
         offset_txt = str(data.get("js8_offset_hz", "0") or "0")
         self.js8_offset_edit.setText(offset_txt)
         self.js8_forms_edit.setText(data.get("js8_forms_path", "") or "")
+        # Message paths
+        msg_paths = data.get("message_paths", {})
+        for origin, edit in self.msg_paths_edits.items():
+            edit.setText(msg_paths.get(origin, ""))
         flrig_port_txt = str(data.get("flrig_port", "12345") or "12345")
         self.flrig_port_edit.setText(flrig_port_txt)
 
@@ -461,6 +490,10 @@ class SettingsTab(QWidget):
         data["js8_offset_hz"] = offset_val
 
         data["js8_forms_path"] = self.js8_forms_edit.text().strip()
+        msg_paths = {}
+        for origin, edit in self.msg_paths_edits.items():
+            msg_paths[origin] = edit.text().strip()
+        data["message_paths"] = msg_paths
 
         groups = [le.text().strip().upper() for le in self.js8_groups_edits if le.text().strip()]
         data["primary_js8_groups"] = groups
@@ -502,6 +535,7 @@ class SettingsTab(QWidget):
                 "primary_js8_groups": data["primary_js8_groups"],
                 "js8_directed_path": data["js8_directed_path"],
                 "js8_forms_path": data.get("js8_forms_path", ""),
+                "message_paths": data.get("message_paths", {}),
                 "js8_auto_query_msg_id": data["js8_auto_query_msg_id"],
                 "js8_auto_query_grids": data["js8_auto_query_grids"],
                 "operating_groups": data.get("operating_groups", []),
@@ -529,6 +563,7 @@ class SettingsTab(QWidget):
             self.settings.set("primary_js8_groups", data["primary_js8_groups"])
             self.settings.set("js8_directed_path", data["js8_directed_path"])
             self.settings.set("js8_forms_path", data.get("js8_forms_path", ""))
+            self.settings.set("message_paths", data.get("message_paths", {}))
             self.settings.set("js8_auto_query_grids", data.get("js8_auto_query_grids", False))
             for prog_name, meta in self.PROGRAMS.items():
                 path_key = meta["setting_key"]
@@ -1242,6 +1277,26 @@ class SettingsTab(QWidget):
             if hasattr(self.settings, "_data"):
                 self.settings._data = data  # type: ignore[attr-defined]
         log.info("JS8Spotter forms path saved: %s", fn)
+
+    def _choose_msg_path(self, origin: str, edit: QLineEdit):
+        """
+        Prompt for message paths used by Message Viewer (VarAC/FLMSG/FLAMP).
+        """
+        fn = QFileDialog.getExistingDirectory(self, f"Select {origin.upper()} folder")
+        if not fn:
+            return
+        edit.setText(fn)
+        data = self.settings.all() if hasattr(self.settings, "all") else {}
+        if isinstance(data, dict):
+            mp = data.get("message_paths", {}) or {}
+            mp[origin] = fn
+            data["message_paths"] = mp
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        if hasattr(self.settings, "set"):
+            mp = self.settings.get("message_paths", {}) or {}
+            mp[origin] = fn
+            self.settings.set("message_paths", mp)
 
     def _load_js8_logs(self):
         """

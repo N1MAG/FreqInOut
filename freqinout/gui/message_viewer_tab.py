@@ -92,7 +92,14 @@ class MessageViewerTab(QWidget):
         super().__init__(parent)
         self.settings = SettingsManager()
         cfg = self.settings.get("message_viewer", {}) or {}
-        self.watch_dirs: List[Dict] = cfg.get("watch_dirs") or DEFAULT_WATCH_DIRS
+        msg_paths = self.settings.get("message_paths", {}) or {}
+        self.watch_dirs: List[Dict] = []
+        for origin in ["js8", "varac", "flmsg", "flamp"]:
+            p = msg_paths.get(origin, "")
+            if p:
+                self.watch_dirs.append({"path": p, "origin": origin})
+        if not self.watch_dirs:
+            self.watch_dirs = DEFAULT_WATCH_DIRS
         self.scan_minutes: int = cfg.get("scan_minutes") or 15
         if self.scan_minutes not in SCAN_CHOICES:
             self.scan_minutes = 15
@@ -214,9 +221,9 @@ class MessageViewerTab(QWidget):
         body.addWidget(left_widget, 1)
 
         self.list_js8 = self._make_list_section(left, "JS8 Messages", "js8", allow_paths=False)
-        self.list_flmsg = self._make_list_section(left, "FLMSG Files", "flmsg", allow_remove=False)
-        self.list_flamp = self._make_list_section(left, "FLAMP Files", "flamp", allow_remove=False)
-        self.list_varac = self._make_list_section(left, "VarAC Files", "varac", allow_remove=False)
+        self.list_flmsg = self._make_list_section(left, "FLMSG Files", "flmsg", allow_paths=False)
+        self.list_flamp = self._make_list_section(left, "FLAMP Files", "flamp", allow_paths=False)
+        self.list_varac = self._make_list_section(left, "VarAC Files", "varac", allow_paths=False)
 
         right = QVBoxLayout()
         body.addLayout(right, 3)
