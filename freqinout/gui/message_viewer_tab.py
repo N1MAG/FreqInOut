@@ -205,8 +205,10 @@ class MessageViewerTab(QWidget):
         body = QHBoxLayout()
         layout.addLayout(body)
 
-        left = QVBoxLayout()
-        body.addLayout(left, 1)
+        left_widget = QWidget()
+        left_widget.setMaximumWidth(280)
+        left = QVBoxLayout(left_widget)
+        body.addWidget(left_widget, 1)
 
         self.list_varac = self._make_list_section(left, "VarAC Files", "varac")
         self.list_flmsg = self._make_list_section(left, "FLMSG Files", "flmsg")
@@ -214,7 +216,7 @@ class MessageViewerTab(QWidget):
         self.list_js8 = self._make_list_section(left, "JS8 Messages", "js8", allow_paths=False)
 
         right = QVBoxLayout()
-        body.addLayout(right, 2)
+        body.addLayout(right, 3)
 
         self.info_label = QLabel("No file selected")
         self.info_label.setStyleSheet("font-weight: bold;")
@@ -235,6 +237,7 @@ class MessageViewerTab(QWidget):
             # Paths controls under the list
             row = QHBoxLayout()
             self.paths_labels[origin] = QLabel("")
+            self.paths_labels[origin].setWordWrap(False)
             row.addWidget(self.paths_labels[origin], 1)
             add_btn = QPushButton("Browse")
             add_btn.clicked.connect(lambda _, o=origin: self._add_path(o))
@@ -281,7 +284,8 @@ class MessageViewerTab(QWidget):
             if origin in by_origin and path:
                 by_origin[origin].append(path)
         for origin, lbl in self.paths_labels.items():
-            paths_txt = "; ".join(by_origin.get(origin, [])) if by_origin.get(origin) else "(none)"
+            paths_raw = "; ".join(by_origin.get(origin, [])) if by_origin.get(origin) else "(none)"
+            paths_txt = paths_raw if len(paths_raw) <= 50 else paths_raw[:50] + "..."
             lbl.setText(f"Paths: {paths_txt}")
 
     def _add_path(self, origin: str):
@@ -346,19 +350,25 @@ class MessageViewerTab(QWidget):
         try:
             conn = sqlite3.connect(inbox_path)
             cur = conn.cursor()
-            try:
-                cur.execute("SELECT id, json, type, value FROM inbox")
-            except Exception:
+            # Try common inbox schemas
+            queries = [
+                "SELECT id, json, type, value FROM inbox",
+                "SELECT rowid, json, type, value FROM inbox",
+                "SELECT id, message, type, value FROM inbox",
+            ]
+            rows = []
+            for q in queries:
                 try:
-                    cur.execute("SELECT rowid, json, type, value FROM inbox")
-                except Exception as e:
-                    log.error("MessageViewer: unable to query JS8 inbox: %s", e)
-                    conn.close()
-                    self.js8_messages = msgs
-                    self._populate_lists()
-                    return
-            rows = cur.fetchall()
+                    cur.execute(q)
+                    rows = cur.fetchall()
+                    break
+                except Exception:
+                    rows = []
             conn.close()
+            if not rows:
+                self.js8_messages = msgs
+                self._populate_lists()
+                return
         except Exception as e:
             log.error("MessageViewer: failed to read JS8 inbox: %s", e)
             rows = []
@@ -369,25 +379,25 @@ class MessageViewerTab(QWidget):
                 params = parsed.get("params", {})
             except Exception:
                 params = {}
-            text = (params.get("TEXT") or "").strip()
-            from_call = (params.get("FROM") or "").strip().upper()
-            to_call = (params.get("TO") or "").strip()
-            utc_str = (params.get("UTC") or "").strip()
-            try:
-                from datetime import datetime
+        text = (params.get("TEXT") or "").strip()
+        from_call = (params.get("FROM") or "").strip().upper()
+        to_call = (params.get("TO") or "").strip()
+        utc_str = (params.get("UTC") or "").strip()
+        try:
+            from datetime import datetime
 
-                utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
-            except Exception:
-                utc_ts = 0.0
-            msg_type = "MSG"
-            decoded = text
-            if text.startswith("F!"):
-                parts = text.split()
-                form_part = parts[0][2:] if parts else ""
-                resp = parts[1] if len(parts) > 1 else ""
-                comment = " ".join(parts[2:]) if len(parts) > 2 else ""
-                msg_type = f"F!{form_part}" if form_part else "MSG"
-                decoded = self._decode_form(form_part, resp, comment, raw=text)
+            utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
+        except Exception:
+            utc_ts = 0.0
+        msg_type = "MSG"
+        decoded = text
+        if text.startswith("F!"):
+            parts = text.split()
+            form_part = parts[0][2:] if parts else ""
+            resp = parts[1] if len(parts) > 1 else ""
+            comment = " ".join(parts[2:]) if len(parts) > 2 else ""
+            msg_type = f"F!{form_part}" if form_part else "MSG"
+            decoded = self._decode_form(form_part, resp, comment, raw=text)
             msgs.append(
                 JS8Message(
                     msg_id=rid,
@@ -507,7 +517,19 @@ class MessageViewerTab(QWidget):
         if not directed:
             return None
         p = Path(directed)
-        return p.parent / "inbox_v1"
+        candidates = [
+            p.parent / "inbox_v1",
+            p.parent / "inbox_v1.sqlite",
+            p.parent / "inbox_v1.db",
+        ]
+        for c in candidates:
+            if c.exists():
+                return c
+        # Last resort: first file starting with inbox
+        for c in p.parent.glob("inbox*"):
+            if c.is_file():
+                return c
+        return candidates[0]
 
     # ---------- JS8 Helpers ----------
 
