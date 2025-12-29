@@ -42,6 +42,7 @@ DEFAULT_WATCH_DIRS = [
 ]
 
 SCAN_CHOICES = [1, 15, 30, 60]  # minutes
+JS8_POLL_SECONDS = 180  # 3 minutes
 
 
 @dataclass
@@ -56,6 +57,22 @@ class FileRecord:
 
     def info_line(self) -> str:
         return f"{self.display_name()} — {self.size} bytes"
+
+
+@dataclass
+class JS8Message:
+    msg_id: int
+    from_call: str
+    to_call: str
+    msg_type: str  # "MSG" or "F!###"
+    utc_str: str
+    utc_ts: float
+    raw_text: str
+    decoded_text: str
+    state: str  # UNREAD / READ
+
+    def display_line(self) -> str:
+        return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
 
 
 class MessageViewerTab(QWidget):
@@ -77,6 +94,12 @@ class MessageViewerTab(QWidget):
         if self.scan_minutes not in SCAN_CHOICES:
             self.scan_minutes = 15
 
+        self.js8_messages: List[JS8Message] = []
+        self.current_js8: JS8Message | None = None
+        self._js8_timer: QTimer | None = None
+        self._form_cache: Dict[str, List[Dict]] = {}
+        self.forms_path = (self.settings.get("js8_forms_path", "") or "").strip()
+
         # merge DB paths if present
         self._load_watch_dirs_from_db()
 
@@ -90,6 +113,8 @@ class MessageViewerTab(QWidget):
         self._load_paths_lists()
         self._refresh_files()
         self._setup_timer()
+        self._refresh_js8_messages()
+        self._setup_js8_timer()
 
     # ---------- DB helpers ----------
 
@@ -186,6 +211,7 @@ class MessageViewerTab(QWidget):
         self.list_varac = self._make_list_section(left, "VarAC Files", "varac")
         self.list_flmsg = self._make_list_section(left, "FLMSG Files", "flmsg")
         self.list_flamp = self._make_list_section(left, "FLAMP Files", "flamp")
+        self.list_js8 = self._make_list_section(left, "JS8 Messages", "js8", allow_paths=False)
 
         right = QVBoxLayout()
         body.addLayout(right, 2)
@@ -199,23 +225,24 @@ class MessageViewerTab(QWidget):
         self.viewer.setAcceptRichText(False)
         right.addWidget(self.viewer, 1)
 
-    def _make_list_section(self, parent_layout: QVBoxLayout, title: str, origin: str) -> QListWidget:
+    def _make_list_section(self, parent_layout: QVBoxLayout, title: str, origin: str, allow_paths: bool = True) -> QListWidget:
         box = QGroupBox(title)
         v = QVBoxLayout()
         lst = QListWidget()
         lst.itemSelectionChanged.connect(self._on_selection_changed)
         v.addWidget(lst)
-        # Paths controls under the list
-        row = QHBoxLayout()
-        self.paths_labels[origin] = QLabel("")
-        row.addWidget(self.paths_labels[origin], 1)
-        add_btn = QPushButton("Browse")
-        add_btn.clicked.connect(lambda _, o=origin: self._add_path(o))
-        rem_btn = QPushButton("Remove Selected Path")
-        rem_btn.clicked.connect(lambda _, o=origin: self._remove_path(o))
-        row.addWidget(add_btn)
-        row.addWidget(rem_btn)
-        v.addLayout(row)
+        if allow_paths:
+            # Paths controls under the list
+            row = QHBoxLayout()
+            self.paths_labels[origin] = QLabel("")
+            row.addWidget(self.paths_labels[origin], 1)
+            add_btn = QPushButton("Browse")
+            add_btn.clicked.connect(lambda _, o=origin: self._add_path(o))
+            rem_btn = QPushButton("Remove Selected Path")
+            rem_btn.clicked.connect(lambda _, o=origin: self._remove_path(o))
+            row.addWidget(add_btn)
+            row.addWidget(rem_btn)
+            v.addLayout(row)
         box.setLayout(v)
         parent_layout.addWidget(box)
         return lst
@@ -228,6 +255,13 @@ class MessageViewerTab(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_files)
         self._timer.start(self.scan_minutes * 60 * 1000)
+
+    def _setup_js8_timer(self):
+        if self._js8_timer:
+            self._js8_timer.stop()
+        self._js8_timer = QTimer(self)
+        self._js8_timer.timeout.connect(self._refresh_js8_messages)
+        self._js8_timer.start(JS8_POLL_SECONDS * 1000)
 
     def _on_scan_changed(self):
         val = self.scan_combo.currentData()
@@ -302,6 +336,76 @@ class MessageViewerTab(QWidget):
         self.files = records
         self._populate_lists()
 
+    def _refresh_js8_messages(self):
+        msgs: List[JS8Message] = []
+        inbox_path = self._inbox_path()
+        if not inbox_path or not inbox_path.exists():
+            self.js8_messages = msgs
+            self._populate_lists()
+            return
+        try:
+            conn = sqlite3.connect(inbox_path)
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT id, json, type, value FROM inbox")
+            except Exception:
+                try:
+                    cur.execute("SELECT rowid, json, type, value FROM inbox")
+                except Exception as e:
+                    log.error("MessageViewer: unable to query JS8 inbox: %s", e)
+                    conn.close()
+                    self.js8_messages = msgs
+                    self._populate_lists()
+                    return
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.error("MessageViewer: failed to read JS8 inbox: %s", e)
+            rows = []
+
+        for rid, js, state, _val in rows:
+            try:
+                parsed = json.loads(js or "{}")
+                params = parsed.get("params", {})
+            except Exception:
+                params = {}
+            text = (params.get("TEXT") or "").strip()
+            from_call = (params.get("FROM") or "").strip().upper()
+            to_call = (params.get("TO") or "").strip()
+            utc_str = (params.get("UTC") or "").strip()
+            try:
+                from datetime import datetime
+
+                utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
+            except Exception:
+                utc_ts = 0.0
+            msg_type = "MSG"
+            decoded = text
+            if text.startswith("F!"):
+                parts = text.split()
+                form_part = parts[0][2:] if parts else ""
+                resp = parts[1] if len(parts) > 1 else ""
+                comment = " ".join(parts[2:]) if len(parts) > 2 else ""
+                msg_type = f"F!{form_part}" if form_part else "MSG"
+                decoded = self._decode_form(form_part, resp, comment, raw=text)
+            msgs.append(
+                JS8Message(
+                    msg_id=rid,
+                    from_call=from_call,
+                    to_call=to_call,
+                    msg_type=msg_type,
+                    utc_str=utc_str,
+                    utc_ts=utc_ts,
+                    raw_text=text,
+                    decoded_text=decoded,
+                    state=(state or "").upper(),
+                )
+            )
+
+        msgs.sort(key=lambda m: (m.state != "UNREAD", m.utc_ts))
+        self.js8_messages = msgs
+        self._populate_lists()
+
     def _populate_lists(self):
         mapping = {
             "varac": self.list_varac,
@@ -316,9 +420,24 @@ class MessageViewerTab(QWidget):
                 item.setData(Qt.UserRole, rec)
                 lst.addItem(item)
             lst.blockSignals(False)
+
+        # JS8 messages
+        if hasattr(self, "list_js8"):
+            self.list_js8.blockSignals(True)
+            self.list_js8.clear()
+            for msg in self.js8_messages:
+                item = QListWidgetItem(msg.display_line())
+                item.setData(Qt.UserRole, msg)
+                # visually indicate unread
+                if msg.state.upper() == "UNREAD":
+                    item.setForeground(Qt.red)
+                self.list_js8.addItem(item)
+            self.list_js8.blockSignals(False)
+
         self.info_label.setText("No file selected")
         self.viewer.clear()
         self.current_record = None
+        self.current_js8 = None
 
     # ---------- Selection / Viewing ----------
 
@@ -330,10 +449,15 @@ class MessageViewerTab(QWidget):
         if not item:
             return
         rec = item.data(Qt.UserRole)
-        if not isinstance(rec, FileRecord):
-            return
-        self.current_record = rec
-        self._load_content(rec)
+        if isinstance(rec, FileRecord):
+            self.current_js8 = None
+            self.current_record = rec
+            self._load_content(rec)
+        elif isinstance(rec, JS8Message):
+            self.current_record = None
+            self.current_js8 = rec
+            self._load_js8_content(rec)
+            self._mark_js8_read(rec)
 
     def _load_content(self, rec: FileRecord):
         try:
@@ -358,6 +482,18 @@ class MessageViewerTab(QWidget):
         self.info_label.setText(info)
         self.viewer.setPlainText(content)
 
+    def _load_js8_content(self, msg: JS8Message):
+        header = [
+            f"FROM: {msg.from_call}",
+            f"TO:   {msg.to_call}",
+            f"TYPE: {msg.msg_type}",
+            f"UTC:  {msg.utc_str}",
+            "",
+        ]
+        body = msg.decoded_text or msg.raw_text
+        self.info_label.setText(f"{msg.msg_type} {msg.from_call} -> {msg.to_call}")
+        self.viewer.setPlainText("\n".join(header + [body]))
+
     def _fmt_mtime(self, mtime: float) -> str:
         try:
             from datetime import datetime
@@ -365,6 +501,90 @@ class MessageViewerTab(QWidget):
             return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
         except Exception:
             return ""
+
+    def _inbox_path(self) -> Path | None:
+        directed = (self.settings.get("js8_directed_path", "") or "").strip()
+        if not directed:
+            return None
+        p = Path(directed)
+        return p.parent / "inbox_v1"
+
+    # ---------- JS8 Helpers ----------
+
+    def _mark_js8_read(self, msg: JS8Message):
+        if msg.state.upper() == "READ":
+            return
+        inbox_path = self._inbox_path()
+        if not inbox_path or not inbox_path.exists():
+            return
+        try:
+            conn = sqlite3.connect(inbox_path)
+            cur = conn.cursor()
+            cur.execute("UPDATE inbox SET type='READ' WHERE id=?", (msg.msg_id,))
+            conn.commit()
+            conn.close()
+            msg.state = "READ"
+            self._populate_lists()
+        except Exception as e:
+            log.debug("MessageViewer: failed to mark JS8 message read: %s", e)
+
+    def _decode_form(self, form_id: str, responses: str, comment: str, raw: str = "") -> str:
+        form_id = form_id.strip()
+        if not form_id:
+            return raw or responses
+        form = self._load_form_definition(form_id)
+        if not form:
+            return raw or responses
+        out_lines: List[str] = []
+        for idx, q in enumerate(form):
+            question = q.get("q", "").strip()
+            answers = q.get("ans", {})
+            out_lines.append(question)
+            if idx < len(responses):
+                code = responses[idx]
+                ans = answers.get(code, f"(unknown: {code})")
+                out_lines.append(ans)
+            else:
+                out_lines.append("(no response)")
+            out_lines.append("")  # spacer
+        if comment:
+            out_lines.append("Comment:")
+            out_lines.append(comment.strip())
+        return "\n".join(out_lines).strip() or (raw or responses)
+
+    def _load_form_definition(self, form_id: str) -> List[Dict]:
+        if form_id in self._form_cache:
+            return self._form_cache[form_id]
+        forms_dir = (self.settings.get("js8_forms_path", self.forms_path) or "").strip()
+        if not forms_dir:
+            return []
+        path = Path(forms_dir) / f"MCF{form_id}.txt"
+        if not path.exists():
+            return []
+        questions: List[Dict] = []
+        current_q = None
+        try:
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("."):
+                    continue
+                if line.startswith("?"):
+                    if current_q:
+                        questions.append(current_q)
+                    current_q = {"q": line[1:].strip(), "ans": {}}
+                elif line.startswith("@") and current_q:
+                    try:
+                        key, text = line[1], line[2:].strip()
+                        current_q["ans"][key] = text
+                    except Exception:
+                        continue
+            if current_q:
+                questions.append(current_q)
+        except Exception as e:
+            log.debug("MessageViewer: failed to parse form %s: %s", form_id, e)
+            questions = []
+        self._form_cache[form_id] = questions
+        return questions
 
     # ---------- Actions ----------
 

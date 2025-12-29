@@ -230,6 +230,16 @@ class SettingsTab(QWidget):
         directed_row.addWidget(directed_browse)
         js8_v.addLayout(directed_row)
 
+        # JS8Spotter forms path (for decoding JS8Spotter messages)
+        forms_row = QHBoxLayout()
+        forms_row.addWidget(QLabel("JS8Spotter forms:"))
+        self.js8_forms_edit = QLineEdit()
+        forms_browse = QPushButton("Browse…")
+        forms_browse.clicked.connect(self._choose_js8_forms_path)
+        forms_row.addWidget(self.js8_forms_edit, stretch=1)
+        forms_row.addWidget(forms_browse)
+        js8_v.addLayout(forms_row)
+
         js8_auto_row = QHBoxLayout()
         self.js8_auto_query_chk = QCheckBox("Auto Query Msg ID")
         self.js8_auto_query_grid_chk = QCheckBox("Auto Query Grids")
@@ -363,6 +373,7 @@ class SettingsTab(QWidget):
         self.js8_port_edit.setText(port_txt)
         offset_txt = str(data.get("js8_offset_hz", "0") or "0")
         self.js8_offset_edit.setText(offset_txt)
+        self.js8_forms_edit.setText(data.get("js8_forms_path", "") or "")
         flrig_port_txt = str(data.get("flrig_port", "12345") or "12345")
         self.flrig_port_edit.setText(flrig_port_txt)
 
@@ -449,6 +460,8 @@ class SettingsTab(QWidget):
             self.js8_offset_edit.setText("0")
         data["js8_offset_hz"] = offset_val
 
+        data["js8_forms_path"] = self.js8_forms_edit.text().strip()
+
         groups = [le.text().strip().upper() for le in self.js8_groups_edits if le.text().strip()]
         data["primary_js8_groups"] = groups
 
@@ -488,6 +501,7 @@ class SettingsTab(QWidget):
                 "js8_offset_hz": data.get("js8_offset_hz", 0),
                 "primary_js8_groups": data["primary_js8_groups"],
                 "js8_directed_path": data["js8_directed_path"],
+                "js8_forms_path": data.get("js8_forms_path", ""),
                 "js8_auto_query_msg_id": data["js8_auto_query_msg_id"],
                 "js8_auto_query_grids": data["js8_auto_query_grids"],
                 "operating_groups": data.get("operating_groups", []),
@@ -514,6 +528,7 @@ class SettingsTab(QWidget):
             self.settings.set("js8_offset_hz", data.get("js8_offset_hz", 0))
             self.settings.set("primary_js8_groups", data["primary_js8_groups"])
             self.settings.set("js8_directed_path", data["js8_directed_path"])
+            self.settings.set("js8_forms_path", data.get("js8_forms_path", ""))
             self.settings.set("js8_auto_query_grids", data.get("js8_auto_query_grids", False))
             for prog_name, meta in self.PROGRAMS.items():
                 path_key = meta["setting_key"]
@@ -1204,6 +1219,29 @@ class SettingsTab(QWidget):
                 self.settings._data = data  # type: ignore[attr-defined]
 
         log.info("JS8Call DIRECTED.TXT path saved: %s", path)
+
+    # ---------- JS8 FORMS PATH ---------- #
+
+    def _choose_js8_forms_path(self):
+        """
+        Prompt for JS8Spotter forms folder (MCF###.txt files).
+        """
+        fn = QFileDialog.getExistingDirectory(
+            self,
+            "Select JS8Spotter forms folder",
+            "",
+        )
+        if not fn:
+            return
+        self.js8_forms_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("js8_forms_path", fn)
+        else:
+            data = self.settings.all()
+            data["js8_forms_path"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        log.info("JS8Spotter forms path saved: %s", fn)
 
     def _load_js8_logs(self):
         """
