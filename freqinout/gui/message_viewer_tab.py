@@ -351,23 +351,23 @@ class MessageViewerTab(QWidget):
             conn = sqlite3.connect(inbox_path)
             cur = conn.cursor()
             # Try common inbox schemas
-        queries = [
-            ("inbox_v1", "id, json, type, value"),
-            ("inbox_v1", "rowid as id, json, type, value"),
-            ("inbox_v1", "id, message, type, value"),
-            ("inbox_v1", "id, blob"),  # observed schema: id, blob
-            ("inbox", "id, json, type, value"),
-            ("inbox", "rowid as id, json, type, value"),
-            ("inbox", "id, message, type, value"),
-        ]
-        rows = []
-        for table, cols in queries:
-            try:
-                cur.execute(f"SELECT {cols} FROM {table}")
-                rows = cur.fetchall()
-                break
-            except Exception:
-                rows = []
+            queries = [
+                ("inbox_v1", "id, json, type, value"),
+                ("inbox_v1", "rowid as id, json, type, value"),
+                ("inbox_v1", "id, message, type, value"),
+                ("inbox_v1", "id, blob"),  # observed schema: id, blob
+                ("inbox", "id, json, type, value"),
+                ("inbox", "rowid as id, json, type, value"),
+                ("inbox", "id, message, type, value"),
+            ]
+            rows = []
+            for table, cols in queries:
+                try:
+                    cur.execute(f"SELECT {cols} FROM {table}")
+                    rows = cur.fetchall()
+                    break
+                except Exception:
+                    rows = []
             conn.close()
             if not rows:
                 self.js8_messages = msgs
