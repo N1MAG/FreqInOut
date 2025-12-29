@@ -98,7 +98,7 @@ class MainWindow(QMainWindow):
         nav_layout.setSpacing(4)
 
         # Logo above nav buttons (optional if file exists)
-        logo_path = Path(r"C:\Users\billd\RadioCode\FreqInOut_logo.png")
+        logo_path = Path(__file__).resolve().parents[2] / "assets" / "FreqInOut_logo.png"
         if logo_path.exists():
             logo_lbl = QLabel()
             pix = QPixmap(str(logo_path))
