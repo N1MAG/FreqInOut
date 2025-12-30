@@ -895,16 +895,26 @@ class MessageViewerTab(QWidget):
         if not fn:
             return
         try:
+            import textwrap
+
             c = canvas.Canvas(fn, pagesize=letter)
+            c.setFont("Helvetica", 12)
             width, height = letter
             margin = 50
+            usable_width = width - 2 * margin
+            line_height = 14
+            # Roughly estimate characters per line at 12pt Helvetica (~6.5 px avg)
+            max_chars = max(40, int(usable_width / 6.5))
             y = height - margin
-            for line in text.splitlines():
-                c.drawString(margin, y, line[:1500])
-                y -= 14
-                if y < margin:
-                    c.showPage()
-                    y = height - margin
+            for raw_line in text.splitlines():
+                wrapped = textwrap.wrap(raw_line, max_chars) or [""]
+                for line in wrapped:
+                    c.drawString(margin, y, line)
+                    y -= line_height
+                    if y < margin:
+                        c.showPage()
+                        c.setFont("Helvetica", 12)
+                        y = height - margin
             c.save()
             log.info("MessageViewer: exported PDF to %s", fn)
         except Exception as e:

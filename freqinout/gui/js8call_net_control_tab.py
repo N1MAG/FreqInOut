@@ -896,6 +896,15 @@ class JS8CallNetControlTab(QWidget):
             .upper()
         )
 
+    @staticmethod
+    def _base_callsign(cs: str) -> str:
+        import re
+
+        cs_norm = (cs or "").strip().upper()
+        if not cs_norm:
+            return ""
+        return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", cs_norm)
+
     def _extract_callsigns_from_line(self, line: str) -> List[str]:
         """
         JS8Check-in line examples:
@@ -1412,17 +1421,19 @@ class JS8CallNetControlTab(QWidget):
                                     self._queue_auto_query(frm, mid, snr=snr_val)
                     # Passive grid capture
                     grid_val = (p.get("GRID") or "").strip()
-                    if grid_val and frm:
-                        self._update_operator_grid(frm, grid_val, self._active_group_name())
+                    base_frm = self._base_callsign(frm) if frm else ""
+                    if grid_val and base_frm:
+                        self._update_operator_grid(base_frm, grid_val, self._active_group_name())
                     else:
                         for token in txt.split():
                             if 4 <= len(token) <= 6 and token[:2].isalpha() and token[2:4].isdigit():
-                                self._update_operator_grid(frm, token, self._active_group_name())
+                                self._update_operator_grid(base_frm or frm, token, self._active_group_name())
                                 break
                     # Auto grid query when allowed
                     if self.auto_query_grids and not self._net_lockout_active():
-                        if frm and self._operator_missing_grid(frm):
-                            self._maybe_queue_grid_query(frm, snr_val, msg_params=p, text=txt)
+                        target_cs = base_frm or frm
+                        if target_cs and self._operator_missing_grid(target_cs):
+                            self._maybe_queue_grid_query(target_cs, snr_val, msg_params=p, text=txt)
                 except Exception:
                     continue
         except queue.Empty:
@@ -1462,7 +1473,7 @@ class JS8CallNetControlTab(QWidget):
     # ---------------- Grid helpers ---------------- #
 
     def _operator_missing_grid(self, callsign: str) -> bool:
-        cs = (callsign or "").strip().upper()
+        cs = self._base_callsign(callsign)
         if not cs:
             return False
         try:
@@ -1482,7 +1493,7 @@ class JS8CallNetControlTab(QWidget):
             return True
 
     def _update_operator_grid(self, callsign: str, grid: str, group_name: str = "") -> None:
-        cs = (callsign or "").strip().upper()
+        cs = self._base_callsign(callsign)
         grid = (grid or "").strip().upper()
         if not cs or not grid:
             return
