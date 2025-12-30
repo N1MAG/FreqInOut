@@ -1314,6 +1314,7 @@ class SettingsTab(QWidget):
         db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
         try:
             indexer = JS8LogLinkIndexer(self.settings, db_path)
+            indexer._base_callsign = JS8LogLinkIndexer._base_callsign  # ensure suffix handling
             indexer.update()
             QMessageBox.information(self, "JS8 Traffic Loaded", "JS8 logs ingested successfully.")
             self._refresh_operator_history_views()
