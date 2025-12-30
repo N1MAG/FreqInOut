@@ -2076,6 +2076,20 @@ class JS8LogLinkIndexer:
         self.settings = settings
         self.db_path = db_path
 
+    @staticmethod
+    def _base_callsign(cs: str) -> str:
+        """
+        Strip common portable/mobile suffixes so variants map to the base callsign.
+        Examples: KG5RKW/P -> KG5RKW, K0ABC/M -> K0ABC
+        """
+        cs_norm = (cs or "").strip().upper()
+        if not cs_norm:
+            return ""
+        # remove trailing /<suffix> where suffix is letters/numbers up to 4 chars
+        import re
+
+        return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", cs_norm)
+
     def _freq_to_band(self, freq_hz: Optional[float]) -> Optional[str]:
         if freq_hz is None:
             return None
@@ -2231,7 +2245,7 @@ class JS8LogLinkIndexer:
 
     def _upsert_operator_info(self, callsign: str, grid: str, group_val: str, ts: datetime.datetime) -> None:
         # Reuse js8call tab helpers not available here; implement lightweight upsert
-        cs = (callsign or "").strip().upper()
+        cs = self._base_callsign(callsign)
         if not cs:
             return
         ts_str = ts.astimezone(datetime.timezone.utc).isoformat()
