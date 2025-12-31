@@ -1051,17 +1051,17 @@ class FldigiNetControlTab(QWidget):
             cs, name, state = self._parse_checkin_line(line)
             if not cs:
                 continue
-                entries.append(
-                    {
-                        "callsign": cs,
-                        "name": name,
-                        "state": state,
-                        "first_seen_utc": now_utc,
-                        "last_seen_utc": now_utc,
-                        "net_name": net_name,
-                        "role": role,
-                        "trusted": None,
-                    }
+            entries.append(
+                {
+                    "callsign": cs,
+                    "name": name,
+                    "state": state,
+                    "first_seen_utc": now_utc,
+                    "last_seen_utc": now_utc,
+                    "net_name": net_name,
+                    "role": role,
+                    "trusted": None,
+                }
             )
 
         if entries:
