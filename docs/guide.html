@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FreqInOut User Guide</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0 18px 40px 18px; background: #fafafa; color: #222; }
+    h1, h2, h3 { margin-top: 1.2em; }
+    h1 { border-bottom: 2px solid #ddd; padding-bottom: 0.3em; }
+    h2 { border-bottom: 1px solid #eee; padding-bottom: 0.15em; }
+    code { background: #f2f2f2; padding: 2px 4px; border-radius: 3px; }
+    pre { background: #f2f2f2; padding: 10px; border-radius: 4px; overflow-x: auto; }
+    ul { margin-top: 0.3em; }
+    .callout { background: #eef5ff; border-left: 4px solid #5b8def; padding: 10px 12px; margin: 12px 0; }
+    .warn { background: #fff7e6; border-left: 4px solid #e0a106; }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
+    .section-list { padding-left: 18px; }
+    .logo-wrap { text-align: center; padding-top: 18px; }
+    .logo-wrap img { max-width: 180px; height: auto; }
+  </style>
+</head>
+<body>
+  <div class="logo-wrap">
+    <img src="../assets/FreqInOut_logo.png" alt="FreqInOut logo" />
+  </div>
+  <h1>FreqInOut User Guide</h1>
+  <p>This guide walks through setup, daily use, nets, JS8Call integration, stations map, scheduler, and troubleshooting. Keep the app offline capable by ensuring all paths are set to local files and that required software (FLRig, JS8Call) is installed.</p>
+
+  <h2>1. Prerequisites</h2>
+  <ul class="section-list">
+    <li><strong>Python</strong>: 3.9-3.12 with requirements installed.</li>
+    <li><strong>Radio software</strong>: FLRig (for rig control) and/or JS8Call (for JS8). Install and configure them separately.</li>
+    <li><strong>Paths</strong>: Know where your JS8Call log files live (DIRECTED.TXT, ALL.TXT, inbox_v1 / inbox.db3) and where FLMSG/FLAMP/VarAC folders are if you use Message Viewer.</li>
+  </ul>
+
+  <h2>2. First-Time Setup (Settings Tab)</h2>
+  <h3>Operator Information</h3>
+  <ul class="section-list">
+    <li>Enter <strong>Callsign</strong>, <strong>Name</strong>, <strong>State</strong>, <strong>Grid 6</strong>. These drive map pins and defaults elsewhere.</li>
+  </ul>
+
+  <h3>Operation Settings</h3>
+  <ul class="section-list">
+    <li><strong>Frequency Control</strong>: Choose FLRig, JS8Call, or Manual. If FLRig, set the XMLRPC port.</li>
+  </ul>
+
+  <h3>JS8Call Settings</h3>
+  <ul class="section-list">
+    <li><strong>JS8Call API</strong>: Light indicates API reachability.</li>
+    <li><strong>TCP Port / Offset (Hz)</strong>: Match JS8Call configuration.</li>
+    <li><strong>DIRECTED.TXT path</strong>: Browse to JS8Call's DIRECTED.TXT. The app derives ALL.TXT and inbox from the same folder.</li>
+    <li><strong>JS8Spotter forms</strong>: Browse to the folder containing MCF form files (e.g., JS8Spotter forms) for decoding F!### traffic.</li>
+    <li><strong>Auto Query Msg ID / Auto Query Grids</strong>: Enable automated queries (honors net lockouts and schedule windows).</li>
+    <li><strong>Load JS8 Traffic</strong>: Manually ingest ALL.TXT/DIRECTED.TXT into the map/link index.</li>
+  </ul>
+
+  <h3>Operating Groups</h3>
+  <ul class="section-list">
+    <li>Map specific frequencies/modes to named groups. These inform nets, JS8 link grouping, and operator grouping.</li>
+    <li>Daily Schedule rows usually reference a group; when that time window is active, its band/mode/VFO/frequency come from the group definition. If a group is missing/incomplete, that schedule row cannot apply rig changes.</li>
+    <li>Updating a group’s frequency or mode will immediately affect future schedule windows that reference it (past windows are not rewritten).</li>
+  </ul>
+
+  <h3>Message Paths</h3>
+  <ul class="section-list">
+    <li>Set folders for VarAC, FLMSG, FLAMP. These are used by the Message Viewer tab. Browse and save.</li>
+  </ul>
+
+  <h3>Radio Software</h3>
+  <ul class="section-list">
+    <li>Define executable paths and autostart/enabled flags for supported programs (FLRig, JS8Call, etc.).</li>
+    <li>Auto-start: when FreqInOut launches, any radio software with its autostart toggle enabled will be started once (with the configured path). FreqInOut does not manage restarts; if you close the external app manually, restart it yourself or restart FreqInOut to re-run autostart.</li>
+  </ul>
+
+  <h2>3. Scheduler & Frequency Planning</h2>
+  <h3>Daily Schedule</h3>
+  <ul class="section-list">
+    <li>Add entries with start/end, mode, band, VFO, frequency, group. Supports UTC/local view toggle.</li>
+    <li>"ALL" day applies to every day of week. Spanning times across midnight are handled in the frequency planner.</li>
+  </ul>
+
+  <h3>Scheduler Engine (How it works)</h3>
+  <ul class="section-list">
+    <li>Sources: Daily Schedule and Net Schedule tables (stored in freqinout_nets.db). Daily rows usually reference an Operating Group for band/mode/VFO/frequency.</li>
+    <li>Time handling: All times are stored in UTC; views can toggle to local. “ALL” day applies to every weekday. Ranges crossing midnight are split so the planner shows continuous coverage.</li>
+    <li>Application: The engine wakes periodically, finds the current UTC time, and picks the active row (priority: in-window Daily row, then Net row). If none match, no change is sent.</li>
+    <li>Outputs: Applies rig changes via the selected controller (FLRig or JS8Call) using the group’s band/mode/VFO/frequency. If a referenced group is missing/incomplete, that row is skipped.</li>
+    <li>Spanning nets: Net schedule enforces start/end and early check-in windows; frequency changes are applied at early-check or start time. "Ad Hoc" nets allow free-form entry but still follow the clock.</li>
+    <li>Suspension: The shared "QSY/Suspend" button pauses schedule-driven changes for 30 minutes across tabs; scheduler evaluations continue but no rig commands are sent while suspended.</li>
+    <li>JS8 offsets: If JS8 is selected for frequency control, dial/offset is set via one-shot API calls to avoid lingering connections.</li>
+  </ul>
+
+  <h3>Net Schedule</h3>
+  <ul class="section-list">
+    <li>Create nets with recurrence, group, band/mode/VFO/frequency, start/end, early check-in, and "Ad Hoc" as needed.</li>
+    <li>"Next Scheduled Net" (in FLDigi Net Control) shows the next upcoming/future net only.</li>
+  </ul>
+
+  <h3>Ad Hoc Nets</h3>
+  <ul class="section-list">
+    <li>Buttons on FLDigi NCS and JS8 NCS start an immediate ad hoc net; the net name auto-fills as "FLDIGI - Ad Hoc - YYYYMMDD HH:MM UTC" or "JS8 Net - Ad Hoc - YYYYMMDD HH:MM UTC" using current UTC.</li>
+    <li>If a net is already running, the Ad Hoc button is disabled. If a name is already in the field, you will be prompted before replacing it.</li>
+    <li>Ad hoc start runs the normal Start Net flow: clears logs, pre-fills operator line, disables Start, enables Save Check-ins, and begins polling.</li>
+  </ul>
+
+  <h3>Frequency Planner</h3>
+  <ul class="section-list">
+    <li>Visualizes day/hour to frequency/band mapping, including spans across days and UTC/local toggle.</li>
+  </ul>
+
+  <h2>4. Net Control Tabs</h2>
+  <h3>FLDigi NCS</h3>
+  <ul class="section-list">
+    <li>Start/End net, check-ins, save logs. "Start Net" clears prior log, pre-fills your call/name/state with spaces (not slashes).</li>
+    <li>"QSY/Suspend" toggles schedule-driven changes (shows blue when suspended; gold when inactive).</li>
+    <li>"Start Net" grays out; "Save Check-ins" turns green while running.</li>
+    <li>Trusted flag: when saving, new calls default to Trusted=No unless already trusted.</li>
+  </ul>
+
+  <h3>JS8 NCS</h3>
+  <ul class="section-list">
+    <li>Similar controls adapted for JS8 nets; obeys net schedule/early check-in lockouts for auto actions.</li>
+  </ul>
+
+  <h2>5. JS8Call Integration</h2>
+  <h3>API & Frequency Control</h3>
+  <ul class="section-list">
+    <li>One-shot API calls to set dial/offset; connection is closed after each action to avoid JS8Call exit issues.</li>
+    <li>Schedule-driven frequency changes will use JS8Call if selected in "Frequency Control".</li>
+  </ul>
+
+  <h3>Messages</h3>
+  <ul class="section-list">
+    <li>In Message Viewer, JS8 messages are ingested incrementally from JS8Call inbox (inbox_v1/db3) and cached locally.</li>
+    <li>UNREAD shown in red; single-click opens and marks READ (locally). READ hidden after 24h; messages older than 30 days skipped.</li>
+    <li>F!### forms decoded using MCF files; raw text shown if form missing/unknown.</li>
+  </ul>
+
+  <h3>Auto Query Msg ID</h3>
+  <ul class="section-list">
+    <li>Detects "YES MSG ID ###" replies (to your call) from DIRECTED.TXT/API; queues QUERY MSG ### to sender in order of weakest SNR.</li>
+    <li>Waits for JS8 ACK before follow-up QUERY MSGS; loops until "NO" or queue empty; respects net lockout.</li>
+  </ul>
+
+  <h3>Auto Query Grid</h3>
+  <ul class="section-list">
+    <li>When enabled and not within 5 minutes of a scheduled net, will query GRID? for stations without grids in operator history.</li>
+    <li>Suffixes (/P, /M, /MM, /QRP, /SOTA, /ROVER, /&lt;1-4 alnum&gt;) are stripped to match base callsigns and avoid duplicate queries.</li>
+    <li>Also passively stores grids heard in traffic (preferring longer/valid Maidenhead) and groups from freq/group context.</li>
+  </ul>
+
+  <h2>6. Stations Map</h2>
+  <ul class="section-list">
+    <li>Shows operators with grids/states (USA/Canada). Groups shown when available. Uses operator history; your Grid6 overrides your record.</li>
+    <li>Paths/JS8 links filtered by mode (My Station, All, etc.), band, recency (default 3h), auto-refresh interval, and "Refresh Links" button.</li>
+    <li>Controls for showing callsigns, grids, states, cities, regions; city population filter.</li>
+    <li>Default link filter set to "My Station" and recency 3h; preserves zoom on refresh.</li>
+  </ul>
+
+  <h2>7. Message Viewer</h2>
+  <ul class="section-list">
+    <li>Lists JS8 Messages (UNREAD first), FLMSG, FLAMP, VarAC. Paths are set in Settings &gt; Message Paths.</li>
+    <li>Single-click loads detail; only one list item highlighted at a time. PDF export wraps text to page.</li>
+    <li>Refresh Now to rescan; scan interval configurable.</li>
+  </ul>
+
+  <h2>8. Operator History</h2>
+  <ul class="section-list">
+    <li>Tracks first/last seen (YYYYMMDD), trust flag, groups, grids. CSV import overwrites grids on matching callsigns.</li>
+    <li>Filter by group/trust (Untrusted option). "Untrusted" and blank filters sorted to bottom of filter list.</li>
+    <li>Auto-insert logic: outbound JS8 transmissions to unknown calls (non-Public group) add them as untrusted; last_seen_utc updated.</li>
+    <li>Suffix handling: variants like KG5RKW/P map to base callsign for history and map display.</li>
+  </ul>
+
+  <h2>9. Logging & Persistence</h2>
+  <ul class="section-list">
+    <li>Primary DB: <code>config/freqinout_nets.db</code> (operator history, JS8 link index, cached JS8 messages).</li>
+    <li>Settings stored via SettingsManager; message paths and JS8 forms/directories persisted in settings.</li>
+    <li>JS8 local cache: js8_messages, js8_inbox_state; read_ts and last_ingested_id used to avoid reprocessing.</li>
+  </ul>
+
+  <h2>10. Common Tasks</h2>
+  <h3>Set up JS8Call</h3>
+  <ol class="section-list">
+    <li>Settings &gt; JS8Call Settings: set DIRECTED.TXT, TCP Port/Offset, forms path.</li>
+    <li>Click "Load JS8 Traffic" to seed data (optional).</li>
+    <li>Open Message Viewer &gt; JS8 Messages to verify UNREAD list.</li>
+  </ol>
+
+  <h3>Run a Net (FLDigi)</h3>
+  <ol class="section-list">
+    <li>Ensure net schedule set and FLRig running.</li>
+    <li>Open FLDigi NCS &gt; Start Net. Log will clear and prefill your call/name/state.</li>
+    <li>Save Check-ins (green) when done; End Net.</li>
+  </ol>
+
+  <h3>View Paths on Map</h3>
+  <ol class="section-list">
+    <li>Open Stations Map; defaults to My Station, recency 3h.</li>
+    <li>Adjust Paths mode/band/recency; click Refresh Links if needed.</li>
+    <li>Hover stations for detail even if callsigns layer is off.</li>
+  </ol>
+
+  <h3>Import Operator CSV</h3>
+  <ol class="section-list">
+    <li>Operator History tab &gt; Import CSV.</li>
+    <li>Existing calls overwrite grid with CSV value; trust flag left untouched unless edited.</li>
+  </ol>
+
+  <h2>11. Troubleshooting</h2>
+  <div class="callout warn">
+    <strong>JS8Call API not green:</strong> Check TCP port, ensure JS8Call running with API enabled. No network needed; local 127.0.0.1 only.<br/>
+    <strong>Messages not showing:</strong> Confirm inbox_v1 or inbox.db3 exists beside DIRECTED.TXT; check Message Paths in Settings; verify forms path for F! decode.<br/>
+    <strong>JS8 exits after frequency change:</strong> One-shot API calls are used; ensure JS8Call not quitting on TCP errors; restart JS8Call.<br/>
+    <strong>Auto-query not firing:</strong> Verify Auto Query Msg ID/Grid enabled, not within 5 minutes of scheduled net, API reachable; check logs for "net lockout".<br/>
+    <strong>Map empty:</strong> Ensure operator history has grids/states; load JS8 traffic; check recency filter and Paths mode.
+  </div>
+
+  <h2>12. Best Practices</h2>
+  <ul class="section-list">
+    <li>Though the option is available to auto-start software, start it yourself and pay attention to your tools.</li>
+    <li>"Load JS8 Traffic" will be done for you in almost every case. This only needs to be clicked at initial installation. </li>
+    <li>Ensure that auto-scheduling in JS8Call or VarAC is disabled if using FreqInOut. FreqInOut will continually override other schedules.</li>
+    <li>Obey radio etiquette. Though FreqInOut is designed to stop auto-queries 10-minutes before a scheduled net, disable beacons in VarAC and TX in JS8Call before a net.</li>
+    <li>Load grids for stations manually wherever possible. Don't harass large groups by relying on GRID? queries in JS8Call</li>
+  </ul>
+
+  <h2>13. Files & Locations</h2>
+  <table>
+    <tr><th>Item</th><th>Location</th></tr>
+    <tr><td>Main DB</td><td>config/freqinout_nets.db</td></tr>
+    <tr><td>JS8 forms</td><td>User-provided folder (set in Settings)</td></tr>
+    <tr><td>JS8 logs</td><td>Beside DIRECTED.TXT (ALL.TXT, inbox_v1/db3)</td></tr>
+    <tr><td>Message paths</td><td>VarAC / FLMSG / FLAMP folders (set in Settings)</td></tr>
+    <tr><td>Docs</td><td>docs/guide.html (this file)</td></tr>
+  </table>
+
+  <h2>14. Reporting Issues</h2>
+  <ul class="section-list">
+    <li>Include OS, Python version, app version/commit, and logs (`config/freqinout.log` if present).</li>
+    <li>Note exact settings (paths, ports) and steps to reproduce.</li>
+    <li>Email issues to N1MAG.radio@gmail.com (website is coming soon, so this may change)</li>
+  </ul>
+</body>
+</html>

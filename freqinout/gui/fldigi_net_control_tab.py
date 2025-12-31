@@ -113,6 +113,9 @@ class FldigiNetControlTab(QWidget):
         self.suspend_btn = QPushButton("QSY/Suspend")
         self.suspend_btn.clicked.connect(self._on_suspend_clicked)
         suspend_row.addWidget(self.suspend_btn)
+        self.ad_hoc_btn = QPushButton("Ad Hoc Net")
+        self.ad_hoc_btn.clicked.connect(self._start_ad_hoc_net)
+        suspend_row.addWidget(self.ad_hoc_btn)
         suspend_row.addStretch()
         layout.addLayout(suspend_row)
 
@@ -235,9 +238,11 @@ class FldigiNetControlTab(QWidget):
         if active:
             self.start_btn.setStyleSheet("QPushButton { background-color: #9E9E9E; color: white; }")
             self.save_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; }")
+            self.ad_hoc_btn.setEnabled(False)
         else:
             self.start_btn.setStyleSheet(self._start_btn_default_style)
             self.save_btn.setStyleSheet(self._save_btn_default_style)
+            self.ad_hoc_btn.setEnabled(True)
 
     def _refresh_operator_history_views(self) -> None:
         try:
@@ -924,6 +929,29 @@ class FldigiNetControlTab(QWidget):
         self._set_net_button_styles(active=True)
         log.info("FLDigi net started: %s (%s)", self.net_name_combo.currentText().strip(), self.role_combo.currentText())
         self._refresh_operator_history_views()
+
+    def _start_ad_hoc_net(self):
+        """
+        Generate and start an ad hoc net with a UTC timestamped name.
+        """
+        if self._net_in_progress:
+            QMessageBox.information(self, "Net In Progress", "End the current net before starting an ad hoc net.")
+            return
+        current_name = self.net_name_combo.currentText().strip()
+        if current_name:
+            resp = QMessageBox.question(
+                self,
+                "Replace Net Name",
+                "Replace the current net name with an ad hoc name?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+        ts = datetime.datetime.utcnow().strftime("%Y%m%d %H:%M")
+        ad_hoc_name = f"FLDIGI - Ad Hoc - {ts} UTC"
+        self.net_name_combo.setEditText(ad_hoc_name)
+        self._start_net()
 
     def _save_checkins(self):
         main_path = self.main_log_edit.text().strip()

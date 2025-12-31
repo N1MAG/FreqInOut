@@ -41,6 +41,8 @@ try:
 except Exception:
     js8net = None
 
+AUTO_GRID_QUIET_SECS = 90  # idle time required since last RX from a station before sending GRID?
+
 
 class JS8CallNetControlTab(QWidget):
     """
@@ -107,7 +109,6 @@ class JS8CallNetControlTab(QWidget):
         self._js8_client = None
         self.auto_query_msg_id = bool(self.settings.get("js8_auto_query_msg_id", False))
         self.auto_query_grids = bool(self.settings.get("js8_auto_query_grids", False))
-        self._last_rx_ts: float = 0.0
         self._js8_rx_timer: QTimer | None = None
         self._last_rx_ts: float = 0.0
         self._pending_grid_queries: List[tuple[Optional[float], str]] = []
@@ -122,6 +123,7 @@ class JS8CallNetControlTab(QWidget):
         self._last_inbound_triggers: Dict[str, tuple[str, float]] = {}
         self._auto_inserted_callsigns: Set[str] = set()
         self._awaiting_ack_for: Optional[str] = None
+        self._call_last_rx_ts: Dict[str, float] = {}
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -233,6 +235,8 @@ class JS8CallNetControlTab(QWidget):
         btn_row.addStretch()
         self.suspend_btn = QPushButton("QSY/Suspend")
         btn_row.addWidget(self.suspend_btn)
+        self.ad_hoc_btn = QPushButton("Ad Hoc Net")
+        btn_row.addWidget(self.ad_hoc_btn)
 
         layout.addLayout(btn_row)
 
@@ -245,6 +249,7 @@ class JS8CallNetControlTab(QWidget):
         self.end_btn.clicked.connect(self._end_net)
         self.refresh_spin.valueChanged.connect(self._update_timer_interval)
         self.suspend_btn.clicked.connect(self._on_suspend_clicked)
+        self.ad_hoc_btn.clicked.connect(self._start_ad_hoc_net)
 
         # Clock timer
         self._clock_timer = QTimer(self)
@@ -451,6 +456,8 @@ class JS8CallNetControlTab(QWidget):
         self._net_in_progress = True
         self._net_start_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
         self._net_end_utc = None
+        if hasattr(self, "ad_hoc_btn"):
+            self.ad_hoc_btn.setEnabled(False)
 
         # Track file size so we only read new lines
         try:
@@ -469,6 +476,29 @@ class JS8CallNetControlTab(QWidget):
         log.info("JS8Call net started: %s (%s)", self.net_name_edit.text().strip(), self.role_combo.currentText())
         self._refresh_operator_history_views()
 
+    def _start_ad_hoc_net(self):
+        """
+        Generate and start an ad hoc JS8 net with a UTC-stamped name.
+        """
+        if self._net_in_progress:
+            QMessageBox.information(self, "Net In Progress", "End the current net before starting an ad hoc net.")
+            return
+        current = self.net_name_edit.text().strip()
+        if current:
+            resp = QMessageBox.question(
+                self,
+                "Replace Net Name",
+                "Replace the current net name with an ad hoc name?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+        ts = datetime.datetime.utcnow().strftime("%Y%m%d %H:%M")
+        ad_hoc_name = f"JS8 Net - Ad Hoc - {ts} UTC"
+        self.net_name_edit.setText(ad_hoc_name)
+        self._start_net()
+
     def _end_net(self):
         if not self._net_in_progress:
             log.info("JS8Call End Net clicked but net_in_progress flag not set; writing log from current state.")
@@ -482,6 +512,8 @@ class JS8CallNetControlTab(QWidget):
         self._write_net_log_file()
 
         self._net_in_progress = False
+        if hasattr(self, "ad_hoc_btn"):
+            self.ad_hoc_btn.setEnabled(True)
         QMessageBox.information(self, "Net Ended", "JS8Call net ended and log saved.")
 
     # ---------------- AUTO-PREFILL NET NAME ---------------- #
@@ -1405,6 +1437,9 @@ class JS8CallNetControlTab(QWidget):
                     extra_txt = str(p.get("EXTRA") or "").upper()
                     combined = " ".join([txt, cmd_txt, extra_txt]).strip()
                     frm = (p.get("FROM") or "").strip().upper()
+                    base_frm = self._base_callsign(frm) if frm else ""
+                    if base_frm:
+                        self._call_last_rx_ts[base_frm] = now_ts
                     snr_val = None
                     try:
                         snr_val = float(p.get("SNR")) if p.get("SNR") not in (None, "") else None
@@ -1580,6 +1615,11 @@ class JS8CallNetControlTab(QWidget):
         call = (callsign or "").strip().upper()
         if not call:
             return
+        # Only query when traffic is directed to us or a group (skip third-party directed traffic)
+        mycall = (self._my_callsign() or "").strip().upper()
+        dest = (msg_params.get("TO") or "").strip().upper()
+        if dest and not dest.startswith("@") and mycall and dest != mycall:
+            return
         # Require active schedule and group match: a AND (b OR c)
         active = self._active_schedule()
         if not active:
@@ -1613,9 +1653,23 @@ class JS8CallNetControlTab(QWidget):
         # Defer while our own transmission recently occurred (e.g., auto-reply in progress)
         if time.time() - self._last_tx_ts < 5.0:
             return
+        now_ts = time.time()
         # Weakest SNR first
         self._pending_grid_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
-        snr_val, call = self._pending_grid_queries.pop(0)
+        # Respect per-callsign quiet window
+        processed = 0
+        max_attempts = len(self._pending_grid_queries)
+        while self._pending_grid_queries and processed < max_attempts:
+            snr_val, call = self._pending_grid_queries.pop(0)
+            last_rx = self._call_last_rx_ts.get(self._base_callsign(call), 0.0)
+            if last_rx and (now_ts - last_rx) < AUTO_GRID_QUIET_SECS:
+                # Too recent; push to back and try later
+                self._pending_grid_queries.append((snr_val, call))
+                processed += 1
+                continue
+            break
+        else:
+            return
         mycall = self._my_callsign() or ""
         query_text = f"{mycall}: {call} GRID?".strip()
         log.info("JS8CallNetControl: attempting auto grid query to %s text=\"%s\"", call, query_text)

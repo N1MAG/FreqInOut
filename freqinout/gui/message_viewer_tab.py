@@ -238,7 +238,7 @@ class MessageViewerTab(QWidget):
         v = QVBoxLayout()
         lst = QListWidget()
         lst.itemSelectionChanged.connect(self._on_selection_changed)
-        lst.itemClicked.connect(self._on_selection_changed)
+        lst.itemClicked.connect(lambda it, l=lst: self._on_selection_changed(item=it, sender_override=l))
         lst.setSelectionMode(QListWidget.SingleSelection)
         v.addWidget(lst)
         if allow_paths:
@@ -395,8 +395,8 @@ class MessageViewerTab(QWidget):
 
     # ---------- Selection / Viewing ----------
 
-    def _on_selection_changed(self):
-        sender = self.sender()
+    def _on_selection_changed(self, item: QListWidgetItem | None = None, sender_override: QListWidget | None = None):
+        sender = sender_override or self.sender()
         if not isinstance(sender, QListWidget):
             return
         # Clear selection in other lists so only one message is highlighted
@@ -405,7 +405,8 @@ class MessageViewerTab(QWidget):
                 lst.blockSignals(True)
                 lst.clearSelection()
                 lst.blockSignals(False)
-        item = sender.currentItem()
+        if item is None:
+            item = sender.currentItem()
         if not item:
             return
         rec = item.data(Qt.UserRole)
