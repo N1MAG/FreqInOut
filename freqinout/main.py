@@ -4,6 +4,7 @@ import argparse
 
 from PySide6.QtWidgets import QApplication
 from freqinout.gui.main_window import MainWindow
+from freqinout.core import db_initializer
 from freqinout.core.logger import log
 from freqinout.core import updater
 
@@ -15,6 +16,12 @@ def main():
     if args.update:
         updater.run_interactive_update()
         return
+
+    # Ensure SQLite schema is present before the UI starts
+    try:
+        db_initializer.ensure_all_tables()
+    except Exception as e:
+        log.error("Database initialization failed: %s", e)
 
     app = QApplication(sys.argv)
     win = MainWindow()
