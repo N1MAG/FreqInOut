@@ -416,8 +416,30 @@ class FreqPlannerTab(QWidget):
 
         hf_sched, net_sched = self._load_schedules()
 
-        # Precompute net schedule by (day_utc, hour)
-        net_by_day_hour: Dict[tuple, List[Dict]] = {}
+        # Precompute net schedule coverage by (day, hour) with boundary-aware logic
+        net_cover: Dict[tuple, List[Tuple[int, int, str]]] = {}
+
+        def add_net_slice(day_name: str, hour: int, start_minute: int, end_minute: int, name: str) -> None:
+            if start_minute >= end_minute:
+                return
+            net_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, name))
+
+        # Track net starts per day to handle hour-boundary ownership
+        net_starts_by_day: Dict[str, set[int]] = {d: set() for d in DAY_NAMES}
+        for row in net_sched:
+            try:
+                smin = self._parse_hhmm(row.get("start_utc", ""))
+                if smin is None:
+                    continue
+                day_txt = (row.get("day_utc", "ALL") or "").strip().upper()
+                targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
+                    DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
+                ]
+                for dname in targets:
+                    net_starts_by_day[dname].add(smin)
+            except Exception:
+                continue
+
         for row in net_sched:
             try:
                 day = row.get("day_utc", "")
@@ -425,11 +447,33 @@ class FreqPlannerTab(QWidget):
                 emin = self._parse_hhmm(row.get("end_utc", ""))
                 if smin is None or emin is None:
                     continue
-                if emin % 60 == 0:
-                    emin = min(emin + 60, 24 * 60)
-                # Display times should use actual start/end (no early check-in adjustment)
-                for dname, hour in self._expand_hours_for_day(day, smin, emin, early=0):
-                    net_by_day_hour.setdefault((dname, hour), []).append(row)
+                name = (row.get("net_name") or "Net").strip()
+                day_txt = (day or "ALL").strip().upper()
+                targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
+                    DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
+                ]
+                overnight = smin > emin
+                intervals: List[Tuple[str, int, int]] = []
+                if not overnight:
+                    intervals.append((targets[0], smin, emin))
+                else:
+                    for dname in targets:
+                        intervals.append((dname, smin, 24 * 60))
+                        next_idx = (DAY_NAMES.index(dname) + 1) % 7
+                        next_day = DAY_NAMES[next_idx]
+                        intervals.append((next_day, 0, emin))
+                for dname, seg_start, seg_end in intervals:
+                    # Extend on exact hour boundary only if no other net starts at that minute on that day
+                    if seg_end % 60 == 0 and (seg_end % (24 * 60)) not in net_starts_by_day.get(dname, set()):
+                        seg_end = min(seg_end + 60, 24 * 60)
+                    start_hour = seg_start // 60
+                    end_hour = (seg_end - 1) // 60
+                    for hour in range(start_hour, end_hour + 1):
+                        hour_start_min = hour * 60
+                        hour_end_min = hour * 60 + 60
+                        overlap_start = max(seg_start, hour_start_min)
+                        overlap_end = min(seg_end, hour_end_min)
+                        add_net_slice(dname, hour % 24, overlap_start - hour_start_min, overlap_end - hour_start_min, name)
             except Exception:
                 continue
 
@@ -536,7 +580,7 @@ class FreqPlannerTab(QWidget):
             # Day columns 2..8
             for col in range(self.COL_DAY_OFFSET, 9):
                 day_name = DAY_NAMES[col - self.COL_DAY_OFFSET]
-                nets_here = net_by_day_hour.get((day_name, hour), [])
+                net_slices = net_cover.get((day_name, hour), [])
                 hf_slices = hf_cover.get((day_name, hour), [])
                 band_label = ""
                 if hf_slices:
@@ -555,21 +599,19 @@ class FreqPlannerTab(QWidget):
                     else:
                         band_label = "/".join(bands_in_order)
 
-                net_names = []
-                for n in nets_here:
-                    nn = (n.get("net_name") or "").strip()
-                    if nn:
-                        net_names.append(nn)
-                # unique
-                seen_n = set()
-                nets_uniq = []
-                for n in net_names:
-                    if n not in seen_n:
-                        seen_n.add(n)
-                        nets_uniq.append(n)
-
-                has_net = bool(nets_here)
-                net_label = " / ".join(nets_uniq) if nets_uniq else ("Net" if has_net else "")
+                net_label = ""
+                if net_slices:
+                    net_slices = sorted(net_slices, key=lambda x: x[0])
+                    net_names = []
+                    last_net = None
+                    for start_m, end_m, name in net_slices:
+                        if end_m <= start_m:
+                            continue
+                        if name != last_net:
+                            net_names.append(name)
+                            last_net = name
+                    if net_names:
+                        net_label = " / ".join(net_names)
 
                 cell_text = ""
                 # If any net exists, show only the net name (no band)
@@ -583,18 +625,21 @@ class FreqPlannerTab(QWidget):
 
                 # Highlight: net window overlaps now or starts within next 24h
                 highlight = False
-                for net_row in nets_here:
-                    window = self._net_window_for_day(net_row, day_name, now_utc)
-                    if not window:
-                        continue
-                    start_dt, end_dt = window
-                    # Highlight if currently in window or starts within 24h
-                    if start_dt <= now_utc <= end_dt:
-                        highlight = True
-                        break
-                    if now_utc <= start_dt <= now_plus_24:
-                        highlight = True
-                        break
+                if net_slices:
+                    for start_m, end_m, name in net_slices:
+                        # Compute absolute times for this day/hour slice
+                        day_idx = DAY_NAMES.index(day_name)
+                        now_idx = now_utc.weekday()
+                        now_day_sun0 = (now_idx + 1) % 7
+                        offset = (day_idx - now_day_sun0) % 7
+                        base_date = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(
+                            days=offset
+                        )
+                        start_dt = base_date + datetime.timedelta(minutes=start_m + hour * 60)
+                        end_dt = base_date + datetime.timedelta(minutes=end_m + hour * 60)
+                        if start_dt <= now_utc <= end_dt or (now_utc <= start_dt <= now_plus_24):
+                            highlight = True
+                            break
                 if highlight:
                     item.setBackground(QColor("#fff59d"))  # soft yellow highlight
 
