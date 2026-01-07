@@ -355,6 +355,37 @@ class FreqPlannerTab(QWidget):
 
         return hours
 
+    def _net_window_for_day(
+        self, row: Dict, day_name: str, now_utc: datetime.datetime
+    ) -> Optional[tuple[datetime.datetime, datetime.datetime]]:
+        """
+        Given a net row and target day name, compute start/end UTC datetimes for that day.
+        Returns None if times are invalid; caller filters by time window.
+        """
+        start_m = self._parse_hhmm(row.get("start_utc", ""))
+        end_m = self._parse_hhmm(row.get("end_utc", ""))
+        if start_m is None or end_m is None:
+            return None
+        early = int(row.get("early_checkin", 0) or 0)
+        start_m = max(0, start_m - early)
+        overnight = start_m > end_m
+
+        # Map day_name to offset from current UTC day (DAY_NAMES starts with Sunday=0)
+        try:
+            day_idx = DAY_NAMES.index(day_name)
+        except ValueError:
+            return None
+        now_idx = now_utc.weekday()  # Monday=0
+        now_day_sun0 = (now_idx + 1) % 7  # convert to Sunday=0..Saturday=6
+        offset = (day_idx - now_day_sun0) % 7
+
+        base_date = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=offset)
+        start_dt = base_date + datetime.timedelta(minutes=start_m)
+        end_dt = base_date + datetime.timedelta(minutes=end_m)
+        if overnight:
+            end_dt += datetime.timedelta(days=1)
+        return start_dt, end_dt
+
     # ------------- core rebuild ------------- #
 
     def rebuild_table(self):
@@ -417,6 +448,7 @@ class FreqPlannerTab(QWidget):
         # Current UTC day for highlighting
         now_utc = datetime.datetime.utcnow()
         current_day_name = now_utc.strftime("%A")  # "Sunday" etc.
+        now_plus_24 = now_utc + datetime.timedelta(hours=24)
 
         # Timezone for local conversion
         tz_name_cfg, tz = self._current_timezone()
@@ -496,8 +528,21 @@ class FreqPlannerTab(QWidget):
                 item = QTableWidgetItem(cell_text)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
 
-                # Highlight: current UTC day + has net
-                if day_name == current_day_name and has_net:
+                # Highlight: net window overlaps now or starts within next 24h
+                highlight = False
+                for net_row in nets_here:
+                    window = self._net_window_for_day(net_row, day_name, now_utc)
+                    if not window:
+                        continue
+                    start_dt, end_dt = window
+                    # Highlight if currently in window or starts within 24h
+                    if start_dt <= now_utc <= end_dt:
+                        highlight = True
+                        break
+                    if now_utc <= start_dt <= now_plus_24:
+                        highlight = True
+                        break
+                if highlight:
                     item.setBackground(QColor("#fff59d"))  # soft yellow highlight
 
                 self.table.setItem(hour, col, item)
