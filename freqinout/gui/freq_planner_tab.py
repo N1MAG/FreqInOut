@@ -428,17 +428,49 @@ class FreqPlannerTab(QWidget):
             except Exception:
                 continue
 
-        # Precompute hf schedule by (day, hour) honoring overnight
-        hf_by_day_hour: Dict[tuple, List[Dict]] = {}
+        # Precompute HF schedule coverage by (day, hour) with minute-level slices
+        hf_cover: Dict[tuple, List[Tuple[int, int, str]]] = {}
+
+        def add_slice(day_name: str, hour: int, start_minute: int, end_minute: int, band: str) -> None:
+            if start_minute >= end_minute:
+                return
+            hf_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, band))
+
         for row in hf_sched:
             try:
                 smin = self._parse_hhmm(row.get("start_utc", ""))
                 emin = self._parse_hhmm(row.get("end_utc", ""))
                 if smin is None or emin is None:
                     continue
-                day = row.get("day_utc", "")
-                for dname, hour in self._expand_hours_for_day(day, smin, emin):
-                    hf_by_day_hour.setdefault((dname, hour), []).append(row)
+                band = (row.get("band") or "").strip()
+                if not band:
+                    continue
+                day_txt = (row.get("day_utc", "ALL") or "").strip().upper()
+                # Expand into day/hour slices with minute precision
+                targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
+                    DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
+                ]
+                overnight = smin > emin
+                intervals: List[Tuple[str, int, int]] = []
+                for dname in targets:
+                    if not overnight:
+                        intervals.append((dname, smin, emin))
+                    else:
+                        # segment 1: start -> 24h on current day
+                        intervals.append((dname, smin, 24 * 60))
+                        # segment 2: 0 -> end on next day
+                        next_idx = (DAY_NAMES.index(dname) + 1) % 7
+                        next_day = DAY_NAMES[next_idx]
+                        intervals.append((next_day, 0, emin))
+                for dname, seg_start, seg_end in intervals:
+                    start_hour = seg_start // 60
+                    end_hour = (seg_end - 1) // 60  # inclusive end minute
+                    for hour in range(start_hour, end_hour + 1):
+                        hour_start_min = hour * 60
+                        hour_end_min = hour * 60 + 60
+                        overlap_start = max(seg_start, hour_start_min)
+                        overlap_end = min(seg_end, hour_end_min)
+                        add_slice(dname, hour % 24, overlap_start - hour_start_min, overlap_end - hour_start_min, band)
             except Exception:
                 continue
 
@@ -480,23 +512,23 @@ class FreqPlannerTab(QWidget):
             for col in range(self.COL_DAY_OFFSET, 9):
                 day_name = DAY_NAMES[col - self.COL_DAY_OFFSET]
                 nets_here = net_by_day_hour.get((day_name, hour), [])
-                hf_rows = hf_by_day_hour.get((day_name, hour), [])
-                bands = []
-                # Sort HF rows by start time to preserve time-order transitions
-                def _hf_start_min(row):
-                    val = self._parse_hhmm(row.get("start_utc", ""))
-                    return val if val is not None else 0
-                for r in sorted(hf_rows, key=_hf_start_min):
-                    b = (r.get("band") or "").strip()
-                    if b:
-                        bands.append(b)
-                seen = set()
-                bands_uniq = []
-                for b in bands:
-                    if b not in seen:
-                        seen.add(b)
-                        bands_uniq.append(b)
-                band_label = " / ".join(bands_uniq)
+                hf_slices = hf_cover.get((day_name, hour), [])
+                band_label = ""
+                if hf_slices:
+                    # Order by start minute and compress consecutive identical bands
+                    hf_slices = sorted(hf_slices, key=lambda x: x[0])
+                    bands_in_order: List[str] = []
+                    last_band = None
+                    for start_m, end_m, b in hf_slices:
+                        if end_m <= start_m:
+                            continue
+                        if b != last_band:
+                            bands_in_order.append(b)
+                            last_band = b
+                    if len(bands_in_order) == 1:
+                        band_label = bands_in_order[0]
+                    else:
+                        band_label = "/".join(bands_in_order)
 
                 net_names = []
                 for n in nets_here:
