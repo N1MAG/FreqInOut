@@ -424,22 +424,6 @@ class FreqPlannerTab(QWidget):
                 return
             net_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, name))
 
-        # Track net starts per day to handle hour-boundary ownership
-        net_starts_by_day: Dict[str, set[int]] = {d: set() for d in DAY_NAMES}
-        for row in net_sched:
-            try:
-                smin = self._parse_hhmm(row.get("start_utc", ""))
-                if smin is None:
-                    continue
-                day_txt = (row.get("day_utc", "ALL") or "").strip().upper()
-                targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
-                    DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
-                ]
-                for dname in targets:
-                    net_starts_by_day[dname].add(smin)
-            except Exception:
-                continue
-
         for row in net_sched:
             try:
                 day = row.get("day_utc", "")
@@ -463,9 +447,6 @@ class FreqPlannerTab(QWidget):
                         next_day = DAY_NAMES[next_idx]
                         intervals.append((next_day, 0, emin))
                 for dname, seg_start, seg_end in intervals:
-                    # Extend on exact hour boundary only if no other net starts at that minute on that day
-                    if seg_end % 60 == 0 and (seg_end % (24 * 60)) not in net_starts_by_day.get(dname, set()):
-                        seg_end = min(seg_end + 60, 24 * 60)
                     start_hour = seg_start // 60
                     end_hour = (seg_end - 1) // 60
                     for hour in range(start_hour, end_hour + 1):
@@ -622,6 +603,8 @@ class FreqPlannerTab(QWidget):
 
                 item = QTableWidgetItem(cell_text)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if cell_text:
+                    item.setToolTip(cell_text)
 
                 # Highlight: net window overlaps now or starts within next 24h
                 highlight = False
