@@ -474,11 +474,7 @@ class FreqPlannerTab(QWidget):
             )
             local_dt = utc_dt.astimezone(tz)
             local_hour_24 = local_dt.hour
-            suffix = "AM" if local_hour_24 < 12 else "PM"
-            hour12 = local_hour_24 % 12
-            if hour12 == 0:
-                hour12 = 12
-            local_str = f"{hour12:02d}:00 {suffix}"
+            local_str = f"{local_hour_24:02d}:00"
             local_item = QTableWidgetItem(local_str)
             local_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(hour, self.COL_LOCAL, local_item)
