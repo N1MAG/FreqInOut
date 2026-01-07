@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import sqlite3
 from typing import List, Dict, Tuple
 
 from PySide6.QtCore import Qt, QTimer
@@ -192,14 +193,63 @@ class FreqPlannerTab(QWidget):
                 return None
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT day_utc, recurrence, biweekly_offset_weeks, band, mode, vfo, frequency,
-                       start_utc, end_utc, early_checkin, primary_js8call_group, comment, net_name
-                FROM net_schedule_tab
-                """
-            )
-            rows = cur.fetchall()
+            rows = []
+            try:
+                cur.execute(
+                    """
+                    SELECT day_utc, recurrence, biweekly_offset_weeks, band, mode, vfo, frequency,
+                           start_utc, end_utc, early_checkin, primary_js8call_group, comment, net_name
+                    FROM net_schedule_tab
+                    """
+                )
+                rows = cur.fetchall()
+            except Exception:
+                rows = []
+            # Fallback to legacy table if the richer table is empty/missing
+            if not rows:
+                try:
+                    cur.execute(
+                        """
+                        SELECT day_utc, recurrence, biweekly_offset_weeks, band, mode, frequency,
+                               start_utc, end_utc, early_checkin, primary_js8call_group, comment, net_name
+                        FROM net_schedule
+                        """
+                    )
+                    legacy = cur.fetchall()
+                    # Pad legacy rows to align with expected tuple positions (insert vfo=None)
+                    rows = [
+                        (
+                            day_utc,
+                            recurrence,
+                            biweekly_offset_weeks,
+                            band,
+                            mode,
+                            None,
+                            freq,
+                            start_utc,
+                            end_utc,
+                            early_checkin,
+                            primary_js8call_group,
+                            comment,
+                            net_name,
+                        )
+                        for (
+                            day_utc,
+                            recurrence,
+                            biweekly_offset_weeks,
+                            band,
+                            mode,
+                            freq,
+                            start_utc,
+                            end_utc,
+                            early_checkin,
+                            primary_js8call_group,
+                            comment,
+                            net_name,
+                        ) in legacy
+                    ]
+                except Exception:
+                    rows = []
             conn.close()
             out = []
             for (
