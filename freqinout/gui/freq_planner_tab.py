@@ -311,6 +311,11 @@ class FreqPlannerTab(QWidget):
         Recompute the table based on current hf_schedule and net_schedule in config.
         """
         self.table.clearContents()
+        try:
+            # Pick up latest settings written by other tabs before reading schedules.
+            self.settings.reload()
+        except Exception:
+            pass
         tz_name, tz_abbr = self._current_timezone_label()
         self.table.setHorizontalHeaderLabels(
             [
