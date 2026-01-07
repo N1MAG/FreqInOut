@@ -1169,6 +1169,14 @@ class NetScheduleTab(QWidget):
             )
             return
 
+        # Refresh Frequency Planner view if available
+        try:
+            win = self.window()
+            if win and hasattr(win, "freq_planner_tab"):
+                win.freq_planner_tab.rebuild_table()
+        except Exception:
+            pass
+
         QMessageBox.information(self, "Saved", "Net Schedule saved.")
 
     # --------- SQLite mirror --------- #

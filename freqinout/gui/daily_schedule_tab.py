@@ -724,6 +724,7 @@ class DailyScheduleTab(QWidget):
         QMessageBox.information(self, "Saved", "HF Frequency Schedule saved.")
         log.info("HF Frequency Schedule saved: %d rows", len(rows))
         self._raw_schedule = rows
+        self._refresh_freq_planner()
 
     # ---------------- Row helpers ---------------- #
 
@@ -801,6 +802,17 @@ class DailyScheduleTab(QWidget):
             if dt:
                 self._set_suspend_until(None)
             self._set_suspend_button(False)
+
+    def _refresh_freq_planner(self) -> None:
+        """
+        Ask the main window to refresh the Frequency Planner after schedule changes.
+        """
+        try:
+            win = self.window()
+            if win and hasattr(win, "freq_planner_tab"):
+                win.freq_planner_tab.rebuild_table()
+        except Exception:
+            pass
 
     def _on_suspend_clicked(self):
         if self._suspend_active():
