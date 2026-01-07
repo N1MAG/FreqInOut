@@ -17,13 +17,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QTextEdit,
     QPushButton,
     QMessageBox,
     QComboBox,
     QApplication,
     QSpinBox,
     QCompleter,
+    QTableWidget,
+    QTableWidgetItem,
 )
 
 from freqinout.core.settings_manager import SettingsManager
@@ -54,23 +55,11 @@ class JS8CallNetControlTab(QWidget):
         * callsign, operator_name, operator_state
         * js8_directed_path: full path to JS8Call DIRECTED.TXT
         * js8_refresh_sec: poll interval (seconds)
-    - Two panels:
-        * Initial Check-ins
-        * New / Late Check-ins
-    - New calls:
-        * Go to Initial until 'Copy Initial Check-ins' is clicked once
-        * After that, only to New/Late
-    - Deduplicates calls across the net.
+    - Single Check-Ins table with per-call metadata (mode, SNR, DT, offset, status).
 
-    Buttons (in this order):
-        Start Net, Copy Initial Check-ins, Copy New Check-ins,
-        Merge Check-ins, Save Check-ins, End Net, QSY/Suspend (shared across tabs)
-
-    - Copy Initial/New:
-        * Parses callsigns
-        * Dedup
-        * Takes last 3 characters of each callsign
-        * Copies space-delimited list to clipboard
+    Buttons:
+        Start Net, ACK Check-ins, Set Group, Set Spotter, Group Spotter,
+        Single Spotter, Save Checkins, End Net, QSY/Suspend (shared across tabs)
 
     - End Net:
         * Stops polling
@@ -98,9 +87,6 @@ class JS8CallNetControlTab(QWidget):
         self._last_directed_size: int = 0
         self._startup_directed_size: int = 0
 
-        self._initial_phase = True  # true until first Copy Initial click
-        self._initial_calls: Set[str] = set()
-        self._late_calls: Set[str] = set()
         self._all_calls_seen: Set[str] = set()
         self._queried_msg_ids: Set[str] = set()
         self._pending_queries: List[tuple[Optional[float], str, str]] = []
@@ -124,6 +110,16 @@ class JS8CallNetControlTab(QWidget):
         self._auto_inserted_callsigns: Set[str] = set()
         self._awaiting_ack_for: Optional[str] = None
         self._call_last_rx_ts: Dict[str, float] = {}
+        self._auto_query_paused_by_net = False
+
+        # Check-in table state
+        self._checkins: Dict[str, Dict] = {}
+        self._checkin_rows: Dict[str, int] = {}
+        self._checkins_saved: Set[str] = set()
+        self._group_target: str = ""
+        self._spotter_form: Optional[str] = None
+        self._expected_form: Optional[str] = None
+        self._status_mismatch: Dict[str, bool] = {}
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -196,40 +192,49 @@ class JS8CallNetControlTab(QWidget):
         top_row.addStretch()
         layout.addLayout(top_row)
 
-        # Panels for check-ins
-        panels_row = QHBoxLayout()
+        # Check-ins table
+        table_layout = QVBoxLayout()
+        table_layout.addWidget(QLabel("<b>Check-Ins</b>"))
+        self.checkin_table = QTableWidget(0, 10)
+        self.checkin_table.setHorizontalHeaderLabels(
+            ["CALLSIGN", "NAME", "ST", "GRID", "REGION", "MODE", "SNR", "DT ms", "OFFSET", "STATUS"]
+        )
+        self.checkin_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.checkin_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.checkin_table.horizontalHeader().setStretchLastSection(True)
+        table_layout.addWidget(self.checkin_table)
+        layout.addLayout(table_layout)
 
-        # Initial check-ins
-        left_col = QVBoxLayout()
-        left_col.addWidget(QLabel("<b>Initial Check-ins</b>"))
-        self.initial_text = QTextEdit()
-        left_col.addWidget(self.initial_text)
-        panels_row.addLayout(left_col, stretch=1)
+        # Group / Spotter controls
+        gs_row = QHBoxLayout()
+        self.set_group_btn = QPushButton("Set Group")
+        self.group_edit = QLineEdit()
+        self.group_edit.setPlaceholderText("@GROUP")
+        gs_row.addWidget(self.set_group_btn)
+        gs_row.addWidget(self.group_edit)
+        gs_row.addSpacing(12)
+        self.set_spotter_btn = QPushButton("Set Spotter")
+        self.spotter_combo = QComboBox()
+        gs_row.addWidget(self.set_spotter_btn)
+        gs_row.addWidget(self.spotter_combo)
+        gs_row.addStretch()
+        layout.addLayout(gs_row)
 
-        # New/Late check-ins
-        right_col = QVBoxLayout()
-        self.new_late_label = QLabel("<b>New / Late Check-ins</b>")
-        right_col.addWidget(self.new_late_label)
-        self.new_late_text = QTextEdit()
-        self.new_late_text.setStyleSheet("QTextEdit { border: 1px solid #cccccc; }")
-        right_col.addWidget(self.new_late_text)
-        panels_row.addLayout(right_col, stretch=1)
-
-        layout.addLayout(panels_row)
-
-        # Buttons row (in required order)
+        # Buttons row
         btn_row = QHBoxLayout()
         self.start_btn = QPushButton("Start Net")
-        self.copy_initial_btn = QPushButton("Copy Initial Check-ins")
-        self.copy_new_btn = QPushButton("Copy New Check-ins")
-        self.merge_btn = QPushButton("Merge Check-ins")
-        self.save_btn = QPushButton("Save Check-ins")
+        self.ack_btn = QPushButton("ACK Check-ins")
+        self.group_spotter_btn = QPushButton("Group Spotter")
+        self.single_spotter_btn = QPushButton("Single Spotter")
+        self.save_btn = QPushButton("Save Checkins")
         self.end_btn = QPushButton("End Net")
+        self.ack_btn.setEnabled(False)
+        self.end_btn.setEnabled(False)
 
         btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.copy_initial_btn)
-        btn_row.addWidget(self.copy_new_btn)
-        btn_row.addWidget(self.merge_btn)
+        btn_row.addWidget(self.ack_btn)
+        btn_row.addWidget(self.group_spotter_btn)
+        btn_row.addWidget(self.single_spotter_btn)
         btn_row.addWidget(self.save_btn)
         btn_row.addWidget(self.end_btn)
         btn_row.addStretch()
@@ -242,11 +247,13 @@ class JS8CallNetControlTab(QWidget):
 
         # Signals
         self.start_btn.clicked.connect(self._start_net)
-        self.copy_initial_btn.clicked.connect(self._copy_initial_checkins)
-        self.copy_new_btn.clicked.connect(self._copy_new_checkins)
-        self.merge_btn.clicked.connect(self._merge_checkins)
+        self.ack_btn.clicked.connect(self._ack_checkins)
+        self.group_spotter_btn.clicked.connect(self._group_spotter)
+        self.single_spotter_btn.clicked.connect(self._single_spotter)
         self.save_btn.clicked.connect(self._save_checkins)
         self.end_btn.clicked.connect(self._end_net)
+        self.set_group_btn.clicked.connect(self._set_group_target)
+        self.set_spotter_btn.clicked.connect(self._set_spotter_form)
         self.refresh_spin.valueChanged.connect(self._update_timer_interval)
         self.suspend_btn.clicked.connect(self._on_suspend_clicked)
         self.ad_hoc_btn.clicked.connect(self._start_ad_hoc_net)
@@ -292,6 +299,31 @@ class JS8CallNetControlTab(QWidget):
         # Refresh interval
         refresh = int(data.get("js8_refresh_sec", 15) or 15)
         self.refresh_spin.setValue(refresh)
+
+        # Spotter forms dropdown
+        forms_dir = Path(data.get("js8_forms_path", "") or "")
+        self.spotter_combo.clear()
+        forms = []
+        if forms_dir.exists() and forms_dir.is_dir():
+            for fn in sorted(forms_dir.glob("MCF*.txt")):
+                try:
+                    num = fn.stem.replace("MCF", "").strip()
+                    if num.isdigit():
+                        forms.append(f"F!{num}")
+                except Exception:
+                    continue
+        if forms:
+            self.spotter_combo.addItems(forms)
+            self.spotter_combo.setEnabled(True)
+            self.set_spotter_btn.setEnabled(True)
+            self.group_spotter_btn.setEnabled(True)
+            self.single_spotter_btn.setEnabled(True)
+        else:
+            self.spotter_combo.addItem("No forms found")
+            self.spotter_combo.setEnabled(False)
+            self.set_spotter_btn.setEnabled(False)
+            self.group_spotter_btn.setEnabled(False)
+            self.single_spotter_btn.setEnabled(False)
 
     def _save_refresh_setting(self):
         try:
@@ -380,6 +412,12 @@ class JS8CallNetControlTab(QWidget):
         dt = self._get_suspend_until()
         return dt is not None and datetime.datetime.now(datetime.timezone.utc) < dt
 
+    def _scheduler_enabled(self) -> bool:
+        try:
+            return bool(self.settings.get("use_scheduler", True))
+        except Exception:
+            return True
+
     def _set_suspend_button(self, active: bool):
         if active:
             self.suspend_btn.setText("Schedule Suspended for 30 Minutes")
@@ -389,6 +427,12 @@ class JS8CallNetControlTab(QWidget):
             self.suspend_btn.setStyleSheet("QPushButton { background-color: gold; color: black; }")
 
     def _update_suspend_state(self):
+        enabled = self._scheduler_enabled()
+        self.suspend_btn.setEnabled(enabled)
+        if not enabled:
+            self._set_suspend_button(False)
+            return
+
         dt = self._get_suspend_until()
         if dt and datetime.datetime.now(datetime.timezone.utc) < dt:
             self._set_suspend_button(True)
@@ -444,20 +488,30 @@ class JS8CallNetControlTab(QWidget):
         if not self._validate_before_start():
             return
 
-        # Reset buffers
-        self.initial_text.clear()
-        self.new_late_text.clear()
-        self._initial_calls.clear()
-        self._late_calls.clear()
-        self._all_calls_seen.clear()
-        self._queried_msg_ids.clear()
-        self._initial_phase = True
-
         self._net_in_progress = True
         self._net_start_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
         self._net_end_utc = None
+        self._all_calls_seen.clear()
+        self._queried_msg_ids.clear()
+        self._pending_queries.clear()
+        self._waiting_for_completion = False
+        self._current_query = None
+        self._pending_grid_queries.clear()
+        self._grid_waiting = False
+        self._awaiting_ack_for = None
+        self._call_last_rx_ts.clear()
+        self._checkins.clear()
+        self._checkin_rows.clear()
+        self._checkins_saved.clear()
+        self._clear_table()
+        self._auto_query_paused_by_net = True
         if hasattr(self, "ad_hoc_btn"):
             self.ad_hoc_btn.setEnabled(False)
+        self.start_btn.setEnabled(False)
+        self.start_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; }")
+        self.end_btn.setEnabled(True)
+        self.end_btn.setStyleSheet("QPushButton { background-color: red; color: white; }")
+        self.ack_btn.setEnabled(True)
 
         # Track file size so we only read new lines
         try:
@@ -508,12 +562,34 @@ class JS8CallNetControlTab(QWidget):
 
         self._net_end_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
 
+        # Send net concluded to group if set
+        group = self._group_target or self.group_edit.text().strip().upper()
+        if group:
+            if not group.startswith("@"):
+                group = "@" + group
+            mycall = self._my_callsign()
+            if mycall:
+                self._send_js8_message(f"{mycall}: {group} NET CONCLUDED")
+
+        # Record check-ins once more at end (no duplicate increments)
+        self._save_checkins(show_message=False)
+
         # Write the net log file from the current panels
         self._write_net_log_file()
 
         self._net_in_progress = False
         if hasattr(self, "ad_hoc_btn"):
             self.ad_hoc_btn.setEnabled(True)
+        self._auto_query_paused_by_net = False
+        self.start_btn.setEnabled(True)
+        self.start_btn.setStyleSheet("")
+        self.end_btn.setEnabled(False)
+        self.end_btn.setStyleSheet("")
+        self.ack_btn.setEnabled(False)
+        self._checkins.clear()
+        self._checkin_rows.clear()
+        self._checkins_saved.clear()
+        self._clear_table()
         QMessageBox.information(self, "Net Ended", "JS8Call net ended and log saved.")
 
     # ---------------- AUTO-PREFILL NET NAME ---------------- #
@@ -587,8 +663,6 @@ class JS8CallNetControlTab(QWidget):
             # File truncated or rotated; re-read from start
             self._last_directed_size = 0
 
-        new_calls: List[str] = []
-
         try:
             with self._directed_path.open("r", encoding="utf-8", errors="ignore") as f:
                 if self._last_directed_size > 0:
@@ -635,10 +709,10 @@ class JS8CallNetControlTab(QWidget):
                     call_primary = calls[0] if calls else ""
                     if not call_primary:
                         continue
-                    if call_primary in self._all_calls_seen:
-                        continue
-                    self._all_calls_seen.add(call_primary)
-                    new_calls.append(call_primary)
+
+                    # During an active net, record/update the check-in row
+                    if self._net_in_progress:
+                        self._upsert_checkin(call_primary, status="NEW")
 
                     # Check for completion markers to advance queue
                     self._process_message_completion(line)
@@ -648,32 +722,16 @@ class JS8CallNetControlTab(QWidget):
             log.error("JS8CallNetControl: failed reading DIRECTED.TXT: %s", e)
             return
 
-        if not new_calls:
-            return
-
-        # Do not populate panels unless a net is in progress (auto-query can still run without one)
+        # If no net in progress, skip UI updates (auto-query can still run)
         if not self._net_in_progress:
             return
-
-        # Append new calls to appropriate panel
-        for call in new_calls:
-            if self._initial_phase:
-                if call not in self._initial_calls:
-                    self._initial_calls.add(call)
-                    self._append_line_to_text(self.initial_text, call)
-            else:
-                if call not in self._late_calls:
-                    self._late_calls.add(call)
-                    self._append_line_to_text(self.new_late_text, call)
-
-        # Flash border on new/late panel only when timer adds new calls
-        if not self._initial_phase and new_calls:
-            self._flash_new_late_border()
 
     def _poll_all_for_query_tx(self):
         """
         Scan ALL.TXT for outgoing QUERY MSG(S) transmissions to enable auto-query from DIRECTED.
         """
+        if self._auto_query_paused_by_net:
+            return
         if not self._directed_path:
             return
         all_path = self._directed_path.parent / "ALL.TXT"
@@ -743,67 +801,288 @@ class JS8CallNetControlTab(QWidget):
         except Exception:
             return False
 
-    def _append_line_to_text(self, text_widget: QTextEdit, line: str):
-        if text_widget.toPlainText().strip():
-            text_widget.append(line)
-        else:
-            text_widget.setPlainText(line)
+    # ---------------- CHECK-IN TABLE HELPERS ---------------- #
 
-    def _flash_new_late_border(self):
-        # subtle green border flash
-        self.new_late_text.setStyleSheet("QTextEdit { border: 2px solid #4CAF50; }")
-        QTimer.singleShot(
-            1000,
-            lambda: self.new_late_text.setStyleSheet("QTextEdit { border: 1px solid #cccccc; }"),
-        )
+    def _clear_table(self) -> None:
+        self.checkin_table.setRowCount(0)
 
-    # ---------------- COPY / MERGE / SAVE ---------------- #
+    def _region_for_state(self, st: str) -> str:
+        st = (st or "").strip().upper()
+        fema = {
+            "CT": "R01",
+            "ME": "R01",
+            "MA": "R01",
+            "NH": "R01",
+            "RI": "R01",
+            "VT": "R01",
+            "NJ": "R02",
+            "NY": "R02",
+            "PR": "R02",
+            "VI": "R02",
+            "DC": "R03",
+            "DE": "R03",
+            "MD": "R03",
+            "PA": "R03",
+            "VA": "R03",
+            "WV": "R03",
+            "AL": "R04",
+            "FL": "R04",
+            "GA": "R04",
+            "KY": "R04",
+            "MS": "R04",
+            "NC": "R04",
+            "SC": "R04",
+            "TN": "R04",
+            "IL": "R05",
+            "IN": "R05",
+            "MI": "R05",
+            "MN": "R05",
+            "OH": "R05",
+            "WI": "R05",
+            "AR": "R06",
+            "LA": "R06",
+            "NM": "R06",
+            "OK": "R06",
+            "TX": "R06",
+            "IA": "R07",
+            "KS": "R07",
+            "MO": "R07",
+            "NE": "R07",
+            "CO": "R08",
+            "MT": "R08",
+            "ND": "R08",
+            "SD": "R08",
+            "UT": "R08",
+            "WY": "R08",
+            "AZ": "R09",
+            "CA": "R09",
+            "HI": "R09",
+            "NV": "R09",
+            "GU": "R09",
+            "AS": "R09",
+            "MP": "R09",
+            "AK": "R10",
+            "ID": "R10",
+            "OR": "R10",
+            "WA": "R10",
+        }
+        return fema.get(st, "")
 
-    def _copy_initial_checkins(self):
-        # After first click, new calls go into New/Late
-        self._initial_phase = False
-        calls = self._dedupe_calls_from_text(self.initial_text.toPlainText())
-        summary = self._build_short_code_summary(calls)
-        QApplication.clipboard().setText(summary)
-        QMessageBox.information(self, "Copied", "Initial check-in short codes copied to clipboard.")
+    def _lookup_operator_meta(self, callsign: str) -> Dict[str, str]:
+        meta = {"name": "", "state": "", "grid": "", "region": ""}
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return meta
+        try:
+            root = Path(__file__).resolve().parents[2]
+            db_path = root / "config" / "freqinout_nets.db"
+            if not db_path.exists():
+                return meta
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT name, state, grid FROM operator_checkins WHERE callsign=?",
+                (cs,),
+            )
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                meta["name"] = row[0] or ""
+                meta["state"] = (row[1] or "").upper()
+                meta["grid"] = (row[2] or "").upper()
+                if meta["state"]:
+                    meta["region"] = self._region_for_state(meta["state"])
+        except Exception:
+            pass
+        return meta
 
-    def _copy_new_checkins(self):
-        calls = self._dedupe_calls_from_text(self.new_late_text.toPlainText())
-        summary = self._build_short_code_summary(calls)
-        QApplication.clipboard().setText(summary)
-        QMessageBox.information(self, "Copied", "New/late check-in short codes copied to clipboard.")
+    def _ensure_row(self, callsign: str) -> int:
+        if callsign in self._checkin_rows:
+            return self._checkin_rows[callsign]
+        row = self.checkin_table.rowCount()
+        self.checkin_table.insertRow(row)
+        self._checkin_rows[callsign] = row
+        for col in range(self.checkin_table.columnCount()):
+            item = QTableWidgetItem("")
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self.checkin_table.setItem(row, col, item)
+        return row
 
-    def _merge_checkins(self):
-        """
-        Merge New/Late into Initial panel, then clear New/Late panel.
-        After this, we continue appending new timer-detected calls
-        only into New/Late (per your instructions).
-        """
-        new_calls = self._dedupe_calls_from_text(self.new_late_text.toPlainText())
-        if not new_calls:
-            self.new_late_text.clear()
-            self._late_calls.clear()
+    def _update_row(self, callsign: str, data: Dict) -> None:
+        row = self._ensure_row(callsign)
+        cols = ["CALLSIGN", "NAME", "ST", "GRID", "REGION", "MODE", "SNR", "DT ms", "OFFSET", "STATUS"]
+        values = [
+            callsign,
+            data.get("name", ""),
+            data.get("state", ""),
+            data.get("grid", ""),
+            data.get("region", ""),
+            data.get("mode", ""),
+            "" if data.get("snr") is None else str(data.get("snr")),
+            "" if data.get("dt") is None else str(data.get("dt")),
+            "" if data.get("offset") is None else str(data.get("offset")),
+            data.get("status", ""),
+        ]
+        for idx, val in enumerate(values):
+            item = self.checkin_table.item(row, idx)
+            if item is None:
+                item = QTableWidgetItem()
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.checkin_table.setItem(row, idx, item)
+            item.setText(val)
+            # Status coloring
+            if cols[idx] == "STATUS":
+                status_upper = val.upper()
+                mismatch = self._status_mismatch.get(callsign, False)
+                if status_upper == "ACKED":
+                    item.setBackground(Qt.green)
+                elif status_upper.startswith("F!"):
+                    item.setBackground(Qt.red if mismatch else Qt.cyan)
+                else:
+                    item.setBackground(Qt.white)
+
+    def _upsert_checkin(
+        self,
+        callsign: str,
+        *,
+        status: str = "NEW",
+        mode: Optional[str] = None,
+        snr: Optional[float] = None,
+        dt_ms: Optional[float] = None,
+        offset: Optional[int] = None,
+        grid: str = "",
+        status_mismatch: bool = False,
+    ) -> None:
+        cs = (callsign or "").strip().upper()
+        if not cs:
             return
+        base = cs.split("/", 1)[0]
+        meta = self._lookup_operator_meta(base)
+        if grid:
+            meta["grid"] = grid
+        data = self._checkins.get(base, {})
+        current_status = (data.get("status") or "").upper()
+        # Do not downgrade from ACKED/F!xxx to NEW
+        if status:
+            if current_status.startswith("F!") or current_status == "ACKED":
+                status_to_use = data.get("status", status)
+            else:
+                status_to_use = status
+        else:
+            status_to_use = data.get("status", "")
+        data.update(
+            {
+                "name": meta.get("name", ""),
+                "state": meta.get("state", ""),
+                "grid": meta.get("grid", ""),
+                "region": meta.get("region", ""),
+                "mode": mode or data.get("mode", ""),
+                "snr": snr if snr is not None else data.get("snr"),
+                "dt": dt_ms if dt_ms is not None else data.get("dt"),
+                "offset": offset if offset is not None else data.get("offset"),
+                "status": status_to_use,
+            }
+        )
+        self._checkins[base] = data
+        self._status_mismatch[base] = status_mismatch
+        self._update_row(base, data)
 
-        # Merge into initial set and panel
-        for call in new_calls:
-            if call not in self._initial_calls:
-                self._initial_calls.add(call)
-                self._append_line_to_text(self.initial_text, call)
+    def _selected_callsign(self) -> Optional[str]:
+        selected = self.checkin_table.selectedItems()
+        if not selected:
+            return None
+        row = selected[0].row()
+        item = self.checkin_table.item(row, 0)
+        return item.text().strip().upper() if item else None
 
-        # Clear new/late panel and set
-        self.new_late_text.clear()
-        self._late_calls.clear()
+    def _set_group_target(self):
+        txt = self.group_edit.text().strip().upper()
+        if txt and not txt.startswith("@"):
+            txt = "@" + txt.lstrip("@")
+        if txt.count("@") > 1:
+            txt = "@" + txt.replace("@", "")
+        self._group_target = txt
+        self.group_edit.setText(txt)
 
-        QMessageBox.information(self, "Merged", "New / Late check-ins merged into Initial list.")
+    def _set_spotter_form(self):
+        if not self.spotter_combo.isEnabled():
+            QMessageBox.warning(self, "Spotter", "No JS8Spotter forms found.")
+            return
+        self._spotter_form = self.spotter_combo.currentText().strip().upper()
+        self._expected_form = self._spotter_form
 
-    def _save_checkins(self):
+    def _ack_checkins(self):
+        if not self._net_in_progress:
+            QMessageBox.information(self, "Net", "Start the net before ACK.")
+            return
+        new_calls = [c for c, d in self._checkins.items() if (d.get("status") or "").upper() == "NEW"]
+        if not new_calls:
+            QMessageBox.information(self, "ACK", "No NEW check-ins to ACK.")
+            return
+        short_codes = self._build_short_code_summary(new_calls)
+        if not short_codes:
+            QMessageBox.information(self, "ACK", "No callsigns to ACK.")
+            return
+        text = f"ACK {short_codes}"
+        if self._send_js8_message(text):
+            for cs in new_calls:
+                self._upsert_checkin(cs, status="ACKED")
+
+    def _group_spotter(self):
+        if not self._net_in_progress:
+            QMessageBox.information(self, "Net", "Start the net first.")
+            return
+        group = self._group_target or self.group_edit.text().strip().upper()
+        if group and not group.startswith("@"):
+            group = "@" + group
+        if not group:
+            QMessageBox.warning(self, "Group", "Set a group first.")
+            return
+        if self._spotter_form is None:
+            QMessageBox.warning(self, "Spotter", "Select a spotter form first.")
+            return
+        mycall = self._my_callsign()
+        if not mycall:
+            QMessageBox.warning(self, "Callsign", "Configure your callsign in Settings.")
+            return
+        self._expected_form = self._spotter_form
+        text = f"{mycall}: {group} E? {self._spotter_form}"
+        self._send_js8_message(text)
+
+    def _single_spotter(self):
+        if not self._net_in_progress:
+            QMessageBox.information(self, "Net", "Start the net first.")
+            return
+        if self._spotter_form is None:
+            QMessageBox.warning(self, "Spotter", "Select a spotter form first.")
+            return
+        cs = self._selected_callsign()
+        if not cs:
+            QMessageBox.information(self, "Spotter", "Select one check-in row.")
+            return
+        mycall = self._my_callsign()
+        if not mycall:
+            QMessageBox.warning(self, "Callsign", "Configure your callsign in Settings.")
+            return
+        self._expected_form = self._spotter_form
+        text = f"{mycall}: {cs} E? {self._spotter_form}"
+        self._send_js8_message(text)
+
+    def _save_checkins(self, *, show_message: bool = True):
         """
-        No external log files are written here; file logging happens when the net ends.
-        This button is kept for parity with FLDigi (and to future-proof if you want
-        mid-net file saves). For now it just acknowledges the check-ins are captured.
+        Increment check-in counters for current check-ins (once per net).
         """
-        QMessageBox.information(self, "Saved", "Check-ins are ready and will be logged when the net ends.")
+        try:
+            for cs in self._checkins.keys():
+                base = cs.split("/", 1)[0]
+                if base in self._checkins_saved:
+                    continue
+                self._increment_checkin_counter(base)
+                self._checkins_saved.add(base)
+        except Exception as e:
+            log.error("JS8CallNetControl: save checkins failed: %s", e)
+        if show_message:
+            QMessageBox.information(self, "Saved", "Check-ins recorded for this net.")
         self._refresh_operator_history_views()
 
     # ---------------- LOG FILE WRITING ---------------- #
@@ -845,10 +1124,8 @@ class JS8CallNetControlTab(QWidget):
         filename = f"{safe_net}-{role}-{date_str}.txt"
         path = net_logs_dir / filename
 
-        # Collect all full callsigns from both panels
-        all_calls = self._dedupe_calls_from_text(
-            self.initial_text.toPlainText() + "\n" + self.new_late_text.toPlainText()
-        )
+        # Collect all full callsigns from the table
+        all_calls = list(self._checkins.keys())
 
         # Try to find band from net_schedule
         band = self._lookup_band_for_net(net_name)
@@ -1153,6 +1430,57 @@ class JS8CallNetControlTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("JS8CallNetControl: failed to upsert untrusted operator %s: %s", callsign, e)
+
+    def _increment_checkin_counter(self, callsign: str) -> None:
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return
+        try:
+            root = Path(__file__).resolve().parents[2]
+            db_path = root / "config" / "freqinout_nets.db"
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_checkins (
+                    callsign TEXT PRIMARY KEY,
+                    name TEXT,
+                    state TEXT,
+                    grid TEXT,
+                    group1 TEXT,
+                    group2 TEXT,
+                    group3 TEXT,
+                    group_role TEXT,
+                    first_seen_utc TEXT,
+                    last_seen_utc TEXT,
+                    last_net TEXT,
+                    last_role TEXT,
+                    checkin_count INTEGER DEFAULT 0,
+                    groups_json TEXT,
+                    trusted INTEGER DEFAULT 1
+                )
+                """
+            )
+            cur.execute("SELECT checkin_count FROM operator_checkins WHERE callsign=?", (cs,))
+            row = cur.fetchone()
+            if row:
+                count = int(row[0] or 0) + 1
+                cur.execute(
+                    "UPDATE operator_checkins SET checkin_count=?, last_seen_utc=strftime('%Y-%m-%d', 'now') WHERE callsign=?",
+                    (count, cs),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO operator_checkins (callsign, first_seen_utc, last_seen_utc, checkin_count, trusted)
+                    VALUES (?, strftime('%Y-%m-%d','now'), strftime('%Y-%m-%d','now'), 1, 0)
+                    """,
+                    (cs,),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.error("JS8CallNetControl: failed to increment checkin count for %s: %s", cs, e)
     def _maybe_capture_grid_report(self, line: str) -> None:
         """
         Capture GRID reports in DIRECTED.TXT lines (ignore GRID? queries).
@@ -1372,6 +1700,8 @@ class JS8CallNetControlTab(QWidget):
         """
         if not self.auto_query_msg_id:
             return
+        if self._auto_query_paused_by_net:
+            return
         key = f"{call}:{msg_id}"
         if key in self._queried_msg_ids:
             return
@@ -1389,6 +1719,8 @@ class JS8CallNetControlTab(QWidget):
             return
         if not self._pending_queries:
             log.debug("JS8CallNetControl: no pending queries to process")
+            return
+        if self._auto_query_paused_by_net:
             return
         # Avoid querying while RX just occurred (idle gap)
         if time.time() - self._last_rx_ts < 2.0:
@@ -1440,12 +1772,45 @@ class JS8CallNetControlTab(QWidget):
                     base_frm = self._base_callsign(frm) if frm else ""
                     if base_frm:
                         self._call_last_rx_ts[base_frm] = now_ts
+                        if self._net_in_progress:
+                            # Extract metrics from API payload when available
+                            try:
+                                snr_val = float(p.get("SNR")) if p.get("SNR") not in (None, "") else None
+                            except Exception:
+                                snr_val = None
+                            speed_val = p.get("SPEED")
+                            mode_name = ""
+                            if speed_val is not None:
+                                try:
+                                    sval = int(speed_val)
+                                    mode_name = {0: "Normal", 1: "Fast", 2: "Turbo", 4: "Slow"}.get(
+                                        sval, str(speed_val)
+                                    )
+                                except Exception:
+                                    mode_name = str(speed_val)
+                            try:
+                                offset_val = int(p.get("OFFSET")) if p.get("OFFSET") not in (None, "") else None
+                            except Exception:
+                                offset_val = None
+                            try:
+                                dt_val = float(p.get("DT")) if p.get("DT") not in (None, "") else None
+                            except Exception:
+                                dt_val = None
+                            self._upsert_checkin(
+                                base_frm,
+                                status="NEW",
+                                mode=mode_name,
+                                snr=snr_val,
+                                dt_ms=dt_val,
+                                offset=offset_val,
+                                grid=(p.get("GRID") or "").strip().upper(),
+                            )
                     snr_val = None
                     try:
                         snr_val = float(p.get("SNR")) if p.get("SNR") not in (None, "") else None
                     except Exception:
                         snr_val = None
-                    if self.auto_query_msg_id:
+                    if self.auto_query_msg_id and not self._auto_query_paused_by_net:
                         if self._net_lockout_active():
                             log.debug("JS8CallNetControl: skipping auto-query (net lockout active)")
                         elif "YES MSG" in combined:
@@ -1464,8 +1829,19 @@ class JS8CallNetControlTab(QWidget):
                             if 4 <= len(token) <= 6 and token[:2].isalpha() and token[2:4].isdigit():
                                 self._update_operator_grid(base_frm or frm, token, self._active_group_name())
                                 break
+                    # Spotter form response handling
+                    if self._net_in_progress and self._expected_form:
+                        forms_found = re.findall(r"F![0-9]{3}", combined)
+                        for form in forms_found:
+                            if base_frm:
+                                mismatch = form != self._expected_form
+                                self._upsert_checkin(
+                                    base_frm,
+                                    status=form,
+                                    status_mismatch=mismatch,
+                                )
                     # Auto grid query when allowed
-                    if self.auto_query_grids and not self._net_lockout_active():
+                    if self.auto_query_grids and not self._auto_query_paused_by_net and not self._net_lockout_active():
                         target_cs = base_frm or frm
                         if target_cs and self._operator_missing_grid(target_cs):
                             self._maybe_queue_grid_query(target_cs, snr_val, msg_params=p, text=txt)
@@ -1615,6 +1991,8 @@ class JS8CallNetControlTab(QWidget):
         call = (callsign or "").strip().upper()
         if not call:
             return
+        if self._auto_query_paused_by_net:
+            return
         # Only query when traffic is directed to us or a group (skip third-party directed traffic)
         mycall = (self._my_callsign() or "").strip().upper()
         dest = (msg_params.get("TO") or "").strip().upper()
@@ -1645,6 +2023,8 @@ class JS8CallNetControlTab(QWidget):
 
     def _maybe_process_next_grid(self) -> None:
         if not self._pending_grid_queries:
+            return
+        if self._auto_query_paused_by_net:
             return
         if time.time() - self._grid_last_rx_ts < 2.0:
             return
@@ -1895,19 +2275,47 @@ class JS8CallNetControlTab(QWidget):
 
     def _build_short_code_summary(self, calls: List[str]) -> str:
         """
-        Take a list of full callsigns, keep only last 3 characters of each,
-        and return them as a space-delimited string.
+        Build minimal unique short codes from callsigns.
+
+        Rules:
+          - If a call has a suffix (e.g. K7ABC/P), strip everything after "/" and
+            derive the short code from the base call.
+          - Start with the last 3 characters of the base call (or fewer if shorter).
+          - If duplicates collide, incrementally extend to 4, 5, ... characters
+            (up to the full base) until each code is unique.
+          - Preserve input order; return space-delimited codes.
         """
-        shorts: List[str] = []
+        bases: List[str] = []
         for cs in calls:
-            cs = cs.strip().upper()
-            if not cs:
+            base = (cs or "").strip().upper()
+            if not base:
                 continue
-            if len(cs) <= 3:
-                shorts.append(cs)
-            else:
-                shorts.append(cs[-3:])
-        return " ".join(shorts)
+            if "/" in base:
+                base = base.split("/", 1)[0]
+            bases.append(base)
+
+        # Track how many chars to use from the end for each base call
+        lengths = [min(3, len(b)) if len(b) < 3 else 3 for b in bases]
+
+        # Gradually extend colliding codes until unique or max length reached
+        while True:
+            codes = [b[-lengths[i]:] for i, b in enumerate(bases)]
+            counts = {}
+            for c in codes:
+                counts[c] = counts.get(c, 0) + 1
+            duplicates = {idx for idx, c in enumerate(codes) if counts[c] > 1}
+            if not duplicates:
+                break
+            progressed = False
+            for idx in duplicates:
+                if lengths[idx] < len(bases[idx]):
+                    lengths[idx] += 1
+                    progressed = True
+            if not progressed:
+                # Cannot disambiguate further (very short/identical bases); exit
+                break
+
+        return " ".join(bases[i][-lengths[i]:] for i in range(len(bases)))
 
     # ---------------- Qt events ---------------- #
 

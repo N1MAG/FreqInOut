@@ -182,6 +182,10 @@ class SettingsTab(QWidget):
         self.control_combo.addItems(["FLRig", "JS8Call", "Manual"])
         ctrl_row.addWidget(self.control_combo)
         ctrl_row.addSpacing(12)
+        self.use_scheduler_chk = QCheckBox("Use Scheduler")
+        self.use_scheduler_chk.setToolTip("Enable automatic schedule-driven frequency changes.")
+        ctrl_row.addWidget(self.use_scheduler_chk)
+        ctrl_row.addSpacing(12)
         ctrl_row.addWidget(QLabel("FLRig XMLRPC Port:"))
         self.flrig_port_edit = QLineEdit()
         self.flrig_port_edit.setFixedWidth(80)
@@ -393,6 +397,7 @@ class SettingsTab(QWidget):
         if ctrl not in allowed_ctrl:
             ctrl = "FLRig"
         self.control_combo.setCurrentText(ctrl)
+        self.use_scheduler_chk.setChecked(bool(data.get("use_scheduler", True)))
 
         port_txt = str(data.get("js8_port", "2442") or "2442")
         self.js8_port_edit.setText(port_txt)
@@ -475,6 +480,7 @@ class SettingsTab(QWidget):
             data["timezone"] = tz
 
         data["control_via"] = self.control_combo.currentText().strip()
+        data["use_scheduler"] = bool(self.use_scheduler_chk.isChecked())
 
         try:
             port_val = int(self.js8_port_edit.text().strip() or "2442")
@@ -530,6 +536,7 @@ class SettingsTab(QWidget):
                 "operator_grid6": data["operator_grid6"],
                 "timezone": data["timezone"],
                 "control_via": data["control_via"],
+                "use_scheduler": data["use_scheduler"],
                 "js8_port": data["js8_port"],
                 "js8_offset_hz": data.get("js8_offset_hz", 0),
                 "primary_js8_groups": data["primary_js8_groups"],

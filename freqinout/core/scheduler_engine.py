@@ -186,12 +186,14 @@ class SchedulerEngine(QObject):
         parent: Optional[QObject] = None,
         rig: Optional[FLRigClient] = None,
         js8: Optional[JS8ControlClient] = None,
+        varac: Optional[object] = None,
         poll_interval_ms: int = 5_000,
     ) -> None:
         super().__init__(parent)
         self.settings = SettingsManager()
         self.rig: Optional[FLRigClient] = rig
         self.js8: Optional[JS8ControlClient] = js8
+        self.varac: Optional[object] = varac
 
         # We keep a small cache of the last applied entry so we don't
         # spam the rig with identical commands.
@@ -756,6 +758,12 @@ class SchedulerEngine(QObject):
         or Net), computes the next change time, and optionally drives
         the rig.
         """
+        # Pick up any setting changes (control_via, use_scheduler, offsets, etc.)
+        try:
+            self.settings.reload()
+        except Exception as e:
+            log.debug("SchedulerEngine: settings reload failed (continuing with cached data): %s", e)
+
         hf_sched, net_sched = self._load_schedules(force=force)
 
         try:
@@ -973,6 +981,47 @@ class SchedulerEngine(QObject):
             log.debug(
                 "SchedulerEngine: control backend unavailable for mode=%s; not sending commands.",
                 self.settings.get("control_via", "FLRig"),
+            )
+            self.active_entry_changed.emit(entry, source)
+            return
+
+        # Scheduler master switch (from Settings tab)
+        try:
+            if not bool(self.settings.get("use_scheduler", True)):
+                log.info("SchedulerEngine: scheduler disabled in settings; no frequency changes sent.")
+                self.active_entry_changed.emit(entry, source)
+                return
+        except Exception:
+            pass
+
+        # Safety: avoid changing frequency while a backend is busy transmitting.
+        busy_reasons = []
+        if self.rig and hasattr(self.rig, "get_ptt"):
+            try:
+                if self.rig.get_ptt():
+                    busy_reasons.append("FLRig PTT is active")
+            except Exception as e:
+                log.warning("SchedulerEngine: get_ptt() failed: %s", e)
+
+        if self.js8 and hasattr(self.js8, "is_busy"):
+            try:
+                if self.js8.is_busy():
+                    busy_reasons.append("JS8Call is busy (RX/TX)")
+            except Exception as e:
+                log.warning("SchedulerEngine: js8.is_busy() failed: %s", e)
+
+        if self.varac and hasattr(self.varac, "is_busy"):
+            try:
+                if self.varac.is_busy():
+                    busy_reasons.append("VarAC is busy")
+            except Exception as e:
+                log.warning("SchedulerEngine: varac.is_busy() failed: %s", e)
+
+        if busy_reasons:
+            log.warning(
+                "SchedulerEngine: skipping frequency change for %s schedule due to activity: %s",
+                source,
+                "; ".join(busy_reasons),
             )
             self.active_entry_changed.emit(entry, source)
             return

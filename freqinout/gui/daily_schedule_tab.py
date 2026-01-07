@@ -773,6 +773,12 @@ class DailyScheduleTab(QWidget):
         dt = self._get_suspend_until()
         return dt is not None and datetime.datetime.now(datetime.timezone.utc) < dt
 
+    def _scheduler_enabled(self) -> bool:
+        try:
+            return bool(self.settings.get("use_scheduler", True))
+        except Exception:
+            return True
+
     def _set_suspend_button(self, active: bool):
         if active:
             self.suspend_btn.setText("Schedule Suspended for 30 Minutes")
@@ -782,6 +788,12 @@ class DailyScheduleTab(QWidget):
             self.suspend_btn.setStyleSheet("QPushButton { background-color: gold; color: black; }")
 
     def _update_suspend_state(self):
+        enabled = self._scheduler_enabled()
+        self.suspend_btn.setEnabled(enabled)
+        if not enabled:
+            self._set_suspend_button(False)
+            return
+
         dt = self._get_suspend_until()
         if dt and datetime.datetime.now(datetime.timezone.utc) < dt:
             self._set_suspend_button(True)

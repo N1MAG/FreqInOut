@@ -31,8 +31,10 @@
   <h2>1. Prerequisites</h2>
   <ul class="section-list">
     <li><strong>Python</strong>: 3.9-3.12 with requirements installed.</li>
+    <li><strong>Debian/Ubuntu Python</strong>: Use the stock distro Python (no PPAs). Install tooling once with <code>sudo apt-get install python3 python3-venv python3-pip</code>, then create a venv (<code>python3 -m venv venv && source venv/bin/activate</code>) and <code>pip install -r requirements.txt</code>.</li>
     <li><strong>Radio software</strong>: FLRig (for rig control) and/or JS8Call (for JS8). Install and configure them separately.</li>
     <li><strong>Paths</strong>: Know where your JS8Call log files live (DIRECTED.TXT, ALL.TXT, inbox_v1 / inbox.db3) and where FLMSG/FLAMP/VarAC folders are if you use Message Viewer.</li>
+    <li><strong>Debian/Ubuntu prerequisites</strong>: QtWebEngine needs a few X11 helpers. Install once via <code>sudo apt-get install libxcb-cursor0 libxcb-xinerama0</code>.</li>
   </ul>
 
   <h2>2. First-Time Setup (Settings Tab)</h2>
@@ -168,7 +170,7 @@
 
   <h2>8. Operator History</h2>
   <ul class="section-list">
-    <li>Tracks first/last seen (YYYYMMDD), trust flag, groups, grids. CSV import overwrites grids on matching callsigns.</li>
+    <li>Tracks last seen (YYYYMMDD), trust flag, groups, grids. CSV import overwrites grids on matching callsigns.</li>
     <li>Filter by group/trust (Untrusted option). "Untrusted" and blank filters sorted to bottom of filter list.</li>
     <li>Auto-insert logic: outbound JS8 transmissions to unknown calls (non-Public group) add them as untrusted; last_seen_utc updated.</li>
     <li>Suffix handling: variants like KG5RKW/P map to base callsign for history and map display.</li>

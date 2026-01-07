@@ -319,7 +319,20 @@ class FldigiNetControlTab(QWidget):
         dt = self._get_suspend_until()
         return dt is not None and datetime.datetime.now(datetime.timezone.utc) < dt
 
+    def _scheduler_enabled(self) -> bool:
+        try:
+            return bool(self.settings.get("use_scheduler", True))
+        except Exception:
+            return True
+
     def _update_suspend_state(self):
+        enabled = self._scheduler_enabled()
+        self.suspend_btn.setEnabled(enabled)
+        if not enabled:
+            self._suspend_warned = False
+            self._set_suspend_button(active=False)
+            return
+
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         suspend_until = self._get_suspend_until()
         now_utc = datetime.datetime.now(datetime.timezone.utc)
