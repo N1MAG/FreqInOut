@@ -120,6 +120,7 @@ class JS8CallNetControlTab(QWidget):
         self._spotter_form: Optional[str] = None
         self._expected_form: Optional[str] = None
         self._status_mismatch: Dict[str, bool] = {}
+        self._flrig_start_style = "QPushButton { background-color: #444; color: white; }"
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -508,7 +509,7 @@ class JS8CallNetControlTab(QWidget):
         if hasattr(self, "ad_hoc_btn"):
             self.ad_hoc_btn.setEnabled(False)
         self.start_btn.setEnabled(False)
-        self.start_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; }")
+        self.start_btn.setStyleSheet(self._flrig_start_style)
         self.end_btn.setEnabled(True)
         self.end_btn.setStyleSheet("QPushButton { background-color: red; color: white; }")
         self.ack_btn.setEnabled(True)

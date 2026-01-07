@@ -132,13 +132,111 @@ class FreqPlannerTab(QWidget):
 
     def _load_schedules(self) -> Tuple[List[Dict], List[Dict]]:
         data = self.settings.all()
-        hf = data.get("hf_schedule") or data.get("daily_schedule") or []
-        net = data.get("net_schedule") or []
+
+        # Try DB-backed schedules first
+        hf_db = self._load_hf_from_db()
+        net_db = self._load_net_from_db()
+
+        hf = hf_db if hf_db is not None else data.get("hf_schedule") or data.get("daily_schedule") or []
+        net = net_db if net_db is not None else data.get("net_schedule") or []
         if not isinstance(hf, list):
             hf = []
         if not isinstance(net, list):
             net = []
         return hf, net
+
+    def _load_hf_from_db(self) -> Optional[List[Dict]]:
+        """
+        Load HF/daily schedule from config/freqinout.db if available.
+        """
+        try:
+            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout.db"
+            if not db_path.exists():
+                return None
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT day_utc, band, mode, vfo, frequency, start_utc, end_utc, group_name, auto_tune
+                FROM daily_schedule_tab
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+            out = []
+            for day_utc, band, mode, vfo, freq, start_utc, end_utc, group_name, auto_tune in rows:
+                out.append(
+                    {
+                        "day_utc": day_utc or "ALL",
+                        "band": band or "",
+                        "mode": mode or "",
+                        "vfo": (vfo or "A").strip().upper() or "A",
+                        "frequency": str(freq or ""),
+                        "start_utc": start_utc or "",
+                        "end_utc": end_utc or "",
+                        "group_name": group_name or "",
+                        "auto_tune": bool(auto_tune),
+                    }
+                )
+            return out
+        except Exception:
+            return None
+
+    def _load_net_from_db(self) -> Optional[List[Dict]]:
+        """
+        Load net schedule from config/freqinout_nets.db if available.
+        """
+        try:
+            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            if not db_path.exists():
+                return None
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT day_utc, recurrence, biweekly_offset_weeks, band, mode, vfo, frequency,
+                       start_utc, end_utc, early_checkin, primary_js8call_group, comment, net_name
+                FROM net_schedule_tab
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+            out = []
+            for (
+                day_utc,
+                recurrence,
+                biweekly_offset_weeks,
+                band,
+                mode,
+                vfo,
+                freq,
+                start_utc,
+                end_utc,
+                early_checkin,
+                primary_js8call_group,
+                comment,
+                net_name,
+            ) in rows:
+                out.append(
+                    {
+                        "day_utc": day_utc or "ALL",
+                        "recurrence": recurrence or "Weekly",
+                        "biweekly_offset_weeks": biweekly_offset_weeks or 0,
+                        "band": band or "",
+                        "mode": mode or "",
+                        "vfo": (vfo or "A").strip().upper() or "A",
+                        "frequency": str(freq or ""),
+                        "start_utc": start_utc or "",
+                        "end_utc": end_utc or "",
+                        "early_checkin": int(early_checkin or 0),
+                        "primary_js8call_group": primary_js8call_group or "",
+                        "comment": comment or "",
+                        "net_name": net_name or "",
+                    }
+                )
+            return out
+        except Exception:
+            return None
 
     def _parse_hhmm(self, s: str) -> int | None:
         s = (s or "").strip()
