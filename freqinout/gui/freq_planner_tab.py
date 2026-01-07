@@ -367,6 +367,9 @@ class FreqPlannerTab(QWidget):
         if start_m is None or end_m is None:
             return None
         overnight = start_m > end_m
+        if not overnight:
+            if end_m % 60 == 0:
+                end_m = min(end_m + 60, 24 * 60)
 
         # Map day_name to offset from current UTC day (DAY_NAMES starts with Sunday=0)
         try:
@@ -422,6 +425,8 @@ class FreqPlannerTab(QWidget):
                 emin = self._parse_hhmm(row.get("end_utc", ""))
                 if smin is None or emin is None:
                     continue
+                if emin % 60 == 0:
+                    emin = min(emin + 60, 24 * 60)
                 # Display times should use actual start/end (no early check-in adjustment)
                 for dname, hour in self._expand_hours_for_day(day, smin, emin, early=0):
                     net_by_day_hour.setdefault((dname, hour), []).append(row)
@@ -436,12 +441,23 @@ class FreqPlannerTab(QWidget):
                 return
             hf_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, band))
 
+        def _adjust_end(smin_val: int, emin_val: int) -> int:
+            """
+            If end minute is on an hour boundary, extend to cover that full hour.
+            """
+            if emin_val % 60 == 0:
+                emin_val += 60
+            if emin_val > 24 * 60:
+                emin_val = 24 * 60
+            return emin_val
+
         for row in hf_sched:
             try:
                 smin = self._parse_hhmm(row.get("start_utc", ""))
                 emin = self._parse_hhmm(row.get("end_utc", ""))
                 if smin is None or emin is None:
                     continue
+                emin = _adjust_end(smin, emin)
                 band = (row.get("band") or "").strip()
                 if not band:
                     continue
