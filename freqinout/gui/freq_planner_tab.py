@@ -431,19 +431,22 @@ class FreqPlannerTab(QWidget):
                         seen_n.add(n)
                         nets_uniq.append(n)
 
+                has_net = bool(nets_here)
+                net_label = " / ".join(nets_uniq) if nets_uniq else ("Net" if has_net else "")
+
                 cell_text = ""
-                if band_label and nets_uniq:
-                    cell_text = f"{band_label}|{' / '.join(nets_uniq)}"
+                if band_label and net_label:
+                    cell_text = f"{band_label}|{net_label}"
                 elif band_label:
                     cell_text = band_label
-                elif nets_uniq:
-                    cell_text = " / ".join(nets_uniq)
+                elif net_label:
+                    cell_text = net_label
 
                 item = QTableWidgetItem(cell_text)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
 
                 # Highlight: current UTC day + has net
-                if day_name == current_day_name and nets_uniq:
+                if day_name == current_day_name and has_net:
                     item.setBackground(Qt.yellow)
 
                 self.table.setItem(hour, col, item)
