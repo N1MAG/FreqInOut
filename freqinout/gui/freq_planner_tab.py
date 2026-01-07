@@ -366,8 +366,6 @@ class FreqPlannerTab(QWidget):
         end_m = self._parse_hhmm(row.get("end_utc", ""))
         if start_m is None or end_m is None:
             return None
-        early = int(row.get("early_checkin", 0) or 0)
-        start_m = max(0, start_m - early)
         overnight = start_m > end_m
 
         # Map day_name to offset from current UTC day (DAY_NAMES starts with Sunday=0)
@@ -424,9 +422,8 @@ class FreqPlannerTab(QWidget):
                 emin = self._parse_hhmm(row.get("end_utc", ""))
                 if smin is None or emin is None:
                     continue
-                early = int(row.get("early_checkin", "0") or 0)
-                smin = max(0, smin - early)
-                for dname, hour in self._expand_hours_for_day(day, smin, emin, early=early):
+                # Display times should use actual start/end (no early check-in adjustment)
+                for dname, hour in self._expand_hours_for_day(day, smin, emin, early=0):
                     net_by_day_hour.setdefault((dname, hour), []).append(row)
             except Exception:
                 continue
@@ -485,7 +482,11 @@ class FreqPlannerTab(QWidget):
                 nets_here = net_by_day_hour.get((day_name, hour), [])
                 hf_rows = hf_by_day_hour.get((day_name, hour), [])
                 bands = []
-                for r in hf_rows:
+                # Sort HF rows by start time to preserve time-order transitions
+                def _hf_start_min(row):
+                    val = self._parse_hhmm(row.get("start_utc", ""))
+                    return val if val is not None else 0
+                for r in sorted(hf_rows, key=_hf_start_min):
                     b = (r.get("band") or "").strip()
                     if b:
                         bands.append(b)
@@ -514,12 +515,11 @@ class FreqPlannerTab(QWidget):
                 net_label = " / ".join(nets_uniq) if nets_uniq else ("Net" if has_net else "")
 
                 cell_text = ""
-                if band_label and net_label:
-                    cell_text = f"{band_label}|{net_label}"
-                elif band_label:
-                    cell_text = band_label
-                elif net_label:
+                # If any net exists, show only the net name (no band)
+                if net_label:
                     cell_text = net_label
+                else:
+                    cell_text = band_label
 
                 item = QTableWidgetItem(cell_text)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
