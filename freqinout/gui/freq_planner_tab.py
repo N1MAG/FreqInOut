@@ -5,6 +5,7 @@ import sqlite3
 from typing import List, Dict, Tuple
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -497,7 +498,7 @@ class FreqPlannerTab(QWidget):
 
                 # Highlight: current UTC day + has net
                 if day_name == current_day_name and has_net:
-                    item.setBackground(Qt.yellow)
+                    item.setBackground(QColor("#fff59d"))  # soft yellow highlight
 
                 self.table.setItem(hour, col, item)
 
