@@ -441,15 +441,21 @@ class FreqPlannerTab(QWidget):
                 return
             hf_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, band))
 
-        def _adjust_end(smin_val: int, emin_val: int) -> int:
-            """
-            If end minute is on an hour boundary, extend to cover that full hour.
-            """
-            if emin_val % 60 == 0:
-                emin_val += 60
-            if emin_val > 24 * 60:
-                emin_val = 24 * 60
-            return emin_val
+        # Collect start minutes per day to resolve boundary ownership
+        starts_by_day: Dict[str, set[int]] = {d: set() for d in DAY_NAMES}
+        for row in hf_sched:
+            try:
+                smin = self._parse_hhmm(row.get("start_utc", ""))
+                if smin is None:
+                    continue
+                day_txt = (row.get("day_utc", "ALL") or "").strip().upper()
+                targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
+                    DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
+                ]
+                for dname in targets:
+                    starts_by_day[dname].add(smin)
+            except Exception:
+                continue
 
         for row in hf_sched:
             try:
@@ -457,7 +463,6 @@ class FreqPlannerTab(QWidget):
                 emin = self._parse_hhmm(row.get("end_utc", ""))
                 if smin is None or emin is None:
                     continue
-                emin = _adjust_end(smin, emin)
                 band = (row.get("band") or "").strip()
                 if not band:
                     continue
@@ -479,6 +484,10 @@ class FreqPlannerTab(QWidget):
                         next_day = DAY_NAMES[next_idx]
                         intervals.append((next_day, 0, emin))
                 for dname, seg_start, seg_end in intervals:
+                    # If this segment ends exactly on an hour boundary, extend to cover that hour
+                    # unless another HF row starts at that exact minute on the same day.
+                    if seg_end % 60 == 0 and (seg_end % (24 * 60)) not in starts_by_day.get(dname, set()):
+                        seg_end = min(seg_end + 60, 24 * 60)
                     start_hour = seg_start // 60
                     end_hour = (seg_end - 1) // 60  # inclusive end minute
                     for hour in range(start_hour, end_hour + 1):
