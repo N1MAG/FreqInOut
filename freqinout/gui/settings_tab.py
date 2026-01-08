@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, Optional, List
 
 import psutil
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -69,6 +69,10 @@ class SettingsTab(QWidget):
     or by updating SettingsManager._data as a fallback. We *do not*
     call any .write() or .save() here to avoid AttributeError.
     """
+
+    settings_saved = Signal()
+
+    settings_saved = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -459,6 +463,14 @@ class SettingsTab(QWidget):
     def _save_settings_button(self):
         """Explicit save via the button (shows confirmation)."""
         self._save_settings(show_message=True)
+        try:
+            self.settings_saved.emit()
+        except Exception:
+            pass
+        try:
+            self.settings_saved.emit()
+        except Exception:
+            pass
 
     def _save_settings_quiet(self):
         """Auto-save on application exit (no dialog)."""

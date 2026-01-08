@@ -141,6 +141,7 @@ class JS8CallNetControlTab(QWidget):
         self._update_clock_labels()
         self._setup_js8_rx_timer()
         self._update_suspend_state()
+        self._refresh_auto_query_flags()
         if self._poll_timer:
             self._poll_timer.start()
 
@@ -275,9 +276,23 @@ class JS8CallNetControlTab(QWidget):
 
     # ---------------- SETTINGS & TIMER ---------------- #
 
+    def _refresh_auto_query_flags(self):
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        self._load_settings()
+
+    def on_settings_saved(self):
+        """
+        Slot invoked when Settings tab emits settings_saved.
+        """
+        self._refresh_auto_query_flags()
+
     def _load_settings(self):
         data = self.settings.all()
         self.auto_query_msg_id = bool(data.get("js8_auto_query_msg_id", False))
+        self.auto_query_grids = bool(data.get("js8_auto_query_grids", False))
 
         # Net name autocomplete from net_schedule
         net_sched = data.get("net_schedule", [])

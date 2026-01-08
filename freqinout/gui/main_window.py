@@ -161,6 +161,12 @@ class MainWindow(QMainWindow):
         self.scheduler = SchedulerEngine(self, rig=self.rig_client, js8=self.js8_control)
         self.scheduler.start()
 
+        # Wire settings_saved signal
+        try:
+            self.settings_tab.settings_saved.connect(self.js8_tab.on_settings_saved)
+        except Exception:
+            pass
+
         log.info("Main window initialized.")
         # Sync sidebar filters initially
         self._sync_map_filters_from_tab()
