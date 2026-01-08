@@ -120,67 +120,74 @@ class FldigiNetControlTab(QWidget):
         layout.addLayout(suspend_row)
 
         # Macro file paths in a framed group
-        paths_group = QGroupBox("Macro File Paths")
+        paths_group = QGroupBox("Check-in Files")
         paths_form = QFormLayout()
 
         # Net Check-in Macro File
         main_path_row = QHBoxLayout()
         self.main_log_edit = QLineEdit()
         self.main_log_edit.setPlaceholderText(
-            "Full path to main check-in macro file (used by FLDigi macro)"
+            "Full path to file (update macro if needed)"
         )
         main_browse_btn = QPushButton("Browse…")
         main_browse_btn.clicked.connect(self._browse_main_log)
         main_path_row.addWidget(self.main_log_edit, stretch=1)
         main_path_row.addWidget(main_browse_btn)
-        paths_form.addRow("Net Check-in Macro File:", main_path_row)
+        paths_form.addRow("Net Check-in File:", main_path_row)
 
         # Late Check-in Macro File
         late_path_row = QHBoxLayout()
         self.late_log_edit = QLineEdit()
         self.late_log_edit.setPlaceholderText(
-            "Full path to late check-ins macro file (used by FLDigi macro)"
+            "Full path to file (update macro if needed)"
         )
         late_browse_btn = QPushButton("Browse…")
         late_browse_btn.clicked.connect(self._browse_late_log)
         late_path_row.addWidget(self.late_log_edit, stretch=1)
         late_path_row.addWidget(late_browse_btn)
-        paths_form.addRow("Late Check-in Macro File:", late_path_row)
+        paths_form.addRow("New/Late Check-in File:", late_path_row)
 
         paths_group.setLayout(paths_form)
         layout.addWidget(paths_group)
 
         # Known operators row (DB-backed auto-suggest)
         known_row = QHBoxLayout()
-        known_row.addWidget(QLabel("Known operator:"))
-        self.known_op_edit = QLineEdit()
-        self.known_op_edit.setPlaceholderText("Type callsign or name to search operator history...")
-        known_row.addWidget(self.known_op_edit, stretch=1)
         self.add_known_main_btn = QPushButton("Add to Main")
         self.add_known_late_btn = QPushButton("Add to Late")
         known_row.addWidget(self.add_known_main_btn)
         known_row.addWidget(self.add_known_late_btn)
+        known_row.addWidget(QLabel("Operator Lookup/Add:"))
+        self.known_op_edit = QLineEdit()
+        self.known_op_edit.setPlaceholderText("Add new or type to search")
+        self.known_op_edit.setMaximumWidth(260)
+        known_row.addWidget(self.known_op_edit, stretch=1)
         known_row.addStretch()
         layout.addLayout(known_row)
-
-        # Macro hint
-        self.macro_hint_label = QLabel()
-        self.macro_hint_label.setWordWrap(True)
-        self.macro_hint_label.setStyleSheet("color:#666666; font-size:9pt;")
-        layout.addWidget(self.macro_hint_label)
 
         # Two panels for check-ins
         panels_row = QHBoxLayout()
 
         # Left: Main log
         left_col = QVBoxLayout()
-        left_col.addWidget(QLabel("<b>Main Check-in Log</b>"))
+        main_header = QHBoxLayout()
+        self.copy_main_btn = QPushButton("Copy")
+        self.copy_main_btn.clicked.connect(lambda: self._copy_text_to_clipboard(self.main_text.toPlainText()))
+        main_header.addWidget(self.copy_main_btn)
+        main_header.addWidget(QLabel("<b>Main Check-in Log</b>"))
+        main_header.addStretch()
+        left_col.addLayout(main_header)
         self.main_text = QTextEdit()
         left_col.addWidget(self.main_text)
 
         # Right: New/Late
         right_col = QVBoxLayout()
-        right_col.addWidget(QLabel("<b>New / Late Check-ins</b>"))
+        late_header = QHBoxLayout()
+        self.copy_late_btn = QPushButton("Copy")
+        self.copy_late_btn.clicked.connect(lambda: self._copy_text_to_clipboard(self.late_text.toPlainText()))
+        late_header.addWidget(self.copy_late_btn)
+        late_header.addWidget(QLabel("<b>New / Late Check-ins</b>"))
+        late_header.addStretch()
+        right_col.addLayout(late_header)
         self.late_text = QTextEdit()
         right_col.addWidget(self.late_text)
 
@@ -199,7 +206,6 @@ class FldigiNetControlTab(QWidget):
         btn_row = QHBoxLayout()
         self.start_btn = QPushButton("Start Net")
         self.save_btn = QPushButton("Save Check-ins")
-        self.copy_btn = QPushButton("Copy Summary")
         self.merge_btn = QPushButton("Merge Check-ins")
         self.end_btn = QPushButton("End Net")
 
@@ -212,7 +218,6 @@ class FldigiNetControlTab(QWidget):
 
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.save_btn)
-        btn_row.addWidget(self.copy_btn)
         btn_row.addWidget(self.merge_btn)
         btn_row.addWidget(self.end_btn)
         btn_row.addStretch()
@@ -220,11 +225,11 @@ class FldigiNetControlTab(QWidget):
         layout.addLayout(btn_row)
 
         # Signals
-        self.main_log_edit.textChanged.connect(self._update_macro_hint)
+        # Remove macro hint updates
+        self.main_log_edit.textChanged.connect(lambda _: None)
 
         self.start_btn.clicked.connect(self._start_net)
         self.save_btn.clicked.connect(self._save_checkins)
-        self.copy_btn.clicked.connect(self._copy_summary)
         self.end_btn.clicked.connect(self._end_net)
         self.merge_btn.clicked.connect(self._merge_late_into_main)
 
@@ -667,7 +672,6 @@ class FldigiNetControlTab(QWidget):
         self.main_log_edit.setText(data.get("fldigi_main_log_file", ""))
         self.late_log_edit.setText(data.get("fldigi_late_log_file", ""))
 
-        self._update_macro_hint()
         self._populate_net_name_from_schedule()
         self._update_net_name_min_width()
 
@@ -821,7 +825,6 @@ class FldigiNetControlTab(QWidget):
         )
         if path:
             self.main_log_edit.setText(path)
-            self._update_macro_hint()
 
     def _browse_late_log(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -832,17 +835,6 @@ class FldigiNetControlTab(QWidget):
         )
         if path:
             self.late_log_edit.setText(path)
-
-    def _update_macro_hint(self):
-        path = self.main_log_edit.text().strip()
-        if path:
-            self.macro_hint_label.setText(
-                f"Verify your macro loads this path to file for reporting check-ins:\n{path}"
-            )
-        else:
-            self.macro_hint_label.setText(
-                "Verify your macro loads the same file path used here for reporting check-ins."
-            )
 
     # ---------------- FILE HELPERS ---------------- #
 
@@ -1008,11 +1000,20 @@ class FldigiNetControlTab(QWidget):
 
         # Append to main file & panel
         main_text = self.main_text.toPlainText()
-        appended_block = late_from_file.strip("\n")
-        if main_text.strip():
-            new_main = main_text.rstrip("\n") + "\n" + appended_block + "\n"
+        appended_lines = []
+        for raw in late_from_file.splitlines():
+            cs, name, state = self._parse_checkin_line(raw)
+            if not cs and not name and not state:
+                continue
+            appended_lines.append(self._format_entry(cs, name, state))
+        appended_block = "\n".join(appended_lines).strip()
+        if appended_block:
+            if main_text.strip():
+                new_main = main_text.rstrip("\n") + "\n" + appended_block + "\n"
+            else:
+                new_main = appended_block + "\n"
         else:
-            new_main = appended_block + "\n"
+            new_main = main_text
 
         self.main_text.setPlainText(new_main)
         self._write_file(main_path, new_main)
@@ -1021,7 +1022,7 @@ class FldigiNetControlTab(QWidget):
         self.late_text.clear()
         self._write_file(late_path, "")
 
-        QMessageBox.information(self, "Merged", "New / Late check-ins merged into main log.")
+        # No popup needed; UI visibly clears the late list.
 
     def _copy_summary(self):
         """
@@ -1044,6 +1045,12 @@ class FldigiNetControlTab(QWidget):
         QApplication.clipboard().setText(summary)
         QMessageBox.information(self, "Copied", "Summary of check-in callsigns copied to clipboard.")
 
+    def _copy_text_to_clipboard(self, text: str):
+        """
+        Copy raw text (already normalized per line) to clipboard.
+        """
+        QApplication.clipboard().setText(text)
+
     def _end_net(self):
         if not self._net_in_progress:
             log.info("End Net clicked but no net_in_progress flag set; proceeding with DB load from file.")
@@ -1056,8 +1063,19 @@ class FldigiNetControlTab(QWidget):
 
         main_text = self._read_file(main_path)
         if not main_text.strip():
-            QMessageBox.information(self, "No Data", "Main Check-in Log file is empty; nothing to import.")
+            resp = QMessageBox.question(
+                self,
+                "End Net?",
+                "Main Check-in Log file is empty. End the net without importing any check-ins?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+            # End net even though no check-ins exist
             self._net_in_progress = False
+            self._set_net_button_styles(active=False)
+            log.info("FLDigi net ended (no check-ins file content).")
             return
 
         now_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
@@ -1072,6 +1090,7 @@ class FldigiNetControlTab(QWidget):
             cs, name, state = self._parse_checkin_line(line)
             if not cs:
                 continue
+            formatted = self._format_entry(cs, name, state)
             entries.append(
                 {
                     "callsign": cs,
@@ -1088,6 +1107,9 @@ class FldigiNetControlTab(QWidget):
         if entries:
             upsert_checkins(entries)
             self._bump_operator_history(entries)
+            # Rewrite main text with normalized formatting
+            normalized_lines = [self._format_entry(e["callsign"], e["name"], e["state"]) for e in entries]
+            self.main_text.setPlainText("\n".join(normalized_lines) + "\n")
             QMessageBox.information(
                 self,
                 "Net Ended",
@@ -1113,7 +1135,7 @@ class FldigiNetControlTab(QWidget):
         cs, name, state = self._parse_checkin_line(line)
         if not cs and not name and not state:
             return
-        formatted = " ".join([part for part in (cs, name, state) if part]).strip()
+        formatted = self._format_entry(cs, name, state)
         if not formatted:
             return
         if self.main_text.toPlainText().strip():
@@ -1128,7 +1150,7 @@ class FldigiNetControlTab(QWidget):
         cs, name, state = self._parse_checkin_line(line)
         if not cs and not name and not state:
             return
-        formatted = " ".join([part for part in (cs, name, state) if part]).strip()
+        formatted = self._format_entry(cs, name, state)
         if not formatted:
             return
         if self.late_text.toPlainText().strip():
@@ -1167,6 +1189,13 @@ class FldigiNetControlTab(QWidget):
         elif tokens:
             return tokens[0].upper(), "", ""
         return "", "", ""
+
+    def _format_entry(self, cs: str, name: str, state: str) -> str:
+        """
+        Normalize check-in display to 'CALL / Name / ST' with single separators.
+        """
+        parts = [p for p in (cs.strip().upper(), name.strip(), state.strip().upper()) if p]
+        return " / ".join(parts)
 
     def _bump_operator_history(self, entries: List[Dict]):
         """
@@ -1220,3 +1249,4 @@ class FldigiNetControlTab(QWidget):
                 conn.close()
         except Exception as ex:
             log.error("Failed to bump operator history: %s", ex)
+
