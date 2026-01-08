@@ -106,3 +106,22 @@ def setup_logger(name: str = "freqinout", log_to_console=True, log_level=logging
     return logger
 
 log = setup_logger()
+
+
+def set_log_level(level_name: str) -> None:
+    """
+    Update the global logger level (both console and file handlers) at runtime.
+    """
+    lvl = _LEVEL_MAP.get(level_name.strip().upper(), logging.INFO)
+    logger = logging.getLogger("freqinout")
+    logger.setLevel(lvl)
+    for h in logger.handlers:
+        h.setLevel(lvl)
+
+
+def get_log_level() -> str:
+    """
+    Return the current global log level name.
+    """
+    logger = logging.getLogger("freqinout")
+    return logging.getLevelName(logger.getEffectiveLevel())
