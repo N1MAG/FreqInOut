@@ -364,11 +364,15 @@ class FldigiNetControlTab(QWidget):
                 new_until = suspend_until + datetime.timedelta(minutes=30)
                 self._set_suspend_until(new_until)
                 self._suspend_warned = False  # allow another warning near new expiry
-        self._set_suspend_button(active=True)
+        self._set_suspend_button(active=True, remaining_sec=remaining)
 
-    def _set_suspend_button(self, active: bool):
+    def _set_suspend_button(self, active: bool, remaining_sec: Optional[float] = None):
         if active:
-            self.suspend_btn.setText("Schedule Suspended for 30 Minutes")
+            mins = 0
+            if remaining_sec is not None:
+                mins = max(0, int((remaining_sec + 59) // 60))
+            label = f"Sched. Paused: {mins} min" if mins else "Sched. Paused"
+            self.suspend_btn.setText(label)
             self.suspend_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
         else:
             self.suspend_btn.setText("QSY/Suspend")
@@ -385,7 +389,9 @@ class FldigiNetControlTab(QWidget):
         else:
             self._set_suspend_until(now_utc + datetime.timedelta(minutes=30))
             self._suspend_warned = False
-            self._set_suspend_button(active=True)
+            su = self._get_suspend_until()
+            remaining = (su - datetime.datetime.now(datetime.timezone.utc)).total_seconds() if su else None
+            self._set_suspend_button(active=True, remaining_sec=remaining)
             QMessageBox.information(
                 self,
                 "Schedule Suspended",

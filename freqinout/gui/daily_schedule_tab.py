@@ -827,9 +827,13 @@ class DailyScheduleTab(QWidget):
         except Exception:
             return True
 
-    def _set_suspend_button(self, active: bool):
+    def _set_suspend_button(self, active: bool, remaining_sec: Optional[float] = None):
         if active:
-            self.suspend_btn.setText("Schedule Suspended for 30 Minutes")
+            mins = 0
+            if remaining_sec is not None:
+                mins = max(0, int((remaining_sec + 59) // 60))
+            label = f"Sched. Paused: {mins} min" if mins else "Sched. Paused"
+            self.suspend_btn.setText(label)
             self.suspend_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
         else:
             self.suspend_btn.setText("QSY/Suspend")
@@ -844,7 +848,8 @@ class DailyScheduleTab(QWidget):
 
         dt = self._get_suspend_until()
         if dt and datetime.datetime.now(datetime.timezone.utc) < dt:
-            self._set_suspend_button(True)
+            remaining = (dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+            self._set_suspend_button(True, remaining_sec=remaining)
         else:
             if dt:
                 self._set_suspend_until(None)
@@ -869,7 +874,8 @@ class DailyScheduleTab(QWidget):
         else:
             new_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
             self._set_suspend_until(new_until)
-            self._set_suspend_button(True)
+            remaining = (new_until - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+            self._set_suspend_button(True, remaining_sec=remaining)
             QMessageBox.information(self, "Schedule Suspended", "Scheduling suspended for 30 minutes.")
 
     def _append_entry_row(self, entry: Dict):
