@@ -235,6 +235,24 @@ def _ensure_nets_db() -> None:
             """
         )
 
+        # Auto-query backlog for JS8 (MSG IDs / GRID requests)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS autoquery_backlog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                callsign TEXT NOT NULL,
+                msg_id TEXT,
+                kind TEXT NOT NULL,           -- 'MSG' or 'GRID'
+                status TEXT NOT NULL DEFAULT 'PENDING', -- PENDING / RETRIEVED / FAILED
+                attempts INTEGER DEFAULT 0,
+                last_attempt_ts REAL,
+                created_ts REAL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_autoquery_callsign ON autoquery_backlog(callsign)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_autoquery_status ON autoquery_backlog(status)")
+
         # Peer HF schedule (imported from other operators)
         cur.execute(
             """
