@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -64,6 +65,7 @@ class FreqPlannerTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self._show_local = False
         self._clock_timer: QTimer | None = None
         self._build_ui()
         self.rebuild_table()
@@ -78,8 +80,12 @@ class FreqPlannerTab(QWidget):
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
+        self.time_toggle_btn = QPushButton("Showing: UTC")
+        self.time_toggle_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: 600;")
+        self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
+        header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
 
         self.table = QTableWidget()
@@ -387,6 +393,16 @@ class FreqPlannerTab(QWidget):
             end_dt += datetime.timedelta(days=1)
         return start_dt, end_dt
 
+    def _start_of_week_local(self, tz: datetime.tzinfo) -> datetime.datetime:
+        """
+        Returns a datetime for Sunday 00:00 of the current local week.
+        """
+        now_local = datetime.datetime.now(tz)
+        # weekday: Monday=0, Sunday=6; want Sunday as start -> offset (weekday+1) % 7
+        days_to_sunday = (now_local.weekday() + 1) % 7
+        start_date = (now_local - datetime.timedelta(days=days_to_sunday)).date()
+        return datetime.datetime.combine(start_date, datetime.time(0, 0)).replace(tzinfo=tz)
+
     # ------------- core rebuild ------------- #
 
     def rebuild_table(self):
@@ -400,8 +416,8 @@ class FreqPlannerTab(QWidget):
         except Exception:
             pass
         tz_name, tz_abbr = self._current_timezone_label()
-        self.table.setHorizontalHeaderLabels(
-            [
+        if not self._show_local:
+            headers = [
                 "UTC Hour",
                 f"Local Time ({tz_abbr})",
                 "Sunday",
@@ -412,7 +428,19 @@ class FreqPlannerTab(QWidget):
                 "Friday",
                 "Saturday",
             ]
-        )
+        else:
+            headers = [
+                f"Local Hour ({tz_abbr})",
+                "UTC Time",
+                "Sunday",
+                "Monday",
+                "Tuesday",
+                "Wednesday",
+                "Thursday",
+                "Friday",
+                "Saturday",
+            ]
+        self.table.setHorizontalHeaderLabels(headers)
 
         hf_sched, net_sched = self._load_schedules()
 
@@ -534,35 +562,60 @@ class FreqPlannerTab(QWidget):
 
         # Fill rows
         today_utc = now_utc.replace(minute=0, second=0, microsecond=0)
+        week_start_local = self._start_of_week_local(tz)
 
         for hour in range(24):
-            # Column 0: UTC hour "HH:00"
-            utc_item = QTableWidgetItem(f"{hour:02d}:00")
-            utc_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(hour, self.COL_UTC, utc_item)
+            if not self._show_local:
+                # Column 0: UTC hour "HH:00"
+                utc_item = QTableWidgetItem(f"{hour:02d}:00")
+                utc_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.table.setItem(hour, self.COL_UTC, utc_item)
 
-            # Column 1: Local time using configured timezone
-            utc_dt = datetime.datetime(
-                year=today_utc.year,
-                month=today_utc.month,
-                day=today_utc.day,
-                hour=hour,
-                minute=0,
-                second=0,
-                tzinfo=datetime.timezone.utc,
-            )
-            local_dt = utc_dt.astimezone(tz)
-            local_hour_24 = local_dt.hour
-            local_str = f"{local_hour_24:02d}:00"
-            local_item = QTableWidgetItem(local_str)
-            local_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(hour, self.COL_LOCAL, local_item)
+                # Column 1: Local time using configured timezone
+                utc_dt = datetime.datetime(
+                    year=today_utc.year,
+                    month=today_utc.month,
+                    day=today_utc.day,
+                    hour=hour,
+                    minute=0,
+                    second=0,
+                    tzinfo=datetime.timezone.utc,
+                )
+                local_dt = utc_dt.astimezone(tz)
+                local_hour_24 = local_dt.hour
+                local_str = f"{local_hour_24:02d}:00"
+                local_item = QTableWidgetItem(local_str)
+                local_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.table.setItem(hour, self.COL_LOCAL, local_item)
+            else:
+                # Local hour as primary
+                local_dt = week_start_local + datetime.timedelta(hours=hour)
+                utc_dt = local_dt.astimezone(datetime.timezone.utc)
+
+                local_item = QTableWidgetItem(f"{local_dt.hour:02d}:00")
+                local_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.table.setItem(hour, self.COL_UTC, local_item)
+
+                utc_item = QTableWidgetItem(f"{utc_dt.hour:02d}:00")
+                utc_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.table.setItem(hour, self.COL_LOCAL, utc_item)
 
             # Day columns 2..8
             for col in range(self.COL_DAY_OFFSET, 9):
                 day_name = DAY_NAMES[col - self.COL_DAY_OFFSET]
-                net_slices = net_cover.get((day_name, hour), [])
-                hf_slices = hf_cover.get((day_name, hour), [])
+                if not self._show_local:
+                    lookup_day = day_name
+                    lookup_hour = hour
+                    cell_dt_local = None
+                else:
+                    # Local day/hour mapped to UTC day/hour for lookup
+                    cell_local_dt = week_start_local + datetime.timedelta(days=(col - self.COL_DAY_OFFSET), hours=hour)
+                    cell_dt_utc = cell_local_dt.astimezone(datetime.timezone.utc)
+                    lookup_day = cell_dt_utc.strftime("%A")
+                    lookup_hour = cell_dt_utc.hour
+
+                net_slices = net_cover.get((lookup_day, lookup_hour), [])
+                hf_slices = hf_cover.get((lookup_day, lookup_hour), [])
                 band_label = ""
                 if hf_slices:
                     # Order by start minute and compress consecutive identical bands
@@ -611,7 +664,10 @@ class FreqPlannerTab(QWidget):
                 if net_slices:
                     for start_m, end_m, name in net_slices:
                         # Compute absolute times for this day/hour slice
-                        day_idx = DAY_NAMES.index(day_name)
+                        try:
+                            day_idx = DAY_NAMES.index(lookup_day)
+                        except ValueError:
+                            continue
                         now_idx = now_utc.weekday()
                         now_day_sun0 = (now_idx + 1) % 7
                         offset = (day_idx - now_day_sun0) % 7
@@ -661,12 +717,17 @@ class FreqPlannerTab(QWidget):
         self.local_label.setText(
             now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {abbr}")
         )
+        self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
 
     def _setup_clock_timer(self):
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._update_clock_labels)
         self._clock_timer.start(1000)
         self._update_clock_labels()
+
+    def _toggle_time_view(self):
+        self._show_local = not self._show_local
+        self.rebuild_table()
 
     # ------------- Qt events ------------- #
 
