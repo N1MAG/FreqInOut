@@ -87,7 +87,7 @@ class MainWindow(QMainWindow):
             ("Map", self.stations_map_tab),
             ("HF Schedule", self.hf_schedule_tab),
             ("Net Schedule", self.net_tab),
-            ("Peer Sched", self.peer_sched_tab),
+            ("Peer Schedules", self.peer_sched_tab),
             ("Settings", self.settings_tab),
             ("Logs", self.log_tab),
         ]
