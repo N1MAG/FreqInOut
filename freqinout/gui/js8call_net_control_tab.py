@@ -406,6 +406,8 @@ class JS8CallNetControlTab(QWidget):
 
     def _get_suspend_until(self) -> Optional[datetime.datetime]:
         try:
+            if hasattr(self.settings, "reload"):
+                self.settings.reload()
             ts = float(self.settings.get("schedule_suspend_until", 0) or 0)
             if ts > 0:
                 return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
