@@ -5,6 +5,7 @@ import sqlite3
 import os
 import platform
 import subprocess
+import json
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QCheckBox,
     QApplication,
+    QFileDialog,
 )
 
 from freqinout.core.settings_manager import SettingsManager
@@ -197,13 +199,16 @@ class DailyScheduleTab(QWidget):
         btn_row.addStretch()
 
         self.save_btn = QPushButton("Save HF Schedule")
+        self.export_btn = QPushButton("Export HF Schedule")
         btn_row.addWidget(self.save_btn)
+        btn_row.addWidget(self.export_btn)
         layout.addLayout(btn_row)
 
         # Signals
         self.add_row_btn.clicked.connect(self._add_row)
         self.del_row_btn.clicked.connect(self._delete_selected_rows)
         self.save_btn.clicked.connect(self._save_schedule)
+        self.export_btn.clicked.connect(self._export_schedule)
 
         # Initialize clock labels once
         self._update_clock_labels()
@@ -725,6 +730,48 @@ class DailyScheduleTab(QWidget):
         log.info("HF Frequency Schedule saved: %d rows", len(rows))
         self._raw_schedule = rows
         self._refresh_freq_planner()
+
+    def _export_schedule(self):
+        """
+        Export HF schedule (no nets) to JSON with callsign in filename.
+        """
+        data = self.settings.all()
+        callsign = (data.get("operator_callsign") or "").strip().upper() or "UNKNOWN"
+        default_name = f"{callsign}-hf-schedule-{datetime.datetime.utcnow().strftime('%Y%m%d')}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export HF Schedule",
+            default_name,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        rows = self._raw_schedule if hasattr(self, "_raw_schedule") and self._raw_schedule else data.get("hf_schedule", [])
+        if not rows:
+            QMessageBox.warning(self, "Export", "No HF schedule rows to export.")
+            return
+        try:
+            payload = {
+                "callsign": callsign,
+                "created_utc": datetime.datetime.utcnow().isoformat(),
+                "rows": [],
+            }
+            for r in rows:
+                payload["rows"].append(
+                    {
+                        "day_utc": r.get("day_utc", "ALL"),
+                        "start_utc": r.get("start_utc", ""),
+                        "end_utc": r.get("end_utc", ""),
+                        "band": r.get("band", ""),
+                        "mode": r.get("mode", ""),
+                        "frequency": r.get("frequency", ""),
+                    }
+                )
+            Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            QMessageBox.information(self, "Exported", f"HF schedule exported to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Could not export:\n{e}")
+            log.error("HF schedule export failed: %s", e)
 
     # ---------------- Row helpers ---------------- #
 

@@ -35,6 +35,7 @@ from freqinout.gui.operator_history_tab import OperatorHistoryTab
 from freqinout.gui.log_viewer import LogViewerTab
 from freqinout.gui.stations_map_tab import StationsMapTab
 from freqinout.gui.message_viewer_tab import MessageViewerTab
+from freqinout.gui.peer_sched_tab import PeerSchedTab
 
 
 class MainWindow(QMainWindow):
@@ -74,6 +75,7 @@ class MainWindow(QMainWindow):
         self.message_viewer_tab = MessageViewerTab(self)
         self.log_tab = LogViewerTab(self)
         self.stations_map_tab = StationsMapTab(self)
+        self.peer_sched_tab = PeerSchedTab(self)
 
         # Sidebar navigation order (as requested)
         self._screens = [
@@ -85,6 +87,7 @@ class MainWindow(QMainWindow):
             ("Map", self.stations_map_tab),
             ("HF Schedule", self.hf_schedule_tab),
             ("Net Schedule", self.net_tab),
+            ("Peer Sched", self.peer_sched_tab),
             ("Settings", self.settings_tab),
             ("Logs", self.log_tab),
         ]

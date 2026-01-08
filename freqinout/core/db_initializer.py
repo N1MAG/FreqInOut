@@ -235,6 +235,25 @@ def _ensure_nets_db() -> None:
             """
         )
 
+        # Peer HF schedule (imported from other operators)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS peer_hf_schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_callsign TEXT NOT NULL,
+                day_utc TEXT NOT NULL,
+                start_utc TEXT NOT NULL,
+                end_utc TEXT NOT NULL,
+                band TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                frequency TEXT NOT NULL,
+                meta_json TEXT,
+                imported_at TEXT
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_hf_owner ON peer_hf_schedule(owner_callsign)")
+
         _ensure_operator_checkins(conn)
         _ensure_js8_links(conn)
 
@@ -250,4 +269,3 @@ def ensure_all_tables() -> None:
     _ensure_settings_db()
     _ensure_nets_db()
     log.info("DB init: ensured core tables (settings and nets).")
-
