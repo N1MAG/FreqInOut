@@ -328,6 +328,23 @@ class SchedulerEngine(QObject):
         if self.timer.isActive():
             self.timer.stop()
 
+    # ------------------------------------------------------------------
+    # Suspend helpers
+    # ------------------------------------------------------------------
+
+    def _suspend_until_dt(self) -> Optional[datetime.datetime]:
+        try:
+            ts = float(self.settings.get("schedule_suspend_until", 0) or 0)
+            if ts > 0:
+                return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+        except Exception:
+            return None
+        return None
+
+    def _scheduling_suspended(self, now_utc: datetime.datetime) -> bool:
+        dt = self._suspend_until_dt()
+        return dt is not None and now_utc < dt
+
     def force_refresh(self) -> None:
         """
         Force re-loading schedules from settings and reevaluating
@@ -807,7 +824,7 @@ class SchedulerEngine(QObject):
             return
 
         # Apply to rig (if needed) and emit active_entry_changed
-        self._apply_schedule_entry(active_entry, source, force=force)
+        self._apply_schedule_entry(active_entry, source, now_utc=now_utc, force=force)
 
     # ------------------------------------------------------------------
     # Active entry lookup
@@ -941,6 +958,7 @@ class SchedulerEngine(QObject):
         entry: Dict,
         source: str,
         *,
+        now_utc: Optional[datetime.datetime] = None,
         force: bool = False,
     ) -> None:
         """
@@ -982,6 +1000,13 @@ class SchedulerEngine(QObject):
                 "SchedulerEngine: control backend unavailable for mode=%s; not sending commands.",
                 self.settings.get("control_via", "FLRig"),
             )
+            self.active_entry_changed.emit(entry, source)
+            return
+        # Respect temporary suspend timer (QSY/Suspend button)
+        if self._scheduling_suspended(now_utc or datetime.datetime.now(datetime.timezone.utc)):
+            dt = self._suspend_until_dt()
+            until_txt = dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ") if dt else ""
+            log.info("SchedulerEngine: scheduling suspended until %s; skipping frequency change.", until_txt)
             self.active_entry_changed.emit(entry, source)
             return
 
