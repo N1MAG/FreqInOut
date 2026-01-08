@@ -126,6 +126,8 @@ class JS8CallNetControlTab(QWidget):
         self._pending_announcements: Dict[str, float] = {}  # callsign -> ts waiting for completion
         self._recent_announcements: Dict[str, float] = {}  # callsign -> last popup ts
         self._backlog_loaded: bool = False
+        self._awaiting_msg_responses: Dict[tuple[str, str], float] = {}  # (call, msg_id) -> expiry ts
+        self._awaiting_grid_responses: Dict[str, float] = {}  # call -> expiry ts
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -694,6 +696,8 @@ class JS8CallNetControlTab(QWidget):
         for k, ts in list(self._pending_announcements.items()):
             if now_ts - ts > 60:
                 self._pending_announcements.pop(k, None)
+        # Expire pending query waits
+        self._expire_pending_responses()
 
         try:
             with self._directed_path.open("r", encoding="utf-8", errors="ignore") as f:
@@ -1805,6 +1809,10 @@ class JS8CallNetControlTab(QWidget):
             self._queried_msg_ids.add(key)
             self._waiting_for_completion = True
             self._current_query = (call, msg_id)
+            # Expect a MSG reply within 120s; track pending response and backlog
+            expiry = time.time() + 120
+            self._awaiting_msg_responses[(call, msg_id)] = expiry
+            self._backlog_upsert(call, msg_id, "MSG", status="PENDING")
             log.info("JS8CallNetControl: auto-queried MSG ID %s from %s via TX.SEND_MESSAGE", msg_id, call)
         else:
             log.error("JS8CallNetControl: auto query send failed for %s/%s", call, msg_id)
@@ -1835,6 +1843,15 @@ class JS8CallNetControlTab(QWidget):
                     base_frm = self._base_callsign(frm) if frm else ""
                     if base_frm:
                         self._call_last_rx_ts[base_frm] = now_ts
+                        # If awaiting MSG response for this call, mark retrieved on any MSG token
+                        for (c, mid), exp in list(self._awaiting_msg_responses.items()):
+                            if c == base_frm and "MSG" in combined:
+                                self._mark_backlog_retrieved(c, mid, "MSG")
+                                self._awaiting_msg_responses.pop((c, mid), None)
+                        # If awaiting GRID response for this call and GRID present, mark retrieved
+                        if base_frm in self._awaiting_grid_responses and "GRID" in combined:
+                            self._mark_backlog_retrieved(base_frm, "", "GRID")
+                            self._awaiting_grid_responses.pop(base_frm, None)
                         if self._net_in_progress:
                             # Extract metrics from API payload when available
                             try:
@@ -1964,9 +1981,14 @@ class JS8CallNetControlTab(QWidget):
             now_ts = time.time()
             cur.execute(
                 """
+                DELETE FROM autoquery_backlog WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind=?
+                """,
+                (callsign, msg_id or "", kind),
+            )
+            cur.execute(
+                """
                 INSERT INTO autoquery_backlog (callsign, msg_id, kind, status, attempts, last_attempt_ts, created_ts)
                 VALUES (?, ?, ?, ?, 0, ?, ?)
-                ON CONFLICT(id) DO NOTHING
                 """,
                 (callsign, msg_id, kind, status, now_ts, now_ts),
             )
@@ -2030,6 +2052,24 @@ class JS8CallNetControlTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("JS8 autoquery backlog touch failed: %s", e)
+
+    def _mark_backlog_retrieved(self, callsign: str, msg_id: str, kind: str) -> None:
+        self._backlog_mark(callsign, msg_id, kind, "RETRIEVED")
+
+    def _mark_backlog_failed(self, callsign: str, msg_id: str, kind: str) -> None:
+        self._backlog_mark(callsign, msg_id, kind, "FAILED")
+
+    def _expire_pending_responses(self) -> None:
+        now = time.time()
+        for key, exp in list(self._awaiting_msg_responses.items()):
+            if now > exp:
+                call, mid = key
+                self._mark_backlog_failed(call, mid, "MSG")
+                self._awaiting_msg_responses.pop(key, None)
+        for call, exp in list(self._awaiting_grid_responses.items()):
+            if now > exp:
+                self._mark_backlog_failed(call, "", "GRID")
+                self._awaiting_grid_responses.pop(call, None)
 
     def _process_message_completion(self, line: str) -> None:
         """
@@ -2235,8 +2275,11 @@ class JS8CallNetControlTab(QWidget):
         if self._send_js8_message(query_text):
             log.info("JS8CallNetControl: auto grid query to %s", call)
             self._grid_waiting = True
+            self._awaiting_grid_responses[call] = time.time() + 120
+            self._backlog_upsert(call, "", "GRID", status="PENDING")
         else:
             log.error("JS8CallNetControl: failed GRID? to %s", call)
+            self._backlog_upsert(call, "", "GRID", status="PENDING")
 
     def _is_message_complete_line(self, line: str) -> bool:
         """
