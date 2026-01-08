@@ -59,7 +59,7 @@ class LogViewerTab(QWidget):
         toolbar.addSpacing(20)
         toolbar.addWidget(QLabel("Level:"))
         self.level_combo = QComboBox()
-        self.level_combo.addItems(["ALL", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+        self.level_combo.addItems(["DISABLED", "ERROR", "WARNING", "INFO", "DEBUG", "ALL"])
         toolbar.addWidget(self.level_combo)
 
         layout.addLayout(toolbar)
@@ -120,7 +120,9 @@ class LogViewerTab(QWidget):
         level = self.level_combo.currentText()
         if level == "ALL":
             return lines
-        return [l for l in lines if f" {level} " in l]
+        token1 = f"[{level}]"
+        token2 = f" {level} "
+        return [l for l in lines if (token1 in l or token2 in l)]
 
     def _color_for_line(self, line: str) -> str:
         if " ERROR " in line or " CRITICAL " in line:

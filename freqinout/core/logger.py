@@ -17,6 +17,7 @@ _LEVEL_MAP = {
     "WARNING": logging.WARNING,
     "ERROR": logging.ERROR,
     "CRITICAL": logging.CRITICAL,
+    "DISABLED": None,
 }
 
 def _get_config_dir():
@@ -78,9 +79,22 @@ def setup_logger(name: str = "freqinout", log_to_console=True, log_level=logging
     if _ENV_LOG_LEVEL in _LEVEL_MAP:
         log_level = _LEVEL_MAP[_ENV_LOG_LEVEL]
     logger = logging.getLogger(name)
-    if logger.handlers:
+    if logger.handlers and log_level is not None:
+        # Update existing handlers if already configured
+        for h in logger.handlers:
+            h.setLevel(log_level)
+        logger.setLevel(log_level)
+        logger.disabled = False
         return logger
+
+    logger.handlers = []
+    if log_level is None:
+        logger.setLevel(logging.CRITICAL + 1)
+        logger.disabled = True
+        return logger
+
     logger.setLevel(log_level)
+    logger.disabled = False
 
     if log_to_console:
         ch = logging.StreamHandler(sys.stdout)
@@ -99,7 +113,8 @@ def setup_logger(name: str = "freqinout", log_to_console=True, log_level=logging
             "%Y-%m-%d %H:%M:%S"
         ))
         logger.addHandler(fh)
-        logger.info(f"Logger initialized. Log file: {log_file}")
+        if log_level <= logging.INFO:
+            logger.info(f"Logger initialized. Log file: {log_file}")
     except Exception as e:
         logger.error("Logger: failed to open log file %s: %s", log_file, e)
 
@@ -112,8 +127,21 @@ def set_log_level(level_name: str) -> None:
     """
     Update the global logger level (both console and file handlers) at runtime.
     """
-    lvl = _LEVEL_MAP.get(level_name.strip().upper(), logging.INFO)
+    level_name = level_name.strip().upper()
+    lvl = _LEVEL_MAP.get(level_name, logging.INFO)
     logger = logging.getLogger("freqinout")
+    if lvl is None:
+        logger.disabled = True
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+        logger.setLevel(logging.CRITICAL + 1)
+        return
+
+    # Re-enable if previously disabled
+    logger.disabled = False
+    if not logger.handlers:
+        setup_logger(name="freqinout", log_level=lvl)
+        return
     logger.setLevel(lvl)
     for h in logger.handlers:
         h.setLevel(lvl)
