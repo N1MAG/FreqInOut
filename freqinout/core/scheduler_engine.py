@@ -358,6 +358,9 @@ class SchedulerEngine(QObject):
         """
         if not self.js8:
             return
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        if self._scheduling_suspended(now_utc):
+            return
         now_ts = time.time()
         if now_ts - self._last_js8_sync_ts < 60:
             return

@@ -125,10 +125,12 @@ class JS8CallNetControlTab(QWidget):
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
         self._js8_rx_timer: QTimer | None = None
+        self._clock_timer: QTimer | None = None
 
         self._build_ui()
         self._load_settings()
         self._setup_timer()
+        self._setup_clock_timer()
         self._update_clock_labels()
         self._setup_js8_rx_timer()
         self._update_suspend_state()
@@ -346,6 +348,15 @@ class JS8CallNetControlTab(QWidget):
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_directed_file)
         self._update_timer_interval()
+
+    def _setup_clock_timer(self):
+        self._clock_timer = QTimer(self)
+        self._clock_timer.timeout.connect(self._tick_clock)
+        self._clock_timer.start(1000)
+
+    def _tick_clock(self):
+        self._update_clock_labels()
+        self._update_suspend_state()
 
     def _setup_js8_rx_timer(self):
         self._js8_rx_timer = QTimer(self)
