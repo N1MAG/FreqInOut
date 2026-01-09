@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import datetime
 import re
@@ -128,6 +128,7 @@ class JS8CallNetControlTab(QWidget):
         self._backlog_loaded: bool = False
         self._awaiting_msg_responses: Dict[tuple[str, str], float] = {}  # (call, msg_id) -> expiry ts
         self._awaiting_grid_responses: Dict[str, float] = {}  # call -> expiry ts
+        self._current_query_sent_ts: float = 0.0
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -1792,8 +1793,15 @@ class JS8CallNetControlTab(QWidget):
 
     def _maybe_process_next_query(self) -> None:
         if self._waiting_for_completion:
-            log.debug("JS8CallNetControl: waiting_for_completion; skipping process_next_query")
-            return
+            if self._current_query_sent_ts and (time.time() - self._current_query_sent_ts) > 15:
+                log.debug("JS8CallNetControl: completion timeout; clearing wait and advancing queue")
+                self._waiting_for_completion = False
+                self._awaiting_ack_for = None
+                self._current_query = None
+                self._current_query_sent_ts = 0.0
+            else:
+                log.debug("JS8CallNetControl: waiting_for_completion; skipping process_next_query")
+                return
         if not self._pending_queries:
             log.debug("JS8CallNetControl: no pending queries to process")
             return
@@ -1824,6 +1832,7 @@ class JS8CallNetControlTab(QWidget):
             self._queried_msg_ids.add(key)
             self._waiting_for_completion = True
             self._current_query = (call, msg_id)
+            self._current_query_sent_ts = time.time()
             # Expect a MSG reply within 120s; track pending response and backlog
             expiry = time.time() + 120
             self._awaiting_msg_responses[(call, msg_id)] = expiry
@@ -2097,6 +2106,7 @@ class JS8CallNetControlTab(QWidget):
         self._waiting_for_completion = False
         call = self._current_query[0] if self._current_query else None
         self._current_query = None
+        self._current_query_sent_ts = 0.0
         # After a message completes, wait for our ACK to be sent before querying for more
         if call:
             self._awaiting_ack_for = call
@@ -2299,12 +2309,12 @@ class JS8CallNetControlTab(QWidget):
     def _is_message_complete_line(self, line: str) -> bool:
         """
         Heuristic: treat lines containing the JS8Call end-of-message marker
-        (diamond '♢') as completion markers.
+        (diamond 'â™¢') as completion markers.
         """
         txt = line.strip()
         if not txt:
             return False
-        if "♢" in txt:
+        if "â™¢" in txt:
             return True
         return False
 
