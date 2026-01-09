@@ -57,6 +57,9 @@ class FldigiNetControlTab(QWidget):
         self._next_change_utc: Optional[datetime.datetime] = None
         self._auto_end_done: bool = False
         self._suspend_warned: bool = False
+        self._opgroups_timer: Optional[QTimer] = None
+        self._qsy_options: Dict[str, Dict] = {}
+        self._opgroups_sig: str = ""
 
         self._start_btn_default_style: str = ""
         self._save_btn_default_style: str = ""
@@ -67,6 +70,8 @@ class FldigiNetControlTab(QWidget):
         self._load_settings()
         self._load_known_operators()
         self._setup_timers()
+        self._setup_operating_groups_timer()
+        self._refresh_qsy_options()
         self._set_net_button_styles(active=False)
 
     # ---------------- UI BUILD ---------------- #
@@ -112,13 +117,16 @@ class FldigiNetControlTab(QWidget):
 
         # Suspend / QSY button row (under net name label)
         suspend_row = QHBoxLayout()
-        self.suspend_btn = QPushButton("QSY/Suspend")
+        suspend_row.addStretch()
+        self.qsy_combo = QComboBox()
+        self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
+        suspend_row.addWidget(self.qsy_combo)
+        self.suspend_btn = QPushButton("QSY")
         self.suspend_btn.clicked.connect(self._on_suspend_clicked)
         suspend_row.addWidget(self.suspend_btn)
         self.ad_hoc_btn = QPushButton("Ad Hoc Net")
         self.ad_hoc_btn.clicked.connect(self._start_ad_hoc_net)
         suspend_row.addWidget(self.ad_hoc_btn)
-        suspend_row.addStretch()
         layout.addLayout(suspend_row)
 
         # Macro file paths in a framed group
@@ -271,6 +279,142 @@ class FldigiNetControlTab(QWidget):
         self._update_suspend_state()
         self._update_next_change_display()
 
+    def _setup_operating_groups_timer(self):
+        """
+        Periodically refresh Operating Groups from settings to keep QSY dropdown in sync.
+        """
+        self._opgroups_timer = QTimer(self)
+        self._opgroups_timer.timeout.connect(self._maybe_reload_operating_groups)
+        self._opgroups_timer.start(2000)
+
+    def _maybe_reload_operating_groups(self):
+        try:
+            if hasattr(self.settings, "reload"):
+                self.settings.reload()
+        except Exception:
+            pass
+        og = self._load_operating_groups()
+        sig = self._snapshot_operating_groups(og)
+        if sig == self._opgroups_sig:
+            return
+        self._opgroups_sig = sig
+        self._refresh_qsy_options(og)
+
+    def _load_operating_groups(self) -> List[Dict]:
+        data = self.settings.all()
+        og = data.get("operating_groups", [])
+        if not isinstance(og, list):
+            return []
+        cleaned: List[Dict] = []
+        for g in og:
+            if not isinstance(g, dict):
+                continue
+            g = dict(g)
+            g["frequency"] = self._format_freq(g.get("frequency", ""))
+            g["auto_tune"] = bool(g.get("auto_tune", False))
+            cleaned.append(g)
+        return cleaned
+
+    def _snapshot_operating_groups(self, og_list: List[Dict]) -> str:
+        parts = []
+        for g in sorted(
+            og_list, key=lambda x: (str(x.get("group", "")).lower(), str(x.get("band", "")).lower())
+        ):
+            parts.append(
+                f"{g.get('group','')}|{g.get('mode','')}|{g.get('band','')}|{self._format_freq(g.get('frequency',''))}|{int(bool(g.get('auto_tune', False)))}"
+            )
+        return ";".join(parts)
+
+    def _refresh_qsy_options(self, og_list: Optional[List[Dict]] = None):
+        """
+        Build a unique frequency list from Operating Groups (auto-tune wins on duplicates).
+        """
+        ops = og_list if og_list is not None else self._load_operating_groups()
+        self._opgroups_sig = self._snapshot_operating_groups(ops)
+        meta: Dict[str, Dict] = {}
+        for g in ops:
+            try:
+                fval = float(g.get("frequency", 0))
+            except Exception:
+                continue
+            key = f"{fval:.3f}"
+            auto = bool(g.get("auto_tune", False))
+            existing = meta.get(key)
+            if existing:
+                existing["auto_tune"] = existing.get("auto_tune", False) or auto
+                if auto and g.get("mode"):
+                    existing["mode"] = g.get("mode", "")
+                if auto and g.get("band"):
+                    existing["band"] = g.get("band", "")
+            else:
+                meta[key] = {
+                    "freq": fval,
+                    "mode": g.get("mode", ""),
+                    "band": g.get("band", ""),
+                    "auto_tune": auto,
+                }
+        self._qsy_options = meta
+        items = sorted(meta.items(), key=lambda kv: float(kv[0]))
+        self.qsy_combo.blockSignals(True)
+        self.qsy_combo.clear()
+        self.qsy_combo.addItem("Select frequency", None)
+        for key, m in items:
+            self.qsy_combo.addItem(f"{key} MHz", m)
+        self.qsy_combo.blockSignals(False)
+        self._update_qsy_button_enabled()
+
+    def _selected_qsy_meta(self) -> Optional[Dict]:
+        data = self.qsy_combo.currentData()
+        return data if isinstance(data, dict) else None
+
+    def _current_scheduler_freq(self) -> Optional[float]:
+        try:
+            win = self.window()
+            sched = getattr(win, "scheduler", None)
+            entry = getattr(sched, "current_schedule_entry", {}) if sched else {}
+            if not entry:
+                return None
+            return float(entry.get("frequency"))
+        except Exception:
+            return None
+
+    def _update_qsy_button_enabled(self):
+        if self._suspend_active():
+            self.suspend_btn.setEnabled(True)
+            return
+        enabled = self._scheduler_enabled()
+        meta = self._selected_qsy_meta()
+        if not enabled or not meta:
+            self.suspend_btn.setEnabled(False)
+            return
+        cur = self._current_scheduler_freq()
+        if cur is not None and abs(cur - meta.get("freq", -1)) < 0.001:
+            self.suspend_btn.setEnabled(False)
+        else:
+            self.suspend_btn.setEnabled(True)
+
+    def _perform_qsy(self, meta: Dict) -> bool:
+        try:
+            win = self.window()
+            scheduler = getattr(win, "scheduler", None)
+        except Exception:
+            scheduler = None
+        if not scheduler:
+            QMessageBox.warning(self, "Scheduler", "Scheduler engine is unavailable.")
+            return False
+        freq = meta.get("freq")
+        if freq is None:
+            QMessageBox.warning(self, "QSY", "Select a frequency before QSY.")
+            return False
+        entry = {
+            "frequency": f"{float(freq):.3f}",
+            "band": meta.get("band", ""),
+            "mode": meta.get("mode", ""),
+            "auto_tune": bool(meta.get("auto_tune", False)),
+        }
+        scheduler.apply_manual_qsy(entry)
+        return True
+
     def _on_timer_tick(self):
         self._update_clock_labels()
         self._update_suspend_state()
@@ -342,6 +486,7 @@ class FldigiNetControlTab(QWidget):
         if not enabled:
             self._suspend_warned = False
             self._set_suspend_button(active=False)
+            self._update_qsy_button_enabled()
             return
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -376,6 +521,7 @@ class FldigiNetControlTab(QWidget):
                 self._set_suspend_until(new_until)
                 self._suspend_warned = False  # allow another warning near new expiry
         self._set_suspend_button(active=True, remaining_sec=remaining)
+        self._update_qsy_button_enabled()
 
     def _set_suspend_button(self, active: bool, remaining_sec: Optional[float] = None):
         if active:
@@ -386,8 +532,9 @@ class FldigiNetControlTab(QWidget):
             self.suspend_btn.setText(label)
             self.suspend_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
         else:
-            self.suspend_btn.setText("QSY/Suspend")
+            self.suspend_btn.setText("QSY")
             self.suspend_btn.setStyleSheet("QPushButton { background-color: gold; color: black; }")
+        self._update_qsy_button_enabled()
 
     def _on_suspend_clicked(self):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -398,6 +545,12 @@ class FldigiNetControlTab(QWidget):
             self._set_suspend_button(active=False)
             QMessageBox.information(self, "Scheduling", "Scheduling resumed.")
         else:
+            meta = self._selected_qsy_meta()
+            if not meta:
+                QMessageBox.warning(self, "QSY", "Select a frequency to QSY to.")
+                return
+            if not self._perform_qsy(meta):
+                return
             self._set_suspend_until(now_utc + datetime.timedelta(minutes=30))
             self._suspend_warned = False
             su = self._get_suspend_until()
@@ -405,8 +558,8 @@ class FldigiNetControlTab(QWidget):
             self._set_suspend_button(active=True, remaining_sec=remaining)
             QMessageBox.information(
                 self,
-                "Schedule Suspended",
-                "Scheduling suspended for 30 minutes.",
+                "QSY Applied",
+                "Frequency changed and scheduling paused for 30 minutes.",
             )
 
     def _compute_next_change_utc(self) -> Optional[datetime.datetime]:
@@ -1054,6 +1207,12 @@ class FldigiNetControlTab(QWidget):
         Copy raw text (already normalized per line) to clipboard.
         """
         QApplication.clipboard().setText(text)
+
+    def _format_freq(self, val) -> str:
+        try:
+            return f"{float(val):.3f}"
+        except Exception:
+            return str(val) if val is not None else ""
 
     # ---------------- NORMALIZATION ---------------- #
 

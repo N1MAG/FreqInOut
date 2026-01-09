@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import datetime
 import os
@@ -236,7 +236,7 @@ class SettingsTab(QWidget):
         directed_row = QHBoxLayout()
         directed_row.addWidget(QLabel("JS8Call DIRECTED.TXT:"))
         self.js8_directed_edit = QLineEdit()
-        directed_browse = QPushButton("Browse…")
+        directed_browse = QPushButton("Browseâ€¦")
         directed_browse.clicked.connect(self._choose_js8_directed_path)
         directed_row.addWidget(self.js8_directed_edit, stretch=1)
         directed_row.addWidget(directed_browse)
@@ -246,7 +246,7 @@ class SettingsTab(QWidget):
         forms_row = QHBoxLayout()
         forms_row.addWidget(QLabel("JS8Spotter forms:"))
         self.js8_forms_edit = QLineEdit()
-        forms_browse = QPushButton("Browse…")
+        forms_browse = QPushButton("Browseâ€¦")
         forms_browse.clicked.connect(self._choose_js8_forms_path)
         forms_row.addWidget(self.js8_forms_edit, stretch=1)
         forms_row.addWidget(forms_browse)
@@ -279,7 +279,7 @@ class SettingsTab(QWidget):
         self.msg_paths_edits = {}
         for origin, label in [("varac", "VarAC folder"), ("flmsg", "FLMSG folder"), ("flamp", "FLAMP folder")]:
             edit = QLineEdit()
-            browse = QPushButton("Browse…")
+            browse = QPushButton("Browseâ€¦")
             browse.clicked.connect(lambda _, o=origin, e=edit: self._choose_msg_path(o, e))
             row = QHBoxLayout()
             row.addWidget(edit, 1)
@@ -297,9 +297,9 @@ class SettingsTab(QWidget):
         ops_layout = QVBoxLayout()
         ops_group.setLayout(ops_layout)
         add_row = QHBoxLayout()
-        add_btn = QPushButton("➕ Add Group")
+        add_btn = QPushButton("âž• Add Group")
         add_btn.clicked.connect(self._add_operating_group)
-        edit_btn = QPushButton("✏️ Edit Selected")
+        edit_btn = QPushButton("âœï¸ Edit Selected")
         edit_btn.clicked.connect(self._edit_operating_group)
         delete_btn = QPushButton("Delete Selected")
         delete_btn.clicked.connect(self._delete_operating_groups)
@@ -308,8 +308,8 @@ class SettingsTab(QWidget):
         add_row.addWidget(edit_btn)
         add_row.addWidget(delete_btn)
         ops_layout.addLayout(add_row)
-        self.op_groups_table = QTableWidget(0, 5)
-        self.op_groups_table.setHorizontalHeaderLabels(["", "Group", "Mode", "Band", "Freq (MHz)"])
+        self.op_groups_table = QTableWidget(0, 6)
+        self.op_groups_table.setHorizontalHeaderLabels(["", "Group", "Mode", "Band", "Freq (MHz)", "Auto-Tune"])
         header = self.op_groups_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setStretchLastSection(True)
@@ -431,6 +431,7 @@ class SettingsTab(QWidget):
                         "mode": g.get("mode", ""),
                         "band": g.get("band", ""),
                         "frequency": g.get("frequency", ""),
+                        "auto_tune": bool(g.get("auto_tune", False)),
                     }
                     for g in og
                     if isinstance(g, dict)
@@ -973,6 +974,8 @@ class SettingsTab(QWidget):
         freq_edit = QLineEdit()
         freq_edit.setPlaceholderText("e.g., 7.115")
         form.addRow("Frequency (MHz):", freq_edit)
+        auto_tune_chk = QCheckBox("Enable Auto-Tune on QSY")
+        form.addRow("", auto_tune_chk)
 
         btn_row = QHBoxLayout()
         ok_btn = QPushButton("OK")
@@ -994,7 +997,7 @@ class SettingsTab(QWidget):
                 QMessageBox.warning(self, "Validation", f"Frequency {freq_txt} invalid for {band} {mode}.")
                 return
             freq_val = float(freq_txt.replace(",", "."))
-            self._upsert_operating_group(name, mode, band, f"{freq_val:.3f}")
+            self._upsert_operating_group(name, mode, band, f"{freq_val:.3f}", auto_tune=auto_tune_chk.isChecked())
             dlg.accept()
 
         ok_btn.clicked.connect(on_accept)
@@ -1043,7 +1046,7 @@ class SettingsTab(QWidget):
         except Exception:
             return str(val) if val is not None else ""
 
-    def _upsert_operating_group(self, name: str, mode: str, band: str, freq_mhz):
+    def _upsert_operating_group(self, name: str, mode: str, band: str, freq_mhz, auto_tune: bool = False):
         # replace existing entry with same group+mode+band
         name = name.strip().upper()
         freq_display = self._format_freq(freq_mhz)
@@ -1051,11 +1054,12 @@ class SettingsTab(QWidget):
         for g in self.operating_groups:
             if g.get("group") == name and g.get("mode") == mode and g.get("band") == band:
                 g["frequency"] = freq_display
+                g["auto_tune"] = bool(auto_tune)
                 updated = True
                 break
         if not updated:
             self.operating_groups.append(
-                {"group": name, "mode": mode, "band": band, "frequency": freq_display}
+                {"group": name, "mode": mode, "band": band, "frequency": freq_display, "auto_tune": bool(auto_tune)}
             )
         self._refresh_operating_groups_table()
         # Persist immediately so additions survive app restarts without requiring an explicit Save click.
@@ -1073,6 +1077,7 @@ class SettingsTab(QWidget):
                     "mode": g.get("mode", ""),
                     "band": g.get("band", ""),
                     "frequency": g.get("frequency", ""),
+                    "auto_tune": bool(g.get("auto_tune", False)),
                 }
                 for g in self.operating_groups
             ],
@@ -1091,6 +1096,10 @@ class SettingsTab(QWidget):
             table.setItem(row, 2, QTableWidgetItem(str(g.get("mode", ""))))
             table.setItem(row, 3, QTableWidgetItem(str(g.get("band", ""))))
             table.setItem(row, 4, QTableWidgetItem(self._format_freq(g.get("frequency", ""))))
+            auto_chk = QCheckBox()
+            auto_chk.setChecked(bool(g.get("auto_tune", False)))
+            auto_chk.setAlignment(Qt.AlignCenter)
+            table.setCellWidget(row, 5, auto_chk)
         table.resizeColumnsToContents()
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
 
@@ -1103,6 +1112,8 @@ class SettingsTab(QWidget):
             mode = self.op_groups_table.item(r, 2).text().strip() if self.op_groups_table.item(r, 2) else ""
             band = self.op_groups_table.item(r, 3).text().strip() if self.op_groups_table.item(r, 3) else ""
             freq_txt = self.op_groups_table.item(r, 4).text().strip() if self.op_groups_table.item(r, 4) else ""
+            auto_widget = self.op_groups_table.cellWidget(r, 5)
+            auto_tune = bool(auto_widget.isChecked()) if isinstance(auto_widget, QCheckBox) else False
             try:
                 freq_val = float(freq_txt)
             except Exception:
@@ -1114,6 +1125,7 @@ class SettingsTab(QWidget):
                         "mode": mode,
                         "band": band,
                         "frequency": self._format_freq(freq_val),
+                        "auto_tune": auto_tune,
                     }
                 )
         return result
@@ -1139,6 +1151,8 @@ class SettingsTab(QWidget):
         mode = self.op_groups_table.item(row, 2).text().strip() if self.op_groups_table.item(row, 2) else "Digi"
         band = self.op_groups_table.item(row, 3).text().strip() if self.op_groups_table.item(row, 3) else ""
         freq_txt = self.op_groups_table.item(row, 4).text().strip() if self.op_groups_table.item(row, 4) else ""
+        auto_widget = self.op_groups_table.cellWidget(row, 5)
+        auto_val = bool(auto_widget.isChecked()) if isinstance(auto_widget, QCheckBox) else False
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Edit Operating Group")
@@ -1175,6 +1189,9 @@ class SettingsTab(QWidget):
 
         freq_edit = QLineEdit(freq_txt)
         form.addRow("Frequency (MHz):", freq_edit)
+        auto_tune_chk = QCheckBox("Enable Auto-Tune on QSY")
+        auto_tune_chk.setChecked(auto_val)
+        form.addRow("", auto_tune_chk)
 
         btn_row = QHBoxLayout()
         ok_btn = QPushButton("Save")
@@ -1203,7 +1220,7 @@ class SettingsTab(QWidget):
                 for g in self.operating_groups
                 if not (g.get("group") == group and g.get("mode") == mode and g.get("band") == band)
             ]
-            self._upsert_operating_group(new_name, new_mode, new_band, new_freq_txt)
+            self._upsert_operating_group(new_name, new_mode, new_band, new_freq_txt, auto_tune=auto_tune_chk.isChecked())
             dlg.accept()
 
         ok_btn.clicked.connect(on_accept)
@@ -1342,3 +1359,4 @@ class SettingsTab(QWidget):
             log.error("SettingsTab: JS8 log ingest failed: %s", e)
             QMessageBox.critical(self, "Error", f"Failed to ingest JS8 logs:\n{e}")
             self._refresh_operator_history_views()
+

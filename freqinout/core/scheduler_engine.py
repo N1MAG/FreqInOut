@@ -829,6 +829,16 @@ class SchedulerEngine(QObject):
         # Apply to rig (if needed) and emit active_entry_changed
         self._apply_schedule_entry(active_entry, source, now_utc=now_utc, force=force)
 
+    def apply_manual_qsy(self, entry: Dict) -> None:
+        """
+        Apply an immediate user-driven QSY, bypassing suspend and force-applying the change.
+
+        Expects entry to contain at least "frequency" (MHz). Mode/band/vfo/auto_tune
+        are honored when provided.
+        """
+        now = datetime.datetime.now(datetime.timezone.utc)
+        self._apply_schedule_entry(entry, "QSY", now_utc=now, force=True, ignore_suspend=True)
+
     # ------------------------------------------------------------------
     # Active entry lookup
     # ------------------------------------------------------------------
@@ -963,6 +973,7 @@ class SchedulerEngine(QObject):
         *,
         now_utc: Optional[datetime.datetime] = None,
         force: bool = False,
+        ignore_suspend: bool = False,
     ) -> None:
         """
         Apply a single schedule entry to the rig.
@@ -1006,7 +1017,7 @@ class SchedulerEngine(QObject):
             self.active_entry_changed.emit(entry, source)
             return
         # Respect temporary suspend timer (QSY/Suspend button)
-        if self._scheduling_suspended(now_utc or datetime.datetime.now(datetime.timezone.utc)):
+        if not ignore_suspend and self._scheduling_suspended(now_utc or datetime.datetime.now(datetime.timezone.utc)):
             dt = self._suspend_until_dt()
             until_txt = dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ") if dt else ""
             log.info("SchedulerEngine: scheduling suspended until %s; skipping frequency change.", until_txt)
