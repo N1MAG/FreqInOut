@@ -30,6 +30,19 @@ from PySide6.QtWidgets import (
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
+from freqinout.gui.qsy_helper import (
+    load_operating_groups as qsy_load_operating_groups,
+    snapshot_operating_groups as qsy_snapshot_operating_groups,
+    build_qsy_options,
+    refresh_qsy_combo,
+    selected_qsy_meta,
+    current_scheduler_freq,
+    perform_qsy,
+    get_suspend_until,
+    set_suspend_until,
+    suspend_active,
+    scheduler_enabled,
+)
 import psutil
 
 # Vendored js8net (replacement for pyjs8call)
@@ -130,7 +143,6 @@ class JS8CallNetControlTab(QWidget):
         self._awaiting_msg_responses: Dict[tuple[str, str], float] = {}  # (call, msg_id) -> expiry ts
         self._awaiting_grid_responses: Dict[str, float] = {}  # call -> expiry ts
         self._current_query_sent_ts: float = 0.0
-        self._opgroups_timer: Optional[QTimer] = None
         self._qsy_options: Dict[str, Dict] = {}
         self._opgroups_sig: str = ""
 
@@ -147,7 +159,6 @@ class JS8CallNetControlTab(QWidget):
         self._setup_js8_rx_timer()
         self._update_suspend_state()
         self._refresh_auto_query_flags()
-        self._setup_operating_groups_timer()
         self._refresh_qsy_options()
         if self._poll_timer:
             self._poll_timer.start()
@@ -223,17 +234,14 @@ class JS8CallNetControlTab(QWidget):
         gs_row.addWidget(self.set_spotter_btn)
         gs_row.addWidget(self.spotter_combo)
         gs_row.addStretch()
-        layout.addLayout(gs_row)
-
-        # QSY controls above table, right aligned
-        qsy_row = QHBoxLayout()
-        qsy_row.addStretch()
         self.qsy_combo = QComboBox()
         self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
-        qsy_row.addWidget(self.qsy_combo)
+        gs_row.addWidget(self.qsy_combo)
         self.suspend_btn = QPushButton("QSY")
-        qsy_row.addWidget(self.suspend_btn)
-        layout.addLayout(qsy_row)
+        gs_row.addWidget(self.suspend_btn)
+        self.ad_hoc_btn = QPushButton("Ad Hoc Net")
+        gs_row.addWidget(self.ad_hoc_btn)
+        layout.addLayout(gs_row)
 
         # Check-ins table
         table_layout = QVBoxLayout()
@@ -252,8 +260,8 @@ class JS8CallNetControlTab(QWidget):
         btn_row = QHBoxLayout()
         self.start_btn = QPushButton("Start Net")
         self.ack_btn = QPushButton("ACK Check-ins")
-        self.group_spotter_btn = QPushButton("Group Spotter")
-        self.single_spotter_btn = QPushButton("Single Spotter")
+        self.group_spotter_btn = QPushButton("Spotter-Group")
+        self.single_spotter_btn = QPushButton("Spotter-Callsign")
         self.save_btn = QPushButton("Save Checkins")
         self.end_btn = QPushButton("End Net")
         self.ack_btn.setEnabled(False)
@@ -268,8 +276,7 @@ class JS8CallNetControlTab(QWidget):
         btn_row.addWidget(self.save_btn)
         btn_row.addWidget(self.end_btn)
         btn_row.addStretch()
-        self.ad_hoc_btn = QPushButton("Ad Hoc Net")
-        btn_row.addWidget(self.ad_hoc_btn)
+        # Ad hoc button already placed in group row
 
         layout.addLayout(btn_row)
 
@@ -306,6 +313,7 @@ class JS8CallNetControlTab(QWidget):
         Slot invoked when Settings tab emits settings_saved.
         """
         self._refresh_auto_query_flags()
+        self._maybe_reload_operating_groups()
 
     def _load_settings(self):
         data = self.settings.all()
@@ -342,6 +350,8 @@ class JS8CallNetControlTab(QWidget):
         # Refresh interval
         refresh = int(data.get("js8_refresh_sec", 15) or 15)
         self.refresh_spin.setValue(refresh)
+        if self._poll_timer:
+            self._poll_timer.setInterval(refresh * 1000)
 
         # Spotter forms dropdown
         forms_dir = Path(data.get("js8_forms_path", "") or "")
@@ -448,29 +458,18 @@ class JS8CallNetControlTab(QWidget):
         try:
             if hasattr(self.settings, "reload"):
                 self.settings.reload()
-            ts = float(self.settings.get("schedule_suspend_until", 0) or 0)
-            if ts > 0:
-                return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
-        except Exception:
-            return None
-        return None
-
-    def _set_suspend_until(self, dt: Optional[datetime.datetime]) -> None:
-        try:
-            if hasattr(self.settings, "set"):
-                self.settings.set("schedule_suspend_until", dt.timestamp() if dt else 0)
         except Exception:
             pass
+        return get_suspend_until(self.settings)
+
+    def _set_suspend_until(self, dt: Optional[datetime.datetime]) -> None:
+        set_suspend_until(self.settings, dt)
 
     def _suspend_active(self) -> bool:
-        dt = self._get_suspend_until()
-        return dt is not None and datetime.datetime.now(datetime.timezone.utc) < dt
+        return suspend_active(self.settings)
 
     def _scheduler_enabled(self) -> bool:
-        try:
-            return bool(self.settings.get("use_scheduler", True))
-        except Exception:
-            return True
+        return scheduler_enabled(self.settings)
 
     def _set_suspend_button(self, active: bool, remaining_sec: Optional[float] = None):
         if active:
@@ -546,14 +545,6 @@ class JS8CallNetControlTab(QWidget):
             self.start_btn.setStyleSheet(self._start_btn_default_style)
             self.end_btn.setStyleSheet(self._end_btn_default_style)
 
-    def _setup_operating_groups_timer(self):
-        """
-        Refresh Operating Groups periodically so the QSY dropdown stays in sync.
-        """
-        self._opgroups_timer = QTimer(self)
-        self._opgroups_timer.timeout.connect(self._maybe_reload_operating_groups)
-        self._opgroups_timer.start(2000)
-
     def _maybe_reload_operating_groups(self):
         try:
             if hasattr(self.settings, "reload"):
@@ -568,79 +559,23 @@ class JS8CallNetControlTab(QWidget):
         self._refresh_qsy_options(og)
 
     def _load_operating_groups(self) -> List[Dict]:
-        data = self.settings.all()
-        og = data.get("operating_groups", [])
-        if not isinstance(og, list):
-            return []
-        cleaned: List[Dict] = []
-        for g in og:
-            if not isinstance(g, dict):
-                continue
-            g = dict(g)
-            g["frequency"] = self._format_freq(g.get("frequency", ""))
-            g["auto_tune"] = bool(g.get("auto_tune", False))
-            cleaned.append(g)
-        return cleaned
+        return qsy_load_operating_groups(self.settings)
 
     def _snapshot_operating_groups(self, og_list: List[Dict]) -> str:
-        parts = []
-        for g in sorted(
-            og_list, key=lambda x: (str(x.get("group", "")).lower(), str(x.get("band", "")).lower())
-        ):
-            parts.append(
-                f"{g.get('group','')}|{g.get('mode','')}|{g.get('band','')}|{self._format_freq(g.get('frequency',''))}|{int(bool(g.get('auto_tune', False)))}"
-            )
-        return ";".join(parts)
+        return qsy_snapshot_operating_groups(og_list)
 
     def _refresh_qsy_options(self, og_list: Optional[List[Dict]] = None):
         ops = og_list if og_list is not None else self._load_operating_groups()
         self._opgroups_sig = self._snapshot_operating_groups(ops)
-        meta: Dict[str, Dict] = {}
-        for g in ops:
-            try:
-                fval = float(g.get("frequency", 0))
-            except Exception:
-                continue
-            key = f"{fval:.3f}"
-            auto = bool(g.get("auto_tune", False))
-            existing = meta.get(key)
-            if existing:
-                existing["auto_tune"] = existing.get("auto_tune", False) or auto
-                if auto and g.get("mode"):
-                    existing["mode"] = g.get("mode", "")
-                if auto and g.get("band"):
-                    existing["band"] = g.get("band", "")
-            else:
-                meta[key] = {
-                    "freq": fval,
-                    "mode": g.get("mode", ""),
-                    "band": g.get("band", ""),
-                    "auto_tune": auto,
-                }
-        self._qsy_options = meta
-        items = sorted(meta.items(), key=lambda kv: float(kv[0]))
-        self.qsy_combo.blockSignals(True)
-        self.qsy_combo.clear()
-        self.qsy_combo.addItem("Select frequency", None)
-        for key, m in items:
-            self.qsy_combo.addItem(f"{key} MHz", m)
-        self.qsy_combo.blockSignals(False)
+        self._qsy_options = build_qsy_options(ops)
+        refresh_qsy_combo(self.qsy_combo, self._qsy_options)
         self._update_qsy_button_enabled()
 
     def _selected_qsy_meta(self) -> Optional[Dict]:
-        data = self.qsy_combo.currentData()
-        return data if isinstance(data, dict) else None
+        return selected_qsy_meta(self.qsy_combo)
 
     def _current_scheduler_freq(self) -> Optional[float]:
-        try:
-            win = self.window()
-            sched = getattr(win, "scheduler", None)
-            entry = getattr(sched, "current_schedule_entry", {}) if sched else {}
-            if not entry:
-                return None
-            return float(entry.get("frequency"))
-        except Exception:
-            return None
+        return current_scheduler_freq(self.window())
 
     def _update_qsy_button_enabled(self):
         if self._suspend_active():
@@ -658,26 +593,8 @@ class JS8CallNetControlTab(QWidget):
             self.suspend_btn.setEnabled(True)
 
     def _perform_qsy(self, meta: Dict) -> bool:
-        try:
-            win = self.window()
-            scheduler = getattr(win, "scheduler", None)
-        except Exception:
-            scheduler = None
-        if not scheduler:
-            QMessageBox.warning(self, "Scheduler", "Scheduler engine is unavailable.")
-            return False
-        freq = meta.get("freq")
-        if freq is None:
-            QMessageBox.warning(self, "QSY", "Select a frequency before QSY.")
-            return False
-        entry = {
-            "frequency": f"{float(freq):.3f}",
-            "band": meta.get("band", ""),
-            "mode": meta.get("mode", ""),
-            "auto_tune": bool(meta.get("auto_tune", False)),
-        }
-        scheduler.apply_manual_qsy(entry)
-        return True
+        win = self.window()
+        return perform_qsy(win, meta)
 
     # ---------------- START / END NET ---------------- #
 
@@ -866,10 +783,10 @@ class JS8CallNetControlTab(QWidget):
         if not self._net_in_progress and not self.auto_query_msg_id and not monitor_announcements:
             return
 
-        log.info("JS8CallNetControl: polling DIRECTED/ALL (net_in_progress=%s)", self._net_in_progress)
+        log.debug("JS8CallNetControl: polling DIRECTED/ALL (net_in_progress=%s)", self._net_in_progress)
         # First, scan ALL.TXT for recent QUERY MSG transmissions to gate auto-queries
         self._poll_all_for_query_tx()
-        log.info("JS8CallNetControl: last query TX ts=%s", self._last_query_tx_ts)
+        log.debug("JS8CallNetControl: last query TX ts=%s", self._last_query_tx_ts)
 
         try:
             size_now = self._directed_path.stat().st_size

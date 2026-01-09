@@ -1020,14 +1020,14 @@ class SchedulerEngine(QObject):
         if not ignore_suspend and self._scheduling_suspended(now_utc or datetime.datetime.now(datetime.timezone.utc)):
             dt = self._suspend_until_dt()
             until_txt = dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ") if dt else ""
-            log.info("SchedulerEngine: scheduling suspended until %s; skipping frequency change.", until_txt)
+            log.debug("SchedulerEngine: scheduling suspended until %s; skipping frequency change.", until_txt)
             self.active_entry_changed.emit(entry, source)
             return
 
         # Scheduler master switch (from Settings tab)
         try:
             if not bool(self.settings.get("use_scheduler", True)):
-                log.info("SchedulerEngine: scheduler disabled in settings; no frequency changes sent.")
+                log.debug("SchedulerEngine: scheduler disabled in settings; no frequency changes sent.")
                 self.active_entry_changed.emit(entry, source)
                 return
         except Exception:

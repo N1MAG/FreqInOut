@@ -236,7 +236,7 @@ class SettingsTab(QWidget):
         directed_row = QHBoxLayout()
         directed_row.addWidget(QLabel("JS8Call DIRECTED.TXT:"))
         self.js8_directed_edit = QLineEdit()
-        directed_browse = QPushButton("Browseâ€¦")
+        directed_browse = QPushButton("Browse")
         directed_browse.clicked.connect(self._choose_js8_directed_path)
         directed_row.addWidget(self.js8_directed_edit, stretch=1)
         directed_row.addWidget(directed_browse)
@@ -246,7 +246,7 @@ class SettingsTab(QWidget):
         forms_row = QHBoxLayout()
         forms_row.addWidget(QLabel("JS8Spotter forms:"))
         self.js8_forms_edit = QLineEdit()
-        forms_browse = QPushButton("Browseâ€¦")
+        forms_browse = QPushButton("Browse")
         forms_browse.clicked.connect(self._choose_js8_forms_path)
         forms_row.addWidget(self.js8_forms_edit, stretch=1)
         forms_row.addWidget(forms_browse)
@@ -279,7 +279,7 @@ class SettingsTab(QWidget):
         self.msg_paths_edits = {}
         for origin, label in [("varac", "VarAC folder"), ("flmsg", "FLMSG folder"), ("flamp", "FLAMP folder")]:
             edit = QLineEdit()
-            browse = QPushButton("Browseâ€¦")
+            browse = QPushButton("Browse")
             browse.clicked.connect(lambda _, o=origin, e=edit: self._choose_msg_path(o, e))
             row = QHBoxLayout()
             row.addWidget(edit, 1)
@@ -297,9 +297,9 @@ class SettingsTab(QWidget):
         ops_layout = QVBoxLayout()
         ops_group.setLayout(ops_layout)
         add_row = QHBoxLayout()
-        add_btn = QPushButton("âž• Add Group")
+        add_btn = QPushButton(" Add Group")
         add_btn.clicked.connect(self._add_operating_group)
-        edit_btn = QPushButton("âœï¸ Edit Selected")
+        edit_btn = QPushButton(" Edit Selected")
         edit_btn.clicked.connect(self._edit_operating_group)
         delete_btn = QPushButton("Delete Selected")
         delete_btn.clicked.connect(self._delete_operating_groups)
@@ -1100,7 +1100,6 @@ class SettingsTab(QWidget):
             auto_chk.setChecked(bool(g.get("auto_tune", False)))
             auto_chk.setAlignment(Qt.AlignCenter)
             table.setCellWidget(row, 5, auto_chk)
-        table.resizeColumnsToContents()
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
 
     def _table_to_operating_groups(self) -> List[Dict[str, str]]:
@@ -1359,4 +1358,3 @@ class SettingsTab(QWidget):
             log.error("SettingsTab: JS8 log ingest failed: %s", e)
             QMessageBox.critical(self, "Error", f"Failed to ingest JS8 logs:\n{e}")
             self._refresh_operator_history_views()
-

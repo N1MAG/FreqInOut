@@ -151,7 +151,7 @@ class NetScheduleTab(QWidget):
         self._clock_timer: QTimer | None = None
         self._suppress_autostart: bool = True  # avoid auto-start during initial load
         self._biweekly_choice_cache: Dict[str, int] = {}
-        self._show_local: bool = False  # view toggle
+        self._show_local: bool = True  # default to Local view
         self._raw_rows: List[Dict] = []
 
         self._build_ui()
@@ -270,8 +270,8 @@ class NetScheduleTab(QWidget):
                 "Band",
                 "VFO",
                 "Freq (MHz)",
-                f"Start ({'Local' if self._show_local else 'UTC'} HH:MM)",
-                f"End ({'Local' if self._show_local else 'UTC'} HH:MM)",
+                "Start",
+                "End",
                 "Early (min)",
                 "Net Name",
             ]

@@ -300,7 +300,6 @@ class PeerSchedTab(QWidget):
                 item = QTableWidgetItem(val)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(r, c, item)
-        self.table.resizeColumnsToContents()
 
     # ---------- helpers ----------
 

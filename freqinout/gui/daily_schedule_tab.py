@@ -30,6 +30,19 @@ from PySide6.QtWidgets import (
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
+from freqinout.gui.qsy_helper import (
+    load_operating_groups as qsy_load_operating_groups,
+    snapshot_operating_groups as qsy_snapshot_operating_groups,
+    build_qsy_options,
+    refresh_qsy_combo,
+    selected_qsy_meta,
+    current_scheduler_freq,
+    perform_qsy,
+    get_suspend_until,
+    set_suspend_until,
+    suspend_active,
+    scheduler_enabled,
+)
 
 
 DAY_OPTIONS = [
@@ -125,11 +138,10 @@ class DailyScheduleTab(QWidget):
         self.settings = SettingsManager()
         self.operating_groups: List[Dict] = self._load_operating_groups()
         self._operating_groups_sig = self._snapshot_operating_groups(self.operating_groups)
-        self._show_local: bool = False  # view toggle
+        self._show_local: bool = True  # default to Local view
         self._raw_schedule: List[Dict] = []
 
         self._clock_timer: Optional[QTimer] = None
-        self._opgroups_timer: Optional[QTimer] = None
         self._suppress_autostart: bool = True  # avoid auto-start during initial load
         self._qsy_options: Dict[str, Dict] = {}
 
@@ -137,7 +149,6 @@ class DailyScheduleTab(QWidget):
         self._refresh_qsy_options()
         self._load_schedule()
         self._setup_clock_timer()
-        self._setup_operating_groups_timer()
         self._suppress_autostart = False
 
     def _format_freq(self, val) -> str:
@@ -165,6 +176,17 @@ class DailyScheduleTab(QWidget):
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
+
+        # QSY controls row (right aligned under time bar)
+        qsy_row = QHBoxLayout()
+        qsy_row.addStretch()
+        self.qsy_combo = QComboBox()
+        self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
+        qsy_row.addWidget(self.qsy_combo)
+        self.suspend_btn = QPushButton("QSY")
+        self.suspend_btn.clicked.connect(self._on_suspend_clicked)
+        qsy_row.addWidget(self.suspend_btn)
+        layout.addLayout(qsy_row)
 
         # Table
         self.table = QTableWidget()
@@ -200,12 +222,6 @@ class DailyScheduleTab(QWidget):
         btn_row.addWidget(self.save_btn)
         btn_row.addWidget(self.export_btn)
         btn_row.addStretch()
-        self.qsy_combo = QComboBox()
-        self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
-        btn_row.addWidget(self.qsy_combo)
-        self.suspend_btn = QPushButton("QSY")
-        self.suspend_btn.clicked.connect(self._on_suspend_clicked)
-        btn_row.addWidget(self.suspend_btn)
         layout.addLayout(btn_row)
 
         # Signals
@@ -219,32 +235,10 @@ class DailyScheduleTab(QWidget):
         self._update_suspend_state()
 
     def _load_operating_groups(self) -> List[Dict]:
-        data = self.settings.all()
-        og = data.get("operating_groups", [])
-        if not isinstance(og, list):
-            return []
-        cleaned: List[Dict] = []
-        for g in og:
-            if not isinstance(g, dict):
-                continue
-            g = dict(g)
-            g["frequency"] = self._format_freq(g.get("frequency", ""))
-            g["auto_tune"] = bool(g.get("auto_tune", False))
-            cleaned.append(g)
-        return cleaned
+        return qsy_load_operating_groups(self.settings)
 
     def _snapshot_operating_groups(self, og_list: List[Dict]) -> str:
-        """
-        Deterministic snapshot string so we can detect changes without restart.
-        """
-        parts = []
-        for g in sorted(
-            og_list, key=lambda x: (str(x.get("group", "")).lower(), str(x.get("band", "")).lower())
-        ):
-            parts.append(
-                f"{g.get('group','')}|{g.get('mode','')}|{g.get('band','')}|{self._format_freq(g.get('frequency',''))}|{int(bool(g.get('auto_tune', False)))}"
-            )
-        return ";".join(parts)
+        return qsy_snapshot_operating_groups(og_list)
 
     # ---------------- CLOCK / TIMEZONE (shared logic) ---------------- #
 
@@ -252,26 +246,6 @@ class DailyScheduleTab(QWidget):
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(lambda: (self._update_clock_labels(), self._update_suspend_state()))
         self._clock_timer.start(1000)
-
-    def _setup_operating_groups_timer(self):
-        """
-        Periodically refresh operating groups from settings so edits in the Settings
-        tab are reflected without restarting the app.
-        """
-        self._opgroups_timer = QTimer(self)
-        self._opgroups_timer.timeout.connect(self._maybe_reload_operating_groups)
-        self._opgroups_timer.start(2000)
-
-    def _maybe_reload_operating_groups(self):
-        self.settings.reload()
-        latest = self._load_operating_groups()
-        sig = self._snapshot_operating_groups(latest)
-        if sig == self._operating_groups_sig:
-            return
-        self.operating_groups = latest
-        self._operating_groups_sig = sig
-        self._refresh_group_band_cells()
-        self._refresh_qsy_options()
 
     def _refresh_group_band_cells(self):
         """
@@ -341,9 +315,9 @@ class DailyScheduleTab(QWidget):
             "Mode",
             "Band",
             "VFO",
-            "Frequency (MHz)",
-            f"Start ({'Local' if self._show_local else 'UTC'} HH:MM)",
-            f"End ({'Local' if self._show_local else 'UTC'} HH:MM)",
+            "Freq (MHz)",
+            "Start",
+            "End",
             "Auto-Tune",
         ]
         self.table.setColumnCount(len(headers))
@@ -809,32 +783,20 @@ class DailyScheduleTab(QWidget):
 
     def _get_suspend_until(self) -> Optional[datetime.datetime]:
         try:
-            # Pull fresh settings so other tabs' changes are visible
             if hasattr(self.settings, "reload"):
                 self.settings.reload()
-            ts = float(self.settings.get("schedule_suspend_until", 0) or 0)
-            if ts > 0:
-                return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
-        except Exception:
-            return None
-        return None
-
-    def _set_suspend_until(self, dt: Optional[datetime.datetime]) -> None:
-        try:
-            if hasattr(self.settings, "set"):
-                self.settings.set("schedule_suspend_until", dt.timestamp() if dt else 0)
         except Exception:
             pass
+        return get_suspend_until(self.settings)
+
+    def _set_suspend_until(self, dt: Optional[datetime.datetime]) -> None:
+        set_suspend_until(self.settings, dt)
 
     def _suspend_active(self) -> bool:
-        dt = self._get_suspend_until()
-        return dt is not None and datetime.datetime.now(datetime.timezone.utc) < dt
+        return suspend_active(self.settings)
 
     def _scheduler_enabled(self) -> bool:
-        try:
-            return bool(self.settings.get("use_scheduler", True))
-        except Exception:
-            return True
+        return scheduler_enabled(self.settings)
 
     def _set_suspend_button(self, active: bool, remaining_sec: Optional[float] = None):
         if active:
@@ -853,57 +815,16 @@ class DailyScheduleTab(QWidget):
         """
         Build a unique frequency list from Operating Groups (auto-tune wins on duplicates).
         """
-        try:
-            self.settings.reload()
-        except Exception:
-            pass
         ops = self._load_operating_groups()
-        meta: Dict[str, Dict] = {}
-        for g in ops:
-            try:
-                fval = float(g.get("frequency", 0))
-            except Exception:
-                continue
-            key = f"{fval:.3f}"
-            auto = bool(g.get("auto_tune", False))
-            existing = meta.get(key)
-            if existing:
-                existing["auto_tune"] = existing.get("auto_tune", False) or auto
-                if auto and g.get("mode"):
-                    existing["mode"] = g.get("mode", "")
-                if auto and g.get("band"):
-                    existing["band"] = g.get("band", "")
-            else:
-                meta[key] = {
-                    "freq": fval,
-                    "mode": g.get("mode", ""),
-                    "band": g.get("band", ""),
-                    "auto_tune": auto,
-                }
-        self._qsy_options = meta
-        items = sorted(meta.items(), key=lambda kv: float(kv[0]))
-        self.qsy_combo.blockSignals(True)
-        self.qsy_combo.clear()
-        self.qsy_combo.addItem("Select frequency", None)
-        for key, m in items:
-            self.qsy_combo.addItem(f"{key} MHz", m)
-        self.qsy_combo.blockSignals(False)
+        self._qsy_options = build_qsy_options(ops)
+        refresh_qsy_combo(self.qsy_combo, self._qsy_options)
         self._update_qsy_button_enabled()
 
     def _selected_qsy_meta(self) -> Optional[Dict]:
-        data = self.qsy_combo.currentData()
-        return data if isinstance(data, dict) else None
+        return selected_qsy_meta(self.qsy_combo)
 
     def _current_scheduler_freq(self) -> Optional[float]:
-        try:
-            win = self.window()
-            sched = getattr(win, "scheduler", None)
-            entry = getattr(sched, "current_schedule_entry", {}) if sched else {}
-            if not entry:
-                return None
-            return float(entry.get("frequency"))
-        except Exception:
-            return None
+        return current_scheduler_freq(self.window())
 
     def _update_qsy_button_enabled(self):
         if self._suspend_active():
@@ -921,26 +842,8 @@ class DailyScheduleTab(QWidget):
             self.suspend_btn.setEnabled(True)
 
     def _perform_qsy(self, meta: Dict) -> bool:
-        try:
-            win = self.window()
-            scheduler = getattr(win, "scheduler", None)
-        except Exception:
-            scheduler = None
-        if not scheduler:
-            QMessageBox.warning(self, "Scheduler", "Scheduler engine is unavailable.")
-            return False
-        freq = meta.get("freq")
-        if freq is None:
-            QMessageBox.warning(self, "QSY", "Select a frequency before QSY.")
-            return False
-        entry = {
-            "frequency": f"{float(freq):.3f}",
-            "band": meta.get("band", ""),
-            "mode": meta.get("mode", ""),
-            "auto_tune": bool(meta.get("auto_tune", False)),
-        }
-        scheduler.apply_manual_qsy(entry)
-        return True
+        win = self.window()
+        return perform_qsy(win, meta)
 
     def _update_suspend_state(self):
         enabled = self._scheduler_enabled()
@@ -970,6 +873,21 @@ class DailyScheduleTab(QWidget):
         except Exception:
             pass
 
+    def on_settings_saved(self):
+        """
+        Refresh operating groups/QSY options when settings are saved.
+        """
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        latest = self._load_operating_groups()
+        sig = self._snapshot_operating_groups(latest)
+        if sig != self._operating_groups_sig:
+            self.operating_groups = latest
+            self._operating_groups_sig = sig
+            self._refresh_group_band_cells()
+            self._refresh_qsy_options()
     def _on_suspend_clicked(self):
         if self._suspend_active():
             self._set_suspend_until(None)

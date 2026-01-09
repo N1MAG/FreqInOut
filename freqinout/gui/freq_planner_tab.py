@@ -65,8 +65,9 @@ class FreqPlannerTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
-        self._show_local = False
+        self._show_local = True
         self._clock_timer: QTimer | None = None
+        self._last_snapshot: str = ""
         self._build_ui()
         self.rebuild_table()
 
@@ -113,6 +114,7 @@ class FreqPlannerTab(QWidget):
         hv.setSectionResizeMode(self.COL_LOCAL, QHeaderView.Stretch)
         for col in range(self.COL_DAY_OFFSET, 9):
             hv.setSectionResizeMode(col, QHeaderView.Stretch)
+        hv.setHighlightSections(False)
 
         layout.addWidget(self.table)
 
@@ -132,10 +134,13 @@ class FreqPlannerTab(QWidget):
     def _current_timezone_label(self) -> tuple[str, str]:
         """
         Returns (tz_name, tz_abbr) for labeling the Local column header.
+        Uses tzname() when available, otherwise a short fallback (ET/CT/MT/PT/UTC).
         """
         tz_name, tz = self._current_timezone()
         now = datetime.datetime.now(tz)
-        abbr = now.tzname() or tz_name
+        abbr = now.tzname() or self._ui_tz_abbr(tz_name, tz_name)
+        if abbr and len(abbr) > 5:
+            abbr = self._ui_tz_abbr(tz_name, abbr)
         return tz_name, abbr
 
     def _load_schedules(self) -> Tuple[List[Dict], List[Dict]]:
@@ -410,11 +415,6 @@ class FreqPlannerTab(QWidget):
         Recompute the table based on current hf_schedule and net_schedule in config.
         """
         self.table.clearContents()
-        try:
-            # Pick up latest settings written by other tabs before reading schedules.
-            self.settings.reload()
-        except Exception:
-            pass
         tz_name, tz_abbr = self._current_timezone_label()
         if not self._show_local:
             headers = [
@@ -443,6 +443,7 @@ class FreqPlannerTab(QWidget):
         self.table.setHorizontalHeaderLabels(headers)
 
         hf_sched, net_sched = self._load_schedules()
+        self._last_snapshot = self._snapshot(hf_sched, net_sched)
 
         # Precompute net schedule coverage by (day, hour) with boundary-aware logic
         net_cover: Dict[tuple, List[Tuple[int, int, str]]] = {}
@@ -688,6 +689,27 @@ class FreqPlannerTab(QWidget):
         self._update_clock_labels()
         log.info("FreqPlanner table rebuilt.")
 
+    def _snapshot(self, hf_sched: List[Dict], net_sched: List[Dict]) -> str:
+        """
+        Deterministic snapshot of schedules and time view to avoid unnecessary rebuilds.
+        """
+        parts = ["LOCAL" if self._show_local else "UTC"]
+        for s in sorted(hf_sched, key=lambda x: (x.get("day_utc", ""), x.get("start_utc", ""), x.get("group_name", ""))):
+            parts.append(
+                f"H|{s.get('day_utc','')}|{s.get('group_name','')}|{s.get('start_utc','')}|{s.get('end_utc','')}|{s.get('band','')}"
+            )
+        for n in sorted(net_sched, key=lambda x: (x.get("day_utc", ""), x.get("start_utc", ""), x.get("net_name", ""))):
+            parts.append(
+                f"N|{n.get('day_utc','')}|{n.get('net_name','')}|{n.get('start_utc','')}|{n.get('end_utc','')}"
+            )
+        return ";".join(parts)
+
+    def _maybe_rebuild_if_changed(self):
+        hf_sched, net_sched = self._load_schedules()
+        snap = self._snapshot(hf_sched, net_sched)
+        if snap != self._last_snapshot:
+            self.rebuild_table()
+
     def _ui_tz_abbr(self, tz_name: str, fallback: str) -> str:
         mapping = {
             "UTC": "UTC",
@@ -695,6 +717,10 @@ class FreqPlannerTab(QWidget):
             "America/Chicago": "CT",
             "America/Denver": "MT",
             "America/Los_Angeles": "PT",
+            "Mountain Standard Time": "MST",
+            "Central Standard Time": "CST",
+            "Eastern Standard Time": "EST",
+            "Pacific Standard Time": "PST",
         }
         return mapping.get(tz_name, fallback)
 
@@ -721,9 +747,12 @@ class FreqPlannerTab(QWidget):
 
     def _setup_clock_timer(self):
         self._clock_timer = QTimer(self)
-        self._clock_timer.timeout.connect(self._update_clock_labels)
+        self._clock_timer.timeout.connect(self._on_clock_tick)
         self._clock_timer.start(1000)
+
+    def _on_clock_tick(self):
         self._update_clock_labels()
+        self._maybe_rebuild_if_changed()
 
     def _toggle_time_view(self):
         self._show_local = not self._show_local
