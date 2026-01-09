@@ -113,6 +113,8 @@ class JS8CallNetControlTab(QWidget):
         self._awaiting_ack_for: Optional[str] = None
         self._call_last_rx_ts: Dict[str, float] = {}
         self._auto_query_paused_by_net = False
+        self._start_btn_default_style = "QPushButton { background-color: #4CAF50; color: white; }"
+        self._end_btn_default_style = "QPushButton { background-color: #F44336; color: white; }"
 
         # Check-in table state
         self._checkins: Dict[str, Dict] = {}
@@ -122,7 +124,6 @@ class JS8CallNetControlTab(QWidget):
         self._spotter_form: Optional[str] = None
         self._expected_form: Optional[str] = None
         self._status_mismatch: Dict[str, bool] = {}
-        self._flrig_start_style = "QPushButton { background-color: #444; color: white; }"
         self._pending_announcements: Dict[str, float] = {}  # callsign -> ts waiting for completion
         self._recent_announcements: Dict[str, float] = {}  # callsign -> last popup ts
         self._backlog_loaded: bool = False
@@ -242,6 +243,8 @@ class JS8CallNetControlTab(QWidget):
         self.end_btn = QPushButton("End Net")
         self.ack_btn.setEnabled(False)
         self.end_btn.setEnabled(False)
+        self.start_btn.setStyleSheet(self._start_btn_default_style)
+        self.end_btn.setStyleSheet(self._end_btn_default_style)
 
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.ack_btn)
@@ -274,6 +277,7 @@ class JS8CallNetControlTab(QWidget):
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._update_clock_labels)
         self._clock_timer.start(1000)
+        self._set_net_button_styles(active=False)
 
     # ---------------- SETTINGS & TIMER ---------------- #
 
@@ -503,6 +507,17 @@ class JS8CallNetControlTab(QWidget):
         except Exception:
             pass
 
+    def _set_net_button_styles(self, active: bool):
+        """
+        Mirror FLDigi styling: green Start when idle, gray when active; End stays red.
+        """
+        if active:
+            self.start_btn.setStyleSheet("QPushButton { background-color: #9E9E9E; color: white; }")
+            self.end_btn.setStyleSheet(self._end_btn_default_style)
+        else:
+            self.start_btn.setStyleSheet(self._start_btn_default_style)
+            self.end_btn.setStyleSheet(self._end_btn_default_style)
+
     # ---------------- START / END NET ---------------- #
 
     def _validate_before_start(self) -> bool:
@@ -551,9 +566,8 @@ class JS8CallNetControlTab(QWidget):
         if hasattr(self, "ad_hoc_btn"):
             self.ad_hoc_btn.setEnabled(False)
         self.start_btn.setEnabled(False)
-        self.start_btn.setStyleSheet(self._flrig_start_style)
+        self._set_net_button_styles(active=True)
         self.end_btn.setEnabled(True)
-        self.end_btn.setStyleSheet("QPushButton { background-color: red; color: white; }")
         self.ack_btn.setEnabled(True)
 
         # Track file size so we only read new lines
@@ -625,9 +639,8 @@ class JS8CallNetControlTab(QWidget):
             self.ad_hoc_btn.setEnabled(True)
         self._auto_query_paused_by_net = False
         self.start_btn.setEnabled(True)
-        self.start_btn.setStyleSheet("")
         self.end_btn.setEnabled(False)
-        self.end_btn.setStyleSheet("")
+        self._set_net_button_styles(active=False)
         self.ack_btn.setEnabled(False)
         self._checkins.clear()
         self._checkin_rows.clear()

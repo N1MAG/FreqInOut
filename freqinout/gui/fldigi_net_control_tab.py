@@ -60,6 +60,8 @@ class FldigiNetControlTab(QWidget):
 
         self._start_btn_default_style: str = ""
         self._save_btn_default_style: str = ""
+        self._normalizing_main = False
+        self._normalizing_late = False
 
         self._build_ui()
         self._load_settings()
@@ -129,7 +131,7 @@ class FldigiNetControlTab(QWidget):
         self.main_log_edit.setPlaceholderText(
             "Full path to file (update macro if needed)"
         )
-        main_browse_btn = QPushButton("Browse…")
+        main_browse_btn = QPushButton("Browse")
         main_browse_btn.clicked.connect(self._browse_main_log)
         main_path_row.addWidget(self.main_log_edit, stretch=1)
         main_path_row.addWidget(main_browse_btn)
@@ -141,7 +143,7 @@ class FldigiNetControlTab(QWidget):
         self.late_log_edit.setPlaceholderText(
             "Full path to file (update macro if needed)"
         )
-        late_browse_btn = QPushButton("Browse…")
+        late_browse_btn = QPushButton("Browse")
         late_browse_btn.clicked.connect(self._browse_late_log)
         late_path_row.addWidget(self.late_log_edit, stretch=1)
         late_path_row.addWidget(late_browse_btn)
@@ -227,6 +229,8 @@ class FldigiNetControlTab(QWidget):
         # Signals
         # Remove macro hint updates
         self.main_log_edit.textChanged.connect(lambda _: None)
+        self.main_text.textChanged.connect(self._on_main_text_changed)
+        self.late_text.textChanged.connect(self._on_late_text_changed)
 
         self.start_btn.clicked.connect(self._start_net)
         self.save_btn.clicked.connect(self._save_checkins)
@@ -814,7 +818,7 @@ class FldigiNetControlTab(QWidget):
             # Fallback if no items exist yet
             self.net_name_combo.setMinimumWidth(320)
 
-    # ---------------- BROWSE / HINT ---------------- #
+    # ---------------- Browse / HINT ---------------- #
 
     def _browse_main_log(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1050,6 +1054,50 @@ class FldigiNetControlTab(QWidget):
         Copy raw text (already normalized per line) to clipboard.
         """
         QApplication.clipboard().setText(text)
+
+    # ---------------- NORMALIZATION ---------------- #
+
+    def _on_main_text_changed(self):
+        self._normalize_text_edit(self.main_text, "_normalizing_main")
+
+    def _on_late_text_changed(self):
+        self._normalize_text_edit(self.late_text, "_normalizing_late")
+
+    def _normalize_text_edit(self, edit: QTextEdit, flag_attr: str) -> None:
+        """
+        Keep entries normalized to 'CALL / Name / ST' as users type or paste.
+        """
+        if getattr(self, flag_attr, False):
+            return
+        setattr(self, flag_attr, True)
+        try:
+            original = edit.toPlainText()
+            if original is None:
+                return
+            lines = original.splitlines()
+            normalized_lines = []
+            for line in lines:
+                cs, name, state = self._parse_checkin_line(line)
+                if cs or name or state:
+                    normalized_lines.append(self._format_entry(cs, name, state))
+                else:
+                    normalized_lines.append(line.strip())
+            normalized = "\n".join(normalized_lines)
+            if original.endswith("\n"):
+                normalized += "\n"
+            if normalized != original:
+                cursor = edit.textCursor()
+                pos = cursor.position()
+                edit.blockSignals(True)
+                try:
+                    edit.setPlainText(normalized)
+                    new_cursor = edit.textCursor()
+                    new_cursor.setPosition(min(pos, len(normalized)))
+                    edit.setTextCursor(new_cursor)
+                finally:
+                    edit.blockSignals(False)
+        finally:
+            setattr(self, flag_attr, False)
 
     def _end_net(self):
         if not self._net_in_progress:

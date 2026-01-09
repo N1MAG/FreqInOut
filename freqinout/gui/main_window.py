@@ -57,7 +57,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.settings = SettingsManager()
-        self.setWindowTitle("FreqInOut")
+        self.setWindowTitle("FreqInOut de N1MAG")
 
         # Central widget with sidebar navigation + stacked pages
         central = QWidget()
