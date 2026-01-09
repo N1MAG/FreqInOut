@@ -1098,7 +1098,6 @@ class SettingsTab(QWidget):
             table.setItem(row, 4, QTableWidgetItem(self._format_freq(g.get("frequency", ""))))
             auto_chk = QCheckBox()
             auto_chk.setChecked(bool(g.get("auto_tune", False)))
-            auto_chk.setAlignment(Qt.AlignCenter)
             table.setCellWidget(row, 5, auto_chk)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
 
