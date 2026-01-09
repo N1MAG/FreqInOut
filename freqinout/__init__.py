@@ -1,7 +1,7 @@
 
 """FreqInOut package."""
 
-__version__ = "1.0.0"
+from freqinout.version import __version__  # central version string
 import datetime
 import os
 

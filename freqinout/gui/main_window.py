@@ -24,6 +24,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.radio_interface.rigctl_client import FLRigClient
 from freqinout.radio_interface.js8_status import JS8ControlClient
+from freqinout.version import __version__
 
 from freqinout.gui.settings_tab import SettingsTab
 from freqinout.gui.daily_schedule_tab import DailyScheduleTab  # HF Frequency Schedule tab
@@ -36,6 +37,7 @@ from freqinout.gui.log_viewer import LogViewerTab
 from freqinout.gui.stations_map_tab import StationsMapTab
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.peer_sched_tab import PeerSchedTab
+from freqinout.gui.help_tab import HelpTab
 
 
 class MainWindow(QMainWindow):
@@ -57,7 +59,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.settings = SettingsManager()
-        self.setWindowTitle("FreqInOut de N1MAG")
+        self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
 
         # Central widget with sidebar navigation + stacked pages
         central = QWidget()
@@ -76,6 +78,7 @@ class MainWindow(QMainWindow):
         self.log_tab = LogViewerTab(self)
         self.stations_map_tab = StationsMapTab(self)
         self.peer_sched_tab = PeerSchedTab(self)
+        self.help_tab = HelpTab(self)
 
         # Sidebar navigation order (as requested)
         self._screens = [
@@ -90,6 +93,7 @@ class MainWindow(QMainWindow):
             ("Peer Schedules", self.peer_sched_tab),
             ("Settings", self.settings_tab),
             ("Logs", self.log_tab),
+            ("Help", self.help_tab),
         ]
 
         # Build sidebar
