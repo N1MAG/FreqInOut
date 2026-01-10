@@ -3,9 +3,14 @@
 
 a = Analysis(
     ['freqinout\\main.py'],
-    pathex=[],
+    pathex=['.'],
     binaries=[],
-    datas=[('config\\leaflet', 'config\\leaflet')],
+    datas=[
+        ('config\\leaflet', 'config\\leaflet'),
+        ('assets', 'assets'),
+        ('docs\\guide.html', 'docs'),
+        ('third_party\\js8net', 'third_party\\js8net'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -26,12 +31,13 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='assets\\FreqInOut.ico',
 )
 coll = COLLECT(
     exe,

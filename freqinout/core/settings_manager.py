@@ -18,8 +18,15 @@ class SettingsManager:
     """
 
     def __init__(self) -> None:
-        # Root of FreqInOut: .../freqinout/core/settings_manager.py -> parents[2]
-        base_dir = Path(__file__).resolve().parents[2]
+        # Prefer a user-writable config dir (works for both source and frozen builds)
+        env_config = os.environ.get("FREQINOUT_CONFIG_DIR")
+        if env_config:
+            base_dir = Path(env_config)
+        else:
+            if os.name == "nt":
+                base_dir = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or Path.home()) / APP_NAME
+            else:
+                base_dir = Path.home() / f".{APP_NAME.lower()}"
         self.config_dir = base_dir / "config"
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.config_dir / "freqinout.db"
