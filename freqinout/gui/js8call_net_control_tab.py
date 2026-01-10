@@ -1442,17 +1442,22 @@ class JS8CallNetControlTab(QWidget):
             return []
 
         mycall = self._my_callsign()
+        msg = line
+        if "\t" in line:
+            parts = line.split("\t", 4)
+            if len(parts) >= 5:
+                msg = parts[4].strip()
 
         # Try F!103 pattern first
-        if "F!103" in line:
-            first = line.split()[0]
+        if "F!103" in msg:
+            first = msg.split()[0]
             if ":" in first:
                 first = first.split(":", 1)[0]
             return [first.upper()]
 
         # Otherwise, look for token ending with ':'
         hits: List[str] = []
-        parts = line.split()
+        parts = msg.split()
         for tok in parts:
             if tok.endswith(":"):
                 cs = tok[:-1].upper()
