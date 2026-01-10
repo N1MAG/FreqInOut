@@ -827,6 +827,7 @@ class JS8CallNetControlTab(QWidget):
                     if not line:
                         continue
                     if not self._line_ts_after_start(line):
+                        log.debug("JS8 NCS: skipping DIRECTED line before app start: %s", line)
                         continue
                     # Load pending backlog for seen calls if applicable
                     calls = self._extract_callsigns_from_line(line)
@@ -844,14 +845,26 @@ class JS8CallNetControlTab(QWidget):
                         # If message completion marker present, notify immediately; else mark pending
                         call_primary = calls[0] if calls else ""
                         if self._is_message_complete_line(line):
+                            log.debug(
+                                "JS8 NCS: F!106 complete line detected (net_in_progress=%s): %s",
+                                self._net_in_progress,
+                                line,
+                            )
                             self._maybe_notify_announcement(call_primary, line)
                         else:
+                            log.debug("JS8 NCS: F!106 partial line, waiting for completion: %s", line)
                             self._pending_announcements[(call_primary or "UNKNOWN")] = time.time()
                     # If a completion marker arrives, see if we had a pending announcement for this call
                     if self._is_message_complete_line(line) and self._pending_announcements:
                         call_primary = calls[0] if calls else "UNKNOWN"
                         pending_ts = self._pending_announcements.pop(call_primary, None)
                         if pending_ts:
+                            log.debug(
+                                "JS8 NCS: F!106 completion arrived for pending call %s (net_in_progress=%s): %s",
+                                call_primary,
+                                self._net_in_progress,
+                                line,
+                            )
                             self._maybe_notify_announcement(call_primary, line)
                     self._maybe_capture_grid_report(line)
                     self._maybe_record_inbound_trigger(line, calls)
@@ -2143,14 +2156,18 @@ class JS8CallNetControlTab(QWidget):
         Show a popup when a net announcement (F!106) is fully received and no net is in progress.
         Debounced per callsign.
         """
+        # Debug guards for missed popups
         if self._net_in_progress:
+            log.debug("JS8 NCS: F!106 suppressed (net in progress): %s", line)
             return
         call = (callsign or "").strip().upper()
         if not call:
+            log.debug("JS8 NCS: F!106 suppressed (no callsign parsed): %s", line)
             return
         now = time.time()
         last = self._recent_announcements.get(call, 0)
         if now - last < 300:
+            log.debug("JS8 NCS: F!106 suppressed (debounce <5min) from %s: %s", call, line)
             return
         self._recent_announcements[call] = now
         msg_text = line
