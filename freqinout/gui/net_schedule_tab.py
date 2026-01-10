@@ -222,6 +222,37 @@ class NetScheduleTab(QWidget):
         self._update_clock_labels()
         self._setup_clock_timer()
 
+    def on_settings_saved(self) -> None:
+        """
+        Reload settings and operating groups after Save Settings.
+        Refresh group/band combos in existing rows.
+        """
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        self._load_operating_groups()
+        for r in range(self.table.rowCount()):
+            group_combo: QComboBox = self.table.cellWidget(r, self.COL_GROUP)  # type: ignore
+            band_combo: QComboBox = self.table.cellWidget(r, self.COL_BAND)  # type: ignore
+            current_group = group_combo.currentText().strip() if group_combo else ""
+            if group_combo:
+                group_names = sorted({g.get("group", "") for g in self.operating_groups if g.get("group")})
+                group_combo.blockSignals(True)
+                group_combo.clear()
+                group_combo.addItems(group_names)
+                if current_group and current_group in group_names:
+                    group_combo.setCurrentText(current_group)
+                group_combo.blockSignals(False)
+            if band_combo:
+                self._populate_band_combo(band_combo, current_group)
+                # keep current band if still valid
+                current_band = band_combo.currentText()
+                if current_band and band_combo.findText(current_band) >= 0:
+                    band_combo.setCurrentText(current_band)
+        # keep net name history intact
+        self._update_clock_labels()
+
     # --------- helpers: time / primary groups --------- #
     def _ui_tz_abbr(self, tz_name: str, fallback: str) -> str:
         mapping = {

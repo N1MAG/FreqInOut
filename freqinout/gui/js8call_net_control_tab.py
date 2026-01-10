@@ -43,6 +43,16 @@ from freqinout.gui.qsy_helper import (
     suspend_active,
     scheduler_enabled,
 )
+from freqinout.core.config_paths import get_config_dir
+
+
+def _nets_db_path() -> Path:
+    return get_config_dir() / "config" / "freqinout_nets.db"
+from freqinout.core.config_paths import get_config_dir
+
+
+def _nets_db_path() -> Path:
+    return get_config_dir() / "config" / "freqinout_nets.db"
 import psutil
 
 # Vendored js8net (replacement for pyjs8call)
@@ -1062,7 +1072,7 @@ class JS8CallNetControlTab(QWidget):
             return meta
         try:
             root = Path(__file__).resolve().parents[2]
-            db_path = root / "config" / "freqinout_nets.db"
+            db_path = _nets_db_path()
             if not db_path.exists():
                 return meta
             conn = sqlite3.connect(db_path)
@@ -1586,7 +1596,7 @@ class JS8CallNetControlTab(QWidget):
             return
         try:
             root = Path(__file__).resolve().parents[2]
-            db_path = root / "config" / "freqinout_nets.db"
+            db_path = _nets_db_path()
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.execute(
@@ -1645,7 +1655,7 @@ class JS8CallNetControlTab(QWidget):
             return
         try:
             root = Path(__file__).resolve().parents[2]
-            db_path = root / "config" / "freqinout_nets.db"
+            db_path = _nets_db_path()
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.execute(
@@ -1794,8 +1804,7 @@ class JS8CallNetControlTab(QWidget):
             return
         ts_str = ts.astimezone(datetime.timezone.utc).isoformat()
         try:
-            root = Path(__file__).resolve().parents[2]
-            db_path = root / "config" / "freqinout_nets.db"
+            db_path = _nets_db_path()
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.execute(
@@ -2157,7 +2166,7 @@ class JS8CallNetControlTab(QWidget):
     # ---------------- Auto-query backlog ---------------- #
 
     def _backlog_db_path(self) -> Path:
-        return Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+        return _nets_db_path()
 
     def _backlog_upsert(self, callsign: str, msg_id: str, kind: str, status: str = "PENDING") -> None:
         try:
@@ -2293,7 +2302,7 @@ class JS8CallNetControlTab(QWidget):
         if not cs:
             return False
         try:
-            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            db_path = _nets_db_path()
             if not db_path.exists():
                 return True
             conn = sqlite3.connect(db_path)
@@ -2314,7 +2323,7 @@ class JS8CallNetControlTab(QWidget):
         if not cs or not grid:
             return
         try:
-            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            db_path = _nets_db_path()
             db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
@@ -2498,7 +2507,7 @@ class JS8CallNetControlTab(QWidget):
     def _load_net_rows(self) -> List[Dict]:
         data = []
         try:
-            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            db_path = _nets_db_path()
             if db_path.exists():
                 conn = sqlite3.connect(db_path)
                 cur = conn.cursor()

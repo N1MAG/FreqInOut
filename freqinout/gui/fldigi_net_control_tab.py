@@ -778,8 +778,9 @@ class FldigiNetControlTab(QWidget):
         Format for suggestions: "CALLSIGN NAME STATE"
         """
         try:
-            root = Path(__file__).resolve().parents[2]  # .../FreqInOut/
-            db_path = root / "config" / "freqinout_nets.db"
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
         except Exception as e:
             log.error("Unable to resolve DB path for known operators: %s", e)
             db_path = Path.home() / "freqinout_nets.db"
@@ -1333,8 +1334,9 @@ class FldigiNetControlTab(QWidget):
         Schema matches OperatorHistoryTab.
         """
         try:
-            root = Path(__file__).resolve().parents[2]
-            db_path = root / "config" / "freqinout_nets.db"
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
         except Exception:
             return
         if not db_path.exists():

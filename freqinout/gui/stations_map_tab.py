@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QPushButton,
 )
+from freqinout.core.config_paths import get_config_dir
 
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -500,7 +501,7 @@ class StationsMapTab(QWidget):
         if not self.settings:
             return
         try:
-            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
             indexer = JS8LogLinkIndexer(self.settings, db_path)
         except Exception as e:
             log.debug("StationsMap: js8net live ingest unavailable: %s", e)
@@ -577,7 +578,7 @@ class StationsMapTab(QWidget):
         if not self.settings:
             return 0
         try:
-            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
             indexer = JS8LogLinkIndexer(self.settings, db_path)
             count = indexer.update(since_ts=since_ts)
             # Track the most recent timestamp from the ingested data if available
@@ -786,8 +787,7 @@ class StationsMapTab(QWidget):
         """
         pts: List[StationPoint] = []
         try:
-            root = Path(__file__).resolve().parents[2]
-            db_path = root / "config" / "freqinout_nets.db"
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
         except Exception as e:
             log.error("StationsMap: failed to resolve DB path: %s", e)
             self.stations = pts
@@ -924,8 +924,9 @@ class StationsMapTab(QWidget):
         """
         freqs: List[float] = []
         try:
-            root = Path(__file__).resolve().parents[2]
-            db_path = root / "config" / "freqinout_nets.db"
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
         except Exception:
             return freqs
         if not db_path.exists():
@@ -1049,8 +1050,9 @@ class StationsMapTab(QWidget):
             return links, {}
 
         try:
-            root = Path(__file__).resolve().parents[2]
-            db_path = root / "config" / "freqinout_nets.db"
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
         except Exception as e:
             log.error("StationsMap: failed to resolve DB path for links: %s", e)
             return links

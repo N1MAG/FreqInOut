@@ -131,7 +131,9 @@ class MessageViewerTab(QWidget):
     def _db_path(self) -> Path | None:
         try:
             root = Path(__file__).resolve().parents[2]
-            return root / "config" / "freqinout_nets.db"
+            from freqinout.core.config_paths import get_config_dir
+
+            return get_config_dir() / "config" / "freqinout_nets.db"
         except Exception as e:
             log.error("MessageViewer: failed to resolve DB path: %s", e)
             return None
@@ -486,7 +488,9 @@ class MessageViewerTab(QWidget):
     def _local_js8_db(self) -> Path | None:
         try:
             root = Path(__file__).resolve().parents[2]
-            return root / "config" / "freqinout_nets.db"
+            from freqinout.core.config_paths import get_config_dir
+
+            return get_config_dir() / "config" / "freqinout_nets.db"
         except Exception as e:
             log.debug("MessageViewer: failed to resolve local JS8 DB path: %s", e)
             return None

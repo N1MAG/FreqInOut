@@ -178,6 +178,10 @@ class MainWindow(QMainWindow):
             self.settings_tab.settings_saved.connect(self.fldigi_tab.on_settings_saved)
         except Exception:
             pass
+        try:
+            self.settings_tab.settings_saved.connect(self.net_tab.on_settings_saved)
+        except Exception:
+            pass
 
         log.info("Main window initialized.")
         # Sync sidebar filters initially

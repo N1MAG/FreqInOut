@@ -689,7 +689,9 @@ class SettingsTab(QWidget):
             return
         try:
             root = Path(__file__).resolve().parents[2]  # repo root
-            db_path = root / "config" / "freqinout_nets.db"
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.execute(
@@ -1346,7 +1348,9 @@ class SettingsTab(QWidget):
         if not path.exists():
             QMessageBox.warning(self, "File not found", f"DIRECTED.TXT not found at:\n{path}")
             return
-        db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+        from freqinout.core.config_paths import get_config_dir
+
+        db_path = get_config_dir() / "config" / "freqinout_nets.db"
         try:
             indexer = JS8LogLinkIndexer(self.settings, db_path)
             indexer._base_callsign = JS8LogLinkIndexer._base_callsign  # ensure suffix handling
