@@ -83,7 +83,7 @@ class SettingsTab(QWidget):
             "FLDigi": {"setting_key": "path_fldigi", "autostart_key": "autostart_fldigi"},
             "FLMsg": {"setting_key": "path_flmsg", "autostart_key": "autostart_flmsg"},
             "FLAmp": {"setting_key": "path_flamp", "autostart_key": "autostart_flamp"},
-            "JS8Call": {"setting_key": "path_js8call", "autostart_key": "autostart_js8call"},
+            # JS8Call is managed externally; no launch/autostart controls here.
         }
 
         self.radio_checkboxes: Dict[str, QCheckBox] = {}

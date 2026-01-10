@@ -2496,14 +2496,12 @@ class JS8CallNetControlTab(QWidget):
     def _is_message_complete_line(self, line: str) -> bool:
         """
         Heuristic: treat lines containing the JS8Call end-of-message marker
-        (diamond 'â™¢') as completion markers.
+        (diamond '?') as completion markers.
         """
         txt = line.strip()
         if not txt:
             return False
-        if "â™¢" in txt:
-            return True
-        return False
+        return '?' in txt
 
     # ---------------- Schedule helpers ---------------- #
 
