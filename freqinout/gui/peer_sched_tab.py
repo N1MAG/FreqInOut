@@ -131,7 +131,9 @@ class PeerSchedTab(QWidget):
     # ---------- data ----------
 
     def _db_path(self) -> Path:
-        return Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+        from freqinout.core.config_paths import get_config_dir
+
+        return get_config_dir() / "config" / "freqinout_nets.db"
 
     def _load_operator_meta(self) -> None:
         """

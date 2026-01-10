@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Set
 
 from freqinout.core.logger import log
+from freqinout.core.config_paths import get_config_dir
 
-# Base config directory (.../config relative to repo root)
-BASE_DIR = Path(__file__).resolve().parents[2]
-CONFIG_DIR = BASE_DIR / "config"
+# Base config directory (user-writable)
+CONFIG_DIR = get_config_dir() / "config"
 
 
 def _ensure_settings_db() -> None:

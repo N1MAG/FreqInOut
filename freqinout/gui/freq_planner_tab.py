@@ -200,7 +200,9 @@ class FreqPlannerTab(QWidget):
         Load net schedule from config/freqinout_nets.db if available.
         """
         try:
-            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout_nets.db"
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
             if not db_path.exists():
                 return None
             conn = sqlite3.connect(db_path)

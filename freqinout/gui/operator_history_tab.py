@@ -191,12 +191,12 @@ class OperatorHistoryTab(QWidget):
     def _db_path(self) -> Path | None:
         """
         Use the same shared DB path as checkin_db:
-
-            <project_root>/config/freqinout_nets.db
+            <config_dir>/config/freqinout_nets.db
         """
         try:
-            root = Path(__file__).resolve().parents[2]  # .../FreqInOut/
-            return root / "config" / "freqinout_nets.db"
+            from freqinout.core.config_paths import get_config_dir
+
+            return get_config_dir() / "config" / "freqinout_nets.db"
         except Exception as e:
             log.error("OperatorHistoryTab: failed to resolve DB path: %s", e)
             return None

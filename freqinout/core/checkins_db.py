@@ -5,20 +5,15 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 from freqinout.core.logger import log
+from freqinout.core.config_paths import get_config_dir
 
 
 def _db_path() -> Path:
     """
-    Returns the path to freqinout_nets.db under the shared config directory:
-
-        <project_root>/config/freqinout_nets.db
-
-    where <project_root> is two levels above this file:
-        freqinout/core/checkin_db.py  -> parents[2] == project root
+    Returns the path to freqinout_nets.db under the shared config directory.
     """
     try:
-        root = Path(__file__).resolve().parents[2]  # .../FreqInOut/
-        config_dir = root / "config"
+        config_dir = get_config_dir() / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         return config_dir / "freqinout_nets.db"
     except Exception as e:
