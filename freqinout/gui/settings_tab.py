@@ -57,7 +57,7 @@ class SettingsTab(QWidget):
     - JS8Call TCP port
     - Primary JS8Call groups
     - JS8Call DIRECTED.TXT path
-    - Radio software paths & autostart
+    - Radio software paths
 
     Timezone is *not* user selectable here; it is auto-detected from the
     system clock and stored under the 'timezone' key in SettingsManager.
@@ -89,7 +89,6 @@ class SettingsTab(QWidget):
         self.radio_checkboxes: Dict[str, QCheckBox] = {}
         self.status_labels: Dict[str, QLabel] = {}
         self.path_edits: Dict[str, QLineEdit] = {}
-        self.autostart_checks: Dict[str, QCheckBox] = {}
         self.js8_groups_edits: List[QLineEdit] = []
         self.js8_auto_query_chk: Optional[QCheckBox] = None
         self.js8_auto_query_grid_chk: Optional[QCheckBox] = None
@@ -347,10 +346,6 @@ class SettingsTab(QWidget):
             browse_btn.clicked.connect(lambda _, n=prog_name: self._choose_program_path(n))
             row.addWidget(browse_btn)
 
-            autostart_chk = QCheckBox("Auto-start")
-            self.autostart_checks[prog_name] = autostart_chk
-            row.addWidget(autostart_chk)
-
             radio_v.addLayout(row)
 
         # Launch Selected
@@ -444,13 +439,10 @@ class SettingsTab(QWidget):
 
         for prog_name, meta in self.PROGRAMS.items():
             path_key = meta["setting_key"]
-            auto_key = meta["autostart_key"]
             enabled_key = f"{prog_name.lower()}_enabled"
 
             if path_key:
                 self.path_edits[prog_name].setText(data.get(path_key, "") or "")
-            if auto_key and prog_name in self.autostart_checks:
-                self.autostart_checks[prog_name].setChecked(bool(data.get(auto_key, False)))
             if prog_name in self.radio_checkboxes:
                 self.radio_checkboxes[prog_name].setChecked(bool(data.get(enabled_key, False)))
 
@@ -522,13 +514,10 @@ class SettingsTab(QWidget):
         # Radio software paths / autostart / enabled flags from UI
         for prog_name, meta in self.PROGRAMS.items():
             path_key = meta["setting_key"]
-            auto_key = meta["autostart_key"]
             enabled_key = f"{prog_name.lower()}_enabled"
 
             if path_key:
                 data[path_key] = self.path_edits[prog_name].text().strip()
-            if auto_key and prog_name in self.autostart_checks:
-                data[auto_key] = bool(self.autostart_checks[prog_name].isChecked())
             if prog_name in self.radio_checkboxes:
                 data[enabled_key] = bool(self.radio_checkboxes[prog_name].isChecked())
 
