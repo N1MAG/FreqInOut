@@ -50,19 +50,20 @@ class HelpTab(QWidget):
         """
         headings: List[Tuple[int, str, str]] = []
         pattern = re.compile(
-            r"<h([1-3])[^>]*?(?:id=\"([^\"]+)\")?[^>]*>(.*?)</h\\1>",
+            r"<h([1-3])([^>]*)>(.*?)</h\1>",
             flags=re.IGNORECASE | re.DOTALL,
         )
-        # Fix backreference: </h\1> (single slash) is required; build a second pattern for safety.
-        pattern_fix = re.compile(
-            r"<h([1-3])[^>]*?(?:id=\"([^\"]+)\")?[^>]*>(.*?)</h\1>",
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        matches = list(pattern_fix.finditer(html_text)) or list(pattern.finditer(html_text))
-        for match in matches:
+        for match in pattern.finditer(html_text):
             level = int(match.group(1))
-            anchor = match.group(2) or ""
+            attrs = match.group(2) or ""
             raw_text = match.group(3)
+            anchor = ""
+            if attrs:
+                id_match = re.search(r'\bid\s*=\s*"([^"]+)"', attrs, flags=re.IGNORECASE)
+                if not id_match:
+                    id_match = re.search(r"\bid\s*=\s*'([^']+)'", attrs, flags=re.IGNORECASE)
+                if id_match:
+                    anchor = id_match.group(1)
             # Strip tags and unescape entities
             text_clean = re.sub("<[^>]+>", "", raw_text)
             text_clean = html.unescape(text_clean).strip()
