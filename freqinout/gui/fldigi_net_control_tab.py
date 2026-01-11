@@ -783,7 +783,7 @@ class FldigiNetControlTab(QWidget):
             db_path = get_config_dir() / "config" / "freqinout_nets.db"
         except Exception as e:
             log.error("Unable to resolve DB path for known operators: %s", e)
-            db_path = Path.home() / "freqinout_nets.db"
+            return
 
         if not db_path.exists():
             return

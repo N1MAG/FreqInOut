@@ -2571,7 +2571,7 @@ class JS8CallNetControlTab(QWidget):
     def _load_daily_rows(self) -> List[Dict]:
         data = []
         try:
-            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout.db"
+            db_path = get_config_dir() / "config" / "freqinout.db"
             if db_path.exists():
                 conn = sqlite3.connect(db_path)
                 cur = conn.cursor()

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 import psutil
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -107,6 +107,7 @@ PROGRAMS = {
 
 
 class DailyScheduleTab(QWidget):
+    schedule_saved = Signal()
     """
     HF Frequency Schedule tab.
 
@@ -383,16 +384,15 @@ class DailyScheduleTab(QWidget):
         """
         Location of the primary settings DB (freqinout.db).
         """
+        from freqinout.core.config_paths import get_config_dir
+
         cfg_path = getattr(self.settings, "_config_path", None)
         if cfg_path:
             try:
                 return Path(cfg_path)
             except Exception:
                 pass
-        try:
-            return Path(__file__).resolve().parents[2] / "config" / "freqinout.db"
-        except Exception:
-            return Path("freqinout.db")
+        return get_config_dir() / "config" / "freqinout.db"
 
     def _load_schedule_from_db(self) -> List[Dict]:
         """
@@ -867,9 +867,7 @@ class DailyScheduleTab(QWidget):
         Ask the main window to refresh the Frequency Planner after schedule changes.
         """
         try:
-            win = self.window()
-            if win and hasattr(win, "freq_planner_tab"):
-                win.freq_planner_tab.rebuild_table()
+            self.schedule_saved.emit()
         except Exception:
             pass
 

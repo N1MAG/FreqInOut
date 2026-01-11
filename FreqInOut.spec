@@ -11,7 +11,7 @@ a = Analysis(
         ('docs\\guide.html', 'docs'),
         ('third_party\\js8net', 'third_party\\js8net'),
     ],
-    hiddenimports=[],
+    hiddenimports=["tzdata"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

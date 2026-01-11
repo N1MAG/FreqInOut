@@ -10,7 +10,7 @@ import datetime
 from pathlib import Path
 
 import psutil
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -105,6 +105,7 @@ PROGRAM_META: Dict[str, Dict[str, str]] = {
 
 
 class NetScheduleTab(QWidget):
+    schedule_saved = Signal()
     """
     Net Schedules GUI.
 
@@ -1202,11 +1203,8 @@ class NetScheduleTab(QWidget):
             )
             return
 
-        # Refresh Frequency Planner view if available
         try:
-            win = self.window()
-            if win and hasattr(win, "freq_planner_tab"):
-                win.freq_planner_tab.rebuild_table()
+            self.schedule_saved.emit()
         except Exception:
             pass
 

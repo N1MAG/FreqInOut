@@ -182,6 +182,16 @@ class MainWindow(QMainWindow):
             self.settings_tab.settings_saved.connect(self.net_tab.on_settings_saved)
         except Exception:
             pass
+        try:
+            self.hf_schedule_tab.schedule_saved.connect(self.freq_planner_tab.rebuild_table)
+            self.hf_schedule_tab.schedule_saved.connect(self.scheduler.force_refresh)
+        except Exception:
+            pass
+        try:
+            self.net_tab.schedule_saved.connect(self.freq_planner_tab.rebuild_table)
+            self.net_tab.schedule_saved.connect(self.scheduler.force_refresh)
+        except Exception:
+            pass
 
         log.info("Main window initialized.")
         # Sync sidebar filters initially

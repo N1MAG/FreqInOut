@@ -21,6 +21,7 @@ from pathlib import Path
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
+from freqinout.core.config_paths import get_config_dir
 from freqinout.utils.timezones import get_timezone
 
 DAY_NAMES = [
@@ -163,7 +164,7 @@ class FreqPlannerTab(QWidget):
         Load HF/daily schedule from config/freqinout.db if available.
         """
         try:
-            db_path = Path(__file__).resolve().parents[2] / "config" / "freqinout.db"
+            db_path = get_config_dir() / "config" / "freqinout.db"
             if not db_path.exists():
                 return None
             conn = sqlite3.connect(db_path)
@@ -200,8 +201,6 @@ class FreqPlannerTab(QWidget):
         Load net schedule from config/freqinout_nets.db if available.
         """
         try:
-            from freqinout.core.config_paths import get_config_dir
-
             db_path = get_config_dir() / "config" / "freqinout_nets.db"
             if not db_path.exists():
                 return None
@@ -416,6 +415,10 @@ class FreqPlannerTab(QWidget):
         """
         Recompute the table based on current hf_schedule and net_schedule in config.
         """
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
         self.table.clearContents()
         tz_name, tz_abbr = self._current_timezone_label()
         if not self._show_local:
