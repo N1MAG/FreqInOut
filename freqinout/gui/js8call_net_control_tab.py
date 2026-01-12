@@ -135,6 +135,9 @@ class JS8CallNetControlTab(QWidget):
         self._auto_inserted_callsigns: Set[str] = set()
         self._awaiting_ack_for: Optional[str] = None
         self._call_last_rx_ts: Dict[str, float] = {}
+        self._last_traffic_to_me_ts: float = 0.0
+        self._last_traffic_group_ts: float = 0.0
+        self._last_traffic_by_call_ts: Dict[str, float] = {}
         self._auto_query_paused_by_net = False
         self._start_btn_default_style = "QPushButton { background-color: #4CAF50; color: white; }"
         self._end_btn_default_style = "QPushButton { background-color: #F44336; color: white; }"
@@ -829,17 +832,15 @@ class JS8CallNetControlTab(QWidget):
                     if not self._line_ts_after_start(line):
                         log.debug("JS8 NCS: skipping DIRECTED line before app start: %s", line)
                         continue
-                    # Load pending backlog for seen calls if applicable
+                    # Load pending backlog for seen calls if applicable (GRID only)
                     calls = self._extract_callsigns_from_line(line)
                     if self._net_in_progress and not self._auto_query_paused_by_net:
                         pending_items = self._backlog_fetch_pending(calls)
                         for cs_b, mid_b, kind_b in pending_items:
-                            if kind_b == "MSG" and mid_b:
-                                self._pending_queries.append((None, None, cs_b, mid_b))
-                                self._backlog_touch_attempt(cs_b, mid_b, "MSG")
-                            elif kind_b == "GRID":
+                            if kind_b == "GRID":
                                 self._pending_grid_queries.append((None, cs_b))
                                 self._backlog_touch_attempt(cs_b, mid_b, "GRID")
+                    self._update_recent_traffic(line, calls)
                     # Net announcement detection (only when net not in progress)
                     if self._line_has_announce_form(line):
                         # If message completion marker present, notify immediately; else mark pending
@@ -887,6 +888,8 @@ class JS8CallNetControlTab(QWidget):
                                 dest_cs or "(unknown)",
                                 mycall,
                             )
+                        elif not self._is_message_complete_line(line):
+                            log.debug("JS8CallNetControl: YES MSG line incomplete; waiting for completion: %s", line.strip())
                         else:
                             for c in calls:
                                 base_c = self._base_callsign(c)
@@ -1933,6 +1936,7 @@ class JS8CallNetControlTab(QWidget):
         """
         Queue a query for MSG ID, and process one at a time when enabled.
         """
+        self._backlog_upsert(call, msg_id, "MSG", status="PENDING")
         if not self.auto_query_msg_id:
             return
         if self._auto_query_paused_by_net:
@@ -1940,24 +1944,7 @@ class JS8CallNetControlTab(QWidget):
         key = f"{call}:{msg_id}"
         if key in self._queried_msg_ids:
             return
-        try:
-            snr_val = float(snr) if snr is not None else None
-        except Exception:
-            snr_val = None
-        speed_val = None
-        try:
-            speed_val = int(speed) if speed is not None else None
-        except Exception:
-            speed_val = None
-        self._pending_queries.append((snr_val, speed_val, call, msg_id))
-        log.debug(
-            "JS8CallNetControl: queued auto-query call=%s id=%s (snr=%s speed=%s) pending=%d",
-            call,
-            msg_id,
-            snr_val,
-            speed_val,
-            len(self._pending_queries),
-        )
+        log.debug("JS8CallNetControl: queued auto-query call=%s id=%s", call, msg_id)
         self._maybe_process_next_query()
 
     def _maybe_process_next_query(self) -> None:
@@ -1971,29 +1958,36 @@ class JS8CallNetControlTab(QWidget):
             else:
                 log.debug("JS8CallNetControl: waiting_for_completion; skipping process_next_query")
                 return
-        if not self._pending_queries:
+        if self._auto_query_paused_by_net:
+            return
+        pending = self._backlog_fetch_next_pending()
+        if not pending:
             log.debug("JS8CallNetControl: no pending queries to process")
             return
-        if self._auto_query_paused_by_net:
-            # Persist pending to backlog so we can retry later
-              for snr_val, speed_val, call, msg_id in list(self._pending_queries):
-                  self._backlog_upsert(call, msg_id, "MSG", status="PENDING")
-              self._pending_queries.clear()
-              return
-        # Avoid querying while RX just occurred (idle gap)
-        if time.time() - self._last_rx_ts < 2.0:
-            log.debug("JS8CallNetControl: RX idle gap not met; deferring auto-query")
+        call, msg_id, created_ts = pending
+        now_ts = time.time()
+        last_relevant = max(
+            self._last_traffic_to_me_ts,
+            self._last_traffic_group_ts,
+            self._last_traffic_by_call_ts.get(self._base_callsign(call), 0.0),
+        )
+        idle_ok = (now_ts - last_relevant) >= 5.0
+        max_wait = (now_ts - created_ts) >= 60.0
+        if not idle_ok and not max_wait:
+            log.debug(
+                "JS8CallNetControl: deferring auto-query call=%s id=%s (idle_gap=%.1fs wait=%.1fs)",
+                call,
+                msg_id,
+                max(0.0, now_ts - last_relevant),
+                max(0.0, now_ts - created_ts),
+            )
             return
-        # Prefer weakest SNR first (more negative first), unknowns last
-        self._pending_queries.sort(key=lambda t: (999 if t[0] is None else t[0]))
-        snr_val, speed_val, call, msg_id = self._pending_queries.pop(0)
         log.debug(
-            "JS8CallNetControl: processing auto-query call=%s id=%s (snr=%s speed=%s) remaining=%d",
+            "JS8CallNetControl: processing auto-query call=%s id=%s (idle_ok=%s max_wait=%s)",
             call,
             msg_id,
-            snr_val,
-            speed_val,
-            len(self._pending_queries),
+            idle_ok,
+            max_wait,
         )
         key = f"{call}:{msg_id}"
         if key in self._queried_msg_ids:
@@ -2003,6 +1997,7 @@ class JS8CallNetControlTab(QWidget):
         mycall = self._my_callsign() or ""
         query_text = f"{mycall}: {call} QUERY MSG {msg_id}".strip()
         log.info("JS8CallNetControl: attempting auto-query TX to %s msg_id=%s text=\"%s\"", call, msg_id, query_text)
+        self._backlog_touch_attempt(call, msg_id, "MSG")
         sent = self._send_js8_message(query_text)
         if sent:
             self._queried_msg_ids.add(key)
@@ -2011,20 +2006,14 @@ class JS8CallNetControlTab(QWidget):
             self._current_query_sent_ts = time.time()
             # Expect a MSG reply; extend timeout for slow mode
             is_slow = False
-            try:
-                is_slow = speed_val == 4
-            except Exception:
-                is_slow = False
             base_timeout = 120
             if is_slow:
                 base_timeout = 180
             expiry = time.time() + base_timeout
             self._awaiting_msg_responses[(call, msg_id)] = expiry
-            self._backlog_upsert(call, msg_id, "MSG", status="PENDING")
             log.info("JS8CallNetControl: auto-queried MSG ID %s from %s via TX.SEND_MESSAGE", msg_id, call)
         else:
             log.error("JS8CallNetControl: auto query send failed for %s/%s", call, msg_id)
-            self._backlog_upsert(call, msg_id, "MSG", status="PENDING")
             self._current_query = None
             self._waiting_for_completion = False
             self._maybe_process_next_query()
@@ -2109,8 +2098,21 @@ class JS8CallNetControlTab(QWidget):
                             ids = re.findall(r"\b(\d+)\b", combined)
                             for mid in ids:
                                 if frm:
-                                    log.info("JS8CallNetControl: detected YES MSG %s from %s (snr=%s)", mid, frm, snr_val)
-                                    self._queue_auto_query(frm, mid, snr=snr_val, speed=p.get("SPEED"))
+                                    dest = ""
+                                    try:
+                                        first = txt.split()[0].strip().upper()
+                                        dest = first
+                                    except Exception:
+                                        dest = ""
+                                    mycall = self._my_callsign()
+                                    if mycall and dest == mycall and self._is_message_complete_line(txt):
+                                        log.info(
+                                            "JS8CallNetControl: detected YES MSG %s from %s (snr=%s)",
+                                            mid,
+                                            frm,
+                                            snr_val,
+                                        )
+                                        self._queue_auto_query(frm, mid, snr=snr_val, speed=p.get("SPEED"))
                     # Passive grid capture
                     grid_val = (p.get("GRID") or "").strip()
                     base_frm = self._base_callsign(frm) if frm else ""
@@ -2152,6 +2154,47 @@ class JS8CallNetControlTab(QWidget):
         """
         up = line.upper()
         return any(form in up for form in CHECKIN_FORMS)
+
+    def _message_text_from_line(self, line: str) -> str:
+        if "\t" in line:
+            parts = line.split("\t", 4)
+            if len(parts) >= 5:
+                return parts[4].strip()
+        return line.strip()
+
+    def _extract_dest_callsign(self, msg_text: str) -> str:
+        txt = (msg_text or "").strip()
+        if not txt:
+            return ""
+        if ":" in txt:
+            rest = txt.split(":", 1)[1]
+        else:
+            rest = txt
+        if not rest:
+            return ""
+        return rest.strip().split()[0].strip().upper()
+
+    def _update_recent_traffic(self, line: str, calls: List[str]) -> None:
+        msg_text = self._message_text_from_line(line)
+        now_ts = time.time()
+
+        if calls:
+            sender = self._base_callsign(calls[0])
+            if sender:
+                self._last_traffic_by_call_ts[sender] = now_ts
+
+        dest = self._base_callsign(self._extract_dest_callsign(msg_text))
+        if dest:
+            self._last_traffic_by_call_ts[dest] = now_ts
+
+        mycall = self._my_callsign()
+        if mycall and dest == mycall:
+            self._last_traffic_to_me_ts = now_ts
+
+        if "@" in msg_text:
+            tokens = re.findall(r"@([A-Z0-9]{1,15})", msg_text.upper())
+            if tokens:
+                self._last_traffic_group_ts = now_ts
 
     def _line_has_announce_form(self, line: str) -> bool:
         return ANNOUNCE_FORM in line.upper()
@@ -2197,10 +2240,19 @@ class JS8CallNetControlTab(QWidget):
             now_ts = time.time()
             cur.execute(
                 """
-                DELETE FROM autoquery_backlog WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind=?
+                SELECT attempts FROM autoquery_backlog
+                WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind=?
                 """,
                 (callsign, msg_id or "", kind),
             )
+            row = cur.fetchone()
+            if row is not None:
+                attempts = row[0] or 0
+                if kind == "MSG" and attempts >= 1:
+                    conn.close()
+                    return
+                conn.close()
+                return
             cur.execute(
                 """
                 INSERT INTO autoquery_backlog (callsign, msg_id, kind, status, attempts, last_attempt_ts, created_ts)
@@ -2241,7 +2293,7 @@ class JS8CallNetControlTab(QWidget):
                 f"""
                 SELECT callsign, msg_id, kind
                 FROM autoquery_backlog
-                WHERE status='PENDING' AND callsign IN ({qs})
+                WHERE COALESCE(attempts,0)=0 AND callsign IN ({qs})
                 """,
                 [c.upper() for c in callsigns],
             )
@@ -2251,6 +2303,31 @@ class JS8CallNetControlTab(QWidget):
         except Exception as e:
             log.debug("JS8 autoquery backlog fetch failed: %s", e)
             return []
+
+    def _backlog_fetch_next_pending(self) -> Optional[tuple[str, str, float]]:
+        try:
+            conn = sqlite3.connect(self._backlog_db_path())
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT callsign, msg_id, created_ts
+                FROM autoquery_backlog
+                WHERE kind='MSG' AND COALESCE(attempts,0)=0 AND COALESCE(msg_id,'')<>''
+                ORDER BY COALESCE(created_ts, 0) ASC, id ASC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            conn.close()
+            if not row:
+                return None
+            created_ts = float(row[2] or 0)
+            if created_ts <= 0:
+                created_ts = time.time()
+            return (row[0] or "", row[1] or "", created_ts)
+        except Exception as e:
+            log.debug("JS8 autoquery backlog fetch next failed: %s", e)
+            return None
 
     def _backlog_touch_attempt(self, callsign: str, msg_id: str, kind: str) -> None:
         try:
@@ -2270,17 +2347,36 @@ class JS8CallNetControlTab(QWidget):
             log.debug("JS8 autoquery backlog touch failed: %s", e)
 
     def _mark_backlog_retrieved(self, callsign: str, msg_id: str, kind: str) -> None:
-        self._backlog_mark(callsign, msg_id, kind, "RETRIEVED")
+        if kind == "MSG":
+            self._backlog_delete(callsign, msg_id, kind)
+        else:
+            self._backlog_mark(callsign, msg_id, kind, "RETRIEVED")
 
     def _mark_backlog_failed(self, callsign: str, msg_id: str, kind: str) -> None:
+        if kind == "MSG":
+            return
         self._backlog_mark(callsign, msg_id, kind, "FAILED")
+
+    def _backlog_delete(self, callsign: str, msg_id: str, kind: str) -> None:
+        try:
+            conn = sqlite3.connect(self._backlog_db_path())
+            cur = conn.cursor()
+            cur.execute(
+                """
+                DELETE FROM autoquery_backlog
+                WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind=?
+                """,
+                (callsign, msg_id or "", kind),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("JS8 autoquery backlog delete failed: %s", e)
 
     def _expire_pending_responses(self) -> None:
         now = time.time()
         for key, exp in list(self._awaiting_msg_responses.items()):
             if now > exp:
-                call, mid = key
-                self._mark_backlog_failed(call, mid, "MSG")
                 self._awaiting_msg_responses.pop(key, None)
         for call, exp in list(self._awaiting_grid_responses.items()):
             if now > exp:
