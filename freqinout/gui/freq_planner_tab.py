@@ -680,8 +680,8 @@ class FreqPlannerTab(QWidget):
                         base_date = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(
                             days=offset
                         )
-                        start_dt = base_date + datetime.timedelta(minutes=start_m + hour * 60)
-                        end_dt = base_date + datetime.timedelta(minutes=end_m + hour * 60)
+                        start_dt = base_date + datetime.timedelta(minutes=start_m + lookup_hour * 60)
+                        end_dt = base_date + datetime.timedelta(minutes=end_m + lookup_hour * 60)
                         if start_dt <= now_utc <= end_dt or (now_utc <= start_dt <= now_plus_24):
                             highlight = True
                             break
