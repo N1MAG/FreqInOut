@@ -2304,6 +2304,28 @@ class JS8CallNetControlTab(QWidget):
             log.debug("JS8 autoquery backlog fetch failed: %s", e)
             return []
 
+    def _backlog_has_pending_msg(self, callsign: str) -> bool:
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return False
+        try:
+            conn = sqlite3.connect(self._backlog_db_path())
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT 1 FROM autoquery_backlog
+                WHERE kind='MSG' AND COALESCE(attempts,0)=0 AND callsign=?
+                LIMIT 1
+                """,
+                (cs,),
+            )
+            row = cur.fetchone()
+            conn.close()
+            return row is not None
+        except Exception as e:
+            log.debug("JS8 autoquery backlog pending check failed: %s", e)
+            return False
+
     def _backlog_fetch_next_pending(self) -> Optional[tuple[str, str, float]]:
         try:
             conn = sqlite3.connect(self._backlog_db_path())
@@ -2573,6 +2595,11 @@ class JS8CallNetControlTab(QWidget):
         max_attempts = len(self._pending_grid_queries)
         while self._pending_grid_queries and processed < max_attempts:
             snr_val, call = self._pending_grid_queries.pop(0)
+            if self._backlog_has_pending_msg(self._base_callsign(call)):
+                # Finish MSG auto-queries for this callsign before GRID?
+                self._pending_grid_queries.append((snr_val, call))
+                processed += 1
+                continue
             last_rx = self._call_last_rx_ts.get(self._base_callsign(call), 0.0)
             if last_rx and (now_ts - last_rx) < AUTO_GRID_QUIET_SECS:
                 # Too recent; push to back and try later
