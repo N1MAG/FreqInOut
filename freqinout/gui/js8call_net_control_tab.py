@@ -1997,9 +1997,9 @@ class JS8CallNetControlTab(QWidget):
         mycall = self._my_callsign() or ""
         query_text = f"{mycall}: {call} QUERY MSG {msg_id}".strip()
         log.info("JS8CallNetControl: attempting auto-query TX to %s msg_id=%s text=\"%s\"", call, msg_id, query_text)
-        self._backlog_touch_attempt(call, msg_id, "MSG")
         sent = self._send_js8_message(query_text)
         if sent:
+            self._backlog_touch_attempt(call, msg_id, "MSG")
             self._queried_msg_ids.add(key)
             self._waiting_for_completion = True
             self._current_query = (call, msg_id)
