@@ -138,6 +138,9 @@ class JS8CallNetControlTab(QWidget):
         self._last_traffic_to_me_ts: float = 0.0
         self._last_traffic_group_ts: float = 0.0
         self._last_traffic_by_call_ts: Dict[str, float] = {}
+        self._msg_defer_last_log: Dict[str, float] = {}
+        self._grid_defer_last_log: Dict[str, float] = {}
+        self._grid_defer_start_ts: Dict[str, float] = {}
         self._auto_query_paused_by_net = False
         self._start_btn_default_style = "QPushButton { background-color: #4CAF50; color: white; }"
         self._end_btn_default_style = "QPushButton { background-color: #F44336; color: white; }"
@@ -1972,8 +1975,7 @@ class JS8CallNetControlTab(QWidget):
             self._last_traffic_by_call_ts.get(self._base_callsign(call), 0.0),
         )
         idle_ok = (now_ts - last_relevant) >= 5.0
-        max_wait = (now_ts - created_ts) >= 60.0
-        if not idle_ok and not max_wait:
+        if not idle_ok:
             log.debug(
                 "JS8CallNetControl: deferring auto-query call=%s id=%s (idle_gap=%.1fs wait=%.1fs)",
                 call,
@@ -1981,13 +1983,22 @@ class JS8CallNetControlTab(QWidget):
                 max(0.0, now_ts - last_relevant),
                 max(0.0, now_ts - created_ts),
             )
+            key = f"{call}:{msg_id}"
+            last_log = self._msg_defer_last_log.get(key, 0.0)
+            if (now_ts - created_ts) >= 60.0 and (now_ts - last_log) >= 60.0:
+                log.info(
+                    "JS8CallNetControl: auto-query still blocked by traffic for %s id=%s (wait=%.1fs)",
+                    call,
+                    msg_id,
+                    max(0.0, now_ts - created_ts),
+                )
+                self._msg_defer_last_log[key] = now_ts
             return
         log.debug(
-            "JS8CallNetControl: processing auto-query call=%s id=%s (idle_ok=%s max_wait=%s)",
+            "JS8CallNetControl: processing auto-query call=%s id=%s (idle_ok=%s)",
             call,
             msg_id,
             idle_ok,
-            max_wait,
         )
         key = f"{call}:{msg_id}"
         if key in self._queried_msg_ids:
@@ -2600,6 +2611,30 @@ class JS8CallNetControlTab(QWidget):
                 self._pending_grid_queries.append((snr_val, call))
                 processed += 1
                 continue
+            now_ts = time.time()
+            last_relevant = max(
+                self._last_traffic_to_me_ts,
+                self._last_traffic_group_ts,
+                self._last_traffic_by_call_ts.get(self._base_callsign(call), 0.0),
+            )
+            idle_ok = (now_ts - last_relevant) >= 5.0
+            if not idle_ok:
+                key = self._base_callsign(call) or call
+                if key not in self._grid_defer_start_ts:
+                    self._grid_defer_start_ts[key] = now_ts
+                last_log = self._grid_defer_last_log.get(key, 0.0)
+                wait = now_ts - self._grid_defer_start_ts.get(key, now_ts)
+                if wait >= 60.0 and (now_ts - last_log) >= 60.0:
+                    log.info(
+                        "JS8CallNetControl: auto grid query still blocked by traffic for %s",
+                        call,
+                    )
+                    self._grid_defer_last_log[key] = now_ts
+                self._pending_grid_queries.append((snr_val, call))
+                processed += 1
+                continue
+            key = self._base_callsign(call) or call
+            self._grid_defer_start_ts.pop(key, None)
             last_rx = self._call_last_rx_ts.get(self._base_callsign(call), 0.0)
             if last_rx and (now_ts - last_rx) < AUTO_GRID_QUIET_SECS:
                 # Too recent; push to back and try later
