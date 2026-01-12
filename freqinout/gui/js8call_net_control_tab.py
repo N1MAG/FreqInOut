@@ -2337,6 +2337,24 @@ class JS8CallNetControlTab(QWidget):
             log.debug("JS8 autoquery backlog pending check failed: %s", e)
             return False
 
+    def _backlog_has_any_pending_msg(self) -> bool:
+        try:
+            conn = sqlite3.connect(self._backlog_db_path())
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT 1 FROM autoquery_backlog
+                WHERE kind='MSG' AND COALESCE(attempts,0)=0
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            conn.close()
+            return row is not None
+        except Exception as e:
+            log.debug("JS8 autoquery backlog pending-any check failed: %s", e)
+            return False
+
     def _backlog_fetch_next_pending(self) -> Optional[tuple[str, str, float]]:
         try:
             conn = sqlite3.connect(self._backlog_db_path())
@@ -2590,6 +2608,8 @@ class JS8CallNetControlTab(QWidget):
         if not self._pending_grid_queries:
             return
         if self._auto_query_paused_by_net:
+            return
+        if self._waiting_for_completion or self._backlog_has_any_pending_msg():
             return
         if time.time() - self._grid_last_rx_ts < 2.0:
             return
