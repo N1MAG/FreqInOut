@@ -464,16 +464,6 @@ class MessageViewerTab(QWidget):
 
     def _refresh_pending_backlog(self) -> None:
         self._ensure_backlog_table()
-        rows = self._load_pending_rows()
-        if rows:
-            for row in rows:
-                if row.get("status") == "RETRIEVED":
-                    continue
-                msg_id = row.get("msg_id")
-                if not msg_id:
-                    continue
-                if self._pending_msg_in_inbox(str(msg_id)):
-                    self._pending_set_status(str(row.get("callsign", "")), str(msg_id), "RETRIEVED")
         self._update_pending_table()
 
     def _load_pending_rows(self) -> List[Dict[str, str | float]]:
@@ -511,32 +501,6 @@ class MessageViewerTab(QWidget):
         self._pending_rows = out
         return out
 
-    def _pending_msg_in_inbox(self, msg_id: str) -> bool:
-        inbox_path = self._inbox_path()
-        if not inbox_path or not inbox_path.exists():
-            return False
-        try:
-            msg_num = int(msg_id)
-        except Exception:
-            return False
-        try:
-            conn = sqlite3.connect(inbox_path)
-            cur = conn.cursor()
-            tables = ["inbox_v1", "inbox"]
-            found = False
-            for table in tables:
-                try:
-                    cur.execute(f"SELECT 1 FROM {table} WHERE id=? LIMIT 1", (msg_num,))
-                    if cur.fetchone():
-                        found = True
-                        break
-                except Exception:
-                    continue
-            conn.close()
-            return found
-        except Exception:
-            return False
-
     def _update_pending_table(self) -> None:
         rows = self._load_pending_rows()
         pending_count = sum(1 for row in rows if str(row.get("status", "")).upper() != "RETRIEVED")
@@ -559,26 +523,38 @@ class MessageViewerTab(QWidget):
             action_layout.setContentsMargins(0, 0, 0, 0)
             action_layout.setSpacing(6)
 
-            query_btn = QPushButton()
+            get_btn = QPushButton()
+            retrieved_btn = QPushButton()
             remove_btn = QPushButton("Remove")
 
             if status == "RETRIEVED":
-                query_btn.setText("Retrieved")
-                query_btn.setEnabled(False)
-                query_btn.setStyleSheet("background-color: #9e9e9e; color: white;")
+                get_btn.setText("Get")
+                get_btn.setEnabled(False)
+                get_btn.setStyleSheet("background-color: #9e9e9e; color: white;")
+                retrieved_btn.setText("Retrieved")
+                retrieved_btn.setEnabled(False)
+                retrieved_btn.setStyleSheet("background-color: #9e9e9e; color: white;")
             elif status == "WAITING":
-                query_btn.setText("Waiting")
-                query_btn.setEnabled(False)
-                query_btn.setStyleSheet("background-color: #f9a825; color: black;")
+                get_btn.setText("Get")
+                get_btn.setEnabled(False)
+                get_btn.setStyleSheet("background-color: #9e9e9e; color: white;")
+                retrieved_btn.setText("Mark Retrieved")
+                retrieved_btn.setEnabled(True)
+                retrieved_btn.setStyleSheet("background-color: #f9a825; color: black;")
             else:
-                query_btn.setText("Query")
-                query_btn.setEnabled(True)
-                query_btn.setStyleSheet("background-color: #2e7d32; color: white;")
+                get_btn.setText("Get")
+                get_btn.setEnabled(True)
+                get_btn.setStyleSheet("background-color: #2e7d32; color: white;")
+                retrieved_btn.setText("Mark Retrieved")
+                retrieved_btn.setEnabled(True)
+                retrieved_btn.setStyleSheet("background-color: #f9a825; color: black;")
 
-            query_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_query(c, m))
+            get_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_get(c, m))
+            retrieved_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_mark_retrieved(c, m))
             remove_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_remove(c, m))
 
-            action_layout.addWidget(query_btn)
+            action_layout.addWidget(get_btn)
+            action_layout.addWidget(retrieved_btn)
             action_layout.addWidget(remove_btn)
             action_layout.addStretch()
             self.pending_table.setCellWidget(idx, 4, action_widget)
@@ -661,7 +637,7 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to clear pending backlog: %s", e)
         self._update_pending_table()
 
-    def _on_pending_query(self, callsign: str, msg_id: str) -> None:
+    def _on_pending_get(self, callsign: str, msg_id: str) -> None:
         if not callsign or not msg_id:
             return
         mycall = self._my_callsign()
@@ -671,6 +647,12 @@ class MessageViewerTab(QWidget):
         text = f"{mycall}: {callsign} QUERY MSG {msg_id}".strip()
         if self._send_js8_message(text):
             self._pending_set_status(callsign, msg_id, "WAITING")
+        self._update_pending_table()
+
+    def _on_pending_mark_retrieved(self, callsign: str, msg_id: str) -> None:
+        if not callsign or not msg_id:
+            return
+        self._pending_set_status(callsign, msg_id, "RETRIEVED")
         self._update_pending_table()
 
     def _on_pending_remove(self, callsign: str, msg_id: str) -> None:
