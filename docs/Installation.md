@@ -57,3 +57,6 @@ python build_executable.py
 - If saving settings fails on OneDrive, run the app from a local folder.
 - Ensure JS8Call API port matches `js8_port` in settings (default 2442).
 - For FLRig control, verify FLRig is running and reachable at 127.0.0.1:12345 (default).
+
+## 11) Linux AppImage (Mint/Debian/Ubuntu)
+For AppImage packaging (Linux Mint 22.1+ / Ubuntu 24.04 base), see `docs/appimage.md`.
