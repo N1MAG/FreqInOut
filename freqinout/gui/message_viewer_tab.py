@@ -25,6 +25,13 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QFormLayout,
     QComboBox,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QAbstractItemView,
+    QMessageBox,
+    QSizePolicy,
+    QAbstractScrollArea,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -44,6 +51,7 @@ DEFAULT_WATCH_DIRS = [
 
 SCAN_CHOICES = [1, 15, 30, 60]  # minutes
 JS8_POLL_SECONDS = 180  # 3 minutes
+PENDING_POLL_SECONDS = 30
 JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
 
@@ -107,11 +115,14 @@ class MessageViewerTab(QWidget):
         self.js8_messages: List[JS8Message] = []
         self.current_js8: JS8Message | None = None
         self._js8_timer: QTimer | None = None
+        self._pending_timer: QTimer | None = None
+        self._pending_rows: List[Dict[str, str | float]] = []
         self._form_cache: Dict[str, List[Dict]] = {}
         self.forms_path = (self.settings.get("js8_forms_path", "") or "").strip()
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
+        self._clear_backlog_on_upgrade()
 
         self.files: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
         self.current_record: FileRecord | None = None
@@ -125,6 +136,8 @@ class MessageViewerTab(QWidget):
         self._setup_timer()
         self._refresh_js8_messages()
         self._setup_js8_timer()
+        self._refresh_pending_backlog()
+        self._setup_pending_timer()
 
     # ---------- DB helpers ----------
 
@@ -178,6 +191,54 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.error("MessageViewer: failed to save watch dirs to DB: %s", e)
 
+    def _backlog_db_path(self) -> Path | None:
+        return self._db_path()
+
+    def _ensure_backlog_table(self) -> None:
+        db_path = self._backlog_db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS autoquery_backlog (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    callsign TEXT NOT NULL,
+                    msg_id TEXT,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    attempts INTEGER DEFAULT 0,
+                    last_attempt_ts REAL,
+                    created_ts REAL
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to ensure backlog table: %s", e)
+
+    def _clear_backlog_on_upgrade(self) -> None:
+        if self.settings.get("autoquery_backlog_cleared_v1", False):
+            return
+        self._ensure_backlog_table()
+        db_path = self._backlog_db_path()
+        if not db_path or not db_path.exists():
+            self.settings.set("autoquery_backlog_cleared_v1", True)
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM autoquery_backlog")
+            conn.commit()
+            conn.close()
+            log.info("MessageViewer: cleared autoquery_backlog on upgrade")
+        except Exception as e:
+            log.debug("MessageViewer: failed to clear backlog on upgrade: %s", e)
+        self.settings.set("autoquery_backlog_cleared_v1", True)
+
     # ---------- UI ----------
 
     def _build_ui(self):
@@ -225,6 +286,36 @@ class MessageViewerTab(QWidget):
 
         right = QVBoxLayout()
         body.addLayout(right, 3)
+
+        pending_box = QGroupBox("Pending JS8 MSGs")
+        pending_layout = QVBoxLayout()
+        pending_header = QHBoxLayout()
+        self.pending_count = QLabel("0 pending")
+        pending_header.addWidget(self.pending_count)
+        pending_header.addStretch()
+        self.pending_clear_btn = QPushButton("Clear All")
+        self.pending_clear_btn.clicked.connect(self._clear_pending_backlog)
+        pending_header.addWidget(self.pending_clear_btn)
+        pending_layout.addLayout(pending_header)
+
+        self.pending_table = QTableWidget(0, 5)
+        self.pending_table.setHorizontalHeaderLabels(
+            ["Callsign", "Msg ID", "Last Seen", "Status", "Actions"]
+        )
+        self.pending_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.pending_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.pending_table.setAlternatingRowColors(True)
+        self.pending_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        header = self.pending_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.Stretch)
+        pending_layout.addWidget(self.pending_table)
+        pending_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        pending_box.setLayout(pending_layout)
+        right.addWidget(pending_box)
 
         self.info_label = QLabel("No file selected")
         self.info_label.setStyleSheet("font-weight: bold;")
@@ -276,6 +367,13 @@ class MessageViewerTab(QWidget):
         self._js8_timer = QTimer(self)
         self._js8_timer.timeout.connect(self._refresh_js8_messages)
         self._js8_timer.start(JS8_POLL_SECONDS * 1000)
+
+    def _setup_pending_timer(self):
+        if self._pending_timer:
+            self._pending_timer.stop()
+        self._pending_timer = QTimer(self)
+        self._pending_timer.timeout.connect(self._refresh_pending_backlog)
+        self._pending_timer.start(PENDING_POLL_SECONDS * 1000)
 
     def _on_scan_changed(self):
         val = self.scan_combo.currentData()
@@ -361,6 +459,258 @@ class MessageViewerTab(QWidget):
             self._load_js8_from_local()
         except Exception as e:
             log.debug("MessageViewer: JS8 local load failed: %s", e)
+
+    # ---------- Pending JS8 MSG backlog ---------- #
+
+    def _refresh_pending_backlog(self) -> None:
+        self._ensure_backlog_table()
+        rows = self._load_pending_rows()
+        if rows:
+            for row in rows:
+                if row.get("status") == "RETRIEVED":
+                    continue
+                msg_id = row.get("msg_id")
+                if not msg_id:
+                    continue
+                if self._pending_msg_in_inbox(str(msg_id)):
+                    self._pending_set_status(str(row.get("callsign", "")), str(msg_id), "RETRIEVED")
+        self._update_pending_table()
+
+    def _load_pending_rows(self) -> List[Dict[str, str | float]]:
+        db_path = self._backlog_db_path()
+        if not db_path or not db_path.exists():
+            self._pending_rows = []
+            return []
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT callsign, msg_id, status, last_attempt_ts, created_ts
+                FROM autoquery_backlog
+                WHERE kind='MSG'
+                ORDER BY created_ts DESC
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to load pending backlog: %s", e)
+            self._pending_rows = []
+            return []
+        out: List[Dict[str, str | float]] = []
+        for row in rows:
+            out.append(
+                {
+                    "callsign": (row[0] or "").strip().upper(),
+                    "msg_id": str(row[1] or "").strip(),
+                    "status": (row[2] or "PENDING").strip().upper(),
+                    "last_seen_ts": float(row[3] or row[4] or 0.0),
+                }
+            )
+        self._pending_rows = out
+        return out
+
+    def _pending_msg_in_inbox(self, msg_id: str) -> bool:
+        inbox_path = self._inbox_path()
+        if not inbox_path or not inbox_path.exists():
+            return False
+        try:
+            msg_num = int(msg_id)
+        except Exception:
+            return False
+        try:
+            conn = sqlite3.connect(inbox_path)
+            cur = conn.cursor()
+            tables = ["inbox_v1", "inbox"]
+            found = False
+            for table in tables:
+                try:
+                    cur.execute(f"SELECT 1 FROM {table} WHERE id=? LIMIT 1", (msg_num,))
+                    if cur.fetchone():
+                        found = True
+                        break
+                except Exception:
+                    continue
+            conn.close()
+            return found
+        except Exception:
+            return False
+
+    def _update_pending_table(self) -> None:
+        rows = self._load_pending_rows()
+        pending_count = sum(1 for row in rows if str(row.get("status", "")).upper() != "RETRIEVED")
+        self.pending_count.setText(f"{pending_count} pending")
+        self.pending_table.setRowCount(0)
+        for idx, row in enumerate(rows):
+            self.pending_table.insertRow(idx)
+            callsign = str(row.get("callsign", ""))
+            msg_id = str(row.get("msg_id", ""))
+            status = str(row.get("status", "PENDING")).upper()
+            last_seen_ts = float(row.get("last_seen_ts", 0.0))
+
+            self.pending_table.setItem(idx, 0, QTableWidgetItem(callsign))
+            self.pending_table.setItem(idx, 1, QTableWidgetItem(msg_id))
+            self.pending_table.setItem(idx, 2, QTableWidgetItem(self._fmt_ts(last_seen_ts)))
+            self.pending_table.setItem(idx, 3, QTableWidgetItem(status))
+
+            action_widget = QWidget()
+            action_layout = QHBoxLayout(action_widget)
+            action_layout.setContentsMargins(0, 0, 0, 0)
+            action_layout.setSpacing(6)
+
+            query_btn = QPushButton()
+            remove_btn = QPushButton("Remove")
+
+            if status == "RETRIEVED":
+                query_btn.setText("Retrieved")
+                query_btn.setEnabled(False)
+                query_btn.setStyleSheet("background-color: #9e9e9e; color: white;")
+            elif status == "WAITING":
+                query_btn.setText("Waiting")
+                query_btn.setEnabled(False)
+                query_btn.setStyleSheet("background-color: #f9a825; color: black;")
+            else:
+                query_btn.setText("Query")
+                query_btn.setEnabled(True)
+                query_btn.setStyleSheet("background-color: #2e7d32; color: white;")
+
+            query_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_query(c, m))
+            remove_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_remove(c, m))
+
+            action_layout.addWidget(query_btn)
+            action_layout.addWidget(remove_btn)
+            action_layout.addStretch()
+            self.pending_table.setCellWidget(idx, 4, action_widget)
+        self._adjust_pending_table_height(len(rows))
+
+    def _adjust_pending_table_height(self, rows: int) -> None:
+        header_h = self.pending_table.horizontalHeader().height()
+        frame = self.pending_table.frameWidth() * 2
+        if rows <= 0:
+            self.pending_table.setVisible(False)
+            self.pending_table.setMinimumHeight(0)
+            self.pending_table.setMaximumHeight(header_h + frame)
+            return
+        self.pending_table.setVisible(True)
+        self.pending_table.resizeRowsToContents()
+        total_rows = sum(self.pending_table.rowHeight(i) for i in range(rows))
+        total = header_h + total_rows + frame
+        self.pending_table.setMinimumHeight(total)
+        self.pending_table.setMaximumHeight(total)
+
+    def _pending_set_status(self, callsign: str, msg_id: str, status: str) -> None:
+        db_path = self._backlog_db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE autoquery_backlog
+                SET status=?, last_attempt_ts=?
+                WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind='MSG'
+                """,
+                (status.upper(), time.time(), callsign, msg_id or ""),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to set pending status: %s", e)
+
+    def _pending_delete(self, callsign: str, msg_id: str) -> None:
+        db_path = self._backlog_db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                DELETE FROM autoquery_backlog
+                WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind='MSG'
+                """,
+                (callsign, msg_id or ""),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to delete pending row: %s", e)
+
+    def _clear_pending_backlog(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Clear Pending",
+            "Remove all pending JS8 MSG rows?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        db_path = self._backlog_db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM autoquery_backlog WHERE kind='MSG'")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to clear pending backlog: %s", e)
+        self._update_pending_table()
+
+    def _on_pending_query(self, callsign: str, msg_id: str) -> None:
+        if not callsign or not msg_id:
+            return
+        mycall = self._my_callsign()
+        if not mycall:
+            QMessageBox.warning(self, "Missing Callsign", "Configure your callsign in the Settings tab.")
+            return
+        text = f"{mycall}: {callsign} QUERY MSG {msg_id}".strip()
+        if self._send_js8_message(text):
+            self._pending_set_status(callsign, msg_id, "WAITING")
+        self._update_pending_table()
+
+    def _on_pending_remove(self, callsign: str, msg_id: str) -> None:
+        self._pending_delete(callsign, msg_id)
+        self._update_pending_table()
+
+    def _send_js8_message(self, text: str) -> bool:
+        import socket
+        host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
+        try:
+            port = int(self.settings.get("js8_port", 2442) or 2442)
+        except Exception:
+            port = 2442
+        payload = json.dumps({"params": {}, "type": "TX.SEND_MESSAGE", "value": text}) + "\n"
+        try:
+            with socket.create_connection((host, port), timeout=2) as s:
+                s.sendall(payload.encode("utf-8"))
+            log.info("MessageViewer: sent JS8 TX.SEND_MESSAGE to %s:%s text=%s", host, port, text)
+            return True
+        except Exception as e:
+            log.error("MessageViewer: failed to send JS8 message to %s:%s text=%s err=%s", host, port, text, e)
+            return False
+
+    def _my_callsign(self) -> str:
+        return (
+            (self.settings.get("operator_callsign", "") or self.settings.get("callsign", "") or "")
+            .strip()
+            .upper()
+        )
+
+    @staticmethod
+    def _fmt_ts(ts: float) -> str:
+        if not ts:
+            return ""
+        try:
+            from datetime import datetime
+
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return ""
 
     def _populate_lists(self):
         mapping = {

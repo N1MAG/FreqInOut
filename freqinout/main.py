@@ -2,7 +2,8 @@
 import sys
 import argparse
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QSharedMemory
+from PySide6.QtWidgets import QApplication, QMessageBox
 from freqinout.gui.main_window import MainWindow
 from freqinout.core import db_initializer
 from freqinout.core.logger import log
@@ -24,6 +25,11 @@ def main():
         log.error("Database initialization failed: %s", e)
 
     app = QApplication(sys.argv)
+    single = QSharedMemory("FreqInOut_single_instance")
+    if not single.create(1):
+        QMessageBox.information(None, "FreqInOut", "FreqInOut is already running.")
+        return
+    app._single_instance = single  # type: ignore[attr-defined]
     win = MainWindow()
     win.show()
     log.info("FreqInOut started.")

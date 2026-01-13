@@ -31,6 +31,7 @@ class SettingsManager:
         self._init_db()
         self._maybe_migrate_from_json()
         self.reload()
+        self._purge_legacy_autoquery_keys()
 
     # ---------- internal I/O ---------- #
 
@@ -70,6 +71,26 @@ class SettingsManager:
             self._conn.executemany(
                 "INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)", payload
             )
+
+    def _purge_legacy_autoquery_keys(self) -> None:
+        """
+        Remove deprecated JS8 auto-query keys from the settings table.
+        """
+        if self._data.get("autoquery_keys_purged_v1"):
+            return
+        keys = ("js8_auto_query_msg_id", "js8_auto_query_grids")
+        try:
+            with self._conn:
+                self._conn.executemany("DELETE FROM kv WHERE key=?", [(k,) for k in keys])
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)",
+                    ("autoquery_keys_purged_v1", json.dumps(True)),
+                )
+            for k in keys:
+                self._data.pop(k, None)
+            self._data["autoquery_keys_purged_v1"] = True
+        except Exception as e:
+            log.error("SettingsManager: failed to purge legacy autoquery keys: %s", e)
 
     def reload(self) -> None:
         """Reload settings from SQLite into the in-memory dict."""

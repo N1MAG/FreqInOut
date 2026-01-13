@@ -797,14 +797,10 @@ class JS8CallNetControlTab(QWidget):
         if not self._directed_path:
             return
         monitor_announcements = True
-        if not self._net_in_progress and not self.auto_query_msg_id and not monitor_announcements:
+        if not self._net_in_progress and not monitor_announcements:
             return
 
         log.debug("JS8CallNetControl: polling DIRECTED/ALL (net_in_progress=%s)", self._net_in_progress)
-        # First, scan ALL.TXT for recent QUERY MSG transmissions to gate auto-queries
-        # Note: Only used to detect our outbound QUERY MSG(S); auto-query enqueue comes from DIRECTED.
-        self._poll_all_for_query_tx()
-        log.debug("JS8CallNetControl: last query TX ts=%s", self._last_query_tx_ts)
 
         try:
             size_now = self._directed_path.stat().st_size
@@ -835,14 +831,7 @@ class JS8CallNetControlTab(QWidget):
                     if not self._line_ts_after_start(line):
                         log.debug("JS8 NCS: skipping DIRECTED line before app start: %s", line)
                         continue
-                    # Load pending backlog for seen calls if applicable (GRID only)
                     calls = self._extract_callsigns_from_line(line)
-                    if self._net_in_progress and not self._auto_query_paused_by_net:
-                        pending_items = self._backlog_fetch_pending(calls)
-                        for cs_b, mid_b, kind_b in pending_items:
-                            if kind_b == "GRID":
-                                self._pending_grid_queries.append((None, cs_b))
-                                self._backlog_touch_attempt(cs_b, mid_b, "GRID")
                     self._update_recent_traffic(line, calls)
                     # Net announcement detection (only when net not in progress)
                     if self._line_has_announce_form(line):
@@ -895,17 +884,8 @@ class JS8CallNetControlTab(QWidget):
                             log.debug("JS8CallNetControl: YES MSG line incomplete; waiting for completion: %s", line.strip())
                         else:
                             for c in calls:
-                                base_c = self._base_callsign(c)
-                                speed_guess = self._call_last_speed.get(base_c)
                                 for mid in msg_ids:
-                                    log.info(
-                                        "JS8CallNetControl: queueing auto-query id=%s from %s (dest=%s speed=%s)",
-                                        mid,
-                                        c,
-                                        dest_cs,
-                                        speed_guess,
-                                    )
-                                    self._queue_auto_query(c, mid, speed=speed_guess)
+                                    self._backlog_upsert(c, mid, "MSG", status="PENDING")
                     call_primary = calls[0] if calls else ""
                     if not call_primary:
                         continue
@@ -929,9 +909,6 @@ class JS8CallNetControlTab(QWidget):
                             dt_ms=dt_line,
                             offset=offset_line,
                         )
-
-                    # Check for completion markers to advance queue
-                    self._process_message_completion(line)
 
                 self._last_directed_size = f.tell()
         except Exception as e:
@@ -976,20 +953,6 @@ class JS8CallNetControlTab(QWidget):
                     if "QUERY MSG" in up:
                         self._last_query_tx_ts = time.time()
                         log.info("JS8CallNetControl: detected outgoing QUERY MSG in ALL.TXT: %s", line.strip())
-                    # Detect outbound ACK to release pending QUERY MSGS
-                    if "ACK" in up and mycall and f"{mycall}:" in up:
-                        dest = ""
-                        try:
-                            msg_part = line.split("JS8:", 1)[1]
-                            rest = msg_part.split(":", 1)[1]
-                            dest = rest.strip().split()[0].strip().upper()
-                        except Exception:
-                            dest = ""
-                        if dest and self._awaiting_ack_for and dest == self._awaiting_ack_for:
-                            log.info("JS8CallNetControl: ACK sent to %s; issuing follow-up QUERY MSGS", dest)
-                            self._awaiting_ack_for = None
-                            self._send_query_msgs(dest)
-                            self._maybe_process_next_query()
                     # Track outbound direct transmissions to add untrusted operators
                     self._maybe_register_outgoing_call(line)
                 self._last_all_size = f.tell()
@@ -1940,17 +1903,10 @@ class JS8CallNetControlTab(QWidget):
         Queue a query for MSG ID, and process one at a time when enabled.
         """
         self._backlog_upsert(call, msg_id, "MSG", status="PENDING")
-        if not self.auto_query_msg_id:
-            return
-        if self._auto_query_paused_by_net:
-            return
-        key = f"{call}:{msg_id}"
-        if key in self._queried_msg_ids:
-            return
-        log.debug("JS8CallNetControl: queued auto-query call=%s id=%s", call, msg_id)
-        self._maybe_process_next_query()
+        return
 
     def _maybe_process_next_query(self) -> None:
+        return
         if self._waiting_for_completion:
             if self._current_query_sent_ts and (time.time() - self._current_query_sent_ts) > 15:
                 log.debug("JS8CallNetControl: completion timeout; clearing wait and advancing queue")
@@ -2102,28 +2058,25 @@ class JS8CallNetControlTab(QWidget):
                         snr_val = float(p.get("SNR")) if p.get("SNR") not in (None, "") else None
                     except Exception:
                         snr_val = None
-                    if self.auto_query_msg_id and not self._auto_query_paused_by_net:
-                        if self._net_lockout_active():
-                            log.debug("JS8CallNetControl: skipping auto-query (net lockout active)")
-                        elif "YES MSG" in combined:
-                            ids = re.findall(r"\b(\d+)\b", combined)
-                            for mid in ids:
-                                if frm:
+                    if "YES MSG" in combined:
+                        ids = re.findall(r"\b(\d+)\b", combined)
+                        for mid in ids:
+                            if frm:
+                                dest = ""
+                                try:
+                                    first = txt.split()[0].strip().upper()
+                                    dest = first
+                                except Exception:
                                     dest = ""
-                                    try:
-                                        first = txt.split()[0].strip().upper()
-                                        dest = first
-                                    except Exception:
-                                        dest = ""
-                                    mycall = self._my_callsign()
-                                    if mycall and dest == mycall and self._is_message_complete_line(txt):
-                                        log.info(
-                                            "JS8CallNetControl: detected YES MSG %s from %s (snr=%s)",
-                                            mid,
-                                            frm,
-                                            snr_val,
-                                        )
-                                        self._queue_auto_query(frm, mid, snr=snr_val, speed=p.get("SPEED"))
+                                mycall = self._my_callsign()
+                                if mycall and dest == mycall and self._is_message_complete_line(txt):
+                                    log.info(
+                                        "JS8CallNetControl: detected YES MSG %s from %s (snr=%s)",
+                                        mid,
+                                        frm,
+                                        snr_val,
+                                    )
+                                    self._backlog_upsert(frm, mid, "MSG", status="PENDING")
                     # Passive grid capture
                     grid_val = (p.get("GRID") or "").strip()
                     base_frm = self._base_callsign(frm) if frm else ""
@@ -2147,17 +2100,10 @@ class JS8CallNetControlTab(QWidget):
                                     status=form,
                                     status_mismatch=mismatch,
                                 )
-                    # Auto grid query when allowed
-                    if self.auto_query_grids and not self._auto_query_paused_by_net and not self._net_lockout_active():
-                        target_cs = base_frm or frm
-                        if target_cs and self._operator_missing_grid(target_cs):
-                            self._maybe_queue_grid_query(target_cs, snr_val, msg_params=p, text=txt)
                 except Exception:
                     continue
         except queue.Empty:
             pass
-        self._maybe_process_next_query()
-        self._maybe_process_next_grid()
 
     def _line_has_checkin_form(self, line: str) -> bool:
         """
@@ -2246,6 +2192,7 @@ class JS8CallNetControlTab(QWidget):
 
     def _backlog_upsert(self, callsign: str, msg_id: str, kind: str, status: str = "PENDING") -> None:
         try:
+            callsign = (callsign or "").strip().upper()
             conn = sqlite3.connect(self._backlog_db_path())
             cur = conn.cursor()
             now_ts = time.time()
@@ -2259,15 +2206,21 @@ class JS8CallNetControlTab(QWidget):
             row = cur.fetchone()
             if row is not None:
                 attempts = row[0] or 0
-                if kind == "MSG" and attempts >= 1:
-                    conn.close()
-                    return
+                cur.execute(
+                    """
+                    UPDATE autoquery_backlog
+                    SET status=?, attempts=?, last_attempt_ts=?
+                    WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind=?
+                    """,
+                    (status, int(attempts) + 1, now_ts, callsign, msg_id or "", kind),
+                )
+                conn.commit()
                 conn.close()
                 return
             cur.execute(
                 """
                 INSERT INTO autoquery_backlog (callsign, msg_id, kind, status, attempts, last_attempt_ts, created_ts)
-                VALUES (?, ?, ?, ?, 0, ?, ?)
+                VALUES (?, ?, ?, ?, 1, ?, ?)
                 """,
                 (callsign, msg_id, kind, status, now_ts, now_ts),
             )
@@ -2438,19 +2391,7 @@ class JS8CallNetControlTab(QWidget):
         """
         Detect end-of-message markers before issuing next queued query.
         """
-        if not self._waiting_for_completion:
-            return
-        if not self._is_message_complete_line(line):
-            return
-        self._waiting_for_completion = False
-        call = self._current_query[0] if self._current_query else None
-        self._current_query = None
-        self._current_query_sent_ts = 0.0
-        # After a message completes, wait for our ACK to be sent before querying for more
-        if call:
-            self._awaiting_ack_for = call
-            log.info("JS8CallNetControl: message completion detected; waiting for ACK before querying MSGS from %s", call)
-        self._maybe_process_next_query()
+        return
 
     def _send_query_msgs(self, call: str) -> None:
         """
@@ -2571,6 +2512,7 @@ class JS8CallNetControlTab(QWidget):
         return (entry.get("group_name") or "").strip()
 
     def _maybe_queue_grid_query(self, callsign: str, snr: Optional[float], msg_params: Dict, text: str) -> None:
+        return
         call = (callsign or "").strip().upper()
         if not call:
             return
@@ -2605,6 +2547,7 @@ class JS8CallNetControlTab(QWidget):
         self._pending_grid_queries.append((snr, call))
 
     def _maybe_process_next_grid(self) -> None:
+        return
         if not self._pending_grid_queries:
             return
         if self._auto_query_paused_by_net:

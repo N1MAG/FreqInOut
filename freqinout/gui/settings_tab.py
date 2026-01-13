@@ -90,8 +90,6 @@ class SettingsTab(QWidget):
         self.status_labels: Dict[str, QLabel] = {}
         self.path_edits: Dict[str, QLineEdit] = {}
         self.js8_groups_edits: List[QLineEdit] = []
-        self.js8_auto_query_chk: Optional[QCheckBox] = None
-        self.js8_auto_query_grid_chk: Optional[QCheckBox] = None
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
         self.operating_groups: List[Dict[str, str]] = []
@@ -250,15 +248,6 @@ class SettingsTab(QWidget):
         forms_row.addWidget(self.js8_forms_edit, stretch=1)
         forms_row.addWidget(forms_browse)
         js8_v.addLayout(forms_row)
-
-        js8_auto_row = QHBoxLayout()
-        self.js8_auto_query_chk = QCheckBox("Auto Query Msg ID")
-        self.js8_auto_query_grid_chk = QCheckBox("Auto Query Grids")
-        js8_auto_row.addSpacing(30)
-        js8_auto_row.addWidget(self.js8_auto_query_chk)
-        js8_auto_row.addWidget(self.js8_auto_query_grid_chk)
-        js8_auto_row.addStretch()
-        js8_v.addLayout(js8_auto_row)
 
         load_links_row = QHBoxLayout()
         self.load_js8_btn = QPushButton("Load JS8 Traffic")
@@ -446,11 +435,6 @@ class SettingsTab(QWidget):
             if prog_name in self.radio_checkboxes:
                 self.radio_checkboxes[prog_name].setChecked(bool(data.get(enabled_key, False)))
 
-        if self.js8_auto_query_chk:
-            self.js8_auto_query_chk.setChecked(bool(data.get("js8_auto_query_msg_id", False)))
-        if self.js8_auto_query_grid_chk:
-            self.js8_auto_query_grid_chk.setChecked(bool(data.get("js8_auto_query_grids", False)))
-
         log.info("SettingsTab: settings loaded.")
 
     def _save_settings_button(self):
@@ -521,12 +505,6 @@ class SettingsTab(QWidget):
             if prog_name in self.radio_checkboxes:
                 data[enabled_key] = bool(self.radio_checkboxes[prog_name].isChecked())
 
-        data["js8_auto_query_msg_id"] = (
-            bool(self.js8_auto_query_chk.isChecked()) if self.js8_auto_query_chk else False
-        )
-        data["js8_auto_query_grids"] = (
-            bool(self.js8_auto_query_grid_chk.isChecked()) if self.js8_auto_query_grid_chk else False
-        )
         data["operating_groups"] = self._table_to_operating_groups()
 
         # Persist with a single write when possible.
@@ -545,8 +523,6 @@ class SettingsTab(QWidget):
                 "js8_directed_path": data["js8_directed_path"],
                 "js8_forms_path": data.get("js8_forms_path", ""),
                 "message_paths": data.get("message_paths", {}),
-                "js8_auto_query_msg_id": data["js8_auto_query_msg_id"],
-                "js8_auto_query_grids": data["js8_auto_query_grids"],
                 "operating_groups": data.get("operating_groups", []),
             }
             for prog_name, meta in self.PROGRAMS.items():
@@ -573,7 +549,6 @@ class SettingsTab(QWidget):
             self.settings.set("js8_directed_path", data["js8_directed_path"])
             self.settings.set("js8_forms_path", data.get("js8_forms_path", ""))
             self.settings.set("message_paths", data.get("message_paths", {}))
-            self.settings.set("js8_auto_query_grids", data.get("js8_auto_query_grids", False))
             for prog_name, meta in self.PROGRAMS.items():
                 path_key = meta["setting_key"]
                 auto_key = meta["autostart_key"]
