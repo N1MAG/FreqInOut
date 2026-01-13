@@ -525,7 +525,6 @@ class MessageViewerTab(QWidget):
 
             get_btn = QPushButton()
             retrieved_btn = QPushButton()
-            remove_btn = QPushButton("Remove")
 
             if status == "RETRIEVED":
                 get_btn.setText("Get")
@@ -534,13 +533,6 @@ class MessageViewerTab(QWidget):
                 retrieved_btn.setText("Retrieved")
                 retrieved_btn.setEnabled(False)
                 retrieved_btn.setStyleSheet("background-color: #9e9e9e; color: white;")
-            elif status == "WAITING":
-                get_btn.setText("Get")
-                get_btn.setEnabled(False)
-                get_btn.setStyleSheet("background-color: #9e9e9e; color: white;")
-                retrieved_btn.setText("Mark Retrieved")
-                retrieved_btn.setEnabled(True)
-                retrieved_btn.setStyleSheet("background-color: #f9a825; color: black;")
             else:
                 get_btn.setText("Get")
                 get_btn.setEnabled(True)
@@ -551,11 +543,8 @@ class MessageViewerTab(QWidget):
 
             get_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_get(c, m))
             retrieved_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_mark_retrieved(c, m))
-            remove_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_remove(c, m))
-
             action_layout.addWidget(get_btn)
             action_layout.addWidget(retrieved_btn)
-            action_layout.addWidget(remove_btn)
             action_layout.addStretch()
             self.pending_table.setCellWidget(idx, 4, action_widget)
         self._adjust_pending_table_height(len(rows))
@@ -652,10 +641,6 @@ class MessageViewerTab(QWidget):
     def _on_pending_mark_retrieved(self, callsign: str, msg_id: str) -> None:
         if not callsign or not msg_id:
             return
-        self._pending_set_status(callsign, msg_id, "RETRIEVED")
-        self._update_pending_table()
-
-    def _on_pending_remove(self, callsign: str, msg_id: str) -> None:
         self._pending_delete(callsign, msg_id)
         self._update_pending_table()
 
