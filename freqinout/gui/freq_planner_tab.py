@@ -5,7 +5,6 @@ import sqlite3
 from typing import List, Dict, Tuple
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -23,6 +22,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.utils.timezones import get_timezone
+from freqinout.gui.theme import resolve_theme, button_style, band_cell_colors, qcolor
 
 DAY_NAMES = [
     "Sunday",
@@ -70,6 +70,7 @@ class FreqPlannerTab(QWidget):
         self._clock_timer: QTimer | None = None
         self._last_snapshot: str = ""
         self._build_ui()
+        self._apply_theme()
         self.rebuild_table()
 
     # ------------- UI ------------- #
@@ -83,12 +84,16 @@ class FreqPlannerTab(QWidget):
         self.utc_label = QLabel()
         self.local_label = QLabel()
         self.time_toggle_btn = QPushButton("Showing: UTC")
-        self.time_toggle_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: 600;")
+        theme = resolve_theme(self.settings)
+        self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
+
+        self.band_legend = QLabel("Band colors: 160m 80m 60m 40m 30m 20m 17m 15m 12m 10m")
+        layout.addWidget(self.band_legend)
 
         self.table = QTableWidget()
         self.table.setRowCount(24)
@@ -448,6 +453,7 @@ class FreqPlannerTab(QWidget):
         self.table.setHorizontalHeaderLabels(headers)
 
         hf_sched, net_sched = self._load_schedules()
+        theme = resolve_theme(self.settings)
         self._last_snapshot = self._snapshot(hf_sched, net_sched)
 
         # Precompute net schedule coverage by (day, hour) with boundary-aware logic
@@ -665,6 +671,13 @@ class FreqPlannerTab(QWidget):
                 if cell_text:
                     item.setToolTip(cell_text)
 
+                if band_label and not net_label:
+                    primary_band = band_label.split("/")[0].strip()
+                    colors = band_cell_colors(primary_band, theme)
+                    if colors:
+                        item.setBackground(qcolor(colors["bg"]))
+                        item.setForeground(qcolor(colors["fg"]))
+
                 # Highlight: net window overlaps now or starts within next 24h
                 highlight = False
                 if net_slices:
@@ -686,7 +699,7 @@ class FreqPlannerTab(QWidget):
                             highlight = True
                             break
                 if highlight:
-                    item.setBackground(QColor("#fff59d"))  # soft yellow highlight
+                    item.setBackground(qcolor(theme["surface_alt"]))
 
                 self.table.setItem(hour, col, item)
 
@@ -762,6 +775,22 @@ class FreqPlannerTab(QWidget):
     def _toggle_time_view(self):
         self._show_local = not self._show_local
         self.rebuild_table()
+
+    def _apply_theme(self):
+        theme = resolve_theme(self.settings)
+        self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
+        self.band_legend.setStyleSheet(f"color: {theme['text_muted']};")
+
+    def on_settings_saved(self):
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        self._apply_theme()
+        self.rebuild_table()
+
+    def apply_theme(self):
+        self._apply_theme()
 
     # ------------- Qt events ------------- #
 

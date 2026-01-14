@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
 )
 from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from freqinout.gui.stations_map_tab import StationsMapTab
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.peer_sched_tab import PeerSchedTab
 from freqinout.gui.help_tab import HelpTab
+from freqinout.gui.theme import resolve_theme, apply_app_theme
 
 
 class MainWindow(QMainWindow):
@@ -79,6 +81,7 @@ class MainWindow(QMainWindow):
         self.stations_map_tab = StationsMapTab(self)
         self.peer_sched_tab = PeerSchedTab(self)
         self.help_tab = HelpTab(self)
+        self._apply_app_theme()
 
         # Sidebar navigation order (as requested)
         self._screens = [
@@ -180,6 +183,14 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.settings_tab.settings_saved.connect(self.net_tab.on_settings_saved)
+        except Exception:
+            pass
+        try:
+            self.settings_tab.settings_saved.connect(self.freq_planner_tab.on_settings_saved)
+        except Exception:
+            pass
+        try:
+            self.settings_tab.settings_saved.connect(self._apply_app_theme)
         except Exception:
             pass
         try:
@@ -373,6 +384,30 @@ class MainWindow(QMainWindow):
             lbl = label(base)
             if idx < len(self.nav_buttons):
                 self.nav_buttons[idx].setText(lbl)
+
+    def _apply_app_theme(self):
+        app = QApplication.instance()
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        theme = resolve_theme(self.settings)
+        apply_app_theme(app, theme)
+        for widget in (
+            self.freq_planner_tab,
+            self.hf_schedule_tab,
+            self.net_tab,
+            self.fldigi_tab,
+            self.js8_tab,
+            self.message_viewer_tab,
+            self.log_tab,
+            self.settings_tab,
+        ):
+            if hasattr(widget, "apply_theme"):
+                try:
+                    widget.apply_theme()
+                except Exception:
+                    pass
 
     def _set_screen(self, index: int) -> None:
         if 0 <= index < self.stack.count():

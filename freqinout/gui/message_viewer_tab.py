@@ -39,6 +39,7 @@ from reportlab.pdfgen import canvas
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
+from freqinout.gui.theme import resolve_theme, button_style
 
 
 SUPPORTED_EXT = {".b2s", ".k2s", ".txt", ".ff", ".xml", ".json", ".html", ".htm"}
@@ -525,21 +526,22 @@ class MessageViewerTab(QWidget):
 
             get_btn = QPushButton()
             retrieved_btn = QPushButton()
+            theme = resolve_theme(self.settings)
 
             if status == "RETRIEVED":
                 get_btn.setText("Get")
                 get_btn.setEnabled(False)
-                get_btn.setStyleSheet("background-color: #9e9e9e; color: white;")
+                get_btn.setStyleSheet(button_style("muted", theme))
                 retrieved_btn.setText("Retrieved")
                 retrieved_btn.setEnabled(False)
-                retrieved_btn.setStyleSheet("background-color: #9e9e9e; color: white;")
+                retrieved_btn.setStyleSheet(button_style("muted", theme))
             else:
                 get_btn.setText("Get")
                 get_btn.setEnabled(True)
-                get_btn.setStyleSheet("background-color: #2e7d32; color: white;")
+                get_btn.setStyleSheet(button_style("success", theme))
                 retrieved_btn.setText("Mark Retrieved")
                 retrieved_btn.setEnabled(True)
-                retrieved_btn.setStyleSheet("background-color: #f9a825; color: black;")
+                retrieved_btn.setStyleSheet(button_style("warning", theme))
 
             get_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_get(c, m))
             retrieved_btn.clicked.connect(lambda _, c=callsign, m=msg_id: self._on_pending_mark_retrieved(c, m))
@@ -548,6 +550,9 @@ class MessageViewerTab(QWidget):
             action_layout.addStretch()
             self.pending_table.setCellWidget(idx, 4, action_widget)
         self._adjust_pending_table_height(len(rows))
+
+    def apply_theme(self) -> None:
+        self._update_pending_table()
 
     def _adjust_pending_table_height(self, rows: int) -> None:
         header_h = self.pending_table.horizontalHeader().height()
@@ -641,6 +646,14 @@ class MessageViewerTab(QWidget):
     def _on_pending_mark_retrieved(self, callsign: str, msg_id: str) -> None:
         if not callsign or not msg_id:
             return
+        if self.settings.get("js8_inbox_mark_retrieved_sync", False):
+            ok = self._mark_js8call_inbox_read(callsign, msg_id)
+            if not ok:
+                log.debug(
+                    "MessageViewer: JS8Call inbox mark READ failed (callsign=%s msg_id=%s)",
+                    callsign,
+                    msg_id,
+                )
         self._pending_delete(callsign, msg_id)
         self._update_pending_table()
 
@@ -811,6 +824,90 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to resolve local JS8 DB path: %s", e)
             return None
+
+    def _table_has_column(self, conn: sqlite3.Connection, table: str, column: str) -> bool:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"PRAGMA table_info({table})")
+            rows = cur.fetchall()
+            return any((r[1] or "").lower() == column.lower() for r in rows)
+        except Exception:
+            return False
+
+    def _mark_js8call_inbox_read(self, callsign: str, msg_id: str) -> bool:
+        inbox_path = self._inbox_path()
+        if not inbox_path or not inbox_path.exists():
+            return False
+        callsign = (callsign or "").strip().upper()
+        msg_id = (msg_id or "").strip()
+        if not callsign or not msg_id:
+            return False
+        like_id = f'%\"_ID\":\"{msg_id}\"%'
+        like_from = f'%\"FROM\":\"{callsign}\"%'
+        candidates = [
+            ("inbox_v1", "blob"),
+            ("inbox_v1", "json"),
+            ("inbox_v1", "message"),
+            ("inbox", "blob"),
+            ("inbox", "json"),
+            ("inbox", "message"),
+        ]
+        try:
+            conn = sqlite3.connect(inbox_path, timeout=1.0)
+            cur = conn.cursor()
+            cur.execute("PRAGMA busy_timeout = 1000")
+            for table, col in candidates:
+                try:
+                    cur.execute(
+                        f"SELECT id, {col} FROM {table} WHERE {col} LIKE ? AND {col} LIKE ?",
+                        (like_id, like_from),
+                    )
+                    rows = cur.fetchall()
+                except Exception:
+                    continue
+                if not rows:
+                    continue
+                has_type_col = self._table_has_column(conn, table, "type")
+                updated = False
+                for row in rows:
+                    row_id = row[0]
+                    blob = row[1] or ""
+                    try:
+                        parsed = json.loads(blob)
+                    except Exception:
+                        continue
+                    if not isinstance(parsed, dict):
+                        continue
+                    params = parsed.get("params") if isinstance(parsed.get("params"), dict) else parsed
+                    from_call = (params.get("FROM") or "").strip().upper() if isinstance(params, dict) else ""
+                    blob_id = (params.get("_ID") or "").strip() if isinstance(params, dict) else ""
+                    if from_call != callsign or blob_id != msg_id:
+                        continue
+                    current_type = str(parsed.get("type", "") or "").strip().upper()
+                    if current_type == "DELIVERED":
+                        continue
+                    if current_type != "READ":
+                        parsed["type"] = "READ"
+                        new_blob = json.dumps(parsed, separators=(",", ":"))
+                        if has_type_col:
+                            cur.execute(
+                                f"UPDATE {table} SET {col}=?, type=? WHERE id=?",
+                                (new_blob, "READ", row_id),
+                            )
+                        else:
+                            cur.execute(
+                                f"UPDATE {table} SET {col}=? WHERE id=?",
+                                (new_blob, row_id),
+                            )
+                        updated = True
+                if updated:
+                    conn.commit()
+                    conn.close()
+                    return True
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: JS8Call inbox update failed: %s", e)
+        return False
 
     # ---------- JS8 Helpers ----------
 

@@ -44,6 +44,7 @@ from freqinout.gui.qsy_helper import (
     scheduler_enabled,
 )
 from freqinout.core.config_paths import get_config_dir
+from freqinout.gui.theme import resolve_theme, button_style
 
 
 def _nets_db_path() -> Path:
@@ -142,8 +143,9 @@ class JS8CallNetControlTab(QWidget):
         self._grid_defer_last_log: Dict[str, float] = {}
         self._grid_defer_start_ts: Dict[str, float] = {}
         self._auto_query_paused_by_net = False
-        self._start_btn_default_style = "QPushButton { background-color: #4CAF50; color: white; }"
-        self._end_btn_default_style = "QPushButton { background-color: #F44336; color: white; }"
+        theme = resolve_theme(self.settings)
+        self._start_btn_default_style = button_style("success", theme)
+        self._end_btn_default_style = button_style("danger", theme)
 
         # Check-in table state
         self._checkins: Dict[str, Dict] = {}
@@ -169,6 +171,7 @@ class JS8CallNetControlTab(QWidget):
         self._clock_timer: QTimer | None = None
 
         self._build_ui()
+        self._apply_theme()
         self._load_settings()
         self._setup_timer()
         self._setup_clock_timer()
@@ -331,6 +334,7 @@ class JS8CallNetControlTab(QWidget):
         """
         self._refresh_auto_query_flags()
         self._maybe_reload_operating_groups()
+        self._apply_theme()
 
     def _load_settings(self):
         data = self.settings.all()
@@ -489,16 +493,17 @@ class JS8CallNetControlTab(QWidget):
         return scheduler_enabled(self.settings)
 
     def _set_suspend_button(self, active: bool, remaining_sec: Optional[float] = None):
+        theme = resolve_theme(self.settings)
         if active:
             mins = 0
             if remaining_sec is not None:
                 mins = max(0, int((remaining_sec + 59) // 60))
             label = f"Sched. Paused: {mins} min" if mins else "Sched. Paused"
             self.suspend_btn.setText(label)
-            self.suspend_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
+            self.suspend_btn.setStyleSheet(button_style("info", theme))
         else:
             self.suspend_btn.setText("QSY")
-            self.suspend_btn.setStyleSheet("QPushButton { background-color: gold; color: black; }")
+            self.suspend_btn.setStyleSheet(button_style("warning", theme))
         self._update_qsy_button_enabled()
 
     def _update_suspend_state(self):
@@ -555,12 +560,23 @@ class JS8CallNetControlTab(QWidget):
         """
         Mirror FLDigi styling: green Start when idle, gray when active; End stays red.
         """
+        theme = resolve_theme(self.settings)
         if active:
-            self.start_btn.setStyleSheet("QPushButton { background-color: #9E9E9E; color: white; }")
+            self.start_btn.setStyleSheet(button_style("muted", theme))
             self.end_btn.setStyleSheet(self._end_btn_default_style)
         else:
             self.start_btn.setStyleSheet(self._start_btn_default_style)
             self.end_btn.setStyleSheet(self._end_btn_default_style)
+
+    def _apply_theme(self) -> None:
+        theme = resolve_theme(self.settings)
+        self._start_btn_default_style = button_style("success", theme)
+        self._end_btn_default_style = button_style("danger", theme)
+        self._set_net_button_styles(self._net_in_progress)
+        self.suspend_btn.setStyleSheet(button_style("warning", theme))
+
+    def apply_theme(self) -> None:
+        self._apply_theme()
 
     def _maybe_reload_operating_groups(self):
         try:

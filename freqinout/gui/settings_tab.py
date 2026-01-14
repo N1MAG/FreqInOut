@@ -37,6 +37,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
+from freqinout.gui.theme import resolve_theme, led_style
 
 
 TIMEZONE_CHOICES = [
@@ -195,6 +196,15 @@ class SettingsTab(QWidget):
         ctrl_row.addStretch()
         op_layout.addLayout(ctrl_row)
 
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(QLabel("Theme:"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["Light", "Dark"])
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        theme_row.addWidget(self.theme_combo)
+        theme_row.addStretch()
+        op_layout.addLayout(theme_row)
+
         # RIGHT column
         right_col = QVBoxLayout()
         content_layout.addLayout(right_col, 4)
@@ -208,7 +218,8 @@ class SettingsTab(QWidget):
         js8_status_row.addWidget(QLabel("JS8Call API"))
         js8_status_lbl = QLabel()
         js8_status_lbl.setFixedSize(14, 14)
-        js8_status_lbl.setStyleSheet("background-color: #555; border-radius: 7px;")
+        theme = resolve_theme(self.settings)
+        js8_status_lbl.setStyleSheet(led_style("idle", theme))
         # Keep API indicator separate from the per-program row to avoid overwrites
         self.status_labels["JS8Call_API"] = js8_status_lbl
         js8_status_row.addWidget(js8_status_lbl)
@@ -248,6 +259,12 @@ class SettingsTab(QWidget):
         forms_row.addWidget(self.js8_forms_edit, stretch=1)
         forms_row.addWidget(forms_browse)
         js8_v.addLayout(forms_row)
+
+        self.js8_mark_retrieved_chk = QCheckBox("Mark JS8Call MSG Retrieved")
+        self.js8_mark_retrieved_chk.setToolTip(
+            "When enabled, clicking 'Mark Retrieved' in Message Viewer will set JS8Call inbox entries to READ."
+        )
+        js8_v.addWidget(self.js8_mark_retrieved_chk)
 
         load_links_row = QHBoxLayout()
         self.load_js8_btn = QPushButton("Load JS8 Traffic")
@@ -321,7 +338,8 @@ class SettingsTab(QWidget):
 
             status_lbl = QLabel()
             status_lbl.setFixedSize(14, 14)
-            status_lbl.setStyleSheet("background-color: #555; border-radius: 7px;")
+            theme = resolve_theme(self.settings)
+            status_lbl.setStyleSheet(led_style("idle", theme))
             self.status_labels[prog_name] = status_lbl
             row.addWidget(status_lbl)
 
@@ -386,12 +404,17 @@ class SettingsTab(QWidget):
             ctrl = "FLRig"
         self.control_combo.setCurrentText(ctrl)
         self.use_scheduler_chk.setChecked(bool(data.get("use_scheduler", True)))
+        theme = (data.get("ui_theme", "light") or "light").strip().lower()
+        self.theme_combo.setCurrentText("Dark" if theme == "dark" else "Light")
 
         port_txt = str(data.get("js8_port", "2442") or "2442")
         self.js8_port_edit.setText(port_txt)
         offset_txt = str(data.get("js8_offset_hz", "0") or "0")
         self.js8_offset_edit.setText(offset_txt)
         self.js8_forms_edit.setText(data.get("js8_forms_path", "") or "")
+        self.js8_mark_retrieved_chk.setChecked(
+            bool(data.get("js8_inbox_mark_retrieved_sync", False))
+        )
         # Message paths
         msg_paths = data.get("message_paths", {})
         for origin, edit in self.msg_paths_edits.items():
@@ -470,6 +493,7 @@ class SettingsTab(QWidget):
 
         data["control_via"] = self.control_combo.currentText().strip()
         data["use_scheduler"] = bool(self.use_scheduler_chk.isChecked())
+        data["ui_theme"] = self.theme_combo.currentText().strip().lower()
 
         try:
             port_val = int(self.js8_port_edit.text().strip() or "2442")
@@ -485,6 +509,7 @@ class SettingsTab(QWidget):
         data["js8_offset_hz"] = offset_val
 
         data["js8_forms_path"] = self.js8_forms_edit.text().strip()
+        data["js8_inbox_mark_retrieved_sync"] = bool(self.js8_mark_retrieved_chk.isChecked())
         msg_paths = {}
         for origin, edit in self.msg_paths_edits.items():
             msg_paths[origin] = edit.text().strip()
@@ -517,11 +542,13 @@ class SettingsTab(QWidget):
                 "timezone": data["timezone"],
                 "control_via": data["control_via"],
                 "use_scheduler": data["use_scheduler"],
+                "ui_theme": data.get("ui_theme", "light"),
                 "js8_port": data["js8_port"],
                 "js8_offset_hz": data.get("js8_offset_hz", 0),
                 "primary_js8_groups": data["primary_js8_groups"],
                 "js8_directed_path": data["js8_directed_path"],
                 "js8_forms_path": data.get("js8_forms_path", ""),
+                "js8_inbox_mark_retrieved_sync": data.get("js8_inbox_mark_retrieved_sync", False),
                 "message_paths": data.get("message_paths", {}),
                 "operating_groups": data.get("operating_groups", []),
             }
@@ -543,11 +570,16 @@ class SettingsTab(QWidget):
             self.settings.set("operator_grid6", data["operator_grid6"])
             self.settings.set("timezone", data["timezone"])
             self.settings.set("control_via", data["control_via"])
+            self.settings.set("ui_theme", data.get("ui_theme", "light"))
             self.settings.set("js8_port", data["js8_port"])
             self.settings.set("js8_offset_hz", data.get("js8_offset_hz", 0))
             self.settings.set("primary_js8_groups", data["primary_js8_groups"])
             self.settings.set("js8_directed_path", data["js8_directed_path"])
             self.settings.set("js8_forms_path", data.get("js8_forms_path", ""))
+            self.settings.set(
+                "js8_inbox_mark_retrieved_sync",
+                data.get("js8_inbox_mark_retrieved_sync", False),
+            )
             self.settings.set("message_paths", data.get("message_paths", {}))
             for prog_name, meta in self.PROGRAMS.items():
                 path_key = meta["setting_key"]
@@ -576,6 +608,20 @@ class SettingsTab(QWidget):
             data.get("operator_state", ""),
         )
         self._refresh_operator_history_views()
+
+    def _on_theme_changed(self):
+        theme = self.theme_combo.currentText().strip().lower() or "light"
+        try:
+            if hasattr(self.settings, "set"):
+                self.settings.set("ui_theme", theme)
+                if hasattr(self.settings, "save"):
+                    self.settings.save()
+        except Exception:
+            pass
+        try:
+            self.settings_saved.emit()
+        except Exception:
+            pass
 
     # ---------- TIME / TIMEZONE ---------- #
 
@@ -803,19 +849,20 @@ class SettingsTab(QWidget):
         return any(entry in target_names for entry in self._proc_snapshot)
 
     def _refresh_running_status(self):
+        theme = resolve_theme(self.settings)
         running_js8 = self._program_is_running("JS8Call")
         api_ok = self._js8_api_reachable()
         # Update API indicator (header)
         api_lbl = self.status_labels.get("JS8Call_API")
         if api_lbl:
             if api_ok:
-                api_lbl.setStyleSheet("background-color: #4CAF50; border-radius: 7px;")
+                api_lbl.setStyleSheet(led_style("ok", theme))
                 api_lbl.setToolTip("API reachable")
             elif running_js8:
-                api_lbl.setStyleSheet("background-color: #ff9800; border-radius: 7px;")
+                api_lbl.setStyleSheet(led_style("warn", theme))
                 api_lbl.setToolTip("Process running, API unreachable")
             else:
-                api_lbl.setStyleSheet("background-color: #555; border-radius: 7px;")
+                api_lbl.setStyleSheet(led_style("idle", theme))
                 api_lbl.setToolTip("Not running")
 
         # Update all other indicators
@@ -825,21 +872,27 @@ class SettingsTab(QWidget):
             running = running_js8 if program_name == "JS8Call" else self._program_is_running(program_name)
             if program_name == "JS8Call":
                 if api_ok:
-                    lbl.setStyleSheet("background-color: #4CAF50; border-radius: 7px;")
+                    lbl.setStyleSheet(led_style("ok", theme))
                     lbl.setToolTip("API reachable")
                 elif running:
-                    lbl.setStyleSheet("background-color: #ff9800; border-radius: 7px;")
+                    lbl.setStyleSheet(led_style("warn", theme))
                     lbl.setToolTip("Process running, API unreachable")
                 else:
-                    lbl.setStyleSheet("background-color: #555; border-radius: 7px;")
+                    lbl.setStyleSheet(led_style("idle", theme))
                     lbl.setToolTip("Not running")
             else:
                 if running:
-                    lbl.setStyleSheet("background-color: #4CAF50; border-radius: 7px;")
+                    lbl.setStyleSheet(led_style("ok", theme))
                     lbl.setToolTip("Running")
                 else:
-                    lbl.setStyleSheet("background-color: #555; border-radius: 7px;")
+                    lbl.setStyleSheet(led_style("idle", theme))
                     lbl.setToolTip("Not Running")
+
+    def apply_theme(self):
+        try:
+            self._refresh_running_status()
+        except Exception:
+            pass
 
     def _js8_api_reachable(self) -> bool:
         """

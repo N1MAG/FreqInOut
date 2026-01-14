@@ -30,6 +30,7 @@ from freqinout.core.settings_manager import SettingsManager
     # must already exist in your project
 from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
+from freqinout.gui.theme import resolve_theme, button_style
 
 
 # ---- Band / Mode metadata (keep in sync with HF tab) ----
@@ -174,7 +175,8 @@ class NetScheduleTab(QWidget):
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
         self.time_toggle_btn = QPushButton("Showing: UTC")
-        self.time_toggle_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: 600;")
+        theme = resolve_theme(self.settings)
+        self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
@@ -222,6 +224,7 @@ class NetScheduleTab(QWidget):
 
         self._update_clock_labels()
         self._setup_clock_timer()
+        self._apply_theme()
 
     def on_settings_saved(self) -> None:
         """
@@ -253,6 +256,17 @@ class NetScheduleTab(QWidget):
                     band_combo.setCurrentText(current_band)
         # keep net name history intact
         self._update_clock_labels()
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        theme = resolve_theme(self.settings)
+        self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
+        self.add_btn.setStyleSheet(button_style("primary", theme))
+        self.del_btn.setStyleSheet(button_style("danger", theme))
+        self.save_btn.setStyleSheet(button_style("success", theme))
+
+    def apply_theme(self) -> None:
+        self._apply_theme()
 
     # --------- helpers: time / primary groups --------- #
     def _ui_tz_abbr(self, tz_name: str, fallback: str) -> str:

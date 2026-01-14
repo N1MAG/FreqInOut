@@ -43,6 +43,7 @@ from freqinout.gui.qsy_helper import (
     scheduler_enabled,
 )
 from freqinout.gui.operator_history_tab import OperatorHistoryTab  # for schema helper
+from freqinout.gui.theme import resolve_theme, button_style
 
 
 class FldigiNetControlTab(QWidget):
@@ -79,6 +80,7 @@ class FldigiNetControlTab(QWidget):
         self._normalizing_late = False
 
         self._build_ui()
+        self._apply_theme()
         self._load_settings()
         self._load_known_operators()
         self._setup_timers()
@@ -231,11 +233,13 @@ class FldigiNetControlTab(QWidget):
         self.end_btn = QPushButton("End Net")
 
         # Button colors
-        self.start_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; }")
-        self.end_btn.setStyleSheet("QPushButton { background-color: #F44336; color: white; }")
-        self.merge_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
+        theme = resolve_theme(self.settings)
+        self.start_btn.setStyleSheet(button_style("success", theme))
+        self.end_btn.setStyleSheet(button_style("danger", theme))
+        self.merge_btn.setStyleSheet(button_style("info", theme))
         self._start_btn_default_style = self.start_btn.styleSheet()
-        self._save_btn_default_style = self.save_btn.styleSheet()
+        self._save_btn_default_style = button_style("success", theme)
+        self.save_btn.setStyleSheet(self._save_btn_default_style)
 
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.save_btn)
@@ -263,9 +267,10 @@ class FldigiNetControlTab(QWidget):
         """
         Update button highlight when a net is running.
         """
+        theme = resolve_theme(self.settings)
         if active:
-            self.start_btn.setStyleSheet("QPushButton { background-color: #9E9E9E; color: white; }")
-            self.save_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; }")
+            self.start_btn.setStyleSheet(button_style("muted", theme))
+            self.save_btn.setStyleSheet(button_style("success", theme))
             self.ad_hoc_btn.setEnabled(False)
         else:
             self.start_btn.setStyleSheet(self._start_btn_default_style)
@@ -285,6 +290,7 @@ class FldigiNetControlTab(QWidget):
         Refresh QSY options when settings are saved.
         """
         self._maybe_reload_operating_groups()
+        self._apply_theme()
 
     # ---------------- TIMERS & CLOCKS ---------------- #
 
@@ -447,17 +453,32 @@ class FldigiNetControlTab(QWidget):
         self._update_qsy_button_enabled()
 
     def _set_suspend_button(self, active: bool, remaining_sec: Optional[float] = None):
+        theme = resolve_theme(self.settings)
         if active:
             mins = 0
             if remaining_sec is not None:
                 mins = max(0, int((remaining_sec + 59) // 60))
             label = f"Sched. Paused: {mins} min" if mins else "Sched. Paused"
             self.suspend_btn.setText(label)
-            self.suspend_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
+            self.suspend_btn.setStyleSheet(button_style("info", theme))
         else:
             self.suspend_btn.setText("QSY")
-            self.suspend_btn.setStyleSheet("QPushButton { background-color: gold; color: black; }")
+            self.suspend_btn.setStyleSheet(button_style("warning", theme))
         self._update_qsy_button_enabled()
+
+    def _apply_theme(self) -> None:
+        theme = resolve_theme(self.settings)
+        self.start_btn.setStyleSheet(button_style("success", theme))
+        self.end_btn.setStyleSheet(button_style("danger", theme))
+        self.merge_btn.setStyleSheet(button_style("info", theme))
+        self._start_btn_default_style = self.start_btn.styleSheet()
+        self._save_btn_default_style = button_style("success", theme)
+        self.save_btn.setStyleSheet(self._save_btn_default_style)
+        self.suspend_btn.setStyleSheet(button_style("warning", theme))
+        self._set_net_button_styles(self._net_in_progress)
+
+    def apply_theme(self) -> None:
+        self._apply_theme()
 
     def _on_suspend_clicked(self):
         now_utc = datetime.datetime.now(datetime.timezone.utc)

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
+from freqinout.gui.theme import resolve_theme, button_style
 from freqinout.gui.qsy_helper import (
     load_operating_groups as qsy_load_operating_groups,
     snapshot_operating_groups as qsy_snapshot_operating_groups,
@@ -173,7 +174,8 @@ class DailyScheduleTab(QWidget):
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
         self.time_toggle_btn = QPushButton("Showing: UTC")
-        self.time_toggle_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: 600;")
+        theme = resolve_theme(self.settings)
+        self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
@@ -234,6 +236,7 @@ class DailyScheduleTab(QWidget):
         # Initialize clock labels once
         self._update_clock_labels()
         self._update_suspend_state()
+        self._apply_theme()
 
     def _load_operating_groups(self) -> List[Dict]:
         return qsy_load_operating_groups(self.settings)
@@ -799,16 +802,17 @@ class DailyScheduleTab(QWidget):
         return scheduler_enabled(self.settings)
 
     def _set_suspend_button(self, active: bool, remaining_sec: Optional[float] = None):
+        theme = resolve_theme(self.settings)
         if active:
             mins = 0
             if remaining_sec is not None:
                 mins = max(0, int((remaining_sec + 59) // 60))
             label = f"Sched. Paused: {mins} min" if mins else "Sched. Paused"
             self.suspend_btn.setText(label)
-            self.suspend_btn.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
+            self.suspend_btn.setStyleSheet(button_style("info", theme))
         else:
             self.suspend_btn.setText("QSY")
-            self.suspend_btn.setStyleSheet("QPushButton { background-color: gold; color: black; }")
+            self.suspend_btn.setStyleSheet(button_style("warning", theme))
         self._update_qsy_button_enabled()
 
     def _refresh_qsy_options(self):
@@ -886,6 +890,8 @@ class DailyScheduleTab(QWidget):
             self._operating_groups_sig = sig
             self._refresh_group_band_cells()
             self._refresh_qsy_options()
+        self._apply_theme()
+
     def _on_suspend_clicked(self):
         if self._suspend_active():
             self._set_suspend_until(None)
@@ -903,6 +909,18 @@ class DailyScheduleTab(QWidget):
             remaining = (new_until - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
             self._set_suspend_button(True, remaining_sec=remaining)
             QMessageBox.information(self, "QSY Applied", "Frequency changed and scheduling paused for 30 minutes.")
+
+    def _apply_theme(self) -> None:
+        theme = resolve_theme(self.settings)
+        self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
+        self.add_row_btn.setStyleSheet(button_style("primary", theme))
+        self.del_row_btn.setStyleSheet(button_style("danger", theme))
+        self.save_btn.setStyleSheet(button_style("success", theme))
+        self.export_btn.setStyleSheet(button_style("info", theme))
+        self._update_suspend_state()
+
+    def apply_theme(self) -> None:
+        self._apply_theme()
 
     def _append_entry_row(self, entry: Dict):
         row = self.table.rowCount()

@@ -17,6 +17,7 @@ from PySide6.QtGui import QTextCursor
 
 from freqinout.core.logger import _get_log_file, set_log_level, get_log_level
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.gui.theme import resolve_theme, button_style
 
 
 class LogViewerTab(QWidget):
@@ -28,6 +29,7 @@ class LogViewerTab(QWidget):
         self.log_file = _get_log_file()
 
         self._build_ui()
+        self._apply_theme()
         self._apply_saved_level()
         self._refresh()
 
@@ -66,7 +68,6 @@ class LogViewerTab(QWidget):
 
         self.text = QTextEdit()
         self.text.setReadOnly(True)
-        self.text.setStyleSheet("background-color: #111; color: #EEE; font-family: monospace;")
         layout.addWidget(self.text)
 
         self.status_label = QLabel(f"Log file: {self.log_file}")
@@ -81,11 +82,14 @@ class LogViewerTab(QWidget):
         self.level_combo.currentTextChanged.connect(self._on_level_changed)
 
         self._update_font()
+        self._apply_theme()
 
     def _update_font(self):
         size = self.font_spin.value()
+        theme = getattr(self, "_theme", resolve_theme(self.settings))
         self.text.setStyleSheet(
-            f"background-color: #111; color: #EEE; font-family: monospace; font-size: {size}pt;"
+            f"background-color: {theme['surface']}; color: {theme['text']}; "
+            f"font-family: monospace; font-size: {size}pt;"
         )
 
     def _apply_saved_level(self):
@@ -125,13 +129,25 @@ class LogViewerTab(QWidget):
         return [l for l in lines if (token1 in l or token2 in l)]
 
     def _color_for_line(self, line: str) -> str:
+        theme = getattr(self, "_theme", resolve_theme(self.settings))
         if " ERROR " in line or " CRITICAL " in line:
-            return "#ff6666"
+            return theme["danger"]
         if " WARNING " in line:
-            return "#ffcc66"
+            return theme["warning"]
         if " DEBUG " in line:
-            return "#66b2ff"
-        return "#cccccc"
+            return theme["info"]
+        return theme["text_muted"]
+
+    def apply_theme(self):
+        self._apply_theme()
+
+    def _apply_theme(self):
+        self._theme = resolve_theme(self.settings)
+        self.refresh_btn.setStyleSheet(button_style("primary", self._theme))
+        self.clear_btn.setStyleSheet(button_style("muted", self._theme))
+        self.search_btn.setStyleSheet(button_style("info", self._theme))
+        self.open_btn.setStyleSheet(button_style("primary", self._theme))
+        self._update_font()
 
     def _refresh(self):
         lines = self._filter_lines(self._read_log_tail())
