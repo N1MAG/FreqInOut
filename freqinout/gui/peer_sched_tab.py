@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.logger import log
+from freqinout.core.settings_manager import SettingsManager
+from freqinout.gui.theme import resolve_theme, button_style
 
 
 # Simple FEMA region mapping for filtering
@@ -60,6 +62,7 @@ class PeerSchedTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.settings = SettingsManager()
         self._rows: List[Dict] = []
         self._operator_meta: Dict[str, Dict[str, str]] = {}
         self._build_ui()
@@ -76,10 +79,14 @@ class PeerSchedTab(QWidget):
         header.addStretch()
         self.import_btn = QPushButton("Import Schedule")
         self.refresh_btn = QPushButton("Refresh")
-        self.delete_btn = QPushButton("Delete Selected")
+        self.delete_callsign_combo = QComboBox()
+        self.delete_callsign_combo.addItem("Select callsign")
+        self.delete_btn = QPushButton("Delete Schedule")
         self.clear_btn = QPushButton("Clear All")
         header.addWidget(self.import_btn)
         header.addWidget(self.refresh_btn)
+        header.addWidget(QLabel("Delete:"))
+        header.addWidget(self.delete_callsign_combo)
         header.addWidget(self.delete_btn)
         header.addWidget(self.clear_btn)
         layout.addLayout(header)
@@ -125,8 +132,11 @@ class PeerSchedTab(QWidget):
         self.region_filter.currentIndexChanged.connect(self._apply_filters)
         self.group_filter.currentIndexChanged.connect(self._apply_filters)
         self.search_edit.textChanged.connect(self._apply_filters)
+        self.delete_callsign_combo.currentIndexChanged.connect(self._update_delete_button_state)
         self.delete_btn.clicked.connect(self._delete_selected)
         self.clear_btn.clicked.connect(self._clear_all)
+        self._apply_theme()
+        self._update_delete_button_state()
 
     # ---------- data ----------
 
@@ -211,6 +221,7 @@ class PeerSchedTab(QWidget):
         except Exception as e:
             log.error("PeerSched: failed to load peer schedules: %s", e)
         self._populate_filters()
+        self._populate_delete_callsigns()
         self._apply_filters()
 
     def _populate_filters(self) -> None:
@@ -247,6 +258,20 @@ class PeerSchedTab(QWidget):
         if idx >= 0:
             self.group_filter.setCurrentIndex(idx)
         self.group_filter.blockSignals(False)
+
+    def _populate_delete_callsigns(self) -> None:
+        calls = sorted({row["callsign"] for row in self._rows if row.get("callsign")})
+        current = self.delete_callsign_combo.currentText()
+        self.delete_callsign_combo.blockSignals(True)
+        self.delete_callsign_combo.clear()
+        self.delete_callsign_combo.addItem("Select callsign")
+        for c in calls:
+            self.delete_callsign_combo.addItem(c)
+        idx = self.delete_callsign_combo.findText(current)
+        if idx >= 0:
+            self.delete_callsign_combo.setCurrentIndex(idx)
+        self.delete_callsign_combo.blockSignals(False)
+        self._update_delete_button_state()
 
     def _apply_filters(self) -> None:
         cs_filter = self.callsign_filter.currentText()
@@ -306,13 +331,21 @@ class PeerSchedTab(QWidget):
     # ---------- helpers ----------
 
     def _selected_callsign(self) -> Optional[str]:
-        row = self.table.currentRow()
-        if row < 0:
+        selected = (self.delete_callsign_combo.currentText() or "").strip().upper()
+        if not selected or selected == "SELECT CALLSIGN":
             return None
-        item = self.table.item(row, 0)
-        if not item:
-            return None
-        return (item.text() or "").strip().upper()
+        return selected
+
+    def _apply_theme(self) -> None:
+        theme = resolve_theme(self.settings)
+        self.delete_btn.setStyleSheet(button_style("muted", theme))
+
+    def _update_delete_button_state(self) -> None:
+        theme = resolve_theme(self.settings)
+        has_selection = self._selected_callsign() is not None
+        self.delete_btn.setEnabled(has_selection)
+        role = "danger" if has_selection else "muted"
+        self.delete_btn.setStyleSheet(button_style(role, theme))
 
     # ---------- import / delete ----------
 
@@ -406,7 +439,7 @@ class PeerSchedTab(QWidget):
     def _delete_selected(self) -> None:
         cs = self._selected_callsign()
         if not cs:
-            QMessageBox.information(self, "Delete", "Select a schedule row to choose an operator to delete.")
+            QMessageBox.information(self, "Delete", "Select a callsign to delete.")
             return
         confirm = QMessageBox.question(
             self,

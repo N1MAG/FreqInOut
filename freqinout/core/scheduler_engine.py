@@ -568,6 +568,7 @@ class SchedulerEngine(QObject):
                             start_utc,
                             end_utc,
                             early_checkin,
+                            auto_tune,
                             primary_js8call_group,
                             comment,
                             net_name,
@@ -594,7 +595,7 @@ class SchedulerEngine(QObject):
                         """
                     )
                 for row in cur.fetchall():
-                    if len(row) == 14:
+                    if len(row) == 15:
                         (
                             day_utc,
                             recurrence,
@@ -606,6 +607,7 @@ class SchedulerEngine(QObject):
                             start_utc,
                             end_utc,
                             early,
+                            auto_tune,
                             primary_group,
                             comment,
                             net_name,
@@ -640,6 +642,7 @@ class SchedulerEngine(QObject):
                             "start_utc": start_utc or "",
                             "end_utc": end_utc or "",
                             "early_checkin": early if early is not None else 0,
+                            "auto_tune": bool(auto_tune) if len(row) == 15 else False,
                             "primary_js8call_group": primary_group or "",
                             "comment": comment or "",
                             "net_name": net_name or "",
@@ -662,6 +665,7 @@ class SchedulerEngine(QObject):
                             start_utc,
                             end_utc,
                             early_checkin,
+                            auto_tune,
                             primary_js8call_group,
                             comment,
                             net_name,
@@ -687,7 +691,7 @@ class SchedulerEngine(QObject):
                         """
                     )
                 for row in cur.fetchall():
-                    if len(row) == 13:
+                    if len(row) == 14:
                         (
                             day_utc,
                             recurrence,
@@ -698,6 +702,7 @@ class SchedulerEngine(QObject):
                             start_utc,
                             end_utc,
                             early,
+                            auto_tune,
                             primary_group,
                             comment,
                             net_name,
@@ -731,6 +736,7 @@ class SchedulerEngine(QObject):
                             "start_utc": start_utc or "",
                             "end_utc": end_utc or "",
                             "early_checkin": early if early is not None else 0,
+                            "auto_tune": bool(auto_tune) if len(row) == 14 else False,
                             "primary_js8call_group": primary_group or "",
                             "comment": comment or "",
                             "net_name": net_name or "",

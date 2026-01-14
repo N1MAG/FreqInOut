@@ -51,13 +51,14 @@
   <h2 id="settings">2. Settings Tab</h2>
   <h3 id="settings-operator">Operator Information</h3>
   <ul class="section-list">
-    <li><strong>Callsign / Name / State / Grid6</strong>: Used everywhere (planner labels, map pins, net control defaults, short-code logic). A 6-character grid is roughly a 24-square-mile area—granular enough for mapping but generally privacy friendly.</li>
+    <li><strong>Callsign / Name / State / Grid6</strong>: Used everywhere (planner labels, map pins, net control defaults, short-code logic). A 6-character grid is roughly a 24-square-mile area, granular enough for mapping but generally privacy friendly.</li>
   </ul>
 
   <h3 id="settings-operation">Operation Settings</h3>
   <ul class="section-list">
     <li><strong>Frequency Control</strong>: Choose FLRig, JS8Call, or Manual. FLRig requires XMLRPC port. Manual means no rig commands are sent.</li>
     <li><strong>Use Scheduler</strong>: Master enable for schedule-driven rig changes. When off, QSY buttons are gray and scheduler output is suppressed.</li>
+    <li><strong>Theme</strong>: Light/Dark/System app-wide UI theme. Changes apply immediately after Save Settings.</li>
   </ul>
 
   <h3 id="settings-js8call">JS8Call Settings</h3>
@@ -65,6 +66,7 @@
     <li><strong>TCP Port / Offset (Hz)</strong>: Must match JS8Call configuration.</li>
     <li><strong>DIRECTED.TXT path</strong>: Browse to JS8Call's DIRECTED.TXT. ALL.TXT and inbox are inferred from the same folder.</li>
     <li><strong>JS8Spotter forms</strong>: Path to the MCF form folder used to decode F!### spotter traffic.</li>
+    <li><strong>Mark JS8Call MSG Retrieved</strong>: When enabled, clicking <em>Mark Retrieved</em> in Messages attempts to update JS8Call's inbox_v1 row to READ.</li>
     <li><strong>Auto Query Msg ID / Auto Query Grids</strong>: Enables background queries when nets are not active, respecting lockouts and timers.</li>
     <li><strong>Load JS8 Traffic</strong>: Manual ingest of logs into the map and link index.</li>
   </ul>
@@ -99,8 +101,9 @@
   <h2 id="scheduler">3. Scheduler and Planning</h2>
   <h3 id="scheduler-daily">Daily Schedule Tab</h3>
   <ul class="section-list">
-    <li><strong>Columns</strong>: Day, Group Name, Mode, Band, VFO, Freq (MHz), Start, End, Auto-Tune.</li>
-    <li><strong>Buttons</strong> (top row): Add Row, Delete Selected, Save HF Schedule (persist), Export HF Schedule (JSON file).</li>
+    <li><strong>Columns</strong>: Selected, Day, Group Name, Mode, Band, VFO, Freq (MHz), Start, End, Auto-Tune.</li>
+    <li><strong>Buttons</strong>: Add Row, Delete Selected, Save HF Schedule (persist), Export HF Schedule (JSON file).</li>
+    <li><strong>Delete Selected</strong>: Button is disabled until a row is selected or a checkbox is ticked.</li>
     <li><strong>QSY row</strong>: Right side under the time bar shows Select Frequency dropdown (unique Operating Group freqs, auto-tune wins ties) and QSY button (manual change plus 30 minute pause).</li>
     <li><strong>Time toggle</strong>: "Showing: Local/UTC" flips the view only; data is stored in UTC. Default view is Local.</li>
     <li><strong>Day values</strong>: "ALL" applies every day. Overnight spans (start > end) extend into the next day.</li>
@@ -109,10 +112,13 @@
 
   <h3 id="scheduler-net">Net Schedule Tab</h3>
   <ul class="section-list">
-    <li><strong>Columns</strong>: Day (Local/UTC view), Recurrence, Group, Mode, Band, VFO, Freq (MHz), Start, End, Early (min), Net Name.</li>
-    <li><strong>Buttons</strong>: Add Row, Delete Selected, Save Net Schedule, Export Net Schedule (JSON file).</li>
-    <li><strong>QSY controls</strong>: Same Select Frequency dropdown and QSY button as Daily (right side).</li>
+    <li><strong>Columns</strong>: Selected, Day (Local/UTC view), Recurrence, Group Name, Mode, Band, VFO, Freq (MHz), Start, End, Early (min), Net Name, Auto-Tune.</li>
+    <li><strong>Buttons</strong>: Add Row, Delete Selected, Export Net Schedule, Import Net Schedule, Save Net Schedule.</li>
+    <li><strong>Delete Selected</strong>: Button is disabled until a row is selected or a checkbox is ticked.</li>
+    <li><strong>QSY controls</strong>: Not available on this tab; use Daily Schedule or Net Control tabs.</li>
     <li><strong>Early (min)</strong>: Shifts the active start earlier for rig changes only; display ignores early check-in.</li>
+    <li><strong>Auto-Tune</strong>: Runs rig tune when this row is applied (if supported by the rig backend).</li>
+    <li><strong>Import/Export</strong>: Files are UTC. VFO and Auto-Tune are intentionally blank on export; import defaults VFO to A and Auto-Tune off.</li>
   </ul>
 
   <h3 id="scheduler-engine">Scheduler Engine</h3>
@@ -128,7 +134,7 @@
   <ul class="section-list">
     <li><strong>Grid</strong>: 24 hour columns for Local and UTC; rows Sun-Sat. Default view is Local. Column header shows short timezone abbreviation (for example MST).</li>
     <li><strong>Display rules</strong>: Shows band per hour; transitions honor partial hours and overnight spans. If two rows meet at the top of an hour, the band that owns the full hour is shown. Nets display only during their scheduled time, not the hour after.</li>
-    <li><strong>Net highlight</strong>: Yellow highlight for nets in the next 24 hours and the currently active net. Past nets are not highlighted.</li>
+    <li><strong>Net highlight</strong>: Highlight for nets in the next 24 hours and the currently active net. Past nets are not highlighted.</li>
     <li><strong>QSY controls</strong>: Dropdown and QSY button under the time bar; manual QSY also starts the 30 minute pause.</li>
   </ul>
 
@@ -175,6 +181,10 @@
   <h3 id="messages">Messages Tab</h3>
   <ul class="section-list">
     <li>Shows JS8Call, VarAC, FLMSG, and FLAMP messages from configured paths. Filtering and search follow the tab controls. No rig control occurs here.</li>
+    <li><strong>Scan every</strong>: Controls file-based scanning (VarAC/FLMSG/FLAMP). JS8 inbox polling uses its own interval.</li>
+    <li><strong>JS8 polling</strong>: JS8 inbox is polled automatically about every 90 seconds to ingest new messages.</li>
+    <li><strong>Pending JS8 MSGs</strong>: <em>Mark Retrieved</em> clears the pending entry and (if enabled in Settings) updates JS8Call inbox_v1 to READ.</li>
+    <li><strong>NEXT MSG ID</strong>: If a received message contains "NEXT MSG ID ###", a pending GET entry is auto-created.</li>
   </ul>
 
   <h3 id="operators">Operators Tab</h3>
@@ -184,8 +194,8 @@
 
   <h3 id="peer-schedules">Peer Schedules Tab</h3>
   <ul class="section-list">
-    <li>Displays imported schedules from other operators. Columns include callsign, name, state, grid, groups, and schedule rows.</li>
-    <li>Filters by callsign, region, and groups. Buttons allow import/export (when available), delete selected operator schedules, and clear all.</li>
+    <li>Displays imported schedules from other operators. Columns include callsign, name, state, groups, and schedule rows.</li>
+    <li>Filters by callsign, region, and groups. Buttons allow import, refresh, delete a selected callsign's schedule, and clear all.</li>
   </ul>
 
   <h3 id="map">Map Tab</h3>

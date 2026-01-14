@@ -286,8 +286,7 @@ class JS8CallNetControlTab(QWidget):
         self.end_btn = QPushButton("End Net")
         self.ack_btn.setEnabled(False)
         self.end_btn.setEnabled(False)
-        self.start_btn.setStyleSheet(self._start_btn_default_style)
-        self.end_btn.setStyleSheet(self._end_btn_default_style)
+        self._set_net_button_styles(active=False)
 
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.ack_btn)
@@ -563,10 +562,20 @@ class JS8CallNetControlTab(QWidget):
         theme = resolve_theme(self.settings)
         if active:
             self.start_btn.setStyleSheet(button_style("muted", theme))
+            self.ack_btn.setStyleSheet(button_style("info", theme))
+            self.group_spotter_btn.setStyleSheet(button_style("info", theme))
+            self.single_spotter_btn.setStyleSheet(button_style("info", theme))
+            self.save_btn.setStyleSheet(button_style("success", theme))
             self.end_btn.setStyleSheet(self._end_btn_default_style)
+            self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
         else:
             self.start_btn.setStyleSheet(self._start_btn_default_style)
-            self.end_btn.setStyleSheet(self._end_btn_default_style)
+            self.ack_btn.setStyleSheet(button_style("muted", theme))
+            self.group_spotter_btn.setStyleSheet(button_style("muted", theme))
+            self.single_spotter_btn.setStyleSheet(button_style("muted", theme))
+            self.save_btn.setStyleSheet(button_style("muted", theme))
+            self.end_btn.setStyleSheet(button_style("muted", theme))
+            self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
@@ -574,6 +583,7 @@ class JS8CallNetControlTab(QWidget):
         self._end_btn_default_style = button_style("danger", theme)
         self._set_net_button_styles(self._net_in_progress)
         self.suspend_btn.setStyleSheet(button_style("warning", theme))
+        self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
 
     def apply_theme(self) -> None:
         self._apply_theme()
@@ -722,6 +732,20 @@ class JS8CallNetControlTab(QWidget):
         self._start_net()
 
     def _end_net(self):
+        prompt = QMessageBox(self)
+        prompt.setIcon(QMessageBox.Question)
+        prompt.setWindowTitle("End Net")
+        prompt.setText("TX NET CONCLUDED MSG?")
+        btn_yes = prompt.addButton("YES", QMessageBox.YesRole)
+        btn_no = prompt.addButton("NO", QMessageBox.NoRole)
+        btn_end_no_tx = prompt.addButton("END w/o TX", QMessageBox.DestructiveRole)
+        prompt.setDefaultButton(btn_yes)
+        prompt.exec()
+        clicked = prompt.clickedButton()
+        if clicked == btn_no:
+            return
+        send_concluded = clicked == btn_yes
+
         if not self._net_in_progress:
             log.info("JS8Call End Net clicked but net_in_progress flag not set; writing log from current state.")
 
@@ -731,13 +755,14 @@ class JS8CallNetControlTab(QWidget):
         self._net_end_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
 
         # Send net concluded to group if set
-        group = self._group_target or self.group_edit.text().strip().upper()
-        if group:
-            if not group.startswith("@"):
-                group = "@" + group
-            mycall = self._my_callsign()
-            if mycall:
-                self._send_js8_message(f"{mycall}: {group} NET CONCLUDED")
+        if send_concluded:
+            group = self._group_target or self.group_edit.text().strip().upper()
+            if group:
+                if not group.startswith("@"):
+                    group = "@" + group
+                mycall = self._my_callsign()
+                if mycall:
+                    self._send_js8_message(f"{mycall}: {group} NET CONCLUDED")
 
         # Record check-ins once more at end (no duplicate increments)
         self._save_checkins(show_message=False)

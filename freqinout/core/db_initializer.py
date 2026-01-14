@@ -201,6 +201,7 @@ def _ensure_nets_db() -> None:
                 start_utc TEXT NOT NULL,
                 end_utc TEXT NOT NULL,
                 early_checkin INTEGER NOT NULL,
+                auto_tune INTEGER DEFAULT 0,
                 primary_js8call_group TEXT,
                 comment TEXT,
                 net_name TEXT
@@ -220,6 +221,7 @@ def _ensure_nets_db() -> None:
                 start_utc TEXT NOT NULL,
                 end_utc TEXT NOT NULL,
                 early_checkin INTEGER NOT NULL,
+                auto_tune INTEGER DEFAULT 0,
                 primary_js8call_group TEXT,
                 comment TEXT,
                 net_name TEXT

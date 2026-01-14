@@ -190,6 +190,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self.settings_tab.settings_saved.connect(self.message_viewer_tab.on_settings_saved)
+        except Exception:
+            pass
+        try:
             self.settings_tab.settings_saved.connect(self._apply_app_theme)
         except Exception:
             pass

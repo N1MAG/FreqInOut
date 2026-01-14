@@ -7,6 +7,7 @@ import platform
 import sqlite3
 import subprocess
 import datetime
+import json
 from pathlib import Path
 
 import psutil
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QLineEdit,
     QCheckBox,
+    QFileDialog,
 )
 
 from freqinout.core.settings_manager import SettingsManager
@@ -123,6 +125,7 @@ class NetScheduleTab(QWidget):
       9: End UTC (HH:MM)
       10: Early Check-in (minutes: 0/5/10/15)
       11: Net Name
+      12: Auto-Tune
 
     Data is saved to:
       - config/config.json under key "net_schedule"
@@ -142,6 +145,7 @@ class NetScheduleTab(QWidget):
     COL_END = 9
     COL_EARLY = 10
     COL_NETNAME = 11
+    COL_AUTOTUNE = 12
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -183,7 +187,7 @@ class NetScheduleTab(QWidget):
 
         # table
         self.table = QTableWidget()
-        self.table.setColumnCount(12)
+        self.table.setColumnCount(13)
         self._set_headers()
         self.table.setSortingEnabled(False)
         hv = self.table.horizontalHeader()
@@ -202,6 +206,7 @@ class NetScheduleTab(QWidget):
             self.COL_END,
             self.COL_EARLY,
             self.COL_NETNAME,
+            self.COL_AUTOTUNE,
         ):
             hv.setSectionResizeMode(col, QHeaderView.Stretch)
         layout.addWidget(self.table)
@@ -210,8 +215,12 @@ class NetScheduleTab(QWidget):
         btn_row = QHBoxLayout()
         self.add_btn = QPushButton("Add Row")
         self.del_btn = QPushButton("Delete Selected")
+        self.export_btn = QPushButton("Export Net Schedule")
+        self.import_btn = QPushButton("Import Net Schedule")
         btn_row.addWidget(self.add_btn)
         btn_row.addWidget(self.del_btn)
+        btn_row.addWidget(self.export_btn)
+        btn_row.addWidget(self.import_btn)
         btn_row.addStretch()
         self.save_btn = QPushButton("Save Net Schedule")
         btn_row.addWidget(self.save_btn)
@@ -220,11 +229,15 @@ class NetScheduleTab(QWidget):
         # signals
         self.add_btn.clicked.connect(self._add_row)
         self.del_btn.clicked.connect(self._delete_rows)
+        self.export_btn.clicked.connect(self._export_schedule)
+        self.import_btn.clicked.connect(self._import_schedule)
         self.save_btn.clicked.connect(self._save)
+        self.table.itemSelectionChanged.connect(self._update_delete_button_state)
 
         self._update_clock_labels()
         self._setup_clock_timer()
         self._apply_theme()
+        self._update_delete_button_state()
 
     def on_settings_saved(self) -> None:
         """
@@ -262,11 +275,31 @@ class NetScheduleTab(QWidget):
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.add_btn.setStyleSheet(button_style("primary", theme))
-        self.del_btn.setStyleSheet(button_style("danger", theme))
+        self.export_btn.setStyleSheet(button_style("info", theme))
+        self.import_btn.setStyleSheet(button_style("primary", theme))
         self.save_btn.setStyleSheet(button_style("success", theme))
+        self._update_delete_button_state()
 
     def apply_theme(self) -> None:
         self._apply_theme()
+
+    def _has_delete_selection(self) -> bool:
+        for r in range(self.table.rowCount()):
+            w = self.table.cellWidget(r, self.COL_SELECT)
+            if isinstance(w, QCheckBox) and w.isChecked():
+                return True
+            if isinstance(w, QWidget):
+                chk = w.findChild(QCheckBox)
+                if chk is not None and chk.isChecked():
+                    return True
+        return bool(self.table.selectedIndexes())
+
+    def _update_delete_button_state(self) -> None:
+        theme = resolve_theme(self.settings)
+        has_selection = self._has_delete_selection()
+        self.del_btn.setEnabled(has_selection)
+        role = "danger" if has_selection else "muted"
+        self.del_btn.setStyleSheet(button_style(role, theme))
 
     # --------- helpers: time / primary groups --------- #
     def _ui_tz_abbr(self, tz_name: str, fallback: str) -> str:
@@ -308,7 +341,7 @@ class NetScheduleTab(QWidget):
     def _set_headers(self):
         self.table.setHorizontalHeaderLabels(
             [
-                "",
+                "Selected",
                 f"Day ({'Local' if self._show_local else 'UTC'})",
                 "Recurrence",
                 "Group Name",
@@ -320,6 +353,7 @@ class NetScheduleTab(QWidget):
                 "End",
                 "Early (min)",
                 "Net Name",
+                "Auto-Tune",
             ]
         )
         self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
@@ -412,7 +446,13 @@ class NetScheduleTab(QWidget):
 
         # Select checkbox
         sel_chk = QCheckBox()
-        self.table.setCellWidget(r, self.COL_SELECT, sel_chk)
+        sel_chk.stateChanged.connect(self._update_delete_button_state)
+        sel_wrap = QWidget()
+        sel_layout = QHBoxLayout(sel_wrap)
+        sel_layout.setContentsMargins(0, 0, 0, 0)
+        sel_layout.setAlignment(Qt.AlignCenter)
+        sel_layout.addWidget(sel_chk)
+        self.table.setCellWidget(r, self.COL_SELECT, sel_wrap)
 
         # Day combo
         day_combo = QComboBox()
@@ -480,6 +520,16 @@ class NetScheduleTab(QWidget):
         net_edit.setText(net_val)
         self.table.setCellWidget(r, self.COL_NETNAME, net_edit)
 
+        # Auto-Tune checkbox
+        auto_chk = QCheckBox()
+        auto_chk.setChecked(bool(row_data.get("auto_tune", False)))
+        auto_wrap = QWidget()
+        auto_layout = QHBoxLayout(auto_wrap)
+        auto_layout.setContentsMargins(0, 0, 0, 0)
+        auto_layout.setAlignment(Qt.AlignCenter)
+        auto_layout.addWidget(auto_chk)
+        self.table.setCellWidget(r, self.COL_AUTOTUNE, auto_wrap)
+
         # Freq / times as QTableWidgetItem
         def set_item(col: int, value: str | None):
             item = QTableWidgetItem(str(value) if value is not None else "")
@@ -503,6 +553,7 @@ class NetScheduleTab(QWidget):
         band_combo.currentTextChanged.connect(on_band_changed)
         # Ensure initial mode/freq selection is synced to operating group data
         self._update_mode_freq(r)
+        self._update_delete_button_state()
 
     def _get_combo_value(self, row: int, col: int, default: str = "") -> str:
         w = self.table.cellWidget(row, col)
@@ -520,11 +571,16 @@ class NetScheduleTab(QWidget):
             w = self.table.cellWidget(r, self.COL_SELECT)
             if isinstance(w, QCheckBox) and w.isChecked():
                 selected.add(r)
+            if isinstance(w, QWidget):
+                chk = w.findChild(QCheckBox)
+                if chk is not None and chk.isChecked():
+                    selected.add(r)
         # Fallback to selected cells if no checkboxes
         if not selected:
             selected = {i.row() for i in self.table.selectedIndexes()}
         for r in sorted(selected, reverse=True):
             self.table.removeRow(r)
+        self._update_delete_button_state()
 
     # --------- Operating group helpers (cascading selections) --------- #
 
@@ -794,6 +850,7 @@ class NetScheduleTab(QWidget):
             vfo_combo: QComboBox = self.table.cellWidget(r, self.COL_VFO)  # type: ignore
             early_combo: QComboBox = self.table.cellWidget(r, self.COL_EARLY)  # type: ignore
             net_edit: QLineEdit = self.table.cellWidget(r, self.COL_NETNAME)  # type: ignore
+            auto_widget = self.table.cellWidget(r, self.COL_AUTOTUNE)
 
             day = day_combo.currentText().strip() if day_combo else ""
             group_name = group_combo.currentText().strip() if group_combo else ""
@@ -803,6 +860,13 @@ class NetScheduleTab(QWidget):
             early = early_combo.currentText().strip() if early_combo else "0"
             net_name = net_edit.text().strip() if net_edit else ""
             recurrence = recur_combo.currentText().strip() if recur_combo else "Weekly"
+            auto_tune = False
+            if isinstance(auto_widget, QCheckBox):
+                auto_tune = auto_widget.isChecked()
+            elif isinstance(auto_widget, QWidget):
+                chk = auto_widget.findChild(QCheckBox)
+                if chk is not None:
+                    auto_tune = chk.isChecked()
 
             freq = text(self.COL_FREQ)
             start_txt = text(self.COL_START)
@@ -915,6 +979,7 @@ class NetScheduleTab(QWidget):
                 "end_utc": end_txt,
                 "early_checkin": str(early_int),
                 "net_name": net_name,
+                "auto_tune": bool(auto_tune),
             }
             rows.append(row)
 
@@ -970,6 +1035,7 @@ class NetScheduleTab(QWidget):
                             start_utc,
                             end_utc,
                             early_checkin,
+                            auto_tune,
                             primary_js8call_group,
                             comment,
                             net_name,
@@ -1020,6 +1086,7 @@ class NetScheduleTab(QWidget):
                                 "start_utc": start_utc or "",
                                 "end_utc": end_utc or "",
                                 "early_checkin": str(early if early is not None else 0),
+                                "auto_tune": False,
                                 "primary_js8call_group": group or "",
                                 "comment": comment or "",
                                 "net_name": net_name or "",
@@ -1039,6 +1106,7 @@ class NetScheduleTab(QWidget):
                     start_utc,
                     end_utc,
                     early,
+                    auto_tune,
                     group,
                     comment,
                     net_name,
@@ -1056,6 +1124,7 @@ class NetScheduleTab(QWidget):
                             "start_utc": start_utc or "",
                             "end_utc": end_utc or "",
                             "early_checkin": str(early if early is not None else 0),
+                            "auto_tune": bool(auto_tune),
                             "primary_js8call_group": group or "",
                             "comment": comment or "",
                             "net_name": net_name or "",
@@ -1078,6 +1147,7 @@ class NetScheduleTab(QWidget):
                             start_utc,
                             end_utc,
                             early_checkin,
+                            auto_tune,
                             primary_js8call_group,
                             comment,
                             net_name
@@ -1125,6 +1195,7 @@ class NetScheduleTab(QWidget):
                                 "start_utc": start_utc or "",
                                 "end_utc": end_utc or "",
                                 "early_checkin": str(early if early is not None else 0),
+                                "auto_tune": False,
                                 "primary_js8call_group": group or "",
                                 "comment": comment or "",
                                 "net_name": net_name or "",
@@ -1142,6 +1213,7 @@ class NetScheduleTab(QWidget):
                     start_utc,
                     end_utc,
                     early,
+                    auto_tune,
                     group,
                     comment,
                     net_name,
@@ -1158,6 +1230,7 @@ class NetScheduleTab(QWidget):
                             "start_utc": start_utc or "",
                             "end_utc": end_utc or "",
                             "early_checkin": str(early if early is not None else 0),
+                            "auto_tune": bool(auto_tune),
                             "primary_js8call_group": group or "",
                             "comment": comment or "",
                             "net_name": net_name or "",
@@ -1224,6 +1297,144 @@ class NetScheduleTab(QWidget):
 
         QMessageBox.information(self, "Saved", "Net Schedule saved.")
 
+    def _export_schedule(self) -> None:
+        """
+        Export net schedule to JSON in UTC. VFO and Auto-Tune are nulled.
+        """
+        data = self.settings.all()
+        callsign = (data.get("operator_callsign") or "").strip().upper() or "UNKNOWN"
+        default_name = f"{callsign}-net-schedule-{datetime.datetime.utcnow().strftime('%Y%m%d')}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Net Schedule",
+            default_name,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            rows = self._collect_rows()
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid Net Schedule", str(e))
+            return
+        if not rows:
+            QMessageBox.warning(self, "Export", "No net schedule rows to export.")
+            return
+        try:
+            payload = {
+                "callsign": callsign,
+                "created_utc": datetime.datetime.utcnow().isoformat(),
+                "rows": [],
+            }
+            for r in rows:
+                payload["rows"].append(
+                    {
+                        "day_utc": r.get("day_utc", ""),
+                        "recurrence": r.get("recurrence", "Weekly"),
+                        "biweekly_offset_weeks": int(r.get("biweekly_offset_weeks", 0) or 0),
+                        "group_name": r.get("group_name", ""),
+                        "band": r.get("band", ""),
+                        "mode": r.get("mode", ""),
+                        "vfo": None,
+                        "frequency": r.get("frequency", ""),
+                        "start_utc": r.get("start_utc", ""),
+                        "end_utc": r.get("end_utc", ""),
+                        "early_checkin": r.get("early_checkin", 0),
+                        "auto_tune": None,
+                        "primary_js8call_group": r.get("primary_js8call_group", ""),
+                        "comment": r.get("comment", ""),
+                        "net_name": r.get("net_name", ""),
+                    }
+                )
+            Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            QMessageBox.information(self, "Exported", f"Net schedule exported to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Could not export:\n{e}")
+            log.error("Net schedule export failed: %s", e)
+
+    def _import_schedule(self) -> None:
+        """
+        Import net schedule JSON (UTC). VFO and Auto-Tune are ignored.
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Net Schedule",
+            "",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            raw = Path(path).read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except Exception as e:
+            QMessageBox.critical(self, "Import Failed", f"Could not read JSON:\n{e}")
+            return
+        rows = data.get("rows", [])
+        if not isinstance(rows, list):
+            QMessageBox.warning(self, "Invalid File", "Expected key: 'rows'.")
+            return
+
+        imported: List[Dict] = []
+        for row in rows:
+            try:
+                day = (row.get("day_utc") or "").strip()
+                band = (row.get("band") or "").strip()
+                mode = (row.get("mode") or "").strip()
+                freq = str(row.get("frequency") or "").strip()
+                start = (row.get("start_utc") or "").strip()
+                end = (row.get("end_utc") or "").strip()
+                if not (day and band and freq and start and end):
+                    continue
+                recurrence = (row.get("recurrence") or "Weekly").strip()
+                if recurrence not in ("Weekly", "Bi-Weekly", "Ad Hoc"):
+                    recurrence = "Weekly"
+                try:
+                    biweekly_offset = int(row.get("biweekly_offset_weeks", 0) or 0)
+                except Exception:
+                    biweekly_offset = 0
+                try:
+                    early_checkin = int(row.get("early_checkin", 0) or 0)
+                except Exception:
+                    early_checkin = 0
+                imported.append(
+                    {
+                        "day_utc": day,
+                        "recurrence": recurrence,
+                        "biweekly_offset_weeks": biweekly_offset,
+                        "group_name": (row.get("group_name") or "").strip(),
+                        "band": band,
+                        "mode": mode,
+                        "vfo": "A",
+                        "frequency": freq,
+                        "start_utc": start,
+                        "end_utc": end,
+                        "early_checkin": str(early_checkin),
+                        "auto_tune": False,
+                        "primary_js8call_group": (row.get("primary_js8call_group") or "").strip(),
+                        "comment": (row.get("comment") or "").strip(),
+                        "net_name": (row.get("net_name") or "").strip(),
+                    }
+                )
+            except Exception:
+                continue
+
+        if not imported:
+            QMessageBox.warning(self, "Import", "No valid rows found to import.")
+            return
+
+        self._raw_rows = imported
+        self.table.setRowCount(0)
+        for row in self._raw_rows:
+            self._add_row(self._to_view_row(row))
+        self._net_name_history = sorted(
+            {r.get("net_name", "") for r in self._raw_rows if isinstance(r, dict) and r.get("net_name")}
+        )
+        self._set_headers()
+        self._update_clock_labels()
+        self._update_delete_button_state()
+        QMessageBox.information(self, "Imported", f"Imported {len(imported)} net schedule rows.")
+
     # --------- SQLite mirror --------- #
 
     def _ensure_db_columns(self, conn: sqlite3.Connection, table: str, columns: Dict[str, str]):
@@ -1274,6 +1485,7 @@ class NetScheduleTab(QWidget):
                 start_utc TEXT NOT NULL,
                 end_utc TEXT NOT NULL,
                 early_checkin INTEGER NOT NULL,
+                auto_tune INTEGER DEFAULT 0,
                 primary_js8call_group TEXT,
                 comment TEXT,
                 net_name TEXT,
@@ -1294,6 +1506,7 @@ class NetScheduleTab(QWidget):
                 start_utc TEXT NOT NULL,
                 end_utc TEXT NOT NULL,
                 early_checkin INTEGER NOT NULL,
+                auto_tune INTEGER DEFAULT 0,
                 primary_js8call_group TEXT,
                 comment TEXT,
                 net_name TEXT,
@@ -1323,6 +1536,7 @@ class NetScheduleTab(QWidget):
                     "biweekly_offset_weeks": "INTEGER DEFAULT 0",
                     "vfo": "TEXT",
                     "group_name": "TEXT",
+                    "auto_tune": "INTEGER DEFAULT 0",
                 },
             )
             self._ensure_db_columns(
@@ -1332,6 +1546,7 @@ class NetScheduleTab(QWidget):
                     "recurrence": "TEXT DEFAULT 'Weekly'",
                     "biweekly_offset_weeks": "INTEGER DEFAULT 0",
                     "group_name": "TEXT",
+                    "auto_tune": "INTEGER DEFAULT 0",
                 },
             )
         except sqlite3.OperationalError as e:
@@ -1345,6 +1560,7 @@ class NetScheduleTab(QWidget):
                     "biweekly_offset_weeks": "INTEGER DEFAULT 0",
                     "vfo": "TEXT",
                     "group_name": "TEXT",
+                    "auto_tune": "INTEGER DEFAULT 0",
                 },
             )
             self._ensure_db_columns(
@@ -1354,6 +1570,7 @@ class NetScheduleTab(QWidget):
                     "recurrence": "TEXT DEFAULT 'Weekly'",
                     "biweekly_offset_weeks": "INTEGER DEFAULT 0",
                     "group_name": "TEXT",
+                    "auto_tune": "INTEGER DEFAULT 0",
                 },
             )
 
@@ -1378,8 +1595,8 @@ class NetScheduleTab(QWidget):
                 """
                 INSERT INTO net_schedule_tab
                   (day_utc, recurrence, biweekly_offset_weeks, band, mode, vfo, frequency, start_utc, end_utc,
-                   early_checkin, primary_js8call_group, comment, net_name, group_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row.get("day_utc"),
@@ -1392,6 +1609,7 @@ class NetScheduleTab(QWidget):
                     row.get("start_utc"),
                     row.get("end_utc"),
                     int(row.get("early_checkin", "0") or 0),
+                    1 if row.get("auto_tune") else 0,
                     row.get("primary_js8call_group"),
                     row.get("comment"),
                     row.get("net_name"),
@@ -1402,8 +1620,8 @@ class NetScheduleTab(QWidget):
                 """
                 INSERT INTO net_schedule
                   (day_utc, recurrence, biweekly_offset_weeks, band, mode, frequency, start_utc, end_utc,
-                   early_checkin, primary_js8call_group, comment, net_name, group_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row.get("day_utc"),
@@ -1415,6 +1633,7 @@ class NetScheduleTab(QWidget):
                     row.get("start_utc"),
                     row.get("end_utc"),
                     int(row.get("early_checkin", "0") or 0),
+                    1 if row.get("auto_tune") else 0,
                     row.get("primary_js8call_group"),
                     row.get("comment"),
                     row.get("net_name"),

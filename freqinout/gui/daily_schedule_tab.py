@@ -232,11 +232,13 @@ class DailyScheduleTab(QWidget):
         self.del_row_btn.clicked.connect(self._delete_selected_rows)
         self.save_btn.clicked.connect(self._save_schedule)
         self.export_btn.clicked.connect(self._export_schedule)
+        self.table.itemSelectionChanged.connect(self._update_delete_button_state)
 
         # Initialize clock labels once
         self._update_clock_labels()
         self._update_suspend_state()
         self._apply_theme()
+        self._update_delete_button_state()
 
     def _load_operating_groups(self) -> List[Dict]:
         return qsy_load_operating_groups(self.settings)
@@ -313,7 +315,7 @@ class DailyScheduleTab(QWidget):
 
     def _set_headers(self):
         headers = [
-            "",
+            "Selected",
             "Day",
             "Group Name",
             "Mode",
@@ -914,13 +916,31 @@ class DailyScheduleTab(QWidget):
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.add_row_btn.setStyleSheet(button_style("primary", theme))
-        self.del_row_btn.setStyleSheet(button_style("danger", theme))
         self.save_btn.setStyleSheet(button_style("success", theme))
         self.export_btn.setStyleSheet(button_style("info", theme))
         self._update_suspend_state()
+        self._update_delete_button_state()
 
     def apply_theme(self) -> None:
         self._apply_theme()
+
+    def _has_delete_selection(self) -> bool:
+        for r in range(self.table.rowCount()):
+            w = self.table.cellWidget(r, self.COL_SELECT)
+            if isinstance(w, QCheckBox) and w.isChecked():
+                return True
+            if isinstance(w, QWidget):
+                chk = w.findChild(QCheckBox)
+                if chk is not None and chk.isChecked():
+                    return True
+        return bool(self.table.selectedIndexes())
+
+    def _update_delete_button_state(self) -> None:
+        theme = resolve_theme(self.settings)
+        has_selection = self._has_delete_selection()
+        self.del_row_btn.setEnabled(has_selection)
+        role = "danger" if has_selection else "muted"
+        self.del_row_btn.setStyleSheet(button_style(role, theme))
 
     def _append_entry_row(self, entry: Dict):
         row = self.table.rowCount()
@@ -928,7 +948,13 @@ class DailyScheduleTab(QWidget):
 
         # Select checkbox
         sel_chk = QCheckBox()
-        self.table.setCellWidget(row, self.COL_SELECT, sel_chk)
+        sel_chk.stateChanged.connect(self._update_delete_button_state)
+        sel_wrap = QWidget()
+        sel_layout = QHBoxLayout(sel_wrap)
+        sel_layout.setContentsMargins(0, 0, 0, 0)
+        sel_layout.setAlignment(Qt.AlignCenter)
+        sel_layout.addWidget(sel_chk)
+        self.table.setCellWidget(row, self.COL_SELECT, sel_wrap)
 
         # Day
         day_combo = QComboBox()
@@ -983,7 +1009,12 @@ class DailyScheduleTab(QWidget):
         chk = QCheckBox()
         chk.setChecked(bool(entry.get("auto_tune", False)))
         chk.setTristate(False)
-        self.table.setCellWidget(row, self.COL_AUTOTUNE, chk)
+        auto_wrap = QWidget()
+        auto_layout = QHBoxLayout(auto_wrap)
+        auto_layout.setContentsMargins(0, 0, 0, 0)
+        auto_layout.setAlignment(Qt.AlignCenter)
+        auto_layout.addWidget(chk)
+        self.table.setCellWidget(row, self.COL_AUTOTUNE, auto_wrap)
 
         # wiring for group/band changes
         def on_group_changed(text: str, self=self, row=row, band_combo=band_combo):
@@ -1000,6 +1031,7 @@ class DailyScheduleTab(QWidget):
         band_combo.currentTextChanged.connect(on_band_changed)
         # Ensure initial mode/freq selection is synced to operating group data
         self._update_mode_freq(row)
+        self._update_delete_button_state()
 
     def _add_row(self):
         self._append_entry_row({})
@@ -1012,12 +1044,17 @@ class DailyScheduleTab(QWidget):
             w = self.table.cellWidget(r, self.COL_SELECT)
             if isinstance(w, QCheckBox) and w.isChecked():
                 selected.add(r)
+            if isinstance(w, QWidget):
+                chk = w.findChild(QCheckBox)
+                if chk is not None and chk.isChecked():
+                    selected.add(r)
         # Fallback to selected cells if no checkboxes are ticked
         if not selected:
             for idx in self.table.selectedIndexes():
                 selected.add(idx.row())
         for r in sorted(selected, reverse=True):
             self.table.removeRow(r)
+        self._update_delete_button_state()
 
     # ---------------- Cell access helpers ---------------- #
 
@@ -1034,6 +1071,10 @@ class DailyScheduleTab(QWidget):
         w = self.table.cellWidget(row, col)
         if isinstance(w, QCheckBox):
             return w.isChecked()
+        if isinstance(w, QWidget):
+            chk = w.findChild(QCheckBox)
+            if chk is not None:
+                return chk.isChecked()
         return False
 
     def _get_text_value(self, row: int, col: int) -> str:

@@ -51,7 +51,7 @@ DEFAULT_WATCH_DIRS = [
 ]
 
 SCAN_CHOICES = [1, 15, 30, 60]  # minutes
-JS8_POLL_SECONDS = 180  # 3 minutes
+JS8_POLL_SECONDS = 90  # 90 seconds
 PENDING_POLL_SECONDS = 30
 JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
@@ -276,7 +276,7 @@ class MessageViewerTab(QWidget):
         layout.addLayout(body)
 
         left_widget = QWidget()
-        left_widget.setMaximumWidth(340)
+        left_widget.setMaximumWidth(450)
         left = QVBoxLayout(left_widget)
         body.addWidget(left_widget, 1)
 
@@ -552,6 +552,14 @@ class MessageViewerTab(QWidget):
         self._adjust_pending_table_height(len(rows))
 
     def apply_theme(self) -> None:
+        self._update_pending_table()
+
+    def on_settings_saved(self) -> None:
+        try:
+            if hasattr(self.settings, "reload"):
+                self.settings.reload()
+        except Exception:
+            pass
         self._update_pending_table()
 
     def _adjust_pending_table_height(self, rows: int) -> None:
