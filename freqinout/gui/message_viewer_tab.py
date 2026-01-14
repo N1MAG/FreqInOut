@@ -858,56 +858,208 @@ class MessageViewerTab(QWidget):
             cur.execute("PRAGMA busy_timeout = 1000")
             for table, col in candidates:
                 try:
-                    cur.execute(
-                        f"SELECT id, {col} FROM {table} WHERE {col} LIKE ? AND {col} LIKE ?",
-                        (like_id, like_from),
-                    )
+                    cur.execute(f"SELECT id, {col} FROM {table} WHERE {col} LIKE ?", (like_from,))
                     rows = cur.fetchall()
                 except Exception:
                     continue
                 if not rows:
                     continue
                 has_type_col = self._table_has_column(conn, table, "type")
-                updated = False
-                for row in rows:
-                    row_id = row[0]
-                    blob = row[1] or ""
-                    try:
-                        parsed = json.loads(blob)
-                    except Exception:
-                        continue
-                    if not isinstance(parsed, dict):
-                        continue
-                    params = parsed.get("params") if isinstance(parsed.get("params"), dict) else parsed
-                    from_call = (params.get("FROM") or "").strip().upper() if isinstance(params, dict) else ""
-                    blob_id = (params.get("_ID") or "").strip() if isinstance(params, dict) else ""
-                    if from_call != callsign or blob_id != msg_id:
-                        continue
-                    current_type = str(parsed.get("type", "") or "").strip().upper()
-                    if current_type == "DELIVERED":
-                        continue
-                    if current_type != "READ":
-                        parsed["type"] = "READ"
-                        new_blob = json.dumps(parsed, separators=(",", ":"))
-                        if has_type_col:
-                            cur.execute(
-                                f"UPDATE {table} SET {col}=?, type=? WHERE id=?",
-                                (new_blob, "READ", row_id),
-                            )
-                        else:
-                            cur.execute(
-                                f"UPDATE {table} SET {col}=? WHERE id=?",
-                                (new_blob, row_id),
-                            )
-                        updated = True
-                if updated:
+                matched_row = self._select_inbox_row(rows, callsign, msg_id)
+                if matched_row is None:
+                    continue
+                row_id, parsed = matched_row
+                current_type = str(parsed.get("type", "") or "").strip().upper()
+                if current_type == "DELIVERED":
+                    log.debug(
+                        "MessageViewer: JS8Call inbox row %s skipped (DELIVERED) callsign=%s msg_id=%s",
+                        row_id,
+                        callsign,
+                        msg_id,
+                    )
+                    conn.close()
+                    return False
+                if current_type != "READ":
+                    parsed["type"] = "READ"
+                    new_blob = json.dumps(parsed, separators=(",", ":"))
+                    if has_type_col:
+                        cur.execute(
+                            f"UPDATE {table} SET {col}=?, type=? WHERE id=?",
+                            (new_blob, "READ", row_id),
+                        )
+                    else:
+                        cur.execute(
+                            f"UPDATE {table} SET {col}=? WHERE id=?",
+                            (new_blob, row_id),
+                        )
                     conn.commit()
                     conn.close()
+                    log.debug(
+                        "MessageViewer: JS8Call inbox row %s marked READ callsign=%s msg_id=%s",
+                        row_id,
+                        callsign,
+                        msg_id,
+                    )
                     return True
+                conn.close()
+                log.debug(
+                    "MessageViewer: JS8Call inbox row %s already READ callsign=%s msg_id=%s",
+                    row_id,
+                    callsign,
+                    msg_id,
+                )
+                return True
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: JS8Call inbox update failed: %s", e)
         return False
+
+    def _select_inbox_row(
+        self, rows: List[tuple], callsign: str, msg_id: str
+    ) -> tuple[int, Dict] | None:
+        """
+        Match inbox rows by FROM + UTC time window + TEXT tie-breaker.
+        msg_id is assumed to be the directed.txt message id.
+        """
+        from datetime import datetime
+
+        call = (callsign or "").strip().upper()
+        target_ts, target_text = self._directed_msg_info(call, msg_id)
+        if target_ts is None:
+            log.debug(
+                "MessageViewer: no directed timestamp for callsign=%s msg_id=%s",
+                call,
+                msg_id,
+            )
+        window = 180.0  # seconds
+        candidates: List[tuple[int, Dict, float, str]] = []
+        for row in rows:
+            row_id = row[0]
+            blob = row[1] or ""
+            try:
+                parsed = json.loads(blob)
+            except Exception:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            params = parsed.get("params") if isinstance(parsed.get("params"), dict) else parsed
+            if not isinstance(params, dict):
+                continue
+            from_call = (params.get("FROM") or "").strip().upper()
+            if from_call != call:
+                continue
+            blob_id = (params.get("_ID") or "").strip()
+            if blob_id and blob_id == msg_id:
+                return int(row_id), parsed
+            utc_str = (params.get("UTC") or "").strip()
+            try:
+                utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
+            except Exception:
+                utc_ts = 0.0
+            if target_ts is not None:
+                if not utc_ts or abs(utc_ts - target_ts) > window:
+                    continue
+            text = (params.get("TEXT") or "").strip()
+            candidates.append((int(row_id), parsed, utc_ts, text))
+
+        if not candidates:
+            log.debug(
+                "MessageViewer: no inbox candidates for callsign=%s msg_id=%s",
+                call,
+                msg_id,
+            )
+            return None
+        if len(candidates) == 1:
+            return candidates[0][0], candidates[0][1]
+
+        # If multiple matches, prefer closest timestamp
+        if target_ts is not None:
+            candidates.sort(key=lambda c: abs(c[2] - target_ts))
+            best = candidates[0]
+            # If top candidate is unique by timestamp, use it
+            if len(candidates) == 1 or abs(candidates[1][2] - target_ts) > 1:
+                return best[0], best[1]
+
+        # As tie-breaker, attempt exact TEXT match to directed.txt line
+        if target_text:
+            exact = [c for c in candidates if c[3] == target_text]
+            if len(exact) == 1:
+                return exact[0][0], exact[0][1]
+            if len(exact) > 1:
+                return exact[0][0], exact[0][1]
+            lower = target_text.lower()
+            fuzzy = [c for c in candidates if c[3].lower() == lower]
+            if len(fuzzy) >= 1:
+                return fuzzy[0][0], fuzzy[0][1]
+        else:
+            log.debug(
+                "MessageViewer: no directed text for callsign=%s msg_id=%s",
+                call,
+                msg_id,
+            )
+
+        # Fall back to most recent by UTC
+        candidates.sort(key=lambda c: c[2], reverse=True)
+        return candidates[0][0], candidates[0][1]
+
+    def _directed_msg_info(self, callsign: str, msg_id: str) -> tuple[float | None, str | None]:
+        directed = (self.settings.get("js8_directed_path", "") or "").strip()
+        if not directed:
+            return None, None
+        path = Path(directed)
+        if not path.exists():
+            return None, None
+        call = (callsign or "").strip().upper()
+        msg_id = (msg_id or "").strip()
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            return None, None
+        import re
+        from datetime import datetime
+
+        ts_re = re.compile(r"^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})")
+        mycall = self._my_callsign()
+        yes_re = re.compile(rf"{call}:\s+{mycall}\s+YES\s+MSG\s+ID\s+{re.escape(msg_id)}\b")
+        msg_re = re.compile(rf"{call}:\s+{mycall}\s+MSG\s+", re.IGNORECASE)
+
+        yes_idx = None
+        yes_ts = None
+        for idx, line in enumerate(lines):
+            if not yes_re.search(line):
+                continue
+            m = ts_re.match(line.strip())
+            if not m:
+                continue
+            ts_txt = f"{m.group(1)} {m.group(2)}"
+            try:
+                yes_ts = datetime.strptime(ts_txt, "%Y-%m-%d %H:%M:%S").timestamp()
+            except Exception:
+                yes_ts = None
+            yes_idx = idx
+            break
+
+        search_start = yes_idx + 1 if yes_idx is not None else 0
+        for line in lines[search_start:]:
+            if not msg_re.search(line):
+                continue
+            m = ts_re.match(line.strip())
+            if not m:
+                continue
+            ts_txt = f"{m.group(1)} {m.group(2)}"
+            try:
+                msg_ts = datetime.strptime(ts_txt, "%Y-%m-%d %H:%M:%S").timestamp()
+            except Exception:
+                msg_ts = None
+            # Extract text after "MSG "
+            text = ""
+            try:
+                text = re.split(rf"{call}:\s+{mycall}\s+MSG\s+", line, maxsplit=1, flags=re.IGNORECASE)[1].strip()
+            except Exception:
+                text = line.strip()
+            return msg_ts, text
+
+        return yes_ts, None
 
     # ---------- JS8 Helpers ----------
 
@@ -1295,6 +1447,57 @@ class MessageViewerTab(QWidget):
                 read_ts=read_ts,
             )
             self._insert_js8_local(msg)
+            try:
+                self._enqueue_next_msg_id(from_call, text)
+            except Exception:
+                pass
+
+    def _enqueue_next_msg_id(self, from_call: str, text: str) -> None:
+        """
+        If message text contains "NEXT MSG ID ###", add it to autoquery_backlog.
+        """
+        import re
+
+        call = (from_call or "").strip().upper()
+        if not call or not text:
+            return
+        m = re.search(r"NEXT\s+MSG\s+ID\s+(\d+)", text.upper())
+        if not m:
+            return
+        next_id = m.group(1)
+        if not next_id:
+            return
+        self._ensure_backlog_table()
+        db_path = self._backlog_db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT 1 FROM autoquery_backlog
+                WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind='MSG'
+                LIMIT 1
+                """,
+                (call, next_id),
+            )
+            if cur.fetchone():
+                conn.close()
+                return
+            now_ts = time.time()
+            cur.execute(
+                """
+                INSERT INTO autoquery_backlog (callsign, msg_id, kind, status, attempts, last_attempt_ts, created_ts)
+                VALUES (?, ?, 'MSG', 'PENDING', 0, ?, ?)
+                """,
+                (call, next_id, now_ts, now_ts),
+            )
+            conn.commit()
+            conn.close()
+            log.debug("MessageViewer: queued NEXT MSG ID %s for %s", next_id, call)
+        except Exception as e:
+            log.debug("MessageViewer: failed to enqueue NEXT MSG ID: %s", e)
 
     # ---------- Actions ----------
 
