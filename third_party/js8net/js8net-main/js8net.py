@@ -29,6 +29,9 @@ global unique_lock
 global s
 
 s=False
+js8_host=None
+js8_port=None
+last_tx_error=0
 tx_queue=Queue()
 tx_lock=threading.Lock()
 rx_queue=Queue()
@@ -208,12 +211,27 @@ def queue_message(message):
 def tx_thread(name):
     global tx_queue
     global tx_lock
+    global last_tx_error
     # Run forever. Delay 0.25 seconds between each send, because
     # sending too quickly jacks up comms with JS8.
     while(True):
         thing=json.dumps(tx_queue.get())
-        with tx_lock:
-            s.sendall(bytes(thing+"\r\n",'utf-8'))
+        try:
+            with tx_lock:
+                s.sendall(bytes(thing+"\r\n",'utf-8'))
+        except (BrokenPipeError,OSError):
+            now=time.time()
+            if now-last_tx_error>30:
+                print("js8net: TX socket broken, attempting reconnect")
+                last_tx_error=now
+            _reconnect()
+            try:
+                with tx_lock:
+                    s.sendall(bytes(thing+"\r\n",'utf-8'))
+            except Exception:
+                # requeue for retry after reconnect
+                with tx_lock:
+                    tx_queue.put(json.loads(thing))
         time.sleep(0.25)
 
 # Station class for RX.CALL_ACTIVITY
@@ -399,10 +417,14 @@ def hb_thread(name):
 
 def start_net(host,port):
     global s
+    global js8_host
+    global js8_port
+    js8_host=host
+    js8_port=int(port)
 
     # Open a socket to JS8Call.
     s=socket.socket()
-    s.connect((host,int(port)))
+    s.connect((js8_host,js8_port))
     s.settimeout(1)
 
     # Start the RX thread. We make this a daemon thread so that it
@@ -418,6 +440,25 @@ def start_net(host,port):
     thread3=Thread(target=hb_thread,args=("HB Thread",),daemon=True)
     thread3.start()
     time.sleep(1)
+
+def _reconnect():
+    global s
+    global js8_host
+    global js8_port
+    if not js8_host or not js8_port:
+        return False
+    try:
+        try:
+            if s:
+                s.close()
+        except Exception:
+            pass
+        s=socket.socket()
+        s.connect((js8_host,js8_port))
+        s.settimeout(1)
+        return True
+    except Exception:
+        return False
 
 def get_freq():
     # Ask JS8Call to get the radio's frequency. Returns the dial
