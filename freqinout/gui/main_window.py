@@ -81,7 +81,6 @@ class MainWindow(QMainWindow):
         self.stations_map_tab = StationsMapTab(self)
         self.peer_sched_tab = PeerSchedTab(self)
         self.help_tab = HelpTab(self)
-        self._apply_app_theme()
 
         # Sidebar navigation order (as requested)
         self._screens = [
@@ -108,15 +107,10 @@ class MainWindow(QMainWindow):
         nav_layout.setSpacing(4)
 
         # Logo above nav buttons (optional if file exists)
-        logo_path = Path(__file__).resolve().parents[2] / "assets" / "FreqInOut_logo.png"
-        if logo_path.exists():
-            logo_lbl = QLabel()
-            pix = QPixmap(str(logo_path))
-            if not pix.isNull():
-                pix = pix.scaledToWidth(160, Qt.SmoothTransformation)
-                logo_lbl.setPixmap(pix)
-                logo_lbl.setAlignment(Qt.AlignCenter)
-                nav_layout.addWidget(logo_lbl)
+        self.logo_label = QLabel()
+        self.logo_label.setAlignment(Qt.AlignCenter)
+        nav_layout.addWidget(self.logo_label)
+        self._set_logo_pixmap()
 
         self.nav_buttons = []
         self.button_group = QButtonGroup(self)
@@ -152,6 +146,8 @@ class MainWindow(QMainWindow):
 
         # Suggest a modest minimum size
         self.setMinimumSize(900, 600)
+
+        self._apply_app_theme()
 
         # Default selection
         if self.nav_buttons:
@@ -397,6 +393,7 @@ class MainWindow(QMainWindow):
             pass
         theme = resolve_theme(self.settings)
         apply_app_theme(app, theme)
+        self._set_logo_pixmap()
         for widget in (
             self.freq_planner_tab,
             self.hf_schedule_tab,
@@ -412,6 +409,23 @@ class MainWindow(QMainWindow):
                     widget.apply_theme()
                 except Exception:
                     pass
+
+    def _set_logo_pixmap(self):
+        if not hasattr(self, "logo_label"):
+            return
+        theme = resolve_theme(self.settings)
+        assets_dir = Path(__file__).resolve().parents[2] / "assets"
+        logo_name = "FreqInOut-dark.png" if theme.get("bg") == "#0F1216" else "FreqInOut_logo.png"
+        logo_path = assets_dir / logo_name
+        if not logo_path.exists():
+            self.logo_label.clear()
+            return
+        pix = QPixmap(str(logo_path))
+        if pix.isNull():
+            self.logo_label.clear()
+            return
+        pix = pix.scaledToWidth(160, Qt.SmoothTransformation)
+        self.logo_label.setPixmap(pix)
 
     def _set_screen(self, index: int) -> None:
         if 0 <= index < self.stack.count():

@@ -722,10 +722,35 @@ class SettingsTab(QWidget):
                 )
                 """
             )
+            # Ensure older DBs have the expected columns.
+            cur.execute("PRAGMA table_info(operator_checkins)")
+            existing_cols = {row[1] for row in cur.fetchall()}
+            required_cols = {
+                "first_seen_utc": "TEXT",
+                "last_seen_utc": "TEXT",
+                "checkin_count": "INTEGER",
+                "trusted": "INTEGER",
+                "groups_json": "TEXT",
+                "group1": "TEXT",
+                "group2": "TEXT",
+                "group3": "TEXT",
+                "grid": "TEXT",
+                "state": "TEXT",
+                "name": "TEXT",
+            }
+            for col, col_type in required_cols.items():
+                if col not in existing_cols:
+                    cur.execute(f"ALTER TABLE operator_checkins ADD COLUMN {col} {col_type}")
+            cur.execute("PRAGMA table_info(operator_checkins)")
+            existing_cols = {row[1] for row in cur.fetchall()}
+            if "first_seen_utc" not in existing_cols:
+                log.debug("SettingsTab: operator_checkins missing first_seen_utc after migration")
+                conn.close()
+                return
             cur.execute(
                 """
                 INSERT INTO operator_checkins (callsign, name, state, grid, first_seen_utc, last_seen_utc, checkin_count, trusted)
-                VALUES (?, ?, ?, ?, COALESCE(first_seen_utc, strftime('%Y-%m-%d', 'now')), strftime('%Y-%m-%d', 'now'), COALESCE((SELECT checkin_count FROM operator_checkins WHERE callsign=?), 0), COALESCE((SELECT trusted FROM operator_checkins WHERE callsign=?), 0))
+                VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), strftime('%Y-%m-%d', 'now'), COALESCE((SELECT checkin_count FROM operator_checkins WHERE callsign=?), 0), COALESCE((SELECT trusted FROM operator_checkins WHERE callsign=?), 0))
                 ON CONFLICT(callsign) DO UPDATE SET
                     name=excluded.name,
                     state=excluded.state,

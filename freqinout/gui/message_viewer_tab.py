@@ -1,29 +1,31 @@
 from __future__ import annotations
 
+import html
 import json
 import os
+import re
 import sqlite3
+import ctypes
+import ctypes.wintypes
+import platform
+import shutil
 import subprocess
 import xml.dom.minidom
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QListWidget,
-    QListWidgetItem,
     QTextEdit,
     QFileDialog,
     QGroupBox,
-    QFormLayout,
     QComboBox,
     QTableWidget,
     QTableWidgetItem,
@@ -32,6 +34,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSizePolicy,
     QAbstractScrollArea,
+    QSplitter,
+    QToolButton,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -43,6 +47,11 @@ from freqinout.gui.theme import resolve_theme, button_style
 
 
 SUPPORTED_EXT = {".b2s", ".k2s", ".txt", ".ff", ".xml", ".json", ".html", ".htm"}
+ORIGIN_EXTS = {
+    "flmsg": {".b2s", ".k2s"},
+    "flamp": {".b2s", ".k2s"},
+    "varac": {".txt", ".html", ".htm", ".b2s", ".k2s"},
+}
 
 DEFAULT_WATCH_DIRS = [
     {"path": r"C:\VarAC", "origin": "varac"},
@@ -67,7 +76,7 @@ class FileRecord:
         return self.path.name
 
     def info_line(self) -> str:
-        return f"{self.display_name()} — {self.size} bytes"
+        return f"{self.display_name()} - {self.size} bytes"
 
 
 @dataclass
@@ -87,13 +96,36 @@ class JS8Message:
         return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
 
 
+@dataclass
+class UnifiedMessage:
+    msg_type: str
+    status: str
+    from_call: str
+    to_call: str
+    rcv_ts: float
+    rcv_display: str
+    title: str
+    origin: str
+    payload: object
+
+
+class SortableDateItem(QTableWidgetItem):
+    def __init__(self, ts: float, text: str):
+        super().__init__(text)
+        self._ts = ts
+
+    def __lt__(self, other):
+        if isinstance(other, SortableDateItem):
+            return self._ts < other._ts
+        return super().__lt__(other)
+
+
 class MessageViewerTab(QWidget):
     """
     Message Viewer for VarAC / FLMSG / FLAMP inbox-like folders.
 
     - Watches configured folders by origin
-    - Lists files per origin; shows content preview
-    - Open externally and export to PDF
+    - Shows a unified messages table (JS8 + file-based) with a viewer
     - Scan interval selectable (1 / 15 / 30 / 60 minutes)
     """
 
@@ -120,10 +152,21 @@ class MessageViewerTab(QWidget):
         self._pending_rows: List[Dict[str, str | float]] = []
         self._form_cache: Dict[str, List[Dict]] = {}
         self.forms_path = (self.settings.get("js8_forms_path", "") or "").strip()
+        self._read_state_map: Dict[tuple, tuple[str, float]] = {}
+        self._message_rows: List[UnifiedMessage] = []
+        self._filters_initialized = False
+        self._has_active_view = False
+        self._sort_column = 4
+        self._sort_order = Qt.DescendingOrder
+        self._filter_row_ready = False
+        self._freeze_messages_table = False
+        self._deferred_refresh = False
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
         self._clear_backlog_on_upgrade()
+        self._ensure_read_state_table()
+        self._read_state_map = self._load_read_state_map()
 
         self.files: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
         self.current_record: FileRecord | None = None
@@ -221,6 +264,90 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to ensure backlog table: %s", e)
 
+    def _ensure_read_state_table(self) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_read_state (
+                    origin TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    mtime REAL NOT NULL,
+                    size INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    read_ts REAL,
+                    PRIMARY KEY (origin, path, mtime, size)
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to ensure read state table: %s", e)
+
+    @staticmethod
+    def _read_state_key(origin: str, rec: FileRecord) -> tuple:
+        return (origin, str(rec.path), float(rec.mtime), int(rec.size))
+
+    def _load_read_state_map(self) -> Dict[tuple, tuple[str, float]]:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return {}
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT origin, path, mtime, size, status, read_ts
+                FROM message_read_state
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to load read state: %s", e)
+            return {}
+        out: Dict[tuple, tuple[str, float]] = {}
+        for origin, path, mtime, size, status, read_ts in rows:
+            key = (origin, path, float(mtime or 0.0), int(size or 0))
+            out[key] = (str(status or "").upper(), float(read_ts or 0.0))
+        return out
+
+    def _get_read_state(self, rec: FileRecord) -> str:
+        key = self._read_state_key(rec.origin, rec)
+        state = self._read_state_map.get(key)
+        if state and state[0]:
+            return state[0]
+        return "NEW"
+
+    def _set_read_state(self, rec: FileRecord, status: str) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        status = (status or "READ").upper()
+        key = self._read_state_key(rec.origin, rec)
+        read_ts = time.time() if status == "READ" else 0.0
+        self._read_state_map[key] = (status, read_ts)
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO message_read_state
+                    (origin, path, mtime, size, status, read_ts)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (rec.origin, str(rec.path), float(rec.mtime), int(rec.size), status, float(read_ts)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to persist read state: %s", e)
+
     def _clear_backlog_on_upgrade(self) -> None:
         if self.settings.get("autoquery_backlog_cleared_v1", False):
             return
@@ -258,12 +385,8 @@ class MessageViewerTab(QWidget):
         header.addWidget(self.scan_combo)
 
         self.refresh_btn = QPushButton("Refresh Now")
-        self.refresh_btn.clicked.connect(self._refresh_files)
+        self.refresh_btn.clicked.connect(self._on_refresh_now)
         header.addWidget(self.refresh_btn)
-
-        self.open_btn = QPushButton("Open Externally")
-        self.open_btn.clicked.connect(self._open_external)
-        header.addWidget(self.open_btn)
 
         self.export_btn = QPushButton("Export to PDF")
         self.export_btn.clicked.connect(self._export_pdf)
@@ -271,22 +394,9 @@ class MessageViewerTab(QWidget):
 
         layout.addLayout(header)
 
-        # Split left/right
-        body = QHBoxLayout()
+        # Main layout
+        body = QVBoxLayout()
         layout.addLayout(body)
-
-        left_widget = QWidget()
-        left_widget.setMaximumWidth(450)
-        left = QVBoxLayout(left_widget)
-        body.addWidget(left_widget, 1)
-
-        self.list_js8 = self._make_list_section(left, "JS8 Messages", "js8", allow_paths=False)
-        self.list_flmsg = self._make_list_section(left, "FLMSG Files", "flmsg", allow_paths=False)
-        self.list_flamp = self._make_list_section(left, "FLAMP Files", "flamp", allow_paths=False)
-        self.list_varac = self._make_list_section(left, "VarAC Files", "varac", allow_paths=False)
-
-        right = QVBoxLayout()
-        body.addLayout(right, 3)
 
         pending_box = QGroupBox("Pending JS8 MSGs")
         pending_layout = QVBoxLayout()
@@ -316,42 +426,66 @@ class MessageViewerTab(QWidget):
         pending_layout.addWidget(self.pending_table)
         pending_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         pending_box.setLayout(pending_layout)
-        right.addWidget(pending_box)
+        body.addWidget(pending_box)
 
+        messages_box = QGroupBox("Messages")
+        messages_layout = QVBoxLayout()
+        self.messages_table = QTableWidget(0, 8)
+        self.messages_table.setHorizontalHeaderLabels(
+            ["Type", "Status", "From", "To", "RCV_DT", "Message Title", "", ""]
+        )
+        self.messages_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.messages_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.messages_table.setAlternatingRowColors(True)
+        self.messages_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        msg_header = self.messages_table.horizontalHeader()
+        msg_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        msg_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        msg_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        msg_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        msg_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        msg_header.setSectionResizeMode(5, QHeaderView.Stretch)
+        msg_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        msg_header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        msg_header.setVisible(False)
+        messages_layout.addWidget(self.messages_table)
+        messages_box.setLayout(messages_layout)
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(messages_box)
+        self.messages_splitter = splitter
+
+        viewer_container = QWidget()
+        viewer_layout = QVBoxLayout(viewer_container)
         self.info_label = QLabel("No file selected")
         self.info_label.setStyleSheet("font-weight: bold;")
-        right.addWidget(self.info_label)
-
+        viewer_layout.addWidget(self.info_label)
+        theme = resolve_theme(self.settings)
+        self.resize_hint = QLabel("Drag divider to resize (||)")
+        self.resize_hint.setStyleSheet(
+            f"font-size: 11px; color: {theme['text_muted']};"
+        )
+        viewer_layout.addWidget(self.resize_hint)
         self.viewer = QTextEdit()
         self.viewer.setReadOnly(True)
         self.viewer.setAcceptRichText(False)
-        right.addWidget(self.viewer, 1)
+        viewer_layout.addWidget(self.viewer)
+        splitter.addWidget(viewer_container)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        body.addWidget(splitter, 3)
 
-    def _make_list_section(self, parent_layout: QVBoxLayout, title: str, origin: str, allow_paths: bool = True, allow_remove: bool = True) -> QListWidget:
-        box = QGroupBox(title)
-        v = QVBoxLayout()
-        lst = QListWidget()
-        lst.itemSelectionChanged.connect(self._on_selection_changed)
-        lst.itemClicked.connect(lambda it, l=lst: self._on_selection_changed(item=it, sender_override=l))
-        lst.setSelectionMode(QListWidget.SingleSelection)
-        v.addWidget(lst)
-        if allow_paths:
-            # Paths controls under the list
-            row = QHBoxLayout()
-            self.paths_labels[origin] = QLabel("")
-            self.paths_labels[origin].setWordWrap(False)
-            row.addWidget(self.paths_labels[origin], 1)
-            add_btn = QPushButton("Browse")
-            add_btn.clicked.connect(lambda _, o=origin: self._add_path(o))
-            row.addWidget(add_btn)
-            if allow_remove:
-                rem_btn = QPushButton("Remove Selected Path")
-                rem_btn.clicked.connect(lambda _, o=origin: self._remove_path(o))
-                row.addWidget(rem_btn)
-            v.addLayout(row)
-        box.setLayout(v)
-        parent_layout.addWidget(box)
-        return lst
+        self.type_filter = QComboBox()
+        self.status_filter = QComboBox()
+        self.from_filter = QComboBox()
+        self.to_filter = QComboBox()
+        self.clear_filters_btn = QPushButton("Clear Filters")
+        self.clear_filters_btn.clicked.connect(self._clear_filters)
+        self.type_filter.currentIndexChanged.connect(self._on_filter_changed)
+        self.status_filter.currentIndexChanged.connect(self._on_filter_changed)
+        self.from_filter.currentIndexChanged.connect(self._on_filter_changed)
+        self.to_filter.currentIndexChanged.connect(self._on_filter_changed)
+        self._setup_filter_row()
+        QTimer.singleShot(0, self._set_initial_splitter_sizes)
 
     # ---------- Timer ----------
 
@@ -375,6 +509,11 @@ class MessageViewerTab(QWidget):
         self._pending_timer = QTimer(self)
         self._pending_timer.timeout.connect(self._refresh_pending_backlog)
         self._pending_timer.start(PENDING_POLL_SECONDS * 1000)
+
+    def _on_refresh_now(self) -> None:
+        self._unfreeze_table()
+        self._refresh_files(force=True)
+        self._refresh_js8_messages(force=True)
 
     def _on_scan_changed(self):
         val = self.scan_combo.currentData()
@@ -418,13 +557,14 @@ class MessageViewerTab(QWidget):
 
     # ---------- Scanning ----------
 
-    def _refresh_files(self):
+    def _refresh_files(self, force: bool = False):
         self._load_paths_lists()
         records: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
         for entry in self.watch_dirs:
             origin = entry.get("origin", "unknown")
             if origin not in records:
                 continue
+            allowed_exts = ORIGIN_EXTS.get(origin)
             p = entry.get("path", "")
             if not p:
                 continue
@@ -435,6 +575,8 @@ class MessageViewerTab(QWidget):
                 if not f.is_file():
                     continue
                 if f.suffix.lower() not in SUPPORTED_EXT:
+                    continue
+                if allowed_exts and f.suffix.lower() not in allowed_exts:
                     continue
                 try:
                     st = f.stat()
@@ -448,16 +590,17 @@ class MessageViewerTab(QWidget):
             records[origin].sort(key=lambda r: r.mtime, reverse=True)
 
         self.files = records
-        self._populate_lists()
+        self._read_state_map = self._load_read_state_map()
+        self._populate_messages_table(force=force)
 
-    def _refresh_js8_messages(self):
+    def _refresh_js8_messages(self, force: bool = False):
         # First ingest any new messages into local cache, then load from local cache for display
         try:
             self._ingest_js8_messages()
         except Exception as e:
             log.debug("MessageViewer: JS8 ingest failed: %s", e)
         try:
-            self._load_js8_from_local()
+            self._load_js8_from_local(force=force)
         except Exception as e:
             log.debug("MessageViewer: JS8 local load failed: %s", e)
 
@@ -700,88 +843,1047 @@ class MessageViewerTab(QWidget):
         except Exception:
             return ""
 
-    def _populate_lists(self):
-        mapping = {
-            "varac": self.list_varac,
-            "flmsg": self.list_flmsg,
-            "flamp": self.list_flamp,
-        }
-        for origin, lst in mapping.items():
-            lst.blockSignals(True)
-            lst.clear()
-            for rec in self.files.get(origin, []):
-                item = QListWidgetItem(rec.display_name())
-                item.setData(Qt.UserRole, rec)
-                lst.addItem(item)
-            lst.blockSignals(False)
+    def _populate_messages_table(self, force: bool = False):
+        rows = self._build_message_rows()
+        self._message_rows = rows
+        if self._freeze_messages_table and not force:
+            self._deferred_refresh = True
+            log.debug("MessageViewer: table refresh deferred (freeze active)")
+            return
+        self._deferred_refresh = False
+        self._refresh_message_filters(rows)
+        self._apply_message_filters()
+        log.debug("MessageViewer: built %d unified messages", len(rows))
 
-        # JS8 messages
-        if hasattr(self, "list_js8"):
-            self.list_js8.blockSignals(True)
-            self.list_js8.clear()
-            for msg in self.js8_messages:
-                item = QListWidgetItem(msg.display_line())
-                item.setData(Qt.UserRole, msg)
-                # visually indicate unread
-                if msg.state.upper() == "UNREAD":
-                    item.setForeground(Qt.red)
-                self.list_js8.addItem(item)
-            self.list_js8.blockSignals(False)
+    def _refresh_message_filters(self, rows: List[UnifiedMessage]) -> None:
+        type_vals = sorted({r.msg_type for r in rows if r.msg_type})
+        status_vals = sorted({r.status for r in rows if r.status})
+        from_vals = sorted({r.from_call for r in rows if r.from_call})
+        to_vals = sorted({r.to_call for r in rows if r.to_call})
 
-        self.info_label.setText("No file selected")
-        self.viewer.clear()
-        self.current_record = None
-        self.current_js8 = None
+        current_type = self.type_filter.currentText() if hasattr(self, "type_filter") else "ALL"
+        current_status = self.status_filter.currentText() if hasattr(self, "status_filter") else "ALL"
+        current_from = self.from_filter.currentText() if hasattr(self, "from_filter") else "ALL"
+        current_to = self.to_filter.currentText() if hasattr(self, "to_filter") else "ALL"
+        if not current_type:
+            current_type = "ALL"
+        if not current_status:
+            current_status = "ALL"
+        if not current_from:
+            current_from = "ALL"
+        if not current_to:
+            current_to = "ALL"
+
+        self.type_filter.blockSignals(True)
+        self.type_filter.clear()
+        self.type_filter.addItem("ALL")
+        self.type_filter.addItems(type_vals)
+        if not self._filters_initialized:
+            self.type_filter.setCurrentText("ALL")
+        elif current_type in ["ALL"] + type_vals:
+            self.type_filter.setCurrentText(current_type)
+        self.type_filter.blockSignals(False)
+
+        self.status_filter.blockSignals(True)
+        self.status_filter.clear()
+        self.status_filter.addItem("ALL")
+        self.status_filter.addItems(status_vals)
+        if not self._filters_initialized:
+            self.status_filter.setCurrentText("ALL")
+        elif current_status in ["ALL"] + status_vals:
+            self.status_filter.setCurrentText(current_status)
+        self.status_filter.blockSignals(False)
+
+        self.from_filter.blockSignals(True)
+        self.from_filter.clear()
+        self.from_filter.addItem("ALL")
+        self.from_filter.addItems(from_vals)
+        if not self._filters_initialized:
+            self.from_filter.setCurrentText("ALL")
+        elif current_from in ["ALL"] + from_vals:
+            self.from_filter.setCurrentText(current_from)
+        self.from_filter.blockSignals(False)
+
+        self.to_filter.blockSignals(True)
+        self.to_filter.clear()
+        self.to_filter.addItem("ALL")
+        self.to_filter.addItems(to_vals)
+        if not self._filters_initialized:
+            self.to_filter.setCurrentText("ALL")
+        elif current_to in ["ALL"] + to_vals:
+            self.to_filter.setCurrentText(current_to)
+        self.to_filter.blockSignals(False)
+        self._filters_initialized = True
+
+    def _apply_message_filters(self) -> None:
+        rows = self._message_rows
+        type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "ALL"
+        status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "ALL"
+        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else "ALL"
+        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else "ALL"
+
+        filtered = []
+        for row in rows:
+            if type_sel != "ALL" and row.msg_type != type_sel:
+                continue
+            if status_sel != "ALL" and row.status != status_sel:
+                continue
+            if from_sel != "ALL" and row.from_call != from_sel:
+                continue
+            if to_sel != "ALL" and row.to_call != to_sel:
+                continue
+            filtered.append(row)
+        filtered = self._sort_rows(filtered)
+        self._render_messages_table(filtered)
+        self._update_clear_filters_style()
+        log.debug(
+            "MessageViewer: filters type=%s status=%s from=%s to=%s => %d rows",
+            type_sel,
+            status_sel,
+            from_sel,
+            to_sel,
+            len(filtered),
+        )
+
+    def _clear_filters(self) -> None:
+        self._unfreeze_table()
+        if (
+            self.type_filter.currentText() in ("", "ALL")
+            and self.status_filter.currentText() in ("", "ALL")
+            and self.from_filter.currentText() in ("", "ALL")
+            and self.to_filter.currentText() in ("", "ALL")
+        ):
+            return
+        self.type_filter.blockSignals(True)
+        self.status_filter.blockSignals(True)
+        self.from_filter.blockSignals(True)
+        self.to_filter.blockSignals(True)
+        self.type_filter.setCurrentText("ALL")
+        self.status_filter.setCurrentText("ALL")
+        self.from_filter.setCurrentText("ALL")
+        self.to_filter.setCurrentText("ALL")
+        self.type_filter.blockSignals(False)
+        self.status_filter.blockSignals(False)
+        self.from_filter.blockSignals(False)
+        self.to_filter.blockSignals(False)
+        self._apply_message_filters()
+
+    def _on_filter_changed(self) -> None:
+        self._unfreeze_table()
+        self._apply_message_filters()
+
+    def _render_messages_table(self, rows: List[UnifiedMessage]) -> None:
+        self.messages_table.setUpdatesEnabled(False)
+        if not self._filter_row_ready:
+            self._setup_filter_row()
+            self._filter_row_ready = True
+        # Preserve header row; clear data rows only.
+        while self.messages_table.rowCount() > 1:
+            self.messages_table.removeRow(1)
+        for idx, row in enumerate(rows, start=1):
+            self.messages_table.insertRow(idx)
+            type_item = QTableWidgetItem(row.msg_type)
+            status_item = QTableWidgetItem(row.status)
+            from_item = QTableWidgetItem(row.from_call)
+            to_item = QTableWidgetItem(row.to_call)
+            rcv_item = SortableDateItem(row.rcv_ts, row.rcv_display)
+            title_item = QTableWidgetItem(row.title)
+
+            if row.status == "NEW":
+                status_item.setForeground(Qt.red)
+
+            self.messages_table.setItem(idx, 0, type_item)
+            self.messages_table.setItem(idx, 1, status_item)
+            self.messages_table.setItem(idx, 2, from_item)
+            self.messages_table.setItem(idx, 3, to_item)
+            self.messages_table.setItem(idx, 4, rcv_item)
+            self.messages_table.setItem(idx, 5, title_item)
+
+            view_btn = QPushButton("View")
+            view_btn.clicked.connect(lambda _, m=row: self._on_view_message(m))
+            self.messages_table.setCellWidget(idx, 6, view_btn)
+            if isinstance(row.payload, FileRecord):
+                del_btn = QPushButton("Delete")
+                del_btn.clicked.connect(lambda _, r=row.payload: self._delete_file_record(r))
+                self.messages_table.setCellWidget(idx, 7, del_btn)
+            else:
+                self.messages_table.setCellWidget(idx, 7, QLabel(""))
+
+        if not self._has_active_view:
+            self.info_label.setText("No file selected")
+            self.viewer.clear()
+            self.current_record = None
+            self.current_js8 = None
+        self.messages_table.setUpdatesEnabled(True)
+
+    def _setup_filter_row(self) -> None:
+        if self.messages_table.rowCount() == 0:
+            self.messages_table.setRowCount(1)
+        self.messages_table.setRowHeight(0, 52)
+        self.messages_table.setCellWidget(0, 0, self._make_filter_header("Type", self.type_filter, 0))
+        self.messages_table.setCellWidget(0, 1, self._make_filter_header("Status", self.status_filter, 1))
+        self.messages_table.setCellWidget(0, 2, self._make_filter_header("From", self.from_filter, 2))
+        self.messages_table.setCellWidget(0, 3, self._make_filter_header("To", self.to_filter, 3))
+        self.messages_table.setCellWidget(0, 4, self._make_sort_button("RCV_DT", 4))
+        self.messages_table.setCellWidget(0, 5, self._make_sort_button("Message Title", 5))
+        self.messages_table.setCellWidget(0, 6, self.clear_filters_btn)
+        self.messages_table.setSpan(0, 6, 1, 2)
+        for col in range(8):
+            item = QTableWidgetItem("")
+            item.setFlags(Qt.NoItemFlags)
+            self.messages_table.setItem(0, col, item)
+        self._update_clear_filters_style()
+        row_height = self.messages_table.verticalHeader().defaultSectionSize()
+        self.messages_table.setMinimumHeight((row_height * 5) + self.messages_table.rowHeight(0) + 8)
+
+    def _set_initial_splitter_sizes(self) -> None:
+        if not hasattr(self, "messages_splitter"):
+            return
+        row_height = self.messages_table.verticalHeader().defaultSectionSize()
+        header_height = self.messages_table.rowHeight(0)
+        target = (row_height * 5) + header_height + 12
+        total = max(target * 3, 400)
+        self.messages_splitter.setSizes([target, total - target])
+
+    def _unfreeze_table(self) -> None:
+        if not self._freeze_messages_table:
+            return
+        self._freeze_messages_table = False
+        if self._deferred_refresh:
+            self._populate_messages_table(force=True)
+
+    def _make_sort_button(self, text: str, column: int) -> QToolButton:
+        btn = QToolButton()
+        btn.setText(text)
+        btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        btn.clicked.connect(lambda: self._on_sort_clicked(column))
+        btn.setStyleSheet("font-weight: 600;")
+        return btn
+
+    def _make_filter_header(self, label: str, combo: QComboBox, column: int) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+        layout.addWidget(self._make_sort_button(label, column))
+        layout.addWidget(combo)
+        return container
+
+    def _filters_active(self) -> bool:
+        return (
+            self.type_filter.currentText() not in ("", "ALL")
+            or self.status_filter.currentText() not in ("", "ALL")
+            or self.from_filter.currentText() not in ("", "ALL")
+            or self.to_filter.currentText() not in ("", "ALL")
+        )
+
+    def _update_clear_filters_style(self) -> None:
+        theme = resolve_theme(self.settings)
+        role = "warning" if self._filters_active() else "muted"
+        self.clear_filters_btn.setStyleSheet(button_style(role, theme))
+
+    def _on_sort_clicked(self, section: int) -> None:
+        if section >= 6:
+            return
+        if section == self._sort_column:
+            self._sort_order = (
+                Qt.AscendingOrder if self._sort_order == Qt.DescendingOrder else Qt.DescendingOrder
+            )
+        else:
+            self._sort_column = section
+            self._sort_order = Qt.AscendingOrder
+        self._apply_message_filters()
+
+    def _sort_rows(self, rows: List[UnifiedMessage]) -> List[UnifiedMessage]:
+        reverse = self._sort_order == Qt.DescendingOrder
+        col = self._sort_column
+
+        def key(row: UnifiedMessage):
+            if col == 0:
+                return row.msg_type or ""
+            if col == 1:
+                return row.status or ""
+            if col == 2:
+                return row.from_call or ""
+            if col == 3:
+                return row.to_call or ""
+            if col == 4:
+                return row.rcv_ts or 0.0
+            if col == 5:
+                return row.title or ""
+            return row.rcv_ts or 0.0
+
+        return sorted(rows, key=key, reverse=reverse)
 
     # ---------- Selection / Viewing ----------
 
-    def _on_selection_changed(self, item: QListWidgetItem | None = None, sender_override: QListWidget | None = None):
-        sender = sender_override or self.sender()
-        if not isinstance(sender, QListWidget):
-            return
-        # Clear selection in other lists so only one message is highlighted
-        for lst in [self.list_js8, self.list_flmsg, self.list_flamp, self.list_varac]:
-            if lst is not sender:
-                lst.blockSignals(True)
-                lst.clearSelection()
-                lst.blockSignals(False)
-        if item is None:
-            item = sender.currentItem()
-        if not item:
-            return
-        rec = item.data(Qt.UserRole)
-        if isinstance(rec, FileRecord):
-            self.current_js8 = None
-            self.current_record = rec
-            self._load_content(rec)
-        elif isinstance(rec, JS8Message):
+    def _build_message_rows(self) -> List[UnifiedMessage]:
+        rows: List[UnifiedMessage] = []
+        for msg in self.js8_messages:
+            msg_type = "Spotter" if msg.msg_type.startswith("F!") else "JS8 MSG"
+            status = "READ" if msg.state.upper() == "READ" else "NEW"
+            rcv_ts = msg.utc_ts or 0.0
+            rcv_display = msg.utc_str or self._fmt_ts(rcv_ts)
+            title = ""
+            if msg_type == "Spotter":
+                title = "Spotter"
+            else:
+                title = (msg.decoded_text or msg.raw_text or "").strip()
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+            rows.append(
+                UnifiedMessage(
+                    msg_type=msg_type,
+                    status=status,
+                    from_call=(msg.from_call or "").strip().upper(),
+                    to_call=(msg.to_call or "").strip().upper(),
+                    rcv_ts=rcv_ts,
+                    rcv_display=rcv_display,
+                    title=title,
+                    origin="js8",
+                    payload=msg,
+                )
+            )
+
+        for origin, recs in self.files.items():
+            for rec in recs:
+                status = self._get_read_state(rec)
+                from_call = self._extract_sender_from_file(rec)
+                title = rec.path.name
+                rcv_ts = rec.mtime or 0.0
+                rcv_display = self._fmt_ts(rcv_ts)
+                rows.append(
+                    UnifiedMessage(
+                        msg_type=origin.upper() if origin != "varac" else "VarAC",
+                        status=status,
+                        from_call=from_call,
+                        to_call="",
+                        rcv_ts=rcv_ts,
+                        rcv_display=rcv_display,
+                        title=title,
+                        origin=origin,
+                        payload=rec,
+                    )
+                )
+
+        rows.sort(key=lambda r: r.rcv_ts, reverse=True)
+        return rows
+
+    def _on_view_message(self, row: UnifiedMessage) -> None:
+        log.debug(
+            "MessageViewer: view requested type=%s origin=%s title=%s",
+            row.msg_type,
+            row.origin,
+            row.title,
+        )
+        self._has_active_view = True
+        self._freeze_messages_table = True
+        if isinstance(row.payload, JS8Message):
             self.current_record = None
-            self.current_js8 = rec
-            self._load_js8_content(rec)
-            self._mark_js8_read(rec)
+            self.current_js8 = row.payload
+            self._load_js8_content(row.payload)
+            self._mark_js8_read(row.payload)
+        elif isinstance(row.payload, FileRecord):
+            self.current_js8 = None
+            self.current_record = row.payload
+            self._load_content(row.payload)
+            self._set_read_state(row.payload, "READ")
+
+    def _read_file_head(self, path: Path, limit: int = 4096) -> str:
+        try:
+            with path.open("rb") as fh:
+                raw = fh.read(limit)
+            return raw.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def _extract_sender_from_file(self, rec: FileRecord) -> str:
+        text = self._read_file_head(rec.path)
+        if not text:
+            log.debug("MessageViewer: sender parse empty for %s", rec.path)
+            return ""
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            log.debug("MessageViewer: sender parse no lines for %s", rec.path)
+            return ""
+        for marker in (":hdr_fm:", ":hdr_ed:"):
+            for idx, line in enumerate(lines):
+                if line.lower().startswith(marker):
+                    for nxt in lines[idx + 1 :]:
+                        parts = nxt.split()
+                        if parts:
+                            sender = parts[0].strip().upper()
+                            log.debug(
+                                "MessageViewer: sender parsed via %s for %s => %s",
+                                marker,
+                                rec.path.name,
+                                sender,
+                            )
+                            return sender
+                    break
+        tokens = re.split(r"[-_\\s]+", rec.path.stem)
+        for tok in tokens:
+            up = tok.strip().upper()
+            if re.fullmatch(r"[A-Z0-9]{3,6}", up):
+                log.debug("MessageViewer: sender fallback from filename %s => %s", rec.path.name, up)
+                return up
+        log.debug("MessageViewer: sender not found for %s", rec.path.name)
+        return ""
+
+    @staticmethod
+    def _title_from_filename(path: Path) -> str:
+        stem = path.stem
+        tokens = [t for t in re.split(r"[-_]", stem) if t]
+        if not tokens:
+            return stem
+        date_idx: Optional[int] = None
+        for i, tok in enumerate(tokens):
+            t = tok.lower()
+            if re.fullmatch(r"\d{6,8}", t) or re.fullmatch(r"\d{4,6}z", t) or re.fullmatch(r"\d{5,6}z", t):
+                date_idx = i
+                break
+        title_tokens = tokens[date_idx + 1 :] if date_idx is not None else tokens[-1:]
+        title = " ".join(title_tokens).strip()
+        return title or stem
+
+    def _resolve_custom_forms_path(self) -> Optional[Path]:
+        override = (self.settings.get("nbems_custom_forms_path", "") or "").strip()
+        if override:
+            p = Path(override)
+            if p.exists():
+                log.debug("MessageViewer: using custom forms override %s", p)
+                return p
+        msg_paths = self.settings.get("message_paths", {}) or {}
+        for origin in ("flmsg", "flamp"):
+            base = (msg_paths.get(origin) or "").strip()
+            if not base:
+                continue
+            p = Path(base)
+            for parent in [p] + list(p.parents):
+                name = parent.name.lower()
+                if name in {"nbems.files", ".nbems"}:
+                    cand = parent / "CUSTOM"
+                    if cand.exists():
+                        log.debug("MessageViewer: using custom forms path %s", cand)
+                        return cand
+        fallback = Path(r"C:\Users\billd\NBEMS.files\CUSTOM")
+        if fallback.exists():
+            log.debug("MessageViewer: using custom forms fallback %s", fallback)
+        return fallback if fallback.exists() else None
+
+    @staticmethod
+    def _extract_custom_form_name(text: str) -> str:
+        if not text:
+            return ""
+        m = re.search(r"CUSTOM_FORM,([A-Za-z0-9_.-]+)", text, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _parse_custom_form_fields(text: str) -> Dict[str, str]:
+        fields: Dict[str, str] = {}
+        if not text:
+            return fields
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or "," not in line:
+                continue
+            key, val = line.split(",", 1)
+            key = key.strip().upper()
+            if re.fullmatch(r"L\d{1,2}", key):
+                fields[key] = val.strip()
+        return fields
+
+    @staticmethod
+    def _apply_form_fields(template: str, fields: Dict[str, str]) -> str:
+        if not template or not fields:
+            return template
+        out = template
+        for key, raw_val in fields.items():
+            val = html.escape(raw_val or "")
+            input_re = re.compile(
+                rf'(<input[^>]*\bname="{key}"[^>]*)(>)',
+                re.IGNORECASE,
+            )
+            def repl_input(match):
+                tag = match.group(1)
+                if re.search(r"\bvalue=", tag, re.IGNORECASE):
+                    tag = re.sub(r'\bvalue="[^"]*"', f'value="{val}"', tag, flags=re.IGNORECASE)
+                    return tag + match.group(2)
+                return tag + f' value="{val}"' + match.group(2)
+            out = input_re.sub(repl_input, out)
+
+            textarea_re = re.compile(
+                rf'(<textarea[^>]*\bname="{key}"[^>]*>)(.*?)(</textarea>)',
+                re.IGNORECASE | re.DOTALL,
+            )
+            out = textarea_re.sub(rf'\1{val}\3', out)
+
+            select_re = re.compile(
+                rf'(<select[^>]*\bname="{key}"[^>]*>)(.*?)(</select>)',
+                re.IGNORECASE | re.DOTALL,
+            )
+            def repl_select(match):
+                block = match.group(2)
+                block = re.sub(r'\sselected="selected"', "", block, flags=re.IGNORECASE)
+                opt_re = re.compile(
+                    r'(<option[^>]*value="([^"]*)"[^>]*>)(.*?)</option>',
+                    re.IGNORECASE | re.DOTALL,
+                )
+                def repl_opt(opt_match):
+                    opt_val = opt_match.group(2)
+                    label = re.sub(r"\s+", " ", opt_match.group(3)).strip()
+                    if opt_val == raw_val or label == raw_val:
+                        tag = opt_match.group(1)
+                        if "selected" not in tag.lower():
+                            tag = (
+                                tag[:-1] + ' selected="selected">'
+                                if tag.endswith(">")
+                                else tag + ' selected="selected">'
+                            )
+                        return tag + opt_match.group(3) + "</option>"
+                    return opt_match.group(0)
+                block = opt_re.sub(repl_opt, block)
+                return match.group(1) + block + match.group(3)
+            out = select_re.sub(repl_select, out)
+        return out
+
+    @staticmethod
+    def _strip_html(text: str) -> str:
+        if not text:
+            return ""
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    @staticmethod
+    def _extract_title_from_template(template: str) -> str:
+        if not template:
+            return ""
+        m = re.search(r"<title>(.*?)</title>", template, flags=re.IGNORECASE | re.DOTALL)
+        if not m:
+            return ""
+        return MessageViewerTab._strip_html(m.group(1))
+
+    @staticmethod
+    def _extract_template_labels(template: str) -> List[Tuple[str, str]]:
+        if not template:
+            return []
+        field_re = re.compile(
+            r"<(input|select|textarea)[^>]*\bname=\"(L\d{1,2})\"[^>]*>",
+            re.IGNORECASE,
+        )
+        label_re = re.compile(r"<label[^>]*>(.*?)</label>", re.IGNORECASE | re.DOTALL)
+        container_re = re.compile(r"<(td|div)[^>]*>", re.IGNORECASE)
+        labels: List[Tuple[str, str]] = []
+        seen = set()
+        for match in field_re.finditer(template):
+            name = match.group(2).upper()
+            if name in seen:
+                continue
+            start = max(0, match.start() - 1200)
+            window = template[start:match.start()]
+            label_text = ""
+            for label_match in label_re.finditer(window):
+                label_text = label_match.group(1)
+            if not label_text:
+                container_pos = window.lower().rfind("<td")
+                if container_pos == -1:
+                    container_pos = window.lower().rfind("<div")
+                if container_pos != -1:
+                    container = window[container_pos:]
+                    label_text = MessageViewerTab._strip_html(container)
+                    if label_text:
+                        parts = [p.strip() for p in label_text.splitlines() if p.strip()]
+                        if parts:
+                            label_text = parts[-1]
+            label_text = MessageViewerTab._strip_html(label_text) or name
+            labels.append((name, label_text))
+            seen.add(name)
+        return labels
+
+    @staticmethod
+    def _render_custom_form_fields(fields: Dict[str, str], labels: List[Tuple[str, str]], title: str = "") -> str:
+        rows = []
+        if labels:
+            for key, label in labels:
+                value = MessageViewerTab._normalize_field_value(fields.get(key, ""))
+                rows.append((label, value))
+        else:
+            for key in sorted(fields.keys()):
+                rows.append((key, MessageViewerTab._normalize_field_value(fields.get(key, ""))))
+        html_out = [
+            "<style>",
+            ".field-table { width: 100%; border-collapse: collapse; }",
+            ".field-row { border-bottom: 1px solid; }",
+            ".field-cell { padding: 6px; vertical-align: top; }",
+            ".label { font-weight: bold; }",
+            ".value { white-space: pre-wrap; }",
+            "</style>",
+        ]
+        if title:
+            html_out.append(f"<div class='label' style='font-size: 16px; margin-bottom: 8px;'>{html.escape(title)}</div>")
+        html_out.append("<table class='field-table'>")
+        for label, value in rows:
+            html_out.append("<tr class='field-row'>")
+            html_out.append(f"<td class='field-cell label'>{html.escape(label)}</td>")
+            html_out.append(f"<td class='field-cell value'>{html.escape(value)}</td>")
+            html_out.append("</tr>")
+        html_out.append("</table>")
+        return "".join(html_out)
+
+    @staticmethod
+    def _normalize_field_value(value: str) -> str:
+        if not value:
+            return ""
+        out = value.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+        out = out.replace('\\"', '"').replace("\\'", "'")
+        return out
+
+    @staticmethod
+    def _merge_template_with_raw(template: str, raw_text: str) -> str:
+        safe_raw = '<pre>' + raw_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') + '</pre>'
+        for token in ('{{DATA}}', '{{RAW}}', '%%DATA%%', '%%RAW%%'):
+            if token in template:
+                return template.replace(token, safe_raw)
+        return template + '\n' + safe_raw
+
+    @staticmethod
+    def _parse_form_fields(text: str, field_titles: Dict[str, str], value_mappings: Dict[str, Dict[str, str]] | None = None) -> Dict[str, str]:
+        parsed = {title: "" for title in field_titles.values()}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            for key, title in field_titles.items():
+                if line.startswith(key):
+                    value = line[len(key):].strip().strip(",")
+                    if value_mappings and title in value_mappings:
+                        mapped = value_mappings[title].get(value, value)
+                        value = mapped
+                    parsed[title] = value
+                    break
+        return parsed
+
+    @staticmethod
+    def _format_fields_table(parsed: Dict[str, str], last_field: str, status_fields: Optional[Dict[str, str]] = None) -> str:
+        html_out = [
+            "<style>",
+            ".field-table { width: 100%; border-collapse: collapse; }",
+            ".field-cell { width: 50%; padding: 4px; vertical-align: top; }",
+            ".label { font-weight: bold; }",
+            ".long-text { white-space: pre-wrap; }",
+            "</style>",
+            "<table class='field-table'>",
+        ]
+        items = list(parsed.items())
+        if not items:
+            return ""
+        last_index = len(items) - 1
+        for i in range(0, last_index, 2):
+            html_out.append("<tr>")
+            html_out.append(MessageViewerTab._render_field_cell(items[i], status_fields))
+            if i + 1 < last_index:
+                html_out.append(MessageViewerTab._render_field_cell(items[i + 1], status_fields))
+            else:
+                html_out.append("<td></td>")
+            html_out.append("</tr>")
+        html_out.append("<tr><td colspan='2' style='height:10px;'></td></tr>")
+        title, value = items[last_index]
+        html_out.append("<tr><td colspan='2'>")
+        html_out.append(f"<div class='label'>{html.escape(title)}:</div>")
+        html_out.append(f"<div class='long-text'>{html.escape(value)}</div>")
+        html_out.append("</td></tr></table>")
+        return "".join(html_out)
+
+    @staticmethod
+    def _render_field_cell(item: Tuple[str, str], status_fields: Optional[Dict[str, str]] = None) -> str:
+        title, value = item
+        display_value = value if value.strip() else "Unknown"
+        label = html.escape(title)
+        display = html.escape(display_value)
+        return f"<td class='field-cell'><span class='label'>{label}:</span> {display}</td>"
+
+    @staticmethod
+    def _parse_blank_form_content(text: str) -> str:
+        field_titles = {
+            "L01": "To",
+            "L02": "From",
+            "L03": "Prec",
+            "L04": "DTG",
+            "L05": "Subject",
+            "L06": "Message",
+        }
+        prec_mapping = {"R": "Routine", "P": "Priority", "I": "Immediate", "F": "Flash"}
+        parsed = MessageViewerTab._parse_form_fields(text, field_titles, {"Prec": prec_mapping})
+        if not any(v.strip() for v in parsed.values()):
+            msg = MessageViewerTab._match_field(text, r":mg:\s*(.*)$")
+            if msg:
+                msg = msg.replace("\\n\\n", "\n\n").replace("\\n", "\n")
+            from_call = MessageViewerTab._extract_hdr_call(text, ":hdr_fm:")
+            fallback = {"From": from_call, "Message": msg or ""}
+            return MessageViewerTab._format_fields_table(fallback, "Message")
+        if "Message" in parsed:
+            parsed["Message"] = parsed["Message"].replace("\\n\\n", "\n\n").replace("\\n", "\n")
+        return MessageViewerTab._format_fields_table(parsed, "Message")
+
+    @staticmethod
+    def _parse_sitrep_content(text: str) -> str:
+        field_titles = {
+            "L01": "To",
+            "L02": "From",
+            "L03": "Prec",
+            "L04": "State",
+            "L05": "Grid",
+            "L06": "Scope",
+            "L07": "DTG",
+            "L08": "Expires",
+            "L09": "Status",
+            "L10": "Narrative",
+        }
+        mappings = {
+            "Prec": {"R": "Routine", "P": "Priority", "I": "Immediate", "F": "Flash"},
+            "Scope": {"L": "Local", "R": "Regional", "N": "National", "U": "Unknown"},
+            "Status": {"N": "New", "O": "On Going", "R": "Resolved", "U": "Unknown"},
+        }
+        parsed = MessageViewerTab._parse_form_fields(text, field_titles, mappings)
+        if "Narrative" in parsed:
+            parsed["Narrative"] = parsed["Narrative"].replace("\\n\\n", "\n\n").replace("\\n", "\n")
+        return MessageViewerTab._format_fields_table(parsed, "Narrative")
+
+    @staticmethod
+    def _parse_statrep_content(text: str) -> str:
+        field_titles = {
+            "L01a": "To",
+            "L01b": "From",
+            "L02": "Scope",
+            "L03": "DTG",
+            "L04": "State",
+            "L05": "Grid",
+            "L06": "Map Pin",
+            "L07": "Power",
+            "L08": "Pub Water",
+            "L09": "Medical",
+            "L10": "Ovr Air Comms",
+            "L11": "Travl Cndtns",
+            "L12": "Internet",
+            "L13": "Fuel",
+            "L14": "Food",
+            "L15": "Criminal Act",
+            "L16": "Civil",
+            "L17": "Political",
+            "L18": "Remarks or Narrative",
+        }
+        status_mapping = {"G": "Green", "Y": "Yellow", "R": "Red", "U": "Unknown"}
+        mappings = {
+            "Scope": {"C": "My Community", "N": "My County", "R": "My Region", "O": "Other Location"},
+            "Map Pin": status_mapping,
+            "Power": status_mapping,
+            "Pub Water": status_mapping,
+            "Medical": status_mapping,
+            "Ovr Air Comms": status_mapping,
+            "Travl Cndtns": status_mapping,
+            "Internet": status_mapping,
+            "Fuel": status_mapping,
+            "Food": status_mapping,
+            "Criminal Act": status_mapping,
+            "Civil": status_mapping,
+            "Political": status_mapping,
+        }
+        parsed = MessageViewerTab._parse_form_fields(text, field_titles, mappings)
+        if not parsed.get("Scope", "").strip():
+            parsed["Scope"] = "My Location"
+        return MessageViewerTab._format_fields_table(parsed, "Remarks or Narrative")
+
+    @staticmethod
+    def _parse_b2s_form_content(text: str) -> str:
+        parsed = {
+            "From": MessageViewerTab._match_field(text, r":hdr_fm:\s*(.*?)\s*(?=:)"),
+            "DTG": MessageViewerTab._match_field(text, r":hdr_ed:\s*(.*?)\s*(?=:)"),
+            "Prec": MessageViewerTab._match_field(text, r":prec:\s*(.*?)\s*(?=:)"),
+            "Subject": MessageViewerTab._match_field(text, r":sub:\s*(.*?)\s*(?=:)"),
+            "Message": MessageViewerTab._match_field(text, r":mg:\s*(.*)$"),
+        }
+        prec_mapping = {"R": "Routine", "P": "Priority", "I": "Immediate", "F": "Flash"}
+        parsed["Prec"] = prec_mapping.get(parsed["Prec"].upper(), parsed["Prec"])
+        return MessageViewerTab._format_fields_table(parsed, "Message")
+
+    @staticmethod
+    def _match_field(text: str, pattern: str) -> str:
+        m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if not m:
+            return ""
+        return m.group(1).strip().replace("\r\n", "\n")
+
+    @staticmethod
+    def _extract_hdr_call(text: str, marker: str) -> str:
+        if not text:
+            return ""
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        for idx, line in enumerate(lines):
+            if line.lower().startswith(marker):
+                for nxt in lines[idx + 1 :]:
+                    parts = nxt.split()
+                    if parts:
+                        return parts[0].strip().upper()
+                break
+        return ""
+
+    def _delete_file_record(self, rec: FileRecord) -> None:
+        if not rec or not rec.path.exists():
+            return
+        title = "Delete File"
+        details = (
+            f"Move this file to the Recycle Bin?\n\n"
+            f"{rec.path}\n"
+            f"Size: {rec.size} bytes\n"
+            f"Modified: {self._fmt_mtime(rec.mtime)}"
+        )
+        resp = QMessageBox.question(self, title, details, QMessageBox.Yes | QMessageBox.No)
+        if resp != QMessageBox.Yes:
+            return
+        ok = self._send_to_recycle_bin(rec.path)
+        if not ok:
+            QMessageBox.warning(self, title, "Failed to move file to the Recycle Bin.")
+            return
+        log.info("MessageViewer: deleted file %s", rec.path)
+        self._remove_file_record(rec)
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+
+    def _remove_file_record(self, rec: FileRecord) -> None:
+        origin = rec.origin
+        if origin in self.files:
+            self.files[origin] = [r for r in self.files[origin] if r.path != rec.path]
+        key = self._read_state_key(origin, rec)
+        self._read_state_map.pop(key, None)
+        db_path = self._db_path()
+        if db_path and db_path.exists():
+            try:
+                conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    DELETE FROM message_read_state
+                    WHERE origin=? AND path=? AND mtime=? AND size=?
+                    """,
+                    (origin, str(rec.path), float(rec.mtime), int(rec.size)),
+                )
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+        if self.current_record and self.current_record.path == rec.path:
+            self.current_record = None
+            self._has_active_view = False
+            self.info_label.setText("No file selected")
+            self.viewer.clear()
+
+    @staticmethod
+    def _send_to_recycle_bin(path: Path) -> bool:
+        if platform.system() == "Windows":
+            try:
+                FO_DELETE = 3
+                FOF_ALLOWUNDO = 0x40
+                FOF_NOCONFIRMATION = 0x10
+                class SHFILEOPSTRUCTW(ctypes.Structure):
+                    _fields_ = [
+                        ("hwnd", ctypes.wintypes.HWND),
+                        ("wFunc", ctypes.wintypes.UINT),
+                        ("pFrom", ctypes.wintypes.LPCWSTR),
+                        ("pTo", ctypes.wintypes.LPCWSTR),
+                        ("fFlags", ctypes.c_uint16),
+                        ("fAnyOperationsAborted", ctypes.wintypes.BOOL),
+                        ("hNameMappings", ctypes.wintypes.LPVOID),
+                        ("lpszProgressTitle", ctypes.wintypes.LPCWSTR),
+                    ]
+                path_str = str(path) + "\0\0"
+                op = SHFILEOPSTRUCTW()
+                op.wFunc = FO_DELETE
+                op.pFrom = path_str
+                op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION
+                res = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+                if res != 0 or op.fAnyOperationsAborted:
+                    log.debug(
+                        "MessageViewer: recycle bin delete failed res=%s aborted=%s path=%s",
+                        res,
+                        bool(op.fAnyOperationsAborted),
+                        path,
+                    )
+                return res == 0 and not op.fAnyOperationsAborted
+            except Exception as e:
+                log.debug("MessageViewer: recycle bin delete exception path=%s err=%s", path, e)
+                return False
+
+        # Linux fallbacks: gio, trash-put (trash-cli), then kioclient
+        path_str = str(path)
+        for cmd in (["gio", "trash", path_str], ["trash-put", path_str], ["kioclient5", "move", path_str, "trash:/"], ["kioclient", "move", path_str, "trash:/"]):
+            exe = cmd[0]
+            if not shutil.which(exe):
+                continue
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if res.returncode == 0:
+                    return True
+                log.debug(
+                    "MessageViewer: recycle bin delete failed cmd=%s code=%s stderr=%s",
+                    " ".join(cmd),
+                    res.returncode,
+                    res.stderr.strip(),
+                )
+            except Exception as e:
+                log.debug(
+                    "MessageViewer: recycle bin delete exception cmd=%s err=%s",
+                    " ".join(cmd),
+                    e,
+                )
+        return False
+
+    @staticmethod
+    def _parse_unknown_content(text: str) -> str:
+        lines = text.splitlines()
+        parsed_fields: List[Tuple[Optional[str], str]] = []
+        skip_patterns = [
+            r"^\d+\.\d+\.\d+$",
+            r"^---",
+            r"^QTC",
+            r"^[A-Z\s\d\.\$]+$",
+        ]
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if any(re.match(pattern, line, re.IGNORECASE) for pattern in skip_patterns):
+                continue
+            match = re.match(r"^:?([a-zA-Z0-9]+):\d*\s*(.*)$", line)
+            if match:
+                key, value = match.groups()
+                key = key.strip().lower()
+                value = value.strip()
+                if key in {"hdr_fm", "hdr_ed"}:
+                    continue
+                parsed_fields.append((key.upper(), value))
+            else:
+                if len(line) > 20:
+                    parsed_fields.append((None, line))
+        html_out = [
+            "<style>",
+            ".field-table { width: 100%; }",
+            ".field-row { border-bottom: 1px solid; }",
+            ".field-cell { padding: 4px; vertical-align: top; }",
+            ".label { font-weight: bold; min-width: 80px; display: inline-block; }",
+            ".long-text { white-space: pre-wrap; }",
+            "</style>",
+            "<table class='field-table'>",
+        ]
+        for i in range(len(parsed_fields)):
+            key, value = parsed_fields[i]
+            is_last_field = i == len(parsed_fields) - 1
+            is_long_text = key is None or "\n" in value or len(value) > 100 or is_last_field
+            safe_val = html.escape(value)
+            if is_long_text:
+                html_out.append("<tr class='field-row'>")
+                html_out.append("<td colspan='2' class='field-cell long-text'>")
+                if key:
+                    html_out.append(f"<span class='label'>{html.escape(key)}:</span><br>")
+                html_out.append(safe_val)
+                html_out.append("</td></tr>")
+            else:
+                html_out.append("<tr class='field-row'>")
+                html_out.append(
+                    f"<td class='field-cell'><span class='label'>{html.escape(key)}:</span> {safe_val}</td>"
+                )
+                html_out.append("</tr>")
+        html_out.append("</table>")
+        return "".join(html_out)
 
     def _load_content(self, rec: FileRecord):
+        log.debug("MessageViewer: loading file %s", rec.path)
         try:
             data = rec.path.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
             self.viewer.setPlainText(f"Failed to read file:\n{e}")
             return
 
-        # Pretty format for JSON/XML
         content = data
-        try:
-            if rec.path.suffix.lower() in {".json"}:
-                parsed = json.loads(data)
-                content = json.dumps(parsed, indent=2)
-            elif rec.path.suffix.lower() in {".xml"}:
-                dom = xml.dom.minidom.parseString(data.encode("utf-8"))
-                content = dom.toprettyxml()
-        except Exception:
-            content = data  # fallback to raw
+        is_html = False
+        ext = rec.path.suffix.lower()
+        if ext in {".html", ".htm"}:
+            is_html = True
+        elif ext in {".b2s", ".k2s"}:
+            lower = data.lower()
+            form_name = self._extract_custom_form_name(data)
+            forms_dir = self._resolve_custom_forms_path()
+            if form_name and forms_dir:
+                template_path = forms_dir / form_name
+                if template_path.exists():
+                    log.debug(
+                        "MessageViewer: rendering custom form %s for %s",
+                        template_path.name,
+                        rec.path.name,
+                    )
+                    try:
+                        template = template_path.read_text(encoding="utf-8", errors="replace")
+                        fields = self._parse_custom_form_fields(data)
+                        log.debug(
+                            "MessageViewer: custom form fields %s for %s",
+                            ", ".join(sorted(fields.keys())),
+                            rec.path.name,
+                        )
+                        title = self._extract_title_from_template(template)
+                        labels = self._extract_template_labels(template)
+                        content = self._render_custom_form_fields(fields, labels, title)
+                        is_html = True
+                    except Exception:
+                        is_html = False
+                else:
+                    log.debug(
+                        "MessageViewer: custom form template missing %s for %s",
+                        template_path,
+                        rec.path.name,
+                    )
+            if not is_html:
+                if "<blankform>" in lower or "blank_form_v5." in lower:
+                    log.debug("MessageViewer: parsed blank form for %s", rec.path.name)
+                    content = self._parse_blank_form_content(data)
+                    is_html = True
+                elif "sitrep_v5." in lower:
+                    log.debug("MessageViewer: parsed sitrep form for %s", rec.path.name)
+                    content = self._parse_sitrep_content(data)
+                    is_html = True
+                elif "statrep_v5.1" in lower:
+                    log.debug("MessageViewer: parsed statrep form for %s", rec.path.name)
+                    content = self._parse_statrep_content(data)
+                    is_html = True
+                elif ext == ".b2s":
+                    log.debug("MessageViewer: parsed b2s form for %s", rec.path.name)
+                    content = self._parse_b2s_form_content(data)
+                    is_html = True
+                else:
+                    log.debug("MessageViewer: parsed unknown form for %s", rec.path.name)
+                    content = self._parse_unknown_content(data)
+                    is_html = True
 
-        info = f"{rec.path.name} — {rec.origin.upper()} — {rec.size} bytes — {self._fmt_mtime(rec.mtime)}"
+        if not is_html:
+            try:
+                if ext in {".json"}:
+                    parsed = json.loads(data)
+                    content = json.dumps(parsed, indent=2)
+                elif ext in {".xml"}:
+                    dom = xml.dom.minidom.parseString(data.encode("utf-8"))
+                    content = dom.toprettyxml()
+            except Exception:
+                content = data  # fallback to raw
+
+        info = f"{rec.path.name} - {rec.origin.upper()} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
         self.info_label.setText(info)
-        self.viewer.setPlainText(content)
+        if is_html:
+            self.viewer.setAcceptRichText(True)
+            self.viewer.setHtml(content)
+        else:
+            self.viewer.setAcceptRichText(False)
+            self.viewer.setPlainText(content)
 
     def _load_js8_content(self, msg: JS8Message):
         header = [
@@ -793,6 +1895,7 @@ class MessageViewerTab(QWidget):
         ]
         body = msg.decoded_text or msg.raw_text
         self.info_label.setText(f"{msg.msg_type} {msg.from_call} -> {msg.to_call}")
+        self.viewer.setAcceptRichText(False)
         self.viewer.setPlainText("\n".join(header + [body]))
 
     def _fmt_mtime(self, mtime: float) -> str:
@@ -920,6 +2023,71 @@ class MessageViewerTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: JS8Call inbox update failed: %s", e)
+        return False
+
+    def _mark_js8call_inbox_read_by_id(self, row_id: int) -> bool:
+        inbox_path = self._inbox_path()
+        if not inbox_path or not inbox_path.exists():
+            return False
+        if row_id is None:
+            return False
+        candidates = [
+            ("inbox_v1", "blob"),
+            ("inbox_v1", "json"),
+            ("inbox_v1", "message"),
+            ("inbox", "blob"),
+            ("inbox", "json"),
+            ("inbox", "message"),
+        ]
+        try:
+            conn = sqlite3.connect(inbox_path, timeout=1.0)
+            cur = conn.cursor()
+            cur.execute("PRAGMA busy_timeout = 1000")
+            for table, col in candidates:
+                rows = []
+                try:
+                    cur.execute(f"SELECT id, {col} FROM {table} WHERE id=?", (int(row_id),))
+                    rows = cur.fetchall()
+                except Exception:
+                    try:
+                        cur.execute(f"SELECT rowid as id, {col} FROM {table} WHERE rowid=?", (int(row_id),))
+                        rows = cur.fetchall()
+                    except Exception:
+                        rows = []
+                if not rows:
+                    continue
+                has_type_col = self._table_has_column(conn, table, "type")
+                row = rows[0]
+                blob = row[1] or ""
+                try:
+                    parsed = json.loads(blob)
+                except Exception:
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                current_type = str(parsed.get("type", "") or "").strip().upper()
+                if current_type == "DELIVERED":
+                    conn.close()
+                    return False
+                if current_type != "READ":
+                    parsed["type"] = "READ"
+                    new_blob = json.dumps(parsed, separators=(",", ":"))
+                    if has_type_col:
+                        cur.execute(
+                            f"UPDATE {table} SET {col}=?, type=? WHERE id=?",
+                            (new_blob, "READ", int(row_id)),
+                        )
+                    else:
+                        cur.execute(
+                            f"UPDATE {table} SET {col}=? WHERE id=?",
+                            (new_blob, int(row_id)),
+                        )
+                    conn.commit()
+                conn.close()
+                return True
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: JS8Call inbox update by id failed: %s", e)
         return False
 
     def _select_inbox_row(
@@ -1075,15 +2243,22 @@ class MessageViewerTab(QWidget):
         if msg.state.upper() == "READ":
             return
         ts = time.time()
-        # Persist read state in local app DB (do not modify JS8Call inbox)
+        # Persist read state in local app DB
         try:
             self._save_js8_state(msg.msg_id, "READ", msg.utc_ts, read_ts=ts)
             self._update_local_read(msg.msg_id, ts)
         except Exception as e:
             log.debug("MessageViewer: failed to persist JS8 READ state: %s", e)
+        if self.settings.get("js8_inbox_mark_retrieved_sync", False):
+            ok = self._mark_js8call_inbox_read_by_id(msg.msg_id)
+            if not ok:
+                log.debug(
+                    "MessageViewer: JS8Call inbox mark READ failed (msg_id=%s)",
+                    msg.msg_id,
+                )
         msg.state = "READ"
         msg.read_ts = ts
-        self._populate_lists()
+        self._populate_messages_table()
 
     def _decode_form(self, form_id: str, responses: str, comment: str, raw: str = "") -> str:
         form_id = form_id.strip()
@@ -1310,13 +2485,13 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to update local read state: %s", e)
 
-    def _load_js8_from_local(self) -> None:
+    def _load_js8_from_local(self, force: bool = False) -> None:
         self._ensure_local_js8_tables()
         db_path = self._local_js8_db()
         msgs: List[JS8Message] = []
         if not db_path or not Path(db_path).exists():
             self.js8_messages = msgs
-            self._populate_lists()
+            self._populate_messages_table(force=force)
             return
         try:
             conn = sqlite3.connect(db_path)
@@ -1362,7 +2537,7 @@ class MessageViewerTab(QWidget):
             msgs.append(msg)
         msgs.sort(key=lambda m: (m.state != "UNREAD", m.utc_ts))
         self.js8_messages = msgs
-        self._populate_lists()
+        self._populate_messages_table(force=force)
 
     def _ingest_js8_messages(self) -> None:
         inbox_path = self._inbox_path()
@@ -1508,12 +2683,6 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to enqueue NEXT MSG ID: %s", e)
 
     # ---------- Actions ----------
-
-    def _open_external(self):
-        if not self.current_record:
-            return
-        url = QUrl.fromLocalFile(str(self.current_record.path))
-        QDesktopServices.openUrl(url)
 
     def _export_pdf(self):
         if not self.current_record:
