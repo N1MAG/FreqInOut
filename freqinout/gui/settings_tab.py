@@ -1140,7 +1140,13 @@ class SettingsTab(QWidget):
             band = self.op_groups_table.item(r, 3).text().strip() if self.op_groups_table.item(r, 3) else ""
             freq_txt = self.op_groups_table.item(r, 4).text().strip() if self.op_groups_table.item(r, 4) else ""
             auto_widget = self.op_groups_table.cellWidget(r, 5)
-            auto_tune = bool(auto_widget.isChecked()) if isinstance(auto_widget, QCheckBox) else False
+            auto_tune = False
+            if isinstance(auto_widget, QCheckBox):
+                auto_tune = auto_widget.isChecked()
+            elif isinstance(auto_widget, QWidget):
+                chk = auto_widget.findChild(QCheckBox)
+                if chk is not None:
+                    auto_tune = chk.isChecked()
             try:
                 freq_val = float(freq_txt)
             except Exception:
@@ -1163,6 +1169,10 @@ class SettingsTab(QWidget):
             w = self.op_groups_table.cellWidget(r, 0)
             if isinstance(w, QCheckBox) and w.isChecked():
                 rows.append(r)
+            elif isinstance(w, QWidget):
+                chk = w.findChild(QCheckBox)
+                if chk is not None and chk.isChecked():
+                    rows.append(r)
         return rows
 
     def _edit_operating_group(self):
@@ -1179,7 +1189,13 @@ class SettingsTab(QWidget):
         band = self.op_groups_table.item(row, 3).text().strip() if self.op_groups_table.item(row, 3) else ""
         freq_txt = self.op_groups_table.item(row, 4).text().strip() if self.op_groups_table.item(row, 4) else ""
         auto_widget = self.op_groups_table.cellWidget(row, 5)
-        auto_val = bool(auto_widget.isChecked()) if isinstance(auto_widget, QCheckBox) else False
+        auto_val = False
+        if isinstance(auto_widget, QCheckBox):
+            auto_val = auto_widget.isChecked()
+        elif isinstance(auto_widget, QWidget):
+            chk = auto_widget.findChild(QCheckBox)
+            if chk is not None:
+                auto_val = chk.isChecked()
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Edit Operating Group")
