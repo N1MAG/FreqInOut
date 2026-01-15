@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QComboBox,
+    QLineEdit,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -158,7 +159,6 @@ class MessageViewerTab(QWidget):
         self._has_active_view = False
         self._sort_column = 4
         self._sort_order = Qt.DescendingOrder
-        self._filter_row_ready = False
         self._freeze_messages_table = False
         self._deferred_refresh = False
 
@@ -430,10 +430,13 @@ class MessageViewerTab(QWidget):
 
         messages_box = QGroupBox("Messages")
         messages_layout = QVBoxLayout()
+        self.messages_header = QWidget()
+        self.messages_header_layout = QHBoxLayout(self.messages_header)
+        self.messages_header_layout.setContentsMargins(0, 0, 0, 4)
+        self.messages_header_layout.setSpacing(4)
+        messages_layout.addWidget(self.messages_header)
+
         self.messages_table = QTableWidget(0, 8)
-        self.messages_table.setHorizontalHeaderLabels(
-            ["Type", "Status", "From", "To", "RCV_DT", "Message Title", "", ""]
-        )
         self.messages_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.messages_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.messages_table.setAlternatingRowColors(True)
@@ -478,13 +481,18 @@ class MessageViewerTab(QWidget):
         self.status_filter = QComboBox()
         self.from_filter = QComboBox()
         self.to_filter = QComboBox()
+        self.rcv_filter = QComboBox()
+        self.rcv_date_edit = QLineEdit()
         self.clear_filters_btn = QPushButton("Clear Filters")
         self.clear_filters_btn.clicked.connect(self._clear_filters)
         self.type_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.status_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.from_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.to_filter.currentIndexChanged.connect(self._on_filter_changed)
-        self._setup_filter_row()
+        self.rcv_filter.currentIndexChanged.connect(self._on_filter_changed)
+        self.rcv_date_edit.editingFinished.connect(self._on_filter_changed)
+        self.rcv_date_edit.returnPressed.connect(self._on_filter_changed)
+        self._build_messages_header()
         QTimer.singleShot(0, self._set_initial_splitter_sizes)
 
     # ---------- Timer ----------
@@ -695,6 +703,12 @@ class MessageViewerTab(QWidget):
         self._adjust_pending_table_height(len(rows))
 
     def apply_theme(self) -> None:
+        theme = resolve_theme(self.settings)
+        grid = theme["border"]
+        table_style = f"QTableWidget {{ gridline-color: {grid}; }}"
+        self.messages_table.setStyleSheet(table_style)
+        self.pending_table.setStyleSheet(table_style)
+        self._update_clear_filters_style()
         self._update_pending_table()
 
     def on_settings_saved(self) -> None:
@@ -921,6 +935,8 @@ class MessageViewerTab(QWidget):
         status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "ALL"
         from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else "ALL"
         to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else "ALL"
+        rcv_sel = self.rcv_filter.currentText() if hasattr(self, "rcv_filter") else "ALL"
+        rcv_cutoff = self._rcv_cutoff_ts(rcv_sel, self.rcv_date_edit.text())
 
         filtered = []
         for row in rows:
@@ -932,16 +948,19 @@ class MessageViewerTab(QWidget):
                 continue
             if to_sel != "ALL" and row.to_call != to_sel:
                 continue
+            if rcv_cutoff and row.rcv_ts and row.rcv_ts < rcv_cutoff:
+                continue
             filtered.append(row)
         filtered = self._sort_rows(filtered)
         self._render_messages_table(filtered)
         self._update_clear_filters_style()
         log.debug(
-            "MessageViewer: filters type=%s status=%s from=%s to=%s => %d rows",
+            "MessageViewer: filters type=%s status=%s from=%s to=%s rcv=%s => %d rows",
             type_sel,
             status_sel,
             from_sel,
             to_sel,
+            rcv_sel,
             len(filtered),
         )
 
@@ -952,20 +971,28 @@ class MessageViewerTab(QWidget):
             and self.status_filter.currentText() in ("", "ALL")
             and self.from_filter.currentText() in ("", "ALL")
             and self.to_filter.currentText() in ("", "ALL")
+            and self.rcv_filter.currentText() in ("", "ALL")
+            and not self.rcv_date_edit.text().strip()
         ):
             return
         self.type_filter.blockSignals(True)
         self.status_filter.blockSignals(True)
         self.from_filter.blockSignals(True)
         self.to_filter.blockSignals(True)
+        self.rcv_filter.blockSignals(True)
+        self.rcv_date_edit.blockSignals(True)
         self.type_filter.setCurrentText("ALL")
         self.status_filter.setCurrentText("ALL")
         self.from_filter.setCurrentText("ALL")
         self.to_filter.setCurrentText("ALL")
+        self.rcv_filter.setCurrentText("ALL")
+        self.rcv_date_edit.clear()
         self.type_filter.blockSignals(False)
         self.status_filter.blockSignals(False)
         self.from_filter.blockSignals(False)
         self.to_filter.blockSignals(False)
+        self.rcv_filter.blockSignals(False)
+        self.rcv_date_edit.blockSignals(False)
         self._apply_message_filters()
 
     def _on_filter_changed(self) -> None:
@@ -974,13 +1001,8 @@ class MessageViewerTab(QWidget):
 
     def _render_messages_table(self, rows: List[UnifiedMessage]) -> None:
         self.messages_table.setUpdatesEnabled(False)
-        if not self._filter_row_ready:
-            self._setup_filter_row()
-            self._filter_row_ready = True
-        # Preserve header row; clear data rows only.
-        while self.messages_table.rowCount() > 1:
-            self.messages_table.removeRow(1)
-        for idx, row in enumerate(rows, start=1):
+        self.messages_table.setRowCount(0)
+        for idx, row in enumerate(rows):
             self.messages_table.insertRow(idx)
             type_item = QTableWidgetItem(row.msg_type)
             status_item = QTableWidgetItem(row.status)
@@ -1016,33 +1038,38 @@ class MessageViewerTab(QWidget):
             self.current_js8 = None
         self.messages_table.setUpdatesEnabled(True)
 
-    def _setup_filter_row(self) -> None:
-        if self.messages_table.rowCount() == 0:
-            self.messages_table.setRowCount(1)
-        self.messages_table.setRowHeight(0, 52)
-        self.messages_table.setCellWidget(0, 0, self._make_filter_header("Type", self.type_filter, 0))
-        self.messages_table.setCellWidget(0, 1, self._make_filter_header("Status", self.status_filter, 1))
-        self.messages_table.setCellWidget(0, 2, self._make_filter_header("From", self.from_filter, 2))
-        self.messages_table.setCellWidget(0, 3, self._make_filter_header("To", self.to_filter, 3))
-        self.messages_table.setCellWidget(0, 4, self._make_sort_button("RCV_DT", 4))
-        self.messages_table.setCellWidget(0, 5, self._make_sort_button("Message Title", 5))
-        self.messages_table.setCellWidget(0, 6, self.clear_filters_btn)
-        self.messages_table.setSpan(0, 6, 1, 2)
-        for col in range(8):
-            item = QTableWidgetItem("")
-            item.setFlags(Qt.NoItemFlags)
-            self.messages_table.setItem(0, col, item)
+    def _build_messages_header(self) -> None:
+        while self.messages_header_layout.count():
+            item = self.messages_header_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.messages_header_layout.addWidget(
+            self._make_filter_header("Type", self.type_filter, 0)
+        )
+        self.messages_header_layout.addWidget(
+            self._make_filter_header("Status", self.status_filter, 1)
+        )
+        self.messages_header_layout.addWidget(
+            self._make_filter_header("From", self.from_filter, 2)
+        )
+        self.messages_header_layout.addWidget(
+            self._make_filter_header("To", self.to_filter, 3)
+        )
+        self.messages_header_layout.addWidget(
+            self._make_rcv_filter_header("RCV_DT", self.rcv_filter, self.rcv_date_edit, 4)
+        )
+        self.messages_header_layout.addWidget(self._make_sort_button("Message Title", 5), 1)
+        self.messages_header_layout.addWidget(self.clear_filters_btn)
         self._update_clear_filters_style()
-        row_height = self.messages_table.verticalHeader().defaultSectionSize()
-        self.messages_table.setMinimumHeight((row_height * 5) + self.messages_table.rowHeight(0) + 8)
 
     def _set_initial_splitter_sizes(self) -> None:
         if not hasattr(self, "messages_splitter"):
             return
         row_height = self.messages_table.verticalHeader().defaultSectionSize()
-        header_height = self.messages_table.rowHeight(0)
+        header_height = self.messages_header.sizeHint().height()
         target = (row_height * 5) + header_height + 12
         total = max(target * 3, 400)
+        self.messages_table.setMinimumHeight((row_height * 5) + 8)
         self.messages_splitter.setSizes([target, total - target])
 
     def _unfreeze_table(self) -> None:
@@ -1069,12 +1096,34 @@ class MessageViewerTab(QWidget):
         layout.addWidget(combo)
         return container
 
+    def _make_rcv_filter_header(self, label: str, combo: QComboBox, edit: QLineEdit, column: int) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+        layout.addWidget(self._make_sort_button(label, column))
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        combo.clear()
+        combo.addItems(["ALL", "1 Day", "1 Week", "1 Month"])
+        combo.setCurrentText("ALL")
+        edit.setPlaceholderText("YYYY-MM-DD")
+        edit.setMaximumWidth(110)
+        row.addWidget(combo)
+        row.addWidget(edit)
+        row.addStretch()
+        layout.addLayout(row)
+        return container
+
     def _filters_active(self) -> bool:
         return (
             self.type_filter.currentText() not in ("", "ALL")
             or self.status_filter.currentText() not in ("", "ALL")
             or self.from_filter.currentText() not in ("", "ALL")
             or self.to_filter.currentText() not in ("", "ALL")
+            or self.rcv_filter.currentText() not in ("", "ALL")
+            or bool(self.rcv_date_edit.text().strip())
         )
 
     def _update_clear_filters_style(self) -> None:
@@ -1114,6 +1163,29 @@ class MessageViewerTab(QWidget):
             return row.rcv_ts or 0.0
 
         return sorted(rows, key=key, reverse=reverse)
+
+    @staticmethod
+    def _rcv_cutoff_ts(selection: str, date_text: str) -> float | None:
+        sel = (selection or "ALL").strip().upper()
+        cutoff = None
+        now = time.time()
+        if sel == "1 DAY":
+            cutoff = now - (24 * 60 * 60)
+        elif sel == "1 WEEK":
+            cutoff = now - (7 * 24 * 60 * 60)
+        elif sel == "1 MONTH":
+            cutoff = now - (30 * 24 * 60 * 60)
+        date_text = (date_text or "").strip()
+        if date_text:
+            try:
+                from datetime import datetime
+
+                dt = datetime.strptime(date_text, "%Y-%m-%d")
+                ts = time.mktime(dt.timetuple())
+                cutoff = ts if cutoff is None else max(cutoff, ts)
+            except Exception:
+                pass
+        return cutoff
 
     # ---------- Selection / Viewing ----------
 
