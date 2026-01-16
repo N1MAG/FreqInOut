@@ -114,7 +114,7 @@ class FldigiNetControlTab(QWidget):
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Role:"))
         self.role_combo = QComboBox()
-        self.role_combo.addItems(["NCS", "ANCS"])
+        self.role_combo.addItems(["NCS", "ANCS", "JOINER"])
         top_row.addWidget(self.role_combo)
 
         top_row.addSpacing(20)
@@ -200,6 +200,7 @@ class FldigiNetControlTab(QWidget):
         main_header.addStretch()
         left_col.addLayout(main_header)
         self.main_text = QTextEdit()
+        self.main_text.setReadOnly(False)
         left_col.addWidget(self.main_text)
 
         # Right: New/Late
@@ -212,6 +213,7 @@ class FldigiNetControlTab(QWidget):
         late_header.addStretch()
         right_col.addLayout(late_header)
         self.late_text = QTextEdit()
+        self.late_text.setReadOnly(False)
         right_col.addWidget(self.late_text)
 
         panels_row.addLayout(left_col, stretch=1)
@@ -1034,12 +1036,15 @@ class FldigiNetControlTab(QWidget):
         self.main_text.setPlainText("")
         self.late_text.setPlainText("")
 
-        # Append operator line CALLSIGN/NAME/STATE/
+        # Append operator line CALLSIGN / NAME / STATE [/ ROLE]
         cs = (self.settings.get("operator_callsign", "") or "").strip().upper()
         name = (self.settings.get("operator_name", "") or "").strip()
         state = (self.settings.get("operator_state", "") or "").strip().upper()
         if cs or name or state:
-            op_line = " ".join([p for p in (cs, name, state) if p]).strip()
+            op_line = self._format_entry(cs, name, state)
+            role = self.role_combo.currentText().strip().upper()
+            if role in ("NCS", "ANCS") and op_line:
+                op_line = f"{op_line} / {role}"
             if self.main_text.toPlainText().strip():
                 self.main_text.append(op_line)
             else:
@@ -1100,8 +1105,10 @@ class FldigiNetControlTab(QWidget):
             )
             return
 
-        # Read the latest late file from disk
-        late_from_file = self._read_file(late_path)
+        # Prefer current UI content (may have manual edits) and fall back to file
+        late_from_file = self.late_text.toPlainText()
+        if not late_from_file.strip():
+            late_from_file = self._read_file(late_path)
         if not late_from_file.strip():
             self.late_text.clear()
             self._write_file(late_path, "")
@@ -1169,10 +1176,12 @@ class FldigiNetControlTab(QWidget):
     # ---------------- NORMALIZATION ---------------- #
 
     def _on_main_text_changed(self):
-        self._normalize_text_edit(self.main_text, "_normalizing_main")
+        # Avoid auto-normalizing while the operator is editing in real time.
+        return
 
     def _on_late_text_changed(self):
-        self._normalize_text_edit(self.late_text, "_normalizing_late")
+        # Avoid auto-normalizing while the operator is editing in real time.
+        return
 
     def _normalize_text_edit(self, edit: QTextEdit, flag_attr: str) -> None:
         """
@@ -1188,11 +1197,15 @@ class FldigiNetControlTab(QWidget):
             lines = original.splitlines()
             normalized_lines = []
             for line in lines:
+                raw_line = line
+                if "/" in raw_line and raw_line.count("/") < 2:
+                    normalized_lines.append(raw_line)
+                    continue
                 cs, name, state = self._parse_checkin_line(line)
                 if cs or name or state:
                     normalized_lines.append(self._format_entry(cs, name, state))
                 else:
-                    normalized_lines.append(line.strip())
+                    normalized_lines.append(raw_line)
             normalized = "\n".join(normalized_lines)
             if original.endswith("\n"):
                 normalized += "\n"
@@ -1301,6 +1314,7 @@ class FldigiNetControlTab(QWidget):
             self.main_text.append(formatted)
         else:
             self.main_text.setPlainText(formatted)
+        self.known_op_edit.clear()
 
     def _insert_known_into_late(self):
         line = self.known_op_edit.text().strip()
@@ -1316,6 +1330,7 @@ class FldigiNetControlTab(QWidget):
             self.late_text.append(formatted)
         else:
             self.late_text.setPlainText(formatted)
+        self.known_op_edit.clear()
 
     # ---------------- PARSING ---------------- #
 

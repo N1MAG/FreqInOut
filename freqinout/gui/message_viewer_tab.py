@@ -254,8 +254,10 @@ class MessageViewerTab(QWidget):
         self._message_rows: List[UnifiedMessage] = []
         self._filters_initialized = False
         self._has_active_view = False
-        self._sort_column = 4
-        self._sort_order = Qt.DescendingOrder
+        self._default_sort_column = 4
+        self._default_sort_order = Qt.DescendingOrder
+        self._sort_column = self._default_sort_column
+        self._sort_order = self._default_sort_order
         self._freeze_messages_table = False
         self._deferred_refresh = False
         self._messages_model = MessageTableModel([])
@@ -447,6 +449,10 @@ class MessageViewerTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to persist read state: %s", e)
+        self._refresh_table_after_read(
+            lambda row: isinstance(row.payload, FileRecord)
+            and self._read_state_key(row.payload.origin, row.payload) == key
+        )
 
     def _clear_backlog_on_upgrade(self) -> None:
         if self.settings.get("autoquery_backlog_cleared_v1", False):
@@ -1052,6 +1058,62 @@ class MessageViewerTab(QWidget):
             rcv_query or "ALL",
             len(filtered),
         )
+
+    def _is_filter_or_sort_active(self) -> bool:
+        type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
+        status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
+        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else "From..."
+        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else "To..."
+        if type_sel not in ("", "MSG Type..."):
+            return True
+        if status_sel not in ("", "Status..."):
+            return True
+        if from_sel not in ("", "From..."):
+            return True
+        if to_sel not in ("", "To..."):
+            return True
+        if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
+            return True
+        if (
+            self._sort_column != self._default_sort_column
+            or self._sort_order != self._default_sort_order
+        ):
+            return True
+        return False
+
+    def _apply_message_filters_preserve_scroll(self) -> None:
+        if not hasattr(self, "messages_table"):
+            self._apply_message_filters()
+            return
+        bar = self.messages_table.verticalScrollBar()
+        value = bar.value()
+        self._apply_message_filters()
+        bar.setValue(min(value, bar.maximum()))
+
+    def _update_rendered_status(self, match_fn) -> None:
+        if not hasattr(self, "_messages_model"):
+            return
+        for i, row in enumerate(self._messages_model._rows):
+            if match_fn(row):
+                row.status = "READ"
+                idx = self._messages_model.index(i, 1)
+                self._messages_model.dataChanged.emit(
+                    idx, idx, [Qt.DisplayRole, Qt.ForegroundRole]
+                )
+
+    def _refresh_table_after_read(self, match_fn) -> None:
+        updated = False
+        for row in self._message_rows:
+            if match_fn(row):
+                row.status = "READ"
+                updated = True
+        if not updated:
+            return
+        self._refresh_message_filters(self._message_rows)
+        if self._is_filter_or_sort_active():
+            self._apply_message_filters_preserve_scroll()
+        else:
+            self._update_rendered_status(match_fn)
 
     def _clear_filters(self) -> None:
         self._unfreeze_table()
@@ -2372,7 +2434,9 @@ class MessageViewerTab(QWidget):
                 )
         msg.state = "READ"
         msg.read_ts = ts
-        self._populate_messages_table()
+        self._refresh_table_after_read(
+            lambda row: isinstance(row.payload, JS8Message) and row.payload.msg_id == msg.msg_id
+        )
 
     def _decode_form(self, form_id: str, responses: str, comment: str, raw: str = "") -> str:
         form_id = form_id.strip()
