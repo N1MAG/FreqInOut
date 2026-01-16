@@ -889,6 +889,15 @@ class MessageViewerTab(QWidget):
             QMessageBox.warning(self, "Missing Callsign", "Configure your callsign in the Settings tab.")
             return
         text = f"{mycall}: {callsign} QUERY MSG {msg_id}".strip()
+        resp = QMessageBox.question(
+            self,
+            "Send MSG",
+            f"Send this JS8Call message?\n\n{text}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
         if self._send_js8_message(text):
             self._pending_set_status(callsign, msg_id, "WAITING")
         self._update_pending_table()
@@ -914,7 +923,7 @@ class MessageViewerTab(QWidget):
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
-        payload = json.dumps({"params": {}, "type": "TX.SEND_MESSAGE", "value": text}) + "\n"
+        payload = json.dumps({"params": {}, "type": "TX.SEND_MESSAGE", "value": text}) + "\r\n"
         try:
             with socket.create_connection((host, port), timeout=2) as s:
                 s.sendall(payload.encode("utf-8"))

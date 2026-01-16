@@ -187,7 +187,7 @@ class JS8CallNetControlTab(QWidget):
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
-        payload = json.dumps({"params": {}, "type": "TX.SEND_MESSAGE", "value": text}) + "\n"
+        payload = json.dumps({"params": {}, "type": "TX.SEND_MESSAGE", "value": text}) + "\r\n"
         try:
             with socket.create_connection((host, port), timeout=3) as sock:
                 sock.sendall(payload.encode("utf-8"))
