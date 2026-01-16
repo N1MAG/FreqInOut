@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Dict, Set, Optional
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -283,17 +284,20 @@ class JS8CallNetControlTab(QWidget):
         # Buttons row
         btn_row = QHBoxLayout()
         self.start_btn = QPushButton("Start Net")
-        self.ack_btn = QPushButton("ACK Check-ins")
+        self.ack_btn = QPushButton("ACK GROUP")
+        self.ack_callsign_btn = QPushButton("ACK CALLSIGN")
         self.group_spotter_btn = QPushButton("E? GROUP")
         self.single_spotter_btn = QPushButton("E? Callsign")
         self.save_btn = QPushButton("Save Checkins")
         self.end_btn = QPushButton("End Net")
         self.ack_btn.setEnabled(False)
+        self.ack_callsign_btn.setEnabled(False)
         self.end_btn.setEnabled(False)
         self._set_net_button_styles(active=False)
 
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.ack_btn)
+        btn_row.addWidget(self.ack_callsign_btn)
         btn_row.addWidget(self.group_spotter_btn)
         btn_row.addWidget(self.single_spotter_btn)
         btn_row.addWidget(self.save_btn)
@@ -306,6 +310,7 @@ class JS8CallNetControlTab(QWidget):
         # Signals
         self.start_btn.clicked.connect(self._start_net)
         self.ack_btn.clicked.connect(self._ack_checkins)
+        self.ack_callsign_btn.clicked.connect(self._ack_callsign)
         self.group_spotter_btn.clicked.connect(self._group_spotter)
         self.single_spotter_btn.clicked.connect(self._single_spotter)
         self.save_btn.clicked.connect(self._save_checkins)
@@ -586,6 +591,7 @@ class JS8CallNetControlTab(QWidget):
         if active:
             self.start_btn.setStyleSheet(button_style("muted", theme))
             self.ack_btn.setStyleSheet(button_style("info", theme))
+            self.ack_callsign_btn.setStyleSheet(button_style("info", theme))
             self.group_spotter_btn.setStyleSheet(button_style("info", theme))
             self.single_spotter_btn.setStyleSheet(button_style("info", theme))
             self.save_btn.setStyleSheet(button_style("success", theme))
@@ -594,6 +600,7 @@ class JS8CallNetControlTab(QWidget):
         else:
             self.start_btn.setStyleSheet(self._start_btn_default_style)
             self.ack_btn.setStyleSheet(button_style("muted", theme))
+            self.ack_callsign_btn.setStyleSheet(button_style("muted", theme))
             self.group_spotter_btn.setStyleSheet(button_style("muted", theme))
             self.single_spotter_btn.setStyleSheet(button_style("muted", theme))
             self.save_btn.setStyleSheet(button_style("muted", theme))
@@ -724,6 +731,7 @@ class JS8CallNetControlTab(QWidget):
         self._set_net_button_styles(active=True)
         self.end_btn.setEnabled(True)
         self.ack_btn.setEnabled(True)
+        self.ack_callsign_btn.setEnabled(True)
 
           # Track file size so we only read new lines
         try:
@@ -812,6 +820,7 @@ class JS8CallNetControlTab(QWidget):
         self.end_btn.setEnabled(False)
         self._set_net_button_styles(active=False)
         self.ack_btn.setEnabled(False)
+        self.ack_callsign_btn.setEnabled(False)
         self._checkins.clear()
         self._checkin_rows.clear()
         self._checkins_saved.clear()
@@ -1235,14 +1244,19 @@ class JS8CallNetControlTab(QWidget):
             item.setText(val)
             # Status coloring
             if cols[idx] == "STATUS":
+                theme = resolve_theme(self.settings)
                 status_upper = val.upper()
                 mismatch = self._status_mismatch.get(callsign, False)
                 if status_upper == "ACKED":
                     item.setBackground(Qt.green)
                 elif status_upper.startswith("F!"):
                     item.setBackground(Qt.red if mismatch else Qt.cyan)
+                elif status_upper == "NEW":
+                    bg = QColor(theme["warning"])
+                    bg.setAlpha(60)
+                    item.setBackground(bg)
                 else:
-                    item.setBackground(Qt.white)
+                    item.setBackground(QColor(theme["surface_alt"]))
 
     def _upsert_checkin(
         self,
@@ -1414,9 +1428,39 @@ class JS8CallNetControlTab(QWidget):
             QMessageBox.information(self, "ACK", "No callsigns to ACK.")
             return
         text = f"ACK {short_codes}"
+        resp = QMessageBox.question(
+            self,
+            "ACK",
+            f"SEND ACK?\n\n{text}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
         if self._send_js8_message(text):
             for cs in new_calls:
                 self._upsert_checkin(cs, status="ACKED")
+
+    def _ack_callsign(self):
+        if not self._net_in_progress:
+            QMessageBox.information(self, "Net", "Start the net before ACK.")
+            return
+        cs = self._selected_callsign()
+        if not cs:
+            QMessageBox.information(self, "ACK", "Select one check-in row.")
+            return
+        text = f"ACK {cs}"
+        resp = QMessageBox.question(
+            self,
+            "ACK",
+            f"SEND ACK?\n\n{text}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        if self._send_js8_message(text):
+            self._upsert_checkin(cs, status="ACKED")
 
     def _group_spotter(self):
         if not self._net_in_progress:
