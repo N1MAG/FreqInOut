@@ -180,9 +180,13 @@
 
   <h3 id="messages">Messages Tab</h3>
   <ul class="section-list">
-    <li>Shows JS8Call, VarAC, FLMSG, and FLAMP messages from configured paths. Filtering and search follow the tab controls. No rig control occurs here.</li>
+    <li>Unified list of JS8Call, VarAC, FLMSG, and FLAMP messages from configured paths. No rig control occurs here.</li>
     <li><strong>Scan every</strong>: Controls file-based scanning (VarAC/FLMSG/FLAMP). JS8 inbox polling uses its own interval.</li>
     <li><strong>JS8 polling</strong>: JS8 inbox is polled automatically about every 90 seconds to ingest new messages.</li>
+    <li><strong>Filters</strong>: MSG Type, Status, From, To plus a free-text search field (filters across all visible columns). Filters are debounced for performance and Clear Filters resets all fields.</li>
+    <li><strong>Sorting</strong>: Click column headers to sort by MSG Type, Status, From, To, RCV_DT, or Message Title.</li>
+    <li><strong>View</strong>: Opens the message in the right-hand viewer and marks it READ in the local message database; the list stays stable while you read.</li>
+    <li><strong>Delete (files only)</strong>: Moves FLMSG/FLAMP/VarAC files to the OS recycle bin/trash after confirmation; JS8 messages are not deleted.</li>
     <li><strong>Pending JS8 MSGs</strong>: <em>Mark Retrieved</em> clears the pending entry and (if enabled in Settings) updates JS8Call inbox_v1 to READ.</li>
     <li><strong>NEXT MSG ID</strong>: If a received message contains "NEXT MSG ID ###", a pending GET entry is auto-created.</li>
   </ul>
