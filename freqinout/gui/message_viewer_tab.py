@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent
+from PySide6.QtGui import QPainter, QColor, QPalette
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QLineEdit,
     QTableWidget,
+    QTableView,
     QTableWidgetItem,
     QHeaderView,
     QAbstractItemView,
@@ -36,7 +38,9 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QAbstractScrollArea,
     QSplitter,
-    QToolButton,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QStyle,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -110,16 +114,109 @@ class UnifiedMessage:
     payload: object
 
 
-class SortableDateItem(QTableWidgetItem):
-    def __init__(self, ts: float, text: str):
-        super().__init__(text)
-        self._ts = ts
+class MessageTableModel(QAbstractTableModel):
+    HEADERS = ["MSG Type", "Status", "From", "To", "RCV_DT", "Message Title", ""]
 
-    def __lt__(self, other):
-        if isinstance(other, SortableDateItem):
-            return self._ts < other._ts
-        return super().__lt__(other)
+    def __init__(self, rows: List[UnifiedMessage]):
+        super().__init__()
+        self._rows = rows
 
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            return 0
+        return len(self.HEADERS)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        col = index.column()
+        if role == Qt.DisplayRole:
+            if col == 0:
+                return row.msg_type
+            if col == 1:
+                return row.status
+            if col == 2:
+                return row.from_call
+            if col == 3:
+                return row.to_call
+            if col == 4:
+                return row.rcv_display
+            if col == 5:
+                return row.title
+            if col == 6:
+                return "View" if isinstance(row.payload, JS8Message) else "View | Delete"
+        if role == Qt.UserRole:
+            return row
+        if role == Qt.ForegroundRole and col == 1 and row.status == "NEW":
+            return QColor(Qt.red)
+        return None
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal and 0 <= section < len(self.HEADERS):
+            return self.HEADERS[section]
+        return None
+
+    def set_rows(self, rows: List[UnifiedMessage]) -> None:
+        self.beginResetModel()
+        self._rows = rows
+        self.endResetModel()
+
+
+class MessageActionDelegate(QStyledItemDelegate):
+    def __init__(self, parent, danger_color: QColor | None = None):
+        super().__init__(parent)
+        self._danger = danger_color or QColor(Qt.red)
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        if index.column() != 6:
+            super().paint(painter, option, index)
+            return
+        row = index.data(Qt.UserRole)
+        if row is None:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        rect = option.rect
+        link_color = option.palette.color(QPalette.Link)
+        painter.setPen(link_color)
+        view_text = "View"
+        fm = option.fontMetrics
+        view_rect = rect.adjusted(6, 0, -6, 0)
+        painter.drawText(view_rect, Qt.AlignVCenter | Qt.AlignLeft, view_text)
+        if isinstance(row.payload, FileRecord):
+            del_text = "Delete"
+            del_width = fm.horizontalAdvance(del_text)
+            del_rect = rect.adjusted(rect.width() - del_width - 6, 0, -6, 0)
+            painter.setPen(self._danger)
+            painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, del_text)
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if index.column() != 6:
+            return False
+        if event.type() != QEvent.MouseButtonRelease:
+            return False
+        row = index.data(Qt.UserRole)
+        if row is None:
+            return False
+        rect = option.rect
+        pos = event.position().toPoint()
+        if isinstance(row.payload, FileRecord):
+            if pos.x() > rect.center().x():
+                self.parent()._delete_file_record(row.payload)
+            else:
+                self.parent()._on_view_message(row)
+        else:
+            self.parent()._on_view_message(row)
+        return True
 
 class MessageViewerTab(QWidget):
     """
@@ -161,6 +258,9 @@ class MessageViewerTab(QWidget):
         self._sort_order = Qt.DescendingOrder
         self._freeze_messages_table = False
         self._deferred_refresh = False
+        self._messages_model = MessageTableModel([])
+        self._actions_delegate = None
+        self._header_cells: List[QWidget] = []
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -404,9 +504,6 @@ class MessageViewerTab(QWidget):
         self.pending_count = QLabel("0 pending")
         pending_header.addWidget(self.pending_count)
         pending_header.addStretch()
-        self.pending_clear_btn = QPushButton("Clear All")
-        self.pending_clear_btn.clicked.connect(self._clear_pending_backlog)
-        pending_header.addWidget(self.pending_clear_btn)
         pending_layout.addLayout(pending_header)
 
         self.pending_table = QTableWidget(0, 5)
@@ -433,10 +530,11 @@ class MessageViewerTab(QWidget):
         self.messages_header = QWidget()
         self.messages_header_layout = QHBoxLayout(self.messages_header)
         self.messages_header_layout.setContentsMargins(0, 0, 0, 4)
-        self.messages_header_layout.setSpacing(4)
+        self.messages_header_layout.setSpacing(0)
         messages_layout.addWidget(self.messages_header)
 
-        self.messages_table = QTableWidget(0, 8)
+        self.messages_table = QTableView()
+        self.messages_table.setModel(self._messages_model)
         self.messages_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.messages_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.messages_table.setAlternatingRowColors(True)
@@ -448,9 +546,12 @@ class MessageViewerTab(QWidget):
         msg_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         msg_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         msg_header.setSectionResizeMode(5, QHeaderView.Stretch)
-        msg_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        msg_header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
-        msg_header.setVisible(False)
+        msg_header.setSectionResizeMode(6, QHeaderView.Fixed)
+        self.messages_table.setColumnWidth(6, 140)
+        msg_header.setVisible(True)
+        msg_header.sectionClicked.connect(self._on_sort_clicked)
+        self._actions_delegate = MessageActionDelegate(self, QColor(resolve_theme(self.settings)["danger"]))
+        self.messages_table.setItemDelegateForColumn(6, self._actions_delegate)
         messages_layout.addWidget(self.messages_table)
         messages_box.setLayout(messages_layout)
         splitter = QSplitter(Qt.Vertical)
@@ -462,12 +563,6 @@ class MessageViewerTab(QWidget):
         self.info_label = QLabel("No file selected")
         self.info_label.setStyleSheet("font-weight: bold;")
         viewer_layout.addWidget(self.info_label)
-        theme = resolve_theme(self.settings)
-        self.resize_hint = QLabel("Drag divider to resize (||)")
-        self.resize_hint.setStyleSheet(
-            f"font-size: 11px; color: {theme['text_muted']};"
-        )
-        viewer_layout.addWidget(self.resize_hint)
         self.viewer = QTextEdit()
         self.viewer.setReadOnly(True)
         self.viewer.setAcceptRichText(False)
@@ -481,17 +576,22 @@ class MessageViewerTab(QWidget):
         self.status_filter = QComboBox()
         self.from_filter = QComboBox()
         self.to_filter = QComboBox()
-        self.rcv_filter = QComboBox()
-        self.rcv_date_edit = QLineEdit()
+        self.rcv_search = QLineEdit()
         self.clear_filters_btn = QPushButton("Clear Filters")
+        self.clear_filters_btn.setMinimumWidth(130)
+        self.clear_filters_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.clear_filters_btn.setFont(self.pending_count.font())
         self.clear_filters_btn.clicked.connect(self._clear_filters)
+        self.clear_filters_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
         self.type_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.status_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.from_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.to_filter.currentIndexChanged.connect(self._on_filter_changed)
-        self.rcv_filter.currentIndexChanged.connect(self._on_filter_changed)
-        self.rcv_date_edit.editingFinished.connect(self._on_filter_changed)
-        self.rcv_date_edit.returnPressed.connect(self._on_filter_changed)
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.timeout.connect(self._on_filter_changed)
+        self.rcv_search.setPlaceholderText("Search...")
+        self.rcv_search.textChanged.connect(lambda _: self._filter_timer.start(200))
         self._build_messages_header()
         QTimer.singleShot(0, self._set_initial_splitter_sizes)
 
@@ -705,9 +805,11 @@ class MessageViewerTab(QWidget):
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
         grid = theme["border"]
-        table_style = f"QTableWidget {{ gridline-color: {grid}; }}"
+        table_style = f"QTableView {{ gridline-color: {grid}; }}"
         self.messages_table.setStyleSheet(table_style)
-        self.pending_table.setStyleSheet(table_style)
+        self.pending_table.setStyleSheet(f"QTableWidget {{ gridline-color: {grid}; }}")
+        if self._actions_delegate:
+            self._actions_delegate._danger = QColor(theme["danger"])
         self._update_clear_filters_style()
         self._update_pending_table()
 
@@ -772,29 +874,6 @@ class MessageViewerTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to delete pending row: %s", e)
-
-    def _clear_pending_backlog(self) -> None:
-        confirm = QMessageBox.question(
-            self,
-            "Clear Pending",
-            "Remove all pending JS8 MSG rows?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if confirm != QMessageBox.Yes:
-            return
-        db_path = self._backlog_db_path()
-        if not db_path:
-            return
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute("DELETE FROM autoquery_backlog WHERE kind='MSG'")
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            log.debug("MessageViewer: failed to clear pending backlog: %s", e)
-        self._update_pending_table()
 
     def _on_pending_get(self, callsign: str, msg_id: str) -> None:
         if not callsign or not msg_id:
@@ -890,66 +969,76 @@ class MessageViewerTab(QWidget):
 
         self.type_filter.blockSignals(True)
         self.type_filter.clear()
-        self.type_filter.addItem("ALL")
+        self.type_filter.addItem("MSG Type...")
         self.type_filter.addItems(type_vals)
         if not self._filters_initialized:
-            self.type_filter.setCurrentText("ALL")
-        elif current_type in ["ALL"] + type_vals:
+            self.type_filter.setCurrentText("MSG Type...")
+        elif current_type in ["MSG Type..."] + type_vals:
             self.type_filter.setCurrentText(current_type)
         self.type_filter.blockSignals(False)
 
         self.status_filter.blockSignals(True)
         self.status_filter.clear()
-        self.status_filter.addItem("ALL")
+        self.status_filter.addItem("Status...")
         self.status_filter.addItems(status_vals)
         if not self._filters_initialized:
-            self.status_filter.setCurrentText("ALL")
-        elif current_status in ["ALL"] + status_vals:
+            self.status_filter.setCurrentText("Status...")
+        elif current_status in ["Status..."] + status_vals:
             self.status_filter.setCurrentText(current_status)
         self.status_filter.blockSignals(False)
 
         self.from_filter.blockSignals(True)
         self.from_filter.clear()
-        self.from_filter.addItem("ALL")
+        self.from_filter.addItem("From...")
         self.from_filter.addItems(from_vals)
         if not self._filters_initialized:
-            self.from_filter.setCurrentText("ALL")
-        elif current_from in ["ALL"] + from_vals:
+            self.from_filter.setCurrentText("From...")
+        elif current_from in ["From..."] + from_vals:
             self.from_filter.setCurrentText(current_from)
         self.from_filter.blockSignals(False)
 
         self.to_filter.blockSignals(True)
         self.to_filter.clear()
-        self.to_filter.addItem("ALL")
+        self.to_filter.addItem("To...")
         self.to_filter.addItems(to_vals)
         if not self._filters_initialized:
-            self.to_filter.setCurrentText("ALL")
-        elif current_to in ["ALL"] + to_vals:
+            self.to_filter.setCurrentText("To...")
+        elif current_to in ["To..."] + to_vals:
             self.to_filter.setCurrentText(current_to)
         self.to_filter.blockSignals(False)
         self._filters_initialized = True
 
     def _apply_message_filters(self) -> None:
         rows = self._message_rows
-        type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "ALL"
-        status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "ALL"
-        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else "ALL"
-        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else "ALL"
-        rcv_sel = self.rcv_filter.currentText() if hasattr(self, "rcv_filter") else "ALL"
-        rcv_cutoff = self._rcv_cutoff_ts(rcv_sel, self.rcv_date_edit.text())
+        type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
+        status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
+        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else "From..."
+        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else "To..."
+        rcv_query = (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip().lower()
 
         filtered = []
         for row in rows:
-            if type_sel != "ALL" and row.msg_type != type_sel:
+            if type_sel != "MSG Type..." and row.msg_type != type_sel:
                 continue
-            if status_sel != "ALL" and row.status != status_sel:
+            if status_sel != "Status..." and row.status != status_sel:
                 continue
-            if from_sel != "ALL" and row.from_call != from_sel:
+            if from_sel != "From..." and row.from_call != from_sel:
                 continue
-            if to_sel != "ALL" and row.to_call != to_sel:
+            if to_sel != "To..." and row.to_call != to_sel:
                 continue
-            if rcv_cutoff and row.rcv_ts and row.rcv_ts < rcv_cutoff:
-                continue
+            if rcv_query:
+                hay = " ".join(
+                    [
+                        row.msg_type or "",
+                        row.status or "",
+                        row.from_call or "",
+                        row.to_call or "",
+                        row.rcv_display or "",
+                        row.title or "",
+                    ]
+                ).lower()
+                if rcv_query not in hay:
+                    continue
             filtered.append(row)
         filtered = self._sort_rows(filtered)
         self._render_messages_table(filtered)
@@ -960,39 +1049,35 @@ class MessageViewerTab(QWidget):
             status_sel,
             from_sel,
             to_sel,
-            rcv_sel,
+            rcv_query or "ALL",
             len(filtered),
         )
 
     def _clear_filters(self) -> None:
         self._unfreeze_table()
         if (
-            self.type_filter.currentText() in ("", "ALL")
-            and self.status_filter.currentText() in ("", "ALL")
-            and self.from_filter.currentText() in ("", "ALL")
-            and self.to_filter.currentText() in ("", "ALL")
-            and self.rcv_filter.currentText() in ("", "ALL")
-            and not self.rcv_date_edit.text().strip()
+            self.type_filter.currentText() in ("", "MSG Type...")
+            and self.status_filter.currentText() in ("", "Status...")
+            and self.from_filter.currentText() in ("", "From...")
+            and self.to_filter.currentText() in ("", "To...")
+            and not self.rcv_search.text().strip()
         ):
             return
         self.type_filter.blockSignals(True)
         self.status_filter.blockSignals(True)
         self.from_filter.blockSignals(True)
         self.to_filter.blockSignals(True)
-        self.rcv_filter.blockSignals(True)
-        self.rcv_date_edit.blockSignals(True)
-        self.type_filter.setCurrentText("ALL")
-        self.status_filter.setCurrentText("ALL")
-        self.from_filter.setCurrentText("ALL")
-        self.to_filter.setCurrentText("ALL")
-        self.rcv_filter.setCurrentText("ALL")
-        self.rcv_date_edit.clear()
+        self.rcv_search.blockSignals(True)
+        self.type_filter.setCurrentText("MSG Type...")
+        self.status_filter.setCurrentText("Status...")
+        self.from_filter.setCurrentText("From...")
+        self.to_filter.setCurrentText("To...")
+        self.rcv_search.clear()
         self.type_filter.blockSignals(False)
         self.status_filter.blockSignals(False)
         self.from_filter.blockSignals(False)
         self.to_filter.blockSignals(False)
-        self.rcv_filter.blockSignals(False)
-        self.rcv_date_edit.blockSignals(False)
+        self.rcv_search.blockSignals(False)
         self._apply_message_filters()
 
     def _on_filter_changed(self) -> None:
@@ -1001,36 +1086,7 @@ class MessageViewerTab(QWidget):
 
     def _render_messages_table(self, rows: List[UnifiedMessage]) -> None:
         self.messages_table.setUpdatesEnabled(False)
-        self.messages_table.setRowCount(0)
-        for idx, row in enumerate(rows):
-            self.messages_table.insertRow(idx)
-            type_item = QTableWidgetItem(row.msg_type)
-            status_item = QTableWidgetItem(row.status)
-            from_item = QTableWidgetItem(row.from_call)
-            to_item = QTableWidgetItem(row.to_call)
-            rcv_item = SortableDateItem(row.rcv_ts, row.rcv_display)
-            title_item = QTableWidgetItem(row.title)
-
-            if row.status == "NEW":
-                status_item.setForeground(Qt.red)
-
-            self.messages_table.setItem(idx, 0, type_item)
-            self.messages_table.setItem(idx, 1, status_item)
-            self.messages_table.setItem(idx, 2, from_item)
-            self.messages_table.setItem(idx, 3, to_item)
-            self.messages_table.setItem(idx, 4, rcv_item)
-            self.messages_table.setItem(idx, 5, title_item)
-
-            view_btn = QPushButton("View")
-            view_btn.clicked.connect(lambda _, m=row: self._on_view_message(m))
-            self.messages_table.setCellWidget(idx, 6, view_btn)
-            if isinstance(row.payload, FileRecord):
-                del_btn = QPushButton("Delete")
-                del_btn.clicked.connect(lambda _, r=row.payload: self._delete_file_record(r))
-                self.messages_table.setCellWidget(idx, 7, del_btn)
-            else:
-                self.messages_table.setCellWidget(idx, 7, QLabel(""))
-
+        self._messages_model.set_rows(rows)
         if not self._has_active_view:
             self.info_label.setText("No file selected")
             self.viewer.clear()
@@ -1043,24 +1099,33 @@ class MessageViewerTab(QWidget):
             item = self.messages_header_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        self.messages_header_layout.addWidget(
-            self._make_filter_header("Type", self.type_filter, 0)
-        )
-        self.messages_header_layout.addWidget(
-            self._make_filter_header("Status", self.status_filter, 1)
-        )
-        self.messages_header_layout.addWidget(
-            self._make_filter_header("From", self.from_filter, 2)
-        )
-        self.messages_header_layout.addWidget(
-            self._make_filter_header("To", self.to_filter, 3)
-        )
-        self.messages_header_layout.addWidget(
-            self._make_rcv_filter_header("RCV_DT", self.rcv_filter, self.rcv_date_edit, 4)
-        )
-        self.messages_header_layout.addWidget(self._make_sort_button("Message Title", 5), 1)
-        self.messages_header_layout.addWidget(self.clear_filters_btn)
+        self._header_cells = []
+        type_hdr = self._make_filter_cell(self.type_filter)
+        status_hdr = self._make_filter_cell(self.status_filter)
+        from_hdr = self._make_filter_cell(self.from_filter)
+        to_hdr = self._make_filter_cell(self.to_filter)
+        rcv_hdr = self._make_search_filter_cell(self.rcv_search)
+        title_hdr = self._make_header_spacer()
+        self.messages_header_layout.addWidget(type_hdr)
+        self.messages_header_layout.addWidget(status_hdr)
+        self.messages_header_layout.addWidget(from_hdr)
+        self.messages_header_layout.addWidget(to_hdr)
+        self.messages_header_layout.addWidget(rcv_hdr)
+        self.messages_header_layout.addWidget(title_hdr, 1)
+        self._header_cells.extend([type_hdr, status_hdr, from_hdr, to_hdr, rcv_hdr, title_hdr])
+        clear_wrap = QWidget()
+        clear_layout = QHBoxLayout(clear_wrap)
+        clear_layout.setContentsMargins(2, 2, 2, 2)
+        clear_layout.addStretch()
+        clear_layout.addWidget(self.clear_filters_btn)
+        clear_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        clear_layout.setAlignment(self.clear_filters_btn, Qt.AlignRight | Qt.AlignVCenter)
+        self.messages_header_layout.addWidget(clear_wrap)
+        self._header_cells.append(clear_wrap)
         self._update_clear_filters_style()
+        self._sync_header_widths()
+        self.messages_table.horizontalHeader().sectionResized.connect(self._sync_header_widths)
+        self.messages_header.setMinimumHeight(self.messages_header.sizeHint().height())
 
     def _set_initial_splitter_sizes(self) -> None:
         if not hasattr(self, "messages_splitter"):
@@ -1071,6 +1136,7 @@ class MessageViewerTab(QWidget):
         total = max(target * 3, 400)
         self.messages_table.setMinimumHeight((row_height * 5) + 8)
         self.messages_splitter.setSizes([target, total - target])
+        self._sync_header_widths()
 
     def _unfreeze_table(self) -> None:
         if not self._freeze_messages_table:
@@ -1079,51 +1145,49 @@ class MessageViewerTab(QWidget):
         if self._deferred_refresh:
             self._populate_messages_table(force=True)
 
-    def _make_sort_button(self, text: str, column: int) -> QToolButton:
-        btn = QToolButton()
-        btn.setText(text)
-        btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        btn.clicked.connect(lambda: self._on_sort_clicked(column))
-        btn.setStyleSheet("font-weight: 600;")
-        return btn
-
-    def _make_filter_header(self, label: str, combo: QComboBox, column: int) -> QWidget:
+    def _make_filter_cell(self, combo: QComboBox) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(2)
-        layout.addWidget(self._make_sort_button(label, column))
+        combo.setMinimumWidth(110)
+        combo.setMinimumContentsLength(6)
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout.addWidget(combo)
         return container
 
-    def _make_rcv_filter_header(self, label: str, combo: QComboBox, edit: QLineEdit, column: int) -> QWidget:
+    def _make_search_filter_cell(self, edit: QLineEdit) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(2)
-        layout.addWidget(self._make_sort_button(label, column))
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-        combo.clear()
-        combo.addItems(["ALL", "1 Day", "1 Week", "1 Month"])
-        combo.setCurrentText("ALL")
-        edit.setPlaceholderText("YYYY-MM-DD")
-        edit.setMaximumWidth(110)
-        row.addWidget(combo)
-        row.addWidget(edit)
-        row.addStretch()
-        layout.addLayout(row)
+        edit.setMinimumWidth(200)
+        edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout.addWidget(edit)
         return container
+
+    @staticmethod
+    def _make_header_spacer() -> QWidget:
+        spacer = QWidget()
+        return spacer
+
+    def _sync_header_widths(self) -> None:
+        header = self.messages_table.horizontalHeader()
+        for idx, widget in enumerate(self._header_cells):
+            if widget is None:
+                continue
+            width = header.sectionSize(idx)
+            min_width = 140 if idx == 6 else 60
+            widget.setFixedWidth(max(min_width, width))
 
     def _filters_active(self) -> bool:
         return (
-            self.type_filter.currentText() not in ("", "ALL")
-            or self.status_filter.currentText() not in ("", "ALL")
-            or self.from_filter.currentText() not in ("", "ALL")
-            or self.to_filter.currentText() not in ("", "ALL")
-            or self.rcv_filter.currentText() not in ("", "ALL")
-            or bool(self.rcv_date_edit.text().strip())
+            self.type_filter.currentText() not in ("", "MSG Type...")
+            or self.status_filter.currentText() not in ("", "Status...")
+            or self.from_filter.currentText() not in ("", "From...")
+            or self.to_filter.currentText() not in ("", "To...")
+            or bool(self.rcv_search.text().strip())
         )
 
     def _update_clear_filters_style(self) -> None:
@@ -1164,28 +1228,6 @@ class MessageViewerTab(QWidget):
 
         return sorted(rows, key=key, reverse=reverse)
 
-    @staticmethod
-    def _rcv_cutoff_ts(selection: str, date_text: str) -> float | None:
-        sel = (selection or "ALL").strip().upper()
-        cutoff = None
-        now = time.time()
-        if sel == "1 DAY":
-            cutoff = now - (24 * 60 * 60)
-        elif sel == "1 WEEK":
-            cutoff = now - (7 * 24 * 60 * 60)
-        elif sel == "1 MONTH":
-            cutoff = now - (30 * 24 * 60 * 60)
-        date_text = (date_text or "").strip()
-        if date_text:
-            try:
-                from datetime import datetime
-
-                dt = datetime.strptime(date_text, "%Y-%m-%d")
-                ts = time.mktime(dt.timetuple())
-                cutoff = ts if cutoff is None else max(cutoff, ts)
-            except Exception:
-                pass
-        return cutoff
 
     # ---------- Selection / Viewing ----------
 
