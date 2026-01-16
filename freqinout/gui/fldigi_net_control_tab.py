@@ -14,20 +14,17 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QTextEdit,
     QPushButton,
-    QFileDialog,
     QMessageBox,
     QComboBox,
     QApplication,
     QCompleter,
-    QGroupBox,
-    QFormLayout,
-    QCheckBox,
 )
 from PySide6.QtGui import QFontMetrics
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.checkins_db import upsert_checkins
+from freqinout.core.config_paths import get_fldigi_checkin_dir
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.qsy_helper import (
     load_operating_groups as qsy_load_operating_groups,
@@ -78,6 +75,7 @@ class FldigiNetControlTab(QWidget):
         self._save_btn_default_style: str = ""
         self._normalizing_main = False
         self._normalizing_late = False
+        self._known_operator_rows: List[Dict[str, str]] = []
 
         self._build_ui()
         self._apply_theme()
@@ -142,43 +140,8 @@ class FldigiNetControlTab(QWidget):
         suspend_row.addWidget(self.ad_hoc_btn)
         layout.addLayout(suspend_row)
 
-        # Macro file paths in a framed group
-        paths_group = QGroupBox("Check-in Files")
-        paths_form = QFormLayout()
-
-        # Net Check-in Macro File
-        main_path_row = QHBoxLayout()
-        self.main_log_edit = QLineEdit()
-        self.main_log_edit.setPlaceholderText(
-            "Full path to file (update macro if needed)"
-        )
-        main_browse_btn = QPushButton("Browse")
-        main_browse_btn.clicked.connect(self._browse_main_log)
-        main_path_row.addWidget(self.main_log_edit, stretch=1)
-        main_path_row.addWidget(main_browse_btn)
-        paths_form.addRow("Net Check-in File:", main_path_row)
-
-        # Late Check-in Macro File
-        late_path_row = QHBoxLayout()
-        self.late_log_edit = QLineEdit()
-        self.late_log_edit.setPlaceholderText(
-            "Full path to file (update macro if needed)"
-        )
-        late_browse_btn = QPushButton("Browse")
-        late_browse_btn.clicked.connect(self._browse_late_log)
-        late_path_row.addWidget(self.late_log_edit, stretch=1)
-        late_path_row.addWidget(late_browse_btn)
-        paths_form.addRow("New/Late Check-in File:", late_path_row)
-
-        paths_group.setLayout(paths_form)
-        layout.addWidget(paths_group)
-
         # Known operators row (DB-backed auto-suggest)
         known_row = QHBoxLayout()
-        self.add_known_main_btn = QPushButton("Add to Main")
-        self.add_known_late_btn = QPushButton("Add to Late")
-        known_row.addWidget(self.add_known_main_btn)
-        known_row.addWidget(self.add_known_late_btn)
         known_row.addWidget(QLabel("Operator Lookup/Add:"))
         self.known_op_edit = QLineEdit()
         self.known_op_edit.setPlaceholderText("Add new or type to search")
@@ -186,6 +149,16 @@ class FldigiNetControlTab(QWidget):
         known_row.addWidget(self.known_op_edit, stretch=1)
         known_row.addStretch()
         layout.addLayout(known_row)
+
+        known_btn_row = QHBoxLayout()
+        self.add_known_main_btn = QPushButton("Add to Main")
+        self.add_known_late_btn = QPushButton("Add to New/Late")
+        known_btn_row.addWidget(self.add_known_main_btn)
+        known_btn_row.addWidget(self.add_known_late_btn)
+        known_btn_row.addStretch()
+        layout.addLayout(known_btn_row)
+
+        layout.addSpacing(24)
 
         # Two panels for check-ins
         panels_row = QHBoxLayout()
@@ -252,10 +225,10 @@ class FldigiNetControlTab(QWidget):
         layout.addLayout(btn_row)
 
         # Signals
-        # Remove macro hint updates
-        self.main_log_edit.textChanged.connect(lambda _: None)
         self.main_text.textChanged.connect(self._on_main_text_changed)
         self.late_text.textChanged.connect(self._on_late_text_changed)
+        self.known_op_edit.textChanged.connect(self._on_known_op_text_changed)
+        self.known_op_edit.returnPressed.connect(self._on_known_op_return)
 
         self.start_btn.clicked.connect(self._start_net)
         self.save_btn.clicked.connect(self._save_checkins)
@@ -485,6 +458,8 @@ class FldigiNetControlTab(QWidget):
         self.suspend_btn.setStyleSheet(button_style("warning", theme))
         self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
         self._set_net_button_styles(self._net_in_progress)
+        self._update_copy_buttons_state()
+        self._update_add_buttons_state()
 
     def apply_theme(self) -> None:
         self._apply_theme()
@@ -778,25 +753,10 @@ class FldigiNetControlTab(QWidget):
             {row.get("net_name", "") for row in net_sched if isinstance(row, dict) and row.get("net_name")}
         )
 
-        # Paths
-        self.main_log_edit.setText(data.get("fldigi_main_log_file", ""))
-        self.late_log_edit.setText(data.get("fldigi_late_log_file", ""))
+        self._resolve_checkin_dir()
 
         self._populate_net_name_from_schedule()
         self._update_net_name_min_width()
-
-    def _save_paths_to_settings(self):
-        main_path = self.main_log_edit.text().strip()
-        late_path = self.late_log_edit.text().strip()
-        if hasattr(self.settings, "set"):
-            self.settings.set("fldigi_main_log_file", main_path)
-            self.settings.set("fldigi_late_log_file", late_path)
-        else:
-            data = self.settings.all()
-            data["fldigi_main_log_file"] = main_path
-            data["fldigi_late_log_file"] = late_path
-            if hasattr(self.settings, "_data"):
-                self.settings._data = data  # type: ignore[attr-defined]
 
     # ---------------- KNOWN OPERATORS FROM DB ---------------- #
 
@@ -832,6 +792,7 @@ class FldigiNetControlTab(QWidget):
             return
 
         suggestions: List[str] = []
+        self._known_operator_rows = []
         for callsign, name, state in rows:
             cs = (callsign or "").strip().upper()
             nm = (name or "").strip()
@@ -843,13 +804,64 @@ class FldigiNetControlTab(QWidget):
                 parts.append(nm)
             if st:
                 parts.append(st)
-            suggestions.append(" ".join(parts))
+            display = " ".join(parts)
+            suggestions.append(display)
+            self._known_operator_rows.append({"callsign": cs, "name": nm, "state": st, "display": display})
 
         if suggestions:
             completer = QCompleter(sorted(suggestions), self)
             completer.setCaseSensitivity(Qt.CaseInsensitive)
             completer.setFilterMode(Qt.MatchContains)
             self.known_op_edit.setCompleter(completer)
+
+    def _matching_known_operators(self, query: str) -> List[Dict[str, str]]:
+        needle = (query or "").strip().lower()
+        if not needle:
+            return []
+        matches = []
+        for row in self._known_operator_rows:
+            if needle in row.get("display", "").lower():
+                matches.append(row)
+        return matches
+
+    def _on_known_op_return(self) -> None:
+        text = self.known_op_edit.text().strip()
+        matches = self._matching_known_operators(text)
+        if len(matches) == 1:
+            row = matches[0]
+            formatted = self._format_entry(row["callsign"], row["name"], row["state"])
+            self.known_op_edit.setText(formatted)
+            return
+        cs, name, state = self._parse_checkin_line(text)
+        if not matches and cs and name and state:
+            formatted = self._format_entry(cs, name, state)
+            self.known_op_edit.setText(formatted)
+
+    def _on_known_op_text_changed(self) -> None:
+        self._update_add_buttons_state()
+
+    def _update_copy_buttons_state(self) -> None:
+        theme = resolve_theme(self.settings)
+        main_has = bool(self.main_text.toPlainText().strip())
+        late_has = bool(self.late_text.toPlainText().strip())
+        self.copy_main_btn.setStyleSheet(
+            button_style("success", theme) if main_has else button_style("muted", theme)
+        )
+        self.copy_late_btn.setStyleSheet(
+            button_style("info", theme) if late_has else button_style("muted", theme)
+        )
+
+    def _update_add_buttons_state(self) -> None:
+        theme = resolve_theme(self.settings)
+        text = self.known_op_edit.text().strip()
+        cs, name, state = self._parse_checkin_line(text)
+        ready = bool(cs and name and state)
+        self.add_known_main_btn.setStyleSheet(
+            button_style("success", theme) if ready else button_style("muted", theme)
+        )
+        self.add_known_late_btn.setStyleSheet(
+            button_style("info", theme) if ready else button_style("muted", theme)
+        )
 
     # ---------------- Net name auto-fill ---------------- #
 
@@ -927,26 +939,6 @@ class FldigiNetControlTab(QWidget):
 
     # ---------------- Browse / HINT ---------------- #
 
-    def _browse_main_log(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Net Check-in Macro File",
-            "",
-            "Text files (*.txt);;All files (*)",
-        )
-        if path:
-            self.main_log_edit.setText(path)
-
-    def _browse_late_log(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Late Check-in Macro File",
-            "",
-            "Text files (*.txt);;All files (*)",
-        )
-        if path:
-            self.late_log_edit.setText(path)
-
     # ---------------- FILE HELPERS ---------------- #
 
     def _read_file(self, path: str) -> str:
@@ -982,34 +974,42 @@ class FldigiNetControlTab(QWidget):
         except Exception as e:
             log.error("Failed to write file %s: %s", path, e)
 
+    def _resolve_checkin_dir(self) -> Path:
+        stored = (self.settings.get("fldigi_checkin_dir", "") or "").strip()
+        if not stored:
+            stored = str(get_fldigi_checkin_dir())
+            try:
+                self.settings.set("fldigi_checkin_dir", stored)
+            except Exception:
+                pass
+        return Path(stored)
+
+    def _checkin_file_paths(self) -> tuple[str, str]:
+        base = self._resolve_checkin_dir()
+        return str(base / "main_checkins.txt"), str(base / "new-late_checkins.txt")
+
+    def _ensure_checkin_files(self) -> tuple[str, str]:
+        base = self._resolve_checkin_dir()
+        main_path = base / "main_checkins.txt"
+        late_path = base / "new-late_checkins.txt"
+        base.mkdir(parents=True, exist_ok=True)
+        if not main_path.exists():
+            main_path.touch()
+        if not late_path.exists():
+            late_path.touch()
+        return str(main_path), str(late_path)
+
     # ---------------- BUTTON LOGIC ---------------- #
 
     def _validate_before_start(self) -> bool:
         net_name = self.net_name_combo.currentText().strip()
-        main_path = self.main_log_edit.text().strip()
-        late_path = self.late_log_edit.text().strip()
 
         if not net_name:
             QMessageBox.warning(self, "Missing Net Name", "Enter Net Name before starting the net.")
             return False
-        if not main_path or not late_path:
-            QMessageBox.warning(
-                self,
-                "Missing File Paths",
-                "Configure both Net Check-in Macro File and Late Check-in Macro File before starting the net.",
-            )
-            return False
 
-        # Verify they exist or are creatable
-        mp = Path(main_path)
-        lp = Path(late_path)
         try:
-            mp.parent.mkdir(parents=True, exist_ok=True)
-            if not mp.exists():
-                mp.touch()
-            lp.parent.mkdir(parents=True, exist_ok=True)
-            if not lp.exists():
-                lp.touch()
+            self._ensure_checkin_files()
         except Exception as e:
             QMessageBox.critical(
                 self,
@@ -1023,11 +1023,7 @@ class FldigiNetControlTab(QWidget):
     def _start_net(self):
         if not self._validate_before_start():
             return
-
-        self._save_paths_to_settings()
-
-        main_path = self.main_log_edit.text().strip()
-        late_path = self.late_log_edit.text().strip()
+        main_path, late_path = self._ensure_checkin_files()
 
         # Load existing file contents
         # Clear files to avoid loading stale/pre-populated data
@@ -1081,9 +1077,7 @@ class FldigiNetControlTab(QWidget):
         self._start_net()
 
     def _save_checkins(self):
-        main_path = self.main_log_edit.text().strip()
-        late_path = self.late_log_edit.text().strip()
-        self._save_paths_to_settings()
+        main_path, late_path = self._ensure_checkin_files()
 
         main_text = self.main_text.toPlainText()
         late_text = self.late_text.toPlainText()
@@ -1095,15 +1089,7 @@ class FldigiNetControlTab(QWidget):
         self._refresh_operator_history_views()
 
     def _merge_late_into_main(self):
-        main_path = self.main_log_edit.text().strip()
-        late_path = self.late_log_edit.text().strip()
-        if not main_path or not late_path:
-            QMessageBox.warning(
-                self,
-                "Missing File Paths",
-                "Configure Net Check-in Macro File and Late Check-in Macro File before merging.",
-            )
-            return
+        main_path, late_path = self._ensure_checkin_files()
 
         # Prefer current UI content (may have manual edits) and fall back to file
         late_from_file = self.late_text.toPlainText()
@@ -1177,11 +1163,11 @@ class FldigiNetControlTab(QWidget):
 
     def _on_main_text_changed(self):
         # Avoid auto-normalizing while the operator is editing in real time.
-        return
+        self._update_copy_buttons_state()
 
     def _on_late_text_changed(self):
         # Avoid auto-normalizing while the operator is editing in real time.
-        return
+        self._update_copy_buttons_state()
 
     def _normalize_text_edit(self, edit: QTextEdit, flag_attr: str) -> None:
         """
@@ -1228,10 +1214,7 @@ class FldigiNetControlTab(QWidget):
             log.info("End Net clicked but no net_in_progress flag set; proceeding with DB load from file.")
         self._save_checkins()
 
-        main_path = self.main_log_edit.text().strip()
-        if not main_path:
-            QMessageBox.warning(self, "Missing File", "Net Check-in Macro File path is not configured.")
-            return
+        main_path, _ = self._checkin_file_paths()
 
         main_text = self._read_file(main_path)
         if not main_text.strip():
@@ -1260,9 +1243,9 @@ class FldigiNetControlTab(QWidget):
             if not line or line.startswith("#"):
                 continue
             cs, name, state = self._parse_checkin_line(line)
+            cs, name, state = self._normalize_checkin_fields(cs, name, state)
             if not cs:
                 continue
-            formatted = self._format_entry(cs, name, state)
             entries.append(
                 {
                     "callsign": cs,
@@ -1370,6 +1353,15 @@ class FldigiNetControlTab(QWidget):
         """
         parts = [p for p in (cs.strip().upper(), name.strip(), state.strip().upper()) if p]
         return " / ".join(parts)
+
+    @staticmethod
+    def _normalize_checkin_fields(cs: str, name: str, state: str) -> tuple[str, str, str]:
+        cs_norm = (cs or "").strip().upper()
+        state_norm = (state or "").strip().upper()
+        name_norm = (name or "").strip()
+        if name_norm:
+            name_norm = name_norm[0].upper() + name_norm[1:]
+        return cs_norm, name_norm, state_norm
 
     def _bump_operator_history(self, entries: List[Dict]):
         """

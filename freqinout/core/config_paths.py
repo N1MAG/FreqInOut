@@ -4,6 +4,7 @@ Shared helpers for locating user-writable config/data directories.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 
@@ -35,3 +36,10 @@ def get_config_dir() -> Path:
         fallback = Path.cwd() / "freqinout_config"
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback
+
+
+def get_fldigi_checkin_dir() -> Path:
+    """
+    Return the default FLDigi check-in directory under the OS temp folder.
+    """
+    return Path(tempfile.gettempdir()) / APP_NAME / "fldigi"

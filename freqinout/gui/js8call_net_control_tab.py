@@ -45,16 +45,11 @@ from freqinout.gui.qsy_helper import (
 )
 from freqinout.core.config_paths import get_config_dir
 from freqinout.gui.theme import resolve_theme, button_style
-
-
-def _nets_db_path() -> Path:
-    return get_config_dir() / "config" / "freqinout_nets.db"
-from freqinout.core.config_paths import get_config_dir
-
-
-def _nets_db_path() -> Path:
-    return get_config_dir() / "config" / "freqinout_nets.db"
 import psutil
+
+
+def _nets_db_path() -> Path:
+    return get_config_dir() / "config" / "freqinout_nets.db"
 
 # Vendored js8net (replacement for pyjs8call)
 JS8NET_PATH = Path(__file__).resolve().parents[2] / "third_party" / "js8net" / "js8net-main"
@@ -168,7 +163,6 @@ class JS8CallNetControlTab(QWidget):
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
         self._js8_rx_timer: QTimer | None = None
-        self._clock_timer: QTimer | None = None
 
         self._build_ui()
         self._apply_theme()
@@ -249,8 +243,10 @@ class JS8CallNetControlTab(QWidget):
         gs_row.addWidget(self.set_group_btn)
         gs_row.addWidget(self.group_edit)
         gs_row.addSpacing(12)
-        self.set_spotter_btn = QPushButton("Set Spotter")
+        self.set_spotter_btn = QPushButton("Set Expect Query")
         self.spotter_combo = QComboBox()
+        self.spotter_combo.setMinimumWidth(240)
+        self.spotter_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         gs_row.addWidget(self.set_spotter_btn)
         gs_row.addWidget(self.spotter_combo)
         gs_row.addStretch()
@@ -262,13 +258,21 @@ class JS8CallNetControlTab(QWidget):
         self.ad_hoc_btn = QPushButton("Ad Hoc Net")
         gs_row.addWidget(self.ad_hoc_btn)
         layout.addLayout(gs_row)
+        layout.addSpacing(24)
 
         # Check-ins table
         table_layout = QVBoxLayout()
         table_layout.addWidget(QLabel("<b>Check-Ins</b>"))
-        self.checkin_table = QTableWidget(0, 10)
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Check-in Filter:"))
+        self.checkin_filter_combo = QComboBox()
+        self.checkin_filter_combo.addItems(["F!103 / F!104", "Any Spotter", "All Callsigns"])
+        filter_row.addWidget(self.checkin_filter_combo)
+        filter_row.addStretch()
+        table_layout.addLayout(filter_row)
+        self.checkin_table = QTableWidget(0, 11)
         self.checkin_table.setHorizontalHeaderLabels(
-            ["CALLSIGN", "NAME", "ST", "GRID", "REGION", "MODE", "SNR", "DT ms", "OFFSET", "STATUS"]
+            ["CALLSIGN", "NAME", "ST", "GRID", "REGION", "MODE", "SNR", "DT ms", "OFFSET", "STATUS", ""]
         )
         self.checkin_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.checkin_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -280,8 +284,8 @@ class JS8CallNetControlTab(QWidget):
         btn_row = QHBoxLayout()
         self.start_btn = QPushButton("Start Net")
         self.ack_btn = QPushButton("ACK Check-ins")
-        self.group_spotter_btn = QPushButton("Spotter-Group")
-        self.single_spotter_btn = QPushButton("Spotter-Callsign")
+        self.group_spotter_btn = QPushButton("E? GROUP")
+        self.single_spotter_btn = QPushButton("E? Callsign")
         self.save_btn = QPushButton("Save Checkins")
         self.end_btn = QPushButton("End Net")
         self.ack_btn.setEnabled(False)
@@ -308,14 +312,14 @@ class JS8CallNetControlTab(QWidget):
         self.end_btn.clicked.connect(self._end_net)
         self.set_group_btn.clicked.connect(self._set_group_target)
         self.set_spotter_btn.clicked.connect(self._set_spotter_form)
+        self.spotter_combo.currentIndexChanged.connect(self._on_spotter_selection_changed)
+        self.group_edit.textChanged.connect(self._update_group_button_state)
+        self.checkin_filter_combo.currentIndexChanged.connect(self._on_checkin_filter_changed)
+        self.checkin_table.cellClicked.connect(self._on_checkin_table_clicked)
         self.refresh_spin.valueChanged.connect(self._update_timer_interval)
         self.suspend_btn.clicked.connect(self._on_suspend_clicked)
         self.ad_hoc_btn.clicked.connect(self._start_ad_hoc_net)
 
-        # Clock timer
-        self._clock_timer = QTimer(self)
-        self._clock_timer.timeout.connect(self._update_clock_labels)
-        self._clock_timer.start(1000)
         self._set_net_button_styles(active=False)
 
     # ---------------- SETTINGS & TIMER ---------------- #
@@ -334,11 +338,13 @@ class JS8CallNetControlTab(QWidget):
         self._refresh_auto_query_flags()
         self._maybe_reload_operating_groups()
         self._apply_theme()
+        self._refresh_group_completer()
 
     def _load_settings(self):
         data = self.settings.all()
         self.auto_query_msg_id = bool(data.get("js8_auto_query_msg_id", False))
         self.auto_query_grids = bool(data.get("js8_auto_query_grids", False))
+        self._refresh_group_completer()
 
         # Net name autocomplete from net_schedule
         net_sched = data.get("net_schedule", [])
@@ -382,11 +388,28 @@ class JS8CallNetControlTab(QWidget):
                 try:
                     num = fn.stem.replace("MCF", "").strip()
                     if num.isdigit():
-                        forms.append(f"F!{num}")
+                        code = f"F!{num}"
+                        desc = ""
+                        try:
+                            with fn.open("r", encoding="utf-8", errors="ignore") as fh:
+                                for line in fh:
+                                    header = line.strip()
+                                    if header:
+                                        desc = header
+                                        break
+                        except Exception:
+                            desc = ""
+                        label = code
+                        if desc and "|" in desc:
+                            parts = [p.strip() for p in desc.split("|", 1)]
+                            if len(parts) == 2 and parts[0]:
+                                label = f"{code} - {parts[0]}"
+                        forms.append((code, label))
                 except Exception:
                     continue
         if forms:
-            self.spotter_combo.addItems(forms)
+            for code, label in forms:
+                self.spotter_combo.addItem(label, code)
             self.spotter_combo.setEnabled(True)
             self.set_spotter_btn.setEnabled(True)
             self.group_spotter_btn.setEnabled(True)
@@ -576,6 +599,8 @@ class JS8CallNetControlTab(QWidget):
             self.save_btn.setStyleSheet(button_style("muted", theme))
             self.end_btn.setStyleSheet(button_style("muted", theme))
             self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
+        self._update_group_button_state()
+        self._update_spotter_button_state()
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
@@ -584,6 +609,8 @@ class JS8CallNetControlTab(QWidget):
         self._set_net_button_styles(self._net_in_progress)
         self.suspend_btn.setStyleSheet(button_style("warning", theme))
         self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
+        self._update_group_button_state()
+        self._update_spotter_button_state()
 
     def apply_theme(self) -> None:
         self._apply_theme()
@@ -659,6 +686,13 @@ class JS8CallNetControlTab(QWidget):
                 "DIRECTED.TXT Not Configured",
                 "JS8Call DIRECTED.TXT path is not configured or does not exist.\n"
                 "Set it in the Settings tab.",
+            )
+            return False
+        if not self._group_target:
+            QMessageBox.warning(
+                self,
+                "Group Required",
+                "Set Call Group to Start Net.",
             )
             return False
         return True
@@ -933,7 +967,10 @@ class JS8CallNetControlTab(QWidget):
 
                     # During an active net, record/update the check-in row
                     if self._net_in_progress:
-                        if not self._line_has_checkin_form(line) and call_primary not in self._checkins:
+                        if (
+                            not self._should_accept_checkin_line(line)
+                            and call_primary not in self._checkins
+                        ):
                             continue
                         snr_line, dt_line, offset_line = self._parse_directed_metrics(line)
                         speed_guess = self._call_last_speed.get(self._base_callsign(call_primary))
@@ -1025,6 +1062,51 @@ class JS8CallNetControlTab(QWidget):
 
     def _clear_table(self) -> None:
         self.checkin_table.setRowCount(0)
+
+    def _rebuild_checkin_table(self) -> None:
+        self._checkin_rows = {}
+        self._clear_table()
+        for cs, data in self._checkins.items():
+            self._update_row(cs, data)
+
+    def _checkin_filter_mode(self) -> str:
+        if hasattr(self, "checkin_filter_combo"):
+            return self.checkin_filter_combo.currentText().strip()
+        return "F!103 / F!104"
+
+    def _delete_action_text(self) -> str:
+        if not self._net_in_progress:
+            return ""
+        if self._checkin_filter_mode() != "All Callsigns":
+            return ""
+        return "Delete"
+
+    def _on_checkin_filter_changed(self) -> None:
+        self._rebuild_checkin_table()
+
+    def _on_checkin_table_clicked(self, row: int, col: int) -> None:
+        delete_col = self.checkin_table.columnCount() - 1
+        if col != delete_col:
+            return
+        if not self._delete_action_text():
+            return
+        item = self.checkin_table.item(row, 0)
+        callsign = item.text().strip().upper() if item else ""
+        if not callsign:
+            return
+        resp = QMessageBox.question(
+            self,
+            "Delete Check-in",
+            f"Remove {callsign} from this net?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        self._checkins.pop(callsign, None)
+        self._status_mismatch.pop(callsign, None)
+        self._checkins_saved.discard(callsign)
+        self._rebuild_checkin_table()
 
     def _region_for_state(self, st: str) -> str:
         st = (st or "").strip().upper()
@@ -1130,7 +1212,7 @@ class JS8CallNetControlTab(QWidget):
 
     def _update_row(self, callsign: str, data: Dict) -> None:
         row = self._ensure_row(callsign)
-        cols = ["CALLSIGN", "NAME", "ST", "GRID", "REGION", "MODE", "SNR", "DT ms", "OFFSET", "STATUS"]
+        cols = ["CALLSIGN", "NAME", "ST", "GRID", "REGION", "MODE", "SNR", "DT ms", "OFFSET", "STATUS", "DELETE"]
         values = [
             callsign,
             data.get("name", ""),
@@ -1142,6 +1224,7 @@ class JS8CallNetControlTab(QWidget):
             "" if data.get("dt") is None else str(data.get("dt")),
             "" if data.get("offset") is None else str(data.get("offset")),
             data.get("status", ""),
+            self._delete_action_text(),
         ]
         for idx, val in enumerate(values):
             item = self.checkin_table.item(row, idx)
@@ -1223,13 +1306,100 @@ class JS8CallNetControlTab(QWidget):
             txt = "@" + txt.replace("@", "")
         self._group_target = txt
         self.group_edit.setText(txt)
+        self._update_group_button_state()
+
+    def _update_group_button_state(self):
+        theme = resolve_theme(self.settings)
+        current = self.group_edit.text().strip().upper()
+        if current and not current.startswith("@"):
+            current = "@" + current
+        needs_set = bool(current) and current != (self._group_target or "")
+        if self._group_target and not needs_set:
+            self.set_group_btn.setStyleSheet(button_style("success_muted", theme))
+        elif needs_set:
+            self.set_group_btn.setStyleSheet(button_style("info", theme))
+        else:
+            self.set_group_btn.setStyleSheet(button_style("info", theme))
 
     def _set_spotter_form(self):
         if not self.spotter_combo.isEnabled():
             QMessageBox.warning(self, "Spotter", "No JS8Spotter forms found.")
             return
-        self._spotter_form = self.spotter_combo.currentText().strip().upper()
+        self._spotter_form = self._current_spotter_code()
         self._expected_form = self._spotter_form
+        self._update_spotter_button_state()
+
+    def _current_spotter_code(self) -> str:
+        data = self.spotter_combo.currentData()
+        if data:
+            return str(data).strip().upper()
+        text = self.spotter_combo.currentText().strip().upper()
+        if "|" in text:
+            text = text.split("|")[-1].strip()
+        if " - " in text:
+            text = text.split(" - ", 1)[0].strip()
+        return text
+
+    def _update_spotter_button_state(self):
+        theme = resolve_theme(self.settings)
+        if self._spotter_form:
+            self.set_spotter_btn.setStyleSheet(button_style("success_muted", theme))
+        else:
+            self.set_spotter_btn.setStyleSheet(button_style("muted", theme))
+
+    def _on_spotter_selection_changed(self) -> None:
+        theme = resolve_theme(self.settings)
+        current = self._current_spotter_code()
+        if current and current != (self._spotter_form or ""):
+            self.set_spotter_btn.setStyleSheet(button_style("info", theme))
+        else:
+            self._update_spotter_button_state()
+
+    def _refresh_group_completer(self):
+        groups: Set[str] = set()
+        mycall = self._base_callsign(self._my_callsign())
+        db_path = _nets_db_path()
+        if mycall and db_path.exists():
+            try:
+                conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT group1, group2, group3, groups_json FROM operator_checkins WHERE callsign=?",
+                    (mycall,),
+                )
+                row = cur.fetchone()
+                conn.close()
+                if row:
+                    g1, g2, g3, groups_json = row
+                    for g in (g1, g2, g3):
+                        if g:
+                            groups.add(str(g).strip().upper())
+                    if groups_json:
+                        try:
+                            for g in json.loads(groups_json):
+                                if g:
+                                    groups.add(str(g).strip().upper())
+                        except Exception:
+                            pass
+            except Exception as e:
+                log.debug("JS8CallNetControl: group lookup failed: %s", e)
+        for g in self.settings.get("primary_js8_groups", []) or []:
+            if g:
+                groups.add(str(g).strip().upper())
+        normalized = []
+        for g in groups:
+            if not g:
+                continue
+            up = g if g.startswith("@") else f"@{g}"
+            normalized.append(up)
+            normalized.append(up.lstrip("@"))
+        normalized = sorted(set(normalized))
+        if normalized:
+            completer = QCompleter(normalized, self)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchStartsWith)
+            completer.setCompletionMode(QCompleter.InlineCompletion)
+            self.group_edit.setCompleter(completer)
 
     def _ack_checkins(self):
         if not self._net_in_progress:
@@ -1265,8 +1435,17 @@ class JS8CallNetControlTab(QWidget):
         if not mycall:
             QMessageBox.warning(self, "Callsign", "Configure your callsign in Settings.")
             return
-        self._expected_form = self._spotter_form
         text = f"{mycall}: {group} E? {self._spotter_form}"
+        resp = QMessageBox.question(
+            self,
+            "Send Spotter",
+            f"Send this JS8Call message?\n\n{text}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        self._expected_form = self._spotter_form
         self._send_js8_message(text)
 
     def _single_spotter(self):
@@ -1284,8 +1463,17 @@ class JS8CallNetControlTab(QWidget):
         if not mycall:
             QMessageBox.warning(self, "Callsign", "Configure your callsign in Settings.")
             return
-        self._expected_form = self._spotter_form
         text = f"{mycall}: {cs} E? {self._spotter_form}"
+        resp = QMessageBox.question(
+            self,
+            "Send Spotter",
+            f"Send this JS8Call message?\n\n{text}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        self._expected_form = self._spotter_form
         self._send_js8_message(text)
 
     def _save_checkins(self, *, show_message: bool = True):
@@ -2153,6 +2341,20 @@ class JS8CallNetControlTab(QWidget):
         up = line.upper()
         return any(form in up for form in CHECKIN_FORMS)
 
+    def _line_has_any_spotter_form(self, line: str) -> bool:
+        msg_text = self._message_text_from_line(line).upper()
+        return re.search(r"F![0-9]{3}", msg_text) is not None
+
+    def _should_accept_checkin_line(self, line: str) -> bool:
+        mode = self._checkin_filter_mode()
+        if mode == "F!103 / F!104":
+            return self._line_has_checkin_form(line)
+        if mode == "Any Spotter":
+            return self._line_has_any_spotter_form(line)
+        if mode == "All Callsigns":
+            return True
+        return self._line_has_checkin_form(line)
+
     def _message_text_from_line(self, line: str) -> str:
         if "\t" in line:
             parts = line.split("\t", 4)
@@ -2553,6 +2755,7 @@ class JS8CallNetControlTab(QWidget):
         return (entry.get("group_name") or "").strip()
 
     def _maybe_queue_grid_query(self, callsign: str, snr: Optional[float], msg_params: Dict, text: str) -> None:
+        # Disabled until auto-grid workflow is re-enabled.
         return
         call = (callsign or "").strip().upper()
         if not call:
@@ -2588,6 +2791,7 @@ class JS8CallNetControlTab(QWidget):
         self._pending_grid_queries.append((snr, call))
 
     def _maybe_process_next_grid(self) -> None:
+        # Disabled until auto-grid workflow is re-enabled.
         return
         if not self._pending_grid_queries:
             return

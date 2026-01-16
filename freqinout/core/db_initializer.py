@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Set
+from typing import Dict, Set
 
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
@@ -161,6 +161,16 @@ def _ensure_js8_links(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE js8_links ADD COLUMN last_seen_utc TEXT")
 
 
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in cur.fetchall()}
+    for name, col_type in columns.items():
+        if name in existing:
+            continue
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
+
+
 def _ensure_nets_db() -> None:
     """
     Ensure nets DB (freqinout_nets.db) has required tables.
@@ -187,6 +197,21 @@ def _ensure_nets_db() -> None:
             )
             """
         )
+        _ensure_columns(
+            conn,
+            "daily_schedule_tab",
+            {
+                "day_utc": "TEXT",
+                "band": "TEXT",
+                "mode": "TEXT",
+                "vfo": "TEXT",
+                "frequency": "TEXT",
+                "start_utc": "TEXT",
+                "end_utc": "TEXT",
+                "group_name": "TEXT",
+                "auto_tune": "INTEGER DEFAULT 0",
+            },
+        )
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS net_schedule_tab (
@@ -208,6 +233,26 @@ def _ensure_nets_db() -> None:
             )
             """
         )
+        _ensure_columns(
+            conn,
+            "net_schedule_tab",
+            {
+                "day_utc": "TEXT",
+                "recurrence": "TEXT",
+                "biweekly_offset_weeks": "INTEGER DEFAULT 0",
+                "band": "TEXT",
+                "mode": "TEXT",
+                "vfo": "TEXT",
+                "frequency": "TEXT",
+                "start_utc": "TEXT",
+                "end_utc": "TEXT",
+                "early_checkin": "INTEGER DEFAULT 0",
+                "auto_tune": "INTEGER DEFAULT 0",
+                "primary_js8call_group": "TEXT",
+                "comment": "TEXT",
+                "net_name": "TEXT",
+            },
+        )
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS net_schedule (
@@ -227,6 +272,25 @@ def _ensure_nets_db() -> None:
                 net_name TEXT
             )
             """
+        )
+        _ensure_columns(
+            conn,
+            "net_schedule",
+            {
+                "day_utc": "TEXT",
+                "recurrence": "TEXT",
+                "biweekly_offset_weeks": "INTEGER DEFAULT 0",
+                "band": "TEXT",
+                "mode": "TEXT",
+                "frequency": "TEXT",
+                "start_utc": "TEXT",
+                "end_utc": "TEXT",
+                "early_checkin": "INTEGER DEFAULT 0",
+                "auto_tune": "INTEGER DEFAULT 0",
+                "primary_js8call_group": "TEXT",
+                "comment": "TEXT",
+                "net_name": "TEXT",
+            },
         )
         cur.execute(
             """
@@ -252,6 +316,19 @@ def _ensure_nets_db() -> None:
             )
             """
         )
+        _ensure_columns(
+            conn,
+            "autoquery_backlog",
+            {
+                "callsign": "TEXT",
+                "msg_id": "TEXT",
+                "kind": "TEXT",
+                "status": "TEXT",
+                "attempts": "INTEGER DEFAULT 0",
+                "last_attempt_ts": "REAL",
+                "created_ts": "REAL",
+            },
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_autoquery_callsign ON autoquery_backlog(callsign)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_autoquery_status ON autoquery_backlog(status)")
 
@@ -271,6 +348,21 @@ def _ensure_nets_db() -> None:
                 imported_at TEXT
             )
             """
+        )
+        _ensure_columns(
+            conn,
+            "peer_hf_schedule",
+            {
+                "owner_callsign": "TEXT",
+                "day_utc": "TEXT",
+                "start_utc": "TEXT",
+                "end_utc": "TEXT",
+                "band": "TEXT",
+                "mode": "TEXT",
+                "frequency": "TEXT",
+                "meta_json": "TEXT",
+                "imported_at": "TEXT",
+            },
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_hf_owner ON peer_hf_schedule(owner_callsign)")
 

@@ -118,6 +118,10 @@ def button_style(role: str, theme: Dict[str, str]) -> str:
         bg = theme["success"]
         hover = _blend_hex(theme["success"], theme["surface"], 0.9)
         active = _blend_hex(theme["success"], theme["surface"], 0.8)
+    elif role == "success_muted":
+        bg = _blend_hex(theme["success"], theme["surface"], 0.3)
+        hover = _blend_hex(theme["success"], theme["surface"], 0.4)
+        active = _blend_hex(theme["success"], theme["surface"], 0.5)
     elif role == "warning":
         bg = theme["warning"]
         hover = _blend_hex(theme["warning"], theme["surface"], 0.9)

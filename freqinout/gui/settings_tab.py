@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.config_paths import get_fldigi_checkin_dir
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
@@ -275,24 +276,69 @@ class SettingsTab(QWidget):
 
         left_col.addWidget(js8_group)
 
-        # Message Paths (for Message Viewer)
-        msg_paths_group = QGroupBox("Message Paths")
+        # Messages & Files (for Message Viewer + FLDigi check-ins)
+        msg_paths_group = QGroupBox("Messages && Files")
         msg_paths_layout = QFormLayout()
         # Match tighter spacing like Radio Software
         msg_paths_layout.setHorizontalSpacing(6)
-        msg_paths_layout.setVerticalSpacing(4)
+        msg_paths_layout.setVerticalSpacing(2)
+        msg_paths_layout.setContentsMargins(0, 6, 0, 0)
         self.msg_paths_edits = {}
-        for origin, label in [("varac", "VarAC folder"), ("flmsg", "FLMSG folder"), ("flamp", "FLAMP folder")]:
+        for origin, label in [
+            ("varac", "VarAC Incoming Files"),
+            ("flmsg", "ICS/Messages"),
+            ("flamp", "FLAMP/rx"),
+        ]:
             edit = QLineEdit()
             browse = QPushButton("Browse")
             browse.clicked.connect(lambda _, o=origin, e=edit: self._choose_msg_path(o, e))
             row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
             row.addWidget(edit, 1)
             row.addWidget(browse)
             container = QWidget()
             container.setLayout(row)
             msg_paths_layout.addRow(label + ":", container)
             self.msg_paths_edits[origin] = edit
+        self.fldigi_checkin_dir_edit = QLineEdit()
+        fldigi_browse = QPushButton("Browse")
+        fldigi_browse.clicked.connect(self._choose_fldigi_checkin_dir)
+        self.fldigi_checkin_dir_edit.textChanged.connect(self._refresh_fldigi_checkin_file_labels)
+        fldigi_row = QHBoxLayout()
+        fldigi_row.setContentsMargins(0, 0, 0, 0)
+        fldigi_row.addWidget(self.fldigi_checkin_dir_edit, 1)
+        fldigi_row.addWidget(fldigi_browse)
+        fldigi_container = QWidget()
+        fldigi_container.setLayout(fldigi_row)
+        msg_paths_layout.addRow("FLDigi Check-in File Path:", fldigi_container)
+
+        self.fldigi_main_file_edit = QLineEdit()
+        self.fldigi_main_file_edit.setReadOnly(True)
+        fldigi_main_copy = QPushButton("Copy Path")
+        fldigi_main_copy.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.fldigi_main_file_edit.text())
+        )
+        fldigi_main_row = QHBoxLayout()
+        fldigi_main_row.setContentsMargins(0, 0, 0, 0)
+        fldigi_main_row.addWidget(self.fldigi_main_file_edit, 1)
+        fldigi_main_row.addWidget(fldigi_main_copy)
+        fldigi_main_container = QWidget()
+        fldigi_main_container.setLayout(fldigi_main_row)
+        msg_paths_layout.addRow("main_checkins.txt:", fldigi_main_container)
+
+        self.fldigi_late_file_edit = QLineEdit()
+        self.fldigi_late_file_edit.setReadOnly(True)
+        fldigi_late_copy = QPushButton("Copy Path")
+        fldigi_late_copy.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.fldigi_late_file_edit.text())
+        )
+        fldigi_late_row = QHBoxLayout()
+        fldigi_late_row.setContentsMargins(0, 0, 0, 0)
+        fldigi_late_row.addWidget(self.fldigi_late_file_edit, 1)
+        fldigi_late_row.addWidget(fldigi_late_copy)
+        fldigi_late_container = QWidget()
+        fldigi_late_container.setLayout(fldigi_late_row)
+        msg_paths_layout.addRow("new-late_checkins.txt:", fldigi_late_container)
         msg_paths_group.setLayout(msg_paths_layout)
         right_col.addWidget(msg_paths_group)
 
@@ -419,6 +465,17 @@ class SettingsTab(QWidget):
         msg_paths = data.get("message_paths", {})
         for origin, edit in self.msg_paths_edits.items():
             edit.setText(msg_paths.get(origin, ""))
+        fldigi_dir = (data.get("fldigi_checkin_dir", "") or "").strip()
+        if not fldigi_dir:
+            fldigi_dir = str(get_fldigi_checkin_dir())
+            if hasattr(self.settings, "set"):
+                self.settings.set("fldigi_checkin_dir", fldigi_dir)
+            else:
+                data["fldigi_checkin_dir"] = fldigi_dir
+                if hasattr(self.settings, "_data"):
+                    self.settings._data = data  # type: ignore[attr-defined]
+        self.fldigi_checkin_dir_edit.setText(fldigi_dir)
+        self._refresh_fldigi_checkin_file_labels()
         flrig_port_txt = str(data.get("flrig_port", "12345") or "12345")
         self.flrig_port_edit.setText(flrig_port_txt)
 
@@ -514,6 +571,11 @@ class SettingsTab(QWidget):
         for origin, edit in self.msg_paths_edits.items():
             msg_paths[origin] = edit.text().strip()
         data["message_paths"] = msg_paths
+        fldigi_dir = self.fldigi_checkin_dir_edit.text().strip()
+        if not fldigi_dir:
+            fldigi_dir = str(get_fldigi_checkin_dir())
+            self.fldigi_checkin_dir_edit.setText(fldigi_dir)
+        data["fldigi_checkin_dir"] = fldigi_dir
 
         groups = [le.text().strip().upper() for le in self.js8_groups_edits if le.text().strip()]
         data["primary_js8_groups"] = groups
@@ -550,6 +612,7 @@ class SettingsTab(QWidget):
                 "js8_forms_path": data.get("js8_forms_path", ""),
                 "js8_inbox_mark_retrieved_sync": data.get("js8_inbox_mark_retrieved_sync", False),
                 "message_paths": data.get("message_paths", {}),
+                "fldigi_checkin_dir": data.get("fldigi_checkin_dir", ""),
                 "operating_groups": data.get("operating_groups", []),
             }
             for prog_name, meta in self.PROGRAMS.items():
@@ -581,6 +644,7 @@ class SettingsTab(QWidget):
                 data.get("js8_inbox_mark_retrieved_sync", False),
             )
             self.settings.set("message_paths", data.get("message_paths", {}))
+            self.settings.set("fldigi_checkin_dir", data.get("fldigi_checkin_dir", ""))
             for prog_name, meta in self.PROGRAMS.items():
                 path_key = meta["setting_key"]
                 auto_key = meta["autostart_key"]
@@ -597,6 +661,7 @@ class SettingsTab(QWidget):
             self.settings._data = data  # type: ignore[attr-defined]
 
         log.info("SettingsTab: settings saved.")
+        self._ensure_fldigi_checkin_files()
         if show_message:
             QMessageBox.information(self, "Settings", "Settings saved.")
 
@@ -1402,6 +1467,47 @@ class SettingsTab(QWidget):
             mp = self.settings.get("message_paths", {}) or {}
             mp[origin] = fn
             self.settings.set("message_paths", mp)
+
+    def _choose_fldigi_checkin_dir(self):
+        fn = QFileDialog.getExistingDirectory(self, "Select FLDigi check-in folder")
+        if not fn:
+            return
+        self.fldigi_checkin_dir_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("fldigi_checkin_dir", fn)
+        else:
+            data = self.settings.all()
+            data["fldigi_checkin_dir"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        self._ensure_fldigi_checkin_files()
+
+    def _refresh_fldigi_checkin_file_labels(self) -> None:
+        base = self.fldigi_checkin_dir_edit.text().strip()
+        if not base:
+            base = str(get_fldigi_checkin_dir())
+        main_path = str(Path(base) / "main_checkins.txt")
+        late_path = str(Path(base) / "new-late_checkins.txt")
+        self.fldigi_main_file_edit.setText(main_path)
+        self.fldigi_late_file_edit.setText(late_path)
+
+    def _ensure_fldigi_checkin_files(self) -> None:
+        base = self.fldigi_checkin_dir_edit.text().strip()
+        if not base:
+            base = str(get_fldigi_checkin_dir())
+            self.fldigi_checkin_dir_edit.setText(base)
+        folder = Path(base)
+        main_path = folder / "main_checkins.txt"
+        late_path = folder / "new-late_checkins.txt"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if not main_path.exists():
+                main_path.touch()
+            if not late_path.exists():
+                late_path.touch()
+        except Exception as e:
+            log.error("SettingsTab: failed to ensure FLDigi check-in files: %s", e)
+        self._refresh_fldigi_checkin_file_labels()
 
     def _load_js8_logs(self):
         """
