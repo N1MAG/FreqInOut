@@ -4,8 +4,9 @@ import datetime
 import sqlite3
 from pathlib import Path
 from typing import List, Dict, Optional
+import re
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QEvent
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -76,6 +77,11 @@ class FldigiNetControlTab(QWidget):
         self._normalizing_main = False
         self._normalizing_late = False
         self._known_operator_rows: List[Dict[str, str]] = []
+        self._known_operator_by_callsign: Dict[str, Dict[str, str]] = {}
+        self._known_op_autofilled_prefix: str = ""
+        self._known_op_autofill_consumed: bool = False
+        self._known_op_tab_stage: int = 0
+        self._known_op_pending_focus: Optional[str] = None
 
         self._build_ui()
         self._apply_theme()
@@ -144,7 +150,7 @@ class FldigiNetControlTab(QWidget):
         known_row = QHBoxLayout()
         known_row.addWidget(QLabel("Operator Lookup/Add:"))
         self.known_op_edit = QLineEdit()
-        self.known_op_edit.setPlaceholderText("Add new or type to search")
+        self.known_op_edit.setPlaceholderText("Enter Callsign Name State...")
         self.known_op_edit.setMaximumWidth(260)
         known_row.addWidget(self.known_op_edit, stretch=1)
         known_row.addStretch()
@@ -153,6 +159,8 @@ class FldigiNetControlTab(QWidget):
         known_btn_row = QHBoxLayout()
         self.add_known_main_btn = QPushButton("Add to Main")
         self.add_known_late_btn = QPushButton("Add to New/Late")
+        self.add_known_main_btn.setFocusPolicy(Qt.StrongFocus)
+        self.add_known_late_btn.setFocusPolicy(Qt.StrongFocus)
         known_btn_row.addWidget(self.add_known_main_btn)
         known_btn_row.addWidget(self.add_known_late_btn)
         known_btn_row.addStretch()
@@ -229,6 +237,9 @@ class FldigiNetControlTab(QWidget):
         self.late_text.textChanged.connect(self._on_late_text_changed)
         self.known_op_edit.textChanged.connect(self._on_known_op_text_changed)
         self.known_op_edit.returnPressed.connect(self._on_known_op_return)
+        self.known_op_edit.installEventFilter(self)
+        self.setTabOrder(self.known_op_edit, self.add_known_main_btn)
+        self.setTabOrder(self.add_known_main_btn, self.add_known_late_btn)
 
         self.start_btn.clicked.connect(self._start_net)
         self.save_btn.clicked.connect(self._save_checkins)
@@ -237,6 +248,10 @@ class FldigiNetControlTab(QWidget):
 
         self.add_known_main_btn.clicked.connect(self._insert_known_into_main)
         self.add_known_late_btn.clicked.connect(self._insert_known_into_late)
+        self.add_known_main_btn.setDefault(False)
+        self.add_known_late_btn.setDefault(False)
+        self.add_known_main_btn.installEventFilter(self)
+        self.add_known_late_btn.installEventFilter(self)
 
     def _set_net_button_styles(self, active: bool):
         """
@@ -793,6 +808,7 @@ class FldigiNetControlTab(QWidget):
 
         suggestions: List[str] = []
         self._known_operator_rows = []
+        self._known_operator_by_callsign = {}
         for callsign, name, state in rows:
             cs = (callsign or "").strip().upper()
             nm = (name or "").strip()
@@ -806,7 +822,9 @@ class FldigiNetControlTab(QWidget):
                 parts.append(st)
             display = " ".join(parts)
             suggestions.append(display)
-            self._known_operator_rows.append({"callsign": cs, "name": nm, "state": st, "display": display})
+            row = {"callsign": cs, "name": nm, "state": st, "display": display}
+            self._known_operator_rows.append(row)
+            self._known_operator_by_callsign[cs] = row
 
         if suggestions:
             completer = QCompleter(sorted(suggestions), self)
@@ -824,20 +842,128 @@ class FldigiNetControlTab(QWidget):
                 matches.append(row)
         return matches
 
-    def _on_known_op_return(self) -> None:
+    def _extract_extra_after_tokens(self, text: str, *, min_tokens: int) -> str:
+        matches = list(re.finditer(r"[A-Za-z0-9]+", text))
+        if len(matches) < min_tokens:
+            return ""
+        end = matches[min_tokens - 1].end()
+        return text[end:].strip()
+
+    def _split_checkin_with_extra(self, line: str) -> tuple[str, str, str, str]:
+        matches = list(re.finditer(r"[A-Za-z0-9]+", line))
+        if not matches:
+            return "", "", "", ""
+        cs = matches[0].group(0).upper()
+        name = matches[1].group(0) if len(matches) > 1 else ""
+        state = matches[2].group(0).upper() if len(matches) > 2 else ""
+        extra = self._extract_extra_after_tokens(line, min_tokens=3)
+        return cs, name, state, extra
+
+    def _apply_known_autofill(self) -> bool:
         text = self.known_op_edit.text().strip()
+        if not text:
+            return False
         matches = self._matching_known_operators(text)
-        if len(matches) == 1:
-            row = matches[0]
-            formatted = self._format_entry(row["callsign"], row["name"], row["state"])
-            self.known_op_edit.setText(formatted)
+        if not matches:
+            comp = self.known_op_edit.completer()
+            if comp:
+                comp.setCompletionPrefix(text)
+                model = comp.completionModel()
+                if model and model.rowCount() == 1:
+                    completion = model.index(0, 0).data()
+                    if completion:
+                        matches = self._matching_known_operators(str(completion))
+        row = matches[0] if len(matches) == 1 else None
+        if row is None:
+            tokens = list(re.finditer(r"[A-Za-z0-9]+", text))
+            if tokens:
+                cs = tokens[0].group(0).upper()
+                row = self._known_operator_by_callsign.get(cs)
+        if row is None:
+            return False
+        tokens = list(re.finditer(r"[A-Za-z0-9]+", text))
+        if len(tokens) >= 3:
+            extra = self._extract_extra_after_tokens(text, min_tokens=3)
+        else:
+            extra = self._extract_extra_after_tokens(text, min_tokens=1)
+        formatted = self._format_entry(row["callsign"], row["name"], row["state"])
+        new_text = f"{formatted} {extra}".strip() if extra else formatted
+        self.known_op_edit.setText(new_text)
+        self._known_op_autofilled_prefix = formatted
+        self._known_op_autofill_consumed = True
+        self._known_op_tab_stage = 1
+        self.known_op_edit.setFocus()
+        self.known_op_edit.setCursorPosition(len(new_text))
+        return True
+
+    def _focus_add_button(self, target: str) -> None:
+        if target == "main":
+            self.add_known_main_btn.setFocus()
+        elif target == "late":
+            self.add_known_late_btn.setFocus()
+
+    def eventFilter(self, obj, event):
+        if obj in (self.add_known_main_btn, self.add_known_late_btn) and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                if obj is self.add_known_main_btn:
+                    self._insert_known_into_main()
+                else:
+                    self._insert_known_into_late()
+                event.accept()
+                return True
+        if obj is self.known_op_edit and event.type() == QEvent.FocusIn:
+            if self._known_op_autofilled_prefix and self.known_op_edit.text().startswith(
+                self._known_op_autofilled_prefix
+            ):
+                self._known_op_tab_stage = 1
+            else:
+                self._known_op_tab_stage = 0
+            return False
+        if obj is self.known_op_edit and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Tab, Qt.Key_Return, Qt.Key_Enter):
+                if self._known_op_pending_focus:
+                    target = self._known_op_pending_focus
+                    self._known_op_pending_focus = None
+                    QTimer.singleShot(0, lambda t=target: self._focus_add_button(t))
+                    event.accept()
+                    return True
+        if obj is self.known_op_edit and event.type() == QEvent.ShortcutOverride:
+            if event.key() in (Qt.Key_Tab, Qt.Key_Return, Qt.Key_Enter):
+                has_prefix = self._known_op_autofilled_prefix and self.known_op_edit.text().startswith(
+                    self._known_op_autofilled_prefix
+                )
+                if has_prefix and self._known_op_tab_stage == 1:
+                    self._known_op_pending_focus = "main"
+                    self._known_op_tab_stage = 2
+                    event.accept()
+                    return True
+                if has_prefix and self._known_op_tab_stage >= 2:
+                    self._known_op_pending_focus = "late"
+                    event.accept()
+                    return True
+                if self._apply_known_autofill():
+                    QTimer.singleShot(0, self.known_op_edit.setFocus)
+                    event.accept()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _on_known_op_return(self) -> None:
+        if self._apply_known_autofill():
             return
+        text = self.known_op_edit.text().strip()
         cs, name, state = self._parse_checkin_line(text)
-        if not matches and cs and name and state:
+        if cs and name and state:
             formatted = self._format_entry(cs, name, state)
             self.known_op_edit.setText(formatted)
 
     def _on_known_op_text_changed(self) -> None:
+        if (
+            self._known_op_autofilled_prefix
+            and not self.known_op_edit.text().startswith(self._known_op_autofilled_prefix)
+        ):
+            self._known_op_autofilled_prefix = ""
+            self._known_op_autofill_consumed = False
+            self._known_op_tab_stage = 0
         self._update_add_buttons_state()
 
     def _update_copy_buttons_state(self) -> None:
@@ -1210,6 +1336,15 @@ class FldigiNetControlTab(QWidget):
             setattr(self, flag_attr, False)
 
     def _end_net(self):
+        resp = QMessageBox.question(
+            self,
+            "End Net",
+            "End net now?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
         if not self._net_in_progress:
             log.info("End Net clicked but no net_in_progress flag set; proceeding with DB load from file.")
         self._save_checkins()
@@ -1242,15 +1377,25 @@ class FldigiNetControlTab(QWidget):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            cs, name, state = self._parse_checkin_line(line)
+            cs, name, state, _extra = self._split_checkin_with_extra(line)
             cs, name, state = self._normalize_checkin_fields(cs, name, state)
             if not cs:
                 continue
+            existing_name, existing_state, exists = self._lookup_operator_name_state(cs)
+            name_out = existing_name
+            if name and (not existing_name or name.strip().lower() != existing_name.strip().lower()):
+                name_out = name
+            state_out = existing_state
+            if not existing_state and state:
+                state_out = state
+            if not exists:
+                name_out = name
+                state_out = state
             entries.append(
                 {
                     "callsign": cs,
-                    "name": name,
-                    "state": state,
+                    "name": name_out,
+                    "state": state_out,
                     "first_seen_utc": now_utc,
                     "last_seen_utc": now_utc,
                     "net_name": net_name,
@@ -1287,10 +1432,17 @@ class FldigiNetControlTab(QWidget):
         line = self.known_op_edit.text().strip()
         if not line:
             return
-        cs, name, state = self._parse_checkin_line(line)
+        cs, name, state, extra = self._split_checkin_with_extra(line)
         if not cs and not name and not state:
             return
+        lookup = self._known_operator_by_callsign.get(cs or "")
+        if lookup:
+            cs = lookup.get("callsign", cs)
+            name = lookup.get("name", name)
+            state = lookup.get("state", state)
         formatted = self._format_entry(cs, name, state)
+        if extra:
+            formatted = f"{formatted} {extra}"
         if not formatted:
             return
         if self.main_text.toPlainText().strip():
@@ -1298,15 +1450,23 @@ class FldigiNetControlTab(QWidget):
         else:
             self.main_text.setPlainText(formatted)
         self.known_op_edit.clear()
+        self.known_op_edit.setFocus()
 
     def _insert_known_into_late(self):
         line = self.known_op_edit.text().strip()
         if not line:
             return
-        cs, name, state = self._parse_checkin_line(line)
+        cs, name, state, extra = self._split_checkin_with_extra(line)
         if not cs and not name and not state:
             return
+        lookup = self._known_operator_by_callsign.get(cs or "")
+        if lookup:
+            cs = lookup.get("callsign", cs)
+            name = lookup.get("name", name)
+            state = lookup.get("state", state)
         formatted = self._format_entry(cs, name, state)
+        if extra:
+            formatted = f"{formatted} {extra}"
         if not formatted:
             return
         if self.late_text.toPlainText().strip():
@@ -1314,6 +1474,7 @@ class FldigiNetControlTab(QWidget):
         else:
             self.late_text.setPlainText(formatted)
         self.known_op_edit.clear()
+        self.known_op_edit.setFocus()
 
     # ---------------- PARSING ---------------- #
 
@@ -1362,6 +1523,30 @@ class FldigiNetControlTab(QWidget):
         if name_norm:
             name_norm = name_norm[0].upper() + name_norm[1:]
         return cs_norm, name_norm, state_norm
+
+    def _lookup_operator_name_state(self, callsign: str) -> tuple[str, str, bool]:
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return "", "", False
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return "", "", False
+        if not db_path.exists():
+            return "", "", False
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT name, state FROM operator_checkins WHERE callsign=?", (cs,))
+            row = cur.fetchone()
+            conn.close()
+        except Exception:
+            return "", "", False
+        if not row:
+            return "", "", False
+        return (row[0] or "").strip(), (row[1] or "").strip().upper(), True
 
     def _bump_operator_history(self, entries: List[Dict]):
         """

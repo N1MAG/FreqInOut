@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
+from freqinout.gui.theme import resolve_theme
 
 
 def _normalize_date_only(val: Optional[str]) -> Optional[str]:
@@ -647,7 +648,7 @@ class OperatorHistoryTab(QWidget):
                 for c in range(self.table.columnCount()):
                     item = self.table.item(row_idx, c)
                     if item:
-                        item.setBackground(QColor("#ffe5e5"))
+                        item.setForeground(QColor("#D55E00"))
             gvals = [
                 (r.get("group1", "") or "").strip(),
                 (r.get("group2", "") or "").strip(),

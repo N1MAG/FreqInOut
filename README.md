@@ -8,3 +8,5 @@ See docs/Installation.md for installation and usage. Quick Debian/Ubuntu setup:
 - QtWebEngine prereqs for the Stations Map: `sudo apt-get install libxcb-cursor0 libxcb-xinerama0`
 
 AppImage build notes are in docs/appimage.md.
+
+License: GNU GPLv3 (see LICENSE.md).
