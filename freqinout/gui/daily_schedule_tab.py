@@ -74,7 +74,6 @@ BAND_OPTIONS = [
 ]
 
 MODE_OPTIONS = ["Digi", "SSB"]
-VFO_OPTIONS = ["A", "B"]
 
 
 # Radio program metadata (must match SettingsTab keys)
@@ -129,11 +128,10 @@ class DailyScheduleTab(QWidget):
     COL_GROUP = 2
     COL_MODE = 3
     COL_BAND = 4
-    COL_VFO = 5
-    COL_FREQ = 6
-    COL_START = 7
-    COL_END = 8
-    COL_AUTOTUNE = 9
+    COL_FREQ = 5
+    COL_START = 6
+    COL_END = 7
+    COL_AUTOTUNE = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -204,7 +202,6 @@ class DailyScheduleTab(QWidget):
             self.COL_GROUP,
             self.COL_MODE,
             self.COL_BAND,
-            self.COL_VFO,
             self.COL_FREQ,
             self.COL_START,
             self.COL_END,
@@ -320,7 +317,6 @@ class DailyScheduleTab(QWidget):
             "Group Name",
             "Mode",
             "Band",
-            "VFO",
             "Freq (MHz)",
             "Start",
             "End",
@@ -623,7 +619,6 @@ class DailyScheduleTab(QWidget):
             group_name = self._get_combo_value(r, self.COL_GROUP, default="")
             mode = self._get_combo_value(r, self.COL_MODE, default="Digi")
             band = self._get_combo_value(r, self.COL_BAND, default="")
-            vfo = self._get_combo_value(r, self.COL_VFO, default="A")
             freq_text = self._get_text_value(r, self.COL_FREQ)
             start_val = self._get_text_value(r, self.COL_START)
             end_val = self._get_text_value(r, self.COL_END)
@@ -655,7 +650,7 @@ class DailyScheduleTab(QWidget):
                     "day_utc": day_utc,
                     "band": band,
                     "mode": mode,
-                    "vfo": vfo,
+                    "vfo": "A",
                     "frequency": freq_text,
                     "start_utc": start_utc,
                     "end_utc": end_utc,
@@ -986,15 +981,6 @@ class DailyScheduleTab(QWidget):
         freq_item = QTableWidgetItem()
         freq_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         self.table.setItem(row, self.COL_FREQ, freq_item)
-
-        # VFO
-        vfo_combo = QComboBox()
-        vfo_combo.addItems(VFO_OPTIONS)
-        vfo_val = (entry.get("vfo") or "A").strip().upper()
-        if vfo_val not in VFO_OPTIONS:
-            vfo_val = "A"
-        vfo_combo.setCurrentText(vfo_val)
-        self.table.setCellWidget(row, self.COL_VFO, vfo_combo)
 
         # Start / End
         st_item = QTableWidgetItem(entry.get("start_utc", ""))

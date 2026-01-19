@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self._shutting_down = False
 
         self.settings = SettingsManager()
         self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
@@ -163,6 +164,14 @@ class MainWindow(QMainWindow):
         self.js8_control = JS8ControlClient()
         self.scheduler = SchedulerEngine(self, rig=self.rig_client, js8=self.js8_control)
         self.scheduler.start()
+        try:
+            self.scheduler.off_schedule_detected.connect(self._on_off_schedule_detected)
+        except Exception:
+            pass
+
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._on_app_about_to_quit)
 
         # Wire settings_saved signal
         try:
@@ -356,6 +365,44 @@ class MainWindow(QMainWindow):
             return
         self.map_filters_container.setVisible(True)
         self._sync_map_filters_from_tab()
+
+    def _on_app_about_to_quit(self):
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        try:
+            if hasattr(self, "scheduler"):
+                self.scheduler.stop()
+        except Exception:
+            pass
+        for _label, widget in self._screens:
+            try:
+                if hasattr(widget, "shutdown"):
+                    widget.shutdown()
+            except Exception:
+                continue
+
+    def _on_off_schedule_detected(self, entry: dict) -> None:
+        if self._shutting_down:
+            return
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Off Schedule")
+        msg.setText("Control Freq back to Schedule?")
+        apply_btn = msg.addButton("Yes", QMessageBox.AcceptRole)
+        suspend_btn = msg.addButton("Suspend", QMessageBox.DestructiveRole)
+        msg.addButton("Ignore", QMessageBox.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == apply_btn:
+            try:
+                self.scheduler.resolve_off_schedule("apply")
+            except Exception:
+                pass
+        elif clicked == suspend_btn:
+            try:
+                self.scheduler.resolve_off_schedule("suspend")
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ #
     # Helpers                                                            #

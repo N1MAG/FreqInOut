@@ -180,6 +180,7 @@ class SchedulerEngine(QObject):
     # Emitted whenever active entry or next change time updates
     active_entry_changed = Signal(dict, str)  # (entry, source: "HF" / "NET" / "NONE")
     next_change_updated = Signal(object)      # datetime or None
+    off_schedule_detected = Signal(dict)
 
     def __init__(
         self,
@@ -203,6 +204,14 @@ class SchedulerEngine(QObject):
         self._last_band: Optional[str] = None
         self._scheduled_vfo: Optional[str] = None
         self._last_js8_sync_ts: float = 0.0
+        self._desired_fldigi_mode: Optional[str] = None
+        self._desired_fldigi_offset: Optional[int] = None
+        self._last_fldigi_apply: Optional[Tuple[Optional[str], Optional[int]]] = None
+        self._fldigi_apply_after_ts: Optional[float] = None
+        self._fldigi_was_available: bool = False
+        self._last_resync_ts: float = 0.0
+        self._off_schedule_prompt_active: bool = False
+        self._last_off_schedule_key: Optional[Tuple] = None
 
         self.current_source: str = "NONE"
         self.current_schedule_entry: Dict = {}
@@ -220,6 +229,7 @@ class SchedulerEngine(QObject):
                     log.warning("SchedulerEngine: FLRig client is not available at init.")
             except Exception as e:
                 log.error("SchedulerEngine: error probing FLRig availability: %s", e)
+        self._ensure_js8_offset_default()
 
     # ------------------------------------------------------------------
     # Paths / DB helpers
@@ -317,6 +327,7 @@ class SchedulerEngine(QObject):
         """Begin periodic schedule evaluation."""
         if not self.timer.isActive():
             self.timer.start()
+        self._apply_js8_offset_startup()
         # Perform an immediate evaluation so UI sees something right away.
         try:
             self._evaluate(now_utc=datetime.datetime.now(datetime.timezone.utc))
@@ -327,6 +338,35 @@ class SchedulerEngine(QObject):
         """Stop periodic schedule evaluation."""
         if self.timer.isActive():
             self.timer.stop()
+
+    def _ensure_js8_offset_default(self) -> None:
+        try:
+            val = self.settings.get("js8_offset_hz", None)
+        except Exception:
+            val = None
+        if val not in (None, "", 0):
+            return
+        now_utc = datetime.datetime.utcnow()
+        offset = 1900 + (now_utc.hour % 7) * 50
+        try:
+            if hasattr(self.settings, "set"):
+                self.settings.set("js8_offset_hz", offset)
+        except Exception:
+            pass
+
+    def _apply_js8_offset_startup(self) -> None:
+        if not self.js8:
+            return
+        try:
+            offset = int(self.settings.get("js8_offset_hz", 0) or 0)
+        except Exception:
+            offset = 0
+        if offset <= 0:
+            return
+        try:
+            self.js8.set_offset(offset)
+        except Exception as e:
+            log.debug("SchedulerEngine: JS8 offset startup apply failed: %s", e)
 
     # ------------------------------------------------------------------
     # Suspend helpers
@@ -356,24 +396,119 @@ class SchedulerEngine(QObject):
         """
         Every ~60s, ensure JS8Call dial/offset match the active schedule entry.
         """
-        if not self.js8:
+        return
+
+    def _enforcement_mode(self) -> str:
+        try:
+            mode = (self.settings.get("schedule_enforcement_mode", "EmComms") or "EmComms").strip()
+        except Exception:
+            mode = "EmComms"
+        return mode if mode in {"Shack", "POTA", "EmComms"} else "EmComms"
+
+    def _maybe_resync_frequency(self) -> None:
+        if self._enforcement_mode() != "EmComms":
+            return
+        entry = self.current_schedule_entry or {}
+        if not entry:
+            return
+        if self.current_source == "NET":
             return
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         if self._scheduling_suspended(now_utc):
             return
         now_ts = time.time()
-        if now_ts - self._last_js8_sync_ts < 60:
+        if now_ts - self._last_resync_ts < 15 * 60:
             return
-        entry = self.current_schedule_entry or {}
         freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
         if not freq_hz:
             return
-        offset = self._js8_offset_setting()
+        cur = self._current_rig_frequency()
+        if cur is not None and abs(cur - freq_hz) <= 5:
+            self._last_resync_ts = now_ts
+            return
+        self._apply_schedule_entry(entry, self.current_source, force=True, apply_js8_offset=False, apply_fldigi=False)
+        self._last_resync_ts = now_ts
+
+    def _expected_fldigi_offset(self, entry: Dict) -> Optional[int]:
+        og = self._resolve_operating_group(entry)
+        if not isinstance(og, dict):
+            return None
+        txt = (og.get("fldigi_offset") or "").strip()
+        if not txt:
+            return None
         try:
-            self.js8.set_frequency(freq_hz, offset_hz=offset)
-            self._last_js8_sync_ts = now_ts
-        except Exception as e:
-            log.debug("SchedulerEngine: js8 resync failed: %s", e)
+            return int(txt)
+        except Exception:
+            return None
+
+    def _current_fldigi_offset(self) -> Optional[int]:
+        if not self.rig or not hasattr(self.rig, "get_fldigi_offset"):
+            return None
+        try:
+            return self.rig.get_fldigi_offset()
+        except Exception:
+            return None
+
+    def _maybe_prompt_off_schedule(self) -> None:
+        if self._enforcement_mode() != "POTA":
+            return
+        entry = self.current_schedule_entry or {}
+        if not entry:
+            return
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        if self._scheduling_suspended(now_utc):
+            return
+        freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
+        if not freq_hz:
+            return
+        cur = self._current_rig_frequency()
+        off_freq = cur is not None and abs(cur - freq_hz) > 5
+        js8_off = False
+        try:
+            desired_js8 = self._js8_offset_setting()
+            current_js8 = self.js8.get_offset() if self.js8 else None
+            js8_off = current_js8 is not None and desired_js8 != current_js8
+        except Exception:
+            js8_off = False
+        fldigi_off = False
+        desired_fldigi = self._expected_fldigi_offset(entry)
+        if desired_fldigi is not None:
+            current_fldigi = self._current_fldigi_offset()
+            fldigi_off = current_fldigi is not None and desired_fldigi != current_fldigi
+        if not (off_freq or js8_off or fldigi_off):
+            self._off_schedule_prompt_active = False
+            self._last_off_schedule_key = None
+            return
+        key = (entry.get("frequency"), entry.get("band"), entry.get("mode"), entry.get("group_name"))
+        if self._off_schedule_prompt_active and self._last_off_schedule_key == key:
+            return
+        self._off_schedule_prompt_active = True
+        self._last_off_schedule_key = key
+        self.off_schedule_detected.emit(entry)
+
+    def resolve_off_schedule(self, action: str) -> None:
+        self._off_schedule_prompt_active = False
+        if action == "suspend":
+            self._suspend_for_minutes(30)
+            return
+        if action == "apply":
+            entry = self.current_schedule_entry or {}
+            if entry:
+                self._apply_schedule_entry(
+                    entry,
+                    self.current_source,
+                    force=True,
+                    apply_js8_offset=True,
+                    apply_fldigi=True,
+                )
+
+    def _suspend_for_minutes(self, minutes: int) -> None:
+        try:
+            until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes)
+            if hasattr(self.settings, "set"):
+                self.settings.set("schedule_suspend_until", until.timestamp())
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Internal evaluation
@@ -383,9 +518,91 @@ class SchedulerEngine(QObject):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         try:
             self._evaluate(now_utc=now_utc)
-            self._maybe_resync_js8()
+            self._maybe_resync_frequency()
+            self._maybe_apply_fldigi()
+            self._maybe_prompt_off_schedule()
         except Exception as e:
             log.error("SchedulerEngine timer tick failed: %s", e)
+
+    def _load_operating_groups(self) -> List[Dict]:
+        data = self.settings.all()
+        og = data.get("operating_groups", [])
+        return og if isinstance(og, list) else []
+
+    def _resolve_operating_group(self, entry: Dict) -> Optional[Dict]:
+        group_name = (entry.get("group_name") or entry.get("group") or "").strip().upper()
+        band = (entry.get("band") or "").strip().upper()
+        mode = (entry.get("mode") or "").strip()
+        if not group_name:
+            return None
+        candidates = []
+        for g in self._load_operating_groups():
+            if not isinstance(g, dict):
+                continue
+            g_name = (g.get("group") or "").strip().upper()
+            if g_name != group_name:
+                continue
+            g_band = (g.get("band") or "").strip().upper()
+            g_mode = (g.get("mode") or "").strip()
+            candidates.append((g_band, g_mode, g))
+        if not candidates:
+            return None
+        # Prefer exact band+mode match, then band-only, then first group match
+        for g_band, g_mode, g in candidates:
+            if g_band == band and g_mode == mode:
+                return g
+        for g_band, _g_mode, g in candidates:
+            if g_band == band:
+                return g
+        return candidates[0][2]
+
+    def _update_desired_fldigi_settings(self, entry: Dict) -> None:
+        og = self._resolve_operating_group(entry) or {}
+        mode = (og.get("fldigi_mode") or "").strip() or None
+        offset_txt = (og.get("fldigi_offset") or "").strip()
+        offset = None
+        if offset_txt:
+            try:
+                offset = int(offset_txt)
+            except Exception:
+                offset = None
+        self._desired_fldigi_mode = mode
+        self._desired_fldigi_offset = offset
+        if mode or offset is not None:
+            # Request immediate apply if FLDigi is already available.
+            self._fldigi_apply_after_ts = 0.0
+        else:
+            self._fldigi_apply_after_ts = None
+
+    def _maybe_apply_fldigi(self) -> None:
+        if not self.rig:
+            return
+        try:
+            if not bool(self.settings.get("use_scheduler", True)):
+                return
+        except Exception:
+            pass
+        if self._control_mode() in ("MANUAL", "NONE"):
+            return
+        if not (self._desired_fldigi_mode or self._desired_fldigi_offset is not None):
+            return
+        available = self.rig.is_fldigi_available()
+        now_ts = time.time()
+        if not available:
+            self._fldigi_was_available = False
+            return
+        if not self._fldigi_was_available:
+            self._fldigi_was_available = True
+            self._fldigi_apply_after_ts = now_ts + 5
+            return
+        if self._fldigi_apply_after_ts is not None and now_ts < self._fldigi_apply_after_ts:
+            return
+        desired = (self._desired_fldigi_mode, self._desired_fldigi_offset)
+        if self._last_fldigi_apply == desired and self._fldigi_apply_after_ts is None:
+            return
+        if self.rig.set_fldigi_mode_offset(self._desired_fldigi_mode, self._desired_fldigi_offset):
+            self._last_fldigi_apply = desired
+            self._fldigi_apply_after_ts = None
 
     def _load_daily_schedule_from_db(self) -> Optional[List[Dict]]:
         """
@@ -980,6 +1197,8 @@ class SchedulerEngine(QObject):
         now_utc: Optional[datetime.datetime] = None,
         force: bool = False,
         ignore_suspend: bool = False,
+        apply_js8_offset: bool = True,
+        apply_fldigi: bool = True,
     ) -> None:
         """
         Apply a single schedule entry to the rig.
@@ -990,10 +1209,11 @@ class SchedulerEngine(QObject):
         # Extract fields
         band = (entry.get("band") or "").strip().upper()
         freq_text = (entry.get("frequency") or "").strip()
-        fldigi_offset_text = (entry.get("fldigi_offset") or "").strip()
         js8_group = (entry.get("primary_js8call_group") or "").strip()
         comment = (entry.get("comment") or "").strip()
-        vfo_raw = (entry.get("vfo") or "A").strip().upper()
+        og = self._resolve_operating_group(entry)
+        vfo_source = og.get("vfo") if isinstance(og, dict) else None
+        vfo_raw = (vfo_source or entry.get("vfo") or "A").strip().upper()
         vfo: Optional[str] = vfo_raw if vfo_raw in ("A", "B") else None
         auto_tune = bool(entry.get("auto_tune"))
 
@@ -1038,6 +1258,8 @@ class SchedulerEngine(QObject):
                 return
         except Exception:
             pass
+        if apply_fldigi:
+            self._update_desired_fldigi_settings(entry)
 
         # Safety: avoid changing frequency while a backend is busy transmitting.
         busy_reasons = []
@@ -1090,6 +1312,7 @@ class SchedulerEngine(QObject):
             log.error("SchedulerEngine: invalid frequency text '%s'; skipping.", freq_text)
             return
 
+        fldigi_offset_text = (og.get("fldigi_offset") or "").strip() if isinstance(og, dict) else ""
         fldigi_center = None
         js8_tune = None
         try:
@@ -1115,8 +1338,7 @@ class SchedulerEngine(QObject):
         freq_matches = (
             current_freq_hz is None or abs(current_freq_hz - freq_hz) <= 5
         )
-        if not force and already_applied and freq_matches:
-            # No changes; still emit active_entry_changed for UI
+        if not force and already_applied:
             self.active_entry_changed.emit(entry, source)
             return
         if current_freq_hz is not None and not freq_matches:
@@ -1127,11 +1349,15 @@ class SchedulerEngine(QObject):
             )
 
         ok = False
-        js8_offset = self._js8_offset_setting()
+        js8_offset = self._js8_offset_setting() if apply_js8_offset else None
         if control_mode == "JS8CALL":
             try:
                 if self.js8:
-                    ok = self.js8.set_frequency(freq_hz, offset_hz=js8_offset)
+                    if js8_offset is None:
+                        current_off = self.js8.get_offset()
+                        ok = self.js8.set_frequency(freq_hz, offset_hz=current_off)
+                    else:
+                        ok = self.js8.set_frequency(freq_hz, offset_hz=js8_offset)
             except Exception as e:
                 log.error("SchedulerEngine: error sending set_frequency to JS8Call: %s", e)
         else:
@@ -1161,7 +1387,11 @@ class SchedulerEngine(QObject):
                 # Keep JS8Call dial in sync even when FLRig controls the rig
                 if self.js8:
                     try:
-                        self.js8.set_frequency(freq_hz, offset_hz=js8_offset)
+                        if js8_offset is None:
+                            current_off = self.js8.get_offset()
+                            self.js8.set_frequency(freq_hz, offset_hz=current_off)
+                        else:
+                            self.js8.set_frequency(freq_hz, offset_hz=js8_offset)
                     except Exception as e:
                         log.debug("SchedulerEngine: JS8Call set_frequency (FLRig control) failed: %s", e)
 

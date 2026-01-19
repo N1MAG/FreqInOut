@@ -160,6 +160,9 @@ class JS8CallNetControlTab(QWidget):
         self._qsy_options: Dict[str, Dict] = {}
         self._opgroups_sig: str = ""
         self._call_last_speed: Dict[str, int] = {}
+        self._is_shutting_down = False
+        self._polling_directed = False
+        self._polling_rx = False
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -878,133 +881,151 @@ class JS8CallNetControlTab(QWidget):
     # ---------------- POLLING DIRECTED.TXT ---------------- #
 
     def _poll_directed_file(self):
-        if not self._directed_path:
+        if self._is_shutting_down or self._polling_directed:
             return
-        monitor_announcements = True
-        if not self._net_in_progress and not monitor_announcements:
-            return
-
-        log.debug("JS8CallNetControl: polling DIRECTED/ALL (net_in_progress=%s)", self._net_in_progress)
-
+        self._polling_directed = True
+        start_ts = time.time()
         try:
-            size_now = self._directed_path.stat().st_size
-        except Exception as e:
-            log.error("JS8CallNetControl: stat DIRECTED.TXT failed: %s", e)
-            return
+            if not self._directed_path:
+                return
+            monitor_announcements = True
+            if not self._net_in_progress and not monitor_announcements:
+                return
 
-        if size_now < self._last_directed_size:
-            # File truncated or rotated; re-read from start
-            self._last_directed_size = 0
+            log.debug("JS8CallNetControl: polling DIRECTED/ALL (net_in_progress=%s)", self._net_in_progress)
 
-        # Drop stale pending announcements
-        now_ts = time.time()
-        for k, ts in list(self._pending_announcements.items()):
-            if now_ts - ts > 60:
-                self._pending_announcements.pop(k, None)
-        # Expire pending query waits
-        self._expire_pending_responses()
+            try:
+                size_now = self._directed_path.stat().st_size
+            except Exception as e:
+                log.error("JS8CallNetControl: stat DIRECTED.TXT failed: %s", e)
+                return
 
-        try:
-            with self._directed_path.open("r", encoding="utf-8", errors="ignore") as f:
-                if self._last_directed_size > 0:
-                    f.seek(self._last_directed_size)
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if not self._line_ts_after_start(line):
-                        log.debug("JS8 NCS: skipping DIRECTED line before app start: %s", line)
-                        continue
-                    calls = self._extract_callsigns_from_line(line)
-                    self._update_recent_traffic(line, calls)
-                    # Net announcement detection (only when net not in progress)
-                    if self._line_has_announce_form(line):
-                        # If message completion marker present, notify immediately; else mark pending
-                        call_primary = calls[0] if calls else ""
-                        if self._is_message_complete_line(line):
-                            log.debug(
-                                "JS8 NCS: F!106 complete line detected (net_in_progress=%s): %s",
-                                self._net_in_progress,
-                                line,
-                            )
-                            self._maybe_notify_announcement(call_primary, line)
-                        else:
-                            log.debug("JS8 NCS: F!106 partial line, waiting for completion: %s", line)
-                            self._pending_announcements[(call_primary or "UNKNOWN")] = time.time()
-                    # If a completion marker arrives, see if we had a pending announcement for this call
-                    if self._is_message_complete_line(line) and self._pending_announcements:
-                        call_primary = calls[0] if calls else "UNKNOWN"
-                        pending_ts = self._pending_announcements.pop(call_primary, None)
-                        if pending_ts:
-                            log.debug(
-                                "JS8 NCS: F!106 completion arrived for pending call %s (net_in_progress=%s): %s",
-                                call_primary,
-                                self._net_in_progress,
-                                line,
-                            )
-                            self._maybe_notify_announcement(call_primary, line)
-                    self._maybe_capture_grid_report(line)
-                    self._maybe_record_inbound_trigger(line, calls)
-                    msg_ids = self._extract_message_ids(line)
-                    # If multiple stations reported YES MSG <id>, query each (only when addressed to us)
-                    mycall = self._my_callsign()
-                    if msg_ids and calls:
-                        dest_cs = ""
-                        try:
-                            msg_field = line.split("\t", 4)[4]
-                            if ":" in msg_field:
-                                dest_cs = msg_field.split(":", 1)[1].strip().split()[0].strip().upper()
-                        except Exception:
-                            dest_cs = ""
-                        if not mycall:
-                            log.info("JS8CallNetControl: YES MSG line but no mycall set; skipping: %s", line.strip())
-                        elif dest_cs != mycall:
-                            log.info(
-                                "JS8CallNetControl: YES MSG line addressed to %s (not %s); skipping",
-                                dest_cs or "(unknown)",
-                                mycall,
-                            )
-                        elif not self._is_message_complete_line(line):
-                            log.debug("JS8CallNetControl: YES MSG line incomplete; waiting for completion: %s", line.strip())
-                        else:
-                            for c in calls:
-                                for mid in msg_ids:
-                                    self._backlog_upsert(c, mid, "MSG", status="PENDING")
-                    call_primary = calls[0] if calls else ""
-                    if not call_primary:
-                        continue
+            if size_now < self._last_directed_size:
+                # File truncated or rotated; re-read from start
+                self._last_directed_size = 0
 
-                    # During an active net, record/update the check-in row
-                    if self._net_in_progress:
-                        if (
-                            not self._should_accept_checkin_line(line)
-                            and call_primary not in self._checkins
-                        ):
+            # Drop stale pending announcements
+            now_ts = time.time()
+            for k, ts in list(self._pending_announcements.items()):
+                if now_ts - ts > 60:
+                    self._pending_announcements.pop(k, None)
+            # Expire pending query waits
+            self._expire_pending_responses()
+
+            try:
+                with self._directed_path.open("r", encoding="utf-8", errors="ignore") as f:
+                    if self._last_directed_size > 0:
+                        f.seek(self._last_directed_size)
+                    max_lines = 500
+                    line_count = 0
+                    for line in f:
+                        line_count += 1
+                        if line_count > max_lines:
+                            break
+                        line = line.strip()
+                        if not line:
                             continue
-                        snr_line, dt_line, offset_line = self._parse_directed_metrics(line)
-                        speed_guess = self._call_last_speed.get(self._base_callsign(call_primary))
-                        mode_name = ""
-                        if speed_guess is not None:
-                            mode_name = {0: "Normal", 1: "Fast", 2: "Turbo", 4: "Slow"}.get(
-                                speed_guess, str(speed_guess)
+                        if not self._line_ts_after_start(line):
+                            log.debug("JS8 NCS: skipping DIRECTED line before app start: %s", line)
+                            continue
+                        calls = self._extract_callsigns_from_line(line)
+                        self._update_recent_traffic(line, calls)
+                        # Net announcement detection (only when net not in progress)
+                        if self._line_has_announce_form(line):
+                            # If message completion marker present, notify immediately; else mark pending
+                            call_primary = calls[0] if calls else ""
+                            if self._is_message_complete_line(line):
+                                log.debug(
+                                    "JS8 NCS: F!106 complete line detected (net_in_progress=%s): %s",
+                                    self._net_in_progress,
+                                    line,
+                                )
+                                self._maybe_notify_announcement(call_primary, line)
+                            else:
+                                log.debug("JS8 NCS: F!106 partial line, waiting for completion: %s", line)
+                                self._pending_announcements[(call_primary or "UNKNOWN")] = time.time()
+                        # If a completion marker arrives, see if we had a pending announcement for this call
+                        if self._is_message_complete_line(line) and self._pending_announcements:
+                            call_primary = calls[0] if calls else "UNKNOWN"
+                            pending_ts = self._pending_announcements.pop(call_primary, None)
+                            if pending_ts:
+                                log.debug(
+                                    "JS8 NCS: F!106 completion arrived for pending call %s (net_in_progress=%s): %s",
+                                    call_primary,
+                                    self._net_in_progress,
+                                    line,
+                                )
+                                self._maybe_notify_announcement(call_primary, line)
+                        self._maybe_capture_grid_report(line)
+                        self._maybe_record_inbound_trigger(line, calls)
+                        msg_ids = self._extract_message_ids(line)
+                        # If multiple stations reported YES MSG <id>, query each (only when addressed to us)
+                        mycall = self._my_callsign()
+                        if msg_ids and calls:
+                            dest_cs = ""
+                            try:
+                                msg_field = line.split("\t", 4)[4]
+                                if ":" in msg_field:
+                                    dest_cs = msg_field.split(":", 1)[1].strip().split()[0].strip().upper()
+                            except Exception:
+                                dest_cs = ""
+                            if not mycall:
+                                log.info("JS8CallNetControl: YES MSG line but no mycall set; skipping: %s", line.strip())
+                            elif dest_cs != mycall:
+                                log.info(
+                                    "JS8CallNetControl: YES MSG line addressed to %s (not %s); skipping",
+                                    dest_cs or "(unknown)",
+                                    mycall,
+                                )
+                            elif not self._is_message_complete_line(line):
+                                log.debug(
+                                    "JS8CallNetControl: YES MSG line incomplete; waiting for completion: %s",
+                                    line.strip(),
+                                )
+                            else:
+                                for c in calls:
+                                    for mid in msg_ids:
+                                        self._backlog_upsert(c, mid, "MSG", status="PENDING")
+                        call_primary = calls[0] if calls else ""
+                        if not call_primary:
+                            continue
+
+                        # During an active net, record/update the check-in row
+                        if self._net_in_progress:
+                            if (
+                                not self._should_accept_checkin_line(line)
+                                and call_primary not in self._checkins
+                            ):
+                                continue
+                            snr_line, dt_line, offset_line = self._parse_directed_metrics(line)
+                            speed_guess = self._call_last_speed.get(self._base_callsign(call_primary))
+                            mode_name = ""
+                            if speed_guess is not None:
+                                mode_name = {0: "Normal", 1: "Fast", 2: "Turbo", 4: "Slow"}.get(
+                                    speed_guess, str(speed_guess)
+                                )
+                            self._upsert_checkin(
+                                call_primary,
+                                status="NEW",
+                                mode=mode_name or None,
+                                snr=snr_line,
+                                dt_ms=dt_line,
+                                offset=offset_line,
                             )
-                        self._upsert_checkin(
-                            call_primary,
-                            status="NEW",
-                            mode=mode_name or None,
-                            snr=snr_line,
-                            dt_ms=dt_line,
-                            offset=offset_line,
-                        )
 
-                self._last_directed_size = f.tell()
-        except Exception as e:
-            log.error("JS8CallNetControl: failed reading DIRECTED.TXT: %s", e)
-            return
+                    self._last_directed_size = f.tell()
+            except Exception as e:
+                log.error("JS8CallNetControl: failed reading DIRECTED.TXT: %s", e)
+                return
 
-        # If no net in progress, skip UI updates (auto-query can still run)
-        if not self._net_in_progress:
-            return
+            # If no net in progress, skip UI updates (auto-query can still run)
+            if not self._net_in_progress:
+                return
+        finally:
+            self._polling_directed = False
+            elapsed = time.time() - start_ts
+            if elapsed > 0.5:
+                log.debug("JS8CallNetControl: directed poll took %.2fs", elapsed)
 
     def _poll_all_for_query_tx(self):
         """
@@ -2259,14 +2280,22 @@ class JS8CallNetControlTab(QWidget):
             self._maybe_process_next_query()
 
     def _poll_js8_rx_queue(self) -> None:
+        if self._is_shutting_down or self._polling_rx:
+            return
         if js8net is None:
             return
         client = self._get_js8_client()
         if client is None or not hasattr(js8net, "rx_queue"):
             return
+        self._polling_rx = True
         try:
+            max_msgs = 200
+            msg_count = 0
             while True:
                 msg = js8net.rx_queue.get_nowait()
+                msg_count += 1
+                if msg_count > max_msgs:
+                    break
                 now_ts = time.time()
                 self._last_rx_ts = now_ts
                 self._grid_last_rx_ts = now_ts
@@ -2376,6 +2405,26 @@ class JS8CallNetControlTab(QWidget):
                 except Exception:
                     continue
         except queue.Empty:
+            pass
+        finally:
+            self._polling_rx = False
+
+    def shutdown(self) -> None:
+        self._is_shutting_down = True
+        try:
+            if self._poll_timer:
+                self._poll_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._clock_timer:
+                self._clock_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._js8_rx_timer:
+                self._js8_rx_timer.stop()
+        except Exception:
             pass
 
     def _line_has_checkin_form(self, line: str) -> bool:

@@ -94,6 +94,47 @@ class FLRigClient:
                 self._fldigi_proxy = None
         return self._fldigi_proxy
 
+    def is_fldigi_available(self) -> bool:
+        proxy = self._connect_fldigi()
+        if proxy is None:
+            return False
+        try:
+            _ = proxy.modem.get_name()
+            return True
+        except Exception as e:
+            log.debug("FLDigi XML-RPC probe failed: %s", e)
+            self._fldigi_proxy = None
+            return False
+
+    def set_fldigi_mode_offset(self, mode: Optional[str], offset_hz: Optional[int]) -> bool:
+        proxy = self._connect_fldigi()
+        if proxy is None:
+            return False
+        try:
+            if mode:
+                log.info("Setting FLDigi mode to %s", mode)
+                proxy.modem.set_by_name(mode)
+            if offset_hz is not None:
+                log.info("Setting FLDigi carrier offset to %s Hz", offset_hz)
+                proxy.modem.set_carrier(int(offset_hz))
+            return True
+        except Exception as e:
+            log.warning("Failed to set FLDigi mode/offset: %s", e)
+            self._fldigi_proxy = None
+            return False
+
+    def get_fldigi_offset(self) -> Optional[int]:
+        proxy = self._connect_fldigi()
+        if proxy is None:
+            return None
+        try:
+            val = proxy.modem.get_carrier()
+            return int(val) if val is not None else None
+        except Exception as e:
+            log.debug("Failed to read FLDigi carrier offset: %s", e)
+            self._fldigi_proxy = None
+            return None
+
     def _set_fldigi_wfhz(self, offset_hz: Optional[int]) -> None:
         """
         Best-effort FLDigi waterfall offset via XML-RPC using the documented

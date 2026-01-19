@@ -38,7 +38,9 @@ def snapshot_operating_groups(og_list: List[Dict]) -> str:
         og_list, key=lambda x: (str(x.get("group", "")).lower(), str(x.get("band", "")).lower())
     ):
         parts.append(
-            f"{g.get('group','')}|{g.get('mode','')}|{g.get('band','')}|{g.get('frequency','')}|{int(bool(g.get('auto_tune', False)))}"
+            f"{g.get('group','')}|{g.get('mode','')}|{g.get('band','')}|{g.get('frequency','')}|"
+            f"{g.get('vfo','')}|{g.get('fldigi_mode','')}|{g.get('fldigi_offset','')}|"
+            f"{int(bool(g.get('auto_tune', False)))}"
         )
     return ";".join(parts)
 

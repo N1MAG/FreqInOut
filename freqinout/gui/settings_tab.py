@@ -10,6 +10,7 @@ from typing import Dict, Optional, List
 
 import psutil
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QSizePolicy,
     QAbstractScrollArea,
+    QCompleter,
 )
 
 from freqinout.core.logger import log
@@ -38,7 +40,7 @@ from freqinout.core.config_paths import get_fldigi_checkin_dir
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
-from freqinout.gui.theme import resolve_theme, led_style
+from freqinout.gui.theme import resolve_theme, led_style, button_style
 
 
 TIMEZONE_CHOICES = [
@@ -47,6 +49,166 @@ TIMEZONE_CHOICES = [
     "America/Chicago",
     "America/Denver",
     "America/Los_Angeles",
+]
+
+FLDIGI_MODE_OPTIONS = [
+    "Cont-4/250",
+    "MFSK32",
+    "SSB",
+    "FSQ",
+    "CW",
+    "WWV",
+    "WEFAX576",
+    "WEFAX288",
+    "Cont-4/125",
+    "Cont-4/500",
+    "Cont-4/1K",
+    "Cont-4/2K",
+    "Cont-8/125",
+    "Cont-8/250",
+    "Cont-8/500",
+    "Cont-8/1K",
+    "Cont-8/2K",
+    "Cont-16/250",
+    "Cont-16/500",
+    "Cont-16/1K",
+    "Cont-16/2K",
+    "Cont-32/1K",
+    "Cont-32/2K",
+    "Cont-64/500",
+    "Cont-64/1K",
+    "Cont-64/2K",
+    "DOMEXM",
+    "DOMEX4",
+    "DOMEX5",
+    "DOMEX8",
+    "DOMX11",
+    "DOMX16",
+    "DOMX22",
+    "DOMX44",
+    "DOMX88",
+    "FELDHELL",
+    "SLOWHELL",
+    "HELLX5",
+    "HELLX9",
+    "FSKH245",
+    "FSKH105",
+    "HELL80",
+    "MFSK8",
+    "MFSK16",
+    "MFSK4",
+    "MFSK11",
+    "MFSK22",
+    "MFSK31",
+    "MFSK64",
+    "MFSK128",
+    "MFSK64L",
+    "MFSK128L",
+    "NAVTEX",
+    "SITORB",
+    "MT63-500S",
+    "MT63-500L",
+    "MT63-1KS",
+    "MT63-1KL",
+    "MT63-2KS",
+    "MT63-2KL",
+    "BPSK31",
+    "BPSK63",
+    "BPSK63F",
+    "BPSK125",
+    "BPSK250",
+    "BPSK500",
+    "BPSK1000",
+    "PSK125C12",
+    "PSK250C6",
+    "PSK500C2",
+    "PSK500C4",
+    "PSK800C2",
+    "PSK1000C2",
+    "QPSK31",
+    "QPSK63",
+    "QPSK125",
+    "QPSK250",
+    "QPSK500",
+    "8PSK125",
+    "8PSK125FL",
+    "8PSK125F",
+    "8PSK250",
+    "8PSK250FL",
+    "8PSK250F",
+    "8PSK500",
+    "8PSK500F",
+    "8PSK1000",
+    "8PSK1000F",
+    "8PSK1200F",
+    "OFDM500F",
+    "OFDM750F",
+    "OFDM3500",
+    "OLIVIA",
+    "OLIVIA-4/125",
+    "OLIVIA-4/250",
+    "OLIVIA-4/500",
+    "OLIVIA-4/1K",
+    "OLIVIA-4/2K",
+    "OLIVIA-8/125",
+    "OLIVIA-8/250",
+    "OLIVIA-8/500",
+    "OLIVIA-8/1K",
+    "OLIVIA-8/2K",
+    "OLIVIA-16/500",
+    "OLIVIA-16/1K",
+    "OLIVIA-16/2K",
+    "OLIVIA-32/1K",
+    "OLIVIA-32/2K",
+    "OLIVIA-64/500",
+    "OLIVIA-64/1K",
+    "OLIVIA-64/2K",
+    "RTTY",
+    "THORM",
+    "THOR4",
+    "THOR5",
+    "THOR8",
+    "THOR11",
+    "THOR16",
+    "THOR22",
+    "THOR32",
+    "THOR44",
+    "THOR56",
+    "THOR25x4",
+    "THOR50x1",
+    "THOR50x2",
+    "THOR100",
+    "THROB1",
+    "THROB2",
+    "THROB4",
+    "THRBX1",
+    "THRBX2",
+    "THRBX4",
+    "PSK125R",
+    "PSK250R",
+    "PSK500R",
+    "PSK1000R",
+    "PSK63RC4",
+    "PSK63RC5",
+    "PSK63RC10",
+    "PSK63RC20",
+    "PSK63RC32",
+    "PSK125RC4",
+    "PSK125RC5",
+    "PSK125RC10",
+    "PSK125RC12",
+    "PSK125RC16",
+    "PSK250RC2",
+    "PSK250RC3",
+    "PSK250RC5",
+    "PSK250RC6",
+    "PSK250RC7",
+    "PSK500RC2",
+    "PSK500RC3",
+    "PSK500RC4",
+    "PSK800RC2",
+    "PSK1000RC2",
+    "IFKP",
 ]
 
 
@@ -79,6 +241,8 @@ class SettingsTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self._settings_dirty = False
+        self._loading_settings = False
 
         self.PROGRAMS: Dict[str, Dict[str, str]] = {
             "FLRig": {"setting_key": "path_flrig", "autostart_key": "autostart_flrig"},
@@ -135,13 +299,6 @@ class SettingsTab(QWidget):
         header_layout.addWidget(self.local_label)
         main_layout.addLayout(header_layout)
 
-        content_layout = QHBoxLayout()
-        main_layout.addLayout(content_layout)
-
-        # LEFT column
-        left_col = QVBoxLayout()
-        content_layout.addLayout(left_col, 3)
-
         # Identity group
         callsign_group = QGroupBox("Operator Information")
         callsign_layout = QVBoxLayout()
@@ -161,54 +318,88 @@ class SettingsTab(QWidget):
         row1.addSpacing(12)
         row1.addWidget(QLabel("Name:"))
         row1.addWidget(self.name_edit)
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("State:"))
-        row2.addWidget(self.state_edit)
-        row2.addWidget(QLabel("Grid 6:"))
-        row2.addWidget(self.grid6_edit)
-        row2.addStretch()
+        row1.addSpacing(12)
+        row1.addWidget(QLabel("State:"))
+        row1.addWidget(self.state_edit)
+        row1.addSpacing(12)
+        row1.addWidget(QLabel("Grid 6:"))
+        row1.addWidget(self.grid6_edit)
+        row1.addStretch()
         callsign_layout.addLayout(row1)
-        callsign_layout.addLayout(row2)
         callsign_group.setLayout(callsign_layout)
-        left_col.addWidget(callsign_group)
+        main_layout.addWidget(callsign_group)
 
         # Operation settings (control)
-        op_group = QGroupBox("Operation Settings")
+        op_group = QGroupBox("FreqInOut Settings")
         op_layout = QVBoxLayout()
         op_group.setLayout(op_layout)
-        left_col.addWidget(op_group)
+        main_layout.addWidget(op_group)
 
         # control mode (no timezone dropdown anymore)
         ctrl_row = QHBoxLayout()
+        ctrl_row.addWidget(QLabel("Theme:"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["Light", "Dark"])
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        ctrl_row.addWidget(self.theme_combo)
+        ctrl_row.addSpacing(12)
         ctrl_row.addWidget(QLabel("Frequency Control:"))
         self.control_combo = QComboBox()
         self.control_combo.addItems(["FLRig", "JS8Call", "Manual"])
         ctrl_row.addWidget(self.control_combo)
         ctrl_row.addSpacing(12)
-        self.use_scheduler_chk = QCheckBox("Use Scheduler")
+        self.use_scheduler_chk = QCheckBox("Use FreqInOut Scheduler")
         self.use_scheduler_chk.setToolTip("Enable automatic schedule-driven frequency changes.")
         ctrl_row.addWidget(self.use_scheduler_chk)
         ctrl_row.addSpacing(12)
-        ctrl_row.addWidget(QLabel("FLRig XMLRPC Port:"))
-        self.flrig_port_edit = QLineEdit()
-        self.flrig_port_edit.setFixedWidth(80)
-        self.flrig_port_edit.setText("12345")
-        ctrl_row.addWidget(self.flrig_port_edit)
+        ctrl_row.addWidget(QLabel("Schedule Mode"))
+        self.schedule_mode_combo = QComboBox()
+        self.schedule_mode_combo.addItems(["Shack", "POTA", "EmComms"])
+        ctrl_row.addWidget(self.schedule_mode_combo)
         ctrl_row.addStretch()
         op_layout.addLayout(ctrl_row)
 
-        theme_row = QHBoxLayout()
-        theme_row.addWidget(QLabel("Theme:"))
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["Light", "Dark"])
-        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
-        theme_row.addWidget(self.theme_combo)
-        theme_row.addStretch()
-        op_layout.addLayout(theme_row)
-
-        # RIGHT column
-        right_col = QVBoxLayout()
-        content_layout.addLayout(right_col, 4)
+        # Operating Groups panel
+        ops_group = QGroupBox("Operating Groups")
+        ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        ops_layout = QVBoxLayout()
+        ops_group.setLayout(ops_layout)
+        add_row = QHBoxLayout()
+        self.add_group_btn = QPushButton("Add Group")
+        self.add_group_btn.clicked.connect(self._add_operating_group)
+        self.edit_group_btn = QPushButton("Edit Selected")
+        self.edit_group_btn.clicked.connect(self._edit_operating_group)
+        self.delete_group_btn = QPushButton("Delete Selected")
+        self.delete_group_btn.clicked.connect(self._delete_operating_groups)
+        add_row.addStretch()
+        add_row.addWidget(self.add_group_btn)
+        add_row.addWidget(self.edit_group_btn)
+        add_row.addWidget(self.delete_group_btn)
+        ops_layout.addLayout(add_row)
+        self.op_groups_table = QTableWidget(0, 9)
+        self.op_groups_table.setHorizontalHeaderLabels(
+            [
+                "Selected",
+                "Group",
+                "Mode",
+                "Band",
+                "Freq (MHz)",
+                "VFO",
+                "FLDigi Starting Mode",
+                "FLDigi Starting Offset",
+                "Auto-Tune",
+            ]
+        )
+        header = self.op_groups_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        header.setStretchLastSection(False)
+        self.op_groups_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        self.op_groups_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.op_groups_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        ops_layout.addWidget(self.op_groups_table)
+        main_layout.addWidget(ops_group)
 
         # JS8Call status/settings (managed externally)
         js8_group = QGroupBox("JS8Call Settings")
@@ -216,7 +407,6 @@ class SettingsTab(QWidget):
         js8_group.setLayout(js8_v)
 
         js8_status_row = QHBoxLayout()
-        js8_status_row.addWidget(QLabel("JS8Call API"))
         js8_status_lbl = QLabel()
         js8_status_lbl.setFixedSize(14, 14)
         theme = resolve_theme(self.settings)
@@ -224,6 +414,7 @@ class SettingsTab(QWidget):
         # Keep API indicator separate from the per-program row to avoid overwrites
         self.status_labels["JS8Call_API"] = js8_status_lbl
         js8_status_row.addWidget(js8_status_lbl)
+        js8_status_row.addWidget(QLabel("JS8Call API Connection"))
         js8_status_row.addStretch()
         js8_v.addLayout(js8_status_row)
 
@@ -239,33 +430,31 @@ class SettingsTab(QWidget):
         self.js8_offset_edit.setFixedWidth(80)
         self.js8_offset_edit.setText("0")
         js8_port_row.addWidget(self.js8_offset_edit)
-        js8_port_row.addStretch()
-        js8_v.addLayout(js8_port_row)
-
-        directed_row = QHBoxLayout()
-        directed_row.addWidget(QLabel("JS8Call DIRECTED.TXT:"))
-        self.js8_directed_edit = QLineEdit()
-        directed_browse = QPushButton("Browse")
-        directed_browse.clicked.connect(self._choose_js8_directed_path)
-        directed_row.addWidget(self.js8_directed_edit, stretch=1)
-        directed_row.addWidget(directed_browse)
-        js8_v.addLayout(directed_row)
-
-        # JS8Spotter forms path (for decoding JS8Spotter messages)
-        forms_row = QHBoxLayout()
-        forms_row.addWidget(QLabel("JS8Spotter forms:"))
-        self.js8_forms_edit = QLineEdit()
-        forms_browse = QPushButton("Browse")
-        forms_browse.clicked.connect(self._choose_js8_forms_path)
-        forms_row.addWidget(self.js8_forms_edit, stretch=1)
-        forms_row.addWidget(forms_browse)
-        js8_v.addLayout(forms_row)
-
-        self.js8_mark_retrieved_chk = QCheckBox("Mark JS8Call MSG Retrieved")
+        js8_port_row.addSpacing(12)
+        js8_port_row.addWidget(QLabel("Mark JS8Call MSG Read?"))
+        self.js8_mark_retrieved_chk = QCheckBox()
         self.js8_mark_retrieved_chk.setToolTip(
             "When enabled, clicking 'Mark Retrieved' in Message Viewer will set JS8Call inbox entries to READ."
         )
-        js8_v.addWidget(self.js8_mark_retrieved_chk)
+        js8_port_row.addWidget(self.js8_mark_retrieved_chk)
+        js8_port_row.addStretch()
+        js8_v.addLayout(js8_port_row)
+
+        directed_forms_row = QHBoxLayout()
+        directed_forms_row.addWidget(QLabel("JS8Call DIRECTED.TXT:"))
+        self.js8_directed_edit = QLineEdit()
+        directed_browse = QPushButton("Browse")
+        directed_browse.clicked.connect(self._choose_js8_directed_path)
+        directed_forms_row.addWidget(self.js8_directed_edit, stretch=1)
+        directed_forms_row.addWidget(directed_browse)
+        directed_forms_row.addSpacing(12)
+        directed_forms_row.addWidget(QLabel("JS8Spotter forms:"))
+        self.js8_forms_edit = QLineEdit()
+        forms_browse = QPushButton("Browse")
+        forms_browse.clicked.connect(self._choose_js8_forms_path)
+        directed_forms_row.addWidget(self.js8_forms_edit, stretch=1)
+        directed_forms_row.addWidget(forms_browse)
+        js8_v.addLayout(directed_forms_row)
 
         load_links_row = QHBoxLayout()
         self.load_js8_btn = QPushButton("Load JS8 Traffic")
@@ -274,142 +463,189 @@ class SettingsTab(QWidget):
         load_links_row.addStretch()
         js8_v.addLayout(load_links_row)
 
-        left_col.addWidget(js8_group)
-
-        # Messages & Files (for Message Viewer + FLDigi check-ins)
-        msg_paths_group = QGroupBox("Messages && Files")
-        msg_paths_layout = QFormLayout()
-        # Match tighter spacing like Radio Software
-        msg_paths_layout.setHorizontalSpacing(6)
-        msg_paths_layout.setVerticalSpacing(2)
-        msg_paths_layout.setContentsMargins(0, 6, 0, 0)
-        self.msg_paths_edits = {}
-        for origin, label in [
-            ("varac", "VarAC Incoming Files"),
-            ("flmsg", "ICS/Messages"),
-            ("flamp", "FLAMP/rx"),
-        ]:
-            edit = QLineEdit()
-            browse = QPushButton("Browse")
-            browse.clicked.connect(lambda _, o=origin, e=edit: self._choose_msg_path(o, e))
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.addWidget(edit, 1)
-            row.addWidget(browse)
-            container = QWidget()
-            container.setLayout(row)
-            msg_paths_layout.addRow(label + ":", container)
-            self.msg_paths_edits[origin] = edit
-        self.fldigi_checkin_dir_edit = QLineEdit()
-        fldigi_browse = QPushButton("Browse")
-        fldigi_browse.clicked.connect(self._choose_fldigi_checkin_dir)
-        self.fldigi_checkin_dir_edit.textChanged.connect(self._refresh_fldigi_checkin_file_labels)
-        fldigi_row = QHBoxLayout()
-        fldigi_row.setContentsMargins(0, 0, 0, 0)
-        fldigi_row.addWidget(self.fldigi_checkin_dir_edit, 1)
-        fldigi_row.addWidget(fldigi_browse)
-        fldigi_container = QWidget()
-        fldigi_container.setLayout(fldigi_row)
-        msg_paths_layout.addRow("FLDigi Check-in File Path:", fldigi_container)
-
-        self.fldigi_main_file_edit = QLineEdit()
-        self.fldigi_main_file_edit.setReadOnly(True)
-        fldigi_main_copy = QPushButton("Copy Path")
-        fldigi_main_copy.clicked.connect(
-            lambda: QApplication.clipboard().setText(self.fldigi_main_file_edit.text())
-        )
-        fldigi_main_row = QHBoxLayout()
-        fldigi_main_row.setContentsMargins(0, 0, 0, 0)
-        fldigi_main_row.addWidget(self.fldigi_main_file_edit, 1)
-        fldigi_main_row.addWidget(fldigi_main_copy)
-        fldigi_main_container = QWidget()
-        fldigi_main_container.setLayout(fldigi_main_row)
-        msg_paths_layout.addRow("main_checkins.txt:", fldigi_main_container)
-
-        self.fldigi_late_file_edit = QLineEdit()
-        self.fldigi_late_file_edit.setReadOnly(True)
-        fldigi_late_copy = QPushButton("Copy Path")
-        fldigi_late_copy.clicked.connect(
-            lambda: QApplication.clipboard().setText(self.fldigi_late_file_edit.text())
-        )
-        fldigi_late_row = QHBoxLayout()
-        fldigi_late_row.setContentsMargins(0, 0, 0, 0)
-        fldigi_late_row.addWidget(self.fldigi_late_file_edit, 1)
-        fldigi_late_row.addWidget(fldigi_late_copy)
-        fldigi_late_container = QWidget()
-        fldigi_late_container.setLayout(fldigi_late_row)
-        msg_paths_layout.addRow("new-late_checkins.txt:", fldigi_late_container)
-        msg_paths_group.setLayout(msg_paths_layout)
-        right_col.addWidget(msg_paths_group)
-
-        # Operating Groups panel (right column)
-        ops_group = QGroupBox("Operating Groups")
-        ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        ops_layout = QVBoxLayout()
-        ops_group.setLayout(ops_layout)
-        add_row = QHBoxLayout()
-        add_btn = QPushButton(" Add Group")
-        add_btn.clicked.connect(self._add_operating_group)
-        edit_btn = QPushButton(" Edit Selected")
-        edit_btn.clicked.connect(self._edit_operating_group)
-        delete_btn = QPushButton("Delete Selected")
-        delete_btn.clicked.connect(self._delete_operating_groups)
-        add_row.addStretch()
-        add_row.addWidget(add_btn)
-        add_row.addWidget(edit_btn)
-        add_row.addWidget(delete_btn)
-        ops_layout.addLayout(add_row)
-        self.op_groups_table = QTableWidget(0, 6)
-        self.op_groups_table.setHorizontalHeaderLabels(["Selected", "Group", "Mode", "Band", "Freq (MHz)", "Auto-Tune"])
-        header = self.op_groups_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setStretchLastSection(True)
-        self.op_groups_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
-        self.op_groups_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.op_groups_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        ops_layout.addWidget(self.op_groups_table)
-        right_col.addWidget(ops_group)
+        main_layout.addWidget(js8_group)
 
         # Radio software
         radio_group = QGroupBox("Radio Software")
         radio_v = QVBoxLayout()
         radio_group.setLayout(radio_v)
-        left_col.addWidget(radio_group)
+        radio_grid = QHBoxLayout()
 
-        for prog_name, meta in self.PROGRAMS.items():
+        # Left column: program rows
+        prog_layout = QVBoxLayout()
+        msg_layout = QVBoxLayout()
+        msg_layout.setSpacing(6)
+
+        def build_prog_row(name: str) -> QHBoxLayout:
             row = QHBoxLayout()
-            chk = QCheckBox(prog_name)
-            self.radio_checkboxes[prog_name] = chk
+            chk = QCheckBox(name)
+            self.radio_checkboxes[name] = chk
+            chk.stateChanged.connect(self._update_launch_selected_state)
             row.addWidget(chk)
 
             status_lbl = QLabel()
             status_lbl.setFixedSize(14, 14)
             theme = resolve_theme(self.settings)
             status_lbl.setStyleSheet(led_style("idle", theme))
-            self.status_labels[prog_name] = status_lbl
+            self.status_labels[name] = status_lbl
             row.addWidget(status_lbl)
 
             path_edit = QLineEdit()
             path_edit.setPlaceholderText("Path to executable")
-            self.path_edits[prog_name] = path_edit
+            self.path_edits[name] = path_edit
             row.addWidget(path_edit)
 
             browse_btn = QPushButton("Browse")
             browse_btn.setFixedWidth(70)
-            browse_btn.clicked.connect(lambda _, n=prog_name: self._choose_program_path(n))
+            browse_btn.clicked.connect(lambda _, n=name: self._choose_program_path(n))
             row.addWidget(browse_btn)
+            return row
 
-            radio_v.addLayout(row)
+        msg_label_width = 160
 
-        # Launch Selected
+        def build_msg_row(label: str, edit: QLineEdit, browse_cb) -> QHBoxLayout:
+            row = QHBoxLayout()
+            lbl = QLabel(label)
+            lbl.setFixedWidth(msg_label_width)
+            row.addWidget(lbl)
+            row.addWidget(edit, 1)
+            browse_btn = QPushButton("Browse")
+            browse_btn.setFixedWidth(70)
+            browse_btn.clicked.connect(browse_cb)
+            row.addWidget(browse_btn)
+            return row
+
+        # Message path edits
+        self.msg_paths_edits = {}
+        varac_edit = QLineEdit()
+        self.msg_paths_edits["varac"] = varac_edit
+        flmsg_edit = QLineEdit()
+        self.msg_paths_edits["flmsg"] = flmsg_edit
+        flamp_edit = QLineEdit()
+        self.msg_paths_edits["flamp"] = flamp_edit
+
+        # FLRig row + XMLRPC port
+        flrig_row = QHBoxLayout()
+        flrig_chk = QCheckBox("FLRig")
+        self.radio_checkboxes["FLRig"] = flrig_chk
+        flrig_chk.stateChanged.connect(self._update_launch_selected_state)
+        flrig_row.addWidget(flrig_chk)
+
+        flrig_status = QLabel()
+        flrig_status.setFixedSize(14, 14)
+        flrig_status.setStyleSheet(led_style("idle", resolve_theme(self.settings)))
+        self.status_labels["FLRig"] = flrig_status
+        flrig_row.addWidget(flrig_status)
+
+        flrig_path = QLineEdit()
+        flrig_path.setPlaceholderText("Path to executable")
+        self.path_edits["FLRig"] = flrig_path
+        flrig_row.addWidget(flrig_path)
+
+        flrig_browse = QPushButton("Browse")
+        flrig_browse.setFixedWidth(70)
+        flrig_browse.clicked.connect(lambda _: self._choose_program_path("FLRig"))
+        flrig_row.addWidget(flrig_browse)
+
+        prog_layout.addLayout(flrig_row)
+
+        flrig_port_row = QHBoxLayout()
+        flrig_port_label = QLabel("FLRig XMLRPC Port")
+        flrig_port_label.setFixedWidth(msg_label_width)
+        flrig_port_row.addWidget(flrig_port_label)
+        self.flrig_port_edit = QLineEdit()
+        self.flrig_port_edit.setFixedWidth(80)
+        self.flrig_port_edit.setText("12345")
+        flrig_port_row.addWidget(self.flrig_port_edit)
+        flrig_port_row.addStretch()
+        flrig_port_spacer = QWidget()
+        flrig_port_spacer.setFixedWidth(70)
+        flrig_port_row.addWidget(flrig_port_spacer)
+        msg_layout.addLayout(flrig_port_row)
+
+        # FLDigi row + check-in path
+        prog_layout.addLayout(build_prog_row("FLDigi"))
+        self.fldigi_checkin_dir_edit = QLineEdit()
+        fldigi_browse = QPushButton("Browse")
+        fldigi_browse.clicked.connect(self._choose_fldigi_checkin_dir)
+        self.fldigi_checkin_dir_edit.textChanged.connect(self._refresh_fldigi_checkin_file_labels)
+        self.fldigi_main_file_edit = QLineEdit()
+        self.fldigi_main_file_edit.setReadOnly(True)
+        self.fldigi_main_file_edit.hide()
+        self.fldigi_late_file_edit = QLineEdit()
+        self.fldigi_late_file_edit.setReadOnly(True)
+        self.fldigi_late_file_edit.hide()
+        fldigi_row = QHBoxLayout()
+        fldigi_label = QLabel("Check-in File Path")
+        fldigi_label.setFixedWidth(msg_label_width)
+        fldigi_row.addWidget(fldigi_label)
+        fldigi_row.addWidget(self.fldigi_checkin_dir_edit, 1)
+        fldigi_row.addWidget(fldigi_browse)
+        msg_layout.addLayout(fldigi_row)
+
+        # FLMsg row + ICS/Messages path
+        prog_layout.addLayout(build_prog_row("FLMsg"))
+        msg_layout.addLayout(
+            build_msg_row(
+                "ICS/Messages",
+                flmsg_edit,
+                lambda: self._choose_msg_path("flmsg", flmsg_edit),
+            )
+        )
+
+        # FLAmp row + FLAMP/rx path
+        prog_layout.addLayout(build_prog_row("FLAmp"))
+        msg_layout.addLayout(
+            build_msg_row(
+                "FLAMP/rx",
+                flamp_edit,
+                lambda: self._choose_msg_path("flamp", flamp_edit),
+            )
+        )
+
+        # VarAC status row + incoming files path
+        varac_row = QHBoxLayout()
+        varac_status = QLabel()
+        varac_status.setFixedSize(14, 14)
+        varac_status.setStyleSheet(led_style("idle", resolve_theme(self.settings)))
+        self.status_labels["VarAC"] = varac_status
+        varac_row.addWidget(varac_status)
+        varac_row.addWidget(QLabel("VarAC"))
+        self.varac_path_edit = QLineEdit()
+        self.varac_path_edit.setReadOnly(True)
+        self.varac_path_edit.setPlaceholderText("Not running")
+        varac_row.addWidget(self.varac_path_edit, 1)
+        prog_layout.addLayout(varac_row)
+
+        msg_layout.addLayout(
+            build_msg_row(
+                "VarAC Incoming Files",
+                varac_edit,
+                lambda: self._choose_msg_path("varac", varac_edit),
+            )
+        )
+
+        radio_grid.addLayout(prog_layout, 3)
+        radio_grid.addLayout(msg_layout, 4)
+        radio_v.addLayout(radio_grid)
+
+        # Launch Selected + Check-in log file copy helpers (single row)
         self.launch_selected_btn = QPushButton("Launch Selected")
         self.launch_selected_btn.clicked.connect(self._launch_selected_programs)
-        radio_v.addWidget(self.launch_selected_btn)
+        self.launch_selected_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        launch_row = QHBoxLayout()
+        launch_row.addWidget(self.launch_selected_btn)
+        launch_row.addStretch()
+        launch_row.addWidget(QLabel("Check-in Log Paths:"))
+        self.copy_main_btn = QPushButton("Copy Main")
+        self.copy_main_btn.clicked.connect(lambda: self._copy_text(self.fldigi_main_file_edit))
+        self.copy_late_btn = QPushButton("Copy New/Late")
+        self.copy_late_btn.clicked.connect(lambda: self._copy_text(self.fldigi_late_file_edit))
+        launch_row.addWidget(self.copy_main_btn)
+        launch_row.addWidget(self.copy_late_btn)
+        radio_v.addLayout(launch_row)
 
-        left_col.addWidget(js8_group)
-        left_col.addStretch()
-
-        right_col.addStretch()
+        main_layout.addWidget(radio_group)
 
         # bottom save
         bottom_row = QHBoxLayout()
@@ -418,10 +654,14 @@ class SettingsTab(QWidget):
         self.save_btn.clicked.connect(self._save_settings_button)
         bottom_row.addWidget(self.save_btn)
         main_layout.addLayout(bottom_row)
+        self.launch_selected_btn.setMinimumWidth(self.launch_selected_btn.sizeHint().width() + 12)
+        self._wire_dirty_tracking()
+        self._set_save_button_state("success")
 
     # ---------- LOAD/SAVE ---------- #
 
     def _load_settings(self):
+        self._loading_settings = True
         data = self.settings.all()
 
         self.callsign_edit.setText(data.get("operator_callsign", "") or "")
@@ -450,13 +690,29 @@ class SettingsTab(QWidget):
             ctrl = "FLRig"
         self.control_combo.setCurrentText(ctrl)
         self.use_scheduler_chk.setChecked(bool(data.get("use_scheduler", True)))
+        sched_mode = (data.get("schedule_enforcement_mode", "EmComms") or "EmComms").strip()
+        if sched_mode not in {"Shack", "POTA", "EmComms"}:
+            sched_mode = "EmComms"
+        self.schedule_mode_combo.setCurrentText(sched_mode)
         theme = (data.get("ui_theme", "light") or "light").strip().lower()
         self.theme_combo.setCurrentText("Dark" if theme == "dark" else "Light")
 
         port_txt = str(data.get("js8_port", "2442") or "2442")
         self.js8_port_edit.setText(port_txt)
-        offset_txt = str(data.get("js8_offset_hz", "0") or "0")
-        self.js8_offset_edit.setText(offset_txt)
+        offset_val = data.get("js8_offset_hz", None)
+        try:
+            offset_int = int(offset_val) if offset_val not in (None, "") else 0
+        except Exception:
+            offset_int = 0
+        if offset_int <= 0:
+            offset_int = 1900 + (datetime.datetime.utcnow().hour % 7) * 50
+            if hasattr(self.settings, "set"):
+                self.settings.set("js8_offset_hz", offset_int)
+            else:
+                data["js8_offset_hz"] = offset_int
+                if hasattr(self.settings, "_data"):
+                    self.settings._data = data  # type: ignore[attr-defined]
+        self.js8_offset_edit.setText(str(offset_int))
         self.js8_forms_edit.setText(data.get("js8_forms_path", "") or "")
         self.js8_mark_retrieved_chk.setChecked(
             bool(data.get("js8_inbox_mark_retrieved_sync", False))
@@ -489,17 +745,25 @@ class SettingsTab(QWidget):
         try:
             og = data.get("operating_groups", [])
             if isinstance(og, list):
-                self.operating_groups = [
-                    {
-                        "group": str(g.get("group", "")).upper(),
-                        "mode": g.get("mode", ""),
-                        "band": g.get("band", ""),
-                        "frequency": g.get("frequency", ""),
-                        "auto_tune": bool(g.get("auto_tune", False)),
-                    }
-                    for g in og
-                    if isinstance(g, dict)
-                ]
+                self.operating_groups = []
+                for g in og:
+                    if not isinstance(g, dict):
+                        continue
+                    vfo_val = (g.get("vfo") or "A").strip().upper()
+                    if vfo_val not in ("A", "B"):
+                        vfo_val = "A"
+                    self.operating_groups.append(
+                        {
+                            "group": str(g.get("group", "")).upper(),
+                            "mode": g.get("mode", ""),
+                            "band": g.get("band", ""),
+                            "frequency": g.get("frequency", ""),
+                            "vfo": vfo_val,
+                            "fldigi_mode": (g.get("fldigi_mode") or "").strip(),
+                            "fldigi_offset": (g.get("fldigi_offset") or "").strip(),
+                            "auto_tune": bool(g.get("auto_tune", False)),
+                        }
+                    )
         except Exception:
             self.operating_groups = []
         self._refresh_operating_groups_table()
@@ -516,6 +780,11 @@ class SettingsTab(QWidget):
                 self.radio_checkboxes[prog_name].setChecked(bool(data.get(enabled_key, False)))
 
         log.info("SettingsTab: settings loaded.")
+        self._update_launch_selected_state()
+        self._update_op_group_action_buttons()
+        self._loading_settings = False
+        self._settings_dirty = False
+        self._set_save_button_state("success")
 
     def _save_settings_button(self):
         """Explicit save via the button (shows confirmation)."""
@@ -528,6 +797,8 @@ class SettingsTab(QWidget):
             self.settings_saved.emit()
         except Exception:
             pass
+        self._settings_dirty = False
+        self._set_save_button_state("success")
 
     def _save_settings_quiet(self):
         """Auto-save on application exit (no dialog)."""
@@ -550,6 +821,7 @@ class SettingsTab(QWidget):
 
         data["control_via"] = self.control_combo.currentText().strip()
         data["use_scheduler"] = bool(self.use_scheduler_chk.isChecked())
+        data["schedule_enforcement_mode"] = self.schedule_mode_combo.currentText().strip()
         data["ui_theme"] = self.theme_combo.currentText().strip().lower()
 
         try:
@@ -604,6 +876,7 @@ class SettingsTab(QWidget):
                 "timezone": data["timezone"],
                 "control_via": data["control_via"],
                 "use_scheduler": data["use_scheduler"],
+                "schedule_enforcement_mode": data.get("schedule_enforcement_mode", "EmComms"),
                 "ui_theme": data.get("ui_theme", "light"),
                 "js8_port": data["js8_port"],
                 "js8_offset_hz": data.get("js8_offset_hz", 0),
@@ -634,6 +907,7 @@ class SettingsTab(QWidget):
             self.settings.set("timezone", data["timezone"])
             self.settings.set("control_via", data["control_via"])
             self.settings.set("ui_theme", data.get("ui_theme", "light"))
+            self.settings.set("schedule_enforcement_mode", data.get("schedule_enforcement_mode", "EmComms"))
             self.settings.set("js8_port", data["js8_port"])
             self.settings.set("js8_offset_hz", data.get("js8_offset_hz", 0))
             self.settings.set("primary_js8_groups", data["primary_js8_groups"])
@@ -673,6 +947,8 @@ class SettingsTab(QWidget):
             data.get("operator_state", ""),
         )
         self._refresh_operator_history_views()
+        self._settings_dirty = False
+        self._set_save_button_state("success")
 
     def _on_theme_changed(self):
         theme = self.theme_combo.currentText().strip().lower() or "light"
@@ -687,6 +963,45 @@ class SettingsTab(QWidget):
             self.settings_saved.emit()
         except Exception:
             pass
+        self._mark_settings_dirty()
+
+    def _wire_dirty_tracking(self) -> None:
+        edits = [
+            self.callsign_edit,
+            self.name_edit,
+            self.state_edit,
+            self.grid6_edit,
+            self.js8_port_edit,
+            self.js8_offset_edit,
+            self.js8_directed_edit,
+            self.js8_forms_edit,
+            self.fldigi_checkin_dir_edit,
+            self.flrig_port_edit,
+        ]
+        edits.extend(self.msg_paths_edits.values())
+        edits.extend(self.path_edits.values())
+        for edit in edits:
+            edit.textChanged.connect(self._mark_settings_dirty)
+
+        combos = [self.control_combo, self.theme_combo, self.schedule_mode_combo]
+        for combo in combos:
+            combo.currentIndexChanged.connect(self._mark_settings_dirty)
+
+        checks = [self.use_scheduler_chk, self.js8_mark_retrieved_chk]
+        checks.extend(self.radio_checkboxes.values())
+        for chk in checks:
+            chk.stateChanged.connect(self._mark_settings_dirty)
+
+    def _mark_settings_dirty(self) -> None:
+        if self._loading_settings:
+            return
+        if not self._settings_dirty:
+            self._settings_dirty = True
+            self._set_save_button_state("info")
+
+    def _set_save_button_state(self, role: str) -> None:
+        theme = resolve_theme(self.settings)
+        self.save_btn.setStyleSheet(button_style(role, theme))
 
     # ---------- TIME / TIMEZONE ---------- #
 
@@ -914,6 +1229,12 @@ class SettingsTab(QWidget):
         else:
             QTimer.singleShot(1500, self._refresh_running_status)
 
+    def _update_launch_selected_state(self):
+        theme = resolve_theme(self.settings)
+        any_selected = any(chk.isChecked() for chk in self.radio_checkboxes.values())
+        role = "info" if any_selected else "muted"
+        self.launch_selected_btn.setStyleSheet(button_style(role, theme))
+
     def _program_is_running(self, program_name: str) -> bool:
         # Cache process snapshot briefly to avoid multiple psutil walks
         now_ts = datetime.datetime.now().timestamp()
@@ -938,6 +1259,28 @@ class SettingsTab(QWidget):
             target_names.add(exe_path.name.lower())
         return any(entry in target_names for entry in self._proc_snapshot)
 
+    def _find_process_exe(self, program_name: str) -> Optional[str]:
+        target = (program_name or "").strip().lower()
+        if not target:
+            return None
+        target_names = {target, f"{target}.exe"}
+        for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                exe = proc.info.get("exe") or ""
+                exe_base = os.path.basename(exe).lower()
+                cmdline_list = proc.info.get("cmdline") or []
+                first_arg = os.path.basename(cmdline_list[0]).lower() if cmdline_list else ""
+                if name in target_names or exe_base in target_names or first_arg in target_names:
+                    if exe:
+                        return exe
+                    if cmdline_list:
+                        return cmdline_list[0]
+                    return None
+            except Exception:
+                continue
+        return None
+
     def _refresh_running_status(self):
         theme = resolve_theme(self.settings)
         running_js8 = self._program_is_running("JS8Call")
@@ -954,6 +1297,20 @@ class SettingsTab(QWidget):
             else:
                 api_lbl.setStyleSheet(led_style("idle", theme))
                 api_lbl.setToolTip("Not running")
+
+        # Update VarAC path display if available
+        if hasattr(self, "varac_path_edit"):
+            varac_running = self._program_is_running("VarAC")
+            exe_path = self._find_process_exe("VarAC") if varac_running else None
+            if exe_path:
+                self.varac_path_edit.setText(exe_path)
+                self.varac_path_edit.setToolTip(exe_path)
+            elif varac_running:
+                self.varac_path_edit.setText("Running")
+                self.varac_path_edit.setToolTip("Running")
+            else:
+                self.varac_path_edit.clear()
+                self.varac_path_edit.setToolTip("Not running")
 
         # Update all other indicators
         for program_name, lbl in self.status_labels.items():
@@ -981,6 +1338,9 @@ class SettingsTab(QWidget):
     def apply_theme(self):
         try:
             self._refresh_running_status()
+            self._update_launch_selected_state()
+            self._update_op_group_action_buttons()
+            self._set_save_button_state("info" if self._settings_dirty else "success")
         except Exception:
             pass
 
@@ -1083,6 +1443,26 @@ class SettingsTab(QWidget):
         freq_edit = QLineEdit()
         freq_edit.setPlaceholderText("e.g., 7.115")
         form.addRow("Frequency (MHz):", freq_edit)
+
+        vfo_combo = QComboBox()
+        vfo_combo.addItems(["A", "B"])
+        form.addRow("VFO:", vfo_combo)
+
+        fldigi_mode_combo = QComboBox()
+        fldigi_mode_combo.setEditable(True)
+        fldigi_mode_combo.addItems(FLDIGI_MODE_OPTIONS)
+        fldigi_mode_combo.setInsertPolicy(QComboBox.NoInsert)
+        completer = QCompleter(FLDIGI_MODE_OPTIONS, fldigi_mode_combo)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        fldigi_mode_combo.setCompleter(completer)
+        form.addRow("FLDigi Starting Mode:", fldigi_mode_combo)
+
+        fldigi_offset_edit = QLineEdit()
+        fldigi_offset_edit.setValidator(QIntValidator(0, 99999, fldigi_offset_edit))
+        fldigi_offset_edit.setPlaceholderText("e.g., 900")
+        form.addRow("FLDigi Starting Offset (Hz):", fldigi_offset_edit)
+
         auto_tune_chk = QCheckBox("Enable Auto-Tune on QSY")
         form.addRow("", auto_tune_chk)
 
@@ -1106,7 +1486,25 @@ class SettingsTab(QWidget):
                 QMessageBox.warning(self, "Validation", f"Frequency {freq_txt} invalid for {band} {mode}.")
                 return
             freq_val = float(freq_txt.replace(",", "."))
-            self._upsert_operating_group(name, mode, band, f"{freq_val:.3f}", auto_tune=auto_tune_chk.isChecked())
+            offset_txt = fldigi_offset_edit.text().strip()
+            if offset_txt:
+                try:
+                    int(offset_txt)
+                except Exception:
+                    QMessageBox.warning(self, "Validation", "FLDigi Starting Offset must be an integer.")
+                    return
+            fldigi_mode = fldigi_mode_combo.currentText().strip()
+            vfo = vfo_combo.currentText().strip().upper() or "A"
+            self._upsert_operating_group(
+                name,
+                mode,
+                band,
+                f"{freq_val:.3f}",
+                auto_tune=auto_tune_chk.isChecked(),
+                vfo=vfo,
+                fldigi_mode=fldigi_mode,
+                fldigi_offset=offset_txt,
+            )
             dlg.accept()
 
         ok_btn.clicked.connect(on_accept)
@@ -1155,7 +1553,17 @@ class SettingsTab(QWidget):
         except Exception:
             return str(val) if val is not None else ""
 
-    def _upsert_operating_group(self, name: str, mode: str, band: str, freq_mhz, auto_tune: bool = False):
+    def _upsert_operating_group(
+        self,
+        name: str,
+        mode: str,
+        band: str,
+        freq_mhz,
+        auto_tune: bool = False,
+        vfo: str = "A",
+        fldigi_mode: str = "",
+        fldigi_offset: str = "",
+    ):
         # replace existing entry with same group+mode+band
         name = name.strip().upper()
         freq_display = self._format_freq(freq_mhz)
@@ -1164,16 +1572,30 @@ class SettingsTab(QWidget):
             if g.get("group") == name and g.get("mode") == mode and g.get("band") == band:
                 g["frequency"] = freq_display
                 g["auto_tune"] = bool(auto_tune)
+                g["vfo"] = vfo
+                g["fldigi_mode"] = fldigi_mode
+                g["fldigi_offset"] = fldigi_offset
                 updated = True
                 break
         if not updated:
             self.operating_groups.append(
-                {"group": name, "mode": mode, "band": band, "frequency": freq_display, "auto_tune": bool(auto_tune)}
+                {
+                    "group": name,
+                    "mode": mode,
+                    "band": band,
+                    "frequency": freq_display,
+                    "vfo": vfo,
+                    "fldigi_mode": fldigi_mode,
+                    "fldigi_offset": fldigi_offset,
+                    "auto_tune": bool(auto_tune),
+                }
             )
         self._refresh_operating_groups_table()
         # Persist immediately so additions survive app restarts without requiring an explicit Save click.
         try:
             self._save_settings_quiet()
+            self._settings_dirty = False
+            self._set_save_button_state("success")
         except Exception:
             log.exception("Failed to persist Operating Group; will remain in-memory only.")
 
@@ -1186,6 +1608,9 @@ class SettingsTab(QWidget):
                     "mode": g.get("mode", ""),
                     "band": g.get("band", ""),
                     "frequency": g.get("frequency", ""),
+                    "vfo": (g.get("vfo") or "A").strip().upper() or "A",
+                    "fldigi_mode": (g.get("fldigi_mode") or "").strip(),
+                    "fldigi_offset": (g.get("fldigi_offset") or "").strip(),
                     "auto_tune": bool(g.get("auto_tune", False)),
                 }
                 for g in self.operating_groups
@@ -1200,6 +1625,7 @@ class SettingsTab(QWidget):
             table.insertRow(row)
             sel_chk = QCheckBox()
             sel_chk.setFixedWidth(22)
+            sel_chk.stateChanged.connect(self._update_op_group_action_buttons)
             sel_wrap = QWidget()
             sel_layout = QHBoxLayout(sel_wrap)
             sel_layout.setContentsMargins(0, 0, 0, 0)
@@ -1210,6 +1636,9 @@ class SettingsTab(QWidget):
             table.setItem(row, 2, QTableWidgetItem(str(g.get("mode", ""))))
             table.setItem(row, 3, QTableWidgetItem(str(g.get("band", ""))))
             table.setItem(row, 4, QTableWidgetItem(self._format_freq(g.get("frequency", ""))))
+            table.setItem(row, 5, QTableWidgetItem(str(g.get("vfo", "A")).upper()))
+            table.setItem(row, 6, QTableWidgetItem(str(g.get("fldigi_mode", ""))))
+            table.setItem(row, 7, QTableWidgetItem(str(g.get("fldigi_offset", ""))))
             auto_chk = QCheckBox()
             auto_chk.setChecked(bool(g.get("auto_tune", False)))
             auto_wrap = QWidget()
@@ -1217,8 +1646,21 @@ class SettingsTab(QWidget):
             auto_layout.setContentsMargins(0, 0, 0, 0)
             auto_layout.setAlignment(Qt.AlignCenter)
             auto_layout.addWidget(auto_chk)
-            table.setCellWidget(row, 5, auto_wrap)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+            table.setCellWidget(row, 8, auto_wrap)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        self._update_op_group_action_buttons()
+
+    def _update_op_group_action_buttons(self):
+        theme = resolve_theme(self.settings)
+        has_selection = bool(self._selected_op_rows())
+        role = "info" if has_selection else "muted"
+        self.edit_group_btn.setEnabled(True)
+        self.delete_group_btn.setEnabled(True)
+        self.edit_group_btn.setStyleSheet(button_style(role, theme))
+        self.delete_group_btn.setStyleSheet(button_style(role, theme))
 
     def _table_to_operating_groups(self) -> List[Dict[str, str]]:
         result: List[Dict[str, str]] = []
@@ -1229,7 +1671,14 @@ class SettingsTab(QWidget):
             mode = self.op_groups_table.item(r, 2).text().strip() if self.op_groups_table.item(r, 2) else ""
             band = self.op_groups_table.item(r, 3).text().strip() if self.op_groups_table.item(r, 3) else ""
             freq_txt = self.op_groups_table.item(r, 4).text().strip() if self.op_groups_table.item(r, 4) else ""
-            auto_widget = self.op_groups_table.cellWidget(r, 5)
+            vfo_txt = self.op_groups_table.item(r, 5).text().strip() if self.op_groups_table.item(r, 5) else "A"
+            fldigi_mode = (
+                self.op_groups_table.item(r, 6).text().strip() if self.op_groups_table.item(r, 6) else ""
+            )
+            fldigi_offset = (
+                self.op_groups_table.item(r, 7).text().strip() if self.op_groups_table.item(r, 7) else ""
+            )
+            auto_widget = self.op_groups_table.cellWidget(r, 8)
             auto_tune = False
             if isinstance(auto_widget, QCheckBox):
                 auto_tune = auto_widget.isChecked()
@@ -1242,12 +1691,18 @@ class SettingsTab(QWidget):
             except Exception:
                 freq_val = None
             if group and mode and band and freq_val is not None:
+                vfo_val = (vfo_txt or "A").strip().upper()
+                if vfo_val not in ("A", "B"):
+                    vfo_val = "A"
                 result.append(
                     {
                         "group": group,
                         "mode": mode,
                         "band": band,
                         "frequency": self._format_freq(freq_val),
+                        "vfo": vfo_val,
+                        "fldigi_mode": fldigi_mode,
+                        "fldigi_offset": fldigi_offset,
                         "auto_tune": auto_tune,
                     }
                 )
@@ -1278,7 +1733,14 @@ class SettingsTab(QWidget):
         mode = self.op_groups_table.item(row, 2).text().strip() if self.op_groups_table.item(row, 2) else "Digi"
         band = self.op_groups_table.item(row, 3).text().strip() if self.op_groups_table.item(row, 3) else ""
         freq_txt = self.op_groups_table.item(row, 4).text().strip() if self.op_groups_table.item(row, 4) else ""
-        auto_widget = self.op_groups_table.cellWidget(row, 5)
+        vfo_txt = self.op_groups_table.item(row, 5).text().strip() if self.op_groups_table.item(row, 5) else "A"
+        fldigi_mode_txt = (
+            self.op_groups_table.item(row, 6).text().strip() if self.op_groups_table.item(row, 6) else ""
+        )
+        fldigi_offset_txt = (
+            self.op_groups_table.item(row, 7).text().strip() if self.op_groups_table.item(row, 7) else ""
+        )
+        auto_widget = self.op_groups_table.cellWidget(row, 8)
         auto_val = False
         if isinstance(auto_widget, QCheckBox):
             auto_val = auto_widget.isChecked()
@@ -1322,6 +1784,31 @@ class SettingsTab(QWidget):
 
         freq_edit = QLineEdit(freq_txt)
         form.addRow("Frequency (MHz):", freq_edit)
+
+        vfo_combo = QComboBox()
+        vfo_combo.addItems(["A", "B"])
+        vfo_val = vfo_txt.strip().upper()
+        if vfo_val in ("A", "B"):
+            vfo_combo.setCurrentText(vfo_val)
+        form.addRow("VFO:", vfo_combo)
+
+        fldigi_mode_combo = QComboBox()
+        fldigi_mode_combo.setEditable(True)
+        fldigi_mode_combo.addItems(FLDIGI_MODE_OPTIONS)
+        fldigi_mode_combo.setInsertPolicy(QComboBox.NoInsert)
+        completer = QCompleter(FLDIGI_MODE_OPTIONS, fldigi_mode_combo)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        fldigi_mode_combo.setCompleter(completer)
+        if fldigi_mode_txt:
+            fldigi_mode_combo.setCurrentText(fldigi_mode_txt)
+        form.addRow("FLDigi Starting Mode:", fldigi_mode_combo)
+
+        fldigi_offset_edit = QLineEdit(fldigi_offset_txt)
+        fldigi_offset_edit.setValidator(QIntValidator(0, 99999, fldigi_offset_edit))
+        fldigi_offset_edit.setPlaceholderText("e.g., 900")
+        form.addRow("FLDigi Starting Offset (Hz):", fldigi_offset_edit)
+
         auto_tune_chk = QCheckBox("Enable Auto-Tune on QSY")
         auto_tune_chk.setChecked(auto_val)
         form.addRow("", auto_tune_chk)
@@ -1347,13 +1834,31 @@ class SettingsTab(QWidget):
                     self, "Validation", f"Frequency {new_freq_txt} invalid for {new_band} {new_mode}."
                 )
                 return
+            offset_txt = fldigi_offset_edit.text().strip()
+            if offset_txt:
+                try:
+                    int(offset_txt)
+                except Exception:
+                    QMessageBox.warning(self, "Validation", "FLDigi Starting Offset must be an integer.")
+                    return
+            fldigi_mode = fldigi_mode_combo.currentText().strip()
+            vfo = vfo_combo.currentText().strip().upper() or "A"
             # Remove old entry, then insert updated
             self.operating_groups = [
                 g
                 for g in self.operating_groups
                 if not (g.get("group") == group and g.get("mode") == mode and g.get("band") == band)
             ]
-            self._upsert_operating_group(new_name, new_mode, new_band, new_freq_txt, auto_tune=auto_tune_chk.isChecked())
+            self._upsert_operating_group(
+                new_name,
+                new_mode,
+                new_band,
+                new_freq_txt,
+                auto_tune=auto_tune_chk.isChecked(),
+                vfo=vfo,
+                fldigi_mode=fldigi_mode,
+                fldigi_offset=offset_txt,
+            )
             dlg.accept()
 
         ok_btn.clicked.connect(on_accept)
@@ -1382,6 +1887,8 @@ class SettingsTab(QWidget):
         self._refresh_operating_groups_table()
         try:
             self._save_settings_quiet()
+            self._settings_dirty = False
+            self._set_save_button_state("success")
         except Exception:
             log.exception("Failed to persist Operating Group deletions; will remain in-memory only.")
         QMessageBox.information(self, "Delete Groups", f"Deleted {len(to_remove)} Operating Group(s).")
@@ -1424,6 +1931,8 @@ class SettingsTab(QWidget):
                 self.settings._data = data  # type: ignore[attr-defined]
 
         log.info("JS8Call DIRECTED.TXT path saved: %s", path)
+        self._settings_dirty = False
+        self._set_save_button_state("success")
 
     # ---------- JS8 FORMS PATH ---------- #
 
@@ -1447,6 +1956,8 @@ class SettingsTab(QWidget):
             if hasattr(self.settings, "_data"):
                 self.settings._data = data  # type: ignore[attr-defined]
         log.info("JS8Spotter forms path saved: %s", fn)
+        self._settings_dirty = False
+        self._set_save_button_state("success")
 
     def _choose_msg_path(self, origin: str, edit: QLineEdit):
         """
@@ -1467,6 +1978,8 @@ class SettingsTab(QWidget):
             mp = self.settings.get("message_paths", {}) or {}
             mp[origin] = fn
             self.settings.set("message_paths", mp)
+        self._settings_dirty = False
+        self._set_save_button_state("success")
 
     def _choose_fldigi_checkin_dir(self):
         fn = QFileDialog.getExistingDirectory(self, "Select FLDigi check-in folder")
@@ -1482,14 +1995,26 @@ class SettingsTab(QWidget):
                 self.settings._data = data  # type: ignore[attr-defined]
         self._ensure_fldigi_checkin_files()
 
+    def _copy_text(self, edit: QLineEdit) -> None:
+        txt = edit.text().strip()
+        if not txt:
+            return
+        cb = QApplication.clipboard()
+        cb.setText(txt)
+        QMessageBox.information(self, "Copied", f"Copied to clipboard:\n{txt}")
+        self._settings_dirty = False
+        self._set_save_button_state("success")
+
     def _refresh_fldigi_checkin_file_labels(self) -> None:
         base = self.fldigi_checkin_dir_edit.text().strip()
         if not base:
             base = str(get_fldigi_checkin_dir())
         main_path = str(Path(base) / "main_checkins.txt")
         late_path = str(Path(base) / "new-late_checkins.txt")
-        self.fldigi_main_file_edit.setText(main_path)
-        self.fldigi_late_file_edit.setText(late_path)
+        if hasattr(self, "fldigi_main_file_edit"):
+            self.fldigi_main_file_edit.setText(main_path)
+        if hasattr(self, "fldigi_late_file_edit"):
+            self.fldigi_late_file_edit.setText(late_path)
 
     def _ensure_fldigi_checkin_files(self) -> None:
         base = self.fldigi_checkin_dir_edit.text().strip()

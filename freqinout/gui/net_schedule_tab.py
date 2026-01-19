@@ -119,17 +119,16 @@ class NetScheduleTab(QWidget):
       3: Group Name (from Operating Groups)
       4: Band
       5: Mode (JS8 / Digi / Tri / SSB)
-      6: VFO (A/B)
-      7: Frequency (MHz)
-      8: Start UTC (HH:MM)
-      9: End UTC (HH:MM)
-      10: Early Check-in (minutes: 0/5/10/15)
-      11: Net Name
-      12: Auto-Tune
+      6: Frequency (MHz)
+      7: Start UTC (HH:MM)
+      8: End UTC (HH:MM)
+      9: Early Check-in (minutes: 0/5/10/15)
+      10: Net Name
+      11: Auto-Tune
 
     Data is saved to:
       - config/config.json under key "net_schedule"
-      - SQLite DB freqinout_nets.db tables "net_schedule_tab" (with VFO)
+      - SQLite DB freqinout_nets.db tables "net_schedule_tab"
         and legacy "net_schedule" (without VFO for backward compatibility)
     """
 
@@ -139,13 +138,12 @@ class NetScheduleTab(QWidget):
     COL_GROUP = 3
     COL_MODE = 4
     COL_BAND = 5
-    COL_VFO = 6
-    COL_FREQ = 7
-    COL_START = 8
-    COL_END = 9
-    COL_EARLY = 10
-    COL_NETNAME = 11
-    COL_AUTOTUNE = 12
+    COL_FREQ = 6
+    COL_START = 7
+    COL_END = 8
+    COL_EARLY = 9
+    COL_NETNAME = 10
+    COL_AUTOTUNE = 11
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -187,7 +185,7 @@ class NetScheduleTab(QWidget):
 
         # table
         self.table = QTableWidget()
-        self.table.setColumnCount(13)
+        self.table.setColumnCount(12)
         self._set_headers()
         self.table.setSortingEnabled(False)
         hv = self.table.horizontalHeader()
@@ -200,7 +198,6 @@ class NetScheduleTab(QWidget):
             self.COL_GROUP,
             self.COL_MODE,
             self.COL_BAND,
-            self.COL_VFO,
             self.COL_FREQ,
             self.COL_START,
             self.COL_END,
@@ -347,7 +344,6 @@ class NetScheduleTab(QWidget):
                 "Group Name",
                 "Mode",
                 "Band",
-                "VFO",
                 "Freq (MHz)",
                 "Start",
                 "End",
@@ -495,15 +491,6 @@ class NetScheduleTab(QWidget):
             if idx >= 0:
                 band_combo.setCurrentIndex(idx)
         self.table.setCellWidget(r, self.COL_BAND, band_combo)
-
-        # VFO combo (A/B)
-        vfo_combo = QComboBox()
-        vfo_combo.addItems(["A", "B"])
-        vfo_val = (row_data.get("vfo") or "A").strip().upper()
-        if vfo_val not in ("A", "B"):
-            vfo_val = "A"
-        vfo_combo.setCurrentText(vfo_val)
-        self.table.setCellWidget(r, self.COL_VFO, vfo_combo)
 
         # Early check-in
         early_combo = QComboBox()
@@ -847,7 +834,6 @@ class NetScheduleTab(QWidget):
             group_combo: QComboBox = self.table.cellWidget(r, self.COL_GROUP)  # type: ignore
             band_combo: QComboBox = self.table.cellWidget(r, self.COL_BAND)  # type: ignore
             mode_combo: QComboBox = self.table.cellWidget(r, self.COL_MODE)  # type: ignore
-            vfo_combo: QComboBox = self.table.cellWidget(r, self.COL_VFO)  # type: ignore
             early_combo: QComboBox = self.table.cellWidget(r, self.COL_EARLY)  # type: ignore
             net_edit: QLineEdit = self.table.cellWidget(r, self.COL_NETNAME)  # type: ignore
             auto_widget = self.table.cellWidget(r, self.COL_AUTOTUNE)
@@ -856,7 +842,6 @@ class NetScheduleTab(QWidget):
             group_name = group_combo.currentText().strip() if group_combo else ""
             band = band_combo.currentText().strip() if band_combo else ""
             mode = mode_combo.currentText().strip() if mode_combo else ""
-            vfo = vfo_combo.currentText().strip().upper() if vfo_combo else "A"
             early = early_combo.currentText().strip() if early_combo else "0"
             net_name = net_edit.text().strip() if net_edit else ""
             recurrence = recur_combo.currentText().strip() if recur_combo else "Weekly"
@@ -884,9 +869,6 @@ class NetScheduleTab(QWidget):
                 raise ValueError(f"Row {r+1}: Unknown band '{band}'.")
             if mode and mode not in MODES:
                 raise ValueError(f"Row {r+1}: Unknown mode '{mode}'.")
-
-            if vfo not in ("A", "B"):
-                raise ValueError(f"Row {r+1}: VFO must be 'A' or 'B'.")
 
             # Frequency validation
             if not freq:
@@ -973,7 +955,7 @@ class NetScheduleTab(QWidget):
                 "group_name": group_name,
                 "band": band,
                 "mode": mode,
-                "vfo": vfo,
+                "vfo": "A",
                 "frequency": self._format_freq(freq_mhz),
                 "start_utc": start_txt,
                 "end_utc": end_txt,
@@ -1278,7 +1260,7 @@ class NetScheduleTab(QWidget):
         self.settings.save()
         log.info("Net schedule saved to config: %d entries", len(rows))
 
-        # Also mirror to SQLite DB (new table with VFO plus legacy table)
+        # Also mirror to SQLite DB (new table plus legacy table)
         try:
             self._save_to_db(rows)
         except Exception as e:
@@ -1299,7 +1281,7 @@ class NetScheduleTab(QWidget):
 
     def _export_schedule(self) -> None:
         """
-        Export net schedule to JSON in UTC. VFO and Auto-Tune are nulled.
+        Export net schedule to JSON in UTC. Auto-Tune is nulled.
         """
         data = self.settings.all()
         callsign = (data.get("operator_callsign") or "").strip().upper() or "UNKNOWN"
@@ -1335,7 +1317,6 @@ class NetScheduleTab(QWidget):
                         "group_name": r.get("group_name", ""),
                         "band": r.get("band", ""),
                         "mode": r.get("mode", ""),
-                        "vfo": None,
                         "frequency": r.get("frequency", ""),
                         "start_utc": r.get("start_utc", ""),
                         "end_utc": r.get("end_utc", ""),
@@ -1354,7 +1335,7 @@ class NetScheduleTab(QWidget):
 
     def _import_schedule(self) -> None:
         """
-        Import net schedule JSON (UTC). VFO and Auto-Tune are ignored.
+        Import net schedule JSON (UTC). Auto-Tune is ignored.
         """
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1451,8 +1432,7 @@ class NetScheduleTab(QWidget):
     def _save_to_db(self, rows: List[Dict]):
         """
         Persist net schedule rows into SQLite tables in config/freqinout_nets.db.
-        Writes both the richer net_schedule_tab (with VFO) and the legacy
-        net_schedule table for backwards compatibility.
+        Writes both net_schedule_tab and the legacy net_schedule table for backwards compatibility.
         """
         db_path = self._db_path()
         conn = sqlite3.connect(db_path)

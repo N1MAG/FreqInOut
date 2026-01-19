@@ -263,6 +263,8 @@ class MessageViewerTab(QWidget):
         self._messages_model = MessageTableModel([])
         self._actions_delegate = None
         self._header_cells: List[QWidget] = []
+        self._is_shutting_down = False
+        self._refresh_files_inflight = False
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -672,42 +674,54 @@ class MessageViewerTab(QWidget):
     # ---------- Scanning ----------
 
     def _refresh_files(self, force: bool = False):
-        self._load_paths_lists()
-        records: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
-        for entry in self.watch_dirs:
-            origin = entry.get("origin", "unknown")
-            if origin not in records:
-                continue
-            allowed_exts = ORIGIN_EXTS.get(origin)
-            p = entry.get("path", "")
-            if not p:
-                continue
-            base = Path(p)
-            if not base.exists():
-                continue
-            for f in base.glob("**/*"):
-                if not f.is_file():
+        if self._is_shutting_down or self._refresh_files_inflight:
+            return
+        self._refresh_files_inflight = True
+        start_ts = time.time()
+        try:
+            self._load_paths_lists()
+            records: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
+            for entry in self.watch_dirs:
+                origin = entry.get("origin", "unknown")
+                if origin not in records:
                     continue
-                if f.suffix.lower() not in SUPPORTED_EXT:
+                allowed_exts = ORIGIN_EXTS.get(origin)
+                p = entry.get("path", "")
+                if not p:
                     continue
-                if allowed_exts and f.suffix.lower() not in allowed_exts:
+                base = Path(p)
+                if not base.exists():
                     continue
-                try:
-                    st = f.stat()
-                except OSError:
-                    continue
-                rec = FileRecord(path=f, origin=origin, size=st.st_size, mtime=st.st_mtime)
-                records[origin].append(rec)
+                for f in base.glob("**/*"):
+                    if not f.is_file():
+                        continue
+                    if f.suffix.lower() not in SUPPORTED_EXT:
+                        continue
+                    if allowed_exts and f.suffix.lower() not in allowed_exts:
+                        continue
+                    try:
+                        st = f.stat()
+                    except OSError:
+                        continue
+                    rec = FileRecord(path=f, origin=origin, size=st.st_size, mtime=st.st_mtime)
+                    records[origin].append(rec)
 
-        # Sort by mtime desc
-        for origin in records:
-            records[origin].sort(key=lambda r: r.mtime, reverse=True)
+            # Sort by mtime desc
+            for origin in records:
+                records[origin].sort(key=lambda r: r.mtime, reverse=True)
 
-        self.files = records
-        self._read_state_map = self._load_read_state_map()
-        self._populate_messages_table(force=force)
+            self.files = records
+            self._read_state_map = self._load_read_state_map()
+            self._populate_messages_table(force=force)
+        finally:
+            self._refresh_files_inflight = False
+            elapsed = time.time() - start_ts
+            if elapsed > 0.5:
+                log.debug("MessageViewer: refresh_files took %.2fs", elapsed)
 
     def _refresh_js8_messages(self, force: bool = False):
+        if self._is_shutting_down:
+            return
         # First ingest any new messages into local cache, then load from local cache for display
         try:
             self._ingest_js8_messages()
@@ -721,6 +735,8 @@ class MessageViewerTab(QWidget):
     # ---------- Pending JS8 MSG backlog ---------- #
 
     def _refresh_pending_backlog(self) -> None:
+        if self._is_shutting_down:
+            return
         self._ensure_backlog_table()
         self._update_pending_table()
 
@@ -818,6 +834,29 @@ class MessageViewerTab(QWidget):
             self._actions_delegate._danger = QColor(theme["danger"])
         self._update_clear_filters_style()
         self._update_pending_table()
+
+    def shutdown(self) -> None:
+        self._is_shutting_down = True
+        try:
+            if self._timer:
+                self._timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._js8_timer:
+                self._js8_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._pending_timer:
+                self._pending_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._filter_timer:
+                self._filter_timer.stop()
+        except Exception:
+            pass
 
     def on_settings_saved(self) -> None:
         try:

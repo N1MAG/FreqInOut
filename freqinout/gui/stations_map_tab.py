@@ -383,6 +383,11 @@ class StationsMapTab(QWidget):
         self._js8_timer: Optional[QTimer] = None
         self._refresh_timer: Optional[QTimer] = None
         self._js8_rx_timer: Optional[QTimer] = None
+        self._js8_indexer: Optional[JS8LogLinkIndexer] = None
+        self._is_shutting_down = False
+        self._js8_polling = False
+        self._last_map_render_ts: float = 0.0
+        self._render_pending: bool = False
 
         self._build_ui()
         self._load_display_preferences()
@@ -492,75 +497,116 @@ class StationsMapTab(QWidget):
             return
         self._js8_rx_timer.start()
 
+    def _get_js8_indexer(self) -> Optional[JS8LogLinkIndexer]:
+        if self._js8_indexer is None:
+            try:
+                db_path = get_config_dir() / "config" / "freqinout_nets.db"
+                self._js8_indexer = JS8LogLinkIndexer(self.settings, db_path)
+            except Exception as e:
+                log.debug("StationsMap: indexer init failed: %s", e)
+                self._js8_indexer = None
+        return self._js8_indexer
+
+    def _schedule_render(self) -> None:
+        if self._is_shutting_down:
+            return
+        now_ts = time.time()
+        if now_ts - self._last_map_render_ts >= 1.0:
+            self._last_map_render_ts = now_ts
+            self._render_map(preserve_view=True)
+            return
+        if not self._render_pending:
+            self._render_pending = True
+            QTimer.singleShot(1000, self._flush_scheduled_render)
+
+    def _flush_scheduled_render(self) -> None:
+        if self._is_shutting_down:
+            return
+        self._render_pending = False
+        self._last_map_render_ts = time.time()
+        self._render_map(preserve_view=True)
+
     def _poll_js8_rx_queue(self):
         """
         Consume js8net.rx_queue and upsert live observations into js8_links.
         """
+        if self._is_shutting_down or self._js8_polling:
+            return
         if js8net is None or not hasattr(js8net, "rx_queue"):
             return
         if not self.settings:
             return
-        try:
-            db_path = get_config_dir() / "config" / "freqinout_nets.db"
-            indexer = JS8LogLinkIndexer(self.settings, db_path)
-        except Exception as e:
-            log.debug("StationsMap: js8net live ingest unavailable: %s", e)
+        indexer = self._get_js8_indexer()
+        if indexer is None:
             return
+        start_ts = time.time()
         try:
             my_call = (self.settings.get("operator_callsign", "") or "").upper()
         except Exception:
             my_call = ""
 
         updated = False
-        while True:
-            try:
-                msg = js8net.rx_queue.get_nowait()  # type: ignore[attr-defined]
-            except queue.Empty:
-                break
-            try:
-                ts = float(msg.get("time") or time.time()) if isinstance(msg, dict) else time.time()
-            except Exception:
-                ts = time.time()
-            params = msg.get("params", {}) if isinstance(msg, dict) else {}
-            mtype = (msg.get("type") or "").strip().upper() if isinstance(msg, dict) else ""
-            freq_hz = None
-            try:
-                fval = params.get("FREQ")
-                if fval not in (None, ""):
-                    freq_hz = float(fval)
-            except Exception:
+        self._js8_polling = True
+        try:
+            max_msgs = 200
+            msg_count = 0
+            while True:
+                try:
+                    msg = js8net.rx_queue.get_nowait()  # type: ignore[attr-defined]
+                except queue.Empty:
+                    break
+                msg_count += 1
+                if msg_count > max_msgs:
+                    break
+                try:
+                    ts = float(msg.get("time") or time.time()) if isinstance(msg, dict) else time.time()
+                except Exception:
+                    ts = time.time()
+                params = msg.get("params", {}) if isinstance(msg, dict) else {}
+                mtype = (msg.get("type") or "").strip().upper() if isinstance(msg, dict) else ""
                 freq_hz = None
-            origin = ""
-            dest = ""
-            snr = None
-            is_spotter = 0
-            if mtype == "RX.SPOT":
-                origin = str(params.get("CALL") or "").upper()
-                dest = my_call
-                snr = params.get("SNR")
-                is_spotter = 1
-            elif mtype == "RX.DIRECTED":
-                origin = str(params.get("FROM") or "").upper()
-                dest = str(params.get("TO") or params.get("CALL") or "").upper()
-                snr = params.get("SNR") or params.get("EXTRA")
-                if not dest:
+                try:
+                    fval = params.get("FREQ")
+                    if fval not in (None, ""):
+                        freq_hz = float(fval)
+                except Exception:
+                    freq_hz = None
+                origin = ""
+                dest = ""
+                snr = None
+                is_spotter = 0
+                if mtype == "RX.SPOT":
+                    origin = str(params.get("CALL") or "").upper()
                     dest = my_call
-            else:
-                continue
-            if not origin or not dest:
-                continue
-            try:
-                snr_val = float(snr)
-            except Exception:
-                snr_val = None
-            try:
-                indexer.ingest_live(ts, origin, dest, snr_val, freq_hz, is_spotter=is_spotter)
-                updated = True
-            except Exception as e:
-                log.debug("StationsMap: live ingest failed for %s->%s: %s", origin, dest, e)
+                    snr = params.get("SNR")
+                    is_spotter = 1
+                elif mtype == "RX.DIRECTED":
+                    origin = str(params.get("FROM") or "").upper()
+                    dest = str(params.get("TO") or params.get("CALL") or "").upper()
+                    snr = params.get("SNR") or params.get("EXTRA")
+                    if not dest:
+                        dest = my_call
+                else:
+                    continue
+                if not origin or not dest:
+                    continue
+                try:
+                    snr_val = float(snr)
+                except Exception:
+                    snr_val = None
+                try:
+                    indexer.ingest_live(ts, origin, dest, snr_val, freq_hz, is_spotter=is_spotter)
+                    updated = True
+                except Exception as e:
+                    log.debug("StationsMap: live ingest failed for %s->%s: %s", origin, dest, e)
+        finally:
+            self._js8_polling = False
         if updated:
             self._last_js8_load_ts = max(self._last_js8_load_ts, time.time())
-            self._render_map(preserve_view=True)
+            self._schedule_render()
+        elapsed = time.time() - start_ts
+        if elapsed > 0.5:
+            log.debug("StationsMap: js8 rx ingest took %.2fs", elapsed)
 
     def _record_exit_time(self):
         try:
@@ -598,11 +644,31 @@ class StationsMapTab(QWidget):
         """
         Background ingest and refresh map. Used on timer and manual refresh.
         """
+        if self._is_shutting_down:
+            return
         since = None
         if initial:
             since = max(self._last_js8_load_ts, self._last_exit_ts)
         self._ingest_js8_logs(since_ts=since)
-        self._render_map(preserve_view=True)
+        self._schedule_render()
+
+    def shutdown(self) -> None:
+        self._is_shutting_down = True
+        try:
+            if self._js8_timer:
+                self._js8_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._js8_rx_timer:
+                self._js8_rx_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._refresh_timer:
+                self._refresh_timer.stop()
+        except Exception:
+            pass
 
     def _start_refresh_timer(self):
         try:

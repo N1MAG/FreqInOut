@@ -564,13 +564,14 @@ class FreqPlannerTab(QWidget):
             except Exception:
                 continue
 
-        # Current UTC day for highlighting
-        now_utc = datetime.datetime.utcnow()
-        current_day_name = now_utc.strftime("%A")  # "Sunday" etc.
-        now_plus_24 = now_utc + datetime.timedelta(hours=24)
-
         # Timezone for local conversion
         tz_name_cfg, tz = self._current_timezone()
+
+        # Current UTC day for highlighting
+        now_utc = datetime.datetime.utcnow()
+        now_local = datetime.datetime.now(tz)
+        current_day_name = now_utc.strftime("%A")  # "Sunday" etc.
+        now_plus_24 = now_utc + datetime.timedelta(hours=24)
 
         # Fill rows
         today_utc = now_utc.replace(minute=0, second=0, microsecond=0)
@@ -581,6 +582,8 @@ class FreqPlannerTab(QWidget):
                 # Column 0: UTC hour "HH:00"
                 utc_item = QTableWidgetItem(f"{hour:02d}:00")
                 utc_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if hour == now_utc.hour:
+                    utc_item.setBackground(qcolor(theme["surface_alt"]))
                 self.table.setItem(hour, self.COL_UTC, utc_item)
 
                 # Column 1: Local time using configured timezone
@@ -598,6 +601,8 @@ class FreqPlannerTab(QWidget):
                 local_str = f"{local_hour_24:02d}:00"
                 local_item = QTableWidgetItem(local_str)
                 local_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if local_hour_24 == now_local.hour:
+                    local_item.setBackground(qcolor(theme["surface_alt"]))
                 self.table.setItem(hour, self.COL_LOCAL, local_item)
             else:
                 # Local hour as primary
@@ -606,10 +611,14 @@ class FreqPlannerTab(QWidget):
 
                 local_item = QTableWidgetItem(f"{local_dt.hour:02d}:00")
                 local_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if local_dt.hour == now_local.hour:
+                    local_item.setBackground(qcolor(theme["surface_alt"]))
                 self.table.setItem(hour, self.COL_UTC, local_item)
 
                 utc_item = QTableWidgetItem(f"{utc_dt.hour:02d}:00")
                 utc_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                if utc_dt.hour == now_utc.hour:
+                    utc_item.setBackground(qcolor(theme["surface_alt"]))
                 self.table.setItem(hour, self.COL_LOCAL, utc_item)
 
             # Day columns 2..8
