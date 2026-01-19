@@ -1258,9 +1258,6 @@ class SchedulerEngine(QObject):
                 return
         except Exception:
             pass
-        if apply_fldigi:
-            self._update_desired_fldigi_settings(entry)
-
         # Safety: avoid changing frequency while a backend is busy transmitting.
         busy_reasons = []
         if self.rig and hasattr(self.rig, "get_ptt"):
@@ -1316,7 +1313,7 @@ class SchedulerEngine(QObject):
         fldigi_center = None
         js8_tune = None
         try:
-            if fldigi_offset_text:
+            if apply_fldigi and fldigi_offset_text:
                 fldigi_center = int(float(fldigi_offset_text))
         except Exception:
             fldigi_center = None
@@ -1339,8 +1336,11 @@ class SchedulerEngine(QObject):
             current_freq_hz is None or abs(current_freq_hz - freq_hz) <= 5
         )
         if not force and already_applied:
+            log.debug("SchedulerEngine: schedule entry already applied; skipping re-apply.")
             self.active_entry_changed.emit(entry, source)
             return
+        if apply_fldigi:
+            self._update_desired_fldigi_settings(entry)
         if current_freq_hz is not None and not freq_matches:
             log.info(
                 "SchedulerEngine: rig currently at %d Hz, target %d Hz; reapplying schedule.",
