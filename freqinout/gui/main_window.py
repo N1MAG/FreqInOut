@@ -375,6 +375,11 @@ class MainWindow(QMainWindow):
                 self.scheduler.stop()
         except Exception:
             pass
+        try:
+            if hasattr(self, "js8_control"):
+                self.js8_control.stop()
+        except Exception:
+            pass
         for _label, widget in self._screens:
             try:
                 if hasattr(widget, "shutdown"):
