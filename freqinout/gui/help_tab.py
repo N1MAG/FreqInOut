@@ -7,7 +7,22 @@ from typing import List, Tuple
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem, QTextBrowser, QLabel
+from PySide6.QtPrintSupport import QPrinter
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QListWidget,
+    QListWidgetItem,
+    QTextBrowser,
+    QLabel,
+    QPushButton,
+    QFileDialog,
+    QMessageBox,
+)
+
+from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.core.settings_manager import SettingsManager
 
 
 class HelpTab(QWidget):
@@ -18,6 +33,7 @@ class HelpTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._doc_path = Path(__file__).resolve().parents[2] / "docs" / "guide.html"
+        self.settings = SettingsManager()
 
         layout = QHBoxLayout(self)
 
@@ -34,7 +50,15 @@ class HelpTab(QWidget):
         # Right: viewer
         viewer_col = QVBoxLayout()
         viewer_col.setAlignment(Qt.AlignTop)
-        viewer_col.addWidget(QLabel("<h3>FreqInOut Guide</h3>"))
+        header_row = QHBoxLayout()
+        header_row.addWidget(QLabel("<h3>FreqInOut Guide</h3>"))
+        header_row.addStretch()
+        self.export_pdf_btn = QPushButton("Export to PDF")
+        theme = resolve_theme(self.settings)
+        self.export_pdf_btn.setStyleSheet(button_style("primary", theme))
+        self.export_pdf_btn.clicked.connect(self._export_pdf)
+        header_row.addWidget(self.export_pdf_btn)
+        viewer_col.addLayout(header_row)
 
         self.viewer = QTextBrowser()
         if self._doc_path.exists():
@@ -43,6 +67,28 @@ class HelpTab(QWidget):
         viewer_col.addWidget(self.viewer)
 
         layout.addLayout(viewer_col, stretch=1)
+
+    def _export_pdf(self) -> None:
+        if not self._doc_path.exists():
+            QMessageBox.warning(self, "Missing guide", "guide.html was not found.")
+            return
+        default_path = str(self._doc_path.parent / "FreqInOut User Guide.pdf")
+        fn, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Guide to PDF",
+            default_path,
+            "PDF Files (*.pdf)",
+        )
+        if not fn:
+            return
+        try:
+            printer = QPrinter(QPrinter.HighResolution)
+            printer.setOutputFormat(QPrinter.PdfFormat)
+            printer.setOutputFileName(fn)
+            self.viewer.document().print(printer)
+            QMessageBox.information(self, "Export complete", f"Saved PDF to:\n{fn}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", f"PDF export failed:\n{e}")
 
     def _parse_headings(self, html_text: str) -> List[Tuple[int, str, str]]:
         """
