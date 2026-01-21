@@ -42,6 +42,7 @@ except Exception:
     js8net = None
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 
 
 USA_STATES = [
@@ -383,6 +384,8 @@ class StationsMapTab(QWidget):
         self._js8_timer: Optional[QTimer] = None
         self._refresh_timer: Optional[QTimer] = None
         self._js8_rx_timer: Optional[QTimer] = None
+        self._js8_rx_hub: Optional[JS8RxHub] = None
+        self._js8_rx_registered = False
         self._js8_indexer: Optional[JS8LogLinkIndexer] = None
         self._is_shutting_down = False
         self._js8_polling = False
@@ -477,31 +480,24 @@ class StationsMapTab(QWidget):
         # Start display refresh timer (separate from ingest) using selected interval
         self._start_refresh_timer()
         # JS8 RX live ingestion timer
-        self._start_js8_rx_timer()
+        self._start_js8_rx_listener()
 
-    def _start_js8_rx_timer(self):
+    def _start_js8_rx_listener(self):
         """
-        Attach to js8net and poll live RX queue to ingest traffic in real time.
+        Attach to JS8 RX hub and ingest live traffic in real time.
         """
-        if js8net is None:
+        if not self.settings:
             return
-        if self._js8_rx_timer is None:
-            self._js8_rx_timer = QTimer(self)
-            self._js8_rx_timer.setInterval(1000)
-            self._js8_rx_timer.timeout.connect(self._poll_js8_rx_queue)
-        if self._js8_rx_timer.isActive():
-            return
+        if self._js8_rx_hub is None:
+            self._js8_rx_hub = JS8RxHub.instance()
+        if not self._js8_rx_registered:
+            self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
+            self._js8_rx_registered = True
         try:
-            port = int(self.settings.get("js8_port", 2442) or 2442) if self.settings else 2442
+            port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
-        try:
-            js8net.start_net("127.0.0.1", port)
-            self._js8_net_started = True
-        except Exception as e:
-            log.debug("StationsMap: js8net start failed: %s", e)
-            return
-        self._js8_rx_timer.start()
+        self._js8_rx_hub.start("127.0.0.1", port)
 
     def _get_js8_indexer(self) -> Optional[JS8LogLinkIndexer]:
         if self._js8_indexer is None:
@@ -532,13 +528,11 @@ class StationsMapTab(QWidget):
         self._last_map_render_ts = time.time()
         self._render_map(preserve_view=True)
 
-    def _poll_js8_rx_queue(self):
+    def _on_js8_rx_messages(self, messages: List[dict]) -> None:
         """
-        Consume js8net.rx_queue and upsert live observations into js8_links.
+        Consume js8net rx messages and upsert live observations into js8_links.
         """
         if self._is_shutting_down or self._js8_polling:
-            return
-        if js8net is None or not hasattr(js8net, "rx_queue"):
             return
         if not self.settings:
             return
@@ -555,22 +549,15 @@ class StationsMapTab(QWidget):
         observations: List[tuple] = []
         self._js8_polling = True
         try:
-            max_msgs = 200
-            msg_count = 0
-            while True:
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
                 try:
-                    msg = js8net.rx_queue.get_nowait()  # type: ignore[attr-defined]
-                except queue.Empty:
-                    break
-                msg_count += 1
-                if msg_count > max_msgs:
-                    break
-                try:
-                    ts = float(msg.get("time") or time.time()) if isinstance(msg, dict) else time.time()
+                    ts = float(msg.get("time") or time.time())
                 except Exception:
                     ts = time.time()
-                params = msg.get("params", {}) if isinstance(msg, dict) else {}
-                mtype = (msg.get("type") or "").strip().upper() if isinstance(msg, dict) else ""
+                params = msg.get("params", {})
+                mtype = (msg.get("type") or "").strip().upper()
                 freq_hz = None
                 try:
                     fval = params.get("FREQ")
@@ -658,7 +645,7 @@ class StationsMapTab(QWidget):
         since = None
         if initial:
             since = max(self._last_js8_load_ts, self._last_exit_ts)
-        elif self._js8_rx_timer and self._js8_rx_timer.isActive():
+        elif self._js8_rx_hub and self._js8_rx_hub.is_active():
             since = self._last_js8_load_ts
         self._ingest_js8_logs(since_ts=since)
         self._schedule_render()
@@ -671,8 +658,9 @@ class StationsMapTab(QWidget):
         except Exception:
             pass
         try:
-            if self._js8_rx_timer:
-                self._js8_rx_timer.stop()
+            if self._js8_rx_hub and self._js8_rx_registered:
+                self._js8_rx_hub.unregister_listener(self._on_js8_rx_messages)
+                self._js8_rx_registered = False
         except Exception:
             pass
         try:
@@ -680,14 +668,6 @@ class StationsMapTab(QWidget):
                 self._refresh_timer.stop()
         except Exception:
             pass
-        if self._js8_net_started and js8net is not None:
-            try:
-                sock = getattr(js8net, "s", None)
-                if sock:
-                    sock.close()
-            except Exception:
-                pass
-            self._js8_net_started = False
         try:
             if self.web is not None:
                 try:

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
+from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.gui.qsy_helper import (
     load_operating_groups as qsy_load_operating_groups,
     snapshot_operating_groups as qsy_snapshot_operating_groups,
@@ -119,6 +120,8 @@ class JS8CallNetControlTab(QWidget):
         self.auto_query_msg_id = bool(self.settings.get("js8_auto_query_msg_id", False))
         self.auto_query_grids = bool(self.settings.get("js8_auto_query_grids", False))
         self._js8_rx_timer: QTimer | None = None
+        self._js8_rx_hub: JS8RxHub | None = None
+        self._js8_rx_registered = False
         self._last_rx_ts: float = 0.0
         self._pending_grid_queries: List[tuple[Optional[float], str]] = []
         self._grid_waiting: bool = False
@@ -477,10 +480,16 @@ class JS8CallNetControlTab(QWidget):
         self._update_suspend_state()
 
     def _setup_js8_rx_timer(self):
-        self._js8_rx_timer = QTimer(self)
-        self._js8_rx_timer.setInterval(1000)
-        self._js8_rx_timer.timeout.connect(self._poll_js8_rx_queue)
-        self._js8_rx_timer.start()
+        if self._js8_rx_hub is None:
+            self._js8_rx_hub = JS8RxHub.instance()
+        if not self._js8_rx_registered:
+            self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
+            self._js8_rx_registered = True
+        try:
+            port = int(self.settings.get("js8_port", 2442) or 2442)
+        except Exception:
+            port = 2442
+        self._js8_rx_hub.start("127.0.0.1", port)
 
     def _update_timer_interval(self):
         if self._poll_timer:
@@ -2303,23 +2312,12 @@ class JS8CallNetControlTab(QWidget):
             self._waiting_for_completion = False
             self._maybe_process_next_query()
 
-    def _poll_js8_rx_queue(self) -> None:
+    def _on_js8_rx_messages(self, messages: List[dict]) -> None:
         if self._is_shutting_down or self._polling_rx:
-            return
-        if js8net is None:
-            return
-        client = self._get_js8_client()
-        if client is None or not hasattr(js8net, "rx_queue"):
             return
         self._polling_rx = True
         try:
-            max_msgs = 200
-            msg_count = 0
-            while True:
-                msg = js8net.rx_queue.get_nowait()
-                msg_count += 1
-                if msg_count > max_msgs:
-                    break
+            for msg in messages:
                 now_ts = time.time()
                 self._last_rx_ts = now_ts
                 self._grid_last_rx_ts = now_ts
@@ -2423,8 +2421,6 @@ class JS8CallNetControlTab(QWidget):
                                 )
                 except Exception:
                     continue
-        except queue.Empty:
-            pass
         finally:
             self._polling_rx = False
 
@@ -2441,18 +2437,11 @@ class JS8CallNetControlTab(QWidget):
         except Exception:
             pass
         try:
-            if self._js8_rx_timer:
-                self._js8_rx_timer.stop()
+            if self._js8_rx_hub and self._js8_rx_registered:
+                self._js8_rx_hub.unregister_listener(self._on_js8_rx_messages)
+                self._js8_rx_registered = False
         except Exception:
             pass
-        if self._js8_net_started and js8net is not None:
-            try:
-                sock = getattr(js8net, "s", None)
-                if sock:
-                    sock.close()
-            except Exception:
-                pass
-            self._js8_net_started = False
 
     def _line_has_checkin_form(self, line: str) -> bool:
         """
