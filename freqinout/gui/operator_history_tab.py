@@ -726,7 +726,7 @@ class OperatorHistoryTab(QWidget):
             if isinstance(w, QCheckBox):
                 w.setChecked(True)
 
-    def _upsert_record(self, row: Dict):
+    def _upsert_record(self, row: Dict, *, merge_groups: bool = True):
         db_path = self._db_path()
         if not db_path:
             QMessageBox.warning(self, "DB Error", "Database path not found.")
@@ -792,7 +792,8 @@ class OperatorHistoryTab(QWidget):
             else:
                 final_grid = base_grid
 
-            groups, g1, g2, g3 = self._normalize_groups_for_save(row, existing_groups)
+            groups_source = existing_groups if merge_groups else []
+            groups, g1, g2, g3 = self._normalize_groups_for_save(row, groups_source)
             trusted = row.get("trusted")
             if trusted is None:
                 trusted = 1 if existing_trusted else 0
@@ -1062,7 +1063,7 @@ class OperatorHistoryTab(QWidget):
         data = self._collect_dialog_data()
         if not data:
             return
-        if self._upsert_record(data):
+        if self._upsert_record(data, merge_groups=False):
             self._load_data()
 
     def _edit_selected_dialog(self):
@@ -1093,7 +1094,7 @@ class OperatorHistoryTab(QWidget):
         data = self._collect_dialog_data(existing or {"callsign": calls[0]})
         if not data:
             return
-        if self._upsert_record(data):
+        if self._upsert_record(data, merge_groups=False):
             self._load_data()
 
     def _delete_selected(self):
