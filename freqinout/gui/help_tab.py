@@ -85,7 +85,7 @@ class HelpTab(QWidget):
             printer = QPrinter(QPrinter.HighResolution)
             printer.setOutputFormat(QPrinter.PdfFormat)
             printer.setOutputFileName(fn)
-            self.viewer.document().print(printer)
+            self.viewer.document().print_(printer)
             QMessageBox.information(self, "Export complete", f"Saved PDF to:\n{fn}")
         except Exception as e:
             QMessageBox.critical(self, "Export failed", f"PDF export failed:\n{e}")
