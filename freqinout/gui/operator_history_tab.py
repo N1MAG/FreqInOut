@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QMenu,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -117,14 +118,10 @@ class OperatorHistoryTab(QWidget):
 
         self.refresh_btn = QPushButton("Refresh")
         search_row.addWidget(self.refresh_btn)
-        self.import_btn = QPushButton("Import CSV")
+        self.import_btn = QPushButton("Import/Export...")
         search_row.addWidget(self.import_btn)
-        self.add_btn = QPushButton("Add Operator")
-        search_row.addWidget(self.add_btn)
-        self.edit_btn = QPushButton("Edit Selected")
-        search_row.addWidget(self.edit_btn)
-        self.delete_btn = QPushButton("Delete Selected")
-        search_row.addWidget(self.delete_btn)
+        self.manage_btn = QPushButton("Manage Operators")
+        search_row.addWidget(self.manage_btn)
         self.select_all_btn = QPushButton("Select All")
         search_row.addWidget(self.select_all_btn)
         search_row.addWidget(QLabel("Filter by:"))
@@ -180,10 +177,8 @@ class OperatorHistoryTab(QWidget):
         # Signals
         self.refresh_btn.clicked.connect(self._load_data)
         self.search_edit.textChanged.connect(self._apply_filter)
-        self.import_btn.clicked.connect(self._import_csv)
-        self.add_btn.clicked.connect(self._add_operator_dialog)
-        self.edit_btn.clicked.connect(self._edit_selected_dialog)
-        self.delete_btn.clicked.connect(self._delete_selected)
+        self.import_btn.clicked.connect(self._show_import_export_menu)
+        self.manage_btn.clicked.connect(self._show_manage_menu)
         self.select_all_btn.clicked.connect(self._select_all_rows)
         self.group_filter.currentTextChanged.connect(self._apply_filter)
 
@@ -593,10 +588,13 @@ class OperatorHistoryTab(QWidget):
     # ------------- FILTER + RENDER ------------- #
 
     def _apply_filter(self):
+        self._render_rows(self._filtered_rows())
+
+    def _filtered_rows(self) -> List[Dict]:
         term = self.search_edit.text().strip().lower()
         filter_term = self.group_filter.currentText().strip().lower()
         if not term:
-            filtered = self._rows
+            filtered = list(self._rows)
         else:
             filtered = []
             for r in self._rows:
@@ -636,7 +634,7 @@ class OperatorHistoryTab(QWidget):
                         )
                     )
                 ]
-        self._render_rows(filtered)
+        return filtered
 
     def _render_rows(self, rows: List[Dict] | None = None):
         if rows is None:
@@ -785,12 +783,25 @@ class OperatorHistoryTab(QWidget):
                 if not existing_groups:
                     existing_groups = [eg1 or "", eg2 or "", eg3 or ""]
 
+            csv_name = (row.get("name") or "").strip()
+            csv_state = (row.get("state") or "").strip().upper()
+            csv_grid = (row.get("grid") or "").strip().upper()
+            base_grid = (existing_grid or "").strip().upper()
+            if csv_grid and len(csv_grid) >= len(base_grid):
+                final_grid = csv_grid
+            else:
+                final_grid = base_grid
+
             groups, g1, g2, g3 = self._normalize_groups_for_save(row, existing_groups)
             trusted = row.get("trusted")
             if trusted is None:
                 trusted = 1 if existing_trusted else 0
-            first_seen = _normalize_date_only(row.get("first_seen_utc") or existing_first)
-            last_seen = _normalize_date_only(row.get("last_seen_utc") or existing_last)
+            if existing:
+                first_seen = _normalize_date_only(existing_first)
+                last_seen = _normalize_date_only(existing_last)
+            else:
+                first_seen = _normalize_date_only(row.get("first_seen_utc") or existing_first)
+                last_seen = _normalize_date_only(row.get("last_seen_utc") or existing_last)
 
             cur.execute(
                 """
@@ -802,9 +813,9 @@ class OperatorHistoryTab(QWidget):
                 """,
                 (
                     cs,
-                    row.get("name", existing_name or ""),
-                    row.get("state", existing_state or ""),
-                    row.get("grid", "") or "",
+                    csv_name or (existing_name or ""),
+                    csv_state or (existing_state or ""),
+                    final_grid,
                     g1,
                     g2,
                     g3,
@@ -826,6 +837,90 @@ class OperatorHistoryTab(QWidget):
             return False
         finally:
             conn.close()
+
+    def _show_import_export_menu(self):
+        menu = QMenu(self)
+        menu.addAction("Import CSV...", self._import_csv)
+        menu.addAction("Export CSV...", self._export_csv)
+        menu.exec(self.import_btn.mapToGlobal(self.import_btn.rect().bottomLeft()))
+
+    def _show_manage_menu(self):
+        menu = QMenu(self)
+        menu.addAction("Add Operator...", self._add_operator_dialog)
+        menu.addAction("Edit Selected...", self._edit_selected_dialog)
+        menu.addAction("Delete Selected...", self._delete_selected)
+        menu.exec(self.manage_btn.mapToGlobal(self.manage_btn.rect().bottomLeft()))
+
+    def _export_csv(self):
+        selected = set(self._selected_callsigns())
+        rows: List[Dict]
+        if selected:
+            rows = [r for r in self._rows if r.get("callsign") in selected]
+        else:
+            current_filter = self.group_filter.currentText().strip()
+            if current_filter and current_filter != "All":
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Export CSV")
+                msg.setText("Export which list?")
+                unfiltered_btn = msg.addButton("Export Unfiltered List", QMessageBox.AcceptRole)
+                filtered_btn = msg.addButton(f"Export {current_filter} Filtered List", QMessageBox.AcceptRole)
+                msg.addButton("Cancel", QMessageBox.RejectRole)
+                msg.exec()
+                clicked = msg.clickedButton()
+                if clicked == filtered_btn:
+                    rows = self._filtered_rows()
+                elif clicked == unfiltered_btn:
+                    rows = list(self._rows)
+                else:
+                    return
+            else:
+                rows = list(self._rows)
+
+        if not rows:
+            QMessageBox.information(self, "Export CSV", "No rows to export.")
+            return
+        fn, _ = QFileDialog.getSaveFileName(self, "Export Operators CSV", "", "CSV Files (*.csv)")
+        if not fn:
+            return
+        try:
+            with open(fn, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "callsign",
+                        "name",
+                        "state",
+                        "grid",
+                        "group1",
+                        "group2",
+                        "group3",
+                        "group_role",
+                        "first_seen_utc",
+                        "last_seen_utc",
+                        "trusted",
+                    ],
+                )
+                writer.writeheader()
+                for r in rows:
+                    writer.writerow(
+                        {
+                            "callsign": r.get("callsign", ""),
+                            "name": r.get("name", ""),
+                            "state": r.get("state", ""),
+                            "grid": r.get("grid", ""),
+                            "group1": r.get("group1", ""),
+                            "group2": r.get("group2", ""),
+                            "group3": r.get("group3", ""),
+                            "group_role": r.get("group_role", ""),
+                            "first_seen_utc": r.get("first_seen_utc", ""),
+                            "last_seen_utc": r.get("last_seen_utc", ""),
+                            "trusted": 1 if r.get("trusted") else 0,
+                        }
+                    )
+        except Exception as e:
+            QMessageBox.warning(self, "Export CSV", f"Failed to export:\n{e}")
+            return
+        QMessageBox.information(self, "Export CSV", f"Exported {len(rows)} record(s).")
 
     # ------------- CSV import ------------- #
 
