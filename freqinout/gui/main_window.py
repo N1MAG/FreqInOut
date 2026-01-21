@@ -371,6 +371,11 @@ class MainWindow(QMainWindow):
             return
         self._shutting_down = True
         try:
+            if self.stack.currentWidget() is self.stations_map_tab:
+                self.stack.setCurrentWidget(self.settings_tab)
+        except Exception:
+            pass
+        try:
             if hasattr(self, "scheduler"):
                 self.scheduler.stop()
         except Exception:
@@ -386,6 +391,10 @@ class MainWindow(QMainWindow):
                     widget.shutdown()
             except Exception:
                 continue
+
+    def closeEvent(self, event):
+        self._on_app_about_to_quit()
+        super().closeEvent(event)
 
     def _on_off_schedule_detected(self, entry: dict) -> None:
         if self._shutting_down:

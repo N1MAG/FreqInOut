@@ -671,12 +671,28 @@ class StationsMapTab(QWidget):
         try:
             if self.web is not None:
                 try:
+                    self.web.stop()
+                except Exception:
+                    pass
+                try:
+                    self.web.hide()
+                except Exception:
+                    pass
+                try:
+                    self.web.setParent(None)
+                except Exception:
+                    pass
+                try:
                     self.web.setUrl(QUrl("about:blank"))
                 except Exception:
                     pass
                 try:
                     page = self.web.page()
                     if page is not None:
+                        try:
+                            page.setParent(None)
+                        except Exception:
+                            pass
                         page.deleteLater()
                 except Exception:
                     pass
