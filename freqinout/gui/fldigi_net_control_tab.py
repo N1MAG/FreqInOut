@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import sqlite3
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -316,6 +317,76 @@ class FldigiNetControlTab(QWidget):
 
     def _snapshot_operating_groups(self, og_list: List[Dict]) -> str:
         return qsy_snapshot_operating_groups(og_list)
+
+    def _current_freq_mhz(self) -> Optional[float]:
+        try:
+            cur = self._current_scheduler_freq()
+            if cur:
+                return float(cur)
+        except Exception:
+            pass
+        meta = self._selected_qsy_meta()
+        try:
+            if meta and meta.get("freq") is not None:
+                return float(meta.get("freq"))
+        except Exception:
+            pass
+        return None
+
+    def _operating_group_for_freq(self, freq_mhz: Optional[float]) -> str:
+        if not freq_mhz:
+            return ""
+        ops = self._load_operating_groups()
+        for g in ops:
+            try:
+                fval = float(g.get("frequency", 0))
+            except Exception:
+                continue
+            if abs(fval - float(freq_mhz)) <= 0.0005:
+                name = (g.get("group") or g.get("group_name") or "").strip()
+                if name:
+                    return name.upper()
+        return ""
+
+    def _lookup_operator_groups(self, callsign: str) -> List[str]:
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return []
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return []
+        if not db_path.exists():
+            return []
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT group1, group2, group3, groups_json FROM operator_checkins WHERE callsign=?", (cs,))
+            row = cur.fetchone()
+            conn.close()
+        except Exception:
+            return []
+        if not row:
+            return []
+        g1, g2, g3, gj = row
+        groups: List[str] = []
+        for g in (g1, g2, g3):
+            val = (g or "").strip().upper()
+            if val and val not in groups:
+                groups.append(val)
+        if gj:
+            try:
+                parsed = json.loads(gj)
+                if isinstance(parsed, list):
+                    for g in parsed:
+                        val = (str(g) or "").strip().upper()
+                        if val and val not in groups:
+                            groups.append(val)
+            except Exception:
+                pass
+        return groups
 
     def _refresh_qsy_options(self, og_list: Optional[List[Dict]] = None):
         """
@@ -1371,6 +1442,7 @@ class FldigiNetControlTab(QWidget):
         now_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
         net_name = self.net_name_combo.currentText().strip()
         role = self.role_combo.currentText().strip().upper()
+        group_name = self._operating_group_for_freq(self._current_freq_mhz())
 
         entries: List[Dict] = []
         for line in main_text.splitlines():
@@ -1391,6 +1463,16 @@ class FldigiNetControlTab(QWidget):
             if not exists:
                 name_out = name
                 state_out = state
+            group1 = group2 = group3 = None
+            groups_json = None
+            if group_name:
+                existing_groups = self._lookup_operator_groups(cs)
+                if group_name not in existing_groups:
+                    existing_groups.append(group_name)
+                group1 = existing_groups[0] if len(existing_groups) > 0 else ""
+                group2 = existing_groups[1] if len(existing_groups) > 1 else ""
+                group3 = existing_groups[2] if len(existing_groups) > 2 else ""
+                groups_json = existing_groups if existing_groups else None
             entries.append(
                 {
                     "callsign": cs,
@@ -1401,6 +1483,10 @@ class FldigiNetControlTab(QWidget):
                     "net_name": net_name,
                     "role": role,
                     "trusted": None,
+                    "group1": group1 or "",
+                    "group2": group2 or "",
+                    "group3": group3 or "",
+                    "groups_json": json.dumps(groups_json) if groups_json else None,
                 }
             )
 
