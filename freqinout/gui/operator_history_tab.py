@@ -475,6 +475,14 @@ class OperatorHistoryTab(QWidget):
         all_txt = directed.parent / "ALL.TXT" if directed_path else None
         if not directed.exists():
             return
+        try:
+            directed_offset = int(self.settings.get("operator_backfill_directed_offset", 0) or 0)
+        except Exception:
+            directed_offset = 0
+        try:
+            all_offset = int(self.settings.get("operator_backfill_all_offset", 0) or 0)
+        except Exception:
+            all_offset = 0
 
         def parse_ts(line: str) -> Optional[str]:
             ts_str = line[:19]
@@ -486,55 +494,73 @@ class OperatorHistoryTab(QWidget):
 
         earliest: Dict[str, str] = {}
         try:
-            text = directed.read_text(encoding="utf-8", errors="ignore")
+            size_now = directed.stat().st_size
+            if directed_offset < 0 or directed_offset > size_now:
+                directed_offset = 0
+            with directed.open("r", encoding="utf-8", errors="ignore") as fh:
+                if directed_offset > 0:
+                    fh.seek(directed_offset)
+                for line in fh:
+                    if "\t" not in line:
+                        continue
+                    ts = parse_ts(line)
+                    if not ts:
+                        continue
+                    parts = line.split("\t")
+                    msg = parts[4] if len(parts) > 4 else ""
+                    # crude extract: before the colon is origin, after is dest
+                    if ":" in msg:
+                        origin = msg.split(":", 1)[0].strip().upper()
+                        if origin:
+                            earliest[origin] = min(earliest.get(origin, ts), ts)
+                        rest = msg.split(":", 1)[1]
+                        tokens = rest.split()
+                        if tokens:
+                            dest = tokens[0].strip().upper()
+                            if dest:
+                                earliest[dest] = min(earliest.get(dest, ts), ts)
+                try:
+                    self.settings.set("operator_backfill_directed_offset", int(fh.tell()))
+                except Exception:
+                    pass
         except Exception:
-            text = ""
-        for line in text.splitlines():
-            if "\t" not in line:
-                continue
-            ts = parse_ts(line)
-            if not ts:
-                continue
-            parts = line.split("\t")
-            msg = parts[4] if len(parts) > 4 else ""
-            # crude extract: before the colon is origin, after is dest
-            if ":" in msg:
-                origin = msg.split(":", 1)[0].strip().upper()
-                if origin:
-                    earliest[origin] = min(earliest.get(origin, ts), ts)
-                rest = msg.split(":", 1)[1]
-                tokens = rest.split()
-                if tokens:
-                    dest = tokens[0].strip().upper()
-                    if dest:
-                        earliest[dest] = min(earliest.get(dest, ts), ts)
+            pass
 
         if all_txt and all_txt.exists():
             try:
-                text = all_txt.read_text(encoding="utf-8", errors="ignore")
+                size_now = all_txt.stat().st_size
+                if all_offset < 0 or all_offset > size_now:
+                    all_offset = 0
+                with all_txt.open("r", encoding="utf-8", errors="ignore") as fh:
+                    if all_offset > 0:
+                        fh.seek(all_offset)
+                    for line in fh:
+                        if "Transmitting" not in line:
+                            continue
+                        ts = parse_ts(line)
+                        if not ts:
+                            continue
+                        try:
+                            msg_part = line.split("JS8:", 1)[1]
+                        except Exception:
+                            continue
+                        msg = msg_part.strip()
+                        if ":" in msg:
+                            origin = msg.split(":", 1)[0].strip().upper()
+                            if origin:
+                                earliest[origin] = min(earliest.get(origin, ts), ts)
+                            rest = msg.split(":", 1)[1]
+                            tokens = rest.split()
+                            if tokens:
+                                dest = tokens[0].strip().upper()
+                                if dest:
+                                    earliest[dest] = min(earliest.get(dest, ts), ts)
+                    try:
+                        self.settings.set("operator_backfill_all_offset", int(fh.tell()))
+                    except Exception:
+                        pass
             except Exception:
-                text = ""
-            for line in text.splitlines():
-                if "Transmitting" not in line:
-                    continue
-                ts = parse_ts(line)
-                if not ts:
-                    continue
-                try:
-                    msg_part = line.split("JS8:", 1)[1]
-                except Exception:
-                    continue
-                msg = msg_part.strip()
-                if ":" in msg:
-                    origin = msg.split(":", 1)[0].strip().upper()
-                    if origin:
-                        earliest[origin] = min(earliest.get(origin, ts), ts)
-                    rest = msg.split(":", 1)[1]
-                    tokens = rest.split()
-                    if tokens:
-                        dest = tokens[0].strip().upper()
-                        if dest:
-                            earliest[dest] = min(earliest.get(dest, ts), ts)
+                pass
 
         if not earliest:
             return

@@ -2635,6 +2635,17 @@ class JS8LogLinkIndexer:
         """
         directed_path = self._resolve_directed_path()
         all_path = directed_path.parent / "ALL.TXT" if directed_path else None
+        directed_offset = 0
+        all_offset = 0
+        if since_ts is not None:
+            try:
+                directed_offset = int(self.settings.get("js8_links_directed_offset", 0) or 0)
+            except Exception:
+                directed_offset = 0
+            try:
+                all_offset = int(self.settings.get("js8_links_all_offset", 0) or 0)
+            except Exception:
+                all_offset = 0
 
         # De-duplicate by station pair + band, averaging SNR and keeping the newest timestamp/frequency.
         last_seen: Dict[str, float] = {}
@@ -2676,18 +2687,36 @@ class JS8LogLinkIndexer:
 
         if directed_path and directed_path.exists():
             try:
+                size_now = directed_path.stat().st_size
+                if directed_offset < 0 or directed_offset > size_now:
+                    directed_offset = 0
                 with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                    if since_ts is not None and directed_offset > 0:
+                        fh.seek(directed_offset)
                     for line in fh:
                         self._maybe_capture_group_grid(line)
                         handle_parsed(self._parse_directed_line(line))
+                    try:
+                        self.settings.set("js8_links_directed_offset", int(fh.tell()))
+                    except Exception:
+                        pass
             except Exception as e:
                 log.debug("JS8LogLinkIndexer: failed reading DIRECTED.TXT: %s", e)
 
         if all_path and all_path.exists():
             try:
+                size_now = all_path.stat().st_size
+                if all_offset < 0 or all_offset > size_now:
+                    all_offset = 0
                 with all_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                    if since_ts is not None and all_offset > 0:
+                        fh.seek(all_offset)
                     for line in fh:
                         handle_parsed(self._parse_all_line(line))
+                    try:
+                        self.settings.set("js8_links_all_offset", int(fh.tell()))
+                    except Exception:
+                        pass
             except Exception as e:
                 log.debug("JS8LogLinkIndexer: failed reading ALL.TXT: %s", e)
 
