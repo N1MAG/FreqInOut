@@ -400,13 +400,15 @@ class SchedulerEngine(QObject):
 
     def _enforcement_mode(self) -> str:
         try:
-            mode = (self.settings.get("schedule_enforcement_mode", "EmComms") or "EmComms").strip()
+            mode = (self.settings.get("schedule_enforcement_mode", "Strict") or "Strict").strip()
         except Exception:
-            mode = "EmComms"
-        return mode if mode in {"Shack", "POTA", "EmComms"} else "EmComms"
+            mode = "Strict"
+        legacy_map = {"Shack": "Normal", "POTA": "Loose", "EmComms": "Strict"}
+        mode = legacy_map.get(mode, mode)
+        return mode if mode in {"Normal", "Loose", "Strict"} else "Strict"
 
     def _maybe_resync_frequency(self) -> None:
-        if self._enforcement_mode() != "EmComms":
+        if self._enforcement_mode() != "Strict":
             return
         entry = self.current_schedule_entry or {}
         if not entry:
@@ -450,7 +452,7 @@ class SchedulerEngine(QObject):
             return None
 
     def _maybe_prompt_off_schedule(self) -> None:
-        if self._enforcement_mode() != "POTA":
+        if self._enforcement_mode() != "Loose":
             return
         entry = self.current_schedule_entry or {}
         if not entry:

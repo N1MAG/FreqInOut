@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QApplication,
     QCompleter,
+    QDialog,
 )
 from PySide6.QtGui import QFontMetrics
 
@@ -165,6 +166,9 @@ class FldigiNetControlTab(QWidget):
         known_btn_row.addWidget(self.add_known_main_btn)
         known_btn_row.addWidget(self.add_known_late_btn)
         known_btn_row.addStretch()
+        self.compare_ncs_btn = QPushButton("Compare NCS Lists")
+        self.compare_ncs_btn.clicked.connect(self._open_compare_dialog)
+        known_btn_row.addWidget(self.compare_ncs_btn)
         layout.addLayout(known_btn_row)
 
         layout.addSpacing(24)
@@ -253,6 +257,110 @@ class FldigiNetControlTab(QWidget):
         self.add_known_late_btn.setDefault(False)
         self.add_known_main_btn.installEventFilter(self)
         self.add_known_late_btn.installEventFilter(self)
+
+    def _open_compare_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Compare NCS List")
+        dialog.setMinimumWidth(520)
+        layout = QVBoxLayout(dialog)
+
+        prompt = QLabel("Paste NCS list (CALL/Name/State). Slash delimiters are expected.")
+        layout.addWidget(prompt)
+
+        input_box = QTextEdit()
+        input_box.setPlaceholderText("Example: K1ABC/John/CA")
+        layout.addWidget(input_box)
+
+        result_label = QLabel("Local entries missing from NCS list")
+        layout.addWidget(result_label)
+
+        result_box = QTextEdit()
+        result_box.setReadOnly(True)
+        layout.addWidget(result_box)
+
+        btn_row = QHBoxLayout()
+        compare_btn = QPushButton("Compare")
+        copy_btn = QPushButton("Copy Missing")
+        close_btn = QPushButton("Close")
+        btn_row.addStretch()
+        btn_row.addWidget(compare_btn)
+        btn_row.addWidget(copy_btn)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        last_missing_text = ""
+        theme = resolve_theme(self.settings)
+        copy_btn.setStyleSheet(button_style("info", theme))
+
+        def extract_callsigns(text: str) -> List[str]:
+            seen = set()
+            calls = []
+            for line in (text or "").splitlines():
+                cs, _, _ = self._parse_checkin_line(line)
+                cs = (cs or "").strip().upper()
+                if not cs or cs in seen:
+                    continue
+                seen.add(cs)
+                calls.append(cs)
+            return calls
+
+        def extract_local_entries() -> List[Dict[str, str]]:
+            entries: List[Dict[str, str]] = []
+            seen = set()
+            for source_text in (self.main_text.toPlainText(), self.late_text.toPlainText()):
+                for line in (source_text or "").splitlines():
+                    cs, name, state = self._parse_checkin_line(line)
+                    cs = (cs or "").strip().upper()
+                    if not cs or cs in seen:
+                        continue
+                    seen.add(cs)
+                    entry = {
+                        "callsign": cs,
+                        "name": (name or "").strip(),
+                        "state": (state or "").strip().upper(),
+                    }
+                    entries.append(entry)
+            return entries
+
+        def run_compare() -> None:
+            local_entries = extract_local_entries()
+            pasted_calls = set(extract_callsigns(input_box.toPlainText()))
+            missing_entries = [
+                self._format_entry(e["callsign"], e["name"], e["state"])
+                for e in local_entries
+                if e["callsign"] not in pasted_calls
+            ]
+            nonlocal last_missing_text
+            last_missing_text = "\n".join(missing_entries) if missing_entries else ""
+
+            lines = [
+                f"Local combined check-ins: {len(local_entries)}",
+                f"NCS pasted list: {len(pasted_calls)}",
+                "",
+                "Local entries missing from NCS list:",
+                last_missing_text if missing_entries else "(none)",
+            ]
+            result_box.setPlainText("\n".join(lines))
+            if not missing_entries:
+                msg = QMessageBox(dialog)
+                msg.setWindowTitle("Compare NCS Lists")
+                msg.setText("Full Match")
+                msg.addButton("Close", QMessageBox.AcceptRole)
+                msg.exec()
+                dialog.accept()
+
+        compare_btn.clicked.connect(run_compare)
+        def copy_and_close() -> None:
+            if not last_missing_text:
+                QMessageBox.information(dialog, "Compare NCS Lists", "No missing entries to copy.")
+                return
+            QApplication.clipboard().setText(last_missing_text)
+            dialog.accept()
+
+        copy_btn.clicked.connect(copy_and_close)
+        close_btn.clicked.connect(dialog.accept)
+
+        dialog.exec()
 
     def _set_net_button_styles(self, active: bool):
         """

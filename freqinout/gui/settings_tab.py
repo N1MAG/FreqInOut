@@ -354,7 +354,7 @@ class SettingsTab(QWidget):
         ctrl_row.addSpacing(12)
         ctrl_row.addWidget(QLabel("Schedule Mode"))
         self.schedule_mode_combo = QComboBox()
-        self.schedule_mode_combo.addItems(["Shack", "POTA", "EmComms"])
+        self.schedule_mode_combo.addItems(["Normal", "Loose", "Strict"])
         ctrl_row.addWidget(self.schedule_mode_combo)
         ctrl_row.addStretch()
         op_layout.addLayout(ctrl_row)
@@ -690,9 +690,11 @@ class SettingsTab(QWidget):
             ctrl = "FLRig"
         self.control_combo.setCurrentText(ctrl)
         self.use_scheduler_chk.setChecked(bool(data.get("use_scheduler", True)))
-        sched_mode = (data.get("schedule_enforcement_mode", "EmComms") or "EmComms").strip()
-        if sched_mode not in {"Shack", "POTA", "EmComms"}:
-            sched_mode = "EmComms"
+        sched_mode = (data.get("schedule_enforcement_mode", "Strict") or "Strict").strip()
+        legacy_map = {"Shack": "Normal", "POTA": "Loose", "EmComms": "Strict"}
+        sched_mode = legacy_map.get(sched_mode, sched_mode)
+        if sched_mode not in {"Normal", "Loose", "Strict"}:
+            sched_mode = "Strict"
         self.schedule_mode_combo.setCurrentText(sched_mode)
         theme = (data.get("ui_theme", "light") or "light").strip().lower()
         self.theme_combo.setCurrentText("Dark" if theme == "dark" else "Light")
@@ -876,7 +878,7 @@ class SettingsTab(QWidget):
                 "timezone": data["timezone"],
                 "control_via": data["control_via"],
                 "use_scheduler": data["use_scheduler"],
-                "schedule_enforcement_mode": data.get("schedule_enforcement_mode", "EmComms"),
+                "schedule_enforcement_mode": data.get("schedule_enforcement_mode", "Strict"),
                 "ui_theme": data.get("ui_theme", "light"),
                 "js8_port": data["js8_port"],
                 "js8_offset_hz": data.get("js8_offset_hz", 0),
@@ -907,7 +909,7 @@ class SettingsTab(QWidget):
             self.settings.set("timezone", data["timezone"])
             self.settings.set("control_via", data["control_via"])
             self.settings.set("ui_theme", data.get("ui_theme", "light"))
-            self.settings.set("schedule_enforcement_mode", data.get("schedule_enforcement_mode", "EmComms"))
+            self.settings.set("schedule_enforcement_mode", data.get("schedule_enforcement_mode", "Strict"))
             self.settings.set("js8_port", data["js8_port"])
             self.settings.set("js8_offset_hz", data.get("js8_offset_hz", 0))
             self.settings.set("primary_js8_groups", data["primary_js8_groups"])
