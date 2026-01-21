@@ -858,21 +858,28 @@ class OperatorHistoryTab(QWidget):
             rows = [r for r in self._rows if r.get("callsign") in selected]
         else:
             current_filter = self.group_filter.currentText().strip()
-            if current_filter and current_filter != "All":
-                msg = QMessageBox(self)
-                msg.setWindowTitle("Export CSV")
-                msg.setText("Export which list?")
-                unfiltered_btn = msg.addButton("Export Unfiltered List", QMessageBox.AcceptRole)
-                filtered_btn = msg.addButton(f"Export {current_filter} Filtered List", QMessageBox.AcceptRole)
-                msg.addButton("Cancel", QMessageBox.RejectRole)
-                msg.exec()
-                clicked = msg.clickedButton()
-                if clicked == filtered_btn:
-                    rows = self._filtered_rows()
-                elif clicked == unfiltered_btn:
-                    rows = list(self._rows)
-                else:
+            if not current_filter or current_filter == "All":
+                resp = QMessageBox.question(
+                    self,
+                    "Export CSV",
+                    "Export Unfiltered List?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if resp != QMessageBox.Yes:
                     return
+                rows = list(self._rows)
+            elif current_filter and current_filter != "All":
+                resp = QMessageBox.question(
+                    self,
+                    "Export CSV",
+                    f"Export {current_filter} Filtered List?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if resp != QMessageBox.Yes:
+                    return
+                rows = self._filtered_rows()
             else:
                 rows = list(self._rows)
 
