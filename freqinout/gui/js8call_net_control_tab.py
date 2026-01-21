@@ -77,7 +77,7 @@ class JS8CallNetControlTab(QWidget):
         * callsign, operator_name, operator_state
         * js8_directed_path: full path to JS8Call DIRECTED.TXT
         * js8_refresh_sec: poll interval (seconds)
-    - Single Check-Ins table with per-call metadata (mode, SNR, DT, offset, status).
+    - Single Check-Ins table with per-call metadata (mode, SNR, offset, status).
 
     Buttons:
         Start Net, ACK Check-ins, Set Group, Set Spotter, Group Spotter,
@@ -275,9 +275,9 @@ class JS8CallNetControlTab(QWidget):
         filter_row.addWidget(self.checkin_filter_combo)
         filter_row.addStretch()
         table_layout.addLayout(filter_row)
-        self.checkin_table = QTableWidget(0, 11)
+        self.checkin_table = QTableWidget(0, 10)
         self.checkin_table.setHorizontalHeaderLabels(
-            ["CALLSIGN", "NAME", "ST", "GRID", "REGION", "MODE", "SNR", "DT ms", "OFFSET", "STATUS", ""]
+            ["CALLSIGN", "NAME", "ST", "GRID", "REGION", "MODE", "SNR", "OFFSET", "STATUS", ""]
         )
         self.checkin_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.checkin_table.setSelectionMode(QTableWidget.SingleSelection)
@@ -1014,7 +1014,7 @@ class JS8CallNetControlTab(QWidget):
                                 and call_primary not in self._checkins
                             ):
                                 continue
-                            snr_line, dt_line, offset_line = self._parse_directed_metrics(line)
+                            snr_line, offset_line = self._parse_directed_metrics(line)
                             speed_guess = self._call_last_speed.get(self._base_callsign(call_primary))
                             mode_name = ""
                             if speed_guess is not None:
@@ -1029,7 +1029,6 @@ class JS8CallNetControlTab(QWidget):
                                 status="NEW",
                                 mode=mode_name or None,
                                 snr=snr_line,
-                                dt_ms=dt_line,
                                 offset=offset_line,
                             )
 
@@ -1270,7 +1269,7 @@ class JS8CallNetControlTab(QWidget):
 
     def _update_row(self, callsign: str, data: Dict) -> None:
         row = self._ensure_row(callsign)
-        cols = ["CALLSIGN", "NAME", "ST", "GRID", "REGION", "MODE", "SNR", "DT ms", "OFFSET", "STATUS", "DELETE"]
+        cols = ["CALLSIGN", "NAME", "ST", "GRID", "REGION", "MODE", "SNR", "OFFSET", "STATUS", "DELETE"]
         values = [
             callsign,
             data.get("name", ""),
@@ -1279,7 +1278,6 @@ class JS8CallNetControlTab(QWidget):
             data.get("region", ""),
             data.get("mode", ""),
             "" if data.get("snr") is None else str(data.get("snr")),
-            "" if data.get("dt") is None else str(data.get("dt")),
             "" if data.get("offset") is None else str(data.get("offset")),
             data.get("status", ""),
             self._delete_action_text(),
@@ -1314,7 +1312,6 @@ class JS8CallNetControlTab(QWidget):
         status: str = "NEW",
         mode: Optional[str] = None,
         snr: Optional[float] = None,
-        dt_ms: Optional[float] = None,
         offset: Optional[int] = None,
         grid: str = "",
         status_mismatch: bool = False,
@@ -1344,7 +1341,6 @@ class JS8CallNetControlTab(QWidget):
                 "region": meta.get("region", ""),
                 "mode": mode or data.get("mode", ""),
                 "snr": snr if snr is not None else data.get("snr"),
-                "dt": dt_ms if dt_ms is not None else data.get("dt"),
                 "offset": offset if offset is not None else data.get("offset"),
                 "status": status_to_use,
             }
@@ -1763,16 +1759,15 @@ class JS8CallNetControlTab(QWidget):
         """
         return re.findall(r"\bYES\s+MSG(?:\s+ID)?\s+(\d+)", line, flags=re.IGNORECASE)
 
-    def _parse_directed_metrics(self, line: str) -> tuple[Optional[float], Optional[float], Optional[int]]:
+    def _parse_directed_metrics(self, line: str) -> tuple[Optional[float], Optional[int]]:
         """
-        Attempt to parse SNR / DT / Offset from a DIRECTED.TXT line.
+        Attempt to parse SNR / Offset from a DIRECTED.TXT line.
         Common format: date time freq offset snr CALL: DEST ...
-        Returns (snr, dt_ms, offset_hz)
+        Returns (snr, offset_hz)
         """
         parts = line.split()
         snr_val: Optional[float] = None
         offset_val: Optional[int] = None
-        dt_val: Optional[float] = None
         if len(parts) >= 5:
             try:
                 offset_val = int(parts[3])
@@ -1782,7 +1777,7 @@ class JS8CallNetControlTab(QWidget):
                 snr_val = float(parts[4])
             except Exception:
                 snr_val = None
-        return snr_val, dt_val, offset_val
+        return snr_val, offset_val
 
     def _get_js8_client(self):
         if self._js8_client:
@@ -2371,16 +2366,11 @@ class JS8CallNetControlTab(QWidget):
                                 offset_val = int(p.get("OFFSET")) if p.get("OFFSET") not in (None, "") else None
                             except Exception:
                                 offset_val = None
-                            try:
-                                dt_val = float(p.get("DT")) if p.get("DT") not in (None, "") else None
-                            except Exception:
-                                dt_val = None
                             self._upsert_checkin(
                                 base_frm,
                                 status="NEW",
                                 mode=mode_name,
                                 snr=snr_val,
-                                dt_ms=dt_val,
                                 offset=offset_val,
                                 grid=(p.get("GRID") or "").strip().upper(),
                             )
