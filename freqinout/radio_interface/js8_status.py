@@ -210,8 +210,15 @@ class JS8ControlClient(JS8StatusClient):
             return False
 
     def stop(self):
-        # js8net has no explicit stop; rely on process exit
-        pass
+        if js8net is None or not self._net_started:
+            return
+        try:
+            sock = getattr(js8net, "s", None)
+            if sock:
+                sock.close()
+        except Exception:
+            pass
+        self._net_started = False
 
 
 class VarACStatusClient:
