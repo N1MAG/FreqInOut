@@ -386,6 +386,11 @@ class StationsMapTab(QWidget):
         self._js8_indexer: Optional[JS8LogLinkIndexer] = None
         self._is_shutting_down = False
         self._js8_polling = False
+        self._js8_net_started = False
+        self._map_initialized = False
+        self._pending_map_payload: Optional[Dict[str, List[Dict]]] = None
+        self._last_map_payload_sig: Optional[str] = None
+        self._last_map_config: Optional[tuple] = None
         self._last_map_render_ts: float = 0.0
         self._render_pending: bool = False
 
@@ -492,6 +497,7 @@ class StationsMapTab(QWidget):
             port = 2442
         try:
             js8net.start_net("127.0.0.1", port)
+            self._js8_net_started = True
         except Exception as e:
             log.debug("StationsMap: js8net start failed: %s", e)
             return
@@ -546,6 +552,7 @@ class StationsMapTab(QWidget):
             my_call = ""
 
         updated = False
+        observations: List[tuple] = []
         self._js8_polling = True
         try:
             max_msgs = 200
@@ -594,13 +601,15 @@ class StationsMapTab(QWidget):
                     snr_val = float(snr)
                 except Exception:
                     snr_val = None
-                try:
-                    indexer.ingest_live(ts, origin, dest, snr_val, freq_hz, is_spotter=is_spotter)
-                    updated = True
-                except Exception as e:
-                    log.debug("StationsMap: live ingest failed for %s->%s: %s", origin, dest, e)
+                observations.append((ts, origin, dest, snr_val, freq_hz, is_spotter))
+                updated = True
         finally:
             self._js8_polling = False
+        if observations:
+            try:
+                indexer.ingest_live_batch(observations)
+            except Exception as e:
+                log.debug("StationsMap: live ingest batch failed: %s", e)
         if updated:
             self._last_js8_load_ts = max(self._last_js8_load_ts, time.time())
             self._schedule_render()
@@ -649,6 +658,8 @@ class StationsMapTab(QWidget):
         since = None
         if initial:
             since = max(self._last_js8_load_ts, self._last_exit_ts)
+        elif self._js8_rx_timer and self._js8_rx_timer.isActive():
+            since = self._last_js8_load_ts
         self._ingest_js8_logs(since_ts=since)
         self._schedule_render()
 
@@ -667,6 +678,33 @@ class StationsMapTab(QWidget):
         try:
             if self._refresh_timer:
                 self._refresh_timer.stop()
+        except Exception:
+            pass
+        if self._js8_net_started and js8net is not None:
+            try:
+                sock = getattr(js8net, "s", None)
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+            self._js8_net_started = False
+        try:
+            if self.web is not None:
+                try:
+                    self.web.setUrl(QUrl("about:blank"))
+                except Exception:
+                    pass
+                try:
+                    page = self.web.page()
+                    if page is not None:
+                        page.deleteLater()
+                except Exception:
+                    pass
+                try:
+                    self.web.deleteLater()
+                except Exception:
+                    pass
+                self.web = None
         except Exception:
             pass
 
@@ -828,6 +866,7 @@ class StationsMapTab(QWidget):
         # Map view
         if QWebEngineView is not None:
             self.web = QWebEngineView()
+            self.web.loadFinished.connect(self._on_map_load_finished)
             layout.addWidget(self.web)
         else:
             self.web = None
@@ -1323,7 +1362,17 @@ class StationsMapTab(QWidget):
 
     # ------------- Map rendering ------------- #
     def _render_map(self, preserve_view: bool = True):
-        if preserve_view is True and getattr(self, "web", None) is not None and self._map_file:
+        config_sig = (
+            bool(self.show_callsigns),
+            bool(self.show_states),
+            bool(self.show_cities),
+            bool(self.show_grids),
+            bool(self.show_grid_labels),
+            bool(self.show_regions),
+            int(self.city_pop_min),
+        )
+        force_reload = self._map_initialized and self._last_map_config and config_sig != self._last_map_config
+        if force_reload and self.web is not None and preserve_view is True:
             try:
                 self.web.page().runJavaScript(
                     "(() => { if (window._leafletMap) { const c = window._leafletMap.getCenter(); return JSON.stringify({lat:c.lat, lon:c.lng, zoom: window._leafletMap.getZoom()}); } if (window._lastView) { return JSON.stringify(window._lastView); } return null; })();",
@@ -1332,6 +1381,7 @@ class StationsMapTab(QWidget):
                 return
             except Exception:
                 pass
+
         view_state = None
         if isinstance(preserve_view, dict):
             view_state = preserve_view or self._last_map_view
@@ -1341,123 +1391,146 @@ class StationsMapTab(QWidget):
             view_state = self._last_map_view
         if view_state is None and self._last_map_view:
             view_state = self._last_map_view
+
         if not self.stations:
             html = "<html><body><h3>No station data to display.</h3></body></html>"
-        else:
-            self.show_city_labels = self.show_cities
+            if self.web is not None:
+                self._map_initialized = False
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
+                    f.write(html.encode("utf-8"))
+                self._map_file = Path(f.name)
+                self.web.setUrl(QUrl.fromLocalFile(str(self._map_file)))
+            else:
+                tmp = Path(tempfile.gettempdir()) / "freqinout_map.html"
+                tmp.write_text(html, encoding="utf-8")
+                self._map_file = tmp
+                log.info("StationsMap: map written to %s (open in browser).", tmp)
+            self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
+            return
 
-            def _fmt_ts(ts_val):
-                try:
-                    if ts_val:
-                        return datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S UTC")
-                except Exception:
-                    pass
-                return ""
+        self.show_city_labels = self.show_cities
 
-            # init stats and links
-            stats_lookup: Dict[str, Dict] = {}
-            links: List[Dict] = []
-            if self._links_active():
-                band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
-                selection = self._parse_link_selection(
-                    self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
-                )
+        def _fmt_ts(ts_val):
+            try:
+                if ts_val:
+                    return datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S UTC")
+            except Exception:
+                pass
+            return ""
+
+        # init stats and links
+        stats_lookup: Dict[str, Dict] = {}
+        links: List[Dict] = []
+        if self._links_active():
+            band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
+            selection = self._parse_link_selection(
+                self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
+            )
+            my_call = ""
+            try:
+                my_call = (self.settings.get("operator_callsign", "") or "").upper()
+            except Exception:
                 my_call = ""
-                try:
-                    my_call = (self.settings.get("operator_callsign", "") or "").upper()
-                except Exception:
-                    my_call = ""
-                relay_target = (self.relay_target or "").strip().upper()
+            relay_target = (self.relay_target or "").strip().upper()
 
-                links, stats_lookup = self._load_js8_links(
-                    band_filter=band_filter,
-                    my_call=my_call,
-                    link_selection=selection,
-                    relay_target=relay_target or None,
-                    max_age_sec=self.recency_seconds,
+            links, stats_lookup = self._load_js8_links(
+                band_filter=band_filter,
+                my_call=my_call,
+                link_selection=selection,
+                relay_target=relay_target or None,
+                max_age_sec=self.recency_seconds,
+            )
+            if view_state:
+                self._last_map_view = view_state
+
+        # Spread overlapping stations with the same base lat/lon
+        markers = []
+        base_map: Dict[tuple[float, float], List[StationPoint]] = {}
+        for pt in self.stations:
+            key = (round(pt.lat, 4), round(pt.lon, 4))
+            base_map.setdefault(key, []).append(pt)
+
+        def offset_positions(base_lat: float, base_lon: float, items: List[StationPoint]):
+            if len(items) == 1:
+                return [(base_lat, base_lon)]
+            coords = []
+            radius = 0.25  # degrees, modest spread
+            for idx, _ in enumerate(items):
+                angle = (idx / len(items)) * 6.28318530718  # 2*pi
+                lat_off = base_lat + radius * math.cos(angle)
+                lon_off = base_lon + (radius * math.sin(angle) / max(0.1, math.cos(math.radians(base_lat))))
+                coords.append((lat_off, lon_off))
+            return coords
+
+        for (base_lat, base_lon), items in base_map.items():
+            positions = offset_positions(base_lat, base_lon, items)
+            for pt, (lat_off, lon_off) in zip(items, positions):
+                stats = stats_lookup.get(pt.callsign.upper(), {})
+
+                detail_lines = [
+                    f"{pt.callsign}",
+                    f"Name: {pt.name}" if pt.name else "",
+                    f"State: {pt.state}" if pt.state else "",
+                    f"Grid: {pt.grid}" if pt.grid else "",
+                    f"Group: {pt.group}" if pt.group else "",
+                ]
+                # Filter empty lines
+                detail_lines = [d for d in detail_lines if d]
+                title = "\n".join(detail_lines)
+                tooltip_html = "<br/>".join(detail_lines)
+
+                markers.append(
+                    {
+                        "lat": lat_off,
+                        "lon": lon_off,
+                        "title": title,
+                        "tooltip": tooltip_html,
+                        "label": pt.callsign if self.show_callsigns else "",
+                        "last_seen": _fmt_ts(stats.get("last_seen", 0)),
+                        "last_spotter": _fmt_ts(stats.get("last_spotter", 0)),
+                        "avg_snr": stats.get("avg_snr"),
+                        "max_snr": stats.get("max_snr"),
+                    }
                 )
-                if view_state:
-                    self._last_map_view = view_state
 
-            # Spread overlapping stations with the same base lat/lon
-            markers = []
-            base_map: Dict[tuple[float, float], List[StationPoint]] = {}
-            for pt in self.stations:
-                key = (round(pt.lat, 4), round(pt.lon, 4))
-                base_map.setdefault(key, []).append(pt)
+        if self.web is not None and self._map_initialized and self._map_file and not force_reload:
+            self._push_map_payload(markers, links)
+            self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
+            return
 
-            def offset_positions(base_lat: float, base_lon: float, items: List[StationPoint]):
-                if len(items) == 1:
-                    return [(base_lat, base_lon)]
-                coords = []
-                radius = 0.25  # degrees, modest spread
-                for idx, _ in enumerate(items):
-                    angle = (idx / len(items)) * 6.28318530718  # 2*pi
-                    lat_off = base_lat + radius * math.cos(angle)
-                    lon_off = base_lon + (radius * math.sin(angle) / max(0.1, math.cos(math.radians(base_lat))))
-                    coords.append((lat_off, lon_off))
-                return coords
-
-            for (base_lat, base_lon), items in base_map.items():
-                positions = offset_positions(base_lat, base_lon, items)
-                for pt, (lat_off, lon_off) in zip(items, positions):
-                    stats = stats_lookup.get(pt.callsign.upper(), {})
-
-                    detail_lines = [
-                        f"{pt.callsign}",
-                        f"Name: {pt.name}" if pt.name else "",
-                        f"State: {pt.state}" if pt.state else "",
-                        f"Grid: {pt.grid}" if pt.grid else "",
-                        f"Group: {pt.group}" if pt.group else "",
-                    ]
-                    # Filter empty lines
-                    detail_lines = [d for d in detail_lines if d]
-                    title = "\n".join(detail_lines)
-                    tooltip_html = "<br/>".join(detail_lines)
-
-                    markers.append(
-                        {
-                            "lat": lat_off,
-                            "lon": lon_off,
-                            "title": title,
-                            "tooltip": tooltip_html,
-                            "label": pt.callsign if self.show_callsigns else "",
-                            "last_seen": _fmt_ts(stats.get("last_seen", 0)),
-                            "last_spotter": _fmt_ts(stats.get("last_spotter", 0)),
-                            "avg_snr": stats.get("avg_snr"),
-                            "max_snr": stats.get("max_snr"),
-                        }
-                    )
-            leaflet_js, leaflet_css = self._ensure_leaflet_assets()
-            geojson_us = self._ensure_geojson(
-                self._geojson_path,
-                "https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json",
-            )
-            geojson_ca = self._ensure_geojson(
-                self._geojson_canada,
-                "https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/canada.geojson",
-            )
-            geojson_mx = self._ensure_geojson(
-                self._geojson_mexico,
-                "https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/mexico.geojson",
-            )
-            fema_geojson = self._ensure_fema_geojson()
-            cities_geojson = self._ensure_cities_geojson()
-            geojson_urls = [u for u in (geojson_us, geojson_ca, geojson_mx, fema_geojson) if u]
-            html = self._build_leaflet_html(
-                markers,
-                links=links,
-                max_zoom=12,
-                leaflet_js=leaflet_js,
-                leaflet_css=leaflet_css,
-                geojson_urls=geojson_urls,
-                cities_geojson=cities_geojson,
-                city_min_pop=self.city_pop_min,
-                show_city_labels=self.show_city_labels,
-                initial_view=view_state or self._last_map_view,
-            )
+        leaflet_js, leaflet_css = self._ensure_leaflet_assets()
+        geojson_us = self._ensure_geojson(
+            self._geojson_path,
+            "https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json",
+        )
+        geojson_ca = self._ensure_geojson(
+            self._geojson_canada,
+            "https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/canada.geojson",
+        )
+        geojson_mx = self._ensure_geojson(
+            self._geojson_mexico,
+            "https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/mexico.geojson",
+        )
+        fema_geojson = self._ensure_fema_geojson()
+        cities_geojson = self._ensure_cities_geojson()
+        geojson_urls = [u for u in (geojson_us, geojson_ca, geojson_mx, fema_geojson) if u]
+        html = self._build_leaflet_html(
+            markers,
+            links=links,
+            max_zoom=12,
+            leaflet_js=leaflet_js,
+            leaflet_css=leaflet_css,
+            geojson_urls=geojson_urls,
+            cities_geojson=cities_geojson,
+            city_min_pop=self.city_pop_min,
+            show_city_labels=self.show_city_labels,
+            initial_view=view_state or self._last_map_view,
+        )
 
         if self.web is not None:
+            self._last_map_config = config_sig
+            self._map_initialized = False
+            self._pending_map_payload = {"markers": markers, "links": links}
             with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
                 f.write(html.encode("utf-8"))
             self._map_file = Path(f.name)
@@ -1468,6 +1541,32 @@ class StationsMapTab(QWidget):
             self._map_file = tmp
             log.info("StationsMap: map written to %s (open in browser).", tmp)
         self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
+
+    def _on_map_load_finished(self, ok: bool) -> None:
+        self._map_initialized = bool(ok)
+        if not ok or self.web is None:
+            return
+        if self._pending_map_payload:
+            payload = self._pending_map_payload
+            self._pending_map_payload = None
+            self._push_map_payload(payload.get("markers", []), payload.get("links", []))
+
+    def _push_map_payload(self, markers: List[Dict], links: List[Dict]) -> None:
+        if self.web is None:
+            return
+        try:
+            payload = json.dumps({"markers": markers, "links": links})
+        except Exception:
+            payload = '{"markers": [], "links": []}'
+        sig = str(hash(payload))
+        if sig == self._last_map_payload_sig:
+            return
+        self._last_map_payload_sig = sig
+        js = f"if (window.updateMapData) {{ window.updateMapData({payload}); }}"
+        try:
+            self.web.page().runJavaScript(js)
+        except Exception:
+            pass
 
     def _parse_view_state(self, js_result) -> Dict[str, float]:
         """
@@ -1889,43 +1988,51 @@ function addGridLabels(res, level, bounds) {
     }};
     legend.addTo(map);
 
-    markers.forEach(m => {{
-      const circle = L.circleMarker([m.lat, m.lon], {{
-        radius: 6,
-        color: '#1976d2',
-        weight: 1,
-        fillColor: '#4FC3F7',
-        fillOpacity: 0.8,
-        pane: 'stationsPane'
-      }}).addTo(map);
-      const tipText = (m.tooltip || m.title || '') +
-        (m.last_seen ? '<br/><b>Last seen:</b> ' + m.last_seen : '') +
-        (m.last_spotter ? '<br/><b>Last spotter:</b> ' + m.last_spotter : '') +
-        (m.avg_snr !== undefined && m.avg_snr !== null ? '<br/><b>Avg SNR:</b> ' + m.avg_snr.toFixed(1) : '') +
-        (m.max_snr !== undefined && m.max_snr !== null ? '<br/><b>Max SNR:</b> ' + m.max_snr.toFixed(1) : '');
-      circle.on('mouseover', function() {{
-        this.bringToFront();
-        showDetail(tipText);
-      }});
-      circle.on('click', function() {{
-        this.bringToFront();
-        showDetail(tipText);
-      }});
-      // Permanent label only when show_callsigns is on
-      if (m.label) {{
-        const icon = L.divIcon({{
-          className: 'label-text',
-          html: m.label
+    const stationsLayer = L.layerGroup().addTo(map);
+    const linksLayer = L.layerGroup().addTo(map);
+
+    function renderMarkers(list) {{
+      stationsLayer.clearLayers();
+      list.forEach(m => {{
+        const circle = L.circleMarker([m.lat, m.lon], {{
+          radius: 6,
+          color: '#1976d2',
+          weight: 1,
+          fillColor: '#4FC3F7',
+          fillOpacity: 0.8,
+          pane: 'stationsPane'
         }});
-        const labelMarker = L.marker([m.lat, m.lon], {{icon, pane:'stationsPane'}}).addTo(map);
-        labelMarker.on('mouseover', function() {{
+        stationsLayer.addLayer(circle);
+        const tipText = (m.tooltip || m.title || '') +
+          (m.last_seen ? '<br/><b>Last seen:</b> ' + m.last_seen : '') +
+          (m.last_spotter ? '<br/><b>Last spotter:</b> ' + m.last_spotter : '') +
+          (m.avg_snr !== undefined && m.avg_snr !== null ? '<br/><b>Avg SNR:</b> ' + m.avg_snr.toFixed(1) : '') +
+          (m.max_snr !== undefined && m.max_snr !== null ? '<br/><b>Max SNR:</b> ' + m.max_snr.toFixed(1) : '');
+        circle.on('mouseover', function() {{
+          this.bringToFront();
           showDetail(tipText);
         }});
-        labelMarker.on('click', function() {{
+        circle.on('click', function() {{
+          this.bringToFront();
           showDetail(tipText);
         }});
-      }}
-    }});
+        // Permanent label only when show_callsigns is on
+        if (m.label) {{
+          const icon = L.divIcon({{
+            className: 'label-text',
+            html: m.label
+          }});
+          const labelMarker = L.marker([m.lat, m.lon], {{icon, pane:'stationsPane'}});
+          stationsLayer.addLayer(labelMarker);
+          labelMarker.on('mouseover', function() {{
+            showDetail(tipText);
+          }});
+          labelMarker.on('click', function() {{
+            showDetail(tipText);
+          }});
+        }}
+      }});
+    }}
     // JS8 links
     function linkColor(val) {{
       if (val === null || val === undefined || isNaN(val)) return '#607d8b';
@@ -1935,10 +2042,21 @@ function addGridLabels(res, level, bounds) {
       if (val >= -10) return '#f57c00';
       return '#c62828';
     }}
-    links.forEach(l => {{
-      const line = L.polyline([[l.lat1, l.lon1], [l.lat2, l.lon2]], {{color: linkColor(l.snr), weight: 2.5, opacity: 0.8}});
-      line.addTo(map);
-    }});
+    function renderLinks(list) {{
+      linksLayer.clearLayers();
+      list.forEach(l => {{
+        const line = L.polyline([[l.lat1, l.lon1], [l.lat2, l.lon2]], {{color: linkColor(l.snr), weight: 2.5, opacity: 0.8}});
+        linksLayer.addLayer(line);
+      }});
+    }}
+
+    window.updateMapData = function(payload) {{
+      if (!payload) return;
+      if (payload.markers) renderMarkers(payload.markers);
+      if (payload.links) renderLinks(payload.links);
+    }};
+    window.updateMapData({{markers: markers, links: links}});
+    window._mapReady = true;
     }}
     </script>
 </body>
@@ -2522,36 +2640,34 @@ class JS8LogLinkIndexer:
         """
         directed_path = self._resolve_directed_path()
         all_path = directed_path.parent / "ALL.TXT" if directed_path else None
-
-        rows: List[tuple] = []
-        if directed_path and directed_path.exists():
-            for line in directed_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                self._maybe_capture_group_grid(line)
-                parsed = self._parse_directed_line(line)
-                if parsed:
-                    rows.append(parsed)
-
-        if all_path and all_path.exists():
-            for line in all_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                parsed = self._parse_all_line(line)
-                if parsed:
-                    rows.append(parsed)
-
-        if not rows:
-            return 0
-        if since_ts:
-            rows = [r for r in rows if r and len(r) > 0 and r[0] and r[0] >= since_ts]
-            if not rows:
-                return 0
+        directed_offset = 0
+        all_offset = 0
+        effective_since = since_ts
+        if effective_since is None:
+            effective_since = self._ensure_latest_ts(last_default=0.0)
+        try:
+            directed_offset = int(self.settings.get("js8_links_directed_offset", 0) or 0)
+        except Exception:
+            directed_offset = 0
+        try:
+            all_offset = int(self.settings.get("js8_links_all_offset", 0) or 0)
+        except Exception:
+            all_offset = 0
 
         # De-duplicate by station pair + band, averaging SNR and keeping the newest timestamp/frequency.
         last_seen: Dict[str, float] = {}
         agg: Dict[tuple, Dict] = {}
-        for ts, origin, dest, snr, freq_hz in rows:
+
+        def handle_parsed(parsed: Optional[tuple]) -> None:
+            if not parsed:
+                return
+            ts, origin, dest, snr, freq_hz = parsed
+            if effective_since and (not ts or ts < effective_since):
+                return
             a = (origin or "").strip().upper()
             b = (dest or "").strip().upper()
             if not a or not b:
-                continue
+                return
             try:
                 if ts:
                     if ts > last_seen.get(a, 0):
@@ -2576,12 +2692,48 @@ class JS8LogLinkIndexer:
             if entry["freq_hz"] is None and freq_hz is not None:
                 entry["freq_hz"] = freq_hz
 
+        if directed_path and directed_path.exists():
+            try:
+                size_now = directed_path.stat().st_size
+                if directed_offset < 0 or directed_offset > size_now:
+                    directed_offset = 0
+                with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                    if directed_offset > 0:
+                        fh.seek(directed_offset)
+                    for line in fh:
+                        self._maybe_capture_group_grid(line)
+                        handle_parsed(self._parse_directed_line(line))
+                    try:
+                        self.settings.set("js8_links_directed_offset", int(fh.tell()))
+                    except Exception:
+                        pass
+            except Exception as e:
+                log.debug("JS8LogLinkIndexer: failed reading DIRECTED.TXT: %s", e)
+
+        if all_path and all_path.exists():
+            try:
+                size_now = all_path.stat().st_size
+                if all_offset < 0 or all_offset > size_now:
+                    all_offset = 0
+                with all_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                    if all_offset > 0:
+                        fh.seek(all_offset)
+                    for line in fh:
+                        handle_parsed(self._parse_all_line(line))
+                    try:
+                        self.settings.set("js8_links_all_offset", int(fh.tell()))
+                    except Exception:
+                        pass
+            except Exception as e:
+                log.debug("JS8LogLinkIndexer: failed reading ALL.TXT: %s", e)
+
+        if not agg:
+            return 0
+
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         try:
             self._ensure_table(conn)
-            if since_ts is None:
-                self._clear_table(conn)
             payload = []
             for key, entry in agg.items():
                 pair, band = key
@@ -2600,15 +2752,14 @@ class JS8LogLinkIndexer:
                         0,
                     )
                 )
-            if since_ts is not None:
-                # delete any existing rows for same pair+band to avoid duplicates
-                for key, _ in agg.items():
-                    pair, band = key
-                    origin, dest = pair
-                    conn.execute(
-                        "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
-                        (origin, dest, dest, origin, band),
-                    )
+            # delete any existing rows for same pair+band to avoid duplicates
+            for key, _ in agg.items():
+                pair, band = key
+                origin, dest = pair
+                conn.execute(
+                    "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
+                    (origin, dest, dest, origin, band),
+                )
             conn.executemany(
                 """
                 INSERT INTO js8_links
@@ -2674,6 +2825,55 @@ class JS8LogLinkIndexer:
             try:
                 conn.execute("UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?", (iso, origin, origin))
                 conn.execute("UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?", (iso, destination, destination))
+            except Exception:
+                pass
+            conn.commit()
+        finally:
+            conn.close()
+
+    def ingest_live_batch(self, observations: List[tuple]) -> None:
+        """
+        Upsert multiple live observations in a single transaction.
+        Each observation: (ts, origin, destination, snr, freq_hz, is_spotter)
+        """
+        if not observations:
+            return
+        rows = []
+        last_seen: Dict[str, float] = {}
+        for ts, origin, destination, snr, freq_hz, is_spotter in observations:
+            origin = (origin or "").strip().upper()
+            destination = (destination or "").strip().upper()
+            if not origin or not destination:
+                continue
+            band = self._freq_to_band(freq_hz)
+            ts_val = float(ts or time.time())
+            iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
+            rows.append((ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso))
+            if ts_val:
+                last_seen[origin] = max(last_seen.get(origin, 0), ts_val)
+                last_seen[destination] = max(last_seen.get(destination, 0), ts_val)
+        if not rows:
+            return
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self._ensure_table(conn)
+            for ts_val, origin, destination, snr, band, freq_hz, is_spotter, iso in rows:
+                conn.execute(
+                    "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
+                    (origin, destination, destination, origin, band),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO js8_links (ts, origin, destination, snr, band, freq_hz, is_relay, relay_via, is_spotter, last_seen_utc)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                    """,
+                    (ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso),
+                )
+            try:
+                for cs, ts_val in last_seen.items():
+                    iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
+                    conn.execute("UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?", (iso, cs, cs))
             except Exception:
                 pass
             conn.commit()

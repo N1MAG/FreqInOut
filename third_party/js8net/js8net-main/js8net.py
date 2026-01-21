@@ -297,6 +297,9 @@ def rx_thread(name):
     # Run forever.
     while(True):
         try:
+            if not s:
+                time.sleep(0.1)
+                continue
             # Get a chunk of text and process it. Each valid chunk of
             # data ends in a \n. This is epically painful due to py3's
             # multi-byte characters.
@@ -404,6 +407,9 @@ def rx_thread(name):
         # Ignore for now. TODO: Be smarter here.
             n=n+1
             time.sleep(0.1)
+        except OSError:
+            # Socket closed during shutdown; exit thread quietly.
+            break
 
 # This thread makes sure the connection is alive by sending a
 # heartbeat request (specifically, a request for callsign) every five

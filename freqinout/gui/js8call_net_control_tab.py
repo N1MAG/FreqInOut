@@ -115,6 +115,7 @@ class JS8CallNetControlTab(QWidget):
         self._waiting_for_completion: bool = False
         self._current_query: tuple[str, str] | None = None
         self._js8_client = None
+        self._js8_net_started = False
         self.auto_query_msg_id = bool(self.settings.get("js8_auto_query_msg_id", False))
         self.auto_query_grids = bool(self.settings.get("js8_auto_query_grids", False))
         self._js8_rx_timer: QTimer | None = None
@@ -371,8 +372,13 @@ class JS8CallNetControlTab(QWidget):
             if p.exists() and p.is_file():
                 self._directed_path = p
                 try:
-                    self._startup_directed_size = p.stat().st_size
-                    self._last_directed_size = self._startup_directed_size
+                    size_now = p.stat().st_size
+                    self._startup_directed_size = size_now
+                    saved_off = int(data.get("js8_directed_offset", 0) or 0)
+                    if saved_off <= 0:
+                        self._last_directed_size = size_now
+                    else:
+                        self._last_directed_size = min(saved_off, size_now)
                 except Exception:
                     self._startup_directed_size = 0
             else:
@@ -380,6 +386,17 @@ class JS8CallNetControlTab(QWidget):
                 log.warning("JS8CallNetControl: js8_directed_path not found: %s", directed_path)
         else:
             self._directed_path = None
+        if self._directed_path:
+            try:
+                all_path = self._directed_path.parent / "ALL.TXT"
+                size_now = all_path.stat().st_size if all_path.exists() else 0
+                saved_all = int(data.get("js8_all_offset", 0) or 0)
+                if saved_all <= 0:
+                    self._last_all_size = size_now
+                else:
+                    self._last_all_size = min(saved_all, size_now)
+            except Exception:
+                self._last_all_size = 0
 
         # Refresh interval
         refresh = int(data.get("js8_refresh_sec", 15) or 15)
@@ -1004,6 +1021,9 @@ class JS8CallNetControlTab(QWidget):
                                 mode_name = {0: "Normal", 1: "Fast", 2: "Turbo", 4: "Slow"}.get(
                                     speed_guess, str(speed_guess)
                                 )
+                            base_call = self._base_callsign(call_primary) if call_primary else ""
+                            if base_call and self._checkins.get(base_call, {}).get("offset") is not None:
+                                offset_line = None
                             self._upsert_checkin(
                                 call_primary,
                                 status="NEW",
@@ -1014,6 +1034,10 @@ class JS8CallNetControlTab(QWidget):
                             )
 
                     self._last_directed_size = f.tell()
+                    try:
+                        self.settings.set("js8_directed_offset", int(self._last_directed_size))
+                    except Exception:
+                        pass
             except Exception as e:
                 log.error("JS8CallNetControl: failed reading DIRECTED.TXT: %s", e)
                 return
@@ -1064,6 +1088,10 @@ class JS8CallNetControlTab(QWidget):
                     # Track outbound direct transmissions to add untrusted operators
                     self._maybe_register_outgoing_call(line)
                 self._last_all_size = f.tell()
+                try:
+                    self.settings.set("js8_all_offset", int(self._last_all_size))
+                except Exception:
+                    pass
         except Exception as e:
             log.error("JS8CallNetControl: failed reading ALL.TXT: %s", e)
             return
@@ -1786,6 +1814,7 @@ class JS8CallNetControlTab(QWidget):
         try:
             js8net.start_net("127.0.0.1", port)
             self._js8_client = js8net
+            self._js8_net_started = True
             return js8net
         except BaseException as e:
             log.error("JS8CallNetControl: failed to start js8net: %s", e)
@@ -2426,6 +2455,14 @@ class JS8CallNetControlTab(QWidget):
                 self._js8_rx_timer.stop()
         except Exception:
             pass
+        if self._js8_net_started and js8net is not None:
+            try:
+                sock = getattr(js8net, "s", None)
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+            self._js8_net_started = False
 
     def _line_has_checkin_form(self, line: str) -> bool:
         """
