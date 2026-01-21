@@ -1021,6 +1021,9 @@ class JS8CallNetControlTab(QWidget):
                                 mode_name = {0: "Normal", 1: "Fast", 2: "Turbo", 4: "Slow"}.get(
                                     speed_guess, str(speed_guess)
                                 )
+                            base_call = self._base_callsign(call_primary) if call_primary else ""
+                            if base_call and self._checkins.get(base_call, {}).get("offset") is not None:
+                                offset_line = None
                             self._upsert_checkin(
                                 call_primary,
                                 status="NEW",

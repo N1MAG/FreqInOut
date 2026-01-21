@@ -552,6 +552,7 @@ class StationsMapTab(QWidget):
             my_call = ""
 
         updated = False
+        observations: List[tuple] = []
         self._js8_polling = True
         try:
             max_msgs = 200
@@ -600,13 +601,15 @@ class StationsMapTab(QWidget):
                     snr_val = float(snr)
                 except Exception:
                     snr_val = None
-                try:
-                    indexer.ingest_live(ts, origin, dest, snr_val, freq_hz, is_spotter=is_spotter)
-                    updated = True
-                except Exception as e:
-                    log.debug("StationsMap: live ingest failed for %s->%s: %s", origin, dest, e)
+                observations.append((ts, origin, dest, snr_val, freq_hz, is_spotter))
+                updated = True
         finally:
             self._js8_polling = False
+        if observations:
+            try:
+                indexer.ingest_live_batch(observations)
+            except Exception as e:
+                log.debug("StationsMap: live ingest batch failed: %s", e)
         if updated:
             self._last_js8_load_ts = max(self._last_js8_load_ts, time.time())
             self._schedule_render()
@@ -655,6 +658,8 @@ class StationsMapTab(QWidget):
         since = None
         if initial:
             since = max(self._last_js8_load_ts, self._last_exit_ts)
+        elif self._js8_rx_timer and self._js8_rx_timer.isActive():
+            since = self._last_js8_load_ts
         self._ingest_js8_logs(since_ts=since)
         self._schedule_render()
 
@@ -2637,15 +2642,17 @@ class JS8LogLinkIndexer:
         all_path = directed_path.parent / "ALL.TXT" if directed_path else None
         directed_offset = 0
         all_offset = 0
-        if since_ts is not None:
-            try:
-                directed_offset = int(self.settings.get("js8_links_directed_offset", 0) or 0)
-            except Exception:
-                directed_offset = 0
-            try:
-                all_offset = int(self.settings.get("js8_links_all_offset", 0) or 0)
-            except Exception:
-                all_offset = 0
+        effective_since = since_ts
+        if effective_since is None:
+            effective_since = self._ensure_latest_ts(last_default=0.0)
+        try:
+            directed_offset = int(self.settings.get("js8_links_directed_offset", 0) or 0)
+        except Exception:
+            directed_offset = 0
+        try:
+            all_offset = int(self.settings.get("js8_links_all_offset", 0) or 0)
+        except Exception:
+            all_offset = 0
 
         # De-duplicate by station pair + band, averaging SNR and keeping the newest timestamp/frequency.
         last_seen: Dict[str, float] = {}
@@ -2655,7 +2662,7 @@ class JS8LogLinkIndexer:
             if not parsed:
                 return
             ts, origin, dest, snr, freq_hz = parsed
-            if since_ts and (not ts or ts < since_ts):
+            if effective_since and (not ts or ts < effective_since):
                 return
             a = (origin or "").strip().upper()
             b = (dest or "").strip().upper()
@@ -2691,7 +2698,7 @@ class JS8LogLinkIndexer:
                 if directed_offset < 0 or directed_offset > size_now:
                     directed_offset = 0
                 with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
-                    if since_ts is not None and directed_offset > 0:
+                    if directed_offset > 0:
                         fh.seek(directed_offset)
                     for line in fh:
                         self._maybe_capture_group_grid(line)
@@ -2709,7 +2716,7 @@ class JS8LogLinkIndexer:
                 if all_offset < 0 or all_offset > size_now:
                     all_offset = 0
                 with all_path.open("r", encoding="utf-8", errors="ignore") as fh:
-                    if since_ts is not None and all_offset > 0:
+                    if all_offset > 0:
                         fh.seek(all_offset)
                     for line in fh:
                         handle_parsed(self._parse_all_line(line))
@@ -2727,8 +2734,6 @@ class JS8LogLinkIndexer:
         conn = sqlite3.connect(self.db_path)
         try:
             self._ensure_table(conn)
-            if since_ts is None:
-                self._clear_table(conn)
             payload = []
             for key, entry in agg.items():
                 pair, band = key
@@ -2747,15 +2752,14 @@ class JS8LogLinkIndexer:
                         0,
                     )
                 )
-            if since_ts is not None:
-                # delete any existing rows for same pair+band to avoid duplicates
-                for key, _ in agg.items():
-                    pair, band = key
-                    origin, dest = pair
-                    conn.execute(
-                        "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
-                        (origin, dest, dest, origin, band),
-                    )
+            # delete any existing rows for same pair+band to avoid duplicates
+            for key, _ in agg.items():
+                pair, band = key
+                origin, dest = pair
+                conn.execute(
+                    "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
+                    (origin, dest, dest, origin, band),
+                )
             conn.executemany(
                 """
                 INSERT INTO js8_links
@@ -2821,6 +2825,55 @@ class JS8LogLinkIndexer:
             try:
                 conn.execute("UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?", (iso, origin, origin))
                 conn.execute("UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?", (iso, destination, destination))
+            except Exception:
+                pass
+            conn.commit()
+        finally:
+            conn.close()
+
+    def ingest_live_batch(self, observations: List[tuple]) -> None:
+        """
+        Upsert multiple live observations in a single transaction.
+        Each observation: (ts, origin, destination, snr, freq_hz, is_spotter)
+        """
+        if not observations:
+            return
+        rows = []
+        last_seen: Dict[str, float] = {}
+        for ts, origin, destination, snr, freq_hz, is_spotter in observations:
+            origin = (origin or "").strip().upper()
+            destination = (destination or "").strip().upper()
+            if not origin or not destination:
+                continue
+            band = self._freq_to_band(freq_hz)
+            ts_val = float(ts or time.time())
+            iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
+            rows.append((ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso))
+            if ts_val:
+                last_seen[origin] = max(last_seen.get(origin, 0), ts_val)
+                last_seen[destination] = max(last_seen.get(destination, 0), ts_val)
+        if not rows:
+            return
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self._ensure_table(conn)
+            for ts_val, origin, destination, snr, band, freq_hz, is_spotter, iso in rows:
+                conn.execute(
+                    "DELETE FROM js8_links WHERE (origin=? AND destination=? OR origin=? AND destination=?) AND IFNULL(band,'')=IFNULL(?,IFNULL(band,''))",
+                    (origin, destination, destination, origin, band),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO js8_links (ts, origin, destination, snr, band, freq_hz, is_relay, relay_via, is_spotter, last_seen_utc)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                    """,
+                    (ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso),
+                )
+            try:
+                for cs, ts_val in last_seen.items():
+                    iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
+                    conn.execute("UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?", (iso, cs, cs))
             except Exception:
                 pass
             conn.commit()
