@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget,
@@ -91,10 +91,16 @@ class OperatorHistoryTab(QWidget):
     COL_TRUSTED = 11
     COL_COUNT = 12
 
+    operator_history_updated = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._rows: List[Dict] = []
+        self._update_timer = QTimer(self)
+        self._update_timer.setSingleShot(True)
+        self._update_timer.setInterval(300)
+        self._update_timer.timeout.connect(self.operator_history_updated.emit)
 
         self._build_ui()
         self._load_data()
@@ -983,6 +989,7 @@ class OperatorHistoryTab(QWidget):
             return
 
         self._load_data()
+        self._schedule_history_update()
         QMessageBox.information(self, "CSV Import", f"Imported {imported} record(s). Skipped {skipped}.")
 
     # ------------- Add / Edit / Delete dialogs ------------- #
@@ -1065,6 +1072,7 @@ class OperatorHistoryTab(QWidget):
             return
         if self._upsert_record(data, merge_groups=False):
             self._load_data()
+            self._schedule_history_update()
 
     def _edit_selected_dialog(self):
         calls = self._selected_callsigns()
@@ -1088,6 +1096,7 @@ class OperatorHistoryTab(QWidget):
                     changed += 1
             if changed:
                 self._load_data()
+                self._schedule_history_update()
             return
         # find existing row data
         existing = next((r for r in self._rows if r["callsign"] == calls[0]), None)
@@ -1096,6 +1105,7 @@ class OperatorHistoryTab(QWidget):
             return
         if self._upsert_record(data, merge_groups=False):
             self._load_data()
+            self._schedule_history_update()
 
     def _delete_selected(self):
         calls = self._selected_callsigns()
@@ -1125,3 +1135,8 @@ class OperatorHistoryTab(QWidget):
         finally:
             conn.close()
         self._load_data()
+        self._schedule_history_update()
+
+    def _schedule_history_update(self) -> None:
+        if not self._update_timer.isActive():
+            self._update_timer.start()

@@ -199,6 +199,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            if hasattr(self.operator_history_tab, "operator_history_updated"):
+                self.operator_history_tab.operator_history_updated.connect(self.refresh_operator_history_views)
+        except Exception:
+            pass
+        try:
             self.settings_tab.settings_saved.connect(self._apply_app_theme)
         except Exception:
             pass

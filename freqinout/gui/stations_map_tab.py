@@ -382,7 +382,6 @@ class StationsMapTab(QWidget):
             self._last_js8_load_ts = 0.0
             self._last_exit_ts = 0.0
         self._js8_timer: Optional[QTimer] = None
-        self._refresh_timer: Optional[QTimer] = None
         self._js8_rx_timer: Optional[QTimer] = None
         self._js8_rx_hub: Optional[JS8RxHub] = None
         self._js8_rx_registered = False
@@ -478,7 +477,6 @@ class StationsMapTab(QWidget):
         self._js8_timer.timeout.connect(lambda: self._auto_ingest_and_refresh(initial=False))
         self._js8_timer.start()
         # Start display refresh timer (separate from ingest) using selected interval
-        self._start_refresh_timer()
         # JS8 RX live ingestion timer
         self._start_js8_rx_listener()
 
@@ -664,11 +662,6 @@ class StationsMapTab(QWidget):
         except Exception:
             pass
         try:
-            if self._refresh_timer:
-                self._refresh_timer.stop()
-        except Exception:
-            pass
-        try:
             if self.web is not None:
                 try:
                     self.web.stop()
@@ -704,21 +697,6 @@ class StationsMapTab(QWidget):
         except Exception:
             pass
 
-    def _start_refresh_timer(self):
-        try:
-            interval_min = int(self.auto_refresh_combo.currentData())
-        except Exception:
-            interval_min = 15
-        if self._refresh_timer is None:
-            self._refresh_timer = QTimer(self)
-        self._refresh_timer.stop()
-        self._refresh_timer.setInterval(max(1, interval_min) * 60 * 1000)
-        self._refresh_timer.timeout.connect(lambda: (self._load_operator_history(), self._render_map(preserve_view=True)))
-        self._refresh_timer.start()
-
-    def _on_auto_refresh_changed(self, idx: int):
-        # restart timer with new interval
-        self._start_refresh_timer()
 
     @staticmethod
     def _parse_link_selection(data) -> tuple[str, str]:
@@ -834,22 +812,9 @@ class StationsMapTab(QWidget):
             completer.setFilterMode(Qt.MatchContains)
             completer.setCaseSensitivity(Qt.CaseInsensitive)
         ctrl_row.addWidget(self.relay_target_combo)
-        ctrl_row.addWidget(self.show_regions_chk)
-
         self.show_grid_labels_chk = QCheckBox("Grids")
         self.show_grid_labels_chk.setChecked(False)
         self.show_grid_labels_chk.stateChanged.connect(self._on_show_grid_labels_changed)
-        ctrl_row.addWidget(self.show_grid_labels_chk)
-
-        # Auto-refresh interval for links
-        ctrl_row.addWidget(QLabel("Auto-refresh"))
-        self.auto_refresh_combo = QComboBox()
-        self._auto_refresh_options = [5, 15, 30, 60]
-        for minutes in self._auto_refresh_options:
-            self.auto_refresh_combo.addItem(f"{minutes} min", minutes)
-        self.auto_refresh_combo.setCurrentIndex(1)  # default 15
-        self.auto_refresh_combo.currentIndexChanged.connect(self._on_auto_refresh_changed)
-        ctrl_row.addWidget(self.auto_refresh_combo)
 
         # Manual refresh for platforms where signals may not fire reliably
         refresh_btn = QPushButton("Refresh Links")
@@ -1609,6 +1574,7 @@ class StationsMapTab(QWidget):
 const gridLayer = L.layerGroup();
 const gridLabelLayer = L.layerGroup();
 let gridUpdating = false;
+let gridUpdateTimer = null;
 function maidenFromLatLon(lat, lon, level) {
       // level: 2,4,6 chars
       let adjLon = lon + 180.0;
@@ -1628,7 +1594,7 @@ function maidenFromLatLon(lat, lon, level) {
       }
       return out;
     }
-function addGrid(res) {
+function addGrid(res, maxCells) {
   const stepLon = res;
   const stepLat = res/2;
   const bounds = map.getBounds();
@@ -1638,13 +1604,20 @@ function addGrid(res) {
   const north = Math.min(90, bounds.getNorth() + stepLat);
   let lonCount = Math.ceil((east - west) / stepLon);
   let latCount = Math.ceil((north - south) / stepLat);
-  if (lonCount * latCount > 1500) return;
+  if (lonCount * latCount > maxCells) return false;
   for (let lon = Math.floor(west / stepLon) * stepLon; lon <= east; lon += stepLon) {
     gridLayer.addLayer(L.polyline([[ south, lon ], [ north, lon ]], {color:'#666', weight:0.5, opacity:0.3}));
   }
   for (let lat = Math.floor(south / stepLat) * stepLat; lat <= north; lat += stepLat) {
     gridLayer.addLayer(L.polyline([[ lat, west ], [ lat, east ]], {color:'#666', weight:0.5, opacity:0.3}));
   }
+  return true;
+}
+function scheduleGridUpdate() {
+  if (gridUpdateTimer) {
+    clearTimeout(gridUpdateTimer);
+  }
+  gridUpdateTimer = setTimeout(updateGrid, 80);
 }
 function updateGrid() {
   if (gridUpdating) return;
@@ -1652,45 +1625,43 @@ function updateGrid() {
   gridLayer.clearLayers();
   const z = map.getZoom();
   const bounds = map.getBounds();
+  const size = map.getSize();
+  const maxCells = Math.max(1200, Math.floor((size.x * size.y) / 900));
+  const maxLabels = Math.max(400, Math.floor((size.x * size.y) / 2000));
   // Maidenhead grid sizes: 2-char ~20x10 deg, 4-char ~2x1 deg, 6-char ~5x2.5 arcmin (~0.0833x0.0417 deg)
   if (""" + str(self.show_grids).lower() + """) {
-        let resVal = 20;
-        let level = 2;
-        if (z < 4) {
-          resVal = 20; level = 2;
-        } else if (z < 7) {
-          resVal = 2; level = 4;
+    let resVal = 0;
+    let level = 0;
+    if (z < 5) {
+      resVal = 20; level = 2;
+    } else if (z < 9) {
+      resVal = 2; level = 4;
     } else {
       resVal = 0.083333; level = 6;
     }
-    // If extremely dense, fall back to coarser grid
-    const west = Math.max(-180, bounds.getWest());
-    const east = Math.min(180, bounds.getEast());
-    const south = Math.max(-90, bounds.getSouth());
-    const north = Math.min(90, bounds.getNorth());
-    let lonCount = Math.ceil((east - west) / resVal);
-    let latCount = Math.ceil((north - south) / (resVal/2));
-    if (lonCount * latCount > 1500 && resVal < 2) {{
-      resVal = 2; level = 4;
-    }}
-    if (lonCount * latCount > 1500 && resVal >= 2) {{
-      resVal = 20; level = 2;
-    }}
-    addGrid(resVal);
-    gridLayer.addTo(map);
-    if (""" + str(self.show_grid_labels).lower() + """) {
-      addGridLabels(resVal, level, bounds);
-    } else {
-      map.removeLayer(gridLabelLayer);
-        }
+    if (resVal > 0 && addGrid(resVal, maxCells)) {
+      gridLayer.addTo(map);
     } else {
       map.removeLayer(gridLayer);
+    }
+    if (""" + str(self.show_grid_labels).lower() + """) {
+      const showLabels = (level === 2 && z >= 4) || (level === 4 && z >= 6) || (level === 6 && z >= 10);
+      if (showLabels) {
+        addGridLabels(resVal, level, bounds, maxLabels);
+      } else {
+        map.removeLayer(gridLabelLayer);
+      }
+    } else {
       map.removeLayer(gridLabelLayer);
     }
+  } else {
+    map.removeLayer(gridLayer);
+    map.removeLayer(gridLabelLayer);
+  }
   gridUpdating = false;
 }
 
-function addGridLabels(res, level, bounds) {
+function addGridLabels(res, level, bounds, maxLabels) {
   gridLabelLayer.clearLayers();
   if (res <= 0) return;
       const stepLon = res;
@@ -1706,14 +1677,15 @@ function addGridLabels(res, level, bounds) {
       const icon = L.divIcon({className:'label-text no-border', html: label});
       gridLabelLayer.addLayer(L.marker([lat, lon], {icon}));
       count++;
-      if (count > 600) break;
+      if (count > maxLabels) break;
     }
-    if (count > 600) break;
+    if (count > maxLabels) break;
   }
   map.addLayer(gridLabelLayer);
 }
 
-    map.on('zoomend', updateGrid);
+    map.on('zoomend', scheduleGridUpdate);
+    map.on('moveend', scheduleGridUpdate);
     updateGrid();
             """
             if self.show_grids
