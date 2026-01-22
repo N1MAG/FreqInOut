@@ -330,6 +330,16 @@
     <li><strong>Logs too large</strong>: Keep level at Disabled or Info for daily use; raise to Debug or All only for troubleshooting.</li>
   </ul>
 
+  <h3 id="db-tools">Database Tools</h3>
+  <p><strong>Purpose</strong>: Inspect or clean the SQLite databases used by FreqInOut.</p>
+  <ul class="section-list">
+    <li><strong>db_tools.py</strong>: Simple CLI to list, show, export, and truncate tables. Examples: <code>python tools/db_tools.py --list-dbs</code>, <code>python tools/db_tools.py --table operator_checkins --table-show</code>.</li>
+    <li><strong>db_admin.py</strong>: Admin CLI to initialize or truncate full tables (settings + nets). Examples: <code>python tools/db_admin.py --init all</code>, <code>python tools/db_admin.py --truncate nets_all --yes</code>.</li>
+    <li><strong>js8_links_check.py</strong>: Quick inspection of JS8 link ingestion. Example: <code>python tools/js8_links_check.py --limit 20</code>.</li>
+    <li><strong>dedupe_operator_groups.py</strong>: Cleanup tool for legacy duplicate group assignments in operator records. Run a dry run with <code>python tools/dedupe_operator_groups.py</code>, then apply with <code>python tools/dedupe_operator_groups.py --apply</code>.</li>
+    <li><strong>Database locations</strong>: Settings live in <code>config/freqinout.db</code>. Operator and net data live in <code>config/freqinout_nets.db</code>.</li>
+  </ul>
+
   <h2 id="licensing">7. Licensing</h2>
   <p><strong>Purpose</strong>: Licensing and copyright.</p>
   <ul class="section-list">
