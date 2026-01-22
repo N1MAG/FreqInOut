@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QAbstractScrollArea,
     QCompleter,
+    QToolButton,
 )
 
 from freqinout.core.logger import log
@@ -259,6 +260,8 @@ class SettingsTab(QWidget):
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
         self.operating_groups: List[Dict[str, str]] = []
+        self._accordion_groups: List[QGroupBox] = []
+        self._section_meta: Dict[QGroupBox, Dict[str, object]] = {}
 
         self._build_ui()
         self._load_settings()
@@ -287,6 +290,7 @@ class SettingsTab(QWidget):
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(10)
 
         header_layout = QHBoxLayout()
         title_label = QLabel("<h2>Settings</h2>")
@@ -301,6 +305,7 @@ class SettingsTab(QWidget):
 
         # Identity group
         callsign_group = QGroupBox("Operator Information")
+        callsign_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         callsign_layout = QVBoxLayout()
         self.callsign_edit = QLineEdit()
         self.callsign_edit.setMaxLength(16)
@@ -331,6 +336,7 @@ class SettingsTab(QWidget):
 
         # Operation settings (control)
         op_group = QGroupBox("FreqInOut Settings")
+        op_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         op_layout = QVBoxLayout()
         op_group.setLayout(op_layout)
         main_layout.addWidget(op_group)
@@ -359,10 +365,37 @@ class SettingsTab(QWidget):
         ctrl_row.addStretch()
         op_layout.addLayout(ctrl_row)
 
+        # Operating status indicators (always visible)
+        status_group = QGroupBox("Operating Status")
+        status_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        status_layout = QHBoxLayout()
+        status_group.setLayout(status_layout)
+
+        theme = resolve_theme(self.settings)
+        status_items = [
+            ("JS8Call_API", "JS8"),
+            ("FLRig", "FLRig"),
+            ("FLDigi", "FLDigi"),
+            ("FLMsg", "FLMsg"),
+            ("FLAmp", "FLAmp"),
+            ("VarAC", "VarAC"),
+        ]
+        for key, label in status_items:
+            led = QLabel()
+            led.setFixedSize(14, 14)
+            led.setStyleSheet(led_style("idle", theme))
+            self.status_labels[key] = led
+            status_layout.addWidget(led)
+            status_layout.addWidget(QLabel(label))
+            status_layout.addSpacing(12)
+        status_layout.addStretch()
+        main_layout.addWidget(status_group)
+
         # Operating Groups panel
         ops_group = QGroupBox("Operating Groups")
         ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         ops_layout = QVBoxLayout()
+        ops_layout.setSpacing(6)
         ops_group.setLayout(ops_layout)
         add_row = QHBoxLayout()
         self.add_group_btn = QPushButton("Add Group")
@@ -393,30 +426,28 @@ class SettingsTab(QWidget):
         header = self.op_groups_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
-        header.setStretchLastSection(False)
+        header.setSectionResizeMode(8, QHeaderView.Fixed)
+        header.setSectionResizeMode(7, QHeaderView.Stretch)
+        header.setStretchLastSection(True)
+        header.setMinimumSectionSize(50)
+        self.op_groups_table.setColumnWidth(8, 110)
         self.op_groups_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
-        self.op_groups_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.op_groups_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.op_groups_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.op_groups_table.setEditTriggers(QTableWidget.NoEditTriggers)
         ops_layout.addWidget(self.op_groups_table)
+        ops_container = QWidget()
+        ops_container.setLayout(ops_layout)
+        ops_group = self._make_collapsible_group("Operating Groups", ops_container, checked=True, fit_content=False)
+        self._register_collapsible_group(ops_group, self._summary_operating_groups)
+        ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         main_layout.addWidget(ops_group)
 
         # JS8Call status/settings (managed externally)
         js8_group = QGroupBox("JS8Call Settings")
         js8_v = QVBoxLayout()
+        js8_v.setSpacing(6)
         js8_group.setLayout(js8_v)
-
-        js8_status_row = QHBoxLayout()
-        js8_status_lbl = QLabel()
-        js8_status_lbl.setFixedSize(14, 14)
-        theme = resolve_theme(self.settings)
-        js8_status_lbl.setStyleSheet(led_style("idle", theme))
-        # Keep API indicator separate from the per-program row to avoid overwrites
-        self.status_labels["JS8Call_API"] = js8_status_lbl
-        js8_status_row.addWidget(js8_status_lbl)
-        js8_status_row.addWidget(QLabel("JS8Call API Connection"))
-        js8_status_row.addStretch()
-        js8_v.addLayout(js8_status_row)
 
         js8_port_row = QHBoxLayout()
         js8_port_row.addWidget(QLabel("TCP Port"))
@@ -447,14 +478,17 @@ class SettingsTab(QWidget):
         directed_browse.clicked.connect(self._choose_js8_directed_path)
         directed_forms_row.addWidget(self.js8_directed_edit, stretch=1)
         directed_forms_row.addWidget(directed_browse)
-        directed_forms_row.addSpacing(12)
-        directed_forms_row.addWidget(QLabel("JS8Spotter forms:"))
+        js8_v.addLayout(directed_forms_row)
+        forms_row = QHBoxLayout()
+        forms_row.addWidget(QLabel("JS8Spotter forms:"))
         self.js8_forms_edit = QLineEdit()
         forms_browse = QPushButton("Browse")
         forms_browse.clicked.connect(self._choose_js8_forms_path)
-        directed_forms_row.addWidget(self.js8_forms_edit, stretch=1)
-        directed_forms_row.addWidget(forms_browse)
-        js8_v.addLayout(directed_forms_row)
+        forms_row.addWidget(self.js8_forms_edit, stretch=1)
+        forms_row.addWidget(forms_browse)
+        js8_v.addLayout(forms_row)
+        self.js8_directed_edit.textChanged.connect(self._refresh_section_titles)
+        self.js8_forms_edit.textChanged.connect(self._refresh_section_titles)
 
         load_links_row = QHBoxLayout()
         self.load_js8_btn = QPushButton("Load JS8 Traffic")
@@ -463,11 +497,17 @@ class SettingsTab(QWidget):
         load_links_row.addStretch()
         js8_v.addLayout(load_links_row)
 
+        js8_container = QWidget()
+        js8_container.setLayout(js8_v)
+        js8_group = self._make_collapsible_group("JS8Call Settings", js8_container, checked=False, fit_content=True)
+        self._register_collapsible_group(js8_group, self._summary_js8_settings)
+        js8_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         main_layout.addWidget(js8_group)
 
         # Radio software
         radio_group = QGroupBox("Radio Software")
         radio_v = QVBoxLayout()
+        radio_v.setSpacing(6)
         radio_group.setLayout(radio_v)
         radio_grid = QHBoxLayout()
 
@@ -483,16 +523,10 @@ class SettingsTab(QWidget):
             chk.stateChanged.connect(self._update_launch_selected_state)
             row.addWidget(chk)
 
-            status_lbl = QLabel()
-            status_lbl.setFixedSize(14, 14)
-            theme = resolve_theme(self.settings)
-            status_lbl.setStyleSheet(led_style("idle", theme))
-            self.status_labels[name] = status_lbl
-            row.addWidget(status_lbl)
-
             path_edit = QLineEdit()
             path_edit.setPlaceholderText("Path to executable")
             self.path_edits[name] = path_edit
+            path_edit.textChanged.connect(self._refresh_section_titles)
             row.addWidget(path_edit)
 
             browse_btn = QPushButton("Browse")
@@ -531,15 +565,10 @@ class SettingsTab(QWidget):
         flrig_chk.stateChanged.connect(self._update_launch_selected_state)
         flrig_row.addWidget(flrig_chk)
 
-        flrig_status = QLabel()
-        flrig_status.setFixedSize(14, 14)
-        flrig_status.setStyleSheet(led_style("idle", resolve_theme(self.settings)))
-        self.status_labels["FLRig"] = flrig_status
-        flrig_row.addWidget(flrig_status)
-
         flrig_path = QLineEdit()
         flrig_path.setPlaceholderText("Path to executable")
         self.path_edits["FLRig"] = flrig_path
+        flrig_path.textChanged.connect(self._refresh_section_titles)
         flrig_row.addWidget(flrig_path)
 
         flrig_browse = QPushButton("Browse")
@@ -605,11 +634,6 @@ class SettingsTab(QWidget):
 
         # VarAC status row + incoming files path
         varac_row = QHBoxLayout()
-        varac_status = QLabel()
-        varac_status.setFixedSize(14, 14)
-        varac_status.setStyleSheet(led_style("idle", resolve_theme(self.settings)))
-        self.status_labels["VarAC"] = varac_status
-        varac_row.addWidget(varac_status)
         varac_row.addWidget(QLabel("VarAC"))
         self.varac_path_edit = QLineEdit()
         self.varac_path_edit.setReadOnly(True)
@@ -645,8 +669,14 @@ class SettingsTab(QWidget):
         launch_row.addWidget(self.copy_late_btn)
         radio_v.addLayout(launch_row)
 
+        radio_container = QWidget()
+        radio_container.setLayout(radio_v)
+        radio_group = self._make_collapsible_group("Radio Software", radio_container, checked=False, fit_content=True)
+        self._register_collapsible_group(radio_group, self._summary_radio_settings)
+        radio_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         main_layout.addWidget(radio_group)
 
+        main_layout.addStretch(1)
         # bottom save
         bottom_row = QHBoxLayout()
         bottom_row.addStretch()
@@ -657,6 +687,144 @@ class SettingsTab(QWidget):
         self.launch_selected_btn.setMinimumWidth(self.launch_selected_btn.sizeHint().width() + 12)
         self._wire_dirty_tracking()
         self._set_save_button_state("success")
+        self._refresh_section_titles()
+
+    def _make_collapsible_group(
+        self,
+        title: str,
+        content: QWidget,
+        *,
+        checked: bool,
+        fit_content: bool,
+    ) -> QGroupBox:
+        group = QGroupBox()
+        group.setMinimumHeight(0)
+        content.setVisible(checked)
+
+        header_btn = QToolButton()
+        header_btn.setCheckable(True)
+        header_btn.setChecked(checked)
+        header_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        header_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        header_btn.setText(title)
+        header_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        header_btn.setMinimumHeight(28)
+        header_btn.setStyleSheet("QToolButton { padding: 4px 6px; font-weight: 600; }")
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.addWidget(header_btn)
+        header_row.addStretch()
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 12)
+        layout.setSpacing(6)
+        layout.addLayout(header_row)
+        layout.addWidget(content)
+        group.setLayout(layout)
+
+        header_btn.toggled.connect(lambda state, g=group, w=content: self._on_section_toggled(g, w, state))
+        self._section_meta[group] = {
+            **self._section_meta.get(group, {}),
+            "fit_content": fit_content,
+            "title": title,
+            "header_btn": header_btn,
+        }
+        self._apply_collapsed_state(group, content, checked)
+        QTimer.singleShot(0, lambda g=group, w=content: self._apply_collapsed_state(g, w, header_btn.isChecked()))
+        return group
+
+    def _register_collapsible_group(self, group: QGroupBox, summary_fn) -> None:
+        self._accordion_groups.append(group)
+        meta = self._section_meta.get(group, {})
+        meta.update({"summary_fn": summary_fn})
+        self._section_meta[group] = meta
+
+    def _on_section_toggled(self, group: QGroupBox, content: QWidget, checked: bool) -> None:
+        self._apply_collapsed_state(group, content, checked)
+        if checked:
+            for other in self._accordion_groups:
+                if other is not group:
+                    other_btn = self._section_meta.get(other, {}).get("header_btn")
+                    if other_btn and other_btn.isChecked():
+                        other_btn.setChecked(False)
+        self._refresh_section_titles()
+
+    def _refresh_section_titles(self) -> None:
+        for group, meta in self._section_meta.items():
+            base = str(meta.get("title", ""))
+            summary_fn = meta.get("summary_fn")
+            header_btn = meta.get("header_btn")
+            if header_btn and header_btn.isChecked():
+                if header_btn:
+                    header_btn.setText(base)
+                continue
+            summary = ""
+            try:
+                if summary_fn:
+                    summary = str(summary_fn()).strip()
+            except Exception:
+                summary = ""
+            if header_btn:
+                header_btn.setText(f"{base} — {summary}" if summary else base)
+
+    def _apply_collapsed_state(self, group: QGroupBox, content: QWidget, expanded: bool) -> None:
+        content.setVisible(expanded)
+        fit_content = bool(self._section_meta.get(group, {}).get("fit_content", False))
+        header_btn = self._section_meta.get(group, {}).get("header_btn")
+        if header_btn:
+            header_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        if expanded:
+            if fit_content:
+                header_height = 0
+                if header_btn:
+                    header_height = header_btn.sizeHint().height()
+                margins = group.layout().contentsMargins() if group.layout() else None
+                extra = 0
+                if margins:
+                    extra = margins.top() + margins.bottom()
+                target_height = content.sizeHint().height() + header_height + extra
+                group.setMinimumHeight(target_height)
+                group.setMaximumHeight(target_height)
+                group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            else:
+                group.setMinimumHeight(0)
+                group.setMaximumHeight(16777215)
+                group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        else:
+            collapsed = self._collapsed_height(group)
+            group.setMinimumHeight(collapsed)
+            group.setMaximumHeight(collapsed)
+            group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        group.updateGeometry()
+
+    def _collapsed_height(self, group: QGroupBox) -> int:
+        header_btn = self._section_meta.get(group, {}).get("header_btn")
+        margins = group.layout().contentsMargins() if group.layout() else None
+        extra = 0
+        if margins:
+            extra = margins.top() + margins.bottom()
+        if header_btn:
+            return max(34, header_btn.sizeHint().height() + extra)
+        return max(34, group.fontMetrics().height() + 24 + extra)
+
+    def _summary_operating_groups(self) -> str:
+        count = len(self.operating_groups)
+        return f"{count} group{'s' if count != 1 else ''}"
+
+    def _summary_js8_settings(self) -> str:
+        directed = "set" if self.js8_directed_edit.text().strip() else "missing"
+        forms = "set" if self.js8_forms_edit.text().strip() else "missing"
+        return f"DIRECTED {directed}, Forms {forms}"
+
+    def _summary_radio_settings(self) -> str:
+        total = len(self.PROGRAMS)
+        set_count = 0
+        for name in self.PROGRAMS:
+            edit = self.path_edits.get(name)
+            if edit and edit.text().strip():
+                set_count += 1
+        return f"{set_count}/{total} program paths set"
 
     # ---------- LOAD/SAVE ---------- #
 
@@ -787,6 +955,7 @@ class SettingsTab(QWidget):
         self._loading_settings = False
         self._settings_dirty = False
         self._set_save_button_state("success")
+        self._refresh_section_titles()
 
     def _save_settings_button(self):
         """Explicit save via the button (shows confirmation)."""
@@ -1643,9 +1812,11 @@ class SettingsTab(QWidget):
             table.setItem(row, 7, QTableWidgetItem(str(g.get("fldigi_offset", ""))))
             auto_chk = QCheckBox()
             auto_chk.setChecked(bool(g.get("auto_tune", False)))
+            auto_chk.setFixedSize(20, 20)
             auto_wrap = QWidget()
+            auto_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             auto_layout = QHBoxLayout(auto_wrap)
-            auto_layout.setContentsMargins(0, 0, 0, 0)
+            auto_layout.setContentsMargins(6, 0, 6, 0)
             auto_layout.setAlignment(Qt.AlignCenter)
             auto_layout.addWidget(auto_chk)
             table.setCellWidget(row, 8, auto_wrap)
@@ -1654,6 +1825,7 @@ class SettingsTab(QWidget):
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
         self._update_op_group_action_buttons()
+        self._refresh_section_titles()
 
     def _update_op_group_action_buttons(self):
         theme = resolve_theme(self.settings)
