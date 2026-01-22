@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import tempfile
 import urllib.request
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional, Set
@@ -329,6 +330,19 @@ def maidenhead_to_latlon(grid: str) -> Optional[tuple[float, float]]:
         return lat, lon
     except Exception:
         return None
+
+
+def maidenhead_grid4_bounds(grid: str) -> Optional[tuple[float, float, float, float]]:
+    grid = (grid or "").strip().upper()
+    if len(grid) < 4:
+        return None
+    if not re.match(r"^[A-R]{2}[0-9]{2}$", grid[:4]):
+        return None
+    lon_min = (ord(grid[0]) - ord("A")) * 20.0 + int(grid[2]) * 2.0 - 180.0
+    lat_min = (ord(grid[1]) - ord("A")) * 10.0 + int(grid[3]) * 1.0 - 90.0
+    lon_max = lon_min + 2.0
+    lat_max = lat_min + 1.0
+    return (lat_min, lon_min, lat_max, lon_max)
 
 
 class StationsMapTab(QWidget):
@@ -899,16 +913,44 @@ class StationsMapTab(QWidget):
             if my_call and cs == my_call and my_grid:
                 grid = my_grid
             state = (state or "").strip().upper()
+            state_abbr = state
+            if state_abbr and len(state_abbr) > 2:
+                if state_abbr in US_STATE_ABBR_FROM_NAME:
+                    state_abbr = US_STATE_ABBR_FROM_NAME[state_abbr]
+                elif state_abbr in CANADA_PROV_ABBR_FROM_NAME:
+                    state_abbr = CANADA_PROV_ABBR_FROM_NAME[state_abbr]
             latlon = None
-            if grid:
+            placement = ""
+            grid4 = grid[:4] if len(grid) >= 4 else ""
+            if len(grid) >= 6:
                 latlon = maidenhead_to_latlon(grid)
-            if not latlon and state:
-                latlon = STATE_CENTERS.get(state)
+                placement = "grid6"
+            if not latlon and grid4 and state_abbr:
+                bounds = maidenhead_grid4_bounds(grid4)
+                state_center = STATE_CENTERS.get(state_abbr)
+                if bounds and state_center:
+                    lat = min(max(state_center[0], bounds[0]), bounds[2])
+                    lon = min(max(state_center[1], bounds[1]), bounds[3])
+                    latlon = (lat, lon)
+                    placement = "state+grid4"
+            if not latlon and state_abbr:
+                latlon = STATE_CENTERS.get(state_abbr)
+                placement = "state"
+            if not latlon and grid4:
+                latlon = maidenhead_to_latlon(grid4)
+                placement = "grid4"
             if not latlon:
                 continue
             lat, lon = latlon
             if not self._is_usa_canada(lat, lon):
                 continue
+            log.debug(
+                "StationsMap: station placement %s cs=%s state=%s grid=%s",
+                placement or "unknown",
+                cs,
+                state_abbr or state,
+                grid,
+            )
             groups: List[str] = []
             try:
                 if gj:
@@ -925,7 +967,7 @@ class StationsMapTab(QWidget):
                     callsign=cs,
                     grid=grid,
                     name=(name or "").strip(),
-                    state=state,
+                    state=state_abbr or state,
                     group=(group or "").strip(),
                     groups=groups,
                     trusted=bool(trusted),
@@ -2397,6 +2439,175 @@ class JS8LogLinkIndexer:
         # Maidenhead: 4-char (LLDD) or 6-char (LLDDLL)
         return bool(re.match(r"^[A-R]{2}[0-9]{2}([A-X]{2})?$", grid.upper()))
 
+    def _parse_commstat_grid(self, text: str) -> str:
+        match = re.search(r",\s*([A-R]{2}[0-9]{2}(?:[A-X]{2})?)\s*,", text or "")
+        return match.group(1) if match else ""
+
+    def _parse_commstat_state(self, text: str) -> str:
+        match = re.search(
+            r",\s*[A-R]{2}[0-9]{2}(?:[A-X]{2})?\s*,[^,]*,[^,]*,[^,]*,\s*([A-Z]{2})\b",
+            text or "",
+        )
+        return match.group(1) if match else ""
+
+    def _extract_group_name(self, msg: str, freq_hz: Optional[float]) -> str:
+        upper = (msg or "").upper()
+        match = re.search(r"@([A-Z0-9]{1,15})", upper)
+        if match:
+            grp = match.group(1).strip().upper()
+            if grp and self._is_allowed_group(grp):
+                return grp
+        op_grp = self._lookup_operating_group(freq_hz)
+        return op_grp or ""
+
+    def _maybe_capture_geo_tokens(self, callsign: str, msg: str, freq_hz: Optional[float]) -> None:
+        cs = self._base_callsign(callsign)
+        text = (msg or "").strip()
+        if not cs or not text:
+            return
+        upper = text.upper()
+        if "GR[" not in upper and "ST[" not in upper and "," not in text:
+            return
+        state = ""
+        grid = ""
+        match = re.search(r"GR\[([A-R]{2}[0-9]{2}(?:[A-X]{2})?)\]", upper)
+        if match:
+            grid = match.group(1)
+        match = re.search(r"ST\[([A-Z]{2})\]", upper)
+        if match:
+            state = match.group(1)
+        if "," in text:
+            if not grid:
+                grid = self._parse_commstat_grid(upper)
+            if not state:
+                state = self._parse_commstat_state(upper)
+        if grid and not self._valid_grid(grid):
+            grid = ""
+        if state and not re.match(r"^[A-Z]{2}$", state):
+            state = ""
+        if not grid and not state:
+            return
+        group_name = self._extract_group_name(text, freq_hz)
+        self._update_operator_geo(cs, state, grid, group_name)
+
+    def _update_operator_geo(self, callsign: str, state: str, grid: str, group_name: str) -> None:
+        cs = self._base_callsign(callsign)
+        state = (state or "").strip().upper()
+        grid = (grid or "").strip().upper()
+        if not cs or (not state and not grid):
+            return
+        if state and not re.match(r"^[A-Z]{2}$", state):
+            state = ""
+        if grid and not self._valid_grid(grid):
+            grid = ""
+        if not state and not grid:
+            return
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_checkins (
+                    callsign TEXT PRIMARY KEY,
+                    name TEXT,
+                    state TEXT,
+                    grid TEXT,
+                    group1 TEXT,
+                    group2 TEXT,
+                    group3 TEXT,
+                    group_role TEXT,
+                    first_seen_utc TEXT,
+                    last_seen_utc TEXT,
+                    checkin_count INTEGER,
+                    groups_json TEXT,
+                    trusted INTEGER
+                )
+                """
+            )
+            cur.execute(
+                "SELECT state, grid, group1, group2, group3, groups_json, trusted FROM operator_checkins WHERE callsign=?",
+                (cs,),
+            )
+            row = cur.fetchone()
+            now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            group_name = (group_name or "").strip().upper()
+            if row is None:
+                groups = [g for g in [group_name] if g]
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO operator_checkins (
+                        callsign, name, state, grid, group1, group2, group3, group_role,
+                        first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted
+                    ) VALUES (?, '', ?, ?, ?, ?, ?, '', ?, ?, 0, ?, 0)
+                    """,
+                    (
+                        cs,
+                        state or "",
+                        grid or "",
+                        groups[0] if len(groups) > 0 else "",
+                        groups[1] if len(groups) > 1 else "",
+                        groups[2] if len(groups) > 2 else "",
+                        now_iso,
+                        now_iso,
+                        json.dumps(groups) if groups else None,
+                    ),
+                )
+            else:
+                old_state, old_grid, g1, g2, g3, gj, trusted = row
+                new_state = (old_state or "").strip().upper()
+                if state and state != new_state:
+                    new_state = state
+                new_grid = (old_grid or "").strip().upper()
+                if grid:
+                    if not new_grid:
+                        new_grid = grid
+                    elif len(grid) > len(new_grid) or (len(grid) == len(new_grid) and grid != new_grid):
+                        new_grid = grid
+                slots = [g1 or "", g2 or "", g3 or ""]
+                if group_name and group_name not in slots:
+                    for idx, val in enumerate(slots):
+                        if not val:
+                            slots[idx] = group_name
+                            break
+                extra_json = []
+                if gj:
+                    try:
+                        prev = json.loads(gj)
+                        if isinstance(prev, list):
+                            extra_json.extend([str(x).upper() for x in prev])
+                    except Exception:
+                        pass
+                if group_name and group_name not in extra_json:
+                    extra_json.append(group_name)
+                cur.execute(
+                    """
+                    UPDATE operator_checkins
+                    SET
+                        state=?,
+                        grid=?,
+                        group1=?,
+                        group2=?,
+                        group3=?,
+                        groups_json=?,
+                        last_seen_utc=?
+                    WHERE callsign=?
+                    """,
+                    (
+                        new_state or "",
+                        new_grid or "",
+                        slots[0],
+                        slots[1],
+                        slots[2],
+                        json.dumps([g for g in extra_json if g]) if extra_json else gj,
+                        now_iso,
+                        cs,
+                    ),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("JS8LogLinkIndexer: failed to update operator geo %s: %s", callsign, e)
+
     def _upsert_operator_info(self, callsign: str, grid: str, group_val: str, ts: datetime.datetime) -> None:
         # Reuse js8call tab helpers not available here; implement lightweight upsert
         cs = self._base_callsign(callsign)
@@ -2669,6 +2880,16 @@ class JS8LogLinkIndexer:
                     if directed_offset > 0:
                         fh.seek(directed_offset)
                     for line in fh:
+                        parts = line.split("\t", 4)
+                        msg = parts[4] if len(parts) >= 5 else ""
+                        origin, _dest = self._extract_origin_dest(msg)
+                        freq_hz = None
+                        try:
+                            freq_hz = float(parts[1]) * 1_000_000.0 if len(parts) >= 2 else None
+                        except Exception:
+                            freq_hz = None
+                        if origin and msg:
+                            self._maybe_capture_geo_tokens(origin, msg, freq_hz)
                         self._maybe_capture_group_grid(line)
                         handle_parsed(self._parse_directed_line(line))
                     try:
@@ -2687,6 +2908,24 @@ class JS8LogLinkIndexer:
                     if all_offset > 0:
                         fh.seek(all_offset)
                     for line in fh:
+                        if "Transmitting" in line:
+                            msg_part = ""
+                            if "JS8:" in line:
+                                msg_part = line.split("JS8:", 1)[1]
+                            elif ":" in line:
+                                msg_part = line.split(":", 1)[1]
+                            msg_part = msg_part.lstrip(": ").strip()
+                            origin, _dest = self._extract_origin_dest(msg_part)
+                            freq_hz = None
+                            try:
+                                mhz_part = line.split("Transmitting", 1)[1]
+                                mhz_tok = [tok for tok in mhz_part.split() if tok.replace(".", "", 1).isdigit()]
+                                if mhz_tok:
+                                    freq_hz = float(mhz_tok[0]) * 1_000_000.0
+                            except Exception:
+                                freq_hz = None
+                            if origin and msg_part:
+                                self._maybe_capture_geo_tokens(origin, msg_part, freq_hz)
                         handle_parsed(self._parse_all_line(line))
                     try:
                         self.settings.set("js8_links_all_offset", int(fh.tell()))
@@ -2798,6 +3037,60 @@ class JS8LogLinkIndexer:
             conn.commit()
         finally:
             conn.close()
+
+    def backfill_geo_from_logs(self) -> int:
+        """
+        Scan DIRECTED.TXT and ALL.TXT for grid/state tokens and update operator_checkins.
+        Returns number of lines scanned.
+        """
+        directed_path = self._resolve_directed_path()
+        all_path = directed_path.parent / "ALL.TXT" if directed_path else None
+        if not directed_path or not directed_path.exists():
+            return 0
+        scanned = 0
+        try:
+            with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    scanned += 1
+                    parts = line.split("\t", 4)
+                    msg = parts[4] if len(parts) >= 5 else ""
+                    origin, _dest = self._extract_origin_dest(msg)
+                    freq_hz = None
+                    try:
+                        freq_hz = float(parts[1]) * 1_000_000.0 if len(parts) >= 2 else None
+                    except Exception:
+                        freq_hz = None
+                    if origin and msg:
+                        self._maybe_capture_geo_tokens(origin, msg, freq_hz)
+        except Exception as e:
+            log.debug("JS8LogLinkIndexer: geo backfill failed on DIRECTED.TXT: %s", e)
+        if all_path and all_path.exists():
+            try:
+                with all_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        scanned += 1
+                        if "Transmitting" not in line:
+                            continue
+                        msg_part = ""
+                        if "JS8:" in line:
+                            msg_part = line.split("JS8:", 1)[1]
+                        elif ":" in line:
+                            msg_part = line.split(":", 1)[1]
+                        msg_part = msg_part.lstrip(": ").strip()
+                        origin, _dest = self._extract_origin_dest(msg_part)
+                        freq_hz = None
+                        try:
+                            mhz_part = line.split("Transmitting", 1)[1]
+                            mhz_tok = [tok for tok in mhz_part.split() if tok.replace(".", "", 1).isdigit()]
+                            if mhz_tok:
+                                freq_hz = float(mhz_tok[0]) * 1_000_000.0
+                        except Exception:
+                            freq_hz = None
+                        if origin and msg_part:
+                            self._maybe_capture_geo_tokens(origin, msg_part, freq_hz)
+            except Exception as e:
+                log.debug("JS8LogLinkIndexer: geo backfill failed on ALL.TXT: %s", e)
+        return scanned
 
     def ingest_live_batch(self, observations: List[tuple]) -> None:
         """

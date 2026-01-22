@@ -291,6 +291,7 @@
   <p><strong>Purpose</strong>: Visualize operators, grids, and JS8 traffic links.</p>
   <ol class="section-list">
     <li><strong>Map view</strong>: Requires Qt WebEngine. If it is missing, a message will say the map is disabled.</li>
+    <li><strong>Geography placement</strong>: Stations are placed using the best available data in this order: Grid6 (most precise), State+Grid4 (state centroid projected into the Grid4 square), State only, then Grid4 only. If no grid or state exists, the station is not plotted.</li>
     <li><strong>Layers (sidebar)</strong>: The layer controls appear in the left sidebar only when the Map tab is active. Use them to show Callsigns, States, Cities, Grids, and Regions. City labels respect the population threshold dropdown.</li>
     <li><strong>JS8 link controls</strong>: Choose link mode (My Station, All, Bidirectional, One-way, Relays, or a region/group), filter by band/frequency, and set recency (3h, 6h, 24h, etc). Region and group choices come from Operators.</li>
     <li><strong>Relays mode</strong>: Use the "Paths to" field to choose a target callsign for relay path highlighting.</li>

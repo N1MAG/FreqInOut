@@ -955,11 +955,18 @@ class JS8CallNetControlTab(QWidget):
                             log.debug("JS8 NCS: skipping DIRECTED line before app start: %s", line)
                             continue
                         calls = self._extract_callsigns_from_line(line)
+                        msg_text = self._message_text_from_line(line)
+                        call_primary = calls[0] if calls else ""
+                        if call_primary and msg_text:
+                            self._maybe_capture_geo_tokens(
+                                call_primary,
+                                msg_text,
+                                group_name=self._active_group_name(),
+                            )
                         self._update_recent_traffic(line, calls)
                         # Net announcement detection (only when net not in progress)
                         if self._line_has_announce_form(line):
                             # If message completion marker present, notify immediately; else mark pending
-                            call_primary = calls[0] if calls else ""
                             if self._is_message_complete_line(line):
                                 log.debug(
                                     "JS8 NCS: F!106 complete line detected (net_in_progress=%s): %s",
@@ -1012,7 +1019,6 @@ class JS8CallNetControlTab(QWidget):
                                 for c in calls:
                                     for mid in msg_ids:
                                         self._backlog_upsert(c, mid, "MSG", status="PENDING")
-                        call_primary = calls[0] if calls else ""
                         if not call_primary:
                             continue
 
@@ -2112,6 +2118,163 @@ class JS8CallNetControlTab(QWidget):
         # Maidenhead: 4-char (LLDD) or 6-char (LLDDLL)
         return bool(re.match(r"^[A-R]{2}[0-9]{2}([A-X]{2})?$", grid.upper()))
 
+    def _parse_commstat_grid(self, text: str) -> str:
+        m = re.search(r",\s*([A-R]{2}[0-9]{2}(?:[A-X]{2})?)\s*,", text or "")
+        return m.group(1) if m else ""
+
+    def _parse_commstat_state(self, text: str) -> str:
+        m = re.search(
+            r",\s*[A-R]{2}[0-9]{2}(?:[A-X]{2})?\s*,[^,]*,[^,]*,[^,]*,\s*([A-Z]{2})\b",
+            text or "",
+        )
+        return m.group(1) if m else ""
+
+    def _maybe_capture_geo_tokens(self, callsign: str, text: str, group_name: str = "") -> None:
+        cs = self._base_callsign(callsign)
+        msg = (text or "").strip()
+        if not cs or not msg:
+            return
+        upper = msg.upper()
+        if "GR[" not in upper and "ST[" not in upper and "," not in msg:
+            return
+        state = ""
+        grid = ""
+        match = re.search(r"GR\[([A-R]{2}[0-9]{2}(?:[A-X]{2})?)\]", upper)
+        if match:
+            grid = match.group(1)
+        match = re.search(r"ST\[([A-Z]{2})\]", upper)
+        if match:
+            state = match.group(1)
+        if "," in msg:
+            if not grid:
+                grid = self._parse_commstat_grid(upper)
+            if not state:
+                state = self._parse_commstat_state(upper)
+        if grid and not self._valid_grid(grid):
+            grid = ""
+        if state and not re.match(r"^[A-Z]{2}$", state):
+            state = ""
+        if not grid and not state:
+            return
+        self._update_operator_geo(cs, state, grid, group_name=group_name)
+
+    def _update_operator_geo(self, callsign: str, state: str, grid: str, group_name: str = "") -> None:
+        cs = self._base_callsign(callsign)
+        state = (state or "").strip().upper()
+        grid = (grid or "").strip().upper()
+        if not cs or (not state and not grid):
+            return
+        if state and not re.match(r"^[A-Z]{2}$", state):
+            state = ""
+        if grid and not self._valid_grid(grid):
+            grid = ""
+        if not state and not grid:
+            return
+        try:
+            db_path = _nets_db_path()
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_checkins (
+                    callsign TEXT PRIMARY KEY,
+                    name TEXT,
+                    state TEXT,
+                    grid TEXT,
+                    group1 TEXT,
+                    group2 TEXT,
+                    group3 TEXT,
+                    group_role TEXT,
+                    first_seen_utc TEXT,
+                    last_seen_utc TEXT,
+                    last_net TEXT,
+                    last_role TEXT,
+                    checkin_count INTEGER DEFAULT 0,
+                    groups_json TEXT,
+                    trusted INTEGER DEFAULT 1
+                )
+                """
+            )
+            cur.execute(
+                "SELECT state, grid, group1, group2, group3, groups_json, trusted FROM operator_checkins WHERE callsign=?",
+                (cs,),
+            )
+            row = cur.fetchone()
+            now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            group_name = (group_name or "").strip().upper()
+            if row is None:
+                groups = [g for g in [group_name] if g]
+                groups_json = json.dumps(groups) if groups else None
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO operator_checkins
+                    (callsign, name, state, grid, group1, group2, group3, group_role, first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted)
+                    VALUES (?, '', ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, 1)
+                    """,
+                    (
+                        cs,
+                        state or None,
+                        grid or None,
+                        group_name or None,
+                        None,
+                        None,
+                        now_iso,
+                        now_iso,
+                        groups_json,
+                    ),
+                )
+            else:
+                old_state, old_grid, g1, g2, g3, groups_json, trusted = row
+                new_state = (old_state or "").strip().upper()
+                if state and state != new_state:
+                    new_state = state
+                new_grid = (old_grid or "").strip().upper()
+                if grid:
+                    if not new_grid:
+                        new_grid = grid
+                    elif len(grid) > len(new_grid) or (len(grid) == len(new_grid) and grid != new_grid):
+                        new_grid = grid
+                g_list = [g1 or "", g2 or "", g3 or ""]
+                if group_name and group_name not in g_list:
+                    for idx, val in enumerate(g_list):
+                        if not val:
+                            g_list[idx] = group_name
+                            break
+                try:
+                    current_groups = json.loads(groups_json) if groups_json else []
+                    if group_name and group_name not in current_groups:
+                        current_groups.append(group_name)
+                    groups_json_out = json.dumps(current_groups) if current_groups else None
+                except Exception:
+                    groups_json_out = groups_json
+                cur.execute(
+                    """
+                    UPDATE operator_checkins
+                    SET state=?, grid=?, group1=?, group2=?, group3=?, last_seen_utc=?, groups_json=?, trusted=COALESCE(trusted, ?)
+                    WHERE callsign=?
+                    """,
+                    (
+                        new_state or None,
+                        new_grid or None,
+                        g_list[0] or None,
+                        g_list[1] or None,
+                        g_list[2] or None,
+                        now_iso,
+                        groups_json_out,
+                        trusted if trusted is not None else 1,
+                        cs,
+                    ),
+                )
+            conn.commit()
+        except Exception as e:
+            log.debug("JS8CallNetControl: failed to update operator geo for %s: %s", callsign, e)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
     def _upsert_operator_info(self, callsign: str, grid: str, groups: List[str], ts: datetime.datetime) -> None:
         cs = (callsign or "").strip().upper()
         if not cs:
@@ -2371,6 +2534,12 @@ class JS8CallNetControlTab(QWidget):
                                 snr=snr_val,
                                 offset=offset_val,
                                 grid=(p.get("GRID") or "").strip().upper(),
+                            )
+                        if combined:
+                            self._maybe_capture_geo_tokens(
+                                base_frm,
+                                combined,
+                                group_name=self._active_group_name(),
                             )
                     snr_val = None
                     try:

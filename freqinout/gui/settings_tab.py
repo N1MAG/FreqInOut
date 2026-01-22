@@ -285,6 +285,7 @@ class SettingsTab(QWidget):
 
         self._update_clock_labels()
         self._refresh_running_status()
+        QTimer.singleShot(0, self._maybe_backfill_js8_geo)
 
     # ---------- UI ---------- #
 
@@ -968,6 +969,7 @@ class SettingsTab(QWidget):
             self.settings_saved.emit()
         except Exception:
             pass
+        QTimer.singleShot(0, self._maybe_backfill_js8_geo)
         self._settings_dirty = False
         self._set_save_button_state("success")
 
@@ -2227,6 +2229,7 @@ class SettingsTab(QWidget):
         try:
             indexer = JS8LogLinkIndexer(self.settings, db_path)
             indexer._base_callsign = JS8LogLinkIndexer._base_callsign  # ensure suffix handling
+            self._maybe_backfill_js8_geo()
             indexer.update()
             QMessageBox.information(self, "JS8 Traffic Loaded", "JS8 logs ingested successfully.")
             self._refresh_operator_history_views()
@@ -2234,3 +2237,26 @@ class SettingsTab(QWidget):
             log.error("SettingsTab: JS8 log ingest failed: %s", e)
             QMessageBox.critical(self, "Error", f"Failed to ingest JS8 logs:\n{e}")
             self._refresh_operator_history_views()
+
+    def _maybe_backfill_js8_geo(self) -> None:
+        if self._loading_settings:
+            return
+        if self.settings.get("js8_geo_backfill_v1_done", False):
+            return
+        directed_path = (self.js8_directed_edit.text().strip() or self.settings.get("js8_directed_path", "") or "")
+        if not directed_path:
+            return
+        path = Path(directed_path)
+        if not path.exists():
+            return
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+            indexer = JS8LogLinkIndexer(self.settings, db_path)
+            indexer._base_callsign = JS8LogLinkIndexer._base_callsign  # ensure suffix handling
+            scanned = indexer.backfill_geo_from_logs()
+            self.settings.set("js8_geo_backfill_v1_done", True)
+            log.info("SettingsTab: JS8 geo backfill complete (lines=%s).", scanned)
+        except Exception as e:
+            log.debug("SettingsTab: JS8 geo backfill failed: %s", e)
