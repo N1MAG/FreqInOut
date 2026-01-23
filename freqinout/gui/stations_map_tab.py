@@ -1247,6 +1247,8 @@ class StationsMapTab(QWidget):
         relay_best: Dict[tuple[str, str], Optional[float]] = {}
         my_partners: Set[str] = set()
         target_partners: Set[str] = set()
+        direct_snrs: Dict[tuple[str, str], List[float]] = {}
+        direct_counts: Dict[tuple[str, str], int] = {}
 
         def _freq_to_band(freq_mhz: Optional[float]) -> str:
             if freq_mhz is None:
@@ -1350,18 +1352,33 @@ class StationsMapTab(QWidget):
             else:
                 if key not in best or (snr_val is not None and (best[key] is None or snr_val > best[key])):
                     best[key] = snr_val
+            if snr_val is not None and my_call and my_call in {o, d} and o != my_call:
+                direct_snrs.setdefault(key, []).append(snr_val)
+                direct_counts[key] = direct_counts.get(key, 0) + 1
 
-            def _record_station(cs: str, ts_val, snr_value, spotted: bool):
-                s = stat.setdefault(cs, {"last_seen": 0, "last_spotter": 0, "snrs": []})
+            def _record_station(cs: str, other: str, ts_val, snr_value, spotted: bool, is_origin: bool):
+                s = stat.setdefault(
+                    cs,
+                    {
+                        "last_seen": 0,
+                        "last_spotter": 0,
+                        "snrs": [],
+                        "snrs_excl_my": [],
+                        "snr_excl_my_count": 0,
+                    },
+                )
                 if ts_val and ts_val > s["last_seen"]:
                     s["last_seen"] = ts_val
                 if spotted and ts_val and ts_val > s["last_spotter"]:
                     s["last_spotter"] = ts_val
-                if snr_value is not None:
+                if snr_value is not None and is_origin:
                     s["snrs"].append(snr_value)
+                    if my_call and other != my_call:
+                        s["snrs_excl_my"].append(snr_value)
+                        s["snr_excl_my_count"] += 1
 
-            _record_station(o, ts, snr_val, bool(is_spotter))
-            _record_station(d, ts, snr_val, bool(is_spotter))
+            _record_station(o, d, ts, snr_val, bool(is_spotter), True)
+            _record_station(d, o, ts, snr_val, bool(is_spotter), False)
 
         def _add_link(key_map: Dict[tuple[str, str], Optional[float]], a: str, b: str):
             k = tuple(sorted((a, b)))
@@ -1399,6 +1416,18 @@ class StationsMapTab(QWidget):
             snrs = data.get("snrs", [])
             avg_snr = sum(snrs) / len(snrs) if snrs else None
             max_snr = max(snrs) if snrs else None
+            snrs_excl_my = data.get("snrs_excl_my", [])
+            if not my_call:
+                snrs_excl_my = snrs
+            avg_snr_excl_my = sum(snrs_excl_my) / len(snrs_excl_my) if snrs_excl_my else None
+            direct_snr = None
+            direct_count = 0
+            if my_call:
+                key = tuple(sorted((my_call, cs)))
+                vals = direct_snrs.get(key, [])
+                if vals:
+                    direct_snr = sum(vals) / len(vals)
+                    direct_count = direct_counts.get(key, 0)
             try:
                 seen_fmt = datetime.datetime.utcfromtimestamp(data.get("last_seen") or 0).strftime("%Y-%m-%d %H:%M:%S UTC") if data.get("last_seen") else ""
             except Exception:
@@ -1414,6 +1443,10 @@ class StationsMapTab(QWidget):
                 "last_spotter_fmt": spotter_fmt,
                 "avg_snr": avg_snr,
                 "max_snr": max_snr,
+                "direct_snr": direct_snr,
+                "avg_snr_excl_my": avg_snr_excl_my,
+                "direct_count": direct_count,
+                "avg_snr_count": data.get("snr_excl_my_count", 0),
             }
         return links, stats_out
 
@@ -1569,8 +1602,10 @@ class StationsMapTab(QWidget):
                         "label": pt.callsign if self.show_callsigns else "",
                         "last_seen": _fmt_ts(stats.get("last_seen", 0)),
                         "last_spotter": _fmt_ts(stats.get("last_spotter", 0)),
-                        "avg_snr": stats.get("avg_snr"),
-                        "max_snr": stats.get("max_snr"),
+                        "direct_snr": stats.get("direct_snr"),
+                        "avg_snr_excl_my": stats.get("avg_snr_excl_my"),
+                        "direct_count": stats.get("direct_count", 0),
+                        "avg_snr_count": stats.get("avg_snr_count", 0),
                     }
                 )
 
@@ -2094,8 +2129,8 @@ function addGridLabels(res, level, bounds, maxLabels) {
         const tipText = (m.tooltip || m.title || '') +
           (m.last_seen ? '<br/><b>Last seen:</b> ' + m.last_seen : '') +
           (m.last_spotter ? '<br/><b>Last spotter:</b> ' + m.last_spotter : '') +
-          (m.avg_snr !== undefined && m.avg_snr !== null ? '<br/><b>Avg SNR:</b> ' + m.avg_snr.toFixed(1) : '') +
-          (m.max_snr !== undefined && m.max_snr !== null ? '<br/><b>Max SNR:</b> ' + m.max_snr.toFixed(1) : '');
+          (m.direct_snr !== undefined && m.direct_snr !== null ? '<br/><b>Direct SNR:</b> ' + m.direct_snr.toFixed(1) + (m.direct_count ? ' (Traffic: ' + m.direct_count + ')' : '') : '') +
+          (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/><b>Avg SNR:</b> ' + m.avg_snr_excl_my.toFixed(1) + (m.avg_snr_count ? ' (Traffic: ' + m.avg_snr_count + ')' : '') : '');
         circle.on('mouseover', function() {{
           this.bringToFront();
           showDetail(tipText);
