@@ -1078,7 +1078,9 @@ class StationsMapTab(QWidget):
         return sorted({v for v in freqs if v})
 
     def _refresh_band_options(self):
-        bands = ["All", "160M", "80M", "60M", "40M", "30M", "20M", "17M", "15M", "12M", "10M", "6M", "2M"]
+        priority = ["20M", "40M", "80M"]
+        remaining = ["160M", "60M", "30M", "17M", "15M", "12M", "10M", "6M", "2M"]
+        bands = ["All"] + priority + remaining
         self.band_combo.blockSignals(True)
         self.band_combo.clear()
         self.band_combo.addItem("All", {"type": "all"})
