@@ -1354,18 +1354,6 @@ class StationsMapTab(QWidget):
             except Exception:
                 snr_val = None
 
-            if relay_target:
-                if key not in relay_best or (snr_val is not None and (relay_best[key] is None or snr_val > relay_best[key])):
-                    relay_best[key] = snr_val
-                if my_call and my_call in {o, d}:
-                    other = d if o == my_call else o
-                    my_partners.add(other)
-                if relay_target in {o, d}:
-                    other = d if o == relay_target else o
-                    target_partners.add(other)
-            else:
-                if key not in best or (snr_val is not None and (best[key] is None or snr_val > best[key])):
-                    best[key] = snr_val
             record_stats = False
             if mode == "all":
                 record_stats = match_o
@@ -1405,6 +1393,19 @@ class StationsMapTab(QWidget):
 
             if not include:
                 continue
+
+            if relay_target:
+                if key not in relay_best or (snr_val is not None and (relay_best[key] is None or snr_val > relay_best[key])):
+                    relay_best[key] = snr_val
+                if my_call and my_call in {o, d}:
+                    other = d if o == my_call else o
+                    my_partners.add(other)
+                if relay_target in {o, d}:
+                    other = d if o == relay_target else o
+                    target_partners.add(other)
+            else:
+                if key not in best or (snr_val is not None and (best[key] is None or snr_val > best[key])):
+                    best[key] = snr_val
 
         def _add_link(key_map: Dict[tuple[str, str], Optional[float]], a: str, b: str):
             k = tuple(sorted((a, b)))
