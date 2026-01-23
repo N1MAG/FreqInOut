@@ -1272,6 +1272,19 @@ class StationsMapTab(QWidget):
                     return name
             return ""
 
+        def _station_matches_filters(cs: str) -> bool:
+            if not cs:
+                return False
+            if group_filter:
+                groups = self.operator_index.get(cs, {}).get("groups", set())
+                if group_filter not in groups:
+                    return False
+            if region_filter:
+                region = self.operator_index.get(cs, {}).get("region")
+                if region != region_filter:
+                    return False
+            return True
+
         for ts, o, d, snr, band, freq_hz, is_spotter in rows:
             o = (o or "").upper()
             d = (d or "").upper()
@@ -1290,6 +1303,9 @@ class StationsMapTab(QWidget):
                 target_f = bf.get("value")
                 if freq_mhz is None or target_f is None or abs(freq_mhz - target_f) > 0.001:
                     continue
+
+            match_o = _station_matches_filters(o)
+            match_d = _station_matches_filters(d)
 
             include = False
             if relay_target:
@@ -1316,23 +1332,21 @@ class StationsMapTab(QWidget):
                     other = d if o == my_call else o
                     include = selection_value in self.operator_index.get(other, {}).get("groups", set())
             if include and group_filter:
-                groups_o = self.operator_index.get(o, {}).get("groups", set())
-                groups_d = self.operator_index.get(d, {}).get("groups", set())
                 if my_call and my_call in {o, d}:
                     other = d if o == my_call else o
                     include = group_filter in self.operator_index.get(other, {}).get("groups", set())
                 else:
-                    include = group_filter in groups_o and group_filter in groups_d
+                    include = group_filter in self.operator_index.get(o, {}).get("groups", set()) and group_filter in self.operator_index.get(d, {}).get("groups", set())
             if include and region_filter:
-                region_o = self.operator_index.get(o, {}).get("region")
-                region_d = self.operator_index.get(d, {}).get("region")
                 if my_call and my_call in {o, d}:
                     other = d if o == my_call else o
                     include = self.operator_index.get(other, {}).get("region") == region_filter
                 else:
+                    region_o = self.operator_index.get(o, {}).get("region")
+                    region_d = self.operator_index.get(d, {}).get("region")
                     include = region_o == region_filter and region_d == region_filter
             if not include:
-                continue
+                include = False
 
             key = tuple(sorted((o, d)))
             try:
@@ -1352,11 +1366,16 @@ class StationsMapTab(QWidget):
             else:
                 if key not in best or (snr_val is not None and (best[key] is None or snr_val > best[key])):
                     best[key] = snr_val
-            if snr_val is not None and my_call and my_call in {o, d} and o != my_call:
+            record_stats = False
+            if mode == "all":
+                record_stats = match_o
+            elif mode == "my_station":
+                record_stats = bool(my_call) and o != my_call and my_call in {o, d} and match_o
+            if snr_val is not None and record_stats and my_call and my_call in {o, d} and o != my_call:
                 direct_snrs.setdefault(key, []).append(snr_val)
                 direct_counts[key] = direct_counts.get(key, 0) + 1
 
-            def _record_station(cs: str, other: str, ts_val, snr_value, spotted: bool, is_origin: bool):
+            def _record_station(cs: str, other: str, ts_val, snr_value, spotted: bool, is_origin: bool, band_name: str):
                 s = stat.setdefault(
                     cs,
                     {
@@ -1365,6 +1384,8 @@ class StationsMapTab(QWidget):
                         "snrs": [],
                         "snrs_excl_my": [],
                         "snr_excl_my_count": 0,
+                        "last_band": "",
+                        "last_band_ts": 0,
                     },
                 )
                 if ts_val and ts_val > s["last_seen"]:
@@ -1376,9 +1397,14 @@ class StationsMapTab(QWidget):
                     if my_call and other != my_call:
                         s["snrs_excl_my"].append(snr_value)
                         s["snr_excl_my_count"] += 1
+                if is_origin and band_name and ts_val and ts_val > s.get("last_band_ts", 0):
+                    s["last_band"] = band_name
+                    s["last_band_ts"] = ts_val
+            if record_stats:
+                _record_station(o, d, ts, snr_val, bool(is_spotter), True, band_val)
 
-            _record_station(o, d, ts, snr_val, bool(is_spotter), True)
-            _record_station(d, o, ts, snr_val, bool(is_spotter), False)
+            if not include:
+                continue
 
         def _add_link(key_map: Dict[tuple[str, str], Optional[float]], a: str, b: str):
             k = tuple(sorted((a, b)))
@@ -1447,6 +1473,7 @@ class StationsMapTab(QWidget):
                 "avg_snr_excl_my": avg_snr_excl_my,
                 "direct_count": direct_count,
                 "avg_snr_count": data.get("snr_excl_my_count", 0),
+                "last_band": data.get("last_band") or "",
             }
         return links, stats_out
 
@@ -1606,6 +1633,7 @@ class StationsMapTab(QWidget):
                         "avg_snr_excl_my": stats.get("avg_snr_excl_my"),
                         "direct_count": stats.get("direct_count", 0),
                         "avg_snr_count": stats.get("avg_snr_count", 0),
+                        "last_band": stats.get("last_band", ""),
                     }
                 )
 
@@ -2129,6 +2157,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
         const tipText = (m.tooltip || m.title || '') +
           (m.last_seen ? '<br/><b>Last seen:</b> ' + m.last_seen : '') +
           (m.last_spotter ? '<br/><b>Last spotter:</b> ' + m.last_spotter : '') +
+          (m.last_band ? '<br/><b>Last band:</b> ' + m.last_band : '') +
           (m.direct_snr !== undefined && m.direct_snr !== null ? '<br/><b>Direct SNR:</b> ' + m.direct_snr.toFixed(1) + (m.direct_count ? ' (Traffic: ' + m.direct_count + ')' : '') : '') +
           (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/><b>Avg SNR:</b> ' + m.avg_snr_excl_my.toFixed(1) + (m.avg_snr_count ? ' (Traffic: ' + m.avg_snr_count + ')' : '') : '');
         circle.on('mouseover', function() {{
