@@ -378,6 +378,7 @@ class StationsMapTab(QWidget):
         self.operator_rows: List[Dict] = []
         self.operator_index: Dict[str, Dict] = {}
         self._operator_groups: List[str] = []
+        self._operator_regions: List[str] = []
         self._last_map_view: Optional[Dict[str, float]] = None
 
         # Settings handle so SettingsTab import works; JS8 indexer may be added later
@@ -411,6 +412,8 @@ class StationsMapTab(QWidget):
         self._render_pending: bool = False
 
         self._build_ui()
+        self._refresh_group_filter_options()
+        self._refresh_region_filter_options()
         self._load_display_preferences()
         self._load_operator_history()
         self._refresh_band_options()
@@ -796,12 +799,25 @@ class StationsMapTab(QWidget):
         self.link_mode_combo.addItem("Off", ("off", ""))
         self.link_mode_combo.addItem("My Station", ("my_station", ""))
         self.link_mode_combo.addItem("All", ("all", ""))
-        self.link_mode_combo.addItem("Bidirectional", ("bidirectional", ""))
-        self.link_mode_combo.addItem("One-way", ("oneway", ""))
-        self.link_mode_combo.addItem("Relays", ("relays", ""))
         # Default to My Station so the filter is applied immediately
         self.link_mode_combo.setCurrentText("My Station")
         self.link_mode_combo.currentIndexChanged.connect(self._on_link_mode_changed)
+
+        ctrl_row.addWidget(QLabel("Group"))
+        self.group_filter_combo = QComboBox()
+        self.group_filter_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.group_filter_combo.setMinimumContentsLength(14)
+        self.group_filter_combo.view().setMinimumWidth(220)
+        self.group_filter_combo.currentIndexChanged.connect(self._on_group_filter_changed)
+        ctrl_row.addWidget(self.group_filter_combo)
+
+        ctrl_row.addWidget(QLabel("Region"))
+        self.region_filter_combo = QComboBox()
+        self.region_filter_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.region_filter_combo.setMinimumContentsLength(12)
+        self.region_filter_combo.view().setMinimumWidth(200)
+        self.region_filter_combo.currentIndexChanged.connect(self._on_region_filter_changed)
+        ctrl_row.addWidget(self.region_filter_combo)
 
         self.band_combo = QComboBox()
         ctrl_row.addWidget(QLabel("Band"))
@@ -1005,6 +1021,10 @@ class StationsMapTab(QWidget):
         self._rebuild_operator_index()
         if hasattr(self, "link_mode_combo"):
             self._refresh_link_mode_options()
+        if hasattr(self, "group_filter_combo"):
+            self._refresh_group_filter_options()
+        if hasattr(self, "region_filter_combo"):
+            self._refresh_region_filter_options()
         if hasattr(self, "relay_target_combo"):
             self._refresh_relay_targets()
 
@@ -1093,6 +1113,33 @@ class StationsMapTab(QWidget):
             groups.update(group_set)
         self.operator_index = idx
         self._operator_groups = sorted(groups)
+        self._operator_regions = sorted({v.get("region") for v in idx.values() if v.get("region")})
+
+    def _refresh_group_filter_options(self):
+        current = self.group_filter_combo.currentData() if hasattr(self, "group_filter_combo") else None
+        self.group_filter_combo.blockSignals(True)
+        self.group_filter_combo.clear()
+        self.group_filter_combo.addItem("All", "")
+        for g in self._operator_groups:
+            self.group_filter_combo.addItem(g, g)
+        if current and self.group_filter_combo.findData(current) >= 0:
+            self.group_filter_combo.setCurrentIndex(self.group_filter_combo.findData(current))
+        else:
+            self.group_filter_combo.setCurrentIndex(0)
+        self.group_filter_combo.blockSignals(False)
+
+    def _refresh_region_filter_options(self):
+        current = self.region_filter_combo.currentData() if hasattr(self, "region_filter_combo") else None
+        self.region_filter_combo.blockSignals(True)
+        self.region_filter_combo.clear()
+        self.region_filter_combo.addItem("All", "")
+        for reg in self._operator_regions:
+            self.region_filter_combo.addItem(f"Region {reg}", reg)
+        if current and self.region_filter_combo.findData(current) >= 0:
+            self.region_filter_combo.setCurrentIndex(self.region_filter_combo.findData(current))
+        else:
+            self.region_filter_combo.setCurrentIndex(0)
+        self.region_filter_combo.blockSignals(False)
 
     def _refresh_link_mode_options(self):
         current_data = self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else None
@@ -1101,10 +1148,6 @@ class StationsMapTab(QWidget):
         self.link_mode_combo.addItem("Off", ("off", ""))
         self.link_mode_combo.addItem("My Station", ("my_station", ""))
         self.link_mode_combo.addItem("All", ("all", ""))
-        for reg in sorted(FEMA_REGIONS.keys()):
-            self.link_mode_combo.addItem(f"Region {reg}", ("region", reg))
-        for g in self._operator_groups:
-            self.link_mode_combo.addItem(f"Group: {g}", ("group", g))
         restore_idx = self.link_mode_combo.findData(current_data) if current_data else -1
         if restore_idx >= 0:
             self.link_mode_combo.setCurrentIndex(restore_idx)
@@ -1135,6 +1178,8 @@ class StationsMapTab(QWidget):
         my_call: str = "",
         link_selection: Optional[tuple[str, str]] = None,
         relay_target: Optional[str] = None,
+        group_filter: str = "",
+        region_filter: str = "",
         max_age_sec: Optional[int] = None,
     ) -> tuple[List[Dict], Dict[str, Dict]]:
         """
@@ -1154,6 +1199,8 @@ class StationsMapTab(QWidget):
             mode, selection_value = "off", ""
         selection_value = (selection_value or "").upper() if mode == "region" else (selection_value or "")
         relay_target = (relay_target or "").strip().upper()
+        group_filter = (group_filter or "").strip().upper()
+        region_filter = (region_filter or "").strip().upper()
         if mode == "off" and not relay_target:
             return links, {}
 
@@ -1266,6 +1313,22 @@ class StationsMapTab(QWidget):
                 elif my_call and my_call in {o, d}:
                     other = d if o == my_call else o
                     include = selection_value in self.operator_index.get(other, {}).get("groups", set())
+            if include and group_filter:
+                groups_o = self.operator_index.get(o, {}).get("groups", set())
+                groups_d = self.operator_index.get(d, {}).get("groups", set())
+                if my_call and my_call in {o, d}:
+                    other = d if o == my_call else o
+                    include = group_filter in self.operator_index.get(other, {}).get("groups", set())
+                else:
+                    include = group_filter in groups_o and group_filter in groups_d
+            if include and region_filter:
+                region_o = self.operator_index.get(o, {}).get("region")
+                region_d = self.operator_index.get(d, {}).get("region")
+                if my_call and my_call in {o, d}:
+                    other = d if o == my_call else o
+                    include = self.operator_index.get(other, {}).get("region") == region_filter
+                else:
+                    include = region_o == region_filter and region_d == region_filter
             if not include:
                 continue
 
@@ -1361,7 +1424,7 @@ class StationsMapTab(QWidget):
         combo_mode, _ = self._parse_link_selection(
             self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
         )
-        return (combo_mode and combo_mode.lower() != "off") or bool((self.relay_target or "").strip())
+        return bool(combo_mode and combo_mode.lower() != "off")
 
     # ------------- Map rendering ------------- #
     def _render_map(self, preserve_view: bool = True):
@@ -1424,8 +1487,12 @@ class StationsMapTab(QWidget):
         selection = self._parse_link_selection(
             self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
         )
-        selection_mode, selection_value = selection[0], selection[1]
-        selection_value = (selection_value or "").strip().upper()
+        group_filter = ""
+        region_filter = ""
+        if hasattr(self, "group_filter_combo"):
+            group_filter = self.group_filter_combo.currentData() or ""
+        if hasattr(self, "region_filter_combo"):
+            region_filter = self.region_filter_combo.currentData() or ""
 
         # init stats and links
         stats_lookup: Dict[str, Dict] = {}
@@ -1444,6 +1511,8 @@ class StationsMapTab(QWidget):
                 my_call=my_call,
                 link_selection=selection,
                 relay_target=relay_target or None,
+                group_filter=group_filter,
+                region_filter=region_filter,
                 max_age_sec=self.recency_seconds,
             )
             if view_state:
@@ -1452,10 +1521,12 @@ class StationsMapTab(QWidget):
         # Spread overlapping stations with the same base lat/lon
         markers = []
         base_map: Dict[tuple[float, float], List[StationPoint]] = {}
+        my_call = (self.settings.get("operator_callsign", "") or "").strip().upper()
+        traffic_calls = {cs.upper() for cs in stats_lookup.keys()}
+        show_all_stations = not self._links_active()
         for pt in self.stations:
-            if selection_mode == "group" and selection_value:
-                pt_groups = {str(g).strip().upper() for g in (pt.groups or []) if str(g).strip()}
-                if selection_value not in pt_groups:
+            if not show_all_stations:
+                if pt.callsign.upper() not in traffic_calls and pt.callsign.upper() != my_call:
                     continue
             key = (round(pt.lat, 4), round(pt.lon, 4))
             base_map.setdefault(key, []).append(pt)
@@ -2137,6 +2208,12 @@ function addGridLabels(res, level, bounds, maxLabels) {
                     self.relay_target_combo.blockSignals(False)
                 except Exception:
                     pass
+        self._render_map()
+
+    def _on_group_filter_changed(self, idx: int):
+        self._render_map()
+
+    def _on_region_filter_changed(self, idx: int):
         self._render_map()
 
     def _on_band_changed(self, idx: int):
