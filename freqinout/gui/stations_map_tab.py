@@ -1584,6 +1584,13 @@ class StationsMapTab(QWidget):
         base_map: Dict[tuple[float, float], List[StationPoint]] = {}
         my_call = (self.settings.get("operator_callsign", "") or "").strip().upper()
         traffic_calls = {cs.upper() for cs in stats_lookup.keys()}
+        for link in links:
+            origin = (link.get("origin") or "").strip().upper()
+            dest = (link.get("destination") or "").strip().upper()
+            if origin:
+                traffic_calls.add(origin)
+            if dest:
+                traffic_calls.add(dest)
         show_all_stations = not self._links_active()
         for pt in self.stations:
             if not show_all_stations:
