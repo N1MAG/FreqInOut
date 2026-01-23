@@ -380,6 +380,8 @@ class SettingsTab(QWidget):
             ("FLMsg", "FLMsg"),
             ("FLAmp", "FLAmp"),
             ("VarAC", "VarAC"),
+            ("JS8Spotter", "JS8Spotter"),
+            ("CommStat", "CommStat"),
         ]
         for key, label in status_items:
             led = QLabel()
@@ -1419,7 +1421,8 @@ class SettingsTab(QWidget):
                     exe = os.path.basename(proc.info.get("exe") or "").lower()
                     cmdline_list = proc.info.get("cmdline") or []
                     first_arg = os.path.basename(cmdline_list[0]).lower() if cmdline_list else ""
-                    for token in (name, exe, first_arg):
+                    second_arg = os.path.basename(cmdline_list[1]).lower() if len(cmdline_list) > 1 else ""
+                    for token in (name, exe, first_arg, second_arg):
                         if token:
                             snap.append(token)
                 except Exception:
@@ -1428,6 +1431,8 @@ class SettingsTab(QWidget):
             self._proc_snapshot_ts = now_ts
         exe_path = self._get_saved_program_path(program_name)
         target_names = {program_name.lower(), f"{program_name.lower()}.exe"}
+        if program_name in {"JS8Spotter", "CommStat"}:
+            target_names.add(f"{program_name.lower()}.py")
         if exe_path:
             target_names.add(exe_path.name.lower())
         return any(entry in target_names for entry in self._proc_snapshot)
