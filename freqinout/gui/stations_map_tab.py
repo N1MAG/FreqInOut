@@ -29,10 +29,14 @@ from PySide6.QtWidgets import (
 )
 from freqinout.core.config_paths import get_config_dir
 
+_WEBENGINE_IMPORT_ERROR = None
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
-except Exception:  # pragma: no cover - optional dependency
+    from PySide6.QtWebEngineCore import QWebEnginePage
+except Exception as exc:  # pragma: no cover - optional dependency
     QWebEngineView = None
+    QWebEnginePage = None
+    _WEBENGINE_IMPORT_ERROR = exc
 
 JS8NET_PATH = Path(__file__).resolve().parents[2] / "third_party" / "js8net" / "js8net-main"
 if JS8NET_PATH.exists():
@@ -44,6 +48,23 @@ except Exception:
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
+
+
+def _ensure_webengine_imported() -> bool:
+    global QWebEngineView, QWebEnginePage, _WEBENGINE_IMPORT_ERROR
+    if QWebEngineView is not None:
+        return True
+    try:
+        from PySide6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView
+        from PySide6.QtWebEngineCore import QWebEnginePage as _QWebEnginePage
+    except Exception as exc:  # pragma: no cover - optional dependency
+        _WEBENGINE_IMPORT_ERROR = exc
+        log.warning("Qt WebEngine import failed: %s", exc, exc_info=True)
+        return False
+    QWebEngineView = _QWebEngineView
+    QWebEnginePage = _QWebEnginePage
+    _WEBENGINE_IMPORT_ERROR = None
+    return True
 
 
 USA_STATES = [
@@ -685,6 +706,10 @@ class StationsMapTab(QWidget):
                 except Exception:
                     pass
                 try:
+                    self.web.loadFinished.disconnect(self._on_map_load_finished)
+                except Exception:
+                    pass
+                try:
                     self.web.hide()
                 except Exception:
                     pass
@@ -700,6 +725,11 @@ class StationsMapTab(QWidget):
                     page = self.web.page()
                     if page is not None:
                         try:
+                            if QWebEnginePage is not None:
+                                self.web.setPage(QWebEnginePage(self.web))
+                        except Exception:
+                            pass
+                        try:
                             page.setParent(None)
                         except Exception:
                             pass
@@ -711,6 +741,10 @@ class StationsMapTab(QWidget):
                 except Exception:
                     pass
                 self.web = None
+        except Exception:
+            pass
+        try:
+            QCoreApplication.processEvents()
         except Exception:
             pass
 
@@ -855,7 +889,7 @@ class StationsMapTab(QWidget):
         layout.addLayout(ctrl_row)
 
         # Map view
-        if QWebEngineView is not None:
+        if _ensure_webengine_imported():
             self.web = QWebEngineView()
             self.web.loadFinished.connect(self._on_map_load_finished)
             layout.addWidget(self.web)
