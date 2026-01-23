@@ -2135,6 +2135,10 @@ class JS8CallNetControlTab(QWidget):
         if not cs or not msg:
             return
         upper = msg.upper()
+        if "*DE*" in upper:
+            return
+        if any(code in upper for code in ("F!107", "F!305", "F!307", "F!308", "F!701")):
+            return
         if "GR[" not in upper and "ST[" not in upper and "," not in msg:
             return
         state = ""
@@ -2227,13 +2231,24 @@ class JS8CallNetControlTab(QWidget):
             else:
                 old_state, old_grid, g1, g2, g3, groups_json, trusted = row
                 new_state = (old_state or "").strip().upper()
-                if state and state != new_state:
+                old_grid_norm = (old_grid or "").strip().upper()
+                has_group = bool((g1 or "").strip() or (g2 or "").strip() or (g3 or "").strip())
+                if not has_group and groups_json:
+                    try:
+                        parsed = json.loads(groups_json)
+                        if isinstance(parsed, list) and any(str(x).strip() for x in parsed):
+                            has_group = True
+                    except Exception:
+                        pass
+                if not (has_group and (new_state or old_grid_norm)) and state and state != new_state:
                     new_state = state
-                new_grid = (old_grid or "").strip().upper()
+                new_grid = old_grid_norm
                 if grid:
                     if not new_grid:
                         new_grid = grid
-                    elif len(grid) > len(new_grid) or (len(grid) == len(new_grid) and grid != new_grid):
+                    elif len(new_grid) == 4 and len(grid) == 6 and new_grid == grid[:4]:
+                        new_grid = grid
+                    elif len(new_grid) == 6 and len(grid) == 6 and grid != new_grid:
                         new_grid = grid
                 g_list = [g1 or "", g2 or "", g3 or ""]
                 if group_name and group_name not in g_list:
