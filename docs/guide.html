@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -27,307 +27,246 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.0.7</p>
+  <p><strong>Current version</strong>: 1.0.8</p>
   <p>This guide describes every tab, button, field, and function in FreqInOut. Times are stored in UTC; the "Showing: Local/UTC" toggle only changes what you see.</p>
   <p><strong>Responsibility notice</strong>: FreqInOut assists licensed amateur operators by coordinating complex radio software and schedules. It assumes you follow applicable band plans and regulations. Disabling safeguards (for example, scheduling) can let you tune outside legal allocations. You are solely responsible for compliant operation; the authors and contributors are not liable for misuse.</p>
 
   <h2 id="quick-start">Quick Start</h2>
   <p><strong>Purpose</strong>: Get a first successful setup and map display quickly.</p>
   <ol class="section-list">
-    <li><strong>Start in Settings</strong>: Open <a href="#settings">Settings</a> and enter your callsign/name/state/grid, select Frequency Control, set JS8Call DIRECTED.TXT, and set message folders. Click <em>Save Settings</em> so the other tabs pick up your changes. (You can return here anytime.)</li>
+    <li><strong>Start in Settings</strong>: Open <a href="#settings">Settings</a> and enter your callsign/name/state/grid, select Frequency Control, set JS8Call DIRECTED.TXT, and set message folders. Click <em>Save Settings</em> so the other tabs pick up your changes.</li>
     <li><strong>Create Operating Groups</strong>: Add your go-to frequencies in <a href="#settings-op-groups">Operating Groups</a>. These drive the HF Schedule, Net Schedule, and the QSY dropdowns.</li>
-    <li><strong>Build schedules</strong>: Use <a href="#scheduler-daily">HF Schedule</a> for routine operating blocks and <a href="#scheduler-net">Net Schedule</a> for nets. The <a href="#planner">FreqPlanner</a> view updates from these schedules.</li>
-    <li><strong>Populate operators and JS8 traffic</strong>: Import your operator list in <a href="#operators">Operators</a> (Map uses this for locations), then return to <a href="#settings-js8call">Settings &gt; JS8Call Settings</a> and click <em>Load JS8 Traffic</em> to populate the Map and link history.</li>
-    <li><strong>Map data sources</strong>: The Map uses the JS8Call API for live traffic when available and falls back to JS8 log files when the API is not reachable. Make sure Settings and Operators are populated for a complete map.</li>
+    <li><strong>Build schedules</strong>: Use <a href="#hf-schedule">HF Schedule</a> for routine operating blocks and <a href="#net-schedule">Net Schedule</a> for nets. The <a href="#freqplanner">FreqPlanner</a> view updates from these schedules.</li>
+    <li><strong>Populate operators and JS8 traffic</strong>: Import your operator list in <a href="#operators">Operators</a>, then return to <a href="#settings-js8call">Settings &gt; JS8Call Settings</a> and click <em>Load JS8 Traffic</em> to populate the Map and link history.</li>
+    <li><strong>Open the Map</strong>: Use the Map Layers sidebar filters and the map dropdowns to focus on the groups, regions, bands, and recency windows you care about.</li>
   </ol>
 
-  <h2 id="prerequisites">1. Prerequisites</h2>
+  <h2 id="prerequisites">Prerequisites</h2>
   <p><strong>Purpose</strong>: Ensure required software and paths are in place before first run.</p>
   <ul class="section-list">
     <li><strong>Install method</strong>: Packaged builds include dependencies; source installs use a Python venv and <code>pip install -r requirements.txt</code>.</li>
     <li><strong>Python</strong>: 3.9-3.12 for source installs.</li>
     <li><strong>Debian/Ubuntu</strong>: Install <code>python3 python3-venv python3-pip libxcb-cursor0 libxcb-xinerama0</code>, then create a venv and install requirements.</li>
-    <li><strong>Radio software</strong>: Install FLRig if you want rig control, JS8Call if you want JS8 features, and FLDigi/FLMsg/FLAmp if you plan to run FLDigi nets or view NBEMS messages.</li>
+    <li><strong>Radio software</strong>: Install FLRig if you want rig control, JS8Call for JS8 features, and FLDigi/FLMsg/FLAmp if you plan to run FLDigi nets or view NBEMS messages.</li>
     <li><strong>Paths you will need</strong>: JS8Call DIRECTED.TXT (and its folder), and the VarAC/FLMSG/FLAMP folders used by the Messages tab.</li>
   </ul>
 
-  <h2 id="settings">2. Settings Tab</h2>
+  <h2 id="freqplanner">FreqPlanner Tab</h2>
+  <p><strong>Purpose</strong>: A read-only 24-hour view of HF and Net schedules.</p>
+  <ol class="section-list">
+    <li><strong>Header clocks</strong>: UTC and Local times update live.</li>
+    <li><strong>Showing: UTC/Local</strong>: Toggle how the time columns are labeled; schedule data is still stored in UTC.</li>
+    <li><strong>Band legend</strong>: The legend above the grid shows the color mapping for bands.</li>
+    <li><strong>Planner table</strong>: Columns are <em>UTC Hour</em>, <em>Local Time (TZ)</em>, and <em>Sunday</em> through <em>Saturday</em>. The table is read-only and not sortable.</li>
+  </ol>
+
+  <h2 id="messages">Messages Tab</h2>
+  <p><strong>Purpose</strong>: View and manage FLDigi/FLMsg/FLAmp/VarAC files and JS8 inbox messages.</p>
+  <ol class="section-list">
+    <li><strong>Scan every</strong>: Dropdown for 1/15/30/60 minutes; controls file folder rescan intervals. JS8Call messages refresh automatically at short intervals.</li>
+    <li><strong>Refresh Now</strong>: Forces an immediate refresh of file-based messages and JS8 inbox data.</li>
+    <li><strong>Export to PDF</strong>: Exports the currently viewed file-based message.</li>
+    <li><strong>Pending JS8 MSGs</strong>: Table columns are Callsign, Msg ID, Last Seen, Status, Actions. Actions include <em>Get</em> (send a JS8 QUERY MSG) and <em>Mark Retrieved</em> (clears the pending state; can also mark JS8Call inbox rows READ if enabled in Settings).</li>
+    <li><strong>Filters row</strong>: Dropdown filters for MSG Type, Status, From, and To; a Search box for free-text; and <em>Clear Filters</em> to reset.</li>
+    <li><strong>Messages table</strong>: Columns are MSG Type, Status, From, To, RCV_DT, Message Title, and Actions. Actions show <em>View</em> for JS8 messages or <em>View | Delete</em> for file-based messages.</li>
+    <li><strong>Sorting</strong>: Click headers to sort by MSG Type, Status, From, To, RCV_DT, or Message Title (Actions is not sortable).</li>
+    <li><strong>Reader panel</strong>: The lower pane shows the selected message and stays open while you review entries.</li>
+  </ol>
+
+  <h2 id="fldigi-ncs">FLDigi NCS Tab</h2>
+  <p><strong>Purpose</strong>: Manage FLDigi net check-ins and logs.</p>
+  <ol class="section-list">
+    <li><strong>Header clocks</strong>: UTC and Local update live at the top.</li>
+    <li><strong>Next Scheduled Net</strong>: The banner shows the next net and current band; it also reflects scheduler pause state.</li>
+    <li><strong>Role</strong>: Dropdown with NCS/ANCS/JOINER, which affects how your own entry is tagged when starting a net.</li>
+    <li><strong>Net Name</strong>: Editable dropdown with schedule-driven suggestions.</li>
+    <li><strong>QSY controls</strong>: QSY dropdown (Operating Groups) and QSY button. Clicking QSY changes frequency and pauses the scheduler for 30 minutes (button shows remaining time).</li>
+    <li><strong>Ad Hoc Net</strong>: Creates a timestamped net name and starts the net.</li>
+    <li><strong>Operator Lookup/Add</strong>: Search field that auto-fills known operators; use Tab/Enter to move through Add buttons.</li>
+    <li><strong>Add to Main / Add to New/Late</strong>: Buttons that insert the lookup line into the appropriate pane.</li>
+    <li><strong>Compare NCS Lists</strong>: Opens a dialog with <em>Compare</em>, <em>Copy Missing</em>, and <em>Close</em> to reconcile local check-ins against an NCS list.</li>
+    <li><strong>Copy buttons</strong>: Copy the full Main or New/Late text to the clipboard.</li>
+    <li><strong>Main Check-in Log</strong>: Editable text area for primary check-ins.</li>
+    <li><strong>New/Late Check-ins</strong>: Editable text area for late or follow-up entries.</li>
+    <li><strong>Start Net</strong>: Begins the net session.</li>
+    <li><strong>Save Check-ins</strong>: Writes both panes to the configured check-in files and refreshes operator history.</li>
+    <li><strong>Merge Check-ins</strong>: Moves New/Late entries into Main and clears New/Late.</li>
+    <li><strong>End Net</strong>: Saves and closes the net; can auto-end if a scheduled frequency change occurs and the scheduler is not paused. Check-ins are saved to Operator History and the check-in counter is incremented.</li>
+  </ol>
+
+  <h2 id="js8-ncs">JS8 NCS Tab</h2>
+  <p><strong>Purpose</strong>: Manage JS8Call net check-ins, ACKs, and spotter forms.</p>
+  <ol class="section-list">
+    <li><strong>Header clocks</strong>: UTC and Local update live at the top.</li>
+    <li><strong>Role</strong>: Dropdown with NCS/ANCS.</li>
+    <li><strong>Net Name</strong>: Text field with schedule-based auto-complete.</li>
+    <li><strong>Refresh (sec)</strong>: Spinbox for JS8 polling interval (5-300 seconds).</li>
+    <li><strong>Set Group</strong>: Button plus group field (use @GROUP format); required to start a net.</li>
+    <li><strong>Set Expect Query</strong>: Button plus Spotter dropdown to choose a form (F!###). The dropdown is disabled if no forms are found.</li>
+    <li><strong>QSY controls</strong>: QSY dropdown (Operating Groups) and QSY button. QSY pauses the scheduler for 30 minutes.</li>
+    <li><strong>Ad Hoc Net</strong>: Starts a net with a timestamped name.</li>
+    <li><strong>Check-in Filter</strong>: Dropdown with F!103 / F!104, Any Spotter, and All Callsigns.</li>
+    <li><strong>Check-ins table</strong>: Columns are CALLSIGN, NAME, ST, GRID, REGION, MODE, SNR, OFFSET, STATUS, and Actions.</li>
+    <li><strong>Delete action</strong>: The Actions column shows <em>Delete</em> only when a net is in progress and the filter is <em>All Callsigns</em>.</li>
+    <li><strong>Start Net</strong>: Clears and begins monitoring.</li>
+    <li><strong>ACK GROUP / ACK CALLSIGN</strong>: Sends group or selected callsign acknowledgments.</li>
+    <li><strong>E? GROUP / E? Callsign</strong>: Sends a spotter form query to the group or selected callsign.</li>
+    <li><strong>Save Checkins</strong>: Saves this net’s check-ins to the DB and updates Operators.</li>
+    <li><strong>End Net</strong>: Ends the net and writes a net log file in a <code>net_logs</code> folder next to DIRECTED.TXT.</li>
+  </ol>
+
+  <h2 id="operators">Operators Tab</h2>
+  <p><strong>Purpose</strong>: Maintain operator records used by maps and nets.</p>
+  <ol class="section-list">
+    <li><strong>Search</strong>: Text box that filters by any column.</li>
+    <li><strong>Refresh</strong>: Reloads operator data from the DB.</li>
+    <li><strong>Import/Export...</strong>: Menu with <em>Import CSV...</em> and <em>Export CSV...</em>.</li>
+    <li><strong>Manage Operators</strong>: Menu with <em>Add Operator...</em>, <em>Edit Selected...(bulk trust update)</em>, and <em>Delete Selected...</em>.</li>
+    <li><strong>Select All</strong>: Checks every row for bulk export or edits.</li>
+    <li><strong>Filter by</strong>: Dropdown with All, Untrusted, and any discovered group names.</li>
+    <li><strong>Operators table</strong>: Columns are Selected checkbox, Callsign, Name, State, Grid, Group 1, Group 2, Group 3, Group Role, First Seen, Last Seen, Trusted, and Check-ins. The table is not sortable.</li>
+    <li><strong>Add/Edit dialog fields</strong>: Callsign, Name, State, Grid, Group 1/2/3, Group Role, First Seen, Last Seen, Trusted ("do I trust their reports?").</li>
+  </ol>
+
+  <h2 id="map">Map Tab</h2>
+  <p><strong>Purpose</strong>: Visualize operators, grids, and JS8 traffic links.</p>
+  <ol class="section-list">
+    <li><strong>Map link controls row</strong>: Top row includes Paths (Off/My Station/All), Group, Region, Band, Recency (Any, 15m, 30m, 1h, 3h, 6h, 12h, 24h, 7d), Paths to (editable callsign), and <em>Refresh Links</em>.</li>
+    <li><strong>Map view</strong>: Requires Qt WebEngine; if unavailable, a disabled message is shown.</li>
+    <li><strong>Map Layers (sidebar)</strong>: Only visible when Map is active. Checkboxes for Callsigns, States, Cities, Grids, and Regions plus a City Pop. dropdown (1M+, 750k+, 500k+, 250k+, 100k+, 75k+, 50k+, 25k+, 10k+, 5k+, &lt;5k).</li>
+    <li><strong>Paths to</strong>: Use this to focus link highlights on paths that reach a specific callsign.</li>
+    <li><strong>Refresh Links</strong>: Forces JS8 log ingest and redraw.</li>
+  </ol>
+
+  <h2 id="hf-schedule">HF Schedule Tab</h2>
+  <p><strong>Purpose</strong>: Plan routine operating blocks.</p>
+  <ol class="section-list">
+    <li><strong>Header clocks</strong>: UTC and Local update live.</li>
+    <li><strong>Showing: UTC/Local</strong>: Toggle the time display only.</li>
+    <li><strong>QSY controls</strong>: QSY dropdown (Operating Groups) and QSY button. QSY pauses the scheduler for 30 minutes.</li>
+    <li><strong>Schedule table</strong>: Columns are Selected, Day, Group Name, Mode, Band, Freq (MHz), Start, End, Auto-Tune. The table is not sortable.</li>
+    <li><strong>Add Row</strong>: Inserts a new schedule row.</li>
+    <li><strong>Delete Selected</strong>: Removes checked rows.</li>
+    <li><strong>Save HF Schedule</strong>: Saves to the database and refreshes FreqPlanner.</li>
+    <li><strong>Export HF Schedule</strong>: Exports JSON in UTC.</li>
+  </ol>
+
+  <h2 id="net-schedule">Net Schedule Tab</h2>
+  <p><strong>Purpose</strong>: Define net windows and how they repeat.</p>
+  <ol class="section-list">
+    <li><strong>Header clocks</strong>: UTC and Local update live.</li>
+    <li><strong>Showing: UTC/Local</strong>: Toggle the time display only.</li>
+    <li><strong>Schedule table</strong>: Columns are Selected, Day (Local or UTC), Recurrence, Group Name, Mode, Band, Freq (MHz), Start, End, Early (min), Net Name, Auto-Tune. The table is not sortable.</li>
+    <li><strong>Add Row</strong>: Inserts a new schedule row.</li>
+    <li><strong>Delete Selected</strong>: Removes checked rows.</li>
+    <li><strong>Export Net Schedule</strong>: Exports JSON in UTC.</li>
+    <li><strong>Import Net Schedule</strong>: Imports JSON (interpreted as UTC).</li>
+    <li><strong>Save Net Schedule</strong>: Saves to the database and refreshes FreqPlanner.</li>
+  </ol>
+
+  <h2 id="peer-schedules">Peer Schedules Tab</h2>
+  <p><strong>Purpose</strong>: Track schedules imported from other operators.</p>
+  <ol class="section-list">
+    <li><strong>Import Schedule</strong>: Loads a peer HF schedule JSON (UTC).</li>
+    <li><strong>Refresh</strong>: Reloads the list from the database.</li>
+    <li><strong>Delete</strong>: Dropdown for callsigns plus <em>Delete Schedule</em> to remove a single peer schedule.</li>
+    <li><strong>Clear All</strong>: Removes all imported peer schedules.</li>
+    <li><strong>Filters</strong>: Callsign dropdown, Region dropdown (R01-R10), Group dropdown, and Search field.</li>
+    <li><strong>Peer schedule table</strong>: Columns are CALLSIGN, NAME, STATE, GROUPS, DAY (UTC), START UTC, END UTC, BAND, MODE, FREQ. The table is not sortable.</li>
+  </ol>
+
+  <h2 id="settings">Settings Tab</h2>
   <p><strong>Purpose</strong>: Configure operator details, scheduler behavior, and integrations.</p>
-  <p><a href="#quick-start">Back to Quick Start</a></p>
   <p><strong>Quick links</strong>: <a href="#settings-operator">Operator Information</a> | <a href="#settings-operation">FreqInOut Settings</a> | <a href="#settings-status">Operating Status</a> | <a href="#settings-op-groups">Operating Groups</a> | <a href="#settings-js8call">JS8Call Settings</a> | <a href="#settings-radio">Radio Software</a> | <a href="#settings-actions">Save Settings</a></p>
+
   <h3 id="settings-operator">Operator Information</h3>
-  <p><strong>Purpose</strong>: Identify your station and map location.</p>
   <ul class="section-list">
-    <li><strong>Header clocks</strong>: The Settings header shows UTC and Local based on your system timezone.</li>
-    <li><strong>Callsign / Name / State / Grid6</strong>: These show up in net control, operator history, and the map. A 6-character grid is used for map placement (it is more precise than a state but still privacy friendly).</li>
-    <li><strong>Why it matters</strong>: Your callsign is required to send JS8 messages and to start nets; your grid helps the Map tab place your station.</li>
+    <li><strong>Header clocks</strong>: UTC and Local update live.</li>
+    <li><strong>Callsign / Name / State / Grid 6</strong>: Used in net control, operator history, and map placement.</li>
   </ul>
 
   <h3 id="settings-operation">FreqInOut Settings</h3>
-  <p><strong>Purpose</strong>: Control scheduler behavior, rig control, and theme.</p>
   <ul class="section-list">
-    <li><strong>Frequency Control</strong>: Choose FLRig, JS8Call, or Manual. FLRig is recommended for rig control. FLRig requires the XMLRPC port which is set to the default value of 12345. Manual means no rig commands are sent.</li>
-    <li><strong>Use FreqInOut Scheduler</strong>: Master enable for schedule-driven frequency changes. When off, QSY buttons are disabled and the scheduler does not send rig commands.</li>
-    <li><strong>Schedule Mode</strong>: Choose how strictly the schedule is enforced. For new users: start with Normal if you want the schedule to guide you without correcting drift, use Loose if you want a reminder and the ability to temporarily pause enforcement, and use Strict if you want active enforcement. See <a href="#scheduler-modes">Scheduler Modes</a> for details.</li>
-    <li><strong>Theme</strong>: Light or Dark UI theme. Changes apply immediately after Save Settings.</li>
+    <li><strong>Theme</strong>: Light or Dark.</li>
+    <li><strong>Frequency Control</strong>: FLRig, JS8Call, or Manual (no rig commands).</li>
+    <li><strong>Use FreqInOut Scheduler</strong>: Master enable for schedule-driven changes; disables QSY when off.</li>
+    <li><strong>Schedule Mode</strong>: Normal (apply on schedule only), Loose (prompt to reapply when off schedule), Strict (periodic resync). Off-schedule prompts offer Yes, Suspend, or Ignore.</li>
   </ul>
-  <p><a href="#qsy-suspend">Back to QSY / Suspend</a> | <a href="#scheduler-engine">Back to Scheduler Engine</a></p>
 
   <h3 id="settings-status">Operating Status</h3>
   <ul class="section-list">
-    <li><strong>Purpose</strong>: Always-visible status LEDs show which companion apps are running.</li>
-    <li><strong>LED order</strong>: JS8, FLRig, FLDigi, FLMsg, FLAmp, VarAC, JS8Spotter, CommStat.</li>
-    <li><strong>Color meaning</strong>: Green means running, gray means not running, yellow means running but not reachable.</li>
+    <li><strong>Status LEDs</strong>: JS8, FLRig, FLDigi, FLMsg, FLAmp, VarAC, JS8Spotter, CommStat.</li>
+    <li><strong>Color meaning</strong>: Green running, gray stopped, yellow running but unreachable.</li>
   </ul>
 
   <h3 id="settings-op-groups">Operating Groups</h3>
   <ul class="section-list">
-    <li><strong>Collapsible section</strong>: Click the arrow to expand or collapse Operating Groups. A brief summary appears when collapsed.</li>
-    <li><strong>Purpose</strong>: Operating Groups are your master list of frequencies. They populate the HF Schedule, Net Schedule, and QSY dropdowns in the net control tabs.</li>
-    <li><strong>Add Group</strong>: Click <em>Add Group</em> and enter Group, Mode, Band, Frequency, VFO, and Auto-Tune. Frequencies are validated against FCC band/mode ranges.</li>
-    <li><strong>VFO</strong>: The scheduler uses the VFO stored on the Operating Group to support advanced rig control scenarios.</li>
-    <li><strong>FLDigi Starting Mode / Offset</strong>: Defines the mode and audio offset to apply when this group becomes active. If left blank, FLDigi stays at its current mode/offset so you can adjust during a net.</li>
-    <li><strong>Edit Selected</strong>: Tick exactly one row and click <em>Edit Selected</em>.</li>
-    <li><strong>Delete Selected</strong>: Tick one or more rows and click <em>Delete Selected</em>.</li>
-    <li><strong>Auto-Tune</strong>: When enabled, QSY will also run a rig tune (if your rig control supports it).</li>
-    <li><strong>Used by</strong>: <a href="#scheduler-daily">HF Schedule</a>, <a href="#scheduler-net">Net Schedule</a>, <a href="#fldigi-ncs">FLDigi NCS</a>, <a href="#js8-ncs">JS8 NCS</a>, and the shared <a href="#qsy-suspend">QSY / Suspend</a> controls.</li>
+    <li><strong>Section behavior</strong>: Collapsible header toggles open/closed state.</li>
+    <li><strong>Add Group</strong>: Opens a dialog to define Group Name, Mode, Band, Frequency, VFO, FLDigi Starting Mode, FLDigi Starting Offset (Hz), and Auto-Tune.</li>
+    <li><strong>Edit Selected</strong>: Edits the checked row (one at a time).</li>
+    <li><strong>Delete Selected</strong>: Removes checked rows.</li>
+    <li><strong>Operating Groups table</strong>: Columns are Selected, Group, Mode, Band, Freq (MHz), VFO, FLDigi Starting Mode, FLDigi Starting Offset, Auto-Tune.</li>
   </ul>
-  <p><a href="#quick-start">Back to Quick Start</a></p>
 
   <h3 id="settings-js8call">JS8Call Settings</h3>
-  <p><strong>Purpose</strong>: Connect to JS8Call and define ingest/spotter sources.</p>
   <ul class="section-list">
-    <li><strong>Collapsible section</strong>: Click the arrow to expand or collapse JS8Call Settings. A brief summary appears when collapsed.</li>
-    <li><strong>TCP Port / Offset (Hz)</strong>: TCP Port must match JS8Call configuration. The Offset is applied at startup and on schedule changes. If you have not set an offset yet, FreqInOut chooses a random value between 1900-2200 Hz (in 50 Hz steps) and saves it for you.</li>
-    <li><strong>DIRECTED.TXT path</strong>: Browse to JS8Call's DIRECTED.TXT. ALL.TXT and the inbox database are inferred from the same folder. Required for <a href="#js8-ncs">JS8 NCS</a>.</li>
-    <li><strong>JS8Spotter forms</strong>: Folder that contains MCF###.txt files so spotter traffic (F!###) can be decoded in Messages and JS8 NCS. Used by <a href="#js8-ncs">JS8 NCS</a> and <a href="#messages">Messages</a>.</li>
-    <li><strong>Mark JS8Call MSG Retrieved</strong>: When enabled, clicking <em>Mark Retrieved</em> in Messages will also set the JS8Call inbox row to READ.</li>
-    <li><strong>Load JS8 Traffic</strong>: Ingest DIRECTED.TXT and ALL.TXT into the Map links and operator history. This is the fallback path when the JS8Call API is unavailable. It works without Operating Groups, but Operating Groups let FreqInOut tag group names based on frequency. After running it, check <a href="#map">Map</a> and <a href="#operators">Operators</a>.</li>
+    <li><strong>Section behavior</strong>: Collapsible header toggles open/closed state.</li>
+    <li><strong>TCP Port</strong>: Must match JS8Call configuration.</li>
+    <li><strong>Offset (Hz)</strong>: Applied on startup and on schedule changes.</li>
+    <li><strong>Mark JS8Call MSG Read?</strong>: Syncs Message Viewer <em>Mark Retrieved</em> to JS8Call inbox READ state.</li>
+    <li><strong>JS8Call DIRECTED.TXT</strong>: Path field plus Browse button.</li>
+    <li><strong>JS8Spotter forms</strong>: Path field plus Browse button (MCF###.txt forms).</li>
+    <li><strong>Load JS8 Traffic</strong>: Ingests DIRECTED.TXT/ALL.TXT into Map and Operators.</li>
   </ul>
-  <p><a href="#js8-ncs">Back to JS8 NCS</a> | <a href="#messages">Back to Messages</a> | <a href="#map">Back to Map</a> | <a href="#quick-start">Back to Quick Start</a></p>
 
   <h3 id="settings-radio">Radio Software</h3>
-  <p><strong>Purpose</strong>: Configure paths and launch options for companion apps.</p>
   <ul class="section-list">
-    <li><strong>Collapsible section</strong>: Click the arrow to expand or collapse Radio Software. A brief summary appears when collapsed.</li>
-    <li><strong>Program rows</strong>: Each row has a checkbox (selects the app for Launch) and an executable path.</li>
-    <li><strong>Launch Selected</strong>: Starts the checked programs that are not already running. This is a convenience launcher; JS8Call is managed separately.</li>
-    <li><strong>FLRig XMLRPC Port</strong>: Set the port FLRig listens on. This must match your FLRig configuration. The default value is populated for you.</li>
-    <li><strong>Message folders</strong>: Check-in File Path (FLDigi), ICS/Messages (FLMSG), FLAMP/rx, and VarAC Incoming Files are used by the Messages tab and FLDigi NCS check-ins.</li>
-    <li><strong>Check-in Log Paths</strong>: Use Copy Main and Copy New/Late to copy the full paths to the FLDigi check-in files to use in Macros if desired. These files are used by the FLDigi NCS tab logic an are automatically generated. A confirmation popup tells you the path was copied.</li>
-    <li><strong>Autostart note</strong>: If you have legacy autostart flags in your settings, the schedule tabs can auto-launch Digi tools when you select Digi mode. Otherwise nothing auto-launches.</li>
+    <li><strong>Section behavior</strong>: Collapsible header toggles open/closed state.</li>
+    <li><strong>Program rows</strong>: FLRig, FLDigi, FLMsg, and FLAmp each have a checkbox, path field, and Browse button.</li>
+    <li><strong>FLRig XMLRPC Port</strong>: Port field under the FLRig row.</li>
+    <li><strong>Check-in File Path</strong>: FLDigi check-in folder plus Browse.</li>
+    <li><strong>ICS/Messages</strong>: FLMsg folder plus Browse.</li>
+    <li><strong>FLAMP/rx</strong>: FLAmp folder plus Browse.</li>
+    <li><strong>VarAC</strong>: Read-only status/path field and VarAC Incoming Files path plus Browse.</li>
+    <li><strong>Launch Selected</strong>: Launches checked programs that are not already running.</li>
+    <li><strong>Check-in Log Paths</strong>: Copy Main and Copy New/Late buttons copy full file paths to the clipboard.</li>
   </ul>
 
   <h3 id="settings-actions">Save Settings</h3>
-  <p><strong>Purpose</strong>: Persist settings and refresh dependent tabs.</p>
   <ul class="section-list">
-    <li><strong>Save Settings</strong>: Writes all settings and refreshes the rest of the app (QSY dropdowns, net name suggestions, map layers). Use this after changing paths or Operating Groups.</li>
-    <li><strong>Auto-save on exit</strong>: Settings are also saved when the app closes, but you should still use Save Settings after major changes.</li>
+    <li><strong>Save Settings</strong>: Persists all settings and refreshes dependent tabs.</li>
+    <li><strong>Auto-save on exit</strong>: Settings are also saved when the app closes.</li>
   </ul>
 
-  <h2 id="scheduler">3. Scheduler and Planning</h2>
-  <p><strong>Purpose</strong>: Define schedules and understand scheduler behavior.</p>
-  <h3 id="scheduler-daily">HF Schedule Tab</h3>
-  <p><strong>Purpose</strong>: Plan routine operating blocks.</p>
-  <ol class="section-list">
-    <li><strong>Start with Operating Groups</strong>: The Group/Mode/Band/Frequency fields pull from <a href="#settings-op-groups">Operating Groups</a>. If a group has multiple modes for the same band, the Mode cell becomes a dropdown.</li>
-    <li><strong>Add a row</strong>: Click <em>Add Row</em>, then select Day (or ALL), Group Name, Band, and Mode. Start/End are HH:MM. The Frequency cell is read-only and auto-filled from the group.</li>
-    <li><strong>VFO comes from Operating Groups</strong>: The scheduler uses the VFO set on the matching Operating Group, so the HF Schedule does not ask for VFO.</li>
-    <li><strong>FLDigi mode/offset (if used)</strong>: When a row becomes active, the scheduler applies the Operating Group's FLDigi Starting Mode/Offset if FLDigi is running. This gives each group a predictable starting point without forcing changes mid-net.</li>
-    <li><strong>Day and overnight rules</strong>: ALL applies every day. If Start is later than End, the row spans overnight into the next day.</li>
-    <li><strong>Auto-Tune</strong>: Check Auto-Tune if you want a rig tune when this row becomes active (if your rig backend supports it).</li>
-    <li><strong>Frequency validation</strong>: Band/mode ranges are validated; 60M is limited to standard channels.</li>
-    <li><strong>Auto-start (optional)</strong>: If legacy autostart flags are enabled, selecting Digi mode can auto-launch FLDigi/FLMsg/FLAmp.</li>
-    <li><strong>Time toggle</strong>: Use the "Showing: Local/UTC" button to change what you see. The schedule is stored in UTC either way.</li>
-    <li><strong>QSY controls</strong>: The QSY dropdown and button under the time bar are shared across tabs. Use them for a manual QSY and a 30-minute scheduler pause. See <a href="#qsy-suspend">QSY / Suspend</a>.</li>
-    <li><strong>Save or Export</strong>: <em>Save HF Schedule</em> writes to the app database and updates the planner. <em>Export HF Schedule</em> writes JSON.</li>
-    <li><strong>Delete Selected</strong>: Use the left checkbox or select a row to enable Delete.</li>
-  </ol>
-  <p><a href="#settings-op-groups">Back to Operating Groups</a> | <a href="#quick-start">Back to Quick Start</a></p>
-
-  <h3 id="scheduler-net">Net Schedule Tab</h3>
-  <ol class="section-list">
-    <li><strong>Purpose</strong>: Net Schedule is used by <a href="#fldigi-ncs">FLDigi NCS</a>, <a href="#js8-ncs">JS8 NCS</a>, and the planner to show upcoming nets.</li>
-    <li><strong>Add a row</strong>: Choose Day, Recurrence (Weekly / Bi-Weekly / Ad Hoc), Group Name, Band, Mode, Start/End, and Net Name. If Start is later than End, the net spans overnight into the next day.</li>
-    <li><strong>VFO comes from Operating Groups</strong>: The scheduler uses the VFO set on the matching Operating Group, so the Net Schedule does not ask for VFO.</li>
-    <li><strong>FLDigi mode/offset (if used)</strong>: When a net starts, the scheduler applies the Operating Group's FLDigi Starting Mode/Offset if FLDigi is running. If FLDigi starts later, the scheduler applies them a few seconds after startup.</li>
-    <li><strong>Bi-Weekly prompt</strong>: When saving a Bi-Weekly net, you will be asked whether the next occurrence starts this week or the week after.</li>
-    <li><strong>Early (min)</strong>: Expands the net window earlier for rig changes and net control auto-fill. It does not change the displayed net time.</li>
-    <li><strong>Auto-Tune</strong>: Runs rig tune when this row becomes active (if supported).</li>
-    <li><strong>Net Name usage</strong>: Net names appear in FLDigi NCS and JS8 NCS auto-complete and in the Next Scheduled Net banner.</li>
-    <li><strong>Time toggle</strong>: "Showing: Local/UTC" changes view only; rows are stored in UTC.</li>
-    <li><strong>Frequency validation</strong>: Band and frequency are validated; 60M is limited to standard channels.</li>
-    <li><strong>Auto-start (optional)</strong>: If legacy autostart flags are enabled, Digi mode can auto-launch FLDigi/FLMsg/FLAmp.</li>
-    <li><strong>Save / Import / Export</strong>: Save writes to settings and the net schedule database. Export creates a UTC JSON file; Import reads UTC and defaults Auto-Tune off.</li>
-    <li><strong>Delete Selected</strong>: Use the left checkbox or select a row to enable Delete.</li>
-  </ol>
-  <p><a href="#settings-op-groups">Back to Operating Groups</a> | <a href="#quick-start">Back to Quick Start</a></p>
-
-  <h3 id="scheduler-engine">Scheduler Engine</h3>
-  <p><strong>Purpose</strong>: Explain how schedules are applied and prioritized.</p>
-  <ul class="section-list">
-    <li><strong>Priority</strong>: Active net schedule rows take priority; otherwise the HF schedule is used.</li>
-    <li><strong>Controller</strong>: Frequency changes are sent via the controller selected in <a href="#settings-operation">Settings &gt; FreqInOut Settings</a>. Manual mode never sends rig commands.</li>
-    <li><strong>Safety</strong>: The scheduler waits to apply changes while FLRig PTT is active or when JS8Call/VarAC is busy.</li>
-    <li><strong>FLDigi mode/offset</strong>: When a schedule becomes active, FLDigi Starting Mode/Offset from the matching Operating Group are applied if FLDigi is running. If FLDigi starts later, the scheduler applies them about 5 seconds after startup.</li>
-    <li><strong>Schedule modes</strong>: The mode you select in Settings changes how the scheduler reacts to drift. See <a href="#scheduler-modes">Scheduler Modes</a> for the full behavior and examples.</li>
-    <li><strong>QSY pause</strong>: Any QSY starts a 30-minute pause that suppresses schedule-driven changes. This pause is shared across HF Schedule, FLDigi NCS, and JS8 NCS.</li>
-    <li><strong>Use FreqInOut Scheduler</strong>: If the scheduler is disabled in Settings, no schedule-driven changes are sent and QSY controls are disabled.</li>
-  </ul>
-  <h3 id="scheduler-modes">Scheduler Modes (Normal / Loose / Strict)</h3>
-  <p><strong>Purpose</strong>: Explain strictness levels for schedule enforcement.</p>
-  <ol class="section-list">
-    <li><strong>Normal (gentle guidance)</strong>: FreqInOut only applies the schedule when the next scheduled change happens. If you drift away from the scheduled frequency or offsets during a net, it will not auto-correct.</li>
-    <li><strong>Loose (prompted correction)</strong>: If any monitored value drifts off schedule (frequency, JS8 offset, or FLDigi offset), a prompt appears. Choose <em>Yes</em> to reapply the schedule immediately, or <em>Suspend</em> to pause enforcement for 30 minutes (the same timer shown on QSY buttons).</li>
-    <li><strong>Strict (active enforcement)</strong>: FreqInOut resyncs every 15 minutes between daily schedule changes, except during scheduled nets. This keeps you aligned without constant popups.</li>
-    <li><strong>Where it shows up</strong>: The mode is set in <a href="#settings-operation">Settings &gt; FreqInOut Settings</a> and affects the Scheduler Engine, HF Schedule, Net Schedule, and QSY behavior.</li>
-  </ol>
-
-  <h3 id="planner">FreqPlanner Tab</h3>
-  <ol class="section-list">
-    <li><strong>Purpose</strong>: A read-only view of your HF and Net schedules in a 24-hour grid. It updates when schedules are saved and whenever you open the tab.</li>
-    <li><strong>Time toggle</strong>: Switch between Local and UTC. Column labels show the timezone abbreviation.</li>
-    <li><strong>HF vs Net display</strong>: If a net is active in a slot, the net name is shown. Otherwise the band label from the HF schedule is shown.</li>
-    <li><strong>Highlights</strong>: Nets within the next 24 hours and the currently active net are highlighted.</li>
-    <li><strong>Current hour</strong>: The active hour is highlighted in the time columns so your eye goes to "now" without changing the day cells.</li>
-    <li><strong>Band colors</strong>: The band legend above the grid matches the HF schedule colors.</li>
-  </ol>
-  <p><a href="#quick-start">Back to Quick Start</a></p>
-
-  <h3 id="qsy-suspend">QSY / Suspend (shared behavior)</h3>
-  <p><strong>Purpose</strong>: Manually change frequency and pause scheduling.</p>
-  <ul class="section-list">
-    <li><strong>Where it appears</strong>: HF Schedule, FLDigi NCS, and JS8 NCS.</li>
-    <li><strong>Select Frequency</strong>: The dropdown is built from Operating Groups. If duplicates exist, Auto-Tune wins.</li>
-    <li><strong>QSY button</strong>: Applies the change immediately, triggers Auto-Tune if marked, and pauses the scheduler for 30 minutes. The button shows the remaining pause time.</li>
-    <li><strong>Resume prompt</strong>: When 5 minutes remain, you can extend the pause by another 30 minutes.</li>
-    <li><strong>Disabled states</strong>: QSY is disabled if the scheduler is off or if the selected frequency already matches the current scheduler frequency.</li>
-  </ul>
-  <p><a href="#settings-op-groups">Back to Operating Groups</a> | <a href="#settings-operation">Back to FreqInOut Settings</a></p>
-
-  <h2 id="net-control">4. Net Control Tabs</h2>
-  <p><strong>Purpose</strong>: Run and manage nets via FLDigi or JS8Call.</p>
-
-  <h3 id="fldigi-ncs">FLDigi NCS Tab</h3>
-  <p><strong>Purpose</strong>: Manage FLDigi net check-ins and logs.</p>
-  <ol class="section-list">
-    <li><strong>Check the header first</strong>: UTC/Local clocks show real-time timekeeping. The "Next Scheduled Net" banner summarizes the next net from Net Schedule and also shows the current band; if scheduling is paused it shows the resume time.</li>
-    <li><strong>Set Role and Net Name</strong>: Choose NCS/ANCS/JOINER. Role controls whether your own line gets a trailing <em>/ NCS</em> or <em>/ ANCS</em> when you start the net. Net Name is required; it auto-fills with the next scheduled net summary, but you can type any name.</li>
-    <li><strong>Optionally QSY before or during the net</strong>: Pick a frequency from the dropdown (built from Operating Groups) and click <em>QSY</em>. This changes frequency and pauses scheduling for 30 minutes; the button becomes a resume toggle and shows the remaining pause time. A 5-minute warning lets you extend the pause by 30 minutes. QSY is disabled if the scheduler is off or the selected frequency matches the current scheduler frequency.</li>
-    <li><strong>Start Ad Hoc Net (optional)</strong>: Click <em>Ad Hoc Net</em> to create a timestamped net name and immediately start the net. If a name is already entered you will be asked to replace it. Ad Hoc is disabled while a net is running.</li>
-    <li><strong>Use Operator Lookup/Add for fast check-ins</strong>: Type callsign/name/state to search operator history. If there is a single match, press Tab or Enter to auto-fill the full line; pressing Tab/Enter again moves focus to <em>Add to Main</em>, then to <em>Add to New/Late</em>. You can add extra notes after the state, and they are kept when you insert the line. The Add buttons only highlight when callsign, name, and state are present.</li>
-    <li><strong>Compare NCS Lists</strong>: Paste the NCS check-in list (slash-delimited <em>CALL/Name/State</em>, spacing optional) to compare against your combined Main + New/Late list. The results show only local entries missing from the NCS list, preserving callsign/name/state. <em>Copy Missing</em> copies the results and closes the dialog. If there are no differences, a <em>Full Match</em> notice appears and closing it also closes the dialog.</li>
-    <li><strong>Manage the check-in panes</strong>: Main Check-in Log is your primary list; New/Late is for late arrivals. Both panes are editable. <em>Copy</em> copies the entire pane to the clipboard and highlights when content exists.</li>
-    <li><strong>How callsigns are captured</strong>: FLDigi NCS captures callsigns only from the lines you add to Main/New-Late (via Operator Lookup/Add or manual entry). Nothing is auto-ingested from the radio stream until you add it.</li>
-    <li><strong>Save Check-ins</strong>: Writes both panes to the check-in files configured in <a href="#settings-radio">Settings &gt; Radio Software</a> and refreshes operator history views.</li>
-    <li><strong>Merge Check-ins</strong>: Moves New/Late entries into Main (normalized to <em>CALL / Name / ST</em>) and clears New/Late. This does not prompt for confirmation.</li>
-    <li><strong>End Net</strong>: Confirms before ending, saves files, and imports valid Main lines into operator history (callsign/state uppercased, name capitalized). If the current frequency matches an Operating Group, that group is added to the operators' group list. If the Main file is empty you can choose to end without importing. If a scheduled frequency change occurs and scheduling is not paused, the net auto-ends at the change time.</li>
-    <li><strong>Check-in files location</strong>: Configure in <a href="#settings-radio">Settings &gt; Radio Software</a> as <em>Check-in File Path</em>. If left blank, a safe temp folder is used. Files are created on Save Settings and on net start: <em>main_checkins.txt</em> and <em>new-late_checkins.txt</em>. The check-in files are cleared when a new net is started.</li>
-  </ol>
-  <p><a href="#settings-op-groups">Back to Operating Groups</a> | <a href="#scheduler-net">Back to Net Schedule</a></p>
-
-  <h3 id="js8-ncs">JS8 NCS Tab</h3>
-  <p><strong>Purpose</strong>: Manage JS8Call net check-ins, ACKs, and spotter forms.</p>
-  <ol class="section-list">
-    <li><strong>Before you start</strong>: Configure your callsign and JS8Call DIRECTED.TXT path in <a href="#settings-js8call">Settings &gt; JS8Call Settings</a>. JS8 NCS will not start without a callsign, a net name, a group, and DIRECTED.TXT.</li>
-    <li><strong>Set Role, Net Name, and Refresh</strong>: Choose NCS or ANCS, type a Net Name, and set the refresh interval (seconds). The Net Name will auto-fill if a net is within the next 20 minutes (including early check-in time).</li>
-    <li><strong>Set Group</strong>: Enter a group (with or without "@") and click <em>Set Group</em>. This is required to start a net and is used for group messages like NET CONCLUDED.</li>
-    <li><strong>Pick a Spotter form (optional)</strong>: Choose a form from the dropdown and click <em>Set Expect Query</em>. Forms come from the JS8Spotter folder in Settings. If no forms exist, spotter actions stay disabled.</li>
-    <li><strong>Choose a check-in filter</strong>: Default is <em>F!103 / F!104</em> (spotter check-ins). You can also accept any spotter form or all callsigns.</li>
-    <li><strong>Check-in table</strong>: Columns include callsign, name, state, grid, region, mode, SNR, offset, and status. Offset is taken from live JS8 RX when available.</li>
-    <li><strong>How callsigns are captured</strong>: JS8 NCS reads callsigns from live JS8 RX and DIRECTED.TXT. The sender callsign (the part before <em>:</em>) is used, then filtered by your check-in mode (F!103/F!104, Any Spotter, or All Callsigns).</li>
-    <li><strong>Start Net</strong>: Clears the table and begins monitoring. The Start button grays out, ACK buttons enable, and Ad Hoc is disabled.</li>
-    <li><strong>ACK check-ins</strong>: <em>ACK GROUP</em> sends a group ACK for NEW entries using short codes; <em>ACK CALLSIGN</em> ACKs the selected row. Status updates to ACKED.</li>
-    <li><strong>Status updates</strong>: When a station replies with the expected spotter form, the Status column shows that F!### code.</li>
-    <li><strong>Spotter queries</strong>: <em>E? GROUP</em> sends the selected form to the group; <em>E? Callsign</em> sends it to the selected row.</li>
-    <li><strong>Save Checkins</strong>: Records one check-in per callsign for this net and updates Operators. This does not write a file; the net log is written on End Net.</li>
-    <li><strong>QSY</strong>: Use the shared QSY control to change frequency and pause the scheduler. See <a href="#qsy-suspend">QSY / Suspend</a>.</li>
-    <li><strong>End Net</strong>: You can send a NET CONCLUDED group message, end without TX, or cancel. Ending writes a net log file to a <em>net_logs</em> folder next to DIRECTED.TXT and clears the table.</li>
-    <li><strong>Announcements (F!106)</strong>: When no net is active, a complete F!106 announcement triggers a popup alert.</li>
-  </ol>
-  <p><a href="#settings-op-groups">Back to Operating Groups</a> | <a href="#scheduler-net">Back to Net Schedule</a></p>
-
-  <h2 id="other-tabs">5. Other Tabs</h2>
-  <p><strong>Purpose</strong>: Supporting tools for messaging, operators, maps, and logs.</p>
-
-  <h3 id="messages">Messages Tab</h3>
-  <p><strong>Purpose</strong>: View and manage FLDigi/FLMsg/JS8/VarAC messages.</p>
-  <ol class="section-list">
-    <li><strong>Connect your folders first</strong>: Paths are configured in <a href="#settings-radio">Settings &gt; Radio Software</a>. If those paths are empty, the Messages list will be limited.</li>
-    <li><strong>Scan every</strong>: Controls how often file-based folders (VarAC/FLMSG/FLAMP) are rescanned. JS8 inbox polling runs on its own timer (about every 90 seconds).</li>
-    <li><strong>Refresh Now</strong>: Forces an immediate scan and table refresh.</li>
-    <li><strong>Pending JS8 MSGs</strong>: The table shows pending message IDs; click <em>GET</em> to send a JS8 QUERY MSG, or <em>Mark Retrieved</em> to clear it. If <em>Mark JS8Call MSG Retrieved</em> is enabled in Settings, the JS8 inbox row is also marked READ.</li>
-    <li><strong>Messages table</strong>: Click <em>View</em> to open the message in the reader. File-based rows also show <em>Delete</em> (moves the file to your recycle bin/trash). JS8 messages are not deleted.</li>
-    <li><strong>Reader panel</strong>: The right-hand viewer shows the selected message and keeps the list stable while you read.</li>
-    <li><strong>Filters and sorting</strong>: Filter by type/status/from/to and a free-text search. Use <em>Clear Filters</em> to reset. Click column headers to sort.</li>
-    <li><strong>Export to PDF</strong>: Exports the currently viewed file-based message to PDF.</li>
-    <li><strong>Spotter decoding</strong>: If JS8Spotter forms are configured, F!### messages are decoded into readable answers in the viewer.</li>
-  </ol>
-
-  <h3 id="operators">Operators Tab</h3>
-  <p><strong>Purpose</strong>: Maintain operator records used by maps and nets.</p>
-  <ol class="section-list">
-    <li><strong>What this is</strong>: A live history of operators, built from net check-ins, JS8 traffic ingestion, and manual edits.</li>
-    <li><strong>Search and filter</strong>: Use the search box to filter any column, or filter by Group/Untrusted.</li>
-    <li><strong>Trusted flag</strong>: Do you trust information reported by this callsign? Untrusted rows are highlighted so you can review them quickly.</li>
-    <li><strong>Import/Export</strong>: Use <em>Import/Export...</em> to import a CSV or export to CSV. Export uses selected rows when any are checked; otherwise it prompts before exporting the unfiltered or filtered list. Callsign is required for import. Optional columns include name, state, grid, group1-3, group_role, and dates.</li>
-    <li><strong>Import behavior</strong>: Existing first/last seen dates are preserved. Name/state from CSV overwrite when provided. Grid keeps the longest value (grid6 beats grid4).</li>
-    <li><strong>Manage Operators</strong>: Use <em>Manage Operators</em> to Add, Edit Selected, or Delete Selected. Edit supports bulk Trusted updates when multiple rows are selected.</li>
-    <li><strong>Group edits</strong>: When editing an operator, groups are replaced by the values you enter (blank means remove).</li>
-    <li><strong>Select All</strong>: Checks every row so you can apply bulk actions.</li>
-    <li><strong>Map integration</strong>: This table powers the <a href="#map">Map</a> tab, including grids and states.</li>
-  </ol>
-  <p><a href="#quick-start">Back to Quick Start</a></p>
-
-  <h3 id="peer-schedules">Peer Schedules</h3>
-  <p><strong>Purpose</strong>: Track schedules imported from other operators.</p>
-  <ol class="section-list">
-    <li><strong>Import Schedule</strong>: Load a peer HF schedule JSON (UTC) and store it locally.</li>
-    <li><strong>Refresh</strong>: Reloads the list from the database after imports or deletes.</li>
-    <li><strong>Filter view</strong>: Filter by callsign, FEMA region, group, or search text.</li>
-    <li><strong>Delete Schedule</strong>: Choose a callsign from the delete dropdown to remove that operator's imported schedule.</li>
-    <li><strong>Clear All</strong>: Removes all imported peer schedules.</li>
-  </ol>
-
-  <h3 id="map">Map Tab</h3>
-  <p><strong>Purpose</strong>: Visualize operators, grids, and JS8 traffic links.</p>
-  <ol class="section-list">
-    <li><strong>Map view</strong>: Requires Qt WebEngine. If it is missing, a message will say the map is disabled.</li>
-    <li><strong>Geography placement</strong>: Stations are placed using the best available data in this order: Grid6 (most precise), State+Grid4 (state centroid projected into the Grid4 square), State only, then Grid4 only. If no grid or state exists, the station is not plotted.</li>
-    <li><strong>Layers (sidebar)</strong>: The layer controls appear in the left sidebar only when the Map tab is active. Use them to show Callsigns, States, Cities, Grids, and Regions. City labels respect the population threshold dropdown.</li>
-    <li><strong>JS8 link controls</strong>: Choose link mode (My Station, All, Bidirectional, One-way, Relays, or a region/group), filter by band/frequency, and set recency (3h, 6h, 24h, etc). Region and group choices come from Operators.</li>
-    <li><strong>Relays mode</strong>: Use the "Paths to" field to choose a target callsign for relay path highlighting.</li>
-    <li><strong>Operators refresh</strong>: The map refreshes automatically when Operators changes (imports, edits, deletions, or new check-ins).</li>
-    <li><strong>Refresh Links</strong>: Forces a JS8 log ingest and redraw.</li>
-    <li><strong>Data sources</strong>: Operator locations come from Operators data and your Settings grid. Link lines come from live JS8 API traffic when available, with a log-file fallback (DIRECTED.TXT/ALL.TXT) every 5 minutes or on <em>Refresh Links</em>. If links are empty, run <em>Load JS8 Traffic</em> in <a href="#settings-js8call">Settings &gt; JS8Call Settings</a>.</li>
-  </ol>
-
-  <h3 id="logs">Logs Tab</h3>
+  <h2 id="logs">Logs Tab</h2>
   <p><strong>Purpose</strong>: View and filter application logs.</p>
   <ol class="section-list">
-    <li><strong>Refresh</strong>: Reloads the log view. The tab also auto-refreshes.</li>
-    <li><strong>Clear</strong>: Clears the on-screen view (does not delete the log file).</li>
-    <li><strong>Search</strong>: Prompts for a keyword and shows matching lines.</li>
-    <li><strong>Open Log</strong>: Opens the log file in your OS default viewer.</li>
-    <li><strong>Level</strong>: Filters what you see and sets the global log level (Disabled, Error, Warning, Info, Debug, All).</li>
-    <li><strong>Font size</strong>: Adjust the font size to make logs easier to read.</li>
+    <li><strong>Refresh</strong>: Reloads the log view (auto-refresh runs every 1.5 seconds).</li>
+    <li><strong>Clear</strong>: Clears the on-screen view only.</li>
+    <li><strong>Search</strong>: Prompts for a keyword and filters matches.</li>
+    <li><strong>Open Log</strong>: Opens the current log file in your OS viewer.</li>
+    <li><strong>Font</strong>: Spinbox for log font size.</li>
+    <li><strong>Level</strong>: Dropdown with DISABLED, ERROR, WARNING, INFO, DEBUG, ALL. This sets the global log level.</li>
+    <li><strong>Log file label</strong>: Shows the active log file path.</li>
+    <li><strong>Sidebar indicator</strong>: When log level is not DISABLED, the Logs button changes to <em>Logs Enabled</em> and is highlighted in warning color.</li>
   </ol>
 
-  <h3 id="help">Help Tab</h3>
-  <p><strong>Purpose</strong>: Access this guide and export it.</p>
+  <h2 id="help">Help Tab</h2>
+  <p><strong>Purpose</strong>: Read this guide and export it.</p>
   <ul class="section-list">
-    <li>Shows this guide. The left pane is a Table of Contents built from the H1-H3 headings; click to jump to a section.</li>
-    <li><strong>Export to PDF</strong>: Saves the guide to a PDF file for sharing or offline use.</li>
+    <li><strong>Table of Contents</strong>: Left-side list of H1-H3 headings for quick navigation.</li>
+    <li><strong>Guide viewer</strong>: Right-side browser that renders <code>docs/guide.html</code>.</li>
+    <li><strong>Export to PDF</strong>: Saves the guide as a PDF file.</li>
   </ul>
 
-  <h2 id="troubleshooting">6. Troubleshooting and Tips</h2>
+  <h2 id="troubleshooting">Troubleshooting and Tips</h2>
   <p><strong>Purpose</strong>: Common fixes and operational tips.</p>
   <ul class="section-list">
     <li><strong>Scheduler not changing frequency</strong>: Verify <em>Use FreqInOut Scheduler</em> is on, the pause timer has expired, and Operating Groups include valid band/mode/frequency.</li>
     <li><strong>JS8 NCS will not start</strong>: Check that callsign, Net Name, Group, and DIRECTED.TXT are set in Settings.</li>
     <li><strong>Messages list is empty</strong>: Confirm Message Paths in Settings and click <em>Refresh Now</em>.</li>
     <li><strong>Map shows no links</strong>: Use <em>Load JS8 Traffic</em> in Settings and confirm DIRECTED.TXT is valid.</li>
-    <li><strong>Logs too large</strong>: Keep level at Disabled or Info for daily use; raise to Debug or All only for troubleshooting.</li>
+    <li><strong>Logs too large</strong>: Keep level at DISABLED or INFO for daily use; raise to DEBUG or ALL only for troubleshooting.</li>
   </ul>
 
   <h3 id="db-tools">Database Tools</h3>
@@ -340,21 +279,22 @@
     <li><strong>Database locations</strong>: Settings live in <code>config/freqinout.db</code>. Operator and net data live in <code>config/freqinout_nets.db</code>.</li>
   </ul>
 
-  <h2 id="licensing">7. Licensing</h2>
+  <h2 id="licensing">Licensing</h2>
   <p><strong>Purpose</strong>: Licensing and copyright.</p>
   <ul class="section-list">
-    <li><strong>FreqInOut</strong>: Distributed under the GNU General Public License v3 (see <code>LICENSE.md</code> in the repository).</li>
+    <li><strong>FreqInOut</strong>: Distributed under the GNU General Public License v3 (see <code>LICENSE.md</code>).</li>
     <li><strong>Copyright</strong>: Copyright (C) 2026 Bill Daniel (N1MAG).</li>
-    <li><strong>Third-party components</strong>: This project bundles JS8Net (MIT License, Copyright (c) 2021 Jeff Francis). See <code>CREDITS.md</code> for details.</li>
+    <li><strong>Third-party components</strong>: This project bundles JS8Net (MIT License). See <code>CREDITS.md</code>.</li>
   </ul>
 
-  <h2 id="acknowledgments">8. Acknowledgments</h2>
+  <h2 id="acknowledgments">Acknowledgments</h2>
   <p><strong>Purpose</strong>: Credit contributors and inspirations.</p>
   <ul class="section-list">
     <li>KG5RKW inspired the Message Viewer tab.</li>
     <li>KI6QDB inspired Python-based scheduling.</li>
     <li>W8UFO contributed to Linux installation considerations.</li>
-    <li>These operators as well as N1ROG, K1RBS, and N5DM have all helped with user testing and feedback.</li>
+    <li>These operators as well as N1ROG, K1RBS, N5DM, and W5TTA have all helped with user testing and feedback.</li>
+    <li>Thank you all for you valuable feedback!</li>
   </ul>
 </body>
 </html>
