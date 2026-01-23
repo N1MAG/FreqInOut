@@ -25,6 +25,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.radio_interface.rigctl_client import FLRigClient
 from freqinout.radio_interface.js8_status import JS8ControlClient
+from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.version import __version__
 
 from freqinout.gui.settings_tab import SettingsTab
@@ -396,6 +397,10 @@ class MainWindow(QMainWindow):
                     widget.shutdown()
             except Exception:
                 continue
+        try:
+            JS8RxHub.instance().shutdown()
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         self._on_app_about_to_quit()

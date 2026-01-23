@@ -5,7 +5,7 @@ import queue
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, QTimer, QCoreApplication
 
 try:
     import psutil
@@ -33,7 +33,8 @@ class JS8RxHub(QObject):
     _instance: Optional["JS8RxHub"] = None
 
     def __init__(self) -> None:
-        super().__init__()
+        app = QCoreApplication.instance()
+        super().__init__(app)
         self._listeners: List[Callable[[List[dict]], None]] = []
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
@@ -79,6 +80,19 @@ class JS8RxHub(QObject):
         if not self._timer.isActive():
             self._timer.start()
         return True
+
+    def shutdown(self) -> None:
+        try:
+            if self._timer.isActive():
+                self._timer.stop()
+        except Exception:
+            pass
+        self._listeners.clear()
+        try:
+            self.deleteLater()
+        except Exception:
+            pass
+        type(self)._instance = None
 
     def _js8call_running(self) -> bool:
         if psutil is None:
