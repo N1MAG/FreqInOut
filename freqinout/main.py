@@ -3,12 +3,13 @@ import sys
 import os
 import argparse
 
-from PySide6.QtCore import QSharedMemory
+from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication, QMessageBox
 from freqinout.gui.main_window import MainWindow
 from freqinout.core import db_initializer
 from freqinout.core.logger import log
 from freqinout.core import updater
+from freqinout.core.config_paths import get_config_dir
 
 def main():
     parser = argparse.ArgumentParser(description="FreqInOut HF controller")
@@ -26,11 +27,16 @@ def main():
         log.error("Database initialization failed: %s", e)
 
     app = QApplication(sys.argv)
-    single = QSharedMemory("FreqInOut_single_instance")
-    if not single.create(1):
+    lock_path = get_config_dir() / "freqinout.lock"
+    lockfile = QLockFile(str(lock_path))
+    lockfile.setStaleLockTime(60_000)
+    if not lockfile.tryLock(0):
+        if lockfile.removeStaleLock():
+            lockfile.tryLock(0)
+    if not lockfile.isLocked():
         QMessageBox.information(None, "FreqInOut", "FreqInOut is already running.")
         return
-    app._single_instance = single  # type: ignore[attr-defined]
+    app._single_instance = lockfile  # type: ignore[attr-defined]
     win = MainWindow()
     win.show()
     log.info("FreqInOut started.")
@@ -38,6 +44,10 @@ def main():
     try:
         win.deleteLater()
         app.processEvents()
+    except Exception:
+        pass
+    try:
+        lockfile.unlock()
     except Exception:
         pass
     hard_exit = os.environ.get("FREQINOUT_HARD_EXIT")
