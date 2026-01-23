@@ -40,7 +40,7 @@ from freqinout.gui.stations_map_tab import StationsMapTab
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.peer_sched_tab import PeerSchedTab
 from freqinout.gui.help_tab import HelpTab
-from freqinout.gui.theme import resolve_theme, apply_app_theme
+from freqinout.gui.theme import resolve_theme, apply_app_theme, button_style
 
 
 class MainWindow(QMainWindow):
@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         self.nav_buttons = []
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)
+        self._logs_nav_index = None
         for idx, (label, _w) in enumerate(self._screens):
             btn = QPushButton(label)
             btn.setCheckable(True)
@@ -126,6 +127,8 @@ class MainWindow(QMainWindow):
             self.button_group.addButton(btn, idx)
             self.nav_buttons.append(btn)
             nav_layout.addWidget(btn)
+            if label == "Logs":
+                self._logs_nav_index = idx
         # Placeholder for map filters (shown only on Map view)
         self.map_filters_container = QWidget()
         self.map_filters_container.setMinimumWidth(120)
@@ -141,9 +144,17 @@ class MainWindow(QMainWindow):
         for _label, widget in self._screens:
             self.stack.addWidget(widget)
 
+        # Right-side layout (notice bar + stacked content)
+        right_container = QWidget()
+        right_layout = QVBoxLayout(right_container)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(4)
+
+        right_layout.addWidget(self.stack, stretch=1)
+
         # Layout composition
         layout.addWidget(nav_widget)
-        layout.addWidget(self.stack, stretch=1)
+        layout.addWidget(right_container, stretch=1)
         self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Suggest a modest minimum size
@@ -222,6 +233,12 @@ class MainWindow(QMainWindow):
         log.info("Main window initialized.")
         # Sync sidebar filters initially
         self._sync_map_filters_from_tab()
+        self._update_log_indicator()
+
+        try:
+            self.log_tab.log_level_changed.connect(self._update_log_indicator)
+        except Exception:
+            pass
 
     def refresh_operator_history_views(self):
         """
@@ -236,8 +253,8 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self.stations_map_tab, "_load_operator_history"):
                 self.stations_map_tab._load_operator_history()
-                if hasattr(self.stations_map_tab, "_render_map"):
-                    self.stations_map_tab._render_map(preserve_view=True)
+                if hasattr(self.stations_map_tab, "_schedule_render"):
+                    self.stations_map_tab._schedule_render()
         except Exception as e:
             log.debug("MainWindow: stations_map_tab refresh failed: %s", e)
         try:
@@ -245,6 +262,35 @@ class MainWindow(QMainWindow):
                 self.fldigi_tab._load_known_operators()
         except Exception as e:
             log.debug("MainWindow: fldigi_tab refresh failed: %s", e)
+
+    def _update_log_indicator(self) -> None:
+        try:
+            try:
+                self.settings.reload()
+            except Exception:
+                pass
+            level = (self.settings.get("log_level", "") or "INFO").upper()
+            if self._logs_nav_index is None:
+                return
+            if self._logs_nav_index >= len(self.nav_buttons):
+                return
+            btn = self.nav_buttons[self._logs_nav_index]
+            if level == "DISABLED":
+                btn.setText("Logs")
+                btn.setToolTip("")
+                btn.setStyleSheet("")
+            else:
+                btn.setText("Logs Enabled")
+                btn.setToolTip(
+                    "Logging is active. Disable in Logs tab unless you are troubleshooting."
+                )
+                try:
+                    theme = resolve_theme(self.settings)
+                    btn.setStyleSheet(button_style("warning", theme))
+                except Exception:
+                    pass
+        except Exception as e:
+            log.debug("MainWindow: log indicator update failed: %s", e)
 
     def _init_map_filters(self) -> None:
         """
@@ -366,6 +412,11 @@ class MainWindow(QMainWindow):
         Show the stations-map 'Show' filters in the sidebar only when the Map view is active.
         """
         is_map = 0 <= index < len(self._screens) and self._screens[index][1] is self.stations_map_tab
+        try:
+            if hasattr(self.stations_map_tab, "set_map_visible"):
+                self.stations_map_tab.set_map_visible(is_map)
+        except Exception:
+            pass
         if not is_map or self.map_filters_layout is None:
             self.map_filters_container.setVisible(False)
             return
@@ -465,6 +516,7 @@ class MainWindow(QMainWindow):
         theme = resolve_theme(self.settings)
         apply_app_theme(app, theme)
         self._set_logo_pixmap()
+        self._update_log_indicator()
         for widget in (
             self.freq_planner_tab,
             self.hf_schedule_tab,

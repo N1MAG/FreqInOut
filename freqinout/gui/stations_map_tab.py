@@ -431,6 +431,8 @@ class StationsMapTab(QWidget):
         self._last_map_config: Optional[tuple] = None
         self._last_map_render_ts: float = 0.0
         self._render_pending: bool = False
+        self._map_visible: bool = False
+        self._map_dirty: bool = False
 
         self._build_ui()
         self._refresh_group_filter_options()
@@ -548,6 +550,9 @@ class StationsMapTab(QWidget):
     def _schedule_render(self) -> None:
         if self._is_shutting_down:
             return
+        if not self._map_visible:
+            self._map_dirty = True
+            return
         now_ts = time.time()
         if now_ts - self._last_map_render_ts >= 1.0:
             self._last_map_render_ts = now_ts
@@ -560,9 +565,21 @@ class StationsMapTab(QWidget):
     def _flush_scheduled_render(self) -> None:
         if self._is_shutting_down:
             return
+        if not self._map_visible:
+            self._map_dirty = True
+            return
         self._render_pending = False
         self._last_map_render_ts = time.time()
         self._render_map(preserve_view=True)
+
+    def set_map_visible(self, is_visible: bool) -> None:
+        is_visible = bool(is_visible)
+        if self._map_visible == is_visible:
+            return
+        self._map_visible = is_visible
+        if self._map_visible and self._map_dirty:
+            self._map_dirty = False
+            self._schedule_render()
 
     def _on_js8_rx_messages(self, messages: List[dict]) -> None:
         """
@@ -1514,6 +1531,53 @@ class StationsMapTab(QWidget):
             }
         return links, stats_out
 
+    def _load_recent_calls(self, max_age_sec: Optional[int], band_filter=None) -> Set[str]:
+        if not max_age_sec or max_age_sec <= 0:
+            return set()
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception as e:
+            log.error("StationsMap: failed to resolve DB path for recent calls: %s", e)
+            return set()
+        if not db_path.exists():
+            return set()
+        ts_cut = time.time() - max_age_sec
+        calls: Set[str] = set()
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT ts, origin, destination, band, freq_hz FROM js8_links WHERE ts >= ?",
+                (ts_cut,),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.error("StationsMap: failed to load recent js8_links: %s", e)
+            return set()
+
+        bf = band_filter or {"type": "all"}
+        for ts, o, d, band, freq_hz in rows:
+            band_val = (band or "").upper()
+            if bf.get("type") == "band":
+                if band_val != str(bf.get("value")).upper():
+                    continue
+            elif bf.get("type") == "freq":
+                target_f = bf.get("value")
+                try:
+                    freq_mhz = float(freq_hz) / 1_000_000.0 if freq_hz is not None else None
+                except Exception:
+                    freq_mhz = None
+                if freq_mhz is None or target_f is None or abs(freq_mhz - target_f) > 0.001:
+                    continue
+            if o:
+                calls.add((o or "").strip().upper())
+            if d:
+                calls.add((d or "").strip().upper())
+        return calls
+
     def _is_usa_canada(self, lat: float, lon: float) -> bool:
         return 7.0 <= lat <= 83.0 and -172.0 <= lon <= -50.0
 
@@ -1525,6 +1589,10 @@ class StationsMapTab(QWidget):
 
     # ------------- Map rendering ------------- #
     def _render_map(self, preserve_view: bool = True):
+        if not self._map_visible:
+            self._map_dirty = True
+            return
+        self._map_dirty = False
         config_sig = (
             bool(self.show_callsigns),
             bool(self.show_states),
@@ -1628,9 +1696,16 @@ class StationsMapTab(QWidget):
             if dest:
                 traffic_calls.add(dest)
         show_all_stations = not self._links_active()
+        recent_calls: Set[str] = set()
+        if show_all_stations and self.recency_seconds:
+            band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
+            recent_calls = self._load_recent_calls(self.recency_seconds, band_filter=band_filter)
         for pt in self.stations:
             if not show_all_stations:
                 if pt.callsign.upper() not in traffic_calls and pt.callsign.upper() != my_call:
+                    continue
+            elif recent_calls:
+                if pt.callsign.upper() not in recent_calls and pt.callsign.upper() != my_call:
                     continue
             key = (round(pt.lat, 4), round(pt.lon, 4))
             base_map.setdefault(key, []).append(pt)
@@ -2995,6 +3070,12 @@ class JS8LogLinkIndexer:
             cols = {row[1] for row in cur.fetchall()}
             if "last_seen_utc" not in cols:
                 conn.execute("ALTER TABLE js8_links ADD COLUMN last_seen_utc TEXT")
+        except Exception:
+            pass
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_ts ON js8_links(ts)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_origin_dest ON js8_links(origin, destination)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_band ON js8_links(band)")
         except Exception:
             pass
         conn.commit()

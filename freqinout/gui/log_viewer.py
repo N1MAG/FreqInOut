@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QInputDialog,
 )
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QTextCursor
 
 from freqinout.core.logger import _get_log_file, set_log_level, get_log_level
@@ -22,6 +22,7 @@ from freqinout.gui.theme import resolve_theme, button_style
 
 class LogViewerTab(QWidget):
     REFRESH_INTERVAL_MS = 1500
+    log_level_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -174,6 +175,10 @@ class LogViewerTab(QWidget):
             set_log_level(level)
             try:
                 self.settings.set("log_level", level)
+            except Exception:
+                pass
+            try:
+                self.log_level_changed.emit(level)
             except Exception:
                 pass
         self._refresh()
