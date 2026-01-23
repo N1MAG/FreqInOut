@@ -1,5 +1,6 @@
 
 import sys
+import os
 import argparse
 
 from PySide6.QtCore import QSharedMemory
@@ -33,7 +34,18 @@ def main():
     win = MainWindow()
     win.show()
     log.info("FreqInOut started.")
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    try:
+        win.deleteLater()
+        app.processEvents()
+    except Exception:
+        pass
+    hard_exit = os.environ.get("FREQINOUT_HARD_EXIT")
+    if hard_exit is None:
+        hard_exit = "1" if sys.platform.startswith("linux") else "0"
+    if hard_exit == "1":
+        os._exit(exit_code)
+    sys.exit(exit_code)
 
 if __name__ == "__main__":
     main()
