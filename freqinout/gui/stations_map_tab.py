@@ -1421,14 +1421,17 @@ class StationsMapTab(QWidget):
                 pass
             return ""
 
+        selection = self._parse_link_selection(
+            self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
+        )
+        selection_mode, selection_value = selection[0], selection[1]
+        selection_value = (selection_value or "").strip().upper()
+
         # init stats and links
         stats_lookup: Dict[str, Dict] = {}
         links: List[Dict] = []
         if self._links_active():
             band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
-            selection = self._parse_link_selection(
-                self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
-            )
             my_call = ""
             try:
                 my_call = (self.settings.get("operator_callsign", "") or "").upper()
@@ -1450,6 +1453,10 @@ class StationsMapTab(QWidget):
         markers = []
         base_map: Dict[tuple[float, float], List[StationPoint]] = {}
         for pt in self.stations:
+            if selection_mode == "group" and selection_value:
+                pt_groups = {str(g).strip().upper() for g in (pt.groups or []) if str(g).strip()}
+                if selection_value not in pt_groups:
+                    continue
             key = (round(pt.lat, 4), round(pt.lon, 4))
             base_map.setdefault(key, []).append(pt)
 
