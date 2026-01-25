@@ -653,6 +653,7 @@ class FldigiNetControlTab(QWidget):
         self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
         self._set_net_button_styles(self._net_in_progress)
         self._update_copy_buttons_state()
+        self._apply_known_op_styles(theme)
         self._update_add_buttons_state()
 
     def apply_theme(self) -> None:
@@ -1162,11 +1163,45 @@ class FldigiNetControlTab(QWidget):
         cs, name, state = self._parse_checkin_line(text)
         ready = bool(cs and name and state)
         self.add_known_main_btn.setStyleSheet(
-            button_style("success", theme) if ready else button_style("muted", theme)
+            self._known_action_button_style("success", theme, ready)
         )
         self.add_known_late_btn.setStyleSheet(
-            button_style("info", theme) if ready else button_style("muted", theme)
+            self._known_action_button_style("info", theme, ready)
         )
+
+    def _apply_known_op_styles(self, theme: Dict[str, str]) -> None:
+        focus = theme.get("focus", "#7FB5FF")
+        border = theme.get("border", "#D3D7DD")
+        surface = theme.get("surface", "#F0F2F4")
+        text = theme.get("text", "#1C1F21")
+        self.known_op_edit.setStyleSheet(
+            "QLineEdit {"
+            f" background-color: {surface}; color: {text}; border: 1px solid {border};"
+            " border-radius: 4px; padding: 4px 6px;"
+            " }"
+            " QLineEdit:focus {"
+            f" border: 2px solid {focus}; padding: 3px 5px;"
+            " }"
+        )
+
+    def _known_action_button_style(self, role: str, theme: Dict[str, str], ready: bool) -> str:
+        focus = theme.get("focus", "#7FB5FF")
+        role_color = theme.get(role, theme.get("accent", "#2E6F9E"))
+        style = button_style("muted", theme)
+        if ready:
+            style += (
+                " QPushButton:focus {"
+                f" background-color: {role_color}; color: #FFFFFF; border: 2px solid {role_color};"
+                " padding: 3px 9px;"
+                " }"
+            )
+        else:
+            style += (
+                " QPushButton:focus {"
+                f" border: 2px solid {focus}; padding: 3px 9px;"
+                " }"
+            )
+        return style
 
     # ---------------- Net name auto-fill ---------------- #
 
