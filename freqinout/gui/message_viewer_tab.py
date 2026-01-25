@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QAbstractItemView,
     QMessageBox,
+    QCompleter,
     QSizePolicy,
     QAbstractScrollArea,
     QSplitter,
@@ -637,6 +638,8 @@ class MessageViewerTab(QWidget):
         self.status_filter = QComboBox()
         self.from_filter = QComboBox()
         self.to_filter = QComboBox()
+        self._make_combo_searchable(self.from_filter, "From")
+        self._make_combo_searchable(self.to_filter, "To")
         self.rcv_search = QLineEdit()
         self.clear_filters_btn = QPushButton("Clear Filters")
         self.clear_filters_btn.setMinimumWidth(130)
@@ -1068,19 +1071,25 @@ class MessageViewerTab(QWidget):
         status_vals = sorted({r.status for r in rows if r.status})
         from_vals = sorted({r.from_call for r in rows if r.from_call})
         to_vals = sorted({r.to_call for r in rows if r.to_call})
+        spotter_forms = sorted({t for t in type_vals if re.match(r"^F!\d+$", t)})
+        base_types = sorted([t for t in type_vals if t not in spotter_forms])
+        if spotter_forms:
+            type_vals = base_types + ["Spotter"] + spotter_forms
+        else:
+            type_vals = base_types
 
         current_type = self.type_filter.currentText() if hasattr(self, "type_filter") else "ALL"
         current_status = self.status_filter.currentText() if hasattr(self, "status_filter") else "ALL"
-        current_from = self.from_filter.currentText() if hasattr(self, "from_filter") else "ALL"
-        current_to = self.to_filter.currentText() if hasattr(self, "to_filter") else "ALL"
+        current_from = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
+        current_to = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
         if not current_type:
             current_type = "ALL"
         if not current_status:
             current_status = "ALL"
         if not current_from:
-            current_from = "ALL"
+            current_from = ""
         if not current_to:
-            current_to = "ALL"
+            current_to = ""
 
         self.type_filter.blockSignals(True)
         self.type_filter.clear()
@@ -1104,22 +1113,20 @@ class MessageViewerTab(QWidget):
 
         self.from_filter.blockSignals(True)
         self.from_filter.clear()
-        self.from_filter.addItem("From...")
         self.from_filter.addItems(from_vals)
-        if not self._filters_initialized:
-            self.from_filter.setCurrentText("From...")
-        elif current_from in ["From..."] + from_vals:
+        if current_from in from_vals:
             self.from_filter.setCurrentText(current_from)
+        else:
+            self.from_filter.setCurrentText("")
         self.from_filter.blockSignals(False)
 
         self.to_filter.blockSignals(True)
         self.to_filter.clear()
-        self.to_filter.addItem("To...")
         self.to_filter.addItems(to_vals)
-        if not self._filters_initialized:
-            self.to_filter.setCurrentText("To...")
-        elif current_to in ["To..."] + to_vals:
+        if current_to in to_vals:
             self.to_filter.setCurrentText(current_to)
+        else:
+            self.to_filter.setCurrentText("")
         self.to_filter.blockSignals(False)
         self._filters_initialized = True
 
@@ -1127,19 +1134,22 @@ class MessageViewerTab(QWidget):
         rows = self._message_rows
         type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
         status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
-        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else "From..."
-        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else "To..."
+        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
+        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
         rcv_query = (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip().lower()
 
         filtered = []
         for row in rows:
-            if type_sel != "MSG Type..." and row.msg_type != type_sel:
+            if type_sel == "Spotter":
+                if not re.match(r"^F!\d+$", row.msg_type or ""):
+                    continue
+            elif type_sel != "MSG Type..." and row.msg_type != type_sel:
                 continue
             if status_sel != "Status..." and row.status != status_sel:
                 continue
-            if from_sel != "From..." and row.from_call != from_sel:
+            if from_sel and row.from_call != from_sel:
                 continue
-            if to_sel != "To..." and row.to_call != to_sel:
+            if to_sel and row.to_call != to_sel:
                 continue
             if rcv_query:
                 hay = " ".join(
@@ -1171,15 +1181,15 @@ class MessageViewerTab(QWidget):
     def _is_filter_or_sort_active(self) -> bool:
         type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
         status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
-        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else "From..."
-        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else "To..."
+        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
+        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
         if type_sel not in ("", "MSG Type..."):
             return True
         if status_sel not in ("", "Status..."):
             return True
-        if from_sel not in ("", "From..."):
+        if from_sel:
             return True
-        if to_sel not in ("", "To..."):
+        if to_sel:
             return True
         if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
             return True
@@ -1229,8 +1239,8 @@ class MessageViewerTab(QWidget):
         if (
             self.type_filter.currentText() in ("", "MSG Type...")
             and self.status_filter.currentText() in ("", "Status...")
-            and self.from_filter.currentText() in ("", "From...")
-            and self.to_filter.currentText() in ("", "To...")
+            and self.from_filter.currentText() in ("",)
+            and self.to_filter.currentText() in ("",)
             and not self.rcv_search.text().strip()
         ):
             return
@@ -1241,8 +1251,8 @@ class MessageViewerTab(QWidget):
         self.rcv_search.blockSignals(True)
         self.type_filter.setCurrentText("MSG Type...")
         self.status_filter.setCurrentText("Status...")
-        self.from_filter.setCurrentText("From...")
-        self.to_filter.setCurrentText("To...")
+        self.from_filter.setCurrentText("")
+        self.to_filter.setCurrentText("")
         self.rcv_search.clear()
         self.type_filter.blockSignals(False)
         self.status_filter.blockSignals(False)
@@ -1297,6 +1307,7 @@ class MessageViewerTab(QWidget):
         self._sync_header_widths()
         self.messages_table.horizontalHeader().sectionResized.connect(self._sync_header_widths)
         self.messages_header.setMinimumHeight(self.messages_header.sizeHint().height())
+        QTimer.singleShot(0, self._sync_header_widths)
 
     def _set_initial_splitter_sizes(self) -> None:
         if not hasattr(self, "messages_splitter"):
@@ -1328,6 +1339,21 @@ class MessageViewerTab(QWidget):
         layout.addWidget(combo)
         return container
 
+    def _make_combo_searchable(self, combo: QComboBox, placeholder: str) -> None:
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        completer = QCompleter(combo.model(), combo)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.activated.connect(lambda _: self._on_filter_changed())
+        combo.setCompleter(completer)
+        edit = combo.lineEdit()
+        if edit is not None:
+            edit.setPlaceholderText(placeholder)
+            edit.editingFinished.connect(self._on_filter_changed)
+            edit.textEdited.connect(lambda _: combo.completer().complete())
+
     def _make_search_filter_cell(self, edit: QLineEdit) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -1356,8 +1382,8 @@ class MessageViewerTab(QWidget):
         return (
             self.type_filter.currentText() not in ("", "MSG Type...")
             or self.status_filter.currentText() not in ("", "Status...")
-            or self.from_filter.currentText() not in ("", "From...")
-            or self.to_filter.currentText() not in ("", "To...")
+            or self.from_filter.currentText() not in ("",)
+            or self.to_filter.currentText() not in ("",)
             or bool(self.rcv_search.text().strip())
         )
 
