@@ -219,9 +219,9 @@ class DailyScheduleTab(QWidget):
         self.export_btn = QPushButton("Export HF Schedule")
         btn_row.addWidget(self.add_row_btn)
         btn_row.addWidget(self.del_row_btn)
-        btn_row.addWidget(self.save_btn)
         btn_row.addWidget(self.export_btn)
         btn_row.addStretch()
+        btn_row.addWidget(self.save_btn)
         layout.addLayout(btn_row)
 
         # Signals
