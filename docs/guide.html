@@ -27,7 +27,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.0.8</p>
+  <p><strong>Current version</strong>: 1.0.9</p>
   <p>This guide describes every tab, button, field, and function in FreqInOut. Times are stored in UTC; the "Showing: Local/UTC" toggle only changes what you see.</p>
   <p><strong>Responsibility notice</strong>: FreqInOut assists licensed amateur operators by coordinating complex radio software and schedules. It assumes you follow applicable band plans and regulations. Disabling safeguards (for example, scheduling) can let you tune outside legal allocations. You are solely responsible for compliant operation; the authors and contributors are not liable for misuse.</p>
 
@@ -169,10 +169,11 @@
   <ol class="section-list">
     <li><strong>Import Schedule</strong>: Loads a peer HF schedule JSON (UTC).</li>
     <li><strong>Refresh</strong>: Reloads the list from the database.</li>
-    <li><strong>Delete</strong>: Dropdown for callsigns plus <em>Delete Schedule</em> to remove a single peer schedule.</li>
-    <li><strong>Clear All</strong>: Removes all imported peer schedules.</li>
+    <li><strong>Delete</strong>: Dropdown for callsigns plus <em>Delete Schedule</em> to remove a single peer schedule. The dropdown also includes <em>Clear All Schedules</em>.</li>
+    <li><strong>Show Local</strong>: Toggle to display DAY/START/END/OVERLAP in local time (labels show the local TZ abbreviation).</li>
     <li><strong>Filters</strong>: Callsign dropdown, Region dropdown (R01-R10), Group dropdown, and Search field.</li>
-    <li><strong>Peer schedule table</strong>: Columns are CALLSIGN, NAME, STATE, GROUPS, DAY (UTC), START UTC, END UTC, BAND, MODE, FREQ. The table is not sortable.</li>
+    <li><strong>Overlap</strong>: Shows upcoming overlaps for today only (UTC day) where your HF and Net schedules share the same frequency and mode with the peer schedule. Single overlaps show HH:MM-HH:MM; multiple overlaps show a count and clicking the cell shows details.</li>
+    <li><strong>Peer schedule table</strong>: Columns are CALLSIGN, NAME, STATE, GROUPS, DAY (UTC), START UTC, END UTC, BAND, MODE, FREQ, OVERLAP. The table is not sortable.</li>
   </ol>
 
   <h2 id="settings">Settings Tab</h2>
