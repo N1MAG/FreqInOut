@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.utils.timezones import get_timezone
 from freqinout.gui.theme import resolve_theme, button_style
 
 
@@ -58,13 +59,18 @@ class PeerSchedTab(QWidget):
         "BAND",
         "MODE",
         "FREQ",
+        "OVERLAP",
     )
+    DAY_CANON = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._rows: List[Dict] = []
         self._operator_meta: Dict[str, Dict[str, str]] = {}
+        self._my_schedule: List[Dict] = []
+        self._my_schedule_by_mode: Dict[str, List[Dict]] = {}
+        self._show_local_times = False
         self._build_ui()
         self._load_operator_meta()
         self._load_data()
@@ -80,15 +86,16 @@ class PeerSchedTab(QWidget):
         self.import_btn = QPushButton("Import Schedule")
         self.refresh_btn = QPushButton("Refresh")
         self.delete_callsign_combo = QComboBox()
-        self.delete_callsign_combo.addItem("Select callsign")
+        self.delete_callsign_combo.addItem("Select callsign", None)
         self.delete_btn = QPushButton("Delete Schedule")
-        self.clear_btn = QPushButton("Clear All")
+        self.tz_toggle_btn = QPushButton("Show Local")
+        self.tz_toggle_btn.setCheckable(True)
         header.addWidget(self.import_btn)
         header.addWidget(self.refresh_btn)
         header.addWidget(QLabel("Delete:"))
         header.addWidget(self.delete_callsign_combo)
         header.addWidget(self.delete_btn)
-        header.addWidget(self.clear_btn)
+        header.addWidget(self.tz_toggle_btn)
         layout.addLayout(header)
 
         # Filters
@@ -96,6 +103,7 @@ class PeerSchedTab(QWidget):
         filter_row.addWidget(QLabel("Callsign:"))
         self.callsign_filter = QComboBox()
         self.callsign_filter.addItem("All")
+        self.callsign_filter.setMinimumWidth(150)
         filter_row.addWidget(self.callsign_filter)
 
         filter_row.addWidget(QLabel("Region:"))
@@ -103,11 +111,13 @@ class PeerSchedTab(QWidget):
         self.region_filter.addItem("All")
         for r in sorted(FEMA_REGIONS.keys()):
             self.region_filter.addItem(r)
+        self.region_filter.setMinimumWidth(120)
         filter_row.addWidget(self.region_filter)
 
         filter_row.addWidget(QLabel("Group:"))
         self.group_filter = QComboBox()
         self.group_filter.addItem("All")
+        self.group_filter.setMinimumWidth(150)
         filter_row.addWidget(self.group_filter)
 
         filter_row.addWidget(QLabel("Search:"))
@@ -119,7 +129,8 @@ class PeerSchedTab(QWidget):
 
         # Table
         self.table = QTableWidget(0, len(self.COLS))
-        self.table.setHorizontalHeaderLabels(self.COLS)
+        self._overlap_col = self.COLS.index("OVERLAP")
+        self._set_time_headers()
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -134,7 +145,8 @@ class PeerSchedTab(QWidget):
         self.search_edit.textChanged.connect(self._apply_filters)
         self.delete_callsign_combo.currentIndexChanged.connect(self._update_delete_button_state)
         self.delete_btn.clicked.connect(self._delete_selected)
-        self.clear_btn.clicked.connect(self._clear_all)
+        self.tz_toggle_btn.toggled.connect(self._toggle_timezone_view)
+        self.table.cellClicked.connect(self._on_table_cell_clicked)
         self._apply_theme()
         self._update_delete_button_state()
 
@@ -215,11 +227,13 @@ class PeerSchedTab(QWidget):
                         "band": band or "",
                         "mode": mode or "",
                         "frequency": str(freq or ""),
+                        "freq_num": self._parse_freq(freq),
                     }
                 )
             conn.close()
         except Exception as e:
             log.error("PeerSched: failed to load peer schedules: %s", e)
+        self._load_my_schedule()
         self._populate_filters()
         self._populate_delete_callsigns()
         self._apply_filters()
@@ -261,13 +275,14 @@ class PeerSchedTab(QWidget):
 
     def _populate_delete_callsigns(self) -> None:
         calls = sorted({row["callsign"] for row in self._rows if row.get("callsign")})
-        current = self.delete_callsign_combo.currentText()
+        current = self.delete_callsign_combo.currentData()
         self.delete_callsign_combo.blockSignals(True)
         self.delete_callsign_combo.clear()
-        self.delete_callsign_combo.addItem("Select callsign")
+        self.delete_callsign_combo.addItem("Select callsign", None)
+        self.delete_callsign_combo.addItem("Clear All Schedules", "__CLEAR_ALL__")
         for c in calls:
-            self.delete_callsign_combo.addItem(c)
-        idx = self.delete_callsign_combo.findText(current)
+            self.delete_callsign_combo.addItem(c, c)
+        idx = self.delete_callsign_combo.findData(current)
         if idx >= 0:
             self.delete_callsign_combo.setCurrentIndex(idx)
         self.delete_callsign_combo.blockSignals(False)
@@ -311,6 +326,8 @@ class PeerSchedTab(QWidget):
         for r, row in enumerate(filtered):
             cs = row.get("callsign", "")
             meta = self._operator_meta.get(cs, {})
+            overlap_ranges = self._compute_overlaps(row)
+            overlap_display = self._format_overlap_summary(overlap_ranges)
             vals = [
                 cs,
                 meta.get("name", ""),
@@ -322,30 +339,295 @@ class PeerSchedTab(QWidget):
                 row.get("band", ""),
                 row.get("mode", ""),
                 row.get("frequency", ""),
+                overlap_display,
             ]
+            if self._show_local_times:
+                day_loc, start_loc = self._convert_day_time(row.get("day_utc", ""), row.get("start_utc", ""))
+                _, end_loc = self._convert_day_time(row.get("day_utc", ""), row.get("end_utc", ""))
+                vals[4] = day_loc
+                vals[5] = start_loc
+                vals[6] = end_loc
             for c, val in enumerate(vals):
                 item = QTableWidgetItem(val)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if c == self._overlap_col and overlap_ranges:
+                    item.setToolTip("\n".join(self._format_overlap_ranges(overlap_ranges)))
+                    item.setData(Qt.UserRole, overlap_ranges)
                 self.table.setItem(r, c, item)
 
     # ---------- helpers ----------
 
-    def _selected_callsign(self) -> Optional[str]:
-        selected = (self.delete_callsign_combo.currentText() or "").strip().upper()
-        if not selected or selected == "SELECT CALLSIGN":
+    def _selected_delete_action(self) -> Optional[str]:
+        selected = self.delete_callsign_combo.currentData()
+        if not selected:
             return None
-        return selected
+        if selected == "__CLEAR_ALL__":
+            return selected
+        return str(selected).strip().upper()
+
+    def _settings_db_path(self) -> Path:
+        cfg_path = getattr(self.settings, "_config_path", None)
+        if cfg_path:
+            try:
+                return Path(cfg_path)
+            except Exception:
+                pass
+        from freqinout.core.config_paths import get_config_dir
+
+        return get_config_dir() / "config" / "freqinout.db"
+
+    def _current_timezone(self) -> datetime.tzinfo:
+        tz_name = self.settings.get("timezone", "UTC") or "UTC"
+        return get_timezone(tz_name)
+
+    def _day_offset(self, day_name: str) -> int:
+        if not day_name:
+            return 0
+        day_name = day_name.strip().lower()
+        for idx, name in enumerate(self.DAY_CANON):
+            if name.lower().startswith(day_name[:3]):
+                return idx
+        return 0
+
+    def _anchor_utc_sunday(self) -> datetime.datetime:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        delta = (now_utc.weekday() + 1) % 7  # Sunday=0, Monday=1, ...
+        sunday = now_utc - datetime.timedelta(days=delta)
+        return sunday.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=datetime.timezone.utc)
+
+    def _convert_day_time(self, day: str, hhmm: str) -> tuple[str, str]:
+        day = (day or "ALL").strip()
+        if not hhmm:
+            return day, hhmm
+        try:
+            hour, minute = hhmm.split(":")
+            hour = int(hour)
+            minute = int(minute)
+        except Exception:
+            return day, hhmm
+        day_upper = day.upper()
+        day_idx = 0 if day_upper == "ALL" else self._day_offset(day)
+        anchor = self._anchor_utc_sunday()
+        dt_utc = anchor + datetime.timedelta(days=day_idx, hours=hour, minutes=minute)
+        dt_loc = dt_utc.astimezone(self._current_timezone())
+        day_label = "ALL" if day_upper == "ALL" else dt_loc.strftime("%A")
+        return day_label, dt_loc.strftime("%H:%M")
+
+    def _parse_time_minutes(self, hhmm: str) -> Optional[int]:
+        if not hhmm:
+            return None
+        try:
+            hour, minute = hhmm.split(":")
+            return int(hour) * 60 + int(minute)
+        except Exception:
+            return None
+
+    def _parse_freq(self, freq_val) -> Optional[float]:
+        try:
+            return float(str(freq_val).strip())
+        except Exception:
+            return None
+
+    def _day_matches_today(self, day: str, today_name: str) -> bool:
+        day = (day or "ALL").strip().upper()
+        if day in ("ALL", "DAILY"):
+            return True
+        if not day:
+            return False
+        today = today_name.upper()
+        return today.startswith(day[:3]) or day.startswith(today[:3])
+
+    def _load_my_schedule(self) -> None:
+        self._my_schedule = []
+        self._my_schedule_by_mode = {}
+        today_name = datetime.datetime.now(datetime.timezone.utc).strftime("%A")
+
+        def add_entry(day: str, start: str, end: str, mode: str, freq) -> None:
+            start_min = self._parse_time_minutes(start)
+            end_min = self._parse_time_minutes(end)
+            freq_num = self._parse_freq(freq)
+            if start_min is None or end_min is None or freq_num is None:
+                return
+            if end_min <= start_min:
+                return
+            if not self._day_matches_today(day, today_name):
+                return
+            mode_key = (mode or "").strip().upper()
+            if not mode_key:
+                return
+            entry = {
+                "day_utc": (day or "ALL").strip(),
+                "start_min": start_min,
+                "end_min": end_min,
+                "mode": mode_key,
+                "freq": freq_num,
+            }
+            self._my_schedule.append(entry)
+            self._my_schedule_by_mode.setdefault(mode_key, []).append(entry)
+
+        db_path = self._settings_db_path()
+        if db_path.exists():
+            try:
+                conn = sqlite3.connect(db_path)
+                has_table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='daily_schedule_tab'"
+                ).fetchone()
+                if has_table:
+                    for day, start, end, mode, freq in conn.execute(
+                        "SELECT day_utc, start_utc, end_utc, mode, frequency FROM daily_schedule_tab"
+                    ).fetchall():
+                        add_entry(day, start, end, mode, freq)
+                conn.close()
+            except Exception as e:
+                log.debug("PeerSched: failed to load daily schedule: %s", e)
+
+        nets_path = self._db_path()
+        if nets_path.exists():
+            try:
+                conn = sqlite3.connect(nets_path)
+                has_table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='net_schedule_tab'"
+                ).fetchone()
+                if has_table:
+                    for day, start, end, mode, freq in conn.execute(
+                        "SELECT day_utc, start_utc, end_utc, mode, frequency FROM net_schedule_tab"
+                    ).fetchall():
+                        add_entry(day, start, end, mode, freq)
+                conn.close()
+            except Exception as e:
+                log.debug("PeerSched: failed to load net schedule: %s", e)
+
+    def _compute_overlaps(self, row: Dict) -> List[tuple[int, int]]:
+        mode = (row.get("mode") or "").strip().upper()
+        freq = row.get("freq_num")
+        if not mode or freq is None:
+            return []
+        today_name = datetime.datetime.now(datetime.timezone.utc).strftime("%A")
+        if not self._day_matches_today(row.get("day_utc", "ALL"), today_name):
+            return []
+        peer_start = self._parse_time_minutes(row.get("start_utc", ""))
+        peer_end = self._parse_time_minutes(row.get("end_utc", ""))
+        if peer_start is None or peer_end is None or peer_end <= peer_start:
+            return []
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_min = now_utc.hour * 60 + now_utc.minute
+        if peer_end <= now_min:
+            return []
+
+        matches = self._my_schedule_by_mode.get(mode, [])
+        overlaps: List[tuple[int, int]] = []
+        for entry in matches:
+            if abs(entry["freq"] - freq) > 0.0001:
+                continue
+            start = max(peer_start, entry["start_min"], now_min)
+            end = min(peer_end, entry["end_min"])
+            if end > start:
+                overlaps.append((start, end))
+        overlaps.sort()
+        return overlaps
+
+    def _format_overlap_ranges(self, ranges: List[tuple[int, int]]) -> List[str]:
+        if not ranges:
+            return []
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        base_date = now_utc.date()
+        tz = self._current_timezone()
+        use_local = self._show_local_times
+        formatted = []
+        for start_min, end_min in ranges:
+            start_dt = datetime.datetime(
+                base_date.year,
+                base_date.month,
+                base_date.day,
+                start_min // 60,
+                start_min % 60,
+                tzinfo=datetime.timezone.utc,
+            )
+            end_dt = datetime.datetime(
+                base_date.year,
+                base_date.month,
+                base_date.day,
+                end_min // 60,
+                end_min % 60,
+                tzinfo=datetime.timezone.utc,
+            )
+            if use_local:
+                start_dt = start_dt.astimezone(tz)
+                end_dt = end_dt.astimezone(tz)
+            formatted.append(f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}")
+        return formatted
+
+    def _format_overlap_summary(self, ranges: List[tuple[int, int]]) -> str:
+        if not ranges:
+            return ""
+        if len(ranges) == 1:
+            return self._format_overlap_ranges(ranges)[0]
+        return f"{len(ranges)} overlaps"
+
+    def _set_time_headers(self) -> None:
+        cols = list(self.COLS)
+        if self._show_local_times:
+            tz_abbrev = datetime.datetime.now(self._current_timezone()).tzname() or "LOCAL"
+            cols[4] = f"DAY ({tz_abbrev})"
+            cols[5] = f"START ({tz_abbrev})"
+            cols[6] = f"END ({tz_abbrev})"
+            cols[self._overlap_col] = f"OVERLAP ({tz_abbrev})"
+        else:
+            cols[4] = "DAY (UTC)"
+            cols[5] = "START UTC"
+            cols[6] = "END UTC"
+            cols[self._overlap_col] = "OVERLAP (UTC)"
+        self.table.setHorizontalHeaderLabels(cols)
+
+    def _toggle_timezone_view(self, checked: bool) -> None:
+        self._show_local_times = bool(checked)
+        self.tz_toggle_btn.setText("Show UTC" if checked else "Show Local")
+        self._set_time_headers()
+        self._update_timezone_button_style()
+        self._apply_filters()
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
         self.delete_btn.setStyleSheet(button_style("muted", theme))
+        self._update_timezone_button_style()
 
     def _update_delete_button_state(self) -> None:
         theme = resolve_theme(self.settings)
-        has_selection = self._selected_callsign() is not None
-        self.delete_btn.setEnabled(has_selection)
-        role = "danger" if has_selection else "muted"
+        selection = self._selected_delete_action()
+        has_rows = bool(self._rows)
+        if selection == "__CLEAR_ALL__":
+            enabled = has_rows
+            label = "Clear All"
+        elif selection:
+            enabled = True
+            label = "Delete Schedule"
+        else:
+            enabled = False
+            label = "Delete Schedule"
+        self.delete_btn.setEnabled(enabled)
+        self.delete_btn.setText(label)
+        role = "danger" if enabled else "muted"
         self.delete_btn.setStyleSheet(button_style(role, theme))
+
+    def _update_timezone_button_style(self) -> None:
+        theme = resolve_theme(self.settings)
+        role = "info" if self._show_local_times else "muted"
+        self.tz_toggle_btn.setStyleSheet(button_style(role, theme))
+
+    def _on_table_cell_clicked(self, row: int, col: int) -> None:
+        if col != self._overlap_col:
+            return
+        item = self.table.item(row, col)
+        if not item:
+            return
+        ranges = item.data(Qt.UserRole)
+        if not ranges or len(ranges) <= 1:
+            return
+        lines = self._format_overlap_ranges(ranges)
+        if not lines:
+            return
+        msg = "\n".join(lines)
+        QMessageBox.information(self, "Overlap Details", msg)
 
     # ---------- import / delete ----------
 
@@ -437,10 +719,14 @@ class PeerSchedTab(QWidget):
             log.error("PeerSched: import failed: %s", e)
 
     def _delete_selected(self) -> None:
-        cs = self._selected_callsign()
-        if not cs:
+        action = self._selected_delete_action()
+        if not action:
             QMessageBox.information(self, "Delete", "Select a callsign to delete.")
             return
+        if action == "__CLEAR_ALL__":
+            self._clear_all()
+            return
+        cs = action
         confirm = QMessageBox.question(
             self,
             "Delete Schedule",
