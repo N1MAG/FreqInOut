@@ -269,6 +269,7 @@ class MessageViewerTab(QWidget):
         self._pending_timer: QTimer | None = None
         self._pending_rows: List[Dict[str, str | float]] = []
         self._form_cache: Dict[str, List[Dict]] = {}
+        self._form_title_cache: Dict[str, str] = {}
         self.forms_path = (self.settings.get("js8_forms_path", "") or "").strip()
         self._read_state_map: Dict[tuple, tuple[str, float]] = {}
         self._message_rows: List[UnifiedMessage] = []
@@ -1409,7 +1410,11 @@ class MessageViewerTab(QWidget):
             rcv_ts = msg.utc_ts or 0.0
             rcv_display = msg.utc_str or self._fmt_ts(rcv_ts)
             title = ""
-            title = (msg.decoded_text or msg.raw_text or "").strip()
+            if msg.msg_type.startswith("F!"):
+                form_id = msg.msg_type[2:].strip()
+                title = self._load_form_title(form_id)
+            if not title:
+                title = (msg.decoded_text or msg.raw_text or "").strip()
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             rows.append(
@@ -1431,7 +1436,12 @@ class MessageViewerTab(QWidget):
             status = "READ" if msg.state.upper() == "READ" else "NEW"
             rcv_ts = msg.utc_ts or 0.0
             rcv_display = msg.utc_str or self._fmt_ts(rcv_ts)
-            title = (msg.decoded_text or msg.raw_text or "").strip()
+            title = ""
+            if msg_type.startswith("F!"):
+                form_id = msg_type[2:].strip()
+                title = self._load_form_title(form_id)
+            if not title:
+                title = (msg.decoded_text or msg.raw_text or "").strip()
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             rows.append(
@@ -2668,6 +2678,32 @@ class MessageViewerTab(QWidget):
             questions = []
         self._form_cache[form_id] = questions
         return questions
+
+    def _load_form_title(self, form_id: str) -> str:
+        if form_id in self._form_title_cache:
+            return self._form_title_cache[form_id]
+        forms_dir = (self.settings.get("js8_forms_path", self.forms_path) or "").strip()
+        if not forms_dir:
+            return ""
+        path = Path(forms_dir) / f"MCF{form_id}.txt"
+        if not path.exists():
+            return ""
+        title = ""
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if "|" in line:
+                        title = line.split("|", 1)[0].strip()
+                    else:
+                        title = line.strip()
+                    break
+        except Exception:
+            title = ""
+        self._form_title_cache[form_id] = title
+        return title
 
     # ---------- JS8 state persistence (local DB) ---------- #
 
