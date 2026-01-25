@@ -7,6 +7,7 @@ import re
 import sqlite3
 import ctypes
 import ctypes.wintypes
+import datetime
 import platform
 import shutil
 import subprocess
@@ -96,6 +97,24 @@ class JS8Message:
     decoded_text: str
     state: str  # UNREAD / READ
     read_ts: float = 0.0
+
+    def display_line(self) -> str:
+        return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
+
+
+@dataclass
+class SpotterMessage:
+    spotter_id: int
+    from_call: str
+    to_call: str
+    msg_type: str  # "F!###"
+    utc_str: str
+    utc_ts: float
+    raw_text: str
+    decoded_text: str
+    state: str  # UNREAD / READ
+    read_ts: float = 0.0
+    relay_via: str = ""
 
     def display_line(self) -> str:
         return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
@@ -244,6 +263,7 @@ class MessageViewerTab(QWidget):
             self.scan_minutes = 15
 
         self.js8_messages: List[JS8Message] = []
+        self.spotter_messages: List[SpotterMessage] = []
         self.current_js8: JS8Message | None = None
         self._js8_timer: QTimer | None = None
         self._pending_timer: QTimer | None = None
@@ -270,6 +290,7 @@ class MessageViewerTab(QWidget):
         self._load_watch_dirs_from_db()
         self._clear_backlog_on_upgrade()
         self._ensure_read_state_table()
+        self._ensure_spotter_table()
         self._read_state_map = self._load_read_state_map()
 
         self.files: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
@@ -392,6 +413,37 @@ class MessageViewerTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to ensure read state table: %s", e)
+
+    def _ensure_spotter_table(self) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS spotter_traffic (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    utc_ts REAL,
+                    utc_str TEXT,
+                    from_call TEXT,
+                    to_call TEXT,
+                    form_id TEXT,
+                    spotter_token TEXT,
+                    raw_text TEXT,
+                    decoded_text TEXT,
+                    state TEXT,
+                    read_ts REAL,
+                    relay_via TEXT,
+                    ingested_ts REAL
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to ensure spotter table: %s", e)
 
     @staticmethod
     def _read_state_key(origin: str, rec: FileRecord) -> tuple:
@@ -728,9 +780,17 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: JS8 ingest failed: %s", e)
         try:
+            self._ingest_spotter_from_directed()
+        except Exception as e:
+            log.debug("MessageViewer: spotter ingest failed: %s", e)
+        try:
             self._load_js8_from_local(force=force)
         except Exception as e:
             log.debug("MessageViewer: JS8 local load failed: %s", e)
+        try:
+            self._load_spotter_from_db(force=force)
+        except Exception as e:
+            log.debug("MessageViewer: spotter load failed: %s", e)
 
     # ---------- Pending JS8 MSG backlog ---------- #
 
@@ -1344,15 +1404,12 @@ class MessageViewerTab(QWidget):
     def _build_message_rows(self) -> List[UnifiedMessage]:
         rows: List[UnifiedMessage] = []
         for msg in self.js8_messages:
-            msg_type = "Spotter" if msg.msg_type.startswith("F!") else "JS8 MSG"
+            msg_type = msg.msg_type if msg.msg_type.startswith("F!") else "JS8 MSG"
             status = "READ" if msg.state.upper() == "READ" else "NEW"
             rcv_ts = msg.utc_ts or 0.0
             rcv_display = msg.utc_str or self._fmt_ts(rcv_ts)
             title = ""
-            if msg_type == "Spotter":
-                title = "Spotter"
-            else:
-                title = (msg.decoded_text or msg.raw_text or "").strip()
+            title = (msg.decoded_text or msg.raw_text or "").strip()
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             rows.append(
@@ -1365,6 +1422,28 @@ class MessageViewerTab(QWidget):
                     rcv_display=rcv_display,
                     title=title,
                     origin="js8",
+                    payload=msg,
+                )
+            )
+
+        for msg in self.spotter_messages:
+            msg_type = msg.msg_type or "F!"
+            status = "READ" if msg.state.upper() == "READ" else "NEW"
+            rcv_ts = msg.utc_ts or 0.0
+            rcv_display = msg.utc_str or self._fmt_ts(rcv_ts)
+            title = (msg.decoded_text or msg.raw_text or "").strip()
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+            rows.append(
+                UnifiedMessage(
+                    msg_type=msg_type,
+                    status=status,
+                    from_call=(msg.from_call or "").strip().upper(),
+                    to_call=(msg.to_call or "").strip().upper(),
+                    rcv_ts=rcv_ts,
+                    rcv_display=rcv_display,
+                    title=title,
+                    origin="spotter",
                     payload=msg,
                 )
             )
@@ -1407,6 +1486,11 @@ class MessageViewerTab(QWidget):
             self.current_js8 = row.payload
             self._load_js8_content(row.payload)
             self._mark_js8_read(row.payload)
+        elif isinstance(row.payload, SpotterMessage):
+            self.current_record = None
+            self.current_js8 = None
+            self._load_js8_content(row.payload)
+            self._mark_spotter_read(row.payload)
         elif isinstance(row.payload, FileRecord):
             self.current_js8 = None
             self.current_record = row.payload
@@ -2109,7 +2193,7 @@ class MessageViewerTab(QWidget):
             self.viewer.setAcceptRichText(False)
             self.viewer.setPlainText(content)
 
-    def _load_js8_content(self, msg: JS8Message):
+    def _load_js8_content(self, msg: JS8Message | SpotterMessage):
         header = [
             f"FROM: {msg.from_call}",
             f"TO:   {msg.to_call}",
@@ -2117,6 +2201,9 @@ class MessageViewerTab(QWidget):
             f"UTC:  {msg.utc_str}",
             "",
         ]
+        relay_via = getattr(msg, "relay_via", "") or ""
+        if relay_via:
+            header.insert(4, f"RELAY VIA: {relay_via}")
         body = msg.decoded_text or msg.raw_text
         self.info_label.setText(f"{msg.msg_type} {msg.from_call} -> {msg.to_call}")
         self.viewer.setAcceptRichText(False)
@@ -2486,6 +2573,31 @@ class MessageViewerTab(QWidget):
             lambda row: isinstance(row.payload, JS8Message) and row.payload.msg_id == msg.msg_id
         )
 
+    def _mark_spotter_read(self, msg: SpotterMessage) -> None:
+        if msg.state.upper() == "READ":
+            return
+        db_path = self._db_path()
+        if not db_path:
+            return
+        ts = time.time()
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE spotter_traffic SET state='READ', read_ts=? WHERE id=?",
+                (float(ts), int(msg.spotter_id)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to update spotter read state: %s", e)
+        msg.state = "READ"
+        msg.read_ts = ts
+        self._refresh_table_after_read(
+            lambda row: isinstance(row.payload, SpotterMessage)
+            and row.payload.spotter_id == msg.spotter_id
+        )
+
     def _decode_form(self, form_id: str, responses: str, comment: str, raw: str = "") -> str:
         form_id = form_id.strip()
         if not form_id:
@@ -2765,6 +2877,47 @@ class MessageViewerTab(QWidget):
         self.js8_messages = msgs
         self._populate_messages_table(force=force)
 
+    def _load_spotter_from_db(self, force: bool = False) -> None:
+        db_path = self._db_path()
+        msgs: List[SpotterMessage] = []
+        if not db_path or not Path(db_path).exists():
+            self.spotter_messages = msgs
+            self._populate_messages_table(force=force)
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, utc_str, utc_ts, from_call, to_call, form_id, spotter_token,
+                       raw_text, decoded_text, state, read_ts, relay_via
+                FROM spotter_traffic
+                ORDER BY utc_ts DESC, id DESC
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to load spotter traffic: %s", e)
+            rows = []
+        for r in rows:
+            msg = SpotterMessage(
+                spotter_id=int(r[0]),
+                utc_str=(r[1] or ""),
+                utc_ts=float(r[2] or 0.0),
+                from_call=(r[3] or "").strip().upper(),
+                to_call=(r[4] or "").strip().upper(),
+                msg_type=f"F!{r[5]}" if r[5] and not str(r[5]).startswith("F!") else (r[5] or ""),
+                raw_text=(r[7] or ""),
+                decoded_text=(r[8] or ""),
+                state=(r[9] or "UNREAD").upper(),
+                read_ts=float(r[10] or 0.0),
+                relay_via=(r[11] or "").strip().upper(),
+            )
+            msgs.append(msg)
+        self.spotter_messages = msgs
+        self._populate_messages_table(force=force)
+
     def _ingest_js8_messages(self) -> None:
         inbox_path = self._inbox_path()
         if not inbox_path or not inbox_path.exists():
@@ -2860,6 +3013,170 @@ class MessageViewerTab(QWidget):
                 self._enqueue_next_msg_id(from_call, text)
             except Exception:
                 pass
+
+    def _spotter_offset_key(self) -> str:
+        return "spotter_directed_offset"
+
+    def _resolve_directed_path(self) -> Optional[Path]:
+        directed = (self.settings.get("js8_directed_path", "") or "").strip()
+        if not directed:
+            return None
+        return Path(directed)
+
+    def _spotter_exists(self, from_call: str, form_id: str, token: str, raw_text: str) -> bool:
+        db_path = self._db_path()
+        if not db_path:
+            return False
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            if token:
+                cur.execute(
+                    """
+                    SELECT 1 FROM spotter_traffic
+                    WHERE from_call=? AND form_id=? AND spotter_token=?
+                    LIMIT 1
+                    """,
+                    (from_call, form_id, token),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT 1 FROM spotter_traffic
+                    WHERE from_call=? AND form_id=? AND raw_text=?
+                    LIMIT 1
+                    """,
+                    (from_call, form_id, raw_text),
+                )
+            exists = cur.fetchone() is not None
+            conn.close()
+            return exists
+        except Exception:
+            return False
+
+    def _parse_directed_spotter_line(self, line: str) -> Optional[Dict[str, str | float]]:
+        if not line:
+            return None
+        if not line.rstrip().endswith("\u2662"):
+            return None
+        parts = [p for p in line.strip().split("\t") if p]
+        if len(parts) < 5:
+            parts = re.split(r"\s+", line.strip(), maxsplit=4)
+        if len(parts) < 5:
+            return None
+        dt_str, _freq_txt, _shift, _snr_txt, msg = parts[0], parts[1], parts[2], parts[3], parts[4]
+        if ":" not in msg:
+            return None
+        msg_upper = msg.upper()
+        if "?" in msg_upper or "E?" in msg_upper:
+            return None
+        if "..." in msg:
+            return None
+        if re.search(r"\bMSG\b", msg_upper):
+            return None
+        form_match = re.search(r"F!(\d{3})", msg_upper)
+        if not form_match:
+            return None
+        try:
+            ts = datetime.datetime.strptime(dt_str[:19], "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc
+            )
+        except Exception:
+            return None
+        relay_via, rest = msg.split(":", 1)
+        relay_via = relay_via.strip().upper()
+        rest = rest.strip()
+        dest_token = (rest.split() or [""])[0]
+        dest = dest_token.split(">")[0].strip().strip(",").upper()
+        if not dest:
+            return None
+        de_match = re.search(r"\*DE\*\s*([A-Z0-9/]+)", msg_upper)
+        from_call = de_match.group(1) if de_match else relay_via
+        form_start = msg_upper.find("F!")
+        if form_start < 0:
+            return None
+        raw_form = msg[form_start:].strip()
+        raw_form = re.split(r"\*DE\*", raw_form, 1, flags=re.IGNORECASE)[0].strip()
+        if raw_form.endswith("\u2662"):
+            raw_form = raw_form[:-1].rstrip()
+        token_match = re.search(r"(#[A-Z0-9]{3,})", raw_form.upper())
+        token = token_match.group(1) if token_match else ""
+        form_id = form_match.group(1)
+        return {
+            "utc_ts": ts.timestamp(),
+            "utc_str": ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "from_call": from_call.strip().upper(),
+            "to_call": dest.strip().upper(),
+            "form_id": form_id,
+            "spotter_token": token,
+            "raw_form": raw_form,
+            "relay_via": relay_via,
+        }
+
+    def _ingest_spotter_from_directed(self) -> None:
+        directed_path = self._resolve_directed_path()
+        if not directed_path or not directed_path.exists():
+            return
+        self._ensure_spotter_table()
+        try:
+            offset = int(self.settings.get(self._spotter_offset_key(), 0) or 0)
+        except Exception:
+            offset = 0
+        try:
+            size_now = directed_path.stat().st_size
+            if offset < 0 or offset > size_now:
+                offset = 0
+            with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                if offset:
+                    fh.seek(offset)
+                for line in fh:
+                    parsed = self._parse_directed_spotter_line(line)
+                    if not parsed:
+                        continue
+                    form_id = str(parsed.get("form_id") or "").strip()
+                    raw_form = str(parsed.get("raw_form") or "").strip()
+                    if not form_id or not raw_form:
+                        continue
+                    from_call = str(parsed.get("from_call") or "").strip().upper()
+                    token = str(parsed.get("spotter_token") or "").strip().upper()
+                    if not from_call:
+                        continue
+                    if self._spotter_exists(from_call, form_id, token, raw_form):
+                        continue
+                    _, resp, comment = self._parse_form_parts(raw_form)
+                    decoded = self._decode_form(form_id, resp, comment, raw=raw_form)
+                    db_path = self._db_path()
+                    if not db_path:
+                        continue
+                    conn = sqlite3.connect(db_path)
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        INSERT INTO spotter_traffic
+                            (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
+                             raw_text, decoded_text, state, read_ts, relay_via, ingested_ts)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?)
+                        """,
+                        (
+                            float(parsed.get("utc_ts") or 0.0),
+                            str(parsed.get("utc_str") or ""),
+                            from_call,
+                            str(parsed.get("to_call") or "").strip().upper(),
+                            form_id,
+                            token,
+                            raw_form,
+                            decoded or raw_form,
+                            str(parsed.get("relay_via") or "").strip().upper(),
+                            float(time.time()),
+                        ),
+                    )
+                    conn.commit()
+                    conn.close()
+                self.settings.set(self._spotter_offset_key(), int(fh.tell()))
+                if hasattr(self.settings, "save"):
+                    self.settings.save()
+        except Exception as e:
+            log.debug("MessageViewer: spotter ingest failed reading DIRECTED.TXT: %s", e)
 
     def _enqueue_next_msg_id(self, from_call: str, text: str) -> None:
         """
