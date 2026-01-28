@@ -304,6 +304,15 @@ def _ensure_nets_db() -> None:
             )
             """
         )
+        # FLDigi check-ins (used for map tooltip mode flags)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fldigi_checkins (
+                callsign TEXT PRIMARY KEY,
+                last_seen_ts REAL
+            )
+            """
+        )
 
         # Auto-query backlog for JS8 (MSG IDs / GRID requests)
         cur.execute(
