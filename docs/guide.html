@@ -79,7 +79,7 @@
     <li><strong>Export to PDF</strong>: Exports the currently viewed message from the viewer pane.</li>
     <li><strong>Pending JS8 MSGs</strong>: Shows pending message IDs and actions. <em>Get</em> sends a JS8 QUERY MSG to the callsign; <em>Mark Retrieved</em> clears the pending entry (and can mark JS8 inbox rows READ if enabled in Settings).</li>
     <li><strong>Filters row</strong>: MSG Type, Status, From, To dropdowns plus free-text Search and <em>Clear Filters</em>. From/To fields are searchable; typing replaces the hint and narrows matches. Status includes <em>Action Needed</em> when red flags exist.</li>
-    <li><strong>Messages table</strong>: Columns are MSG Type, Status, From, To, RCV_DT, Message Title, Actions. Actions show <em>View</em> for all rows; a flag icon (between View/Delete) for all rows; and <em>Delete</em> for JS8/VarAC/file-based entries.</li>
+    <li><strong>Messages table</strong>: Columns are MSG Type, Status, From, To, RCV_DT, Message Title, Actions. Actions show <em>View</em> for all rows; a flag icon (between View/Delete) for all rows; and <em>Delete</em> for JS8/VarAC/file-based entries and Spotter (F!###) messages.</li>
     <li><strong>Flags</strong>: Click the flag icon to cycle None -> Red -> Green -> None. Red flags indicate follow-up needed and are included in the Status filter as <em>Action Needed</em>.</li>
     <li><strong>Sorting</strong>: Click headers to sort by MSG Type, Status, From, To, RCV_DT, or Message Title (Actions is not sortable).</li>
     <li><strong>Reader panel</strong>: The lower pane shows the selected message and remains open while you review entries.</li>
@@ -88,8 +88,11 @@
   <ul class="section-list">
     <li><strong>Send MSG</strong>: When clicking <em>Get</em> in Pending JS8 MSGs, a confirmation dialog shows the exact QUERY MSG string before sending.</li>
     <li><strong>Missing Callsign</strong>: If your callsign is not configured, a warning appears when attempting to send a QUERY MSG.</li>
+    <li><strong>Delete Selected</strong>: Deletes only checked rows. The button highlights only when at least one row is checked.</li>
+    <li><strong>Row selection</strong>: Use the checkbox column to select rows. The header checkbox is a master select/deselect for the current filtered view and is enabled only when a filter is active.</li>
     <li><strong>Delete File</strong>: File-based messages prompt <em>Move this file to the Recycle Bin?</em> and show size/modified time. Failure shows <em>Failed to move file to the Recycle Bin.</em></li>
     <li><strong>Delete Message</strong>: JS8 deletions show <em>Message {ID} Deleted</em> or <em>Failed to delete Message {ID}</em>. VarAC deletions confirm with <em>Delete VarAC message {ID}?</em> and then show the same success/failure toast.</li>
+    <li><strong>Delete Spotter</strong>: Spotter (F!###) messages are deleted from the local <code>spotter_traffic</code> table after confirmation.</li>
   </ul>
 
 <h2 id="fldigi-ncs">FLDigi NCS Tab</h2>
@@ -295,6 +298,8 @@
     <li><strong>Frequency Control</strong>: FLRig, JS8Call, or Manual (no rig commands).</li>
     <li><strong>Use FreqInOut Scheduler</strong>: Master enable for schedule-driven changes; QSY depends on this.</li>
     <li><strong>Schedule Mode</strong>: Normal (apply only on schedule), Loose (prompt to reapply when off schedule), Strict (periodic resync). Off-schedule prompt offers Yes, Suspend, or Ignore.</li>
+    <li><strong>Activity check</strong>: Before any scheduled frequency change, the scheduler checks for active transmissions and recent receive activity. It skips changes if FLRig PTT is active, JS8Call PTT is active, JS8 RX activity occurred in the last ~12 seconds, or VarAC reports busy.</li>
+    <li><strong>Wait behavior</strong>: There is no fixed delay timer. Changes resume as soon as the activity checks clear (PTT off, JS8 RX window elapsed, VarAC disconnected). If you manually QSY and pause scheduling, the pause is 30 minutes.</li>
   </ul>
 
   <h3 id="settings-status">Operating Status</h3>
