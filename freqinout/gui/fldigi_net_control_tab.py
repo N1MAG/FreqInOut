@@ -835,6 +835,32 @@ class FldigiNetControlTab(QWidget):
                 return None
             return None
 
+        def parse_month_weeks(txt: str) -> List[int]:
+            weeks: List[int] = []
+            for token in (txt or "").split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    val = int(token)
+                except Exception:
+                    continue
+                if 1 <= val <= 5:
+                    weeks.append(val)
+            return sorted(set(weeks))
+
+        def nth_weekday_date(year: int, month: int, weekday_idx: int, nth: int) -> Optional[datetime.date]:
+            try:
+                first = datetime.date(year, month, 1)
+            except Exception:
+                return None
+            offset = (weekday_idx - first.weekday()) % 7
+            day = 1 + offset + (nth - 1) * 7
+            try:
+                return datetime.date(year, month, day)
+            except Exception:
+                return None
+
         day_name = (row.get("day_utc") or "").strip()
         day_idx = day_to_idx(day_name) if day_name else None
         if day_idx is None:
@@ -845,9 +871,55 @@ class FldigiNetControlTab(QWidget):
             return None
 
         recurrence = (row.get("recurrence") or "Weekly").strip()
+        if recurrence == "Monthly":
+            recurrence = "Periodic"
         interval_weeks = 2 if recurrence == "Bi-Weekly" else 1
         offset_weeks = int(row.get("biweekly_offset_weeks", 0) or 0)
         early = int(row.get("early_checkin", 0) or 0)
+
+        if recurrence == "Daily":
+            start_dt = datetime.datetime.combine(now.date(), start_t)
+            end_dt = datetime.datetime.combine(now.date(), end_t)
+            if end_dt <= start_dt:
+                end_dt += datetime.timedelta(days=1)
+            if end_dt < now:
+                start_dt += datetime.timedelta(days=1)
+                end_dt += datetime.timedelta(days=1)
+            window_start = start_dt - datetime.timedelta(minutes=early)
+            active = window_start <= now < end_dt
+            return {
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "window_start": window_start,
+                "active": active,
+                "row": row,
+            }
+
+        if recurrence == "Periodic":
+            weeks = parse_month_weeks(row.get("month_weeks", "")) or [1]
+            for month_offset in range(0, 13):
+                year = (now.year + (now.month - 1 + month_offset) // 12)
+                month = ((now.month - 1 + month_offset) % 12) + 1
+                for nth in weeks:
+                    occ_date = nth_weekday_date(year, month, day_idx, nth)
+                    if not occ_date:
+                        continue
+                    start_dt = datetime.datetime.combine(occ_date, start_t)
+                    end_dt = datetime.datetime.combine(occ_date, end_t)
+                    if end_dt <= start_dt:
+                        end_dt += datetime.timedelta(days=1)
+                    window_start = start_dt - datetime.timedelta(minutes=early)
+                    if end_dt < now:
+                        continue
+                    active = window_start <= now < end_dt
+                    return {
+                        "start_dt": start_dt,
+                        "end_dt": end_dt,
+                        "window_start": window_start,
+                        "active": active,
+                        "row": row,
+                    }
+            return None
 
         today_idx = now.weekday()
         days_ahead = (day_idx - today_idx) % 7
@@ -1798,6 +1870,14 @@ class FldigiNetControlTab(QWidget):
             try:
                 dummy._ensure_schema(conn)  # type: ignore[attr-defined]
                 cur = conn.cursor()
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS fldigi_checkins (
+                        callsign TEXT PRIMARY KEY,
+                        last_seen_ts REAL
+                    )
+                    """
+                )
                 today_str = datetime.datetime.utcnow().strftime("%Y%m%d")
                 for e in entries:
                     cs = (e.get("callsign") or "").strip().upper()
@@ -1824,6 +1904,14 @@ class FldigiNetControlTab(QWidget):
                             date_added,
                             trusted_val,
                         ),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO fldigi_checkins (callsign, last_seen_ts)
+                        VALUES (?, ?)
+                        ON CONFLICT(callsign) DO UPDATE SET last_seen_ts=excluded.last_seen_ts
+                        """,
+                        (cs, float(datetime.datetime.utcnow().timestamp())),
                     )
                 conn.commit()
             finally:
