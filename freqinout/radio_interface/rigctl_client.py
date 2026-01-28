@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from xmlrpc.client import ServerProxy
+from xmlrpc.client import ServerProxy, Transport
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +66,7 @@ class FLRigClient:
         port: int = 12345,
         fldigi_port: int = 7362,
         fldigi_host: Optional[str] = None,
+        timeout: float = 0.8,
     ):
         self.host = host
         self.port = port
@@ -73,6 +74,25 @@ class FLRigClient:
         self.fldigi_port = fldigi_port
         self.fldigi_host = fldigi_host or host
         self._fldigi_proxy: Optional[ServerProxy] = None
+        self.timeout = float(timeout)
+
+    def _transport(self) -> Transport:
+        timeout = self.timeout
+
+        class TimeoutTransport(Transport):
+            def __init__(self, timeout_val: float):
+                super().__init__()
+                self._timeout_val = timeout_val
+
+            def make_connection(self, host):
+                conn = super().make_connection(host)
+                try:
+                    conn.timeout = self._timeout_val
+                except Exception:
+                    pass
+                return conn
+
+        return TimeoutTransport(timeout)
 
     # ------------- INTERNAL -------------
 
@@ -80,7 +100,7 @@ class FLRigClient:
         if self._proxy is None:
             url = f"http://{self.host}:{self.port}"
             log.info("Connecting to FLRig XML-RPC at %s", url)
-            self._proxy = ServerProxy(url, allow_none=True)
+            self._proxy = ServerProxy(url, allow_none=True, transport=self._transport())
         return self._proxy
 
     def _connect_fldigi(self) -> Optional[ServerProxy]:
@@ -88,7 +108,7 @@ class FLRigClient:
             url = f"http://{self.fldigi_host}:{self.fldigi_port}"
             try:
                 log.info("Connecting to FLDigi XML-RPC at %s", url)
-                self._fldigi_proxy = ServerProxy(url, allow_none=True)
+                self._fldigi_proxy = ServerProxy(url, allow_none=True, transport=self._transport())
             except Exception as e:
                 log.warning("FLDigi XML-RPC connect failed: %s", e)
                 self._fldigi_proxy = None
