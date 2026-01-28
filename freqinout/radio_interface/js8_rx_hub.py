@@ -43,6 +43,9 @@ class JS8RxHub(QObject):
         self._net_started = False
         self._host = "127.0.0.1"
         self._port = 2442
+        self._last_rx_activity_ts: float = 0.0
+        self._last_ptt_ts: float = 0.0
+        self._ptt_active: bool = False
 
     @classmethod
     def instance(cls) -> "JS8RxHub":
@@ -132,8 +135,31 @@ class JS8RxHub(QObject):
                 lock.release()
         if not messages:
             return
+        now_ts = time.time()
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            mtype = str(msg.get("type") or "").upper()
+            if mtype == "RX.ACTIVITY":
+                self._last_rx_activity_ts = now_ts
+            elif mtype == "RIG.PTT":
+                self._last_ptt_ts = now_ts
+                params = msg.get("params") or {}
+                if "PTT" in params:
+                    self._ptt_active = bool(params.get("PTT"))
+                else:
+                    self._ptt_active = str(msg.get("value") or "").lower() == "on"
         for cb in list(self._listeners):
             try:
                 cb(messages)
             except Exception:
                 continue
+
+    def last_rx_activity_ts(self) -> float:
+        return self._last_rx_activity_ts
+
+    def last_ptt_ts(self) -> float:
+        return self._last_ptt_ts
+
+    def ptt_active(self) -> bool:
+        return self._ptt_active
