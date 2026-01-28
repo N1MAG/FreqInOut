@@ -210,6 +210,7 @@ class SchedulerEngine(QObject):
         self._last_fldigi_apply: Optional[Tuple[Optional[str], Optional[int]]] = None
         self._fldigi_apply_after_ts: Optional[float] = None
         self._fldigi_was_available: bool = False
+        self._fldigi_apply_pending: bool = False
         self._last_resync_ts: float = 0.0
         self._off_schedule_prompt_active: bool = False
         self._last_off_schedule_key: Optional[Tuple] = None
@@ -680,6 +681,10 @@ class SchedulerEngine(QObject):
                 offset = None
         self._desired_fldigi_mode = mode
         self._desired_fldigi_offset = offset
+        if mode is None and offset is None:
+            self._fldigi_apply_pending = False
+        elif self._enforcement_mode() == "Normal":
+            self._fldigi_apply_pending = True
         if mode or offset is not None:
             # Request immediate apply if FLDigi is already available.
             self._fldigi_apply_after_ts = 0.0
@@ -695,6 +700,8 @@ class SchedulerEngine(QObject):
         except Exception:
             pass
         if self._control_mode() in ("MANUAL", "NONE"):
+            return
+        if self._enforcement_mode() == "Normal" and not self._fldigi_apply_pending:
             return
         if not (self._desired_fldigi_mode or self._desired_fldigi_offset is not None):
             return
@@ -715,6 +722,7 @@ class SchedulerEngine(QObject):
         if self.rig.set_fldigi_mode_offset(self._desired_fldigi_mode, self._desired_fldigi_offset):
             self._last_fldigi_apply = desired
             self._fldigi_apply_after_ts = None
+            self._fldigi_apply_pending = False
 
     def _load_daily_schedule_from_db(self) -> Optional[List[Dict]]:
         """
