@@ -11,6 +11,7 @@ from typing import Optional
 import psutil
 
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 
 log = logging.getLogger(__name__)
 
@@ -56,35 +57,21 @@ class JS8StatusClient:
         Attempt a quick status query to JS8Call.
 
         For now, we:
-          - Open a short-lived TCP connection to JS8Call API port.
-          - Send a simple STATUS request (if JS8Call supports it).
-          - If we can detect an active TX/RX, return True.
+          - Use JS8RxHub to observe recent RX activity and PTT state.
+          - If we have recent RX activity or active PTT, return True.
           - On any failure, assume not busy (but log at debug level).
         """
-        port = self._get_port()
         try:
-            with socket.create_connection((self.host, port), timeout=0.3) as s:
-                payload = json.dumps({"type": "STATUS"}) + "\n"
-                s.sendall(payload.encode("utf-8"))
-
-                s.settimeout(0.3)
-                data = s.recv(4096)
-                if not data:
-                    return False
-
-                for line in data.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        msg = json.loads(line.decode("utf-8"))
-                    except Exception:
-                        continue
-                    state = msg.get("state") or msg.get("TRX")
-                    if state in ("TX", "RX", "BUSY"):
-                        log.debug("JS8Call reported busy state: %s", state)
-                        return True
+            hub = JS8RxHub.instance()
+            if not hub.start(self.host, self._get_port()):
                 return False
+            now_ts = time.time()
+            if hub.ptt_active():
+                return True
+            # Treat very recent RX activity as busy to avoid QSY mid-stream.
+            if now_ts - hub.last_rx_activity_ts() <= 12.0:
+                return True
+            return False
         except BaseException as e:
             log.debug("JS8Call status query failed (assuming not busy): %s", e)
             return False
@@ -222,7 +209,47 @@ class JS8ControlClient(JS8StatusClient):
 
 
 class VarACStatusClient:
-    """Deprecated: VarAC is not managed by FreqInOut."""
+    """VarAC busy check using VarAC_traffic.log in the install folder."""
+
+    def __init__(self) -> None:
+        self.settings = SettingsManager()
+
+    def _resolve_log_path(self) -> Optional[Path]:
+        raw_install = (self.settings.get("varac_path", "") or "").strip()
+        raw_db = (self.settings.get("varac_db_path", "") or "").strip()
+        base: Optional[Path] = None
+        if raw_install:
+            base = Path(raw_install)
+        elif raw_db:
+            p = Path(raw_db)
+            base = p.parent if p.is_file() or p.suffix.lower() == ".db" else p
+        if not base:
+            return None
+        return base / "VarAC_traffic.log"
 
     def is_busy(self) -> bool:
-        return False
+        log_path = self._resolve_log_path()
+        if not log_path or not log_path.exists():
+            return False
+        try:
+            # Read tail to avoid loading large logs
+            with log_path.open("rb") as fh:
+                try:
+                    fh.seek(-8192, 2)
+                except OSError:
+                    fh.seek(0)
+                tail = fh.read().decode("utf-8", errors="replace")
+            lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+            last_state: Optional[str] = None
+            for line in lines:
+                upper = line.upper()
+                if "INCOMING CONNECTION REQUEST" in upper:
+                    last_state = "incoming"
+                elif "CONNECTED TO" in upper:
+                    last_state = "connected"
+                elif "DISCONNECTED FROM" in upper:
+                    last_state = "disconnected"
+            return last_state in {"incoming", "connected"}
+        except Exception as e:
+            log.debug("VarACStatusClient: failed to read log: %s", e)
+            return False
