@@ -7,8 +7,8 @@ import sqlite3
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QStandardItemModel, QStandardItem
+from PySide6.QtCore import Qt, Signal, QTimer, QRect
+from PySide6.QtGui import QColor, QStandardItemModel, QStandardItem, QPainter
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QTableWidget,
     QTableWidgetItem,
-    QHeaderView,
     QMessageBox,
     QTextEdit,
     QFileDialog,
@@ -27,6 +26,8 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QCheckBox,
     QComboBox,
+    QHeaderView,
+    QStyle,
 )
 
 from freqinout.core.settings_manager import SettingsManager
@@ -55,6 +56,94 @@ def _normalize_date_only(val: Optional[str]) -> Optional[str]:
     if len(digits) >= 8:
         return digits[:8]
     return None
+
+
+class OperatorHeaderWithCheckbox(QHeaderView):
+    checkboxToggled = Signal(int)
+
+    def __init__(self, orientation: Qt.Orientation, parent=None):
+        super().__init__(orientation, parent)
+        self._checkbox_state = Qt.Unchecked
+        self._checkbox_enabled = False
+        self._cb_bg = QColor("#ffffff")
+        self._cb_border = QColor("#777777")
+        self._cb_accent = QColor("#2d8cf0")
+        self._cb_mark = QColor("#ffffff")
+        self.setSectionsClickable(True)
+
+    def set_checkbox_state(self, state: Qt.CheckState, enabled: Optional[bool] = None) -> None:
+        if enabled is not None:
+            self._checkbox_enabled = bool(enabled)
+        self._checkbox_state = state
+        self.updateSection(0)
+
+    def set_checkbox_colors(
+        self, *, bg: QColor, border: QColor, accent: QColor, mark: QColor
+    ) -> None:
+        self._cb_bg = bg
+        self._cb_border = border
+        self._cb_accent = accent
+        self._cb_mark = mark
+        self.updateSection(0)
+
+    def _checkbox_rect(self, rect: QRect) -> QRect:
+        style = self.style()
+        width = style.pixelMetric(QStyle.PM_IndicatorWidth)
+        height = style.pixelMetric(QStyle.PM_IndicatorHeight)
+        x = rect.x() + 4
+        y = rect.y() + (rect.height() - height) // 2
+        return QRect(x, y, width, height)
+
+    def paintSection(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:
+        super().paintSection(painter, rect, logicalIndex)
+        if logicalIndex != 0:
+            return
+        box = self._checkbox_rect(rect)
+        border = self._cb_accent if self._checkbox_enabled else self._cb_border
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(border)
+        painter.setBrush(self._cb_bg)
+        painter.drawRoundedRect(box.adjusted(0, 0, -1, -1), 2, 2)
+        if self._checkbox_state in (Qt.Checked, Qt.PartiallyChecked):
+            inner = box.adjusted(3, 3, -3, -3)
+            painter.setBrush(self._cb_accent)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(inner, 1, 1)
+            painter.setPen(self._cb_mark)
+            if self._checkbox_state == Qt.PartiallyChecked:
+                y = inner.center().y()
+                painter.drawLine(inner.left() + 2, y, inner.right() - 2, y)
+            else:
+                x1 = inner.left() + 2
+                y1 = inner.center().y()
+                x2 = inner.center().x()
+                y2 = inner.bottom() - 2
+                x3 = inner.right() - 2
+                y3 = inner.top() + 2
+                painter.drawLine(x1, y1, x2, y2)
+                painter.drawLine(x2, y2, x3, y3)
+        painter.restore()
+
+    def mousePressEvent(self, event) -> None:
+        if self._checkbox_enabled:
+            idx = self.logicalIndexAt(event.pos())
+            if idx == 0:
+                rect = QRect(
+                    self.sectionViewportPosition(0),
+                    0,
+                    self.sectionSize(0),
+                    self.height(),
+                )
+                if self._checkbox_rect(rect).contains(event.pos()):
+                    if self._checkbox_state == Qt.Checked:
+                        self._checkbox_state = Qt.Unchecked
+                    else:
+                        self._checkbox_state = Qt.Checked
+                    self.updateSection(0)
+                    self.checkboxToggled.emit(int(self._checkbox_state.value))
+                    return
+        super().mousePressEvent(event)
 
 
 class OperatorHistoryTab(QWidget):
@@ -102,6 +191,7 @@ class OperatorHistoryTab(QWidget):
         self._rows: List[Dict] = []
         self.loading_label: QLabel | None = None
         self._nav_refresh_inflight = False
+        self._bulk_select_inflight = False
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.setInterval(300)
@@ -117,6 +207,7 @@ class OperatorHistoryTab(QWidget):
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Operator History</h3>"))
+        header.addSpacing(8)
         self.loading_label = QLabel("Brewing it fresh...")
         self.loading_label.setStyleSheet("color: #888;")
         self.loading_label.setVisible(False)
@@ -141,15 +232,11 @@ class OperatorHistoryTab(QWidget):
         search_row.addWidget(self.group_filter)
         self.manage_btn = QPushButton("Manage Operators")
         search_row.addWidget(self.manage_btn)
-        self.select_all_btn = QPushButton("Select All")
-        search_row.addWidget(self.select_all_btn)
         self.export_group_combo = QComboBox()
         self.export_group_combo.setEditable(False)
         self.export_group_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.export_group_combo.setMinimumWidth(160)
-        self.export_group_combo.setEditable(True)
-        self.export_group_combo.lineEdit().setReadOnly(True)
-        self.export_group_combo.lineEdit().setPlaceholderText("Export by Group")
+        self.export_group_combo.setEditable(False)
         search_row.addWidget(self.export_group_combo)
         self.import_btn = QPushButton("Import/Export...")
         search_row.addWidget(self.import_btn)
@@ -177,7 +264,8 @@ class OperatorHistoryTab(QWidget):
                 "Check-ins",
             ]
         )
-        hv = self.table.horizontalHeader()
+        hv = OperatorHeaderWithCheckbox(Qt.Horizontal, self.table)
+        self.table.setHorizontalHeader(hv)
         hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
         hv.setMinimumSectionSize(50)
         hv.setDefaultSectionSize(100)
@@ -199,6 +287,7 @@ class OperatorHistoryTab(QWidget):
             hv.setSectionResizeMode(col, QHeaderView.Stretch)
         for col in (self.COL_G1, self.COL_G2, self.COL_G3):
             self.table.setColumnHidden(col, True)
+        hv.checkboxToggled.connect(self._on_header_checkbox_toggled)
 
         layout.addWidget(self.table)
 
@@ -206,7 +295,6 @@ class OperatorHistoryTab(QWidget):
         self.search_edit.textChanged.connect(self._apply_filter)
         self.import_btn.clicked.connect(self._show_import_export_menu)
         self.manage_btn.clicked.connect(self._show_manage_menu)
-        self.select_all_btn.clicked.connect(self._select_all_rows)
         self.group_filter.currentTextChanged.connect(self._apply_filter)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self._wire_export_group_combo()
@@ -636,18 +724,73 @@ class OperatorHistoryTab(QWidget):
 
     def _apply_filter(self):
         self._render_rows(self._filtered_rows())
+        self._update_bulk_select_controls()
+
+    def _is_filter_active(self) -> bool:
+        term = self.search_edit.text().strip()
+        filt = self.group_filter.currentText().strip().lower()
+        return bool(term) or (filt and filt != "all")
+
+    def _update_bulk_select_controls(self) -> None:
+        self._sync_header_checkbox()
+
+    def _sync_header_checkbox(self) -> None:
+        header = self.table.horizontalHeader()
+        if not isinstance(header, OperatorHeaderWithCheckbox):
+            return
+        total = self.table.rowCount()
+        enabled = self._is_filter_active() and total > 0
+        if total <= 0:
+            header.set_checkbox_state(Qt.Unchecked, enabled=False)
+            return
+        selected = 0
+        for r in range(total):
+            w = self.table.cellWidget(r, self.COL_SELECT)
+            if isinstance(w, QCheckBox) and w.isChecked():
+                selected += 1
+        if selected == 0:
+            header.set_checkbox_state(Qt.Unchecked, enabled=enabled)
+        elif selected == total:
+            header.set_checkbox_state(Qt.Checked, enabled=enabled)
+        else:
+            header.set_checkbox_state(Qt.PartiallyChecked, enabled=enabled)
+
+    def _on_header_checkbox_toggled(self, state: int) -> None:
+        if not self._is_filter_active():
+            self._sync_header_checkbox()
+            return
+        state_val = int(getattr(state, "value", state))
+        if state_val == Qt.PartiallyChecked.value:
+            return
+        self._select_filtered_rows(state_val == Qt.Checked.value)
+
+    def _select_filtered_rows(self, selected: bool) -> None:
+        if self._bulk_select_inflight:
+            return
+        self._bulk_select_inflight = True
+        try:
+            for r in range(self.table.rowCount()):
+                w = self.table.cellWidget(r, self.COL_SELECT)
+                if isinstance(w, QCheckBox):
+                    w.blockSignals(True)
+                    w.setChecked(bool(selected))
+                    w.blockSignals(False)
+        finally:
+            self._bulk_select_inflight = False
+        self._sync_header_checkbox()
 
     def _wire_export_group_combo(self) -> None:
         model = QStandardItemModel(self.export_group_combo)
         self.export_group_combo.setModel(model)
         model.itemChanged.connect(self._on_export_group_item_changed)
+        self.export_group_combo.view().pressed.connect(self._on_export_group_pressed)
 
     def _refresh_export_group_options(self, groups: List[str]) -> None:
         model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
         prior = set(self._get_selected_export_groups())
         model.blockSignals(True)
         model.clear()
-        hint = QStandardItem("Select up to 3")
+        hint = QStandardItem("Select groups...")
         hint.setFlags(Qt.ItemIsEnabled)
         model.appendRow(hint)
         for g in groups:
@@ -666,14 +809,21 @@ class OperatorHistoryTab(QWidget):
         if item.checkState() != Qt.Checked:
             self._update_export_group_placeholder()
             return
-        selected = self._get_selected_export_groups()
-        if len(selected) > 3:
+        self._update_export_group_placeholder()
+
+    def _on_export_group_pressed(self, index) -> None:
+        if not index.isValid():
+            return
+        if index.row() == 0:
+            return
+        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
+        item = model.itemFromIndex(index)
+        if not item:
+            return
+        if item.checkState() == Qt.Checked:
             item.setCheckState(Qt.Unchecked)
-            QMessageBox.information(
-                self,
-                "Export Groups",
-                "You can select up to 3 groups for export.",
-            )
+        else:
+            item.setCheckState(Qt.Checked)
         self._update_export_group_placeholder()
 
     def _get_selected_export_groups(self) -> List[str]:
@@ -687,10 +837,13 @@ class OperatorHistoryTab(QWidget):
 
     def _update_export_group_placeholder(self) -> None:
         selected = self._get_selected_export_groups()
-        if selected:
-            self.export_group_combo.lineEdit().setPlaceholderText(f"{len(selected)} Selected")
-        else:
-            self.export_group_combo.lineEdit().setPlaceholderText("Export by Group")
+        label = f"{len(selected)} Selected" if selected else "Export by Group"
+        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
+        if model.rowCount() > 0:
+            hint = model.item(0)
+            if hint:
+                hint.setText(label)
+        self.export_group_combo.setCurrentIndex(0)
 
     def _filtered_rows(self) -> List[Dict]:
         term = self.search_edit.text().strip().lower()
@@ -754,6 +907,7 @@ class OperatorHistoryTab(QWidget):
                 self.table.setItem(row_idx, col, item)
 
             sel_chk = QCheckBox()
+            sel_chk.stateChanged.connect(self._on_row_checkbox_changed)
             self.table.setCellWidget(row_idx, self.COL_SELECT, sel_chk)
             set_item(self.COL_CALLSIGN, r["callsign"])
             set_item(self.COL_NAME, r["name"])
@@ -808,6 +962,7 @@ class OperatorHistoryTab(QWidget):
         if current in [self.group_filter.itemText(i) for i in range(self.group_filter.count())]:
             self.group_filter.setCurrentText(current)
         self.group_filter.blockSignals(False)
+        self._sync_header_checkbox()
 
     # ------------- Qt events ------------- #
 
@@ -820,6 +975,27 @@ class OperatorHistoryTab(QWidget):
             return
         self._set_loading(False)
         self._load_data(show_toast=False)
+
+    def apply_theme(self) -> None:
+        theme = resolve_theme(self.settings)
+        if self.loading_label:
+            bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
+            fg = theme.get("accent", theme.get("text", "#222"))
+            border = theme.get("border", "#ccc")
+            self.loading_label.setStyleSheet(
+                f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
+            )
+        grid = theme["border"]
+        table_style = f"QTableWidget {{ gridline-color: {grid}; }}"
+        self.table.setStyleSheet(table_style)
+        header = self.table.horizontalHeader()
+        if isinstance(header, OperatorHeaderWithCheckbox):
+            header.set_checkbox_colors(
+                bg=QColor(theme.get("surface_alt", theme["surface"])),
+                border=QColor(theme.get("text_muted", theme["border"])),
+                accent=QColor(theme["accent"]),
+                mark=QColor(theme.get("bg", "#ffffff")),
+            )
 
     def on_tab_activated(self) -> None:
         self._nav_refresh_inflight = True
@@ -844,10 +1020,15 @@ class OperatorHistoryTab(QWidget):
         return calls
 
     def _select_all_rows(self):
-        for r in range(self.table.rowCount()):
-            w = self.table.cellWidget(r, self.COL_SELECT)
-            if isinstance(w, QCheckBox):
-                w.setChecked(True)
+        if not self._is_filter_active():
+            QMessageBox.information(self, "Select All", "Apply a filter before bulk selecting.")
+            return
+        self._select_filtered_rows(True)
+
+    def _on_row_checkbox_changed(self, _=None) -> None:
+        if self._bulk_select_inflight:
+            return
+        self._sync_header_checkbox()
 
     def _on_cell_double_clicked(self, row: int, col: int) -> None:
         if col != self.COL_GROUPS:
@@ -858,6 +1039,9 @@ class OperatorHistoryTab(QWidget):
         callsign = (item.text() or "").strip().upper()
         if not callsign:
             return
+        self._edit_groups_dialog(callsign)
+
+    def _edit_groups_dialog(self, callsign: str) -> None:
         record = next((r for r in self._rows if (r.get("callsign") or "").strip().upper() == callsign), None)
         if not record:
             return
@@ -873,21 +1057,33 @@ class OperatorHistoryTab(QWidget):
                 if g
             ]
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Groups for {callsign}")
+        dlg.setWindowTitle(f"Edit Groups for {callsign}")
         layout = QVBoxLayout(dlg)
-        label = QLabel("All Groups:")
+        label = QLabel("One group per line:")
         layout.addWidget(label)
         text = QTextEdit()
-        text.setReadOnly(True)
-        text.setPlainText("\n".join(groups) if groups else "(none)")
+        text.setPlainText("\n".join(groups))
         text.setMinimumHeight(220)
         layout.addWidget(text)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dlg.accept)
-        btn_row.addWidget(close_btn)
+        save_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addWidget(save_btn)
+        btn_row.addWidget(cancel_btn)
         layout.addLayout(btn_row)
+
+        def _save():
+            raw = [ln.strip() for ln in text.toPlainText().splitlines() if ln.strip()]
+            groups_norm = self._normalize_groups_list(raw)
+            data = {"callsign": callsign, "groups": groups_norm}
+            if self._upsert_record(data, merge_groups=False):
+                self._load_data(show_toast=True)
+                self._schedule_history_update()
+            dlg.accept()
+
+        save_btn.clicked.connect(_save)
+        cancel_btn.clicked.connect(dlg.reject)
         dlg.exec()
 
     def _upsert_record(self, row: Dict, *, merge_groups: bool = True):
@@ -1016,20 +1212,14 @@ class OperatorHistoryTab(QWidget):
         menu.addAction("Delete Selected...", self._delete_selected)
         menu.exec(self.manage_btn.mapToGlobal(self.manage_btn.rect().bottomLeft()))
 
+
     def _export_csv(self):
         selected_groups = self._get_selected_export_groups()
         if not selected_groups:
             QMessageBox.information(
                 self,
                 "Export CSV",
-                "Select 1–3 groups in the Export groups dropdown before exporting.",
-            )
-            return
-        if len(selected_groups) > 3:
-            QMessageBox.information(
-                self,
-                "Export CSV",
-                "Select no more than 3 groups for export.",
+                "Select one or more groups in the Export groups dropdown before exporting.",
             )
             return
         selected = set(self._selected_callsigns())
@@ -1099,35 +1289,23 @@ class OperatorHistoryTab(QWidget):
                 )
                 writer.writeheader()
                 for r in rows:
-                    base_groups = [
+                    all_groups = {
                         (r.get("group1") or "").strip(),
                         (r.get("group2") or "").strip(),
                         (r.get("group3") or "").strip(),
-                    ]
-                    used = {g for g in base_groups if g}
-                    export_g1, export_g2, export_g3 = base_groups
-                    for g in selected_groups:
-                        if g in used:
-                            continue
-                        if not export_g1:
-                            export_g1 = g
-                            used.add(g)
-                            continue
-                        if not export_g2:
-                            export_g2 = g
-                            used.add(g)
-                            continue
-                        if not export_g3:
-                            export_g3 = g
-                            used.add(g)
-                            continue
+                    }
+                    all_groups.update({str(x).strip() for x in (r.get("groups") or [])})
+                    row_groups = [g for g in selected_groups if g and g in all_groups]
+                    export_g1 = row_groups[0] if len(row_groups) > 0 else ""
+                    export_g2 = row_groups[1] if len(row_groups) > 1 else ""
+                    export_g3 = row_groups[2] if len(row_groups) > 2 else ""
                     writer.writerow(
                         {
                             "callsign": r.get("callsign", ""),
                             "name": r.get("name", ""),
                             "state": r.get("state", ""),
                             "grid": r.get("grid", ""),
-                            "groups": ",".join(selected_groups),
+                            "groups": ",".join(row_groups),
                             "group1": export_g1,
                             "group2": export_g2,
                             "group3": export_g3,
@@ -1141,6 +1319,15 @@ class OperatorHistoryTab(QWidget):
             QMessageBox.warning(self, "Export CSV", f"Failed to export:\n{e}")
             return
         QMessageBox.information(self, "Export CSV", f"Exported {len(rows)} record(s).")
+        # Clear export group selections after successful export
+        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
+        model.blockSignals(True)
+        for i in range(1, model.rowCount()):
+            item = model.item(i)
+            if item and (item.flags() & Qt.ItemIsUserCheckable):
+                item.setCheckState(Qt.Unchecked)
+        model.blockSignals(False)
+        self._update_export_group_placeholder()
 
     # ------------- CSV import ------------- #
 
@@ -1300,12 +1487,20 @@ class OperatorHistoryTab(QWidget):
                 return
             trusted_val = 1 if resp == QMessageBox.Yes else 0
             changed = 0
+            failed = 0
             for cs in calls:
                 if self._upsert_record({"callsign": cs, "trusted": trusted_val}):
                     changed += 1
+                else:
+                    failed += 1
             if changed:
                 self._load_data(show_toast=True)
                 self._schedule_history_update()
+            QMessageBox.information(
+                self,
+                "Bulk Edit Trusted",
+                f"Updated {changed} record(s). Failed {failed}.",
+            )
             return
         # find existing row data
         existing = next((r for r in self._rows if r["callsign"] == calls[0]), None)
@@ -1334,17 +1529,35 @@ class OperatorHistoryTab(QWidget):
         if not db_path:
             return
         conn = sqlite3.connect(db_path)
+        deleted = 0
+        skipped = 0
+        failed = 0
         try:
             cur = conn.cursor()
-            cur.executemany("DELETE FROM operator_checkins WHERE callsign = ?", [(c,) for c in calls])
+            for cs in calls:
+                try:
+                    cur.execute("DELETE FROM operator_checkins WHERE callsign = ?", (cs,))
+                    if cur.rowcount:
+                        deleted += 1
+                    else:
+                        skipped += 1
+                except Exception:
+                    failed += 1
             conn.commit()
         except Exception as e:
             log.error("OperatorHistoryTab: delete failed: %s", e)
             QMessageBox.warning(self, "DB Error", f"Delete failed:\n{e}")
+            conn.close()
+            return
         finally:
             conn.close()
         self._load_data(show_toast=True)
         self._schedule_history_update()
+        QMessageBox.information(
+            self,
+            "Delete Operators",
+            f"Deleted {deleted} record(s). Skipped {skipped}. Failed {failed}.",
+        )
 
     def _schedule_history_update(self) -> None:
         if not self._update_timer.isActive():
