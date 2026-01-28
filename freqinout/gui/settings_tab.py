@@ -644,6 +644,16 @@ class SettingsTab(QWidget):
         varac_row.addWidget(self.varac_path_edit, 1)
         prog_layout.addLayout(varac_row)
 
+        self.varac_db_edit = QLineEdit()
+        self.varac_db_edit.setPlaceholderText("VarAC.db path")
+        msg_layout.addLayout(
+            build_msg_row(
+                "VarAC DB",
+                self.varac_db_edit,
+                self._choose_varac_db_path,
+            )
+        )
+
         msg_layout.addLayout(
             build_msg_row(
                 "VarAC Incoming Files",
@@ -894,6 +904,8 @@ class SettingsTab(QWidget):
         msg_paths = data.get("message_paths", {})
         for origin, edit in self.msg_paths_edits.items():
             edit.setText(msg_paths.get(origin, ""))
+        if hasattr(self, "varac_db_edit"):
+            self.varac_db_edit.setText(data.get("varac_db_path", "") or "")
         fldigi_dir = (data.get("fldigi_checkin_dir", "") or "").strip()
         if not fldigi_dir:
             fldigi_dir = str(get_fldigi_checkin_dir())
@@ -1018,6 +1030,7 @@ class SettingsTab(QWidget):
         for origin, edit in self.msg_paths_edits.items():
             msg_paths[origin] = edit.text().strip()
         data["message_paths"] = msg_paths
+        data["varac_db_path"] = (self.varac_db_edit.text().strip() if hasattr(self, "varac_db_edit") else "")
         fldigi_dir = self.fldigi_checkin_dir_edit.text().strip()
         if not fldigi_dir:
             fldigi_dir = str(get_fldigi_checkin_dir())
@@ -1060,6 +1073,7 @@ class SettingsTab(QWidget):
                 "js8_forms_path": data.get("js8_forms_path", ""),
                 "js8_inbox_mark_retrieved_sync": data.get("js8_inbox_mark_retrieved_sync", False),
                 "message_paths": data.get("message_paths", {}),
+                "varac_db_path": data.get("varac_db_path", ""),
                 "fldigi_checkin_dir": data.get("fldigi_checkin_dir", ""),
                 "operating_groups": data.get("operating_groups", []),
             }
@@ -1093,6 +1107,7 @@ class SettingsTab(QWidget):
                 data.get("js8_inbox_mark_retrieved_sync", False),
             )
             self.settings.set("message_paths", data.get("message_paths", {}))
+            self.settings.set("varac_db_path", data.get("varac_db_path", ""))
             self.settings.set("fldigi_checkin_dir", data.get("fldigi_checkin_dir", ""))
             for prog_name, meta in self.PROGRAMS.items():
                 path_key = meta["setting_key"]
@@ -1636,6 +1651,13 @@ class SettingsTab(QWidget):
         fldigi_mode_combo.setCompleter(completer)
         form.addRow("FLDigi Starting Mode:", fldigi_mode_combo)
 
+        def _sync_fldigi_mode_for_ssb(text: str):
+            if (text or "").strip().upper() == "SSB":
+                fldigi_mode_combo.setCurrentText("SSB")
+
+        mode_combo.currentTextChanged.connect(_sync_fldigi_mode_for_ssb)
+        _sync_fldigi_mode_for_ssb(mode_combo.currentText())
+
         fldigi_offset_edit = QLineEdit()
         fldigi_offset_edit.setValidator(QIntValidator(0, 99999, fldigi_offset_edit))
         fldigi_offset_edit.setPlaceholderText("e.g., 900")
@@ -1774,6 +1796,10 @@ class SettingsTab(QWidget):
             self._save_settings_quiet()
             self._settings_dirty = False
             self._set_save_button_state("success")
+            try:
+                self.settings_saved.emit()
+            except Exception:
+                pass
         except Exception:
             log.exception("Failed to persist Operating Group; will remain in-memory only.")
 
@@ -1985,6 +2011,13 @@ class SettingsTab(QWidget):
             fldigi_mode_combo.setCurrentText(fldigi_mode_txt)
         form.addRow("FLDigi Starting Mode:", fldigi_mode_combo)
 
+        def _sync_fldigi_mode_for_ssb(text: str):
+            if (text or "").strip().upper() == "SSB":
+                fldigi_mode_combo.setCurrentText("SSB")
+
+        mode_combo.currentTextChanged.connect(_sync_fldigi_mode_for_ssb)
+        _sync_fldigi_mode_for_ssb(mode_combo.currentText())
+
         fldigi_offset_edit = QLineEdit(fldigi_offset_txt)
         fldigi_offset_edit.setValidator(QIntValidator(0, 99999, fldigi_offset_edit))
         fldigi_offset_edit.setPlaceholderText("e.g., 900")
@@ -2070,6 +2103,10 @@ class SettingsTab(QWidget):
             self._save_settings_quiet()
             self._settings_dirty = False
             self._set_save_button_state("success")
+            try:
+                self.settings_saved.emit()
+            except Exception:
+                pass
         except Exception:
             log.exception("Failed to persist Operating Group deletions; will remain in-memory only.")
         QMessageBox.information(self, "Delete Groups", f"Deleted {len(to_remove)} Operating Group(s).")
@@ -2159,6 +2196,30 @@ class SettingsTab(QWidget):
             mp = self.settings.get("message_paths", {}) or {}
             mp[origin] = fn
             self.settings.set("message_paths", mp)
+        self._settings_dirty = False
+        self._set_save_button_state("success")
+
+    def _choose_varac_db_path(self):
+        """
+        Prompt for VarAC.db file path.
+        """
+        fn, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select VarAC.db",
+            "",
+            "VarAC DB (VarAC.db);;SQLite DB (*.db);;All Files (*)",
+        )
+        if not fn:
+            return
+        if hasattr(self, "varac_db_edit"):
+            self.varac_db_edit.setText(fn)
+        data = self.settings.all() if hasattr(self.settings, "all") else {}
+        if isinstance(data, dict):
+            data["varac_db_path"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        if hasattr(self.settings, "set"):
+            self.settings.set("varac_db_path", fn)
         self._settings_dirty = False
         self._set_save_button_state("success")
 
