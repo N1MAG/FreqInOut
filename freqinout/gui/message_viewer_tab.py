@@ -1823,7 +1823,10 @@ class MessageViewerTab(QWidget):
             status = "NEW" if (msg.read_status == 0 and msg.msg_type.upper() != "QSO") else "READ"
             rcv_ts = msg.ts or 0.0
             rcv_display = self._fmt_ts(rcv_ts)
-            title_base = (msg.subject or msg.body or "").strip()
+            if (msg.msg_type or "").upper() == "VMAIL":
+                title_base = (msg.subject or "").strip()
+            else:
+                title_base = (msg.subject or msg.body or "").strip()
             title = f"{msg.msg_type}: {title_base}" if title_base else (msg.msg_type or "VarAC")
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
@@ -2755,7 +2758,12 @@ class MessageViewerTab(QWidget):
         if msg.snr is not None:
             header.append(f"SNR:  {msg.snr}")
         header.append("")
-        body = msg.body or msg.subject or ""
+        if (msg.msg_type or "").upper() == "VMAIL":
+            body = msg.body or ""
+            if not body:
+                body = msg.subject or ""
+        else:
+            body = msg.body or msg.subject or ""
         self.info_label.setText(f"VarAC {msg.msg_type} {msg.from_call} -> {msg.to_call}")
         self.viewer.setAcceptRichText(False)
         self.viewer.setPlainText("\n".join(header + [body]))
