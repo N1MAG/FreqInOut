@@ -101,6 +101,7 @@ class OperatorHistoryTab(QWidget):
         self.settings = SettingsManager()
         self._rows: List[Dict] = []
         self.loading_label: QLabel | None = None
+        self._nav_refresh_inflight = False
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.setInterval(300)
@@ -389,11 +390,14 @@ class OperatorHistoryTab(QWidget):
         g3 = groups[2] if len(groups) > 2 else ""
         return groups, g1, g2, g3
 
-    def _load_data(self):
+    def _load_data(self, *, show_toast: bool = False):
         """
         Load operator_checkins table into self._rows.
         """
-        self._set_loading(True)
+        if show_toast:
+            self._set_loading(True)
+        else:
+            self._set_loading(False)
         try:
             ingest_varac(self.settings)
         except Exception:
@@ -402,7 +406,8 @@ class OperatorHistoryTab(QWidget):
         if not db_path or not db_path.exists():
             self._rows = []
             self._render_rows()
-            self._set_loading(False)
+            if show_toast:
+                self._set_loading(False)
             return
 
         # One-time backfill: hydrate first_seen_utc from DIRECTED/ALL logs if earlier than stored
@@ -491,7 +496,8 @@ class OperatorHistoryTab(QWidget):
 
         self._rows = rows
         self._apply_filter()
-        self._set_loading(False)
+        if show_toast:
+            self._set_loading(False)
 
     def _set_loading(self, active: bool, text: str = "Brewing it fresh...") -> None:
         if not self.loading_label:
@@ -810,7 +816,20 @@ class OperatorHistoryTab(QWidget):
         Refresh on show so the operator history is up to date.
         """
         super().showEvent(event)
-        self._load_data()
+        if self._nav_refresh_inflight:
+            return
+        self._set_loading(False)
+        self._load_data(show_toast=False)
+
+    def on_tab_activated(self) -> None:
+        self._nav_refresh_inflight = True
+        try:
+            self._load_data(show_toast=True)
+        finally:
+            self._nav_refresh_inflight = False
+
+    def show_loading_toast(self) -> None:
+        self._set_loading(True)
 
     # ------------- Helpers for selection / DB ops ------------- #
 
@@ -1178,7 +1197,7 @@ class OperatorHistoryTab(QWidget):
             log.error("OperatorHistoryTab: CSV import failed: %s", e)
             return
 
-        self._load_data()
+        self._load_data(show_toast=True)
         self._schedule_history_update()
         QMessageBox.information(self, "CSV Import", f"Imported {imported} record(s). Skipped {skipped}.")
 
@@ -1261,7 +1280,7 @@ class OperatorHistoryTab(QWidget):
         if not data:
             return
         if self._upsert_record(data, merge_groups=False):
-            self._load_data()
+            self._load_data(show_toast=True)
             self._schedule_history_update()
 
     def _edit_selected_dialog(self):
@@ -1285,7 +1304,7 @@ class OperatorHistoryTab(QWidget):
                 if self._upsert_record({"callsign": cs, "trusted": trusted_val}):
                     changed += 1
             if changed:
-                self._load_data()
+                self._load_data(show_toast=True)
                 self._schedule_history_update()
             return
         # find existing row data
@@ -1294,7 +1313,7 @@ class OperatorHistoryTab(QWidget):
         if not data:
             return
         if self._upsert_record(data, merge_groups=False):
-            self._load_data()
+            self._load_data(show_toast=True)
             self._schedule_history_update()
 
     def _delete_selected(self):
@@ -1324,7 +1343,7 @@ class OperatorHistoryTab(QWidget):
             QMessageBox.warning(self, "DB Error", f"Delete failed:\n{e}")
         finally:
             conn.close()
-        self._load_data()
+        self._load_data(show_toast=True)
         self._schedule_history_update()
 
     def _schedule_history_update(self) -> None:

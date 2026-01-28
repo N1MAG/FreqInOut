@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from pathlib import Path
 
 from freqinout.core.logger import log
@@ -150,6 +150,10 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(4)
 
+        self.nav_toast = QLabel("Brewing it fresh...")
+        self.nav_toast.setStyleSheet("padding: 2px 6px; border-radius: 4px;")
+        self.nav_toast.setVisible(False)
+        right_layout.addWidget(self.nav_toast)
         right_layout.addWidget(self.stack, stretch=1)
 
         # Layout composition
@@ -523,6 +527,16 @@ class MainWindow(QMainWindow):
         apply_app_theme(app, theme)
         self._set_logo_pixmap()
         self._update_log_indicator()
+        try:
+            if hasattr(self, "nav_toast"):
+                bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
+                fg = theme.get("accent", theme.get("text", "#222"))
+                border = theme.get("border", "#ccc")
+                self.nav_toast.setStyleSheet(
+                    f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
+                )
+        except Exception:
+            pass
         for widget in (
             self.freq_planner_tab,
             self.hf_schedule_tab,
@@ -560,3 +574,30 @@ class MainWindow(QMainWindow):
         if 0 <= index < self.stack.count():
             self.stack.setCurrentIndex(index)
             self._update_map_filters_visibility(index)
+            try:
+                widget = self.stack.widget(index)
+                if hasattr(widget, "on_tab_activated"):
+                    self._show_nav_toast()
+                    QTimer.singleShot(0, lambda w=widget: self._run_tab_activation(w))
+                else:
+                    self._hide_nav_toast()
+            except Exception:
+                pass
+
+    def _run_tab_activation(self, widget) -> None:
+        try:
+            widget.on_tab_activated()
+        finally:
+            self._hide_nav_toast()
+
+    def _show_nav_toast(self, text: str = "Brewing it fresh...") -> None:
+        if not hasattr(self, "nav_toast"):
+            return
+        self.nav_toast.setText(text)
+        self.nav_toast.setVisible(True)
+        QApplication.processEvents()
+
+    def _hide_nav_toast(self) -> None:
+        if not hasattr(self, "nav_toast"):
+            return
+        self.nav_toast.setVisible(False)

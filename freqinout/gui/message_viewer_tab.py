@@ -482,6 +482,7 @@ class MessageHeaderWithCheckbox(QHeaderView):
             opt.state |= QStyle.State_Off
         if not self._checkbox_enabled:
             opt.state |= QStyle.State_ReadOnly
+        opt.palette = self.palette()
         self.style().drawControl(QStyle.CE_CheckBox, opt, painter)
 
     def mousePressEvent(self, event) -> None:
@@ -1026,21 +1027,32 @@ class MessageViewerTab(QWidget):
         self._save_settings()
 
     def _initial_refresh(self) -> None:
-        self._set_loading(True)
-        try:
-            self._load_paths_lists()
-            self._refresh_files()
-            self._refresh_js8_messages()
-            self._refresh_varac_messages(force=True)
-            self._refresh_pending_backlog()
-        finally:
-            self._set_loading(False)
+        self._set_loading(False)
+        self._load_paths_lists()
+        self._refresh_files()
+        self._refresh_js8_messages()
+        self._refresh_varac_messages(force=True)
+        self._refresh_pending_backlog()
 
     def _set_loading(self, active: bool, text: str = "Brewing it fresh...") -> None:
         if not self.loading_label:
             return
         self.loading_label.setText(text)
         self.loading_label.setVisible(bool(active))
+
+    def show_loading_toast(self) -> None:
+        self._set_loading(True)
+
+    def on_tab_activated(self) -> None:
+        self._unfreeze_table()
+        try:
+            self._load_paths_lists()
+            self._refresh_files(force=True)
+            self._refresh_js8_messages(force=True)
+            self._refresh_varac_messages(force=True)
+            self._refresh_pending_backlog()
+        finally:
+            self._set_loading(False)
 
     # ---------- Paths ----------
 
@@ -1439,7 +1451,18 @@ class MessageViewerTab(QWidget):
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
         grid = theme["border"]
-        table_style = f"QTableView {{ gridline-color: {grid}; }}"
+        table_style = (
+            f"QTableView {{ gridline-color: {grid}; }}"
+            "QTableView::indicator {"
+            " width: 14px; height: 14px;"
+            f" border: 1px solid {theme['text_muted']};"
+            f" background-color: {theme['surface']};"
+            "}"
+            "QTableView::indicator:checked {"
+            f" background-color: {theme['accent']};"
+            f" border: 1px solid {theme['accent']};"
+            "}"
+        )
         self.messages_table.setStyleSheet(table_style)
         self.pending_table.setStyleSheet(f"QTableWidget {{ gridline-color: {grid}; }}")
         if self._actions_delegate:
