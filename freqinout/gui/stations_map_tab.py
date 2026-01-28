@@ -46,6 +46,7 @@ try:
 except Exception:
     js8net = None
 from freqinout.core.logger import log
+from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 
@@ -701,6 +702,10 @@ class StationsMapTab(QWidget):
         elif self._js8_rx_hub and self._js8_rx_hub.is_active():
             since = self._last_js8_load_ts
         self._ingest_js8_logs(since_ts=since)
+        try:
+            ingest_varac(self.settings)
+        except Exception:
+            pass
         self._schedule_render()
 
     def shutdown(self) -> None:
@@ -1531,6 +1536,229 @@ class StationsMapTab(QWidget):
             }
         return links, stats_out
 
+    def _load_varac_links(
+        self,
+        band_filter=None,
+        my_call: str = "",
+        link_selection: Optional[tuple[str, str]] = None,
+        group_filter: str = "",
+        region_filter: str = "",
+        max_age_sec: Optional[int] = None,
+    ) -> List[Dict]:
+        links: List[Dict] = []
+        pos_map: Dict[str, tuple[float, float]] = {}
+        for pt in self.stations:
+            pos_map[pt.callsign.upper()] = (pt.lat, pt.lon)
+
+        if isinstance(link_selection, (list, tuple)) and len(link_selection) >= 2:
+            mode, selection_value = link_selection[0], link_selection[1]
+        else:
+            mode, selection_value = "off", ""
+        selection_value = (selection_value or "").upper() if mode == "region" else (selection_value or "")
+        group_filter = (group_filter or "").strip().upper()
+        region_filter = (region_filter or "").strip().upper()
+        if mode == "off":
+            return links
+
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return links
+        if not db_path.exists():
+            return links
+
+        ts_cut = None
+        if max_age_sec and max_age_sec > 0:
+            ts_cut = time.time() - max_age_sec
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            if ts_cut:
+                cur.execute(
+                    "SELECT ts, origin, destination, snr, band, freq_hz FROM varac_links WHERE ts >= ?",
+                    (ts_cut,),
+                )
+            else:
+                cur.execute("SELECT ts, origin, destination, snr, band, freq_hz FROM varac_links")
+            rows = cur.fetchall()
+            conn.close()
+        except Exception:
+            return links
+
+        def _freq_to_band(freq_mhz: Optional[float]) -> str:
+            if freq_mhz is None:
+                return ""
+            bands = [
+                ("160M", 1.8, 2.0),
+                ("80M", 3.5, 4.0),
+                ("60M", 5.0, 5.5),
+                ("40M", 7.0, 7.3),
+                ("30M", 10.1, 10.15),
+                ("20M", 14.0, 14.35),
+                ("17M", 18.068, 18.168),
+                ("15M", 21.0, 21.45),
+                ("12M", 24.89, 24.99),
+                ("10M", 28.0, 29.7),
+                ("6M", 50.0, 54.0),
+                ("2M", 144.0, 148.0),
+            ]
+            for name, lo, hi in bands:
+                if lo <= freq_mhz <= hi:
+                    return name
+            return ""
+
+        def _station_matches_filters(cs: str) -> bool:
+            if not cs:
+                return False
+            if group_filter:
+                groups = self.operator_index.get(cs, {}).get("groups", set())
+                if group_filter not in groups:
+                    return False
+            if region_filter:
+                region = self.operator_index.get(cs, {}).get("region")
+                if region != region_filter:
+                    return False
+            return True
+
+        for ts, o, d, snr, band, freq_hz in rows:
+            o = (o or "").upper()
+            d = (d or "").upper()
+            if o == "" or d == "" or o not in pos_map or d not in pos_map:
+                continue
+            bf = band_filter or {"type": "all"}
+            try:
+                freq_mhz = float(freq_hz) / 1_000_000.0 if freq_hz is not None else None
+            except Exception:
+                freq_mhz = None
+            band_val = (band or "").upper() or _freq_to_band(freq_mhz)
+            if bf.get("type") == "band":
+                if band_val != str(bf.get("value")).upper():
+                    continue
+            elif bf.get("type") == "freq":
+                target_f = bf.get("value")
+                if freq_mhz is None or target_f is None or abs(freq_mhz - target_f) > 0.001:
+                    continue
+
+            include = False
+            match_o = _station_matches_filters(o)
+            match_d = _station_matches_filters(d)
+            if mode == "my_station":
+                include = bool(my_call) and my_call in {o, d}
+            elif mode == "all":
+                include = True
+            elif mode == "region" and selection_value:
+                region_o = self.operator_index.get(o, {}).get("region")
+                region_d = self.operator_index.get(d, {}).get("region")
+                if region_o == selection_value and region_d == selection_value:
+                    include = True
+                elif my_call and my_call in {o, d}:
+                    other = d if o == my_call else o
+                    include = self.operator_index.get(other, {}).get("region") == selection_value
+            elif mode == "group" and selection_value:
+                groups_o = self.operator_index.get(o, {}).get("groups", set())
+                groups_d = self.operator_index.get(d, {}).get("groups", set())
+                if selection_value in groups_o and selection_value in groups_d:
+                    include = True
+                elif my_call and my_call in {o, d}:
+                    other = d if o == my_call else o
+                    include = selection_value in self.operator_index.get(other, {}).get("groups", set())
+            if include and group_filter:
+                if my_call and my_call in {o, d}:
+                    other = d if o == my_call else o
+                    include = group_filter in self.operator_index.get(other, {}).get("groups", set())
+                else:
+                    include = group_filter in self.operator_index.get(o, {}).get("groups", set()) and group_filter in self.operator_index.get(d, {}).get("groups", set())
+            if include and region_filter:
+                if my_call and my_call in {o, d}:
+                    other = d if o == my_call else o
+                    include = self.operator_index.get(other, {}).get("region") == region_filter
+                else:
+                    region_o = self.operator_index.get(o, {}).get("region")
+                    region_d = self.operator_index.get(d, {}).get("region")
+                    include = region_o == region_filter and region_d == region_filter
+            if not include:
+                include = False
+
+            if not include:
+                continue
+            p1 = pos_map.get(o)
+            p2 = pos_map.get(d)
+            if not p1 or not p2:
+                continue
+            try:
+                snr_val = float(snr)
+            except Exception:
+                snr_val = None
+            links.append(
+                {
+                    "origin": o,
+                    "destination": d,
+                    "lat1": p1[0],
+                    "lon1": p1[1],
+                    "lat2": p2[0],
+                    "lon2": p2[1],
+                    "snr": snr_val,
+                }
+            )
+
+        return links
+
+    def _load_varac_stats(self) -> Dict[str, Dict]:
+        stats: Dict[str, Dict] = {}
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return stats
+        if not db_path.exists():
+            return stats
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT callsign, last_seen_ts, last_band, last_freq_hz, last_snr
+                FROM varac_callsign_stats
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception:
+            return stats
+        for cs, last_seen_ts, last_band, last_freq_hz, last_snr in rows:
+            stats[(cs or "").strip().upper()] = {
+                "last_seen_ts": float(last_seen_ts or 0.0),
+                "last_band": (last_band or "").strip().upper(),
+                "last_freq_hz": float(last_freq_hz) if last_freq_hz not in (None, "") else None,
+                "last_snr": float(last_snr) if last_snr not in (None, "") else None,
+            }
+        return stats
+
+    def _load_fldigi_presence(self) -> Set[str]:
+        calls: Set[str] = set()
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return calls
+        if not db_path.exists():
+            return calls
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT callsign FROM fldigi_checkins")
+            checkins = {str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]}
+            cur.execute("SELECT callsign FROM fldigi_file_senders")
+            senders = {str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]}
+            conn.close()
+        except Exception:
+            return calls
+        return checkins & senders
+
     def _load_recent_calls(self, max_age_sec: Optional[int], band_filter=None) -> Set[str]:
         if not max_age_sec or max_age_sec <= 0:
             return set()
@@ -1662,13 +1890,13 @@ class StationsMapTab(QWidget):
         # init stats and links
         stats_lookup: Dict[str, Dict] = {}
         links: List[Dict] = []
-        if self._links_active():
-            band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
+        band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
+        my_call = ""
+        try:
+            my_call = (self.settings.get("operator_callsign", "") or "").upper()
+        except Exception:
             my_call = ""
-            try:
-                my_call = (self.settings.get("operator_callsign", "") or "").upper()
-            except Exception:
-                my_call = ""
+        if self._links_active():
             relay_target = (self.relay_target or "").strip().upper()
 
             links, stats_lookup = self._load_js8_links(
@@ -1680,8 +1908,21 @@ class StationsMapTab(QWidget):
                 region_filter=region_filter,
                 max_age_sec=self.recency_seconds,
             )
+            links.extend(
+                self._load_varac_links(
+                    band_filter=band_filter,
+                    my_call=my_call,
+                    link_selection=selection,
+                    group_filter=group_filter,
+                    region_filter=region_filter,
+                    max_age_sec=self.recency_seconds,
+                )
+            )
             if view_state:
                 self._last_map_view = view_state
+
+        varac_stats = self._load_varac_stats()
+        fldigi_calls = self._load_fldigi_presence()
 
         # Spread overlapping stations with the same base lat/lon
         markers = []
@@ -1695,6 +1936,9 @@ class StationsMapTab(QWidget):
                 traffic_calls.add(origin)
             if dest:
                 traffic_calls.add(dest)
+        for cs in varac_stats.keys():
+            if cs:
+                traffic_calls.add(cs)
         show_all_stations = not self._links_active()
         recent_calls: Set[str] = set()
         if show_all_stations and self.recency_seconds:
@@ -1725,7 +1969,16 @@ class StationsMapTab(QWidget):
         for (base_lat, base_lon), items in base_map.items():
             positions = offset_positions(base_lat, base_lon, items)
             for pt, (lat_off, lon_off) in zip(items, positions):
-                stats = stats_lookup.get(pt.callsign.upper(), {})
+                cs_upper = pt.callsign.upper()
+                stats = stats_lookup.get(cs_upper, {})
+                vstats = varac_stats.get(cs_upper, {})
+                modes: List[str] = []
+                if stats:
+                    modes.append("JS8")
+                if vstats:
+                    modes.append("VarAC")
+                if cs_upper in fldigi_calls:
+                    modes.append("FLDigi")
 
                 detail_lines = [
                     f"{pt.callsign}",
@@ -1733,6 +1986,7 @@ class StationsMapTab(QWidget):
                     f"State: {pt.state}" if pt.state else "",
                     f"Grid: {pt.grid}" if pt.grid else "",
                     f"Group: {pt.group}" if pt.group else "",
+                    f"Modes: {', '.join(modes)}" if modes else "",
                 ]
                 # Filter empty lines
                 detail_lines = [d for d in detail_lines if d]
@@ -1753,6 +2007,9 @@ class StationsMapTab(QWidget):
                         "direct_count": stats.get("direct_count", 0),
                         "avg_snr_count": stats.get("avg_snr_count", 0),
                         "last_band": stats.get("last_band", ""),
+                        "varac_last_seen": _fmt_ts(vstats.get("last_seen_ts", 0)),
+                        "varac_last_band": vstats.get("last_band", ""),
+                        "varac_snr": vstats.get("last_snr"),
                     }
                 )
 
@@ -2274,11 +2531,14 @@ function addGridLabels(res, level, bounds, maxLabels) {
         }});
         stationsLayer.addLayer(circle);
         const tipText = (m.tooltip || m.title || '') +
-          (m.last_seen ? '<br/><b>Last seen:</b> ' + m.last_seen : '') +
-          (m.last_spotter ? '<br/><b>Last spotter:</b> ' + m.last_spotter : '') +
-          (m.last_band ? '<br/><b>Last band:</b> ' + m.last_band : '') +
-          (m.direct_snr !== undefined && m.direct_snr !== null ? '<br/><b>Direct SNR:</b> ' + m.direct_snr.toFixed(1) + (m.direct_count ? ' (Traffic: ' + m.direct_count + ')' : '') : '') +
-          (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/><b>Avg SNR:</b> ' + m.avg_snr_excl_my.toFixed(1) + (m.avg_snr_count ? ' (Traffic: ' + m.avg_snr_count + ')' : '') : '');
+          (m.last_seen ? '<br/><b>JS8 Last Seen:</b> ' + m.last_seen : '') +
+          (m.last_spotter ? '<br/><b>JS8 Spotter:</b> ' + m.last_spotter : '') +
+          (m.last_band ? '<br/><b>JS8 Last Band:</b> ' + m.last_band : '') +
+          (m.direct_snr !== undefined && m.direct_snr !== null ? '<br/><b>JS8 Direct SNR:</b> ' + m.direct_snr.toFixed(1) + (m.direct_count ? ' (Traffic: ' + m.direct_count + ')' : '') : '') +
+          (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/><b>JS8 Avg SNR:</b> ' + m.avg_snr_excl_my.toFixed(1) + (m.avg_snr_count ? ' (Traffic: ' + m.avg_snr_count + ')' : '') : '') +
+          (m.varac_last_seen ? '<br/><b>VarAC Last Seen:</b> ' + m.varac_last_seen : '') +
+          (m.varac_last_band ? '<br/><b>VarAC Last Band:</b> ' + m.varac_last_band : '') +
+          (m.varac_snr !== undefined && m.varac_snr !== null ? '<br/><b>VarAC SNR:</b> ' + m.varac_snr.toFixed(1) : '');
         circle.on('mouseover', function() {{
           this.bringToFront();
           showDetail(tipText);
