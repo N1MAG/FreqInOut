@@ -244,6 +244,7 @@ class SettingsTab(QWidget):
         self.settings = SettingsManager()
         self._settings_dirty = False
         self._loading_settings = False
+        self.loading_label: QLabel | None = None
 
         self.PROGRAMS: Dict[str, Dict[str, str]] = {
             "FLRig": {"setting_key": "path_flrig", "autostart_key": "autostart_flrig"},
@@ -296,6 +297,10 @@ class SettingsTab(QWidget):
         header_layout = QHBoxLayout()
         title_label = QLabel("<h2>Settings</h2>")
         header_layout.addWidget(title_label)
+        self.loading_label = QLabel("Wilco. Standby for Spectrum QSY...")
+        self.loading_label.setVisible(False)
+        self.loading_label.setStyleSheet("padding: 2px 6px; border-radius: 4px;")
+        header_layout.addWidget(self.loading_label)
         header_layout.addStretch()
 
         self.utc_label = QLabel()
@@ -1152,6 +1157,8 @@ class SettingsTab(QWidget):
 
     def _on_theme_changed(self):
         theme = self.theme_combo.currentText().strip().lower() or "light"
+        self._set_loading(True, "Wilco. Standby for Spectrum QSY...")
+        QApplication.processEvents()
         try:
             if hasattr(self.settings, "set"):
                 self.settings.set("ui_theme", theme)
@@ -1164,6 +1171,13 @@ class SettingsTab(QWidget):
         except Exception:
             pass
         self._mark_settings_dirty()
+        # apply_theme will clear the toast once the app theme is applied
+
+    def _set_loading(self, active: bool, text: str = "Wilco. Standby for Spectrum QSY...") -> None:
+        if not self.loading_label:
+            return
+        self.loading_label.setText(text)
+        self.loading_label.setVisible(bool(active))
 
     def _wire_dirty_tracking(self) -> None:
         edits = [
@@ -1537,6 +1551,15 @@ class SettingsTab(QWidget):
 
     def apply_theme(self):
         try:
+            theme = resolve_theme(self.settings)
+            if self.loading_label:
+                bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
+                fg = theme.get("accent", theme.get("text", "#222"))
+                border = theme.get("border", "#ccc")
+                self.loading_label.setStyleSheet(
+                    f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
+                )
+                self.loading_label.setVisible(False)
             self._refresh_running_status()
             self._update_launch_selected_state()
             self._update_op_group_action_buttons()
