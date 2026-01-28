@@ -1775,17 +1775,34 @@ class StationsMapTab(QWidget):
             return calls
         if not db_path.exists():
             return calls
+        def _base_callsign(val: str) -> str:
+            cs_norm = (val or "").strip().upper()
+            if not cs_norm:
+                return ""
+            cs_norm = re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", cs_norm)
+            match = re.search(r"\b[A-Z]{1,2}\d[A-Z0-9]{1,4}\b", cs_norm)
+            if match:
+                return match.group(0)
+            return cs_norm
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.execute("SELECT callsign FROM fldigi_checkins")
-            checkins = {str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]}
+            checkins = {
+                _base_callsign(str(r[0]).strip().upper())
+                for r in cur.fetchall()
+                if r and r[0]
+            }
             cur.execute("SELECT callsign FROM fldigi_file_senders")
-            senders = {str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]}
+            senders = {
+                _base_callsign(str(r[0]).strip().upper())
+                for r in cur.fetchall()
+                if r and r[0]
+            }
             conn.close()
         except Exception:
             return calls
-        return checkins | senders
+        return {c for c in (checkins | senders) if c}
 
     def _load_recent_calls(self, max_age_sec: Optional[int], band_filter=None) -> Set[str]:
         if not max_age_sec or max_age_sec <= 0:

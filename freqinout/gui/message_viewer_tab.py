@@ -943,7 +943,11 @@ class MessageViewerTab(QWidget):
             cs_norm = (val or "").strip().upper()
             if not cs_norm:
                 return ""
-            return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", cs_norm)
+            cs_norm = re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", cs_norm)
+            match = re.search(r"\b[A-Z]{1,2}\d[A-Z0-9]{1,4}\b", cs_norm)
+            if match:
+                return match.group(0)
+            return cs_norm
         rows: Dict[str, tuple[float, str]] = {}
         for origin in ("flmsg", "flamp"):
             for rec in records.get(origin, []):
@@ -1955,9 +1959,9 @@ class MessageViewerTab(QWidget):
             for idx, line in enumerate(lines):
                 if line.lower().startswith(marker):
                     for nxt in lines[idx + 1 :]:
-                        parts = nxt.split()
-                        if parts:
-                            sender = parts[0].strip().upper()
+                        match = re.search(r"\b[A-Z]{1,2}\d[A-Z0-9]{1,4}\b", nxt.upper())
+                        if match:
+                            sender = match.group(0)
                             log.debug(
                                 "MessageViewer: sender parsed via %s for %s => %s",
                                 marker,
@@ -1969,7 +1973,7 @@ class MessageViewerTab(QWidget):
         tokens = re.split(r"[-_\\s]+", rec.path.stem)
         for tok in tokens:
             up = tok.strip().upper()
-            if re.fullmatch(r"[A-Z0-9]{3,6}", up):
+            if re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9]{1,4}", up):
                 log.debug("MessageViewer: sender fallback from filename %s => %s", rec.path.name, up)
                 return up
         log.debug("MessageViewer: sender not found for %s", rec.path.name)
