@@ -873,6 +873,7 @@ class MessageViewerTab(QWidget):
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Message Viewer</h3>"))
+        header.addSpacing(8)
         self.loading_label = QLabel("Brewing it fresh...")
         self.loading_label.setStyleSheet("color: #888;")
         self.loading_label.setVisible(False)
@@ -1493,6 +1494,13 @@ class MessageViewerTab(QWidget):
         self.pending_table.setStyleSheet(f"QTableWidget {{ gridline-color: {grid}; }}")
         if self._actions_delegate:
             self._actions_delegate._danger = QColor(theme["danger"])
+        if self.loading_label:
+            bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
+            fg = theme.get("accent", theme.get("text", "#222"))
+            border = theme.get("border", "#ccc")
+            self.loading_label.setStyleSheet(
+                f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
+            )
         header = self.messages_table.horizontalHeader()
         if isinstance(header, MessageHeaderWithCheckbox):
             header.set_checkbox_colors(
