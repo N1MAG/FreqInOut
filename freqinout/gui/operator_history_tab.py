@@ -100,13 +100,14 @@ class OperatorHistoryTab(QWidget):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._rows: List[Dict] = []
+        self.loading_label: QLabel | None = None
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.setInterval(300)
         self._update_timer.timeout.connect(self.operator_history_updated.emit)
 
         self._build_ui()
-        self._load_data()
+        QTimer.singleShot(0, self._load_data)
 
     # ------------- UI ------------- #
 
@@ -115,6 +116,10 @@ class OperatorHistoryTab(QWidget):
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Operator History</h3>"))
+        self.loading_label = QLabel("Brewing it fresh...")
+        self.loading_label.setStyleSheet("color: #888;")
+        self.loading_label.setVisible(False)
+        header.addWidget(self.loading_label)
         header.addStretch()
         layout.addLayout(header)
 
@@ -388,6 +393,7 @@ class OperatorHistoryTab(QWidget):
         """
         Load operator_checkins table into self._rows.
         """
+        self._set_loading(True)
         try:
             ingest_varac(self.settings)
         except Exception:
@@ -396,6 +402,7 @@ class OperatorHistoryTab(QWidget):
         if not db_path or not db_path.exists():
             self._rows = []
             self._render_rows()
+            self._set_loading(False)
             return
 
         # One-time backfill: hydrate first_seen_utc from DIRECTED/ALL logs if earlier than stored
@@ -484,6 +491,13 @@ class OperatorHistoryTab(QWidget):
 
         self._rows = rows
         self._apply_filter()
+        self._set_loading(False)
+
+    def _set_loading(self, active: bool, text: str = "Brewing it fresh...") -> None:
+        if not self.loading_label:
+            return
+        self.loading_label.setText(text)
+        self.loading_label.setVisible(bool(active))
 
     def _backfill_first_seen_from_logs(self):
         """
