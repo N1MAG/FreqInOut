@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent
-from PySide6.QtGui import QPainter, QColor, QPalette
+from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent, QRect
+from PySide6.QtGui import QPainter, QColor, QPalette, QFont
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -50,13 +50,14 @@ from reportlab.pdfgen import canvas
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
+from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.theme import resolve_theme, button_style
 
 
-SUPPORTED_EXT = {".b2s", ".k2s", ".txt", ".ff", ".xml", ".json", ".html", ".htm"}
+SUPPORTED_EXT = {".b2s", ".k2s", ".txt", ".rtf", ".ff", ".xml", ".json", ".html", ".htm"}
 ORIGIN_EXTS = {
-    "flmsg": {".b2s", ".k2s"},
-    "flamp": {".b2s", ".k2s"},
+    "flmsg": {".b2s", ".k2s", ".txt", ".rtf"},
+    "flamp": {".b2s", ".k2s", ".txt", ".rtf"},
     "varac": {".txt", ".html", ".htm", ".b2s", ".k2s"},
 }
 
@@ -98,6 +99,7 @@ class JS8Message:
     decoded_text: str
     state: str  # UNREAD / READ
     read_ts: float = 0.0
+    flag_state: int = 0
 
     def display_line(self) -> str:
         return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
@@ -116,9 +118,30 @@ class SpotterMessage:
     state: str  # UNREAD / READ
     read_ts: float = 0.0
     relay_via: str = ""
+    flag_state: int = 0
 
     def display_line(self) -> str:
         return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
+
+
+@dataclass
+class VarACMessage:
+    msg_id: int
+    guid: str
+    source: str
+    msg_type: str
+    from_call: str
+    to_call: str
+    subject: str
+    body: str
+    ts: float
+    band: str
+    freq_hz: float | None
+    snr: float | None
+    read_status: int
+    folder: str
+    vmail_guid: str
+    flag_state: int = 0
 
 
 @dataclass
@@ -170,7 +193,9 @@ class MessageTableModel(QAbstractTableModel):
             if col == 5:
                 return row.title
             if col == 6:
-                return "View" if isinstance(row.payload, JS8Message) else "View | Delete"
+                if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage)):
+                    return "View | Delete"
+                return "View"
         if role == Qt.UserRole:
             return row
         if role == Qt.ForegroundRole and col == 1 and row.status == "NEW":
@@ -194,6 +219,8 @@ class MessageActionDelegate(QStyledItemDelegate):
     def __init__(self, parent, danger_color: QColor | None = None):
         super().__init__(parent)
         self._danger = danger_color or QColor(Qt.red)
+        self._flag_color_red = QColor("#d32f2f")
+        self._flag_color_green = QColor("#2e7d32")
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         if index.column() != 6:
@@ -209,13 +236,38 @@ class MessageActionDelegate(QStyledItemDelegate):
         painter.setPen(link_color)
         view_text = "View"
         fm = option.fontMetrics
-        view_rect = rect.adjusted(6, 0, -6, 0)
+        view_width = fm.horizontalAdvance(view_text)
+        view_left = rect.left() + 6
+        view_rect = QRect(view_left, rect.y(), view_width, rect.height())
         painter.drawText(view_rect, Qt.AlignVCenter | Qt.AlignLeft, view_text)
-        if isinstance(row.payload, FileRecord):
-            del_text = "Delete"
-            del_width = fm.horizontalAdvance(del_text)
-            del_rect = rect.adjusted(rect.width() - del_width - 6, 0, -6, 0)
+        flag_text = "\u2691"
+        flag_width = fm.horizontalAdvance(flag_text)
+        del_text = "Delete"
+        del_width = fm.horizontalAdvance(del_text)
+        del_right = rect.right() - 6
+        del_left = del_right - del_width + 1
+        del_rect = QRect(del_left, rect.y(), del_width, rect.height())
+        gap_left = view_left + view_width + 10
+        gap_right = del_left - 10
+        flag_center = (gap_left + gap_right) // 2
+        flag_left = max(gap_left, flag_center - (flag_width // 2))
+        flag_rect = QRect(flag_left, rect.y(), flag_width, rect.height())
+
+        if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage, SpotterMessage)):
+            flag_state = getattr(row.payload, "flag_state", 0)
+            if flag_state == 1:
+                painter.setPen(self._flag_color_red)
+            elif flag_state == 2:
+                painter.setPen(self._flag_color_green)
+            else:
+                painter.setPen(option.palette.color(QPalette.Disabled, QPalette.Text))
+            font = QFont(option.font)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(flag_rect, Qt.AlignVCenter | Qt.AlignLeft, flag_text)
+
             painter.setPen(self._danger)
+            painter.setFont(option.font)
             painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, del_text)
         painter.restore()
 
@@ -224,14 +276,53 @@ class MessageActionDelegate(QStyledItemDelegate):
             return False
         if event.type() != QEvent.MouseButtonRelease:
             return False
+        if hasattr(event, "button") and event.button() != Qt.LeftButton:
+            return False
         row = index.data(Qt.UserRole)
         if row is None:
             return False
         rect = option.rect
         pos = event.position().toPoint()
+        flag_text = "\u2691"
+        fm = option.fontMetrics
+        view_text = "View"
+        view_width = fm.horizontalAdvance(view_text)
+        flag_width = fm.horizontalAdvance(flag_text)
+        del_text = "Delete"
+        del_width = fm.horizontalAdvance(del_text)
+        right = rect.right() - 6
+        del_left = right - del_width + 1
+        del_rect = QRect(del_left, rect.y(), del_width, rect.height())
+        view_left = rect.left() + 6
+        gap_left = view_left + view_width + 10
+        gap_right = del_left - 10
+        flag_center = (gap_left + gap_right) // 2
+        flag_left = max(gap_left, flag_center - (flag_width // 2))
+        flag_rect = QRect(flag_left, rect.y(), flag_width, rect.height())
         if isinstance(row.payload, FileRecord):
-            if pos.x() > rect.center().x():
+            if flag_rect.contains(pos):
+                self.parent()._cycle_flag_state(row.payload)
+            elif del_rect.contains(pos):
                 self.parent()._delete_file_record(row.payload)
+            else:
+                self.parent()._on_view_message(row)
+        elif isinstance(row.payload, JS8Message):
+            if flag_rect.contains(pos):
+                self.parent()._cycle_flag_state(row.payload)
+            elif del_rect.contains(pos):
+                self.parent()._delete_js8_message(row.payload)
+            else:
+                self.parent()._on_view_message(row)
+        elif isinstance(row.payload, SpotterMessage):
+            if flag_rect.contains(pos):
+                self.parent()._cycle_flag_state(row.payload)
+            else:
+                self.parent()._on_view_message(row)
+        elif isinstance(row.payload, VarACMessage):
+            if flag_rect.contains(pos):
+                self.parent()._cycle_flag_state(row.payload)
+            elif del_rect.contains(pos):
+                self.parent()._delete_varac_message(row.payload)
             else:
                 self.parent()._on_view_message(row)
         else:
@@ -265,6 +356,7 @@ class MessageViewerTab(QWidget):
 
         self.js8_messages: List[JS8Message] = []
         self.spotter_messages: List[SpotterMessage] = []
+        self.varac_messages: List[VarACMessage] = []
         self.current_js8: JS8Message | None = None
         self._js8_timer: QTimer | None = None
         self._pending_timer: QTimer | None = None
@@ -272,7 +364,7 @@ class MessageViewerTab(QWidget):
         self._form_cache: Dict[str, List[Dict]] = {}
         self._form_title_cache: Dict[str, str] = {}
         self.forms_path = (self.settings.get("js8_forms_path", "") or "").strip()
-        self._read_state_map: Dict[tuple, tuple[str, float]] = {}
+        self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
         self._filters_initialized = False
         self._has_active_view = False
@@ -293,6 +385,7 @@ class MessageViewerTab(QWidget):
         self._clear_backlog_on_upgrade()
         self._ensure_read_state_table()
         self._ensure_spotter_table()
+        self._ensure_fldigi_sender_table()
         self._read_state_map = self._load_read_state_map()
 
         self.files: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
@@ -307,6 +400,7 @@ class MessageViewerTab(QWidget):
         self._setup_timer()
         self._refresh_js8_messages()
         self._setup_js8_timer()
+        self._refresh_varac_messages(force=True)
         self._refresh_pending_backlog()
         self._setup_pending_timer()
 
@@ -407,10 +501,15 @@ class MessageViewerTab(QWidget):
                     size INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     read_ts REAL,
+                    flag_state INTEGER DEFAULT 0,
                     PRIMARY KEY (origin, path, mtime, size)
                 )
                 """
             )
+            try:
+                cur.execute("ALTER TABLE message_read_state ADD COLUMN flag_state INTEGER DEFAULT 0")
+            except Exception:
+                pass
             conn.commit()
             conn.close()
         except Exception as e:
@@ -437,21 +536,47 @@ class MessageViewerTab(QWidget):
                     decoded_text TEXT,
                     state TEXT,
                     read_ts REAL,
+                    flag_state INTEGER DEFAULT 0,
                     relay_via TEXT,
                     ingested_ts REAL
+                )
+                """
+            )
+            try:
+                cur.execute("ALTER TABLE spotter_traffic ADD COLUMN flag_state INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to ensure spotter table: %s", e)
+
+    def _ensure_fldigi_sender_table(self) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fldigi_file_senders (
+                    callsign TEXT PRIMARY KEY,
+                    last_seen_ts REAL,
+                    origin TEXT
                 )
                 """
             )
             conn.commit()
             conn.close()
         except Exception as e:
-            log.debug("MessageViewer: failed to ensure spotter table: %s", e)
+            log.debug("MessageViewer: failed to ensure fldigi sender table: %s", e)
 
     @staticmethod
     def _read_state_key(origin: str, rec: FileRecord) -> tuple:
         return (origin, str(rec.path), float(rec.mtime), int(rec.size))
 
-    def _load_read_state_map(self) -> Dict[tuple, tuple[str, float]]:
+    def _load_read_state_map(self) -> Dict[tuple, tuple[str, float, int]]:
         db_path = self._db_path()
         if not db_path or not db_path.exists():
             return {}
@@ -460,7 +585,7 @@ class MessageViewerTab(QWidget):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT origin, path, mtime, size, status, read_ts
+                SELECT origin, path, mtime, size, status, read_ts, flag_state
                 FROM message_read_state
                 """
             )
@@ -469,10 +594,14 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to load read state: %s", e)
             return {}
-        out: Dict[tuple, tuple[str, float]] = {}
-        for origin, path, mtime, size, status, read_ts in rows:
+        out: Dict[tuple, tuple[str, float, int]] = {}
+        for origin, path, mtime, size, status, read_ts, flag_state in rows:
             key = (origin, path, float(mtime or 0.0), int(size or 0))
-            out[key] = (str(status or "").upper(), float(read_ts or 0.0))
+            out[key] = (
+                str(status or "").upper(),
+                float(read_ts or 0.0),
+                int(flag_state or 0),
+            )
         return out
 
     def _get_read_state(self, rec: FileRecord) -> str:
@@ -482,6 +611,13 @@ class MessageViewerTab(QWidget):
             return state[0]
         return "NEW"
 
+    def _get_flag_state(self, rec: FileRecord) -> int:
+        key = self._read_state_key(rec.origin, rec)
+        state = self._read_state_map.get(key)
+        if state and len(state) > 2:
+            return int(state[2] or 0)
+        return 0
+
     def _set_read_state(self, rec: FileRecord, status: str) -> None:
         db_path = self._db_path()
         if not db_path:
@@ -489,17 +625,18 @@ class MessageViewerTab(QWidget):
         status = (status or "READ").upper()
         key = self._read_state_key(rec.origin, rec)
         read_ts = time.time() if status == "READ" else 0.0
-        self._read_state_map[key] = (status, read_ts)
+        flag_state = self._get_flag_state(rec)
+        self._read_state_map[key] = (status, read_ts, flag_state)
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.execute(
                 """
                 INSERT OR REPLACE INTO message_read_state
-                    (origin, path, mtime, size, status, read_ts)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (origin, path, mtime, size, status, read_ts, flag_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (rec.origin, str(rec.path), float(rec.mtime), int(rec.size), status, float(read_ts)),
+                (rec.origin, str(rec.path), float(rec.mtime), int(rec.size), status, float(read_ts), int(flag_state)),
             )
             conn.commit()
             conn.close()
@@ -767,7 +904,9 @@ class MessageViewerTab(QWidget):
                 records[origin].sort(key=lambda r: r.mtime, reverse=True)
 
             self.files = records
+            self._update_fldigi_senders(records)
             self._read_state_map = self._load_read_state_map()
+            self._refresh_varac_messages(force=force)
             self._populate_messages_table(force=force)
         finally:
             self._refresh_files_inflight = False
@@ -795,6 +934,190 @@ class MessageViewerTab(QWidget):
             self._load_spotter_from_db(force=force)
         except Exception as e:
             log.debug("MessageViewer: spotter load failed: %s", e)
+
+    def _update_fldigi_senders(self, records: Dict[str, List[FileRecord]]) -> None:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return
+        rows: Dict[str, tuple[float, str]] = {}
+        for origin in ("flmsg", "flamp"):
+            for rec in records.get(origin, []):
+                sender = self._extract_sender_from_file(rec)
+                if not sender:
+                    continue
+                ts_val = float(rec.mtime or 0.0)
+                existing = rows.get(sender)
+                if not existing or ts_val > existing[0]:
+                    rows[sender] = (ts_val, origin)
+        if not rows:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            for cs, (ts_val, origin) in rows.items():
+                cur.execute(
+                    """
+                    INSERT INTO fldigi_file_senders (callsign, last_seen_ts, origin)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(callsign) DO UPDATE SET
+                        last_seen_ts=excluded.last_seen_ts,
+                        origin=excluded.origin
+                    """,
+                    (cs, float(ts_val), origin),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to update fldigi senders: %s", e)
+
+    def _refresh_varac_messages(self, force: bool = False) -> None:
+        if self._is_shutting_down:
+            return
+        try:
+            ingest_varac(self.settings)
+        except Exception as e:
+            log.debug("MessageViewer: VarAC ingest failed: %s", e)
+        try:
+            self._load_varac_from_local(force=force)
+        except Exception as e:
+            log.debug("MessageViewer: VarAC load failed: %s", e)
+
+    def _cycle_flag_state(self, payload: object) -> None:
+        current = int(getattr(payload, "flag_state", 0) or 0)
+        next_state = 1 if current == 0 else (2 if current == 1 else 0)
+        try:
+            setattr(payload, "flag_state", next_state)
+        except Exception:
+            pass
+        if isinstance(payload, JS8Message):
+            self._set_js8_flag(payload.msg_id, next_state)
+        elif isinstance(payload, SpotterMessage):
+            self._set_spotter_flag(payload.spotter_id, next_state)
+        elif isinstance(payload, VarACMessage):
+            self._set_varac_flag(payload, next_state)
+        elif isinstance(payload, FileRecord):
+            self._set_file_flag(payload, next_state)
+        self._populate_messages_table(force=True)
+
+    def _set_js8_flag(self, msg_id: int, flag_state: int) -> None:
+        db_path = self._local_js8_db()
+        if not db_path or not Path(db_path).exists():
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("UPDATE js8_messages SET flag_state=? WHERE id=?", (int(flag_state), int(msg_id)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to update JS8 flag: %s", e)
+
+    def _set_spotter_flag(self, msg_id: int, flag_state: int) -> None:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("UPDATE spotter_traffic SET flag_state=? WHERE id=?", (int(flag_state), int(msg_id)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to update Spotter flag: %s", e)
+
+    def _set_varac_flag(self, msg: VarACMessage, flag_state: int) -> None:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE varac_messages SET flag_state=? WHERE source=? AND id=?",
+                (int(flag_state), msg.source, int(msg.msg_id)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to update VarAC flag: %s", e)
+
+    def _set_file_flag(self, rec: FileRecord, flag_state: int) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        key = self._read_state_key(rec.origin, rec)
+        status, read_ts, _ = self._read_state_map.get(key, ("NEW", 0.0, 0))
+        self._read_state_map[key] = (status, read_ts, int(flag_state))
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO message_read_state
+                    (origin, path, mtime, size, status, read_ts, flag_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rec.origin,
+                    str(rec.path),
+                    float(rec.mtime),
+                    int(rec.size),
+                    status,
+                    float(read_ts),
+                    int(flag_state),
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to update file flag: %s", e)
+
+    def _load_varac_from_local(self, force: bool = False) -> None:
+        db_path = self._db_path()
+        msgs: List[VarACMessage] = []
+        if not db_path or not db_path.exists():
+            self.varac_messages = msgs
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, guid, source, msg_type, from_call, to_call, subject, body,
+                       ts, band, freq_hz, snr, read_status, folder, vmail_guid, is_deleted, flag_state
+                FROM varac_messages
+                WHERE COALESCE(is_deleted, 0) = 0
+                ORDER BY ts DESC
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to load varac messages: %s", e)
+            rows = []
+        for r in rows:
+            msg = VarACMessage(
+                msg_id=int(r[0]),
+                guid=(r[1] or ""),
+                source=(r[2] or ""),
+                msg_type=(r[3] or ""),
+                from_call=(r[4] or "").strip().upper(),
+                to_call=(r[5] or "").strip().upper(),
+                subject=(r[6] or ""),
+                body=(r[7] or ""),
+                ts=float(r[8] or 0.0),
+                band=(r[9] or ""),
+                freq_hz=float(r[10]) if r[10] not in (None, "") else None,
+                snr=float(r[11]) if r[11] not in (None, "") else None,
+                read_status=int(r[12] or 0),
+                folder=str(r[13] or ""),
+                vmail_guid=(r[14] or ""),
+                flag_state=int(r[16] or 0),
+            )
+            msgs.append(msg)
+        self.varac_messages = msgs
+        if force:
+            self._populate_messages_table(force=True)
 
     # ---------- Pending JS8 MSG backlog ---------- #
 
@@ -926,6 +1249,10 @@ class MessageViewerTab(QWidget):
         try:
             if hasattr(self.settings, "reload"):
                 self.settings.reload()
+        except Exception:
+            pass
+        try:
+            self._refresh_varac_messages(force=True)
         except Exception:
             pass
         self._update_pending_table()
@@ -1077,6 +1404,9 @@ class MessageViewerTab(QWidget):
             type_vals = base_types + ["Spotter"] + spotter_forms
         else:
             type_vals = base_types
+        if any(getattr(r.payload, "flag_state", 0) == 1 for r in rows):
+            if "Action Needed" not in status_vals:
+                status_vals.append("Action Needed")
 
         current_type = self.type_filter.currentText() if hasattr(self, "type_filter") else "ALL"
         current_status = self.status_filter.currentText() if hasattr(self, "status_filter") else "ALL"
@@ -1145,8 +1475,12 @@ class MessageViewerTab(QWidget):
                     continue
             elif type_sel != "MSG Type..." and row.msg_type != type_sel:
                 continue
-            if status_sel != "Status..." and row.status != status_sel:
-                continue
+            if status_sel != "Status...":
+                if status_sel == "Action Needed":
+                    if getattr(row.payload, "flag_state", 0) != 1:
+                        continue
+                elif row.status != status_sel:
+                    continue
             if from_sel and row.from_call != from_sel:
                 continue
             if to_sel and row.to_call != to_sel:
@@ -1484,6 +1818,29 @@ class MessageViewerTab(QWidget):
                 )
             )
 
+        for msg in self.varac_messages:
+            msg_type = "VarAC"
+            status = "NEW" if (msg.read_status == 0 and msg.msg_type.upper() != "QSO") else "READ"
+            rcv_ts = msg.ts or 0.0
+            rcv_display = self._fmt_ts(rcv_ts)
+            title_base = (msg.subject or msg.body or "").strip()
+            title = f"{msg.msg_type}: {title_base}" if title_base else (msg.msg_type or "VarAC")
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+            rows.append(
+                UnifiedMessage(
+                    msg_type=msg_type,
+                    status=status,
+                    from_call=(msg.from_call or "").strip().upper(),
+                    to_call=(msg.to_call or "").strip().upper(),
+                    rcv_ts=rcv_ts,
+                    rcv_display=rcv_display,
+                    title=title,
+                    origin="varac",
+                    payload=msg,
+                )
+            )
+
         for origin, recs in self.files.items():
             for rec in recs:
                 status = self._get_read_state(rec)
@@ -1532,6 +1889,10 @@ class MessageViewerTab(QWidget):
             self.current_record = row.payload
             self._load_content(row.payload)
             self._set_read_state(row.payload, "READ")
+        elif isinstance(row.payload, VarACMessage):
+            self.current_js8 = None
+            self.current_record = None
+            self._load_varac_content(row.payload)
 
     def _read_file_head(self, path: Path, limit: int = 4096) -> str:
         try:
@@ -2024,6 +2385,144 @@ class MessageViewerTab(QWidget):
             self.info_label.setText("No file selected")
             self.viewer.clear()
 
+    def _delete_js8_message(self, msg: JS8Message) -> None:
+        if not msg:
+            return
+        msg_id = int(getattr(msg, "msg_id", 0) or 0)
+        if msg_id <= 0:
+            return
+        deleted = self._delete_js8_inbox_row(msg_id)
+        if not deleted:
+            QMessageBox.warning(self, "Delete Message", f"Failed to delete Message {msg_id}.")
+            return
+        self._delete_js8_local_row(msg_id)
+        self.js8_messages = [m for m in self.js8_messages if m.msg_id != msg_id]
+        if self.current_js8 and self.current_js8.msg_id == msg_id:
+            self.current_js8 = None
+            self._has_active_view = False
+            self.info_label.setText("No message selected")
+            self.viewer.clear()
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+        QMessageBox.information(self, "Delete Message", f"Message {msg_id} Deleted")
+
+    def _delete_varac_message(self, msg: VarACMessage) -> None:
+        if not msg:
+            return
+        msg_id = int(getattr(msg, "msg_id", 0) or 0)
+        if msg_id <= 0:
+            return
+        resp = QMessageBox.question(
+            self,
+            "Delete Message",
+            f"Delete VarAC message {msg_id}?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        if not self._soft_delete_varac_row(msg):
+            QMessageBox.warning(self, "Delete Message", f"Failed to delete Message {msg_id}.")
+            return
+        self._delete_varac_local_row(msg)
+        self.varac_messages = [m for m in self.varac_messages if m.msg_id != msg_id or m.source != msg.source]
+        if self.current_record is None and self.current_js8 is None:
+            self._has_active_view = False
+            self.info_label.setText("No message selected")
+            self.viewer.clear()
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+        QMessageBox.information(self, "Delete Message", f"Message {msg_id} Deleted")
+
+    def _soft_delete_varac_row(self, msg: VarACMessage) -> bool:
+        varac_path = (self.settings.get("varac_db_path", "") or "").strip()
+        if not varac_path:
+            return False
+        db_path = Path(varac_path)
+        if not db_path.exists():
+            return False
+        table = msg.source
+        if table not in {"qso", "vmail", "broadcast"}:
+            return False
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(f"UPDATE {table} SET is_deleted=1 WHERE id=?", (int(msg.msg_id),))
+            if table == "vmail" and msg.vmail_guid:
+                try:
+                    cur.execute("UPDATE vmail_attachment SET is_deleted=1 WHERE vmail_guid=?", (msg.vmail_guid,))
+                except Exception:
+                    pass
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            log.debug("MessageViewer: failed to soft delete VarAC row %s/%s: %s", table, msg.msg_id, e)
+            return False
+
+    def _delete_varac_local_row(self, msg: VarACMessage) -> None:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM varac_messages WHERE source=? AND id=?",
+                (msg.source, int(msg.msg_id)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to delete local varac row %s/%s: %s", msg.source, msg.msg_id, e)
+
+    def _delete_js8_inbox_row(self, msg_id: int) -> bool:
+        inbox_path = self._inbox_path()
+        if not inbox_path or not inbox_path.exists():
+            return False
+        try:
+            conn = sqlite3.connect(inbox_path, timeout=1.0)
+            cur = conn.cursor()
+            cur.execute("PRAGMA busy_timeout = 1000")
+            tables = ["inbox_v1", "inbox"]
+            deleted = False
+            for table in tables:
+                try:
+                    cur.execute("PRAGMA table_info(%s)" % table)
+                    cols = {str(r[1]).lower() for r in cur.fetchall()}
+                except Exception:
+                    continue
+                try:
+                    if "id" in cols:
+                        cur.execute(f"DELETE FROM {table} WHERE id=?", (int(msg_id),))
+                        if cur.rowcount:
+                            deleted = True
+                    else:
+                        cur.execute(f"DELETE FROM {table} WHERE rowid=?", (int(msg_id),))
+                        if cur.rowcount:
+                            deleted = True
+                except Exception:
+                    continue
+            conn.commit()
+            conn.close()
+            return deleted
+        except Exception as e:
+            log.debug("MessageViewer: failed to delete inbox row %s: %s", msg_id, e)
+            return False
+
+    def _delete_js8_local_row(self, msg_id: int) -> None:
+        db_path = self._local_js8_db()
+        if not db_path or not Path(db_path).exists():
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM js8_messages WHERE id=?", (int(msg_id),))
+            cur.execute("DELETE FROM js8_inbox_state WHERE id=?", (int(msg_id),))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to delete local js8 row %s: %s", msg_id, e)
+
     @staticmethod
     def _send_to_recycle_bin(path: Path) -> bool:
         if platform.system() == "Windows":
@@ -2228,6 +2727,45 @@ class MessageViewerTab(QWidget):
         else:
             self.viewer.setAcceptRichText(False)
             self.viewer.setPlainText(content)
+
+    def _load_varac_content(self, msg: VarACMessage) -> None:
+        header = [
+            f"TYPE: {msg.msg_type}",
+            f"FROM: {msg.from_call}",
+            f"TO:   {msg.to_call}",
+            f"TIME: {self._fmt_ts(msg.ts)}",
+        ]
+        if msg.band:
+            header.append(f"BAND: {msg.band}")
+        if msg.freq_hz:
+            header.append(f"FREQ: {float(msg.freq_hz) / 1_000_000.0:.3f}")
+        if msg.snr is not None:
+            header.append(f"SNR:  {msg.snr}")
+        header.append("")
+        body = msg.body or msg.subject or ""
+        self.info_label.setText(f"VarAC {msg.msg_type} {msg.from_call} -> {msg.to_call}")
+        self.viewer.setAcceptRichText(False)
+        self.viewer.setPlainText("\n".join(header + [body]))
+        self._mark_varac_read(msg)
+
+    def _mark_varac_read(self, msg: VarACMessage) -> None:
+        if not msg or msg.read_status:
+            return
+        msg.read_status = 1
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE varac_messages SET read_status=1 WHERE source=? AND id=?",
+                (msg.source, int(msg.msg_id)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
 
     def _load_js8_content(self, msg: JS8Message | SpotterMessage):
         header = [
@@ -2791,7 +3329,8 @@ class MessageViewerTab(QWidget):
                 raw_text TEXT,
                 decoded_text TEXT,
                 state TEXT,
-                read_ts REAL
+                read_ts REAL,
+                flag_state INTEGER DEFAULT 0
             )
             """
         )
@@ -2801,6 +3340,10 @@ class MessageViewerTab(QWidget):
         # Add columns if missing
         try:
             cur.execute("ALTER TABLE js8_messages ADD COLUMN read_ts REAL")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE js8_messages ADD COLUMN flag_state INTEGER DEFAULT 0")
         except Exception:
             pass
         try:
@@ -2898,7 +3441,7 @@ class MessageViewerTab(QWidget):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts
+                SELECT id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts, flag_state
                 FROM js8_messages
                 WHERE utc_ts IS NULL OR utc_ts >= ?
                 """,
@@ -2921,6 +3464,7 @@ class MessageViewerTab(QWidget):
                 decoded_text=(r[7] or ""),
                 state=(r[8] or "UNREAD").upper(),
                 read_ts=float(r[9] or 0.0),
+                flag_state=int(r[10] or 0),
             )
             # If older than retention and read, skip
             now_ts = time.time()
@@ -2952,7 +3496,7 @@ class MessageViewerTab(QWidget):
             cur.execute(
                 """
                 SELECT id, utc_str, utc_ts, from_call, to_call, form_id, spotter_token,
-                       raw_text, decoded_text, state, read_ts, relay_via
+                       raw_text, decoded_text, state, read_ts, flag_state, relay_via
                 FROM spotter_traffic
                 ORDER BY utc_ts DESC, id DESC
                 """
@@ -2974,7 +3518,8 @@ class MessageViewerTab(QWidget):
                 decoded_text=(r[8] or ""),
                 state=(r[9] or "UNREAD").upper(),
                 read_ts=float(r[10] or 0.0),
-                relay_via=(r[11] or "").strip().upper(),
+                relay_via=(r[12] or "").strip().upper(),
+                flag_state=int(r[11] or 0),
             )
             msgs.append(msg)
         self.spotter_messages = msgs
