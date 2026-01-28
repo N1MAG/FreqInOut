@@ -1705,7 +1705,7 @@ class StationsMapTab(QWidget):
 
         return links
 
-    def _load_varac_stats(self) -> Dict[str, Dict]:
+    def _load_varac_stats(self, max_age_sec: Optional[int] = None) -> Dict[str, Dict]:
         stats: Dict[str, Dict] = {}
         try:
             from freqinout.core.config_paths import get_config_dir
@@ -1728,9 +1728,15 @@ class StationsMapTab(QWidget):
             conn.close()
         except Exception:
             return stats
+        ts_cut = None
+        if max_age_sec and max_age_sec > 0:
+            ts_cut = time.time() - max_age_sec
         for cs, last_seen_ts, last_band, last_freq_hz, last_snr in rows:
+            last_seen_val = float(last_seen_ts or 0.0)
+            if ts_cut and last_seen_val and last_seen_val < ts_cut:
+                continue
             stats[(cs or "").strip().upper()] = {
-                "last_seen_ts": float(last_seen_ts or 0.0),
+                "last_seen_ts": last_seen_val,
                 "last_band": (last_band or "").strip().upper(),
                 "last_freq_hz": float(last_freq_hz) if last_freq_hz not in (None, "") else None,
                 "last_snr": float(last_snr) if last_snr not in (None, "") else None,
@@ -1757,7 +1763,7 @@ class StationsMapTab(QWidget):
             conn.close()
         except Exception:
             return calls
-        return checkins & senders
+        return checkins | senders
 
     def _load_recent_calls(self, max_age_sec: Optional[int], band_filter=None) -> Set[str]:
         if not max_age_sec or max_age_sec <= 0:
@@ -1781,6 +1787,11 @@ class StationsMapTab(QWidget):
                 (ts_cut,),
             )
             rows = cur.fetchall()
+            cur.execute(
+                "SELECT callsign, last_seen_ts, last_band, last_freq_hz FROM varac_callsign_stats WHERE last_seen_ts >= ?",
+                (ts_cut,),
+            )
+            varac_rows = cur.fetchall()
             conn.close()
         except Exception as e:
             log.error("StationsMap: failed to load recent js8_links: %s", e)
@@ -1804,6 +1815,21 @@ class StationsMapTab(QWidget):
                 calls.add((o or "").strip().upper())
             if d:
                 calls.add((d or "").strip().upper())
+        for cs, last_seen_ts, last_band, last_freq_hz in varac_rows:
+            band_val = (last_band or "").upper()
+            if bf.get("type") == "band":
+                if band_val != str(bf.get("value")).upper():
+                    continue
+            elif bf.get("type") == "freq":
+                target_f = bf.get("value")
+                try:
+                    freq_mhz = float(last_freq_hz) / 1_000_000.0 if last_freq_hz is not None else None
+                except Exception:
+                    freq_mhz = None
+                if freq_mhz is None or target_f is None or abs(freq_mhz - target_f) > 0.001:
+                    continue
+            if cs:
+                calls.add((cs or "").strip().upper())
         return calls
 
     def _is_usa_canada(self, lat: float, lon: float) -> bool:
@@ -1921,7 +1947,7 @@ class StationsMapTab(QWidget):
             if view_state:
                 self._last_map_view = view_state
 
-        varac_stats = self._load_varac_stats()
+        varac_stats = self._load_varac_stats(max_age_sec=self.recency_seconds)
         fldigi_calls = self._load_fldigi_presence()
 
         # Spread overlapping stations with the same base lat/lon
@@ -2531,14 +2557,15 @@ function addGridLabels(res, level, bounds, maxLabels) {
         }});
         stationsLayer.addLayer(circle);
         const tipText = (m.tooltip || m.title || '') +
-          (m.last_seen ? '<br/><b>JS8 Last Seen:</b> ' + m.last_seen : '') +
-          (m.last_spotter ? '<br/><b>JS8 Spotter:</b> ' + m.last_spotter : '') +
-          (m.last_band ? '<br/><b>JS8 Last Band:</b> ' + m.last_band : '') +
-          (m.direct_snr !== undefined && m.direct_snr !== null ? '<br/><b>JS8 Direct SNR:</b> ' + m.direct_snr.toFixed(1) + (m.direct_count ? ' (Traffic: ' + m.direct_count + ')' : '') : '') +
-          (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/><b>JS8 Avg SNR:</b> ' + m.avg_snr_excl_my.toFixed(1) + (m.avg_snr_count ? ' (Traffic: ' + m.avg_snr_count + ')' : '') : '') +
-          (m.varac_last_seen ? '<br/><b>VarAC Last Seen:</b> ' + m.varac_last_seen : '') +
-          (m.varac_last_band ? '<br/><b>VarAC Last Band:</b> ' + m.varac_last_band : '') +
-          (m.varac_snr !== undefined && m.varac_snr !== null ? '<br/><b>VarAC SNR:</b> ' + m.varac_snr.toFixed(1) : '');
+          (m.last_seen || m.last_band || m.direct_snr !== undefined || m.avg_snr_excl_my !== undefined ? '<br/><b>JS8Call</b>' : '') +
+          (m.last_seen ? '<br/>Last Seen: ' + m.last_seen : '') +
+          (m.last_band ? '<br/>Last Band: ' + m.last_band : '') +
+          (m.direct_snr !== undefined && m.direct_snr !== null ? '<br/>Directed SNR: ' + m.direct_snr.toFixed(1) + (m.direct_count ? ' (Traffic: ' + m.direct_count + ')' : '') : '') +
+          (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/>Avg SNR: ' + m.avg_snr_excl_my.toFixed(1) + (m.avg_snr_count ? ' (Traffic: ' + m.avg_snr_count + ')' : '') : '') +
+          (m.varac_last_seen || m.varac_last_band || m.varac_snr !== undefined ? '<br/><b>VarAC</b>' : '') +
+          (m.varac_last_seen ? '<br/>Last Seen: ' + m.varac_last_seen : '') +
+          (m.varac_last_band ? '<br/>Last Band: ' + m.varac_last_band : '') +
+          (m.varac_snr !== undefined && m.varac_snr !== null ? '<br/>SNR: ' + m.varac_snr.toFixed(1) : '');
         circle.on('mouseover', function() {{
           this.bringToFront();
           showDetail(tipText);
