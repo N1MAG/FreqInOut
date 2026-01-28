@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent, QRect
+from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent, QRect, Signal
 from PySide6.QtGui import QPainter, QColor, QPalette, QFont
 from PySide6.QtWidgets import (
     QWidget,
@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QStyle,
+    QStyleOptionButton,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -158,11 +159,13 @@ class UnifiedMessage:
 
 
 class MessageTableModel(QAbstractTableModel):
-    HEADERS = ["MSG Type", "Status", "From", "To", "RCV_DT", "Message Title", ""]
+    HEADERS = ["", "MSG Type", "Status", "From", "To", "RCV_DT", "Message Title", ""]
 
     def __init__(self, rows: List[UnifiedMessage]):
         super().__init__()
         self._rows = rows
+        self._selected_keys: set[tuple] = set()
+        self._select_column_index = 0
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         if parent.isValid():
@@ -179,26 +182,31 @@ class MessageTableModel(QAbstractTableModel):
             return None
         row = self._rows[index.row()]
         col = index.column()
+        if role == Qt.CheckStateRole and col == 0:
+            key = self._row_key(row)
+            if key is None:
+                return None
+            return Qt.Checked if key in self._selected_keys else Qt.Unchecked
         if role == Qt.DisplayRole:
-            if col == 0:
-                return row.msg_type
             if col == 1:
-                return row.status
+                return row.msg_type
             if col == 2:
-                return row.from_call
+                return row.status
             if col == 3:
-                return row.to_call
+                return row.from_call
             if col == 4:
-                return row.rcv_display
+                return row.to_call
             if col == 5:
-                return row.title
+                return row.rcv_display
             if col == 6:
+                return row.title
+            if col == 7:
                 if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage)):
                     return "View | Delete"
                 return "View"
         if role == Qt.UserRole:
             return row
-        if role == Qt.ForegroundRole and col == 1 and row.status == "NEW":
+        if role == Qt.ForegroundRole and col == 2 and row.status == "NEW":
             return QColor(Qt.red)
         return None
 
@@ -209,10 +217,98 @@ class MessageTableModel(QAbstractTableModel):
             return self.HEADERS[section]
         return None
 
+    def flags(self, index: QModelIndex) -> Qt.ItemFlags:
+        if not index.isValid():
+            return Qt.NoItemFlags
+        row = self._rows[index.row()]
+        if index.column() == 0 and self._row_key(row) is not None:
+            return Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsEditable
+        return Qt.ItemIsEnabled | Qt.ItemIsSelectable
+
+    def setData(self, index: QModelIndex, value, role: int = Qt.EditRole) -> bool:
+        if not index.isValid():
+            return False
+        if index.column() != 0 or role != Qt.CheckStateRole:
+            return False
+        row = self._rows[index.row()]
+        key = self._row_key(row)
+        if key is None:
+            return False
+        if value == Qt.Checked:
+            self._selected_keys.add(key)
+        else:
+            self._selected_keys.discard(key)
+        self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+        return True
+
     def set_rows(self, rows: List[UnifiedMessage]) -> None:
         self.beginResetModel()
         self._rows = rows
+        keep = {self._row_key(r) for r in rows if self._row_key(r) is not None}
+        self._selected_keys = {k for k in self._selected_keys if k in keep}
         self.endResetModel()
+
+    def rows(self) -> List[UnifiedMessage]:
+        return list(self._rows)
+
+    def selected_rows(self) -> List[UnifiedMessage]:
+        out: List[UnifiedMessage] = []
+        for row in self._rows:
+            key = self._row_key(row)
+            if key is not None and key in self._selected_keys:
+                out.append(row)
+        return out
+
+    def clear_selection(self) -> None:
+        if not self._selected_keys:
+            return
+        self._selected_keys.clear()
+        if self.rowCount() > 0:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(self.rowCount() - 1, 0),
+                [Qt.CheckStateRole],
+            )
+
+    def set_selected_for_rows(self, rows: List[UnifiedMessage], selected: bool) -> None:
+        if not rows:
+            return
+        updated = False
+        for row in rows:
+            key = self._row_key(row)
+            if key is None:
+                continue
+            if selected:
+                if key not in self._selected_keys:
+                    self._selected_keys.add(key)
+                    updated = True
+            else:
+                if key in self._selected_keys:
+                    self._selected_keys.discard(key)
+                    updated = True
+        if updated and self.rowCount() > 0:
+            self.dataChanged.emit(
+                self.index(0, self._select_column_index),
+                self.index(self.rowCount() - 1, self._select_column_index),
+                [Qt.CheckStateRole],
+            )
+
+    @staticmethod
+    def _row_key(row: UnifiedMessage) -> tuple | None:
+        payload = row.payload
+        if isinstance(payload, JS8Message):
+            msg_id = int(getattr(payload, "msg_id", 0) or 0)
+            return ("js8", msg_id) if msg_id > 0 else None
+        if isinstance(payload, SpotterMessage):
+            msg_id = int(getattr(payload, "spotter_id", 0) or 0)
+            return ("spotter", msg_id) if msg_id > 0 else None
+        if isinstance(payload, VarACMessage):
+            msg_id = int(getattr(payload, "msg_id", 0) or 0)
+            source = str(getattr(payload, "source", "") or "")
+            return ("varac", source, msg_id) if msg_id > 0 and source else None
+        if isinstance(payload, FileRecord):
+            return ("file", payload.origin, str(payload.path), float(payload.mtime), int(payload.size))
+        return None
 
 
 class MessageActionDelegate(QStyledItemDelegate):
@@ -223,7 +319,7 @@ class MessageActionDelegate(QStyledItemDelegate):
         self._flag_color_green = QColor("#2e7d32")
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
-        if index.column() != 6:
+        if index.column() != 7:
             super().paint(painter, option, index)
             return
         row = index.data(Qt.UserRole)
@@ -272,7 +368,7 @@ class MessageActionDelegate(QStyledItemDelegate):
         painter.restore()
 
     def editorEvent(self, event, model, option, index):
-        if index.column() != 6:
+        if index.column() != 7:
             return False
         if event.type() != QEvent.MouseButtonRelease:
             return False
@@ -316,6 +412,8 @@ class MessageActionDelegate(QStyledItemDelegate):
         elif isinstance(row.payload, SpotterMessage):
             if flag_rect.contains(pos):
                 self.parent()._cycle_flag_state(row.payload)
+            elif del_rect.contains(pos):
+                self.parent()._delete_spotter_message(row.payload)
             else:
                 self.parent()._on_view_message(row)
         elif isinstance(row.payload, VarACMessage):
@@ -328,6 +426,84 @@ class MessageActionDelegate(QStyledItemDelegate):
         else:
             self.parent()._on_view_message(row)
         return True
+
+
+class MessageCheckboxDelegate(QStyledItemDelegate):
+    def editorEvent(self, event, model, option, index):
+        if index.column() != 0:
+            return False
+        if event.type() != QEvent.MouseButtonRelease:
+            return False
+        if hasattr(event, "button") and event.button() != Qt.LeftButton:
+            return False
+        state = model.data(index, Qt.CheckStateRole)
+        if state is None:
+            return False
+        new_state = Qt.Unchecked if state == Qt.Checked else Qt.Checked
+        model.setData(index, new_state, Qt.CheckStateRole)
+        return True
+
+
+class MessageHeaderWithCheckbox(QHeaderView):
+    checkboxToggled = Signal(int)
+
+    def __init__(self, orientation: Qt.Orientation, parent=None):
+        super().__init__(orientation, parent)
+        self._checkbox_state = Qt.Unchecked
+        self._checkbox_enabled = False
+        self.setSectionsClickable(True)
+
+    def set_checkbox_state(self, state: Qt.CheckState, enabled: Optional[bool] = None) -> None:
+        if enabled is not None:
+            self._checkbox_enabled = bool(enabled)
+        self._checkbox_state = state
+        self.updateSection(0)
+
+    def _checkbox_rect(self, rect: QRect) -> QRect:
+        style = self.style()
+        width = style.pixelMetric(QStyle.PM_IndicatorWidth)
+        height = style.pixelMetric(QStyle.PM_IndicatorHeight)
+        x = rect.x() + 4
+        y = rect.y() + (rect.height() - height) // 2
+        return QRect(x, y, width, height)
+
+    def paintSection(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:
+        super().paintSection(painter, rect, logicalIndex)
+        if logicalIndex != 0:
+            return
+        opt = QStyleOptionButton()
+        opt.rect = self._checkbox_rect(rect)
+        opt.state = QStyle.State_Enabled if self._checkbox_enabled else QStyle.State_None
+        if self._checkbox_state == Qt.Checked:
+            opt.state |= QStyle.State_On
+        elif self._checkbox_state == Qt.PartiallyChecked:
+            opt.state |= QStyle.State_NoChange
+        else:
+            opt.state |= QStyle.State_Off
+        if not self._checkbox_enabled:
+            opt.state |= QStyle.State_ReadOnly
+        self.style().drawControl(QStyle.CE_CheckBox, opt, painter)
+
+    def mousePressEvent(self, event) -> None:
+        if self._checkbox_enabled:
+            idx = self.logicalIndexAt(event.pos())
+            if idx == 0:
+                rect = QRect(
+                    self.sectionViewportPosition(0),
+                    0,
+                    self.sectionSize(0),
+                    self.height(),
+                )
+                if self._checkbox_rect(rect).contains(event.pos()):
+                    if self._checkbox_state == Qt.Checked:
+                        self._checkbox_state = Qt.Unchecked
+                    else:
+                        self._checkbox_state = Qt.Checked
+                    self.updateSection(0)
+                    self.checkboxToggled.emit(int(self._checkbox_state.value))
+                    return
+        super().mousePressEvent(event)
+
 
 class MessageViewerTab(QWidget):
     """
@@ -368,7 +544,7 @@ class MessageViewerTab(QWidget):
         self._message_rows: List[UnifiedMessage] = []
         self._filters_initialized = False
         self._has_active_view = False
-        self._default_sort_column = 4
+        self._default_sort_column = 5
         self._default_sort_order = Qt.DescendingOrder
         self._sort_column = self._default_sort_column
         self._sort_order = self._default_sort_order
@@ -379,6 +555,7 @@ class MessageViewerTab(QWidget):
         self._header_cells: List[QWidget] = []
         self._is_shutting_down = False
         self._refresh_files_inflight = False
+        self.loading_label: QLabel | None = None
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -395,13 +572,9 @@ class MessageViewerTab(QWidget):
         self.paths_labels: Dict[str, QLabel] = {}
 
         self._build_ui()
-        self._load_paths_lists()
-        self._refresh_files()
+        QTimer.singleShot(0, self._initial_refresh)
         self._setup_timer()
-        self._refresh_js8_messages()
         self._setup_js8_timer()
-        self._refresh_varac_messages(force=True)
-        self._refresh_pending_backlog()
         self._setup_pending_timer()
 
     # ---------- DB helpers ----------
@@ -673,6 +846,10 @@ class MessageViewerTab(QWidget):
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Message Viewer</h3>"))
+        self.loading_label = QLabel("Brewing it fresh...")
+        self.loading_label.setStyleSheet("color: #888;")
+        self.loading_label.setVisible(False)
+        header.addWidget(self.loading_label)
         header.addStretch()
 
         header.addWidget(QLabel("Scan every:"))
@@ -690,6 +867,12 @@ class MessageViewerTab(QWidget):
         self.export_btn = QPushButton("Export to PDF")
         self.export_btn.clicked.connect(self._export_pdf)
         header.addWidget(self.export_btn)
+
+        self.delete_selected_btn = QPushButton("Delete Selected")
+        self.delete_selected_btn.clicked.connect(self._delete_selected_messages)
+        self.delete_selected_btn.setEnabled(False)
+        self.delete_selected_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
+        header.addWidget(self.delete_selected_btn)
 
         layout.addLayout(header)
 
@@ -738,19 +921,24 @@ class MessageViewerTab(QWidget):
         self.messages_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.messages_table.setAlternatingRowColors(True)
         self.messages_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
-        msg_header = self.messages_table.horizontalHeader()
+        msg_header = MessageHeaderWithCheckbox(Qt.Horizontal, self.messages_table)
+        self.messages_table.setHorizontalHeader(msg_header)
         msg_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         msg_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         msg_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         msg_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         msg_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        msg_header.setSectionResizeMode(5, QHeaderView.Stretch)
-        msg_header.setSectionResizeMode(6, QHeaderView.Fixed)
-        self.messages_table.setColumnWidth(6, 140)
+        msg_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        msg_header.setSectionResizeMode(6, QHeaderView.Stretch)
+        msg_header.setSectionResizeMode(7, QHeaderView.Fixed)
+        self.messages_table.setColumnWidth(0, 32)
+        self.messages_table.setColumnWidth(7, 140)
         msg_header.setVisible(True)
         msg_header.sectionClicked.connect(self._on_sort_clicked)
+        msg_header.checkboxToggled.connect(self._on_header_checkbox_toggled)
         self._actions_delegate = MessageActionDelegate(self, QColor(resolve_theme(self.settings)["danger"]))
-        self.messages_table.setItemDelegateForColumn(6, self._actions_delegate)
+        self.messages_table.setItemDelegateForColumn(7, self._actions_delegate)
+        self.messages_table.setItemDelegateForColumn(0, MessageCheckboxDelegate(self.messages_table))
         messages_layout.addWidget(self.messages_table)
         messages_box.setLayout(messages_layout)
         splitter = QSplitter(Qt.Vertical)
@@ -795,6 +983,7 @@ class MessageViewerTab(QWidget):
         self.rcv_search.textChanged.connect(lambda _: self._filter_timer.start(200))
         self._build_messages_header()
         QTimer.singleShot(0, self._set_initial_splitter_sizes)
+        self._messages_model.dataChanged.connect(self._update_bulk_delete_buttons)
 
     # ---------- Timer ----------
 
@@ -821,8 +1010,12 @@ class MessageViewerTab(QWidget):
 
     def _on_refresh_now(self) -> None:
         self._unfreeze_table()
-        self._refresh_files(force=True)
-        self._refresh_js8_messages(force=True)
+        self._set_loading(True)
+        try:
+            self._refresh_files(force=True)
+            self._refresh_js8_messages(force=True)
+        finally:
+            self._set_loading(False)
 
     def _on_scan_changed(self):
         val = self.scan_combo.currentData()
@@ -831,6 +1024,23 @@ class MessageViewerTab(QWidget):
         self.scan_minutes = int(val)
         self._setup_timer()
         self._save_settings()
+
+    def _initial_refresh(self) -> None:
+        self._set_loading(True)
+        try:
+            self._load_paths_lists()
+            self._refresh_files()
+            self._refresh_js8_messages()
+            self._refresh_varac_messages(force=True)
+            self._refresh_pending_backlog()
+        finally:
+            self._set_loading(False)
+
+    def _set_loading(self, active: bool, text: str = "Brewing it fresh...") -> None:
+        if not self.loading_label:
+            return
+        self.loading_label.setText(text)
+        self.loading_label.setVisible(bool(active))
 
     # ---------- Paths ----------
 
@@ -1108,11 +1318,14 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to load varac messages: %s", e)
             rows = []
         for r in rows:
+            msg_type = (r[3] or "")
+            if msg_type.strip().upper() == "QSO":
+                continue
             msg = VarACMessage(
                 msg_id=int(r[0]),
                 guid=(r[1] or ""),
                 source=(r[2] or ""),
-                msg_type=(r[3] or ""),
+                msg_type=msg_type,
                 from_call=(r[4] or "").strip().upper(),
                 to_call=(r[5] or "").strip().upper(),
                 subject=(r[6] or ""),
@@ -1575,6 +1788,23 @@ class MessageViewerTab(QWidget):
             return True
         return False
 
+    def _is_filter_active(self) -> bool:
+        type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
+        status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
+        from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
+        to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
+        if type_sel not in ("", "MSG Type..."):
+            return True
+        if status_sel not in ("", "Status..."):
+            return True
+        if from_sel:
+            return True
+        if to_sel:
+            return True
+        if (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip():
+            return True
+        return False
+
     def _apply_message_filters_preserve_scroll(self) -> None:
         if not hasattr(self, "messages_table"):
             self._apply_message_filters()
@@ -1649,6 +1879,122 @@ class MessageViewerTab(QWidget):
             self.current_record = None
             self.current_js8 = None
         self.messages_table.setUpdatesEnabled(True)
+        self._update_bulk_delete_buttons()
+
+    def _update_bulk_delete_buttons(self) -> None:
+        theme = resolve_theme(self.settings)
+        count = len(self._messages_model.selected_rows())
+        has_selection = count > 0
+        if hasattr(self, "delete_selected_btn"):
+            self.delete_selected_btn.setEnabled(has_selection)
+            role = "danger" if has_selection else "muted"
+            self.delete_selected_btn.setStyleSheet(button_style(role, theme))
+        self._sync_select_all_checkbox()
+
+    def _delete_selected_messages(self) -> None:
+        rows = self._messages_model.selected_rows()
+        deletable = self._collect_deletable_rows(rows)
+        if not deletable:
+            QMessageBox.information(self, "Delete Selected", "No deletable messages selected.")
+            return
+        if not self._confirm_bulk_delete(deletable, "Delete selected messages?"):
+            return
+        self._bulk_delete_rows(deletable)
+
+    @staticmethod
+    def _collect_deletable_rows(rows: List[UnifiedMessage]) -> List[UnifiedMessage]:
+        out: List[UnifiedMessage] = []
+        for row in rows:
+            if MessageTableModel._row_key(row) is not None:
+                out.append(row)
+        return out
+
+    @staticmethod
+    def _summarize_types(rows: List[UnifiedMessage]) -> str:
+        counts: Dict[str, int] = {}
+        for row in rows:
+            label = (row.msg_type or row.origin or "").strip() or "Unknown"
+            counts[label] = counts.get(label, 0) + 1
+        parts = [f"{k}: {counts[k]}" for k in sorted(counts)]
+        return ", ".join(parts)
+
+    def _confirm_bulk_delete(self, rows: List[UnifiedMessage], prompt: str) -> bool:
+        summary = self._summarize_types(rows)
+        msg = f"{prompt}\n\n{len(rows)} messages\n{summary}"
+        resp = QMessageBox.question(self, "Delete Messages", msg, QMessageBox.Yes | QMessageBox.No)
+        return resp == QMessageBox.Yes
+
+    def _bulk_delete_rows(self, rows: List[UnifiedMessage]) -> None:
+        deleted = 0
+        failed = 0
+        skipped = 0
+        for row in rows:
+            payload = row.payload
+            if isinstance(payload, JS8Message):
+                msg_id = int(getattr(payload, "msg_id", 0) or 0)
+                if msg_id <= 0:
+                    skipped += 1
+                    continue
+                if not self._delete_js8_inbox_row(msg_id):
+                    failed += 1
+                    continue
+                self._delete_js8_local_row(msg_id)
+                self.js8_messages = [m for m in self.js8_messages if m.msg_id != msg_id]
+                if self.current_js8 and self.current_js8.msg_id == msg_id:
+                    self.current_js8 = None
+                    self._has_active_view = False
+                    self.info_label.setText("No message selected")
+                    self.viewer.clear()
+                deleted += 1
+            elif isinstance(payload, VarACMessage):
+                msg_id = int(getattr(payload, "msg_id", 0) or 0)
+                if msg_id <= 0:
+                    skipped += 1
+                    continue
+                if not self._soft_delete_varac_row(payload):
+                    failed += 1
+                    continue
+                self._delete_varac_local_row(payload)
+                self.varac_messages = [
+                    m for m in self.varac_messages if m.msg_id != msg_id or m.source != payload.source
+                ]
+                deleted += 1
+            elif isinstance(payload, SpotterMessage):
+                msg_id = int(getattr(payload, "spotter_id", 0) or 0)
+                if msg_id <= 0:
+                    skipped += 1
+                    continue
+                if not self._delete_spotter_row(msg_id):
+                    failed += 1
+                    continue
+                self.spotter_messages = [m for m in self.spotter_messages if m.spotter_id != msg_id]
+                if self.current_js8 is None and self.current_record is None:
+                    self._has_active_view = False
+                    self.info_label.setText("No message selected")
+                    self.viewer.clear()
+                deleted += 1
+            elif isinstance(payload, FileRecord):
+                if not payload.path.exists():
+                    skipped += 1
+                    continue
+                ok = self._send_to_recycle_bin(payload.path)
+                if not ok:
+                    failed += 1
+                    continue
+                self._remove_file_record(payload)
+                deleted += 1
+            else:
+                skipped += 1
+        self._messages_model.clear_selection()
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+        summary = self._summarize_types(rows)
+        details = f"Deleted {deleted} messages.\n{summary}"
+        if skipped:
+            details = f"{details}\nSkipped: {skipped}"
+        if failed:
+            details = f"{details}\nFailed: {failed}"
+        QMessageBox.information(self, "Delete Messages", details)
 
     def _build_messages_header(self) -> None:
         while self.messages_header_layout.count():
@@ -1656,19 +2002,21 @@ class MessageViewerTab(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._header_cells = []
+        select_hdr = self._make_header_spacer()
         type_hdr = self._make_filter_cell(self.type_filter)
         status_hdr = self._make_filter_cell(self.status_filter)
         from_hdr = self._make_filter_cell(self.from_filter)
         to_hdr = self._make_filter_cell(self.to_filter)
         rcv_hdr = self._make_search_filter_cell(self.rcv_search)
         title_hdr = self._make_header_spacer()
+        self.messages_header_layout.addWidget(select_hdr)
         self.messages_header_layout.addWidget(type_hdr)
         self.messages_header_layout.addWidget(status_hdr)
         self.messages_header_layout.addWidget(from_hdr)
         self.messages_header_layout.addWidget(to_hdr)
         self.messages_header_layout.addWidget(rcv_hdr)
         self.messages_header_layout.addWidget(title_hdr, 1)
-        self._header_cells.extend([type_hdr, status_hdr, from_hdr, to_hdr, rcv_hdr, title_hdr])
+        self._header_cells.extend([select_hdr, type_hdr, status_hdr, from_hdr, to_hdr, rcv_hdr, title_hdr])
         clear_wrap = QWidget()
         clear_layout = QHBoxLayout(clear_wrap)
         clear_layout.setContentsMargins(2, 2, 2, 2)
@@ -1683,6 +2031,7 @@ class MessageViewerTab(QWidget):
         self.messages_table.horizontalHeader().sectionResized.connect(self._sync_header_widths)
         self.messages_header.setMinimumHeight(self.messages_header.sizeHint().height())
         QTimer.singleShot(0, self._sync_header_widths)
+        QTimer.singleShot(0, self._sync_select_all_checkbox)
 
     def _set_initial_splitter_sizes(self) -> None:
         if not hasattr(self, "messages_splitter"):
@@ -1750,7 +2099,12 @@ class MessageViewerTab(QWidget):
             if widget is None:
                 continue
             width = header.sectionSize(idx)
-            min_width = 140 if idx == 6 else 60
+            if idx == 0:
+                min_width = 30
+            elif idx == 7:
+                min_width = 140
+            else:
+                min_width = 60
             widget.setFixedWidth(max(min_width, width))
 
     def _filters_active(self) -> bool:
@@ -1768,7 +2122,7 @@ class MessageViewerTab(QWidget):
         self.clear_filters_btn.setStyleSheet(button_style(role, theme))
 
     def _on_sort_clicked(self, section: int) -> None:
-        if section >= 6:
+        if section == 0 or section >= 7:
             return
         if section == self._sort_column:
             self._sort_order = (
@@ -1779,22 +2133,56 @@ class MessageViewerTab(QWidget):
             self._sort_order = Qt.AscendingOrder
         self._apply_message_filters()
 
+    def _sync_select_all_checkbox(self) -> None:
+        header = self.messages_table.horizontalHeader() if hasattr(self, "messages_table") else None
+        if not isinstance(header, MessageHeaderWithCheckbox):
+            return
+        rows = self._messages_model.rows()
+        keys = [MessageTableModel._row_key(r) for r in rows]
+        keys = [k for k in keys if k is not None]
+        enabled = self._is_filter_active() and bool(keys)
+        if not keys:
+            header.set_checkbox_state(Qt.Unchecked, enabled=False)
+            return
+        selected = 0
+        for k in keys:
+            if k in self._messages_model._selected_keys:
+                selected += 1
+        if selected == 0:
+            header.set_checkbox_state(Qt.Unchecked, enabled=enabled)
+        elif selected == len(keys):
+            header.set_checkbox_state(Qt.Checked, enabled=enabled)
+        else:
+            header.set_checkbox_state(Qt.PartiallyChecked, enabled=enabled)
+
+    def _on_header_checkbox_toggled(self, state: int) -> None:
+        if not self._is_filter_active():
+            self._sync_select_all_checkbox()
+            return
+        rows = self._messages_model.rows()
+        state_val = int(getattr(state, "value", state))
+        if state_val == Qt.PartiallyChecked.value:
+            return
+        target = state_val == Qt.Checked.value
+        self._messages_model.set_selected_for_rows(rows, target)
+        self._update_bulk_delete_buttons()
+
     def _sort_rows(self, rows: List[UnifiedMessage]) -> List[UnifiedMessage]:
         reverse = self._sort_order == Qt.DescendingOrder
         col = self._sort_column
 
         def key(row: UnifiedMessage):
-            if col == 0:
-                return row.msg_type or ""
             if col == 1:
-                return row.status or ""
+                return row.msg_type or ""
             if col == 2:
-                return row.from_call or ""
+                return row.status or ""
             if col == 3:
-                return row.to_call or ""
+                return row.from_call or ""
             if col == 4:
-                return row.rcv_ts or 0.0
+                return row.to_call or ""
             if col == 5:
+                return row.rcv_ts or 0.0
+            if col == 6:
                 return row.title or ""
             return row.rcv_ts or 0.0
 
@@ -2477,6 +2865,32 @@ class MessageViewerTab(QWidget):
         self._populate_messages_table(force=True)
         QMessageBox.information(self, "Delete Message", f"Message {msg_id} Deleted")
 
+    def _delete_spotter_message(self, msg: SpotterMessage) -> None:
+        if not msg:
+            return
+        msg_id = int(getattr(msg, "spotter_id", 0) or 0)
+        if msg_id <= 0:
+            return
+        resp = QMessageBox.question(
+            self,
+            "Delete Message",
+            f"Delete Spotter message {msg_id}?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        if not self._delete_spotter_row(msg_id):
+            QMessageBox.warning(self, "Delete Message", f"Failed to delete Message {msg_id}.")
+            return
+        self.spotter_messages = [m for m in self.spotter_messages if m.spotter_id != msg_id]
+        if self.current_js8 is None and self.current_record is None:
+            self._has_active_view = False
+            self.info_label.setText("No message selected")
+            self.viewer.clear()
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+        QMessageBox.information(self, "Delete Message", f"Message {msg_id} Deleted")
+
     def _resolve_varac_db_path(self) -> Path | None:
         raw_db = (self.settings.get("varac_db_path", "") or "").strip()
         raw_install = (self.settings.get("varac_path", "") or "").strip()
@@ -2531,6 +2945,21 @@ class MessageViewerTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to delete local varac row %s/%s: %s", msg.source, msg.msg_id, e)
+
+    def _delete_spotter_row(self, msg_id: int) -> bool:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return False
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM spotter_traffic WHERE id=?", (int(msg_id),))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            log.debug("MessageViewer: failed to delete spotter row %s: %s", msg_id, e)
+            return False
 
     def _delete_js8_inbox_row(self, msg_id: int) -> bool:
         inbox_path = self._inbox_path()
