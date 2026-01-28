@@ -635,24 +635,18 @@ class SettingsTab(QWidget):
             )
         )
 
-        # VarAC status row + incoming files path
+        # VarAC status row + install path
         varac_row = QHBoxLayout()
         varac_row.addWidget(QLabel("VarAC"))
         self.varac_path_edit = QLineEdit()
-        self.varac_path_edit.setReadOnly(True)
-        self.varac_path_edit.setPlaceholderText("Not running")
+        self.varac_path_edit.setReadOnly(False)
+        self.varac_path_edit.setPlaceholderText("VarAC install folder")
         varac_row.addWidget(self.varac_path_edit, 1)
+        varac_browse = QPushButton("Browse")
+        varac_browse.setFixedWidth(70)
+        varac_browse.clicked.connect(self._choose_varac_install_path)
+        varac_row.addWidget(varac_browse)
         prog_layout.addLayout(varac_row)
-
-        self.varac_db_edit = QLineEdit()
-        self.varac_db_edit.setPlaceholderText("VarAC.db path")
-        msg_layout.addLayout(
-            build_msg_row(
-                "VarAC DB",
-                self.varac_db_edit,
-                self._choose_varac_db_path,
-            )
-        )
 
         msg_layout.addLayout(
             build_msg_row(
@@ -904,8 +898,20 @@ class SettingsTab(QWidget):
         msg_paths = data.get("message_paths", {})
         for origin, edit in self.msg_paths_edits.items():
             edit.setText(msg_paths.get(origin, ""))
-        if hasattr(self, "varac_db_edit"):
-            self.varac_db_edit.setText(data.get("varac_db_path", "") or "")
+        varac_path = (data.get("varac_path", "") or "").strip()
+        if not varac_path:
+            legacy_db = (data.get("varac_db_path", "") or "").strip()
+            if legacy_db:
+                try:
+                    legacy = Path(legacy_db)
+                    if legacy.is_file():
+                        varac_path = str(legacy.parent)
+                    elif legacy.is_dir():
+                        varac_path = str(legacy)
+                except Exception:
+                    varac_path = legacy_db
+        if hasattr(self, "varac_path_edit"):
+            self.varac_path_edit.setText(varac_path)
         fldigi_dir = (data.get("fldigi_checkin_dir", "") or "").strip()
         if not fldigi_dir:
             fldigi_dir = str(get_fldigi_checkin_dir())
@@ -1030,7 +1036,9 @@ class SettingsTab(QWidget):
         for origin, edit in self.msg_paths_edits.items():
             msg_paths[origin] = edit.text().strip()
         data["message_paths"] = msg_paths
-        data["varac_db_path"] = (self.varac_db_edit.text().strip() if hasattr(self, "varac_db_edit") else "")
+        varac_path = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
+        data["varac_path"] = varac_path
+        data["varac_db_path"] = str(Path(varac_path) / "VarAC.db") if varac_path else ""
         fldigi_dir = self.fldigi_checkin_dir_edit.text().strip()
         if not fldigi_dir:
             fldigi_dir = str(get_fldigi_checkin_dir())
@@ -1073,6 +1081,7 @@ class SettingsTab(QWidget):
                 "js8_forms_path": data.get("js8_forms_path", ""),
                 "js8_inbox_mark_retrieved_sync": data.get("js8_inbox_mark_retrieved_sync", False),
                 "message_paths": data.get("message_paths", {}),
+                "varac_path": data.get("varac_path", ""),
                 "varac_db_path": data.get("varac_db_path", ""),
                 "fldigi_checkin_dir": data.get("fldigi_checkin_dir", ""),
                 "operating_groups": data.get("operating_groups", []),
@@ -1107,6 +1116,7 @@ class SettingsTab(QWidget):
                 data.get("js8_inbox_mark_retrieved_sync", False),
             )
             self.settings.set("message_paths", data.get("message_paths", {}))
+            self.settings.set("varac_path", data.get("varac_path", ""))
             self.settings.set("varac_db_path", data.get("varac_db_path", ""))
             self.settings.set("fldigi_checkin_dir", data.get("fldigi_checkin_dir", ""))
             for prog_name, meta in self.PROGRAMS.items():
@@ -1491,18 +1501,15 @@ class SettingsTab(QWidget):
                 api_lbl.setStyleSheet(led_style("idle", theme))
                 api_lbl.setToolTip("Not running")
 
-        # Update VarAC path display if available
+        # Update VarAC status tooltip without overwriting configured install path
         if hasattr(self, "varac_path_edit"):
             varac_running = self._program_is_running("VarAC")
             exe_path = self._find_process_exe("VarAC") if varac_running else None
             if exe_path:
-                self.varac_path_edit.setText(exe_path)
-                self.varac_path_edit.setToolTip(exe_path)
+                self.varac_path_edit.setToolTip(f"Running: {exe_path}")
             elif varac_running:
-                self.varac_path_edit.setText("Running")
                 self.varac_path_edit.setToolTip("Running")
             else:
-                self.varac_path_edit.clear()
                 self.varac_path_edit.setToolTip("Not running")
 
         # Update all other indicators
@@ -2199,27 +2206,24 @@ class SettingsTab(QWidget):
         self._settings_dirty = False
         self._set_save_button_state("success")
 
-    def _choose_varac_db_path(self):
+    def _choose_varac_install_path(self):
         """
-        Prompt for VarAC.db file path.
+        Prompt for VarAC install folder path.
         """
-        fn, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select VarAC.db",
-            "",
-            "VarAC DB (VarAC.db);;SQLite DB (*.db);;All Files (*)",
-        )
+        fn = QFileDialog.getExistingDirectory(self, "Select VarAC install folder")
         if not fn:
             return
-        if hasattr(self, "varac_db_edit"):
-            self.varac_db_edit.setText(fn)
+        if hasattr(self, "varac_path_edit"):
+            self.varac_path_edit.setText(fn)
         data = self.settings.all() if hasattr(self.settings, "all") else {}
         if isinstance(data, dict):
-            data["varac_db_path"] = fn
+            data["varac_path"] = fn
+            data["varac_db_path"] = str(Path(fn) / "VarAC.db")
             if hasattr(self.settings, "_data"):
                 self.settings._data = data  # type: ignore[attr-defined]
         if hasattr(self.settings, "set"):
-            self.settings.set("varac_db_path", fn)
+            self.settings.set("varac_path", fn)
+            self.settings.set("varac_db_path", str(Path(fn) / "VarAC.db"))
         self._settings_dirty = False
         self._set_save_button_state("success")
 

@@ -2433,12 +2433,25 @@ class MessageViewerTab(QWidget):
         self._populate_messages_table(force=True)
         QMessageBox.information(self, "Delete Message", f"Message {msg_id} Deleted")
 
+    def _resolve_varac_db_path(self) -> Path | None:
+        raw_db = (self.settings.get("varac_db_path", "") or "").strip()
+        raw_install = (self.settings.get("varac_path", "") or "").strip()
+        for raw in (raw_db, raw_install):
+            if not raw:
+                continue
+            try:
+                p = Path(raw)
+                if p.is_dir():
+                    return p / "VarAC.db"
+                if p.is_file():
+                    return p
+            except Exception:
+                continue
+        return None
+
     def _soft_delete_varac_row(self, msg: VarACMessage) -> bool:
-        varac_path = (self.settings.get("varac_db_path", "") or "").strip()
-        if not varac_path:
-            return False
-        db_path = Path(varac_path)
-        if not db_path.exists():
+        db_path = self._resolve_varac_db_path()
+        if not db_path or not db_path.exists():
             return False
         table = msg.source
         if table not in {"qso", "vmail", "broadcast"}:

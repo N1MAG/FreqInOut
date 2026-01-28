@@ -16,6 +16,23 @@ def _local_db_path() -> Path:
     return get_config_dir() / "config" / "freqinout_nets.db"
 
 
+def _resolve_varac_db_path(settings) -> Optional[Path]:
+    raw_db = (settings.get("varac_db_path", "") or "").strip()
+    raw_install = (settings.get("varac_path", "") or "").strip()
+    for raw in (raw_db, raw_install):
+        if not raw:
+            continue
+        try:
+            p = Path(raw)
+            if p.is_dir():
+                return p / "VarAC.db"
+            if p.is_file():
+                return p
+        except Exception:
+            continue
+    return None
+
+
 def _parse_dt(val) -> float:
     if val is None:
         return 0.0
@@ -203,10 +220,9 @@ def _update_stats(
 
 
 def ingest_varac(settings, *, force: bool = False) -> bool:
-    varac_path = (settings.get("varac_db_path", "") or "").strip()
-    if not varac_path:
+    varac_db = _resolve_varac_db_path(settings)
+    if not varac_db:
         return False
-    varac_db = Path(varac_path)
     if not varac_db.exists():
         return False
 
