@@ -136,6 +136,10 @@ class DailyScheduleTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
         self.operating_groups: List[Dict] = self._load_operating_groups()
         self._operating_groups_sig = self._snapshot_operating_groups(self.operating_groups)
         self._show_local: bool = True  # default to Local view
@@ -881,12 +885,15 @@ class DailyScheduleTab(QWidget):
         except Exception:
             pass
         latest = self._load_operating_groups()
-        sig = self._snapshot_operating_groups(latest)
-        if sig != self._operating_groups_sig:
-            self.operating_groups = latest
-            self._operating_groups_sig = sig
+        self.operating_groups = latest
+        self._operating_groups_sig = self._snapshot_operating_groups(latest)
+        prev_suppress = self._suppress_autostart
+        self._suppress_autostart = True
+        try:
             self._refresh_group_band_cells()
-            self._refresh_qsy_options()
+        finally:
+            self._suppress_autostart = prev_suppress
+        self._refresh_qsy_options()
         self._apply_theme()
 
     def _on_suspend_clicked(self):

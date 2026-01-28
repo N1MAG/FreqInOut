@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 import psutil
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QRegularExpression
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -26,7 +26,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QCheckBox,
     QFileDialog,
+    QAbstractItemView,
 )
+from PySide6.QtGui import QRegularExpressionValidator
 
 from freqinout.core.settings_manager import SettingsManager
     # must already exist in your project
@@ -96,6 +98,7 @@ DAY_NAMES = [
     "Friday",
     "Saturday",
 ]
+DAY_OPTIONS = ["ALL"] + DAY_NAMES
 
 # Program metadata matching SettingsTab keys
 PROGRAM_META: Dict[str, Dict[str, str]] = {
@@ -115,16 +118,17 @@ class NetScheduleTab(QWidget):
     Columns:
       0: Select (checkbox for delete)
       1: Day (UTC)
-      2: Recurrence (Weekly / Bi-Weekly / Ad Hoc)
-      3: Group Name (from Operating Groups)
-      4: Band
+      2: Recurrence (Weekly / Daily / Periodic)
+      3: Month Weeks (1/2/3/4/5)
+      4: Group Name (from Operating Groups)
       5: Mode (JS8 / Digi / Tri / SSB)
-      6: Frequency (MHz)
-      7: Start UTC (HH:MM)
-      8: End UTC (HH:MM)
-      9: Early Check-in (minutes: 0/5/10/15)
-      10: Net Name
-      11: Auto-Tune
+      6: Band
+      7: Frequency (MHz)
+      8: Start UTC (HH:MM)
+      9: End UTC (HH:MM)
+      10: Early Check-in (minutes: 0/5/10/15)
+      11: Net Name
+      12: Auto-Tune
 
     Data is saved to:
       - config/config.json under key "net_schedule"
@@ -135,15 +139,16 @@ class NetScheduleTab(QWidget):
     COL_SELECT = 0
     COL_DAY = 1
     COL_RECURRENCE = 2
-    COL_GROUP = 3
-    COL_MODE = 4
-    COL_BAND = 5
-    COL_FREQ = 6
-    COL_START = 7
-    COL_END = 8
-    COL_EARLY = 9
-    COL_NETNAME = 10
-    COL_AUTOTUNE = 11
+    COL_MONTH_WEEKS = 3
+    COL_GROUP = 4
+    COL_MODE = 5
+    COL_BAND = 6
+    COL_FREQ = 7
+    COL_START = 8
+    COL_END = 9
+    COL_EARLY = 10
+    COL_NETNAME = 11
+    COL_AUTOTUNE = 12
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -154,7 +159,6 @@ class NetScheduleTab(QWidget):
         self._proc_snapshot_ts: float = 0.0
         self._clock_timer: QTimer | None = None
         self._suppress_autostart: bool = True  # avoid auto-start during initial load
-        self._biweekly_choice_cache: Dict[str, int] = {}
         self._show_local: bool = True  # default to Local view
         self._raw_rows: List[Dict] = []
 
@@ -185,27 +189,17 @@ class NetScheduleTab(QWidget):
 
         # table
         self.table = QTableWidget()
-        self.table.setColumnCount(12)
+        self.table.setColumnCount(13)
         self._set_headers()
         self.table.setSortingEnabled(False)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setStyleSheet(
+            "QComboBox:focus, QLineEdit:focus { outline: none; border: 1px solid #888; }"
+        )
         hv = self.table.horizontalHeader()
-        hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
+        hv.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hv.setStretchLastSection(False)
         hv.setMinimumSectionSize(50)
-        hv.setDefaultSectionSize(100)
-        for col in (
-            self.COL_DAY,
-            self.COL_RECURRENCE,
-            self.COL_GROUP,
-            self.COL_MODE,
-            self.COL_BAND,
-            self.COL_FREQ,
-            self.COL_START,
-            self.COL_END,
-            self.COL_EARLY,
-            self.COL_NETNAME,
-            self.COL_AUTOTUNE,
-        ):
-            hv.setSectionResizeMode(col, QHeaderView.Stretch)
         layout.addWidget(self.table)
 
         # buttons
@@ -239,31 +233,37 @@ class NetScheduleTab(QWidget):
     def on_settings_saved(self) -> None:
         """
         Reload settings and operating groups after Save Settings.
-        Refresh group/band combos in existing rows.
+        Refresh group/band/mode combos in existing rows.
         """
         try:
             self.settings.reload()
         except Exception:
             pass
         self._load_operating_groups()
-        for r in range(self.table.rowCount()):
-            group_combo: QComboBox = self.table.cellWidget(r, self.COL_GROUP)  # type: ignore
-            band_combo: QComboBox = self.table.cellWidget(r, self.COL_BAND)  # type: ignore
-            current_group = group_combo.currentText().strip() if group_combo else ""
-            if group_combo:
-                group_names = sorted({g.get("group", "") for g in self.operating_groups if g.get("group")})
-                group_combo.blockSignals(True)
-                group_combo.clear()
-                group_combo.addItems(group_names)
-                if current_group and current_group in group_names:
-                    group_combo.setCurrentText(current_group)
-                group_combo.blockSignals(False)
-            if band_combo:
-                self._populate_band_combo(band_combo, current_group)
-                # keep current band if still valid
-                current_band = band_combo.currentText()
-                if current_band and band_combo.findText(current_band) >= 0:
-                    band_combo.setCurrentText(current_band)
+        prev_suppress = self._suppress_autostart
+        self._suppress_autostart = True
+        try:
+            for r in range(self.table.rowCount()):
+                group_combo: QComboBox = self.table.cellWidget(r, self.COL_GROUP)  # type: ignore
+                band_combo: QComboBox = self.table.cellWidget(r, self.COL_BAND)  # type: ignore
+                current_group = group_combo.currentText().strip() if group_combo else ""
+                if group_combo:
+                    group_names = sorted({g.get("group", "") for g in self.operating_groups if g.get("group")})
+                    group_combo.blockSignals(True)
+                    group_combo.clear()
+                    group_combo.addItems(group_names)
+                    if current_group and current_group in group_names:
+                        group_combo.setCurrentText(current_group)
+                    group_combo.blockSignals(False)
+                if band_combo:
+                    self._populate_band_combo(band_combo, current_group)
+                    # keep current band if still valid
+                    current_band = band_combo.currentText()
+                    if current_band and band_combo.findText(current_band) >= 0:
+                        band_combo.setCurrentText(current_band)
+                self._update_mode_freq(r)
+        finally:
+            self._suppress_autostart = prev_suppress
         # keep net name history intact
         self._update_clock_labels()
         self._apply_theme()
@@ -289,7 +289,7 @@ class NetScheduleTab(QWidget):
                 chk = w.findChild(QCheckBox)
                 if chk is not None and chk.isChecked():
                     return True
-        return bool(self.table.selectedIndexes())
+        return False
 
     def _update_delete_button_state(self) -> None:
         theme = resolve_theme(self.settings)
@@ -338,9 +338,10 @@ class NetScheduleTab(QWidget):
     def _set_headers(self):
         self.table.setHorizontalHeaderLabels(
             [
-                "Selected",
+                "Select",
                 f"Day ({'Local' if self._show_local else 'UTC'})",
                 "Recurrence",
+                "Weeks of Month",
                 "Group Name",
                 "Mode",
                 "Band",
@@ -380,7 +381,7 @@ class NetScheduleTab(QWidget):
         Returns day name and hh:mm in target zone.
         """
         day = (day or "").strip()
-        if not day or day not in DAY_NAMES or not hhmm:
+        if not day or day == "ALL" or day not in DAY_NAMES or not hhmm:
             return day, hhmm
         try:
             h, m = hhmm.split(":")
@@ -452,20 +453,53 @@ class NetScheduleTab(QWidget):
 
         # Day combo
         day_combo = QComboBox()
-        day_combo.addItems(DAY_NAMES)
+        self._set_day_options(day_combo, include_all=True)
         day_val = row_data.get("day_utc", "")
-        if day_val in DAY_NAMES:
-            day_combo.setCurrentIndex(DAY_NAMES.index(day_val))
+        if day_val in DAY_OPTIONS:
+            day_combo.setCurrentIndex(DAY_OPTIONS.index(day_val))
+        day_combo.setEditable(True)
+        if day_combo.lineEdit():
+            day_combo.lineEdit().setReadOnly(True)
+        day_combo.setMinimumContentsLength(6)
+        day_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        day_combo.currentIndexChanged.connect(lambda _, c=day_combo: self._update_day_display(c))
+        self._update_day_display(day_combo)
         self.table.setCellWidget(r, self.COL_DAY, day_combo)
 
         # Recurrence combo
         recur_combo = QComboBox()
-        recur_combo.addItems(["Weekly", "Bi-Weekly", "Ad Hoc"])
-        recur_val = row_data.get("recurrence", "Weekly")
-        if recur_val not in ["Weekly", "Bi-Weekly", "Ad Hoc"]:
+        recur_combo.addItems(["Weekly", "Daily", "Periodic"])
+        recur_val = (row_data.get("recurrence", "Weekly") or "Weekly").strip()
+        if recur_val == "Monthly":
+            recur_val = "Periodic"
+        if recur_val == "Bi-Weekly":
+            recur_val = "Weekly"
+        if recur_val not in ["Weekly", "Daily", "Periodic"]:
             recur_val = "Weekly"
         recur_combo.setCurrentText(recur_val)
         self.table.setCellWidget(r, self.COL_RECURRENCE, recur_combo)
+        recur_combo.setMinimumContentsLength(7)
+        recur_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+
+        # Month weeks summary for Periodic recurrence
+        weeks_txt = (row_data.get("month_weeks") or "").strip()
+        month_weeks_edit = QLineEdit()
+        month_weeks_edit.setPlaceholderText("1,3,5")
+        month_weeks_edit.setText(weeks_txt)
+        month_weeks_edit.setValidator(QRegularExpressionValidator(QRegularExpression(r"[0-9,\\s]*")))
+        month_weeks_edit.editingFinished.connect(
+            lambda w=month_weeks_edit: w.setText(self._format_month_weeks(w.text()))
+        )
+        month_weeks_edit.textChanged.connect(
+            lambda _, w=month_weeks_edit, c=recur_combo: self._validate_month_weeks_field(w, c)
+        )
+        self._validate_month_weeks_field(month_weeks_edit, recur_combo)
+        self.table.setCellWidget(r, self.COL_MONTH_WEEKS, month_weeks_edit)
+        self._set_month_weeks_enabled(month_weeks_edit, recur_val == "Periodic")
+        recur_combo.currentTextChanged.connect(
+            lambda txt, row=r, w=month_weeks_edit, d=day_combo: self._on_recurrence_changed(row, txt, w, d)
+        )
+        self._on_recurrence_changed(r, recur_val, month_weeks_edit, day_combo)
 
         # Group combo
         group_combo = QComboBox()
@@ -475,6 +509,8 @@ class NetScheduleTab(QWidget):
         if group_val and group_val in group_names:
             group_combo.setCurrentText(group_val)
         self.table.setCellWidget(r, self.COL_GROUP, group_combo)
+        group_combo.setMinimumContentsLength(10)
+        group_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
 
         # Mode combo (cascades from group+band)
         mode_combo = self._set_mode_widget(r, group_combo.currentText(), "", row_data.get("mode", ""))
@@ -491,6 +527,8 @@ class NetScheduleTab(QWidget):
             if idx >= 0:
                 band_combo.setCurrentIndex(idx)
         self.table.setCellWidget(r, self.COL_BAND, band_combo)
+        band_combo.setMinimumContentsLength(5)
+        band_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
 
         # Early check-in
         early_combo = QComboBox()
@@ -500,6 +538,8 @@ class NetScheduleTab(QWidget):
         if idx >= 0:
             early_combo.setCurrentIndex(idx)
         self.table.setCellWidget(r, self.COL_EARLY, early_combo)
+        early_combo.setMinimumContentsLength(3)
+        early_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
 
         # Net name edit
         net_edit = QLineEdit()
@@ -542,14 +582,118 @@ class NetScheduleTab(QWidget):
         self._update_mode_freq(r)
         self._update_delete_button_state()
 
+    def _parse_month_weeks(self, txt: str) -> set[int]:
+        out: set[int] = set()
+        for token in (txt or "").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                val = int(token)
+            except Exception:
+                continue
+            if 1 <= val <= 5:
+                out.add(val)
+        return out
+
+    def _format_month_weeks(self, txt: str) -> str:
+        cleaned = (txt or "").replace(";", ",").replace(" ", ",")
+        if cleaned.isdigit() and len(cleaned) > 1:
+            cleaned = ",".join(list(cleaned))
+        weeks = sorted(self._parse_month_weeks(cleaned))
+        return ",".join(str(w) for w in weeks)
+
+    def _validate_month_weeks_field(self, widget: QLineEdit, recur_combo: QComboBox | None = None) -> None:
+        if not isinstance(widget, QLineEdit):
+            return
+        if recur_combo is not None and recur_combo.currentText().strip() != "Periodic":
+            widget.setStyleSheet("")
+            widget.setToolTip("")
+            return
+        txt = widget.text().strip()
+        if not txt or txt.upper() == "ALL":
+            widget.setStyleSheet("")
+            widget.setToolTip("")
+            return
+        weeks = self._parse_month_weeks(txt)
+        if not weeks:
+            widget.setStyleSheet("QLineEdit { border: 2px solid #C62828; }")
+            widget.setToolTip("Weeks of Month must be 1-5 (comma-separated).")
+            return
+        widget.setStyleSheet("")
+        widget.setToolTip("")
+
+    def _get_month_weeks(self, widget: QWidget | None) -> List[int]:
+        if not isinstance(widget, QLineEdit):
+            return []
+        return self._parse_month_weeks(self._format_month_weeks(widget.text()))
+
+    def _set_month_weeks_enabled(self, widget: QWidget, enabled: bool) -> None:
+        if not isinstance(widget, QLineEdit):
+            return
+        widget.setReadOnly(not enabled)
+        widget.setEnabled(True)
+        if not enabled:
+            widget.setText("ALL")
+        else:
+            if widget.text().strip().upper() == "ALL":
+                widget.setText("")
+
+    def _on_recurrence_changed(
+        self, row: int, recurrence: str, widget: QWidget, day_combo: QComboBox
+    ) -> None:
+        is_periodic = recurrence.strip() == "Periodic"
+        is_daily = recurrence.strip() == "Daily"
+        self._set_month_weeks_enabled(widget, is_periodic)
+        if is_periodic:
+            self._set_day_options(day_combo, include_all=False)
+        else:
+            self._set_day_options(day_combo, include_all=True)
+        if is_periodic and not self._get_month_weeks(widget):
+            if isinstance(widget, QLineEdit):
+                widget.setText("1")
+        if is_daily:
+            day_combo.setCurrentText("ALL")
+            day_combo.setEnabled(False)
+        else:
+            day_combo.setEnabled(True)
+        self._update_day_display(day_combo)
+
     def _get_combo_value(self, row: int, col: int, default: str = "") -> str:
         w = self.table.cellWidget(row, col)
         if isinstance(w, QComboBox):
+            if col == self.COL_DAY:
+                data = w.currentData(Qt.UserRole)
+                if data:
+                    return str(data).strip()
             return w.currentText().strip()
+        if isinstance(w, QLineEdit):
+            return w.text().strip() if w.text() else default
         item = self.table.item(row, col)
         if item is not None:
             return item.text().strip()
         return default
+
+    def _update_day_display(self, combo: QComboBox) -> None:
+        if combo is None:
+            return
+        full = combo.currentText()
+        short = "ALL" if full == "ALL" else (full[:3] or "").upper()
+        combo.setItemData(combo.currentIndex(), full, Qt.UserRole)
+        if combo.lineEdit():
+            combo.lineEdit().setText(short)
+
+    def _set_day_options(self, combo: QComboBox, *, include_all: bool) -> None:
+        if combo is None:
+            return
+        current_full = combo.currentData(Qt.UserRole) or combo.currentText()
+        options = DAY_OPTIONS if include_all else DAY_NAMES
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(options)
+        if current_full in options:
+            combo.setCurrentText(current_full)
+        combo.blockSignals(False)
 
     def _delete_rows(self):
         selected = set()
@@ -831,6 +975,7 @@ class NetScheduleTab(QWidget):
 
             day_combo: QComboBox = self.table.cellWidget(r, self.COL_DAY)  # type: ignore
             recur_combo: QComboBox = self.table.cellWidget(r, self.COL_RECURRENCE)  # type: ignore
+            month_weeks_widget: QWidget = self.table.cellWidget(r, self.COL_MONTH_WEEKS)  # type: ignore
             group_combo: QComboBox = self.table.cellWidget(r, self.COL_GROUP)  # type: ignore
             band_combo: QComboBox = self.table.cellWidget(r, self.COL_BAND)  # type: ignore
             mode_combo: QComboBox = self.table.cellWidget(r, self.COL_MODE)  # type: ignore
@@ -838,13 +983,14 @@ class NetScheduleTab(QWidget):
             net_edit: QLineEdit = self.table.cellWidget(r, self.COL_NETNAME)  # type: ignore
             auto_widget = self.table.cellWidget(r, self.COL_AUTOTUNE)
 
-            day = day_combo.currentText().strip() if day_combo else ""
+            day = self._get_combo_value(r, self.COL_DAY, "")
             group_name = group_combo.currentText().strip() if group_combo else ""
             band = band_combo.currentText().strip() if band_combo else ""
             mode = mode_combo.currentText().strip() if mode_combo else ""
             early = early_combo.currentText().strip() if early_combo else "0"
             net_name = net_edit.text().strip() if net_edit else ""
             recurrence = recur_combo.currentText().strip() if recur_combo else "Weekly"
+            month_weeks = self._get_month_weeks(month_weeks_widget)
             auto_tune = False
             if isinstance(auto_widget, QCheckBox):
                 auto_tune = auto_widget.isChecked()
@@ -863,6 +1009,10 @@ class NetScheduleTab(QWidget):
 
             if not day:
                 raise ValueError(f"Row {r+1}: Day is required.")
+            if recurrence == "Daily":
+                day = "ALL"
+            if recurrence == "Periodic" and day == "ALL":
+                raise ValueError(f"Row {r+1}: Periodic nets require a specific day.")
             if band == "--":
                 raise ValueError(f"Row {r+1}: '--' is not a valid band.")
             if band and band not in BAND_ORDER:
@@ -873,6 +1023,8 @@ class NetScheduleTab(QWidget):
             # Frequency validation
             if not freq:
                 raise ValueError(f"Row {r+1}: Frequency is required.")
+            if not net_name:
+                raise ValueError(f"Row {r+1}: Net Name is required.")
             try:
                 freq_norm = freq.replace(" ", "")
                 if freq_norm.count(".") > 1:
@@ -923,24 +1075,17 @@ class NetScheduleTab(QWidget):
             if early_int not in (0, 5, 10, 15):
                 raise ValueError(f"Row {r+1}: Early check-in must be 0, 5, 10, or 15.")
 
-            recurrence = recurrence if recurrence in ("Weekly", "Bi-Weekly", "Ad Hoc") else "Weekly"
+            recurrence = recurrence if recurrence in ("Weekly", "Daily", "Periodic") else "Weekly"
+            if recurrence != "Periodic":
+                month_weeks = []
             biweekly_offset = 0
-            if recurrence == "Bi-Weekly":
-                # Cache prompt per unique net/day/band so we only ask once per save session
-                key = f"{day}|{band}|{net_name}|{freq_mhz:.4f}"
-                if key in self._biweekly_choice_cache:
-                    biweekly_offset = self._biweekly_choice_cache[key]
-                else:
-                    resp = QMessageBox.question(
-                        self,
-                        "Bi-Weekly Start",
-                        f"For {net_name or 'this net'} on {day}, start next {day}?"
-                        "\nChoose No for the week after.",
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.Yes,
-                    )
-                    biweekly_offset = 0 if resp == QMessageBox.Yes else 1
-                    self._biweekly_choice_cache[key] = biweekly_offset
+            if recurrence == "Periodic":
+                if not month_weeks:
+                    month_weeks = [1]
+                if isinstance(month_weeks_widget, QLineEdit):
+                    month_weeks_widget.setText(",".join(str(w) for w in month_weeks))
+                if not month_weeks:
+                    raise ValueError(f"Row {r+1}: Weeks of Month must be 1-5.")
 
             # If viewing local, convert back to UTC before storing
             if self._show_local:
@@ -952,6 +1097,7 @@ class NetScheduleTab(QWidget):
                 "day_utc": day,
                 "recurrence": recurrence,
                 "biweekly_offset_weeks": biweekly_offset,
+                "month_weeks": ",".join(str(w) for w in month_weeks) if month_weeks else "",
                 "group_name": group_name,
                 "band": band,
                 "mode": mode,
@@ -1010,6 +1156,7 @@ class NetScheduleTab(QWidget):
                             day_utc,
                             recurrence,
                             biweekly_offset_weeks,
+                            month_weeks,
                             band,
                             mode,
                             vfo,
@@ -1025,6 +1172,45 @@ class NetScheduleTab(QWidget):
                         FROM net_schedule_tab
                         """
                     )
+                    for (
+                        day_utc,
+                        recurrence,
+                        biweekly_offset_weeks,
+                        month_weeks,
+                        band,
+                        mode,
+                        vfo,
+                        freq,
+                        start_utc,
+                        end_utc,
+                        early,
+                        auto_tune,
+                        group,
+                        comment,
+                        net_name,
+                        group_name,
+                    ) in cur.fetchall():
+                        rows.append(
+                            {
+                                "day_utc": day_utc or "",
+                                "recurrence": "Periodic" if (recurrence or "Weekly") == "Monthly" else recurrence or "Weekly",
+                                "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
+                                "month_weeks": month_weeks or "",
+                                "band": band or "",
+                                "mode": mode or "",
+                                "vfo": (vfo or "A").strip().upper(),
+                                "frequency": str(freq or ""),
+                                "start_utc": start_utc or "",
+                                "end_utc": end_utc or "",
+                                "early_checkin": str(early if early is not None else 0),
+                                "auto_tune": bool(auto_tune),
+                                "primary_js8call_group": group or "",
+                                "comment": comment or "",
+                                "net_name": net_name or "",
+                                "group_name": group_name or "",
+                            }
+                        )
+                    return rows
                 except Exception:
                     cur = conn.execute(
                         """
@@ -1061,6 +1247,7 @@ class NetScheduleTab(QWidget):
                                 "day_utc": day_utc or "",
                                 "recurrence": "Weekly",
                                 "biweekly_offset_weeks": 0,
+                                "month_weeks": "",
                                 "band": band or "",
                                 "mode": mode or "",
                                 "vfo": (vfo or "A").strip().upper(),
@@ -1077,44 +1264,6 @@ class NetScheduleTab(QWidget):
                         )
                     return rows
 
-                for (
-                    day_utc,
-                    recurrence,
-                    biweekly_offset_weeks,
-                    band,
-                    mode,
-                    vfo,
-                    freq,
-                    start_utc,
-                    end_utc,
-                    early,
-                    auto_tune,
-                    group,
-                    comment,
-                    net_name,
-                    group_name,
-                ) in cur.fetchall():
-                    rows.append(
-                        {
-                            "day_utc": day_utc or "",
-                            "recurrence": recurrence or "Weekly",
-                            "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
-                            "band": band or "",
-                            "mode": mode or "",
-                            "vfo": (vfo or "A").strip().upper(),
-                            "frequency": str(freq or ""),
-                            "start_utc": start_utc or "",
-                            "end_utc": end_utc or "",
-                            "early_checkin": str(early if early is not None else 0),
-                            "auto_tune": bool(auto_tune),
-                            "primary_js8call_group": group or "",
-                            "comment": comment or "",
-                            "net_name": net_name or "",
-                            "group_name": group_name or "",
-                        }
-                    )
-                return rows
-
             if has_legacy:
                 try:
                     cur = conn.execute(
@@ -1123,6 +1272,7 @@ class NetScheduleTab(QWidget):
                             day_utc,
                             recurrence,
                             biweekly_offset_weeks,
+                            month_weeks,
                             band,
                             mode,
                             frequency,
@@ -1132,10 +1282,49 @@ class NetScheduleTab(QWidget):
                             auto_tune,
                             primary_js8call_group,
                             comment,
-                            net_name
+                            net_name,
+                            group_name
                         FROM net_schedule
                         """
                     )
+                    for (
+                        day_utc,
+                        recurrence,
+                        biweekly_offset_weeks,
+                        month_weeks,
+                        band,
+                        mode,
+                        freq,
+                        start_utc,
+                        end_utc,
+                        early,
+                        auto_tune,
+                        group,
+                        comment,
+                        net_name,
+                        group_name,
+                    ) in cur.fetchall():
+                        rows.append(
+                            {
+                                "day_utc": day_utc or "",
+                                "recurrence": "Periodic" if (recurrence or "Weekly") == "Monthly" else recurrence or "Weekly",
+                                "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
+                                "month_weeks": month_weeks or "",
+                                "band": band or "",
+                                "mode": mode or "",
+                                "vfo": "A",
+                                "frequency": str(freq or ""),
+                                "start_utc": start_utc or "",
+                                "end_utc": end_utc or "",
+                                "early_checkin": str(early if early is not None else 0),
+                                "auto_tune": bool(auto_tune),
+                                "primary_js8call_group": group or "",
+                                "comment": comment or "",
+                                "net_name": net_name or "",
+                                "group_name": group_name or "",
+                            }
+                        )
+                    return rows
                 except Exception:
                     cur = conn.execute(
                         """
@@ -1170,6 +1359,7 @@ class NetScheduleTab(QWidget):
                                 "day_utc": day_utc or "",
                                 "recurrence": "Weekly",
                                 "biweekly_offset_weeks": 0,
+                                "month_weeks": "",
                                 "band": band or "",
                                 "mode": mode or "",
                                 "vfo": "A",
@@ -1181,44 +1371,10 @@ class NetScheduleTab(QWidget):
                                 "primary_js8call_group": group or "",
                                 "comment": comment or "",
                                 "net_name": net_name or "",
+                                "group_name": "",
                             }
                         )
                     return rows
-
-                for (
-                    day_utc,
-                    recurrence,
-                    biweekly_offset_weeks,
-                    band,
-                    mode,
-                    freq,
-                    start_utc,
-                    end_utc,
-                    early,
-                    auto_tune,
-                    group,
-                    comment,
-                    net_name,
-                ) in cur.fetchall():
-                    rows.append(
-                        {
-                            "day_utc": day_utc or "",
-                            "recurrence": recurrence or "Weekly",
-                            "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
-                            "band": band or "",
-                            "mode": mode or "",
-                            "vfo": "A",
-                            "frequency": str(freq or ""),
-                            "start_utc": start_utc or "",
-                            "end_utc": end_utc or "",
-                            "early_checkin": str(early if early is not None else 0),
-                            "auto_tune": bool(auto_tune),
-                            "primary_js8call_group": group or "",
-                            "comment": comment or "",
-                            "net_name": net_name or "",
-                            "group_name": "",
-                        }
-                    )
             return rows
         except Exception as e:
             log.error("NetScheduleTab: failed to load schedule from DB %s: %s", db_path, e)
@@ -1230,6 +1386,10 @@ class NetScheduleTab(QWidget):
 
     def _load(self):
         self.table.setRowCount(0)
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
         self._load_operating_groups()
         data = self._load_from_db()
         loaded_from_db = bool(data)
@@ -1312,8 +1472,9 @@ class NetScheduleTab(QWidget):
                 payload["rows"].append(
                     {
                         "day_utc": r.get("day_utc", ""),
-                        "recurrence": r.get("recurrence", "Weekly"),
+                        "recurrence": "Periodic" if r.get("recurrence", "Weekly") == "Monthly" else r.get("recurrence", "Weekly"),
                         "biweekly_offset_weeks": int(r.get("biweekly_offset_weeks", 0) or 0),
+                        "month_weeks": r.get("month_weeks", ""),
                         "group_name": r.get("group_name", ""),
                         "band": r.get("band", ""),
                         "mode": r.get("mode", ""),
@@ -1368,12 +1529,17 @@ class NetScheduleTab(QWidget):
                 if not (day and band and freq and start and end):
                     continue
                 recurrence = (row.get("recurrence") or "Weekly").strip()
-                if recurrence not in ("Weekly", "Bi-Weekly", "Ad Hoc"):
+                if recurrence == "Monthly":
+                    recurrence = "Periodic"
+                if recurrence == "Bi-Weekly":
+                    recurrence = "Weekly"
+                if recurrence not in ("Weekly", "Daily", "Periodic"):
                     recurrence = "Weekly"
                 try:
                     biweekly_offset = int(row.get("biweekly_offset_weeks", 0) or 0)
                 except Exception:
                     biweekly_offset = 0
+                month_weeks = (row.get("month_weeks") or "").strip()
                 try:
                     early_checkin = int(row.get("early_checkin", 0) or 0)
                 except Exception:
@@ -1383,6 +1549,7 @@ class NetScheduleTab(QWidget):
                         "day_utc": day,
                         "recurrence": recurrence,
                         "biweekly_offset_weeks": biweekly_offset,
+                        "month_weeks": month_weeks,
                         "group_name": (row.get("group_name") or "").strip(),
                         "band": band,
                         "mode": mode,
@@ -1458,6 +1625,7 @@ class NetScheduleTab(QWidget):
                 day_utc TEXT NOT NULL,
                 recurrence TEXT DEFAULT 'Weekly',
                 biweekly_offset_weeks INTEGER DEFAULT 0,
+                month_weeks TEXT,
                 band TEXT NOT NULL,
                 mode TEXT NOT NULL,
                 vfo TEXT,
@@ -1480,6 +1648,7 @@ class NetScheduleTab(QWidget):
                 day_utc TEXT NOT NULL,
                 recurrence TEXT DEFAULT 'Weekly',
                 biweekly_offset_weeks INTEGER DEFAULT 0,
+                month_weeks TEXT,
                 band TEXT NOT NULL,
                 mode TEXT NOT NULL,
                 frequency TEXT NOT NULL,
@@ -1514,6 +1683,7 @@ class NetScheduleTab(QWidget):
                 {
                     "recurrence": "TEXT DEFAULT 'Weekly'",
                     "biweekly_offset_weeks": "INTEGER DEFAULT 0",
+                    "month_weeks": "TEXT",
                     "vfo": "TEXT",
                     "group_name": "TEXT",
                     "auto_tune": "INTEGER DEFAULT 0",
@@ -1525,6 +1695,7 @@ class NetScheduleTab(QWidget):
                 {
                     "recurrence": "TEXT DEFAULT 'Weekly'",
                     "biweekly_offset_weeks": "INTEGER DEFAULT 0",
+                    "month_weeks": "TEXT",
                     "group_name": "TEXT",
                     "auto_tune": "INTEGER DEFAULT 0",
                 },
@@ -1538,6 +1709,7 @@ class NetScheduleTab(QWidget):
                 {
                     "recurrence": "TEXT DEFAULT 'Weekly'",
                     "biweekly_offset_weeks": "INTEGER DEFAULT 0",
+                    "month_weeks": "TEXT",
                     "vfo": "TEXT",
                     "group_name": "TEXT",
                     "auto_tune": "INTEGER DEFAULT 0",
@@ -1549,6 +1721,7 @@ class NetScheduleTab(QWidget):
                 {
                     "recurrence": "TEXT DEFAULT 'Weekly'",
                     "biweekly_offset_weeks": "INTEGER DEFAULT 0",
+                    "month_weeks": "TEXT",
                     "group_name": "TEXT",
                     "auto_tune": "INTEGER DEFAULT 0",
                 },
@@ -1574,14 +1747,15 @@ class NetScheduleTab(QWidget):
             conn.execute(
                 """
                 INSERT INTO net_schedule_tab
-                  (day_utc, recurrence, biweekly_offset_weeks, band, mode, vfo, frequency, start_utc, end_utc,
+                  (day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, vfo, frequency, start_utc, end_utc,
                    early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row.get("day_utc"),
                     row.get("recurrence", "Weekly"),
                     int(row.get("biweekly_offset_weeks", 0) or 0),
+                    row.get("month_weeks", ""),
                     row.get("band"),
                     row.get("mode"),
                     row.get("vfo"),
@@ -1599,14 +1773,15 @@ class NetScheduleTab(QWidget):
             conn.execute(
                 """
                 INSERT INTO net_schedule
-                  (day_utc, recurrence, biweekly_offset_weeks, band, mode, frequency, start_utc, end_utc,
+                  (day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, frequency, start_utc, end_utc,
                    early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row.get("day_utc"),
                     row.get("recurrence", "Weekly"),
                     int(row.get("biweekly_offset_weeks", 0) or 0),
+                    row.get("month_weeks", ""),
                     row.get("band"),
                     row.get("mode"),
                     row.get("frequency"),
