@@ -451,12 +451,25 @@ class MessageHeaderWithCheckbox(QHeaderView):
         super().__init__(orientation, parent)
         self._checkbox_state = Qt.Unchecked
         self._checkbox_enabled = False
+        self._cb_bg = QColor("#ffffff")
+        self._cb_border = QColor("#777777")
+        self._cb_accent = QColor("#2d8cf0")
+        self._cb_mark = QColor("#ffffff")
         self.setSectionsClickable(True)
 
     def set_checkbox_state(self, state: Qt.CheckState, enabled: Optional[bool] = None) -> None:
         if enabled is not None:
             self._checkbox_enabled = bool(enabled)
         self._checkbox_state = state
+        self.updateSection(0)
+
+    def set_checkbox_colors(
+        self, *, bg: QColor, border: QColor, accent: QColor, mark: QColor
+    ) -> None:
+        self._cb_bg = bg
+        self._cb_border = border
+        self._cb_accent = accent
+        self._cb_mark = mark
         self.updateSection(0)
 
     def _checkbox_rect(self, rect: QRect) -> QRect:
@@ -471,19 +484,32 @@ class MessageHeaderWithCheckbox(QHeaderView):
         super().paintSection(painter, rect, logicalIndex)
         if logicalIndex != 0:
             return
-        opt = QStyleOptionButton()
-        opt.rect = self._checkbox_rect(rect)
-        opt.state = QStyle.State_Enabled if self._checkbox_enabled else QStyle.State_None
-        if self._checkbox_state == Qt.Checked:
-            opt.state |= QStyle.State_On
-        elif self._checkbox_state == Qt.PartiallyChecked:
-            opt.state |= QStyle.State_NoChange
-        else:
-            opt.state |= QStyle.State_Off
-        if not self._checkbox_enabled:
-            opt.state |= QStyle.State_ReadOnly
-        opt.palette = self.palette()
-        self.style().drawControl(QStyle.CE_CheckBox, opt, painter)
+        box = self._checkbox_rect(rect)
+        border = self._cb_accent if self._checkbox_enabled else self._cb_border
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(border)
+        painter.setBrush(self._cb_bg)
+        painter.drawRoundedRect(box.adjusted(0, 0, -1, -1), 2, 2)
+        if self._checkbox_state in (Qt.Checked, Qt.PartiallyChecked):
+            inner = box.adjusted(3, 3, -3, -3)
+            painter.setBrush(self._cb_accent)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(inner, 1, 1)
+            painter.setPen(self._cb_mark)
+            if self._checkbox_state == Qt.PartiallyChecked:
+                y = inner.center().y()
+                painter.drawLine(inner.left() + 2, y, inner.right() - 2, y)
+            else:
+                x1 = inner.left() + 2
+                y1 = inner.center().y()
+                x2 = inner.center().x()
+                y2 = inner.bottom() - 2
+                x3 = inner.right() - 2
+                y3 = inner.top() + 2
+                painter.drawLine(x1, y1, x2, y2)
+                painter.drawLine(x2, y2, x3, y3)
+        painter.restore()
 
     def mousePressEvent(self, event) -> None:
         if self._checkbox_enabled:
@@ -1467,6 +1493,14 @@ class MessageViewerTab(QWidget):
         self.pending_table.setStyleSheet(f"QTableWidget {{ gridline-color: {grid}; }}")
         if self._actions_delegate:
             self._actions_delegate._danger = QColor(theme["danger"])
+        header = self.messages_table.horizontalHeader()
+        if isinstance(header, MessageHeaderWithCheckbox):
+            header.set_checkbox_colors(
+                bg=QColor(theme.get("surface_alt", theme["surface"])),
+                border=QColor(theme.get("text_muted", theme["border"])),
+                accent=QColor(theme["accent"]),
+                mark=QColor(theme.get("bg", "#ffffff")),
+            )
         self._update_clear_filters_style()
         self._update_pending_table()
 
