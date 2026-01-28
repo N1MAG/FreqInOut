@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -212,6 +213,11 @@ class SchedulerEngine(QObject):
         self._last_resync_ts: float = 0.0
         self._off_schedule_prompt_active: bool = False
         self._last_off_schedule_key: Optional[Tuple] = None
+        self._control_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-control")
+        self._control_future = None
+        self._control_backoff_until: float = 0.0
+        self._control_fail_count: int = 0
+        self._pending_entry_key: Optional[Tuple] = None
 
         self.current_source: str = "NONE"
         self.current_schedule_entry: Dict = {}
@@ -430,6 +436,110 @@ class SchedulerEngine(QObject):
             return
         self._apply_schedule_entry(entry, self.current_source, force=True, apply_js8_offset=False, apply_fldigi=False)
         self._last_resync_ts = now_ts
+
+    def _control_can_attempt(self) -> bool:
+        return time.time() >= (self._control_backoff_until or 0.0)
+
+    def _control_backoff(self) -> float:
+        base = 5.0
+        max_backoff = 300.0
+        return min(base * (2 ** max(0, self._control_fail_count - 1)), max_backoff)
+
+    def _queue_control_action(
+        self,
+        *,
+        control_mode: str,
+        entry_key: Tuple,
+        source: str,
+        freq_hz: int,
+        band: str,
+        vfo: Optional[str],
+        auto_tune: bool,
+        js8_offset: Optional[int],
+        js8_group: str,
+    ) -> bool:
+        if not self._control_can_attempt():
+            return False
+        if self._control_future is not None and not self._control_future.done():
+            return False
+        if self._pending_entry_key == entry_key:
+            return False
+        self._pending_entry_key = entry_key
+
+        def _task() -> bool:
+            ok = False
+            if control_mode == "JS8CALL":
+                try:
+                    if self.js8:
+                        if js8_offset is None:
+                            current_off = self.js8.get_offset()
+                            ok = self.js8.set_frequency(freq_hz, offset_hz=current_off)
+                        else:
+                            ok = self.js8.set_frequency(freq_hz, offset_hz=js8_offset)
+                except Exception as e:
+                    log.error("SchedulerEngine: error sending set_frequency to JS8Call: %s", e)
+            else:
+                cmd = FrequencyCommand(
+                    band=band,
+                    rig_hz=freq_hz,
+                    fldigi_center_hz=None,
+                    js8_tune_hz=None,
+                    vfo=vfo,
+                    js8_group=js8_group or None,
+                )
+                try:
+                    if self.rig:
+                        ok = self.rig.set_frequency(cmd)
+                except Exception as e:
+                    log.error("SchedulerEngine: error sending set_frequency to FLRig: %s", e)
+            if ok and control_mode == "FLRIG":
+                if auto_tune:
+                    try:
+                        if self.rig and hasattr(self.rig, "tune"):
+                            self.rig.tune()
+                    except Exception as e:
+                        log.error("SchedulerEngine: error invoking rig.tune(): %s", e)
+                if self.js8:
+                    try:
+                        if js8_offset is None:
+                            current_off = self.js8.get_offset()
+                            self.js8.set_frequency(freq_hz, offset_hz=current_off)
+                        else:
+                            self.js8.set_frequency(freq_hz, offset_hz=js8_offset)
+                    except Exception as e:
+                        log.debug("SchedulerEngine: JS8Call set_frequency (FLRig control) failed: %s", e)
+            return ok
+
+        def _on_done(fut):
+            def _apply_result():
+                self._pending_entry_key = None
+                ok = False
+                try:
+                    ok = bool(fut.result())
+                except Exception as e:
+                    log.error("SchedulerEngine: control task failed: %s", e)
+                    ok = False
+                if ok:
+                    self._control_fail_count = 0
+                    self._control_backoff_until = 0.0
+                    self._last_entry_key = entry_key
+                    self._last_source = source
+                    self._last_freq_hz = freq_hz
+                    self._last_band = band
+                else:
+                    self._control_fail_count += 1
+                    backoff = self._control_backoff()
+                    self._control_backoff_until = time.time() + backoff
+                    log.warning(
+                        "SchedulerEngine: control action failed; backing off %.1fs (failures=%d)",
+                        backoff,
+                        self._control_fail_count,
+                    )
+            QTimer.singleShot(0, _apply_result)
+
+        self._control_future = self._control_executor.submit(_task)
+        self._control_future.add_done_callback(_on_done)
+        return True
 
     def _expected_fldigi_offset(self, entry: Dict) -> Optional[int]:
         og = self._resolve_operating_group(entry)
@@ -780,6 +890,7 @@ class SchedulerEngine(QObject):
                             day_utc,
                             recurrence,
                             biweekly_offset_weeks,
+                            month_weeks,
                             band,
                             mode,
                             vfo,
@@ -814,11 +925,12 @@ class SchedulerEngine(QObject):
                         """
                     )
                 for row in cur.fetchall():
-                    if len(row) == 15:
+                    if len(row) == 16:
                         (
                             day_utc,
                             recurrence,
                             biweekly_offset_weeks,
+                            month_weeks,
                             band,
                             mode,
                             vfo,
@@ -848,12 +960,14 @@ class SchedulerEngine(QObject):
                         ) = row
                         recurrence = "Weekly"
                         biweekly_offset_weeks = 0
+                        month_weeks = ""
                         group_name = ""
                     rows.append(
                         {
                             "day_utc": day_utc or "",
                             "recurrence": recurrence or "Weekly",
                             "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
+                            "month_weeks": month_weeks or "",
                             "band": band or "",
                             "mode": mode or "",
                             "vfo": (vfo or "A").strip().upper() or "A",
@@ -878,6 +992,7 @@ class SchedulerEngine(QObject):
                             day_utc,
                             recurrence,
                             biweekly_offset_weeks,
+                            month_weeks,
                             band,
                             mode,
                             frequency,
@@ -910,11 +1025,12 @@ class SchedulerEngine(QObject):
                         """
                     )
                 for row in cur.fetchall():
-                    if len(row) == 14:
+                    if len(row) == 15:
                         (
                             day_utc,
                             recurrence,
                             biweekly_offset_weeks,
+                            month_weeks,
                             band,
                             mode,
                             freq,
@@ -942,12 +1058,14 @@ class SchedulerEngine(QObject):
                         ) = row
                         recurrence = "Weekly"
                         biweekly_offset_weeks = 0
+                        month_weeks = ""
                         group_name = ""
                     rows.append(
                         {
                             "day_utc": day_utc or "",
                             "recurrence": recurrence or "Weekly",
                             "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
+                            "month_weeks": month_weeks or "",
                             "band": band or "",
                             "mode": mode or "",
                             "vfo": "A",
@@ -1126,6 +1244,7 @@ class SchedulerEngine(QObject):
 
         weekday_name = _python_weekday_to_day_name(now_utc.weekday())
         weekday_upper = weekday_name.upper()
+        prev_day_name = _prev_day_name(weekday_name).upper()
         now_min = now_utc.hour * 60 + now_utc.minute
 
         best: Optional[Dict] = None
@@ -1134,6 +1253,10 @@ class SchedulerEngine(QObject):
         for row in net_sched:
             try:
                 day = (row.get("day_utc") or "ALL").strip().upper()
+                recurrence = (row.get("recurrence") or "Weekly").strip()
+                if recurrence == "Monthly":
+                    recurrence = "Periodic"
+                month_weeks = self._parse_month_weeks(row.get("month_weeks", ""))
 
                 smin = _parse_hhmm_to_minutes(row.get("start_utc", ""))
                 emin = _parse_hhmm_to_minutes(row.get("end_utc", ""))
@@ -1143,9 +1266,15 @@ class SchedulerEngine(QObject):
                 early = int(row.get("early_checkin", 0) or 0)
                 window_start = max(0, smin - early)
                 overnight = smin > emin
-                prev_day = _prev_day_name(weekday_name).upper()
+                prev_day = prev_day_name
 
                 active = False
+                if recurrence == "Daily":
+                    day = "ALL"
+                if day == "ALL":
+                    day = weekday_upper
+                if not self._monthly_match(now_utc, day, prev_day, recurrence, month_weeks, overnight):
+                    continue
                 if day == weekday_upper:
                     if not overnight:
                         active = window_start <= now_min < emin
@@ -1163,6 +1292,43 @@ class SchedulerEngine(QObject):
                 continue
 
         return best
+
+    def _parse_month_weeks(self, txt: str) -> List[int]:
+        weeks: List[int] = []
+        for token in (txt or "").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                val = int(token)
+            except Exception:
+                continue
+            if 1 <= val <= 5:
+                weeks.append(val)
+        return sorted(set(weeks))
+
+    def _month_week_index(self, date_val: datetime.date) -> int:
+        return 1 + ((date_val.day - 1) // 7)
+
+    def _monthly_match(
+        self,
+        now_utc: datetime.datetime,
+        day: str,
+        prev_day: str,
+        recurrence: str,
+        month_weeks: List[int],
+        overnight: bool,
+    ) -> bool:
+        if recurrence != "Periodic":
+            return True
+        if not month_weeks:
+            month_weeks = [1]
+        today = now_utc.date()
+        if day == _python_weekday_to_day_name(now_utc.weekday()).upper():
+            return self._month_week_index(today) in month_weeks
+        if overnight and day == prev_day:
+            return self._month_week_index(today - datetime.timedelta(days=1)) in month_weeks
+        return False
 
     # ------------------------------------------------------------------
     # Rig status helpers
@@ -1352,60 +1518,18 @@ class SchedulerEngine(QObject):
 
         ok = False
         js8_offset = self._js8_offset_setting() if apply_js8_offset else None
-        if control_mode == "JS8CALL":
-            try:
-                if self.js8:
-                    if js8_offset is None:
-                        current_off = self.js8.get_offset()
-                        ok = self.js8.set_frequency(freq_hz, offset_hz=current_off)
-                    else:
-                        ok = self.js8.set_frequency(freq_hz, offset_hz=js8_offset)
-            except Exception as e:
-                log.error("SchedulerEngine: error sending set_frequency to JS8Call: %s", e)
-        else:
-            cmd = FrequencyCommand(
-                band=band,
-                rig_hz=freq_hz,
-                fldigi_center_hz=fldigi_center,
-                js8_tune_hz=None,
-                vfo=vfo,
-                js8_group=js8_group or None,
-            )
-            try:
-                if self.rig:
-                    ok = self.rig.set_frequency(cmd)
-            except Exception as e:
-                log.error("SchedulerEngine: error sending set_frequency to FLRig: %s", e)
-
-        if ok:
-            if control_mode == "FLRIG":
-                # Optionally key the tuner if the rig supports it.
-                if auto_tune:
-                    try:
-                        if hasattr(self.rig, "tune"):
-                            self.rig.tune()
-                    except Exception as e:
-                        log.error("SchedulerEngine: error invoking rig.tune(): %s", e)
-                # Keep JS8Call dial in sync even when FLRig controls the rig
-                if self.js8:
-                    try:
-                        if js8_offset is None:
-                            current_off = self.js8.get_offset()
-                            self.js8.set_frequency(freq_hz, offset_hz=current_off)
-                        else:
-                            self.js8.set_frequency(freq_hz, offset_hz=js8_offset)
-                    except Exception as e:
-                        log.debug("SchedulerEngine: JS8Call set_frequency (FLRig control) failed: %s", e)
-
-            self._last_entry_key = entry_key
-            self._last_source = source
-            self._last_freq_hz = freq_hz
-            self._last_band = band
-
-            # Notify listeners that we have a new active entry applied.
-            self.active_entry_changed.emit(entry, source)
-        else:
-            log.warning("SchedulerEngine: %s set_frequency() reported failure.", control_mode)
-            # Even if backend failed, we still update the UI state so that
-            # Net control operator can see what *should* have happened.
-            self.active_entry_changed.emit(entry, source)
+        queued = self._queue_control_action(
+            control_mode=control_mode,
+            entry_key=entry_key,
+            source=source,
+            freq_hz=freq_hz,
+            band=band,
+            vfo=vfo,
+            auto_tune=auto_tune,
+            js8_offset=js8_offset,
+            js8_group=js8_group,
+        )
+        if not queued:
+            log.debug("SchedulerEngine: control action skipped (pending/backoff).")
+        # Update UI state immediately regardless of control action.
+        self.active_entry_changed.emit(entry, source)
