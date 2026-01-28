@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
+    QColorDialog,
+    QDialog,
 )
 
 from pathlib import Path
@@ -22,7 +24,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.utils.timezones import get_timezone
-from freqinout.gui.theme import resolve_theme, button_style, band_cell_colors, qcolor
+from freqinout.gui.theme import resolve_theme, button_style, band_cell_colors, qcolor, BAND_COLORS_LIGHT, BAND_COLORS_DARK
 
 DAY_NAMES = [
     "Sunday",
@@ -67,6 +69,9 @@ class FreqPlannerTab(QWidget):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._show_local = True
+        self._show_band = True
+        self._band_colors: Dict[str, str] = {}
+        self._visible_bands: List[str] = []
         self._clock_timer: QTimer | None = None
         self._last_snapshot: str = ""
         self._build_ui()
@@ -92,7 +97,14 @@ class FreqPlannerTab(QWidget):
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
 
-        self.band_legend = QLabel("Band colors: 160m 80m 60m 40m 30m 20m 17m 15m 12m 10m")
+        self.band_legend = QWidget()
+        self.band_legend_layout = QHBoxLayout(self.band_legend)
+        self.band_legend_layout.setContentsMargins(0, 0, 0, 0)
+        self.band_legend_layout.setSpacing(6)
+        self.band_toggle_btn = QPushButton("Showing Band")
+        self.band_toggle_btn.setStyleSheet(button_style("info", theme))
+        self.band_toggle_btn.clicked.connect(self._toggle_band_view)
+        self.band_legend_layout.addWidget(self.band_toggle_btn)
         layout.addWidget(self.band_legend)
 
         self.table = QTableWidget()
@@ -125,6 +137,8 @@ class FreqPlannerTab(QWidget):
         layout.addWidget(self.table)
 
         self._setup_clock_timer()
+        self._load_band_colors()
+        self._render_band_legend()
 
     # ------------- helpers ------------- #
 
@@ -215,7 +229,7 @@ class FreqPlannerTab(QWidget):
             try:
                 cur.execute(
                     """
-                    SELECT day_utc, recurrence, biweekly_offset_weeks, band, mode, vfo, frequency,
+                    SELECT day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, vfo, frequency,
                            start_utc, end_utc, early_checkin, primary_js8call_group, comment, net_name
                     FROM net_schedule_tab
                     """
@@ -240,6 +254,7 @@ class FreqPlannerTab(QWidget):
                             day_utc,
                             recurrence,
                             biweekly_offset_weeks,
+                            "",
                             band,
                             mode,
                             None,
@@ -274,6 +289,7 @@ class FreqPlannerTab(QWidget):
                 day_utc,
                 recurrence,
                 biweekly_offset_weeks,
+                month_weeks,
                 band,
                 mode,
                 vfo,
@@ -290,6 +306,7 @@ class FreqPlannerTab(QWidget):
                         "day_utc": day_utc or "ALL",
                         "recurrence": recurrence or "Weekly",
                         "biweekly_offset_weeks": biweekly_offset_weeks or 0,
+                        "month_weeks": month_weeks or "",
                         "band": band or "",
                         "mode": mode or "",
                         "vfo": (vfo or "A").strip().upper() or "A",
@@ -319,6 +336,44 @@ class FreqPlannerTab(QWidget):
         except Exception:
             return None
         return None
+
+    def _week_start_sunday_utc(self, now_utc: datetime.datetime) -> datetime.date:
+        delta = (now_utc.weekday() + 1) % 7  # Sunday=0
+        return (now_utc - datetime.timedelta(days=delta)).date()
+
+    def _month_week_index(self, date_val: datetime.date) -> int:
+        return 1 + ((date_val.day - 1) // 7)
+
+    def _parse_month_weeks(self, txt: str) -> List[int]:
+        weeks: List[int] = []
+        for token in (txt or "").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                val = int(token)
+            except Exception:
+                continue
+            if 1 <= val <= 5:
+                weeks.append(val)
+        return sorted(set(weeks))
+
+    def _net_row_applies_this_week(
+        self, row: Dict, targets: List[str], week_sunday: datetime.date
+    ) -> bool:
+        recurrence = (row.get("recurrence") or "Weekly").strip()
+        if recurrence not in ("Periodic", "Monthly"):
+            return True
+        weeks = self._parse_month_weeks(row.get("month_weeks", ""))
+        if not weeks:
+            weeks = [1]
+        for idx, day_name in enumerate(DAY_NAMES):
+            if day_name not in targets:
+                continue
+            date_val = week_sunday + datetime.timedelta(days=idx)
+            if self._month_week_index(date_val) in weeks:
+                return True
+        return False
 
     def _hour_overlaps(self, start_min: int, end_min: int, hour: int) -> bool:
         """
@@ -455,6 +510,8 @@ class FreqPlannerTab(QWidget):
         hf_sched, net_sched = self._load_schedules()
         theme = resolve_theme(self.settings)
         self._last_snapshot = self._snapshot(hf_sched, net_sched)
+        now_utc = datetime.datetime.utcnow()
+        week_sunday = self._week_start_sunday_utc(now_utc)
 
         # Precompute net schedule coverage by (day, hour) with boundary-aware logic
         net_cover: Dict[tuple, List[Tuple[int, int, str]]] = {}
@@ -472,10 +529,15 @@ class FreqPlannerTab(QWidget):
                 if smin is None or emin is None:
                     continue
                 name = (row.get("net_name") or "Net").strip()
+                recurrence = (row.get("recurrence") or "Weekly").strip()
                 day_txt = (day or "ALL").strip().upper()
+                if recurrence == "Daily":
+                    day_txt = "ALL"
                 targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
                     DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
                 ]
+                if not self._net_row_applies_this_week(row, targets, week_sunday):
+                    continue
                 overnight = smin > emin
                 intervals: List[Tuple[str, int, int]] = []
                 if not overnight:
@@ -499,12 +561,14 @@ class FreqPlannerTab(QWidget):
                 continue
 
         # Precompute HF schedule coverage by (day, hour) with minute-level slices
-        hf_cover: Dict[tuple, List[Tuple[int, int, str]]] = {}
+        hf_cover: Dict[tuple, List[Tuple[int, int, str, str]]] = {}
 
-        def add_slice(day_name: str, hour: int, start_minute: int, end_minute: int, band: str) -> None:
+        def add_slice(
+            day_name: str, hour: int, start_minute: int, end_minute: int, band: str, freq: str
+        ) -> None:
             if start_minute >= end_minute:
                 return
-            hf_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, band))
+            hf_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, band, freq))
 
         # Collect start minutes per day to resolve boundary ownership
         starts_by_day: Dict[str, set[int]] = {d: set() for d in DAY_NAMES}
@@ -531,6 +595,7 @@ class FreqPlannerTab(QWidget):
                 band = (row.get("band") or "").strip()
                 if not band:
                     continue
+                freq = (row.get("frequency") or "").strip()
                 day_txt = (row.get("day_utc", "ALL") or "").strip().upper()
                 # Expand into day/hour slices with minute precision
                 targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
@@ -560,7 +625,14 @@ class FreqPlannerTab(QWidget):
                         hour_end_min = hour * 60 + 60
                         overlap_start = max(seg_start, hour_start_min)
                         overlap_end = min(seg_end, hour_end_min)
-                        add_slice(dname, hour % 24, overlap_start - hour_start_min, overlap_end - hour_start_min, band)
+                        add_slice(
+                            dname,
+                            hour % 24,
+                            overlap_start - hour_start_min,
+                            overlap_end - hour_start_min,
+                            band,
+                            freq,
+                        )
             except Exception:
                 continue
 
@@ -568,7 +640,6 @@ class FreqPlannerTab(QWidget):
         tz_name_cfg, tz = self._current_timezone()
 
         # Current UTC day for highlighting
-        now_utc = datetime.datetime.utcnow()
         now_local = datetime.datetime.now(tz)
         current_day_name = now_utc.strftime("%A")  # "Sunday" etc.
         now_plus_24 = now_utc + datetime.timedelta(hours=24)
@@ -576,6 +647,7 @@ class FreqPlannerTab(QWidget):
         # Fill rows
         today_utc = now_utc.replace(minute=0, second=0, microsecond=0)
         week_start_local = self._start_of_week_local(tz)
+        visible_bands: set[str] = set()
 
         for hour in range(24):
             if not self._show_local:
@@ -638,21 +710,33 @@ class FreqPlannerTab(QWidget):
                 net_slices = net_cover.get((lookup_day, lookup_hour), [])
                 hf_slices = hf_cover.get((lookup_day, lookup_hour), [])
                 band_label = ""
+                freq_label = ""
                 if hf_slices:
                     # Order by start minute and compress consecutive identical bands
                     hf_slices = sorted(hf_slices, key=lambda x: x[0])
                     bands_in_order: List[str] = []
+                    freqs_in_order: List[str] = []
                     last_band = None
-                    for start_m, end_m, b in hf_slices:
+                    last_freq = None
+                    for start_m, end_m, b, f in hf_slices:
                         if end_m <= start_m:
                             continue
+                        if b:
+                            visible_bands.add(b.lower())
                         if b != last_band:
                             bands_in_order.append(b)
                             last_band = b
+                        if f != last_freq and f:
+                            freqs_in_order.append(f)
+                            last_freq = f
                     if len(bands_in_order) == 1:
                         band_label = bands_in_order[0]
                     else:
                         band_label = "/".join(bands_in_order)
+                    if len(freqs_in_order) == 1:
+                        freq_label = freqs_in_order[0]
+                    elif freqs_in_order:
+                        freq_label = "/".join(freqs_in_order)
 
                 net_label = ""
                 if net_slices:
@@ -673,7 +757,7 @@ class FreqPlannerTab(QWidget):
                 if net_label:
                     cell_text = net_label
                 else:
-                    cell_text = band_label
+                    cell_text = band_label if self._show_band else (freq_label or band_label)
 
                 item = QTableWidgetItem(cell_text)
                 item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -682,7 +766,7 @@ class FreqPlannerTab(QWidget):
 
                 if band_label and not net_label:
                     primary_band = band_label.split("/")[0].strip()
-                    colors = band_cell_colors(primary_band, theme)
+                    colors = self._band_cell_colors(primary_band, theme)
                     if colors:
                         item.setBackground(qcolor(colors["bg"]))
                         item.setForeground(qcolor(colors["fg"]))
@@ -714,20 +798,22 @@ class FreqPlannerTab(QWidget):
 
         # Update clock labels
         self._update_clock_labels()
+        self._visible_bands = sorted(visible_bands)
+        self._render_band_legend()
         log.info("FreqPlanner table rebuilt.")
 
     def _snapshot(self, hf_sched: List[Dict], net_sched: List[Dict]) -> str:
         """
         Deterministic snapshot of schedules and time view to avoid unnecessary rebuilds.
         """
-        parts = ["LOCAL" if self._show_local else "UTC"]
+        parts = ["LOCAL" if self._show_local else "UTC", "BAND" if self._show_band else "FREQ"]
         for s in sorted(hf_sched, key=lambda x: (x.get("day_utc", ""), x.get("start_utc", ""), x.get("group_name", ""))):
             parts.append(
                 f"H|{s.get('day_utc','')}|{s.get('group_name','')}|{s.get('start_utc','')}|{s.get('end_utc','')}|{s.get('band','')}"
             )
         for n in sorted(net_sched, key=lambda x: (x.get("day_utc", ""), x.get("start_utc", ""), x.get("net_name", ""))):
             parts.append(
-                f"N|{n.get('day_utc','')}|{n.get('net_name','')}|{n.get('start_utc','')}|{n.get('end_utc','')}"
+                f"N|{n.get('day_utc','')}|{n.get('net_name','')}|{n.get('start_utc','')}|{n.get('end_utc','')}|{n.get('recurrence','')}|{n.get('month_weeks','')}"
             )
         return ";".join(parts)
 
@@ -785,10 +871,166 @@ class FreqPlannerTab(QWidget):
         self._show_local = not self._show_local
         self.rebuild_table()
 
+    def _toggle_band_view(self):
+        self._show_band = not self._show_band
+        self.band_toggle_btn.setText("Showing Band" if self._show_band else "Showing Frequency")
+        self.rebuild_table()
+
+    def _load_band_colors(self) -> None:
+        raw = self.settings.get("band_colors", {}) or {}
+        self._band_colors = {}
+        for k, v in raw.items():
+            if not k or not v:
+                continue
+            self._band_colors[str(k).lower().strip()] = str(v).strip()
+
+    def _default_band_colors(self) -> Dict[str, str]:
+        theme = resolve_theme(self.settings)
+        is_dark = theme.get("bg") == "#0F1216"
+        palette = BAND_COLORS_DARK if is_dark else BAND_COLORS_LIGHT
+        return {k.lower(): v for k, v in palette.items()}
+
+    def _band_cell_colors(self, band: str, theme: Dict[str, str]) -> Dict[str, str] | None:
+        band_key = (band or "").strip().lower()
+        if not band_key:
+            return None
+        base = self._band_colors.get(band_key)
+        if not base:
+            return band_cell_colors(band_key, theme)
+        alpha = 0.18 if theme.get("bg") == "#0F1216" else 0.28
+        bg = self._blend_hex(base, theme.get("surface", "#F0F2F4"), alpha)
+        fg = self._pick_text_color(bg, theme.get("text", "#1C1F21"), "#111111")
+        return {"bg": bg, "fg": fg, "border": base}
+
+    def _render_band_legend(self) -> None:
+        while self.band_legend_layout.count():
+            item = self.band_legend_layout.takeAt(0)
+            if item.widget():
+                if item.widget() is self.band_toggle_btn:
+                    item.widget().setParent(None)
+                else:
+                    item.widget().deleteLater()
+
+        theme = resolve_theme(self.settings)
+        if not hasattr(self, "band_toggle_btn") or self.band_toggle_btn is None:
+            self.band_toggle_btn = QPushButton("Showing Band")
+            self.band_toggle_btn.clicked.connect(self._toggle_band_view)
+        self.band_toggle_btn.setStyleSheet(button_style("info", theme))
+        self.band_toggle_btn.setText("Showing Band" if self._show_band else "Showing Frequency")
+        self.band_legend_layout.addWidget(self.band_toggle_btn)
+
+        if not self._visible_bands:
+            empty = QLabel("Band colors: none")
+            empty.setStyleSheet(f"color: {theme['text_muted']};")
+            self.band_legend_layout.addWidget(empty)
+            self.band_legend_layout.addStretch()
+            return
+
+        label = QLabel("Band colors:")
+        label.setStyleSheet(f"color: {theme['text_muted']};")
+        self.band_legend_layout.addWidget(label)
+
+        for band in self._visible_bands:
+            btn = QPushButton(band.upper())
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setProperty("band_key", band)
+            btn.clicked.connect(self._on_band_color_clicked)
+            btn.setStyleSheet(self._band_chip_style(band, theme))
+            self.band_legend_layout.addWidget(btn)
+
+        self.band_legend_layout.addStretch()
+
+    def _band_chip_style(self, band: str, theme: Dict[str, str]) -> str:
+        band_key = (band or "").strip().lower()
+        base = self._band_colors.get(band_key) or self._default_band_colors().get(band_key)
+        if not base:
+            base = theme.get("surface_alt", "#DDE1E6")
+        fg = self._pick_text_color(base, theme.get("text", "#1C1F21"), "#111111")
+        return (
+            "QPushButton {"
+            f" background-color: {base}; color: {fg}; border: 1px solid {theme['border']};"
+            " border-radius: 10px; padding: 2px 10px; font-weight: 600;"
+            " }"
+            " QPushButton:hover { opacity: 0.9; }"
+        )
+
+    def _on_band_color_clicked(self) -> None:
+        btn = self.sender()
+        if not isinstance(btn, QPushButton):
+            return
+        band_key = (btn.property("band_key") or "").strip().lower()
+        if not band_key:
+            return
+        current = self._band_colors.get(band_key) or self._default_band_colors().get(band_key, "#CCCCCC")
+        selected = self._pick_band_color(band_key, current)
+        if not selected:
+            return
+        self._band_colors[band_key] = selected
+        self.settings.set("band_colors", dict(self._band_colors))
+        self.rebuild_table()
+
+    def _reset_band_colors(self) -> None:
+        self._band_colors = {}
+        self.settings.set("band_colors", {})
+        self.rebuild_table()
+
+    def _pick_band_color(self, band_key: str, current: str) -> str | None:
+        dialog = QColorDialog(qcolor(current), self)
+        dialog.setOption(QColorDialog.DontUseNativeDialog, True)
+        dialog.setWindowTitle(f"Select {band_key.upper()} Color")
+        reset_btn = QPushButton("Reset Default")
+        reset_btn.setAutoDefault(False)
+        reset_btn.setDefault(False)
+        layout = dialog.layout()
+        if layout is not None:
+            if hasattr(layout, "rowCount"):
+                row = layout.rowCount()
+                layout.addWidget(reset_btn, row, 0, 1, layout.columnCount())
+            else:
+                layout.addWidget(reset_btn)
+
+        def reset_and_accept():
+            default = self._default_band_colors().get(band_key, current)
+            dialog.setCurrentColor(qcolor(default))
+            dialog.done(QDialog.Accepted)
+
+        reset_btn.clicked.connect(reset_and_accept)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        color = dialog.currentColor()
+        if not color.isValid():
+            return None
+        return color.name().upper()
+
+    def _hex_to_rgb(self, value: str) -> tuple[int, int, int]:
+        value = (value or "").lstrip("#")
+        if len(value) != 6:
+            return 0, 0, 0
+        return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+
+    def _rgb_to_hex(self, r: int, g: int, b: int) -> str:
+        return f"#{r:02X}{g:02X}{b:02X}"
+
+    def _blend_hex(self, fg: str, bg: str, alpha: float) -> str:
+        fr, fg_c, fb = self._hex_to_rgb(fg)
+        br, bg_c, bb = self._hex_to_rgb(bg)
+        r = int(fr * alpha + br * (1 - alpha))
+        g = int(fg_c * alpha + bg_c * (1 - alpha))
+        b = int(fb * alpha + bb * (1 - alpha))
+        return self._rgb_to_hex(r, g, b)
+
+    def _luminance(self, value: str) -> float:
+        r, g, b = self._hex_to_rgb(value)
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+
+    def _pick_text_color(self, bg_hex: str, light: str, dark: str) -> str:
+        return dark if self._luminance(bg_hex) > 0.6 else light
+
     def _apply_theme(self):
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
-        self.band_legend.setStyleSheet(f"color: {theme['text_muted']};")
+        self.band_toggle_btn.setStyleSheet(button_style("info", theme))
+        self._render_band_legend()
 
     def on_settings_saved(self):
         try:
