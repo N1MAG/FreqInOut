@@ -24,7 +24,7 @@ from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.radio_interface.rigctl_client import FLRigClient
-from freqinout.radio_interface.js8_status import JS8ControlClient
+from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.version import __version__
 
@@ -174,7 +174,13 @@ class MainWindow(QMainWindow):
         # Start scheduler engine
         self.rig_client = FLRigClient()
         self.js8_control = JS8ControlClient()
-        self.scheduler = SchedulerEngine(self, rig=self.rig_client, js8=self.js8_control)
+        self.varac_status = VarACStatusClient()
+        self.scheduler = SchedulerEngine(
+            self,
+            rig=self.rig_client,
+            js8=self.js8_control,
+            varac=self.varac_status,
+        )
         self.scheduler.start()
         try:
             self.scheduler.off_schedule_detected.connect(self._on_off_schedule_detected)
