@@ -1725,21 +1725,67 @@ class StationsMapTab(QWidget):
                 """
             )
             rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT callsign, AVG(snr) FROM (
+                    SELECT origin AS callsign, snr FROM varac_links WHERE snr IS NOT NULL
+                    UNION ALL
+                    SELECT destination AS callsign, snr FROM varac_links WHERE snr IS NOT NULL
+                )
+                GROUP BY callsign
+                """
+            )
+            avg_rows = cur.fetchall()
             conn.close()
         except Exception:
             return stats
         ts_cut = None
         if max_age_sec and max_age_sec > 0:
             ts_cut = time.time() - max_age_sec
+        avg_map = {str(c or "").strip().upper(): float(a) for c, a in avg_rows if c and a is not None}
+        def _freq_to_band(freq_hz: Optional[float]) -> str:
+            if not freq_hz:
+                return ""
+            try:
+                mhz = float(freq_hz) / 1_000_000.0
+            except Exception:
+                return ""
+            bands = [
+                ("160M", 1.8, 2.0),
+                ("80M", 3.5, 4.0),
+                ("60M", 5.0, 5.5),
+                ("40M", 7.0, 7.3),
+                ("30M", 10.1, 10.15),
+                ("20M", 14.0, 14.35),
+                ("17M", 18.068, 18.168),
+                ("15M", 21.0, 21.45),
+                ("12M", 24.89, 24.99),
+                ("10M", 28.0, 29.7),
+                ("6M", 50.0, 54.0),
+                ("2M", 144.0, 148.0),
+            ]
+            for name, lo, hi in bands:
+                if lo <= mhz <= hi:
+                    return name
+            return ""
         for cs, last_seen_ts, last_band, last_freq_hz, last_snr in rows:
             last_seen_val = float(last_seen_ts or 0.0)
             if ts_cut and last_seen_val and last_seen_val < ts_cut:
                 continue
+            band_val = (last_band or "").strip().upper()
+            if band_val in {"NA", "N/A"}:
+                band_val = ""
+            if not band_val and last_freq_hz not in (None, ""):
+                try:
+                    band_val = _freq_to_band(float(last_freq_hz))
+                except Exception:
+                    band_val = ""
             stats[(cs or "").strip().upper()] = {
                 "last_seen_ts": last_seen_val,
-                "last_band": (last_band or "").strip().upper(),
+                "last_band": band_val,
                 "last_freq_hz": float(last_freq_hz) if last_freq_hz not in (None, "") else None,
                 "last_snr": float(last_snr) if last_snr not in (None, "") else None,
+                "avg_snr": avg_map.get((cs or "").strip().upper()),
             }
         return stats
 
@@ -2076,7 +2122,7 @@ class StationsMapTab(QWidget):
                         "last_band": stats.get("last_band", ""),
                         "varac_last_seen": _fmt_ts(vstats.get("last_seen_ts", 0)),
                         "varac_last_band": vstats.get("last_band", ""),
-                        "varac_snr": vstats.get("last_snr"),
+                        "varac_avg_snr": vstats.get("avg_snr"),
                     }
                 )
 
@@ -2597,16 +2643,17 @@ function addGridLabels(res, level, bounds, maxLabels) {
           pane: 'stationsPane'
         }});
         stationsLayer.addLayer(circle);
+        const hasJS8 = m.last_seen || m.last_band || m.direct_snr !== undefined || m.avg_snr_excl_my !== undefined;
+        const hasVarAC = m.varac_last_seen || m.varac_last_band || m.varac_avg_snr !== undefined;
         const tipText = (m.tooltip || m.title || '') +
-          (m.last_seen || m.last_band || m.direct_snr !== undefined || m.avg_snr_excl_my !== undefined ? '<br/><b>JS8Call</b>' : '') +
-          (m.last_seen ? '<br/>Last Seen: ' + m.last_seen : '') +
-          (m.last_band ? '<br/>Last Band: ' + m.last_band : '') +
-          (m.direct_snr !== undefined && m.direct_snr !== null ? '<br/>Directed SNR: ' + m.direct_snr.toFixed(1) + (m.direct_count ? ' (Traffic: ' + m.direct_count + ')' : '') : '') +
-          (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/>Avg SNR: ' + m.avg_snr_excl_my.toFixed(1) + (m.avg_snr_count ? ' (Traffic: ' + m.avg_snr_count + ')' : '') : '') +
-          (m.varac_last_seen || m.varac_last_band || m.varac_snr !== undefined ? '<br/><b>VarAC</b>' : '') +
-          (m.varac_last_seen ? '<br/>Last Seen: ' + m.varac_last_seen : '') +
-          (m.varac_last_band ? '<br/>Last Band: ' + m.varac_last_band : '') +
-          (m.varac_snr !== undefined && m.varac_snr !== null ? '<br/>SNR: ' + m.varac_snr.toFixed(1) : '');
+          (hasJS8 || hasVarAC ? '<br/>Last Seen, Last Band, SNR' : '') +
+          (m.last_seen ? '<br/>JS8: ' + m.last_seen : '') +
+          (m.last_band ? '<br/>JS8: ' + m.last_band : '') +
+          (m.direct_snr !== undefined && m.direct_snr !== null ? '<br/>JS8 Direct SNR: ' + m.direct_snr.toFixed(1) : '') +
+          (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/>JS8 Avg SNR: ' + m.avg_snr_excl_my.toFixed(1) : '') +
+          (m.varac_last_seen ? '<br/>VarAC: ' + m.varac_last_seen : '') +
+          (m.varac_last_band ? '<br/>VarAC: ' + m.varac_last_band : '') +
+          (m.varac_avg_snr !== undefined && m.varac_avg_snr !== null ? '<br/>VarAC Avg SNR: ' + m.varac_avg_snr.toFixed(1) : '');
         circle.on('mouseover', function() {{
           this.bringToFront();
           showDetail(tipText);
