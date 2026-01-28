@@ -939,10 +939,18 @@ class MessageViewerTab(QWidget):
         db_path = self._db_path()
         if not db_path or not db_path.exists():
             return
+        def _base_callsign(val: str) -> str:
+            cs_norm = (val or "").strip().upper()
+            if not cs_norm:
+                return ""
+            return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", cs_norm)
         rows: Dict[str, tuple[float, str]] = {}
         for origin in ("flmsg", "flamp"):
             for rec in records.get(origin, []):
                 sender = self._extract_sender_from_file(rec)
+                if not sender:
+                    continue
+                sender = _base_callsign(sender)
                 if not sender:
                     continue
                 ts_val = float(rec.mtime or 0.0)
@@ -1311,6 +1319,24 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to delete pending row: %s", e)
 
+    def _minutes_to_next_change(self) -> Optional[int]:
+        if suspend_active(self.settings) or not scheduler_enabled(self.settings):
+            return None
+        win = self.window()
+        sched = getattr(win, "scheduler", None) if win is not None else None
+        dt = getattr(sched, "next_change_utc", None) if sched is not None else None
+        if not dt:
+            return None
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        else:
+            dt = dt.astimezone(datetime.timezone.utc)
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        delta = (dt - now_utc).total_seconds()
+        if delta <= 0:
+            return None
+        return int((delta + 59) // 60)
+
     def _on_pending_get(self, callsign: str, msg_id: str) -> None:
         if not callsign or not msg_id:
             return
@@ -1318,6 +1344,17 @@ class MessageViewerTab(QWidget):
         if not mycall:
             QMessageBox.warning(self, "Missing Callsign", "Configure your callsign in the Settings tab.")
             return
+        minutes = self._minutes_to_next_change()
+        if minutes is not None and minutes <= 5:
+            resp = QMessageBox.question(
+                self,
+                "Frequency Change",
+                f"Frequency Change in {minutes} minutes. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
         text = f"{mycall}: {callsign} QUERY MSG {msg_id}".strip()
         resp = QMessageBox.question(
             self,
