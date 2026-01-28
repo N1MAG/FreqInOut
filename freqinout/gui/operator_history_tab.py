@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QMessageBox,
+    QTextEdit,
     QFileDialog,
     QDialog,
     QFormLayout,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
+from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.theme import resolve_theme
 
 
@@ -82,14 +84,15 @@ class OperatorHistoryTab(QWidget):
     COL_NAME = 2
     COL_STATE = 3
     COL_GRID = 4
-    COL_G1 = 5
-    COL_G2 = 6
-    COL_G3 = 7
-    COL_ROLE = 8
-    COL_FIRST_SEEN = 9
-    COL_LAST_SEEN = 10
-    COL_TRUSTED = 11
-    COL_COUNT = 12
+    COL_GROUPS = 5
+    COL_G1 = 6
+    COL_G2 = 7
+    COL_G3 = 8
+    COL_ROLE = 9
+    COL_FIRST_SEEN = 10
+    COL_LAST_SEEN = 11
+    COL_TRUSTED = 12
+    COL_COUNT = 13
 
     operator_history_updated = Signal()
 
@@ -119,28 +122,37 @@ class OperatorHistoryTab(QWidget):
         search_row = QHBoxLayout()
         search_row.addWidget(QLabel("Search:"))
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Filter by any column...")
+        self.search_edit.setPlaceholderText("Any column...")
         search_row.addWidget(self.search_edit, stretch=1)
 
-        self.refresh_btn = QPushButton("Refresh")
-        search_row.addWidget(self.refresh_btn)
-        self.import_btn = QPushButton("Import/Export...")
-        search_row.addWidget(self.import_btn)
-        self.manage_btn = QPushButton("Manage Operators")
-        search_row.addWidget(self.manage_btn)
-        self.select_all_btn = QPushButton("Select All")
-        search_row.addWidget(self.select_all_btn)
         search_row.addWidget(QLabel("Filter by:"))
         self.group_filter = QComboBox()
         self.group_filter.addItem("All")
         self.group_filter.addItem("Untrusted")
+        self.group_filter.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
+        self.group_filter.setMinimumContentsLength(12)
+        self.group_filter.view().setMinimumWidth(240)
         search_row.addWidget(self.group_filter)
+        self.manage_btn = QPushButton("Manage Operators")
+        search_row.addWidget(self.manage_btn)
+        self.select_all_btn = QPushButton("Select All")
+        search_row.addWidget(self.select_all_btn)
+        self.export_group_combo = QComboBox()
+        self.export_group_combo.setEditable(False)
+        self.export_group_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.export_group_combo.setMinimumWidth(160)
+        self.export_group_combo.setEditable(True)
+        self.export_group_combo.lineEdit().setReadOnly(True)
+        self.export_group_combo.lineEdit().setPlaceholderText("Export by Group")
+        search_row.addWidget(self.export_group_combo)
+        self.import_btn = QPushButton("Import/Export...")
+        search_row.addWidget(self.import_btn)
 
         layout.addLayout(search_row)
 
         # Table
         self.table = QTableWidget()
-        self.table.setColumnCount(13)
+        self.table.setColumnCount(14)
         self.table.setHorizontalHeaderLabels(
             [
                 "",
@@ -148,6 +160,7 @@ class OperatorHistoryTab(QWidget):
                 "Name",
                 "State",
                 "Grid",
+                "Groups",
                 "Group 1",
                 "Group 2",
                 "Group 3",
@@ -167,6 +180,7 @@ class OperatorHistoryTab(QWidget):
             self.COL_NAME,
             self.COL_STATE,
             self.COL_GRID,
+            self.COL_GROUPS,
             self.COL_G1,
             self.COL_G2,
             self.COL_G3,
@@ -177,16 +191,19 @@ class OperatorHistoryTab(QWidget):
             self.COL_COUNT,
         ):
             hv.setSectionResizeMode(col, QHeaderView.Stretch)
+        for col in (self.COL_G1, self.COL_G2, self.COL_G3):
+            self.table.setColumnHidden(col, True)
 
         layout.addWidget(self.table)
 
         # Signals
-        self.refresh_btn.clicked.connect(self._load_data)
         self.search_edit.textChanged.connect(self._apply_filter)
         self.import_btn.clicked.connect(self._show_import_export_menu)
         self.manage_btn.clicked.connect(self._show_manage_menu)
         self.select_all_btn.clicked.connect(self._select_all_rows)
         self.group_filter.currentTextChanged.connect(self._apply_filter)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        self._wire_export_group_combo()
 
     # ------------- DB LOAD ------------- #
 
@@ -371,6 +388,10 @@ class OperatorHistoryTab(QWidget):
         """
         Load operator_checkins table into self._rows.
         """
+        try:
+            ingest_varac(self.settings)
+        except Exception:
+            pass
         db_path = self._db_path()
         if not db_path or not db_path.exists():
             self._rows = []
@@ -596,6 +617,61 @@ class OperatorHistoryTab(QWidget):
     def _apply_filter(self):
         self._render_rows(self._filtered_rows())
 
+    def _wire_export_group_combo(self) -> None:
+        model = QStandardItemModel(self.export_group_combo)
+        self.export_group_combo.setModel(model)
+        model.itemChanged.connect(self._on_export_group_item_changed)
+
+    def _refresh_export_group_options(self, groups: List[str]) -> None:
+        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
+        prior = set(self._get_selected_export_groups())
+        model.blockSignals(True)
+        model.clear()
+        hint = QStandardItem("Select up to 3")
+        hint.setFlags(Qt.ItemIsEnabled)
+        model.appendRow(hint)
+        for g in groups:
+            item = QStandardItem(g)
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            item.setData(Qt.Checked if g in prior else Qt.Unchecked, Qt.CheckStateRole)
+            model.appendRow(item)
+        model.blockSignals(False)
+        if self.export_group_combo.currentIndex() >= 0:
+            self.export_group_combo.setCurrentIndex(-1)
+        self._update_export_group_placeholder()
+
+    def _on_export_group_item_changed(self, item: QStandardItem) -> None:
+        if not (item.flags() & Qt.ItemIsUserCheckable):
+            return
+        if item.checkState() != Qt.Checked:
+            self._update_export_group_placeholder()
+            return
+        selected = self._get_selected_export_groups()
+        if len(selected) > 3:
+            item.setCheckState(Qt.Unchecked)
+            QMessageBox.information(
+                self,
+                "Export Groups",
+                "You can select up to 3 groups for export.",
+            )
+        self._update_export_group_placeholder()
+
+    def _get_selected_export_groups(self) -> List[str]:
+        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
+        selected: List[str] = []
+        for i in range(1, model.rowCount()):
+            item = model.item(i)
+            if item and item.checkState() == Qt.Checked:
+                selected.append(item.text().strip())
+        return [g for g in selected if g]
+
+    def _update_export_group_placeholder(self) -> None:
+        selected = self._get_selected_export_groups()
+        if selected:
+            self.export_group_combo.lineEdit().setPlaceholderText(f"{len(selected)} Selected")
+        else:
+            self.export_group_combo.lineEdit().setPlaceholderText("Export by Group")
+
     def _filtered_rows(self) -> List[Dict]:
         term = self.search_edit.text().strip().lower()
         filter_term = self.group_filter.currentText().strip().lower()
@@ -663,6 +739,12 @@ class OperatorHistoryTab(QWidget):
             set_item(self.COL_NAME, r["name"])
             set_item(self.COL_STATE, r["state"])
             set_item(self.COL_GRID, r.get("grid", ""))
+            groups_all = [g for g in (r.get("groups") or []) if str(g).strip()]
+            groups_first = [g for g in groups_all if g][:3]
+            if not groups_first:
+                groups_first = [g for g in [(r.get("group1") or "").strip(), (r.get("group2") or "").strip(), (r.get("group3") or "").strip()] if g]
+            groups_display = ", ".join(groups_first)
+            set_item(self.COL_GROUPS, groups_display)
             set_item(self.COL_G1, r.get("group1", ""))
             set_item(self.COL_G2, r.get("group2", ""))
             set_item(self.COL_G3, r.get("group3", ""))
@@ -698,6 +780,8 @@ class OperatorHistoryTab(QWidget):
         for g in sorted(groups, key=lambda x: x.lower()):
             if g not in ("All", "Untrusted", "Blank"):
                 self.group_filter.addItem(g)
+        export_groups = sorted([g for g in groups if g not in ("All", "Untrusted", "Blank")], key=lambda x: x.lower())
+        self._refresh_export_group_options(export_groups)
         self.group_filter.addItem("Untrusted")
         self.group_filter.addItem("Blank")
         # restore selection if still present
@@ -731,6 +815,47 @@ class OperatorHistoryTab(QWidget):
             w = self.table.cellWidget(r, self.COL_SELECT)
             if isinstance(w, QCheckBox):
                 w.setChecked(True)
+
+    def _on_cell_double_clicked(self, row: int, col: int) -> None:
+        if col != self.COL_GROUPS:
+            return
+        item = self.table.item(row, self.COL_CALLSIGN)
+        if not item:
+            return
+        callsign = (item.text() or "").strip().upper()
+        if not callsign:
+            return
+        record = next((r for r in self._rows if (r.get("callsign") or "").strip().upper() == callsign), None)
+        if not record:
+            return
+        groups = [g for g in (record.get("groups") or []) if str(g).strip()]
+        if not groups:
+            groups = [
+                g
+                for g in [
+                    (record.get("group1") or "").strip(),
+                    (record.get("group2") or "").strip(),
+                    (record.get("group3") or "").strip(),
+                ]
+                if g
+            ]
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Groups for {callsign}")
+        layout = QVBoxLayout(dlg)
+        label = QLabel("All Groups:")
+        layout.addWidget(label)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText("\n".join(groups) if groups else "(none)")
+        text.setMinimumHeight(220)
+        layout.addWidget(text)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        dlg.exec()
 
     def _upsert_record(self, row: Dict, *, merge_groups: bool = True):
         db_path = self._db_path()
@@ -859,6 +984,21 @@ class OperatorHistoryTab(QWidget):
         menu.exec(self.manage_btn.mapToGlobal(self.manage_btn.rect().bottomLeft()))
 
     def _export_csv(self):
+        selected_groups = self._get_selected_export_groups()
+        if not selected_groups:
+            QMessageBox.information(
+                self,
+                "Export CSV",
+                "Select 1–3 groups in the Export groups dropdown before exporting.",
+            )
+            return
+        if len(selected_groups) > 3:
+            QMessageBox.information(
+                self,
+                "Export CSV",
+                "Select no more than 3 groups for export.",
+            )
+            return
         selected = set(self._selected_callsigns())
         rows: List[Dict]
         if selected:
@@ -866,34 +1006,43 @@ class OperatorHistoryTab(QWidget):
         else:
             current_filter = self.group_filter.currentText().strip()
             if not current_filter or current_filter == "All":
-                resp = QMessageBox.question(
-                    self,
-                    "Export CSV",
-                    "Export Unfiltered List?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
-                )
-                if resp != QMessageBox.Yes:
-                    return
                 rows = list(self._rows)
             elif current_filter and current_filter != "All":
-                resp = QMessageBox.question(
-                    self,
-                    "Export CSV",
-                    f"Export {current_filter} Filtered List?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
-                )
-                if resp != QMessageBox.Yes:
-                    return
                 rows = self._filtered_rows()
             else:
                 rows = list(self._rows)
 
+        if selected_groups:
+            def _row_groups(row: Dict) -> set[str]:
+                groups = {
+                    (row.get("group1") or "").strip(),
+                    (row.get("group2") or "").strip(),
+                    (row.get("group3") or "").strip(),
+                }
+                groups.update({str(x).strip() for x in (row.get("groups") or [])})
+                return {g for g in groups if g}
+            rows = [r for r in rows if _row_groups(r) & set(selected_groups)]
+        rows = [
+            r
+            for r in rows
+            if r.get("trusted") and any(
+                [
+                    (r.get("group1") or "").strip(),
+                    (r.get("group2") or "").strip(),
+                    (r.get("group3") or "").strip(),
+                    *(r.get("groups") or []),
+                ]
+            )
+        ]
+
         if not rows:
             QMessageBox.information(self, "Export CSV", "No rows to export.")
             return
-        fn, _ = QFileDialog.getSaveFileName(self, "Export Operators CSV", "", "CSV Files (*.csv)")
+        callsign = (self.settings.get("operator_callsign", "") or "").strip().upper() or "CALLSIGN"
+        date_str = datetime.datetime.utcnow().strftime("%Y%m%d")
+        name_parts = [callsign] + [g.replace(" ", "") for g in selected_groups] + [date_str]
+        default_name = "_".join([p for p in name_parts if p]) + ".csv"
+        fn, _ = QFileDialog.getSaveFileName(self, "Export Operators CSV", default_name, "CSV Files (*.csv)")
         if not fn:
             return
         try:
@@ -905,6 +1054,7 @@ class OperatorHistoryTab(QWidget):
                         "name",
                         "state",
                         "grid",
+                        "groups",
                         "group1",
                         "group2",
                         "group3",
@@ -916,15 +1066,38 @@ class OperatorHistoryTab(QWidget):
                 )
                 writer.writeheader()
                 for r in rows:
+                    base_groups = [
+                        (r.get("group1") or "").strip(),
+                        (r.get("group2") or "").strip(),
+                        (r.get("group3") or "").strip(),
+                    ]
+                    used = {g for g in base_groups if g}
+                    export_g1, export_g2, export_g3 = base_groups
+                    for g in selected_groups:
+                        if g in used:
+                            continue
+                        if not export_g1:
+                            export_g1 = g
+                            used.add(g)
+                            continue
+                        if not export_g2:
+                            export_g2 = g
+                            used.add(g)
+                            continue
+                        if not export_g3:
+                            export_g3 = g
+                            used.add(g)
+                            continue
                     writer.writerow(
                         {
                             "callsign": r.get("callsign", ""),
                             "name": r.get("name", ""),
                             "state": r.get("state", ""),
                             "grid": r.get("grid", ""),
-                            "group1": r.get("group1", ""),
-                            "group2": r.get("group2", ""),
-                            "group3": r.get("group3", ""),
+                            "groups": ",".join(selected_groups),
+                            "group1": export_g1,
+                            "group2": export_g2,
+                            "group3": export_g3,
                             "group_role": r.get("group_role", ""),
                             "first_seen_utc": r.get("first_seen_utc", ""),
                             "last_seen_utc": r.get("last_seen_utc", ""),
@@ -963,6 +1136,8 @@ class OperatorHistoryTab(QWidget):
                     if not cs:
                         skipped += 1
                         continue
+                    groups_raw = (lower_row.get("groups") or "").strip()
+                    groups_list = [g.strip().upper() for g in groups_raw.split(",") if g.strip()]
                     date_val = (lower_row.get("date added") or lower_row.get("date_added") or "").strip()
                     if not date_val:
                         date_val = datetime.datetime.utcnow().strftime("%Y%m%d")
@@ -974,6 +1149,7 @@ class OperatorHistoryTab(QWidget):
                         "group1": lower_row.get("group1", "").strip().upper(),
                         "group2": lower_row.get("group2", "").strip().upper(),
                         "group3": lower_row.get("group3", "").strip().upper(),
+                        "groups": groups_list,
                         "group_role": (lower_row.get("group role") or lower_row.get("group_role") or "").strip().upper(),
                         "first_seen_utc": date_val,
                         "last_seen_utc": date_val,
