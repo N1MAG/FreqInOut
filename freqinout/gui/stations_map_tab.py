@@ -1743,6 +1743,28 @@ class StationsMapTab(QWidget):
             }
         return stats
 
+    def _load_js8_presence(self) -> Set[str]:
+        calls: Set[str] = set()
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return calls
+        if not db_path.exists():
+            return calls
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT origin FROM js8_links")
+            calls.update({str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]})
+            cur.execute("SELECT DISTINCT destination FROM js8_links")
+            calls.update({str(r[0]).strip().upper() for r in cur.fetchall() if r and r[0]})
+            conn.close()
+        except Exception:
+            return calls
+        return calls
+
     def _load_fldigi_presence(self) -> Set[str]:
         calls: Set[str] = set()
         try:
@@ -1948,6 +1970,8 @@ class StationsMapTab(QWidget):
                 self._last_map_view = view_state
 
         varac_stats = self._load_varac_stats(max_age_sec=self.recency_seconds)
+        varac_all = self._load_varac_stats(max_age_sec=None)
+        js8_all = self._load_js8_presence()
         fldigi_calls = self._load_fldigi_presence()
 
         # Spread overlapping stations with the same base lat/lon
@@ -1999,9 +2023,9 @@ class StationsMapTab(QWidget):
                 stats = stats_lookup.get(cs_upper, {})
                 vstats = varac_stats.get(cs_upper, {})
                 modes: List[str] = []
-                if stats:
+                if cs_upper in js8_all:
                     modes.append("JS8")
-                if vstats:
+                if cs_upper in varac_all:
                     modes.append("VarAC")
                 if cs_upper in fldigi_calls:
                     modes.append("FLDigi")
