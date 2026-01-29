@@ -367,6 +367,7 @@ class SettingsTab(QWidget):
         ctrl_row.addWidget(QLabel("Schedule Mode"))
         self.schedule_mode_combo = QComboBox()
         self.schedule_mode_combo.addItems(["Normal", "Loose", "Strict"])
+        self.schedule_mode_combo.currentIndexChanged.connect(self._on_schedule_mode_changed)
         ctrl_row.addWidget(self.schedule_mode_combo)
         ctrl_row.addStretch()
         op_layout.addLayout(ctrl_row)
@@ -1172,6 +1173,21 @@ class SettingsTab(QWidget):
             pass
         self._mark_settings_dirty()
         # apply_theme will clear the toast once the app theme is applied
+
+    def _on_schedule_mode_changed(self):
+        mode = self.schedule_mode_combo.currentText().strip()
+        try:
+            if hasattr(self.settings, "set"):
+                self.settings.set("schedule_enforcement_mode", mode)
+                if hasattr(self.settings, "save"):
+                    self.settings.save()
+        except Exception:
+            pass
+        try:
+            self.settings_saved.emit()
+        except Exception:
+            pass
+        self._mark_settings_dirty()
 
     def _set_loading(self, active: bool, text: str = "Wilco. Standby for Spectrum QSY...") -> None:
         if not self.loading_label:
