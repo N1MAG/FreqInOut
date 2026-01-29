@@ -410,9 +410,13 @@ class SchedulerEngine(QObject):
             mode = (self.settings.get("schedule_enforcement_mode", "Strict") or "Strict").strip()
         except Exception:
             mode = "Strict"
-        legacy_map = {"Shack": "Normal", "POTA": "Loose", "EmComms": "Strict"}
-        mode = legacy_map.get(mode, mode)
-        return mode if mode in {"Normal", "Loose", "Strict"} else "Strict"
+        norm = str(mode or "").strip().lower()
+        legacy_map = {"shack": "Normal", "pota": "Loose", "emcomms": "Strict"}
+        if norm in legacy_map:
+            return legacy_map[norm]
+        if norm in {"normal", "loose", "strict"}:
+            return norm.title()
+        return "Strict"
 
     def _maybe_resync_frequency(self) -> None:
         if self._enforcement_mode() != "Strict":
