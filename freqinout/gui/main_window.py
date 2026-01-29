@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QGroupBox,
+    QMessageBox,
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
@@ -466,13 +467,47 @@ class MainWindow(QMainWindow):
     def _on_off_schedule_detected(self, entry: dict) -> None:
         if self._shutting_down:
             return
+        if hasattr(self, "_off_schedule_prompt") and self._off_schedule_prompt is not None:
+            try:
+                self._off_schedule_prompt.close()
+            except Exception:
+                pass
+            self._off_schedule_prompt = None
         msg = QMessageBox(self)
         msg.setWindowTitle("Off Schedule")
-        msg.setText("Control Freq back to Schedule?")
-        apply_btn = msg.addButton("Yes", QMessageBox.AcceptRole)
+        msg.setText("RIG off schedule. Apply default schedule?")
+        apply_btn = msg.addButton("Apply", QMessageBox.AcceptRole)
+        ignore_btn = msg.addButton("Ignore", QMessageBox.RejectRole)
         suspend_btn = msg.addButton("Suspend", QMessageBox.DestructiveRole)
-        msg.addButton("Ignore", QMessageBox.RejectRole)
+        self._off_schedule_prompt = msg
+        auto_applied = {"done": False}
+
+        def _auto_apply():
+            if auto_applied["done"]:
+                return
+            auto_applied["done"] = True
+            try:
+                self.scheduler.resolve_off_schedule("apply")
+            except Exception:
+                pass
+            try:
+                msg.done(0)
+            except Exception:
+                pass
+
+        timer = QTimer(msg)
+        timer.setSingleShot(True)
+        timer.timeout.connect(_auto_apply)
+        timer.start(120000)
+
         msg.exec()
+        try:
+            timer.stop()
+        except Exception:
+            pass
+        if auto_applied["done"]:
+            self._off_schedule_prompt = None
+            return
         clicked = msg.clickedButton()
         if clicked == apply_btn:
             try:
@@ -484,6 +519,7 @@ class MainWindow(QMainWindow):
                 self.scheduler.resolve_off_schedule("suspend")
             except Exception:
                 pass
+        self._off_schedule_prompt = None
 
     # ------------------------------------------------------------------ #
     # Helpers                                                            #

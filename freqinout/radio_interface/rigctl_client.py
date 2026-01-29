@@ -155,6 +155,18 @@ class FLRigClient:
             self._fldigi_proxy = None
             return None
 
+    def get_fldigi_mode(self) -> Optional[str]:
+        proxy = self._connect_fldigi()
+        if proxy is None:
+            return None
+        try:
+            mode = proxy.modem.get_name()
+            return str(mode).strip() if mode else None
+        except Exception as e:
+            log.debug("Failed to read FLDigi mode: %s", e)
+            self._fldigi_proxy = None
+            return None
+
     def _set_fldigi_wfhz(self, offset_hz: Optional[int]) -> None:
         """
         Best-effort FLDigi waterfall offset via XML-RPC using the documented

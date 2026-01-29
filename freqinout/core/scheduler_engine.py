@@ -421,6 +421,8 @@ class SchedulerEngine(QObject):
     def _maybe_resync_frequency(self) -> None:
         if self._enforcement_mode() != "Strict":
             return
+        # Strict now uses the off-schedule prompt with timeout apply.
+        return
         entry = self.current_schedule_entry or {}
         if not entry:
             return
@@ -558,6 +560,13 @@ class SchedulerEngine(QObject):
         except Exception:
             return None
 
+    def _expected_fldigi_mode(self, entry: Dict) -> Optional[str]:
+        og = self._resolve_operating_group(entry)
+        if not isinstance(og, dict):
+            return None
+        mode = (og.get("fldigi_mode") or "").strip()
+        return mode or None
+
     def _current_fldigi_offset(self) -> Optional[int]:
         if not self.rig or not hasattr(self.rig, "get_fldigi_offset"):
             return None
@@ -566,8 +575,17 @@ class SchedulerEngine(QObject):
         except Exception:
             return None
 
+    def _current_fldigi_mode(self) -> Optional[str]:
+        if not self.rig or not hasattr(self.rig, "get_fldigi_mode"):
+            return None
+        try:
+            mode = self.rig.get_fldigi_mode()
+        except Exception:
+            return None
+        return mode.strip().upper() if isinstance(mode, str) else None
+
     def _maybe_prompt_off_schedule(self) -> None:
-        if self._enforcement_mode() != "Loose":
+        if self._enforcement_mode() not in {"Loose", "Strict"}:
             return
         entry = self.current_schedule_entry or {}
         if not entry:
@@ -592,6 +610,11 @@ class SchedulerEngine(QObject):
         if desired_fldigi is not None:
             current_fldigi = self._current_fldigi_offset()
             fldigi_off = current_fldigi is not None and desired_fldigi != current_fldigi
+        desired_fldigi_mode = self._expected_fldigi_mode(entry)
+        if desired_fldigi_mode:
+            current_mode = self._current_fldigi_mode()
+            if current_mode is not None:
+                fldigi_off = fldigi_off or (current_mode != desired_fldigi_mode.strip().upper())
         if not (off_freq or js8_off or fldigi_off):
             self._off_schedule_prompt_active = False
             self._last_off_schedule_key = None
@@ -618,6 +641,9 @@ class SchedulerEngine(QObject):
                     apply_js8_offset=True,
                     apply_fldigi=True,
                 )
+                if self._desired_fldigi_mode or self._desired_fldigi_offset is not None:
+                    self._fldigi_apply_pending = True
+                    self._maybe_apply_fldigi()
 
     def _suspend_for_minutes(self, minutes: int) -> None:
         try:
@@ -705,7 +731,7 @@ class SchedulerEngine(QObject):
             pass
         if self._control_mode() in ("MANUAL", "NONE"):
             return
-        if self._enforcement_mode() == "Normal" and not self._fldigi_apply_pending:
+        if not self._fldigi_apply_pending:
             return
         if not (self._desired_fldigi_mode or self._desired_fldigi_offset is not None):
             return
