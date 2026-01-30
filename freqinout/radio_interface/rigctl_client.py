@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -71,6 +72,7 @@ class FLRigClient:
         self.host = host
         self.port = port
         self._proxy: Optional[ServerProxy] = None
+        self._lock = threading.Lock()
         self.fldigi_port = fldigi_port
         self.fldigi_host = fldigi_host or host
         self._fldigi_proxy: Optional[ServerProxy] = None
@@ -102,6 +104,23 @@ class FLRigClient:
             log.info("Connecting to FLRig XML-RPC at %s", url)
             self._proxy = ServerProxy(url, allow_none=True, transport=self._transport())
         return self._proxy
+
+    def _with_proxy(self, func, *, label: str) -> object:
+        """
+        Serialize access to the XML-RPC proxy and retry once on transport glitches.
+        """
+        with self._lock:
+            try:
+                proxy = self._connect()
+                return func(proxy)
+            except Exception as e:
+                msg = str(e)
+                if "Request-sent" in msg or "Idle" in msg:
+                    log.warning("FLRig XML-RPC transient error during %s; reconnecting.", label)
+                    self._proxy = None
+                    proxy = self._connect()
+                    return func(proxy)
+                raise
 
     def _connect_fldigi(self) -> Optional[ServerProxy]:
         if self._fldigi_proxy is None:
@@ -210,8 +229,7 @@ class FLRigClient:
         Returns True if FLRig reports PTT active (transmitting).
         """
         try:
-            proxy = self._connect()
-            state = proxy.rig.get_ptt()
+            state = self._with_proxy(lambda p: p.rig.get_ptt(), label="get_ptt")
             return bool(state)
         except Exception as e:
             log.warning("Failed to get PTT from FLRig: %s", e)
@@ -222,8 +240,10 @@ class FLRigClient:
         Returns the current VFO frequency in Hz, or None on failure.
         """
         try:
-            proxy = self._connect()
-            freq_str = proxy.rig.get_vfo()  # documented as "return current VFO in Hz" :contentReference[oaicite:2]{index=2}
+            freq_str = self._with_proxy(
+                lambda p: p.rig.get_vfo(),
+                label="get_vfo",
+            )  # documented as "return current VFO in Hz" :contentReference[oaicite:2]{index=2}
             return int(float(freq_str))
         except Exception as e:
             log.warning("Failed to get VFO frequency from FLRig: %s", e)
@@ -236,23 +256,24 @@ class FLRigClient:
         Set rig frequency (and optionally mode/VFO) via FLRig.
         """
         try:
-            proxy = self._connect()
+            def _do_set(p):
+                # Select VFO if requested
+                if cmd.vfo in ("A", "B"):
+                    log.info("Setting FLRig VFO to %s", cmd.vfo)
+                    p.rig.set_AB(cmd.vfo)
 
-            # Select VFO if requested
-            if cmd.vfo in ("A", "B"):
-                log.info("Setting FLRig VFO to %s", cmd.vfo)
-                proxy.rig.set_AB(cmd.vfo)
+                # Set and verify frequency in Hz
+                freq_hz = cmd.hz
+                freq = float(freq_hz)
+                log.info("Setting FLRig frequency to %d Hz", freq_hz)
+                p.rig.set_verify_frequency(freq)
 
-            # Set and verify frequency in Hz
-            freq_hz = cmd.hz
-            freq = float(freq_hz)
-            log.info("Setting FLRig frequency to %d Hz", freq_hz)
-            proxy.rig.set_verify_frequency(freq)
+                # Optional mode change (if you configure it to be allowed)
+                if cmd.mode:
+                    log.info("Setting FLRig mode to %s", cmd.mode)
+                    p.rig.set_mode(cmd.mode)
 
-            # Optional mode change (if you configure it to be allowed)
-            if cmd.mode:
-                log.info("Setting FLRig mode to %s", cmd.mode)
-                proxy.rig.set_mode(cmd.mode)
+            self._with_proxy(_do_set, label="set_frequency")
 
             return True
         except Exception as e:
@@ -264,9 +285,8 @@ class FLRigClient:
         Ask FLRig to run the rig's tune function (if supported).
         """
         try:
-            proxy = self._connect()
             log.info("Invoking FLRig tune()")
-            proxy.rig.tune()
+            self._with_proxy(lambda p: p.rig.tune(), label="tune")
             return True
         except Exception as e:
             log.error("Failed to start tune via FLRig: %s", e)

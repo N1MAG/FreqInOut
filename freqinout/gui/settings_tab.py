@@ -364,13 +364,74 @@ class SettingsTab(QWidget):
         self.use_scheduler_chk.setToolTip("Enable automatic schedule-driven frequency changes.")
         ctrl_row.addWidget(self.use_scheduler_chk)
         ctrl_row.addSpacing(12)
-        ctrl_row.addWidget(QLabel("Schedule Mode"))
-        self.schedule_mode_combo = QComboBox()
-        self.schedule_mode_combo.addItems(["Normal", "Loose", "Strict"])
-        self.schedule_mode_combo.currentIndexChanged.connect(self._on_schedule_mode_changed)
-        ctrl_row.addWidget(self.schedule_mode_combo)
         ctrl_row.addStretch()
         op_layout.addLayout(ctrl_row)
+
+        enforcement_choices = ["On Schedule Change", "Prompt"]
+        prompt_choices = [
+            "Select Interval",
+            "Hourly",
+            "Every 5 minutes",
+            "Every 10 minutes",
+            "Every 15 minutes",
+            "Every 30 minutes",
+        ]
+
+        freq_row = QHBoxLayout()
+        self.freq_timer_label = QLabel("Frequency Timer:")
+        freq_row.addWidget(self.freq_timer_label)
+        self.freq_enforce_combo = QComboBox()
+        self.freq_enforce_combo.addItems(enforcement_choices)
+        self.freq_enforce_combo.currentIndexChanged.connect(self._on_enforcement_changed)
+        freq_row.addWidget(self.freq_enforce_combo)
+        freq_row.addSpacing(12)
+        self.freq_prompt_label = QLabel("Prompt Interval:")
+        freq_row.addWidget(self.freq_prompt_label)
+        self.freq_prompt_combo = QComboBox()
+        self.freq_prompt_combo.addItems(prompt_choices)
+        self.freq_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
+        self._disable_prompt_hint_item(self.freq_prompt_combo)
+        freq_row.addWidget(self.freq_prompt_combo)
+        freq_row.addStretch()
+        op_layout.addLayout(freq_row)
+
+        fldigi_row = QHBoxLayout()
+        self.fldigi_timer_label = QLabel("FLDigi Mode Timer:")
+        fldigi_row.addWidget(self.fldigi_timer_label)
+        self.fldigi_enforce_combo = QComboBox()
+        self.fldigi_enforce_combo.addItems(enforcement_choices)
+        self.fldigi_enforce_combo.currentIndexChanged.connect(self._on_enforcement_changed)
+        fldigi_row.addWidget(self.fldigi_enforce_combo)
+        fldigi_row.addSpacing(12)
+        self.fldigi_prompt_label = QLabel("Prompt Interval:")
+        fldigi_row.addWidget(self.fldigi_prompt_label)
+        self.fldigi_prompt_combo = QComboBox()
+        self.fldigi_prompt_combo.addItems(prompt_choices)
+        self.fldigi_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
+        self._disable_prompt_hint_item(self.fldigi_prompt_combo)
+        fldigi_row.addWidget(self.fldigi_prompt_combo)
+        fldigi_row.addStretch()
+        op_layout.addLayout(fldigi_row)
+
+        js8_row = QHBoxLayout()
+        self.js8_timer_label = QLabel("JS8 Offset Timer:")
+        js8_row.addWidget(self.js8_timer_label)
+        self.js8_enforce_combo = QComboBox()
+        self.js8_enforce_combo.addItems(enforcement_choices)
+        self.js8_enforce_combo.currentIndexChanged.connect(self._on_enforcement_changed)
+        js8_row.addWidget(self.js8_enforce_combo)
+        js8_row.addSpacing(12)
+        self.js8_prompt_label = QLabel("Prompt Interval:")
+        js8_row.addWidget(self.js8_prompt_label)
+        self.js8_prompt_combo = QComboBox()
+        self.js8_prompt_combo.addItems(prompt_choices)
+        self.js8_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
+        self._disable_prompt_hint_item(self.js8_prompt_combo)
+        js8_row.addWidget(self.js8_prompt_combo)
+        js8_row.addStretch()
+        op_layout.addLayout(js8_row)
+
+        self._align_enforcement_labels()
 
         # Operating status indicators (always visible)
         status_group = QGroupBox("Operating Status")
@@ -839,6 +900,37 @@ class SettingsTab(QWidget):
                 set_count += 1
         return f"{set_count}/{total} program paths set"
 
+    def _disable_prompt_hint_item(self, combo: QComboBox) -> None:
+        try:
+            model = combo.model()
+            if model is None:
+                return
+            idx = model.index(0, 0)
+            model.setData(idx, 0, Qt.UserRole - 1)
+        except Exception:
+            pass
+
+    def _align_enforcement_labels(self) -> None:
+        labels = [
+            self.freq_timer_label,
+            self.fldigi_timer_label,
+            self.js8_timer_label,
+        ]
+        prompt_labels = [
+            self.freq_prompt_label,
+            self.fldigi_prompt_label,
+            self.js8_prompt_label,
+        ]
+        try:
+            max_timer = max(lbl.sizeHint().width() for lbl in labels)
+            max_prompt = max(lbl.sizeHint().width() for lbl in prompt_labels)
+            for lbl in labels:
+                lbl.setFixedWidth(max_timer)
+            for lbl in prompt_labels:
+                lbl.setFixedWidth(max_prompt)
+        except Exception:
+            pass
+
     # ---------- LOAD/SAVE ---------- #
 
     def _load_settings(self):
@@ -871,12 +963,39 @@ class SettingsTab(QWidget):
             ctrl = "FLRig"
         self.control_combo.setCurrentText(ctrl)
         self.use_scheduler_chk.setChecked(bool(data.get("use_scheduler", True)))
-        sched_mode = (data.get("schedule_enforcement_mode", "Strict") or "Strict").strip()
-        legacy_map = {"Shack": "Normal", "POTA": "Loose", "EmComms": "Strict"}
-        sched_mode = legacy_map.get(sched_mode, sched_mode)
-        if sched_mode not in {"Normal", "Loose", "Strict"}:
-            sched_mode = "Strict"
-        self.schedule_mode_combo.setCurrentText(sched_mode)
+        freq_mode = (data.get("freq_enforcement_mode", "On Schedule Change") or "On Schedule Change").strip()
+        fldigi_mode = (data.get("fldigi_enforcement_mode", "On Schedule Change") or "On Schedule Change").strip()
+        js8_mode = (data.get("js8_enforcement_mode", "On Schedule Change") or "On Schedule Change").strip()
+        if freq_mode not in {"On Schedule Change", "Prompt"}:
+            freq_mode = "On Schedule Change"
+        if fldigi_mode not in {"On Schedule Change", "Prompt"}:
+            fldigi_mode = "On Schedule Change"
+        if js8_mode not in {"On Schedule Change", "Prompt"}:
+            js8_mode = "On Schedule Change"
+        self.freq_enforce_combo.setCurrentText(freq_mode)
+        self.fldigi_enforce_combo.setCurrentText(fldigi_mode)
+        self.js8_enforce_combo.setCurrentText(js8_mode)
+
+        freq_prompt = (data.get("freq_prompt_interval", "Hourly") or "Hourly").strip()
+        fldigi_prompt = (data.get("fldigi_prompt_interval", "Hourly") or "Hourly").strip()
+        js8_prompt = (data.get("js8_prompt_interval", "Hourly") or "Hourly").strip()
+        prompt_choices = {"Hourly", "Every 5 minutes", "Every 10 minutes", "Every 15 minutes", "Every 30 minutes"}
+        if freq_prompt not in prompt_choices:
+            freq_prompt = ""
+        if fldigi_prompt not in prompt_choices:
+            fldigi_prompt = ""
+        if js8_prompt not in prompt_choices:
+            js8_prompt = ""
+        self.freq_prompt_combo.setCurrentText(freq_prompt or "Select Interval")
+        self.fldigi_prompt_combo.setCurrentText(fldigi_prompt or "Select Interval")
+        self.js8_prompt_combo.setCurrentText(js8_prompt or "Select Interval")
+        if freq_mode != "Prompt":
+            self.freq_prompt_combo.setCurrentText("Select Interval")
+        if fldigi_mode != "Prompt":
+            self.fldigi_prompt_combo.setCurrentText("Select Interval")
+        if js8_mode != "Prompt":
+            self.js8_prompt_combo.setCurrentText("Select Interval")
+        self._update_enforcement_visibility()
         theme = (data.get("ui_theme", "light") or "light").strip().lower()
         self.theme_combo.setCurrentText("Dark" if theme == "dark" else "Light")
 
@@ -1020,7 +1139,28 @@ class SettingsTab(QWidget):
 
         data["control_via"] = self.control_combo.currentText().strip()
         data["use_scheduler"] = bool(self.use_scheduler_chk.isChecked())
-        data["schedule_enforcement_mode"] = self.schedule_mode_combo.currentText().strip()
+        freq_mode = self.freq_enforce_combo.currentText().strip()
+        fldigi_mode = self.fldigi_enforce_combo.currentText().strip()
+        js8_mode = self.js8_enforce_combo.currentText().strip()
+        freq_prompt = self.freq_prompt_combo.currentText().strip()
+        fldigi_prompt = self.fldigi_prompt_combo.currentText().strip()
+        js8_prompt = self.js8_prompt_combo.currentText().strip()
+        missing = []
+        if freq_mode == "Prompt" and freq_prompt == "Select Interval":
+            missing.append("Frequency Prompt Interval")
+        if fldigi_mode == "Prompt" and fldigi_prompt == "Select Interval":
+            missing.append("FLDigi Prompt Interval")
+        if js8_mode == "Prompt" and js8_prompt == "Select Interval":
+            missing.append("JS8 Prompt Interval")
+        if missing:
+            QMessageBox.warning(self, "Settings", f"Please select: {', '.join(missing)}.")
+            return
+        data["freq_enforcement_mode"] = freq_mode
+        data["freq_prompt_interval"] = freq_prompt
+        data["fldigi_enforcement_mode"] = fldigi_mode
+        data["fldigi_prompt_interval"] = fldigi_prompt
+        data["js8_enforcement_mode"] = js8_mode
+        data["js8_prompt_interval"] = js8_prompt
         data["ui_theme"] = self.theme_combo.currentText().strip().lower()
 
         try:
@@ -1078,7 +1218,12 @@ class SettingsTab(QWidget):
                 "timezone": data["timezone"],
                 "control_via": data["control_via"],
                 "use_scheduler": data["use_scheduler"],
-                "schedule_enforcement_mode": data.get("schedule_enforcement_mode", "Strict"),
+                "freq_enforcement_mode": data.get("freq_enforcement_mode", "On Schedule Change"),
+                "freq_prompt_interval": data.get("freq_prompt_interval", "Hourly"),
+                "fldigi_enforcement_mode": data.get("fldigi_enforcement_mode", "On Schedule Change"),
+                "fldigi_prompt_interval": data.get("fldigi_prompt_interval", "Hourly"),
+                "js8_enforcement_mode": data.get("js8_enforcement_mode", "On Schedule Change"),
+                "js8_prompt_interval": data.get("js8_prompt_interval", "Hourly"),
                 "ui_theme": data.get("ui_theme", "light"),
                 "js8_port": data["js8_port"],
                 "js8_offset_hz": data.get("js8_offset_hz", 0),
@@ -1111,7 +1256,12 @@ class SettingsTab(QWidget):
             self.settings.set("timezone", data["timezone"])
             self.settings.set("control_via", data["control_via"])
             self.settings.set("ui_theme", data.get("ui_theme", "light"))
-            self.settings.set("schedule_enforcement_mode", data.get("schedule_enforcement_mode", "Strict"))
+            self.settings.set("freq_enforcement_mode", data.get("freq_enforcement_mode", "On Schedule Change"))
+            self.settings.set("freq_prompt_interval", data.get("freq_prompt_interval", "Hourly"))
+            self.settings.set("fldigi_enforcement_mode", data.get("fldigi_enforcement_mode", "On Schedule Change"))
+            self.settings.set("fldigi_prompt_interval", data.get("fldigi_prompt_interval", "Hourly"))
+            self.settings.set("js8_enforcement_mode", data.get("js8_enforcement_mode", "On Schedule Change"))
+            self.settings.set("js8_prompt_interval", data.get("js8_prompt_interval", "Hourly"))
             self.settings.set("js8_port", data["js8_port"])
             self.settings.set("js8_offset_hz", data.get("js8_offset_hz", 0))
             self.settings.set("primary_js8_groups", data["primary_js8_groups"])
@@ -1174,19 +1324,40 @@ class SettingsTab(QWidget):
         self._mark_settings_dirty()
         # apply_theme will clear the toast once the app theme is applied
 
-    def _on_schedule_mode_changed(self):
-        mode = self.schedule_mode_combo.currentText().strip()
-        try:
-            if hasattr(self.settings, "set"):
-                self.settings.set("schedule_enforcement_mode", mode)
-                if hasattr(self.settings, "save"):
-                    self.settings.save()
-        except Exception:
-            pass
-        try:
-            self.settings_saved.emit()
-        except Exception:
-            pass
+    def _update_enforcement_visibility(self) -> None:
+        freq_prompt = self.freq_enforce_combo.currentText().strip() == "Prompt"
+        fldigi_prompt = self.fldigi_enforce_combo.currentText().strip() == "Prompt"
+        js8_prompt = self.js8_enforce_combo.currentText().strip() == "Prompt"
+        theme = resolve_theme(self.settings)
+        muted_style = (
+            "QComboBox {"
+            f" color: {theme['text_muted']}; background-color: {theme['surface_alt']};"
+            f" border: 1px solid {theme['border']};"
+            "}"
+        )
+        warn_style = (
+            "QComboBox {"
+            f" color: {theme['warning']}; background-color: {theme['surface']};"
+            f" border: 1px solid {theme['border']};"
+            "}"
+        )
+        for combo, enabled in (
+            (self.freq_prompt_combo, freq_prompt),
+            (self.fldigi_prompt_combo, fldigi_prompt),
+            (self.js8_prompt_combo, js8_prompt),
+        ):
+            combo.setEnabled(enabled)
+            if not enabled:
+                combo.setCurrentText("Select Interval")
+                combo.setStyleSheet(muted_style)
+                continue
+            if combo.currentText().strip() == "Select Interval":
+                combo.setStyleSheet(warn_style)
+            else:
+                combo.setStyleSheet("")
+
+    def _on_enforcement_changed(self):
+        self._update_enforcement_visibility()
         self._mark_settings_dirty()
 
     def _set_loading(self, active: bool, text: str = "Wilco. Standby for Spectrum QSY...") -> None:
@@ -1213,7 +1384,16 @@ class SettingsTab(QWidget):
         for edit in edits:
             edit.textChanged.connect(self._mark_settings_dirty)
 
-        combos = [self.control_combo, self.theme_combo, self.schedule_mode_combo]
+        combos = [
+            self.control_combo,
+            self.theme_combo,
+            self.freq_enforce_combo,
+            self.freq_prompt_combo,
+            self.fldigi_enforce_combo,
+            self.fldigi_prompt_combo,
+            self.js8_enforce_combo,
+            self.js8_prompt_combo,
+        ]
         for combo in combos:
             combo.currentIndexChanged.connect(self._mark_settings_dirty)
 

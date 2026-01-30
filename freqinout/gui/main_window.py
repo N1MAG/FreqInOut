@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
     QMessageBox,
+    QLayout,
+    QSpacerItem,
 )
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
@@ -102,10 +104,10 @@ class MainWindow(QMainWindow):
         ]
 
         # Build sidebar
-        nav_widget = QWidget()
-        nav_widget.setMinimumWidth(140)
-        nav_widget.setMaximumWidth(200)
-        nav_layout = QVBoxLayout(nav_widget)
+        self.nav_widget = QWidget()
+        self.nav_widget.setMinimumWidth(140)
+        self.nav_widget.setMaximumWidth(200)
+        nav_layout = QVBoxLayout(self.nav_widget)
         nav_layout.setContentsMargins(4, 4, 4, 4)
         nav_layout.setSpacing(4)
 
@@ -138,7 +140,51 @@ class MainWindow(QMainWindow):
         self.map_filters_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.addWidget(self.map_filters_container)
         self._init_map_filters()
+        spacer_height = 0
+        if self.nav_buttons:
+            try:
+                spacer_height = max(btn.sizeHint().height() for btn in self.nav_buttons)
+            except Exception:
+                spacer_height = 0
+        if spacer_height > 0:
+            nav_layout.addItem(QSpacerItem(0, spacer_height, QSizePolicy.Minimum, QSizePolicy.Fixed))
+
+        # Scheduler status panel (hidden on Map view)
+        self.scheduler_status_container = QGroupBox("Schedule Status")
+        self.scheduler_status_container.setCheckable(False)
+        self.scheduler_status_container.setMinimumWidth(140)
+        self.scheduler_status_container.setMaximumWidth(200)
+        self.scheduler_status_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.scheduler_status_container.setStyleSheet(
+            "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 4px; }"
+        )
+        status_layout = QVBoxLayout(self.scheduler_status_container)
+        status_layout.setContentsMargins(4, 4, 4, 4)
+        status_layout.setSpacing(4)
+        status_layout.setSizeConstraint(QLayout.SetMinimumSize)
+        self.scheduler_status_header = QLabel("On Schedule")
+        self.scheduler_status_header.setAlignment(Qt.AlignCenter)
+        self.scheduler_status_header.setWordWrap(True)
+        self.scheduler_status_header.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.scheduler_status_reasons = QWidget()
+        self.scheduler_status_reasons_layout = QVBoxLayout(self.scheduler_status_reasons)
+        self.scheduler_status_reasons_layout.setContentsMargins(0, 0, 0, 0)
+        self.scheduler_status_reasons_layout.setSpacing(2)
+        self.resume_schedule_btn = QPushButton("Resume Schedule")
+        self.resume_schedule_btn.setFixedWidth(140)
+        self.resume_schedule_btn.clicked.connect(self._on_resume_schedule_clicked)
+        try:
+            theme = resolve_theme(self.settings)
+            self.resume_schedule_btn.setStyleSheet(button_style("info", theme))
+        except Exception:
+            pass
+        status_layout.addWidget(self.scheduler_status_header)
+        status_layout.addWidget(self.scheduler_status_reasons)
+        status_layout.addWidget(self.resume_schedule_btn, alignment=Qt.AlignCenter)
+        nav_layout.addWidget(self.scheduler_status_container)
+        self.resume_schedule_btn.setVisible(False)
         nav_layout.addStretch()
+        QTimer.singleShot(0, self._sync_status_box_width)
 
         # Stacked content
         self.stack = QStackedWidget()
@@ -154,7 +200,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.stack, stretch=1)
 
         # Layout composition
-        layout.addWidget(nav_widget)
+        layout.addWidget(self.nav_widget)
         layout.addWidget(right_container, stretch=1)
         self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -187,6 +233,38 @@ class MainWindow(QMainWindow):
             self.scheduler.off_schedule_detected.connect(self._on_off_schedule_detected)
         except Exception:
             pass
+        try:
+            self.scheduler.off_schedule_cleared.connect(self._dismiss_off_schedule_prompt)
+        except Exception:
+            pass
+        try:
+            self.scheduler.varac_wait_detected.connect(self._on_varac_wait_detected)
+        except Exception:
+            pass
+        try:
+            self.scheduler.varac_wait_cleared.connect(self._dismiss_varac_wait_prompt)
+        except Exception:
+            pass
+        try:
+            self.scheduler.active_entry_changed.connect(self._refresh_scheduler_status_panel)
+        except Exception:
+            pass
+        try:
+            if hasattr(self.fldigi_tab, "net_status_changed"):
+                self.fldigi_tab.net_status_changed.connect(
+                    lambda kind, active: self.scheduler.set_manual_net_active(kind, active)
+                )
+            if hasattr(self.js8_tab, "net_status_changed"):
+                self.js8_tab.net_status_changed.connect(
+                    lambda kind, active: self.scheduler.set_manual_net_active(kind, active)
+                )
+        except Exception:
+            pass
+
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(2000)
+        self._status_timer.timeout.connect(self._refresh_scheduler_status_panel)
+        self._status_timer.start()
 
         app = QApplication.instance()
         if app is not None:
@@ -241,6 +319,7 @@ class MainWindow(QMainWindow):
         # Sync sidebar filters initially
         self._sync_map_filters_from_tab()
         self._update_log_indicator()
+        self._refresh_scheduler_status_panel()
 
         try:
             self.log_tab.log_level_changed.connect(self._update_log_indicator)
@@ -419,6 +498,8 @@ class MainWindow(QMainWindow):
         Show the stations-map 'Show' filters in the sidebar only when the Map view is active.
         """
         is_map = 0 <= index < len(self._screens) and self._screens[index][1] is self.stations_map_tab
+        if hasattr(self, "scheduler_status_container"):
+            self.scheduler_status_container.setVisible(not is_map)
         try:
             if hasattr(self.stations_map_tab, "set_map_visible"):
                 self.stations_map_tab.set_map_visible(is_map)
@@ -429,6 +510,144 @@ class MainWindow(QMainWindow):
             return
         self.map_filters_container.setVisible(True)
         self._sync_map_filters_from_tab()
+
+    def _on_resume_schedule_clicked(self) -> None:
+        try:
+            if hasattr(self, "scheduler"):
+                if hasattr(self.scheduler, "resume_schedule"):
+                    self.scheduler.resume_schedule()
+                else:
+                    try:
+                        self.scheduler.settings.set("schedule_suspend_until", 0)
+                    except Exception:
+                        pass
+                    self.scheduler.apply_current_entry(
+                        force=True,
+                        ignore_wait_prompt=True,
+                        ignore_suspend=True,
+                    )
+        except Exception:
+            pass
+
+    def _set_scheduler_reasons(self, lines: list[str]) -> None:
+        if not hasattr(self, "scheduler_status_reasons_layout"):
+            return
+        layout = self.scheduler_status_reasons_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for line in lines:
+            lbl = QLabel(line)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setWordWrap(True)
+            layout.addWidget(lbl)
+
+    def _refresh_scheduler_status_panel(self, *_args) -> None:
+        if not hasattr(self, "scheduler") or not hasattr(self, "scheduler_status_container"):
+            return
+        if not self.scheduler_status_container.isVisible():
+            return
+        try:
+            status = self.scheduler.get_status_summary()
+        except Exception:
+            return
+        control_mode = status.get("control_mode")
+        use_scheduler = bool(status.get("use_scheduler", True))
+        freq_label = status.get("freq_label") or ""
+        suspended_until = status.get("suspended_until")
+        off_schedule = bool(status.get("off_schedule"))
+        varac_waiting = bool(status.get("varac_waiting"))
+        ptt_active = bool(status.get("ptt_active"))
+        js8_busy = bool(status.get("js8_busy"))
+        varac_busy = bool(status.get("varac_busy"))
+        net_kind = status.get("net_kind")
+        flags = status.get("off_schedule_flags") or {}
+        fldigi_mode_off = bool(status.get("fldigi_mode_off"))
+        fldigi_offset_off = bool(status.get("fldigi_offset_off"))
+
+        if (control_mode in {"MANUAL", "NONE"}) or not use_scheduler:
+            self.scheduler_status_header.setText("Frequency")
+            self._set_scheduler_reasons([freq_label or "--"])
+            self.resume_schedule_btn.setVisible(False)
+            try:
+                self.scheduler_status_container.adjustSize()
+            except Exception:
+                pass
+            return
+
+        if suspended_until:
+            local_dt = suspended_until.astimezone()
+            self.scheduler_status_header.setText("Suspended until")
+            self._set_scheduler_reasons([f"{local_dt:%Y-%m-%d %H:%M}"])
+            self.resume_schedule_btn.setVisible(True)
+            try:
+                self.scheduler_status_container.adjustSize()
+            except Exception:
+                pass
+            return
+
+        reasons = []
+        if off_schedule:
+            if flags.get("frequency"):
+                reasons.append("Frequency")
+            if flags.get("offset"):
+                reasons.append("JS8 Offset")
+            if flags.get("mode"):
+                if fldigi_mode_off:
+                    reasons.append("FLDigi Mode")
+                if fldigi_offset_off:
+                    reasons.append("FLDigi Offset")
+                if not fldigi_mode_off and not fldigi_offset_off:
+                    reasons.append("FLDigi Mode/Offset")
+            if varac_waiting:
+                reasons.append("Waiting to Clear")
+            if ptt_active:
+                reasons.append("Sending Traffic")
+            if js8_busy or varac_busy:
+                reasons.append("QSO")
+        else:
+            if varac_waiting:
+                reasons.append("Waiting to Clear")
+            if ptt_active:
+                reasons.append("Sending Traffic")
+            if js8_busy or varac_busy:
+                reasons.append("QSO")
+            if net_kind:
+                reasons.append(net_kind)
+
+        if off_schedule:
+            self.scheduler_status_header.setText("Off Schedule")
+            self.scheduler_status_header.setStyleSheet("font-weight: bold; color: #C62828;")
+            self._set_scheduler_reasons(reasons or [""])
+            self.resume_schedule_btn.setVisible(True)
+            try:
+                theme = resolve_theme(self.settings)
+                highlight = theme.get("surface_alt", theme.get("surface", "#FFFFFF"))
+                border = theme.get("warning", theme.get("border", "#CCCCCC"))
+                self.scheduler_status_container.setStyleSheet(
+                    "QGroupBox { background-color: %s; border: 1px solid %s; border-radius: 6px; }"
+                    "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 4px; }"
+                    % (highlight, border)
+                )
+            except Exception:
+                pass
+        else:
+            self.scheduler_status_header.setText("On Schedule")
+            self.scheduler_status_header.setStyleSheet("")
+            self._set_scheduler_reasons([])
+            self.resume_schedule_btn.setVisible(False)
+            try:
+                self.scheduler_status_container.setStyleSheet(
+                    "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 4px; }"
+                )
+            except Exception:
+                pass
+        try:
+            self.scheduler_status_container.adjustSize()
+        except Exception:
+            pass
 
     def _on_app_about_to_quit(self):
         if self._shutting_down:
@@ -464,21 +683,69 @@ class MainWindow(QMainWindow):
         self._on_app_about_to_quit()
         super().closeEvent(event)
 
-    def _on_off_schedule_detected(self, entry: dict) -> None:
-        if self._shutting_down:
+    def resizeEvent(self, event):
+        try:
+            self._sync_status_box_width()
+        except Exception:
+            pass
+        super().resizeEvent(event)
+
+    def _sync_status_box_width(self) -> None:
+        if not hasattr(self, "scheduler_status_container"):
             return
+        width = 0
+        if hasattr(self, "nav_buttons") and self.nav_buttons:
+            try:
+                width = max(btn.width() for btn in self.nav_buttons)
+                if width <= 10:
+                    width = max(btn.sizeHint().width() for btn in self.nav_buttons)
+            except Exception:
+                width = 0
+        if width <= 10 and hasattr(self, "nav_widget"):
+            try:
+                margins = self.nav_widget.layout().contentsMargins()
+                width = int(self.nav_widget.width() - margins.left() - margins.right())
+            except Exception:
+                width = int(self.nav_widget.width())
+        if width > 0:
+            self.scheduler_status_container.setFixedWidth(width)
+
+    def _dismiss_off_schedule_prompt(self) -> None:
         if hasattr(self, "_off_schedule_prompt") and self._off_schedule_prompt is not None:
             try:
                 self._off_schedule_prompt.close()
             except Exception:
                 pass
             self._off_schedule_prompt = None
+
+    def _dismiss_varac_wait_prompt(self) -> None:
+        if hasattr(self, "_varac_wait_prompt") and self._varac_wait_prompt is not None:
+            try:
+                self._varac_wait_prompt.close()
+            except Exception:
+                pass
+            self._varac_wait_prompt = None
+
+    def _on_off_schedule_detected(self, payload: dict) -> None:
+        if self._shutting_down:
+            return
+        self._dismiss_off_schedule_prompt()
+        items = payload.get("items") if isinstance(payload, dict) else None
+        items = items if isinstance(items, list) else []
+        if not items:
+            return
         msg = QMessageBox(self)
         msg.setWindowTitle("Off Schedule")
-        msg.setText("RIG off schedule. Apply default schedule?")
-        apply_btn = msg.addButton("Apply", QMessageBox.AcceptRole)
-        ignore_btn = msg.addButton("Ignore", QMessageBox.RejectRole)
-        suspend_btn = msg.addButton("Suspend", QMessageBox.DestructiveRole)
+        if len(items) == 1:
+            text = f"{items[0]} Off Schedule"
+        elif len(items) == 2:
+            text = f"{items[0]} and {items[1]} are Off Schedule"
+        else:
+            text = f"{', '.join(items[:-1])}, and {items[-1]} are Off Schedule"
+        msg.setText(text)
+        apply_btn = msg.addButton("Resume Sched.", QMessageBox.AcceptRole)
+        ignore_btn = msg.addButton("Skip Once", QMessageBox.RejectRole)
+        suspend_btn = msg.addButton("Pause Sched. 30 Min", QMessageBox.DestructiveRole)
         self._off_schedule_prompt = msg
         auto_applied = {"done": False}
 
@@ -487,7 +754,7 @@ class MainWindow(QMainWindow):
                 return
             auto_applied["done"] = True
             try:
-                self.scheduler.resolve_off_schedule("apply")
+                self.scheduler.resolve_off_schedule("apply", items=items)
             except Exception:
                 pass
             try:
@@ -511,15 +778,50 @@ class MainWindow(QMainWindow):
         clicked = msg.clickedButton()
         if clicked == apply_btn:
             try:
-                self.scheduler.resolve_off_schedule("apply")
+                self.scheduler.resolve_off_schedule("apply", items=items)
+            except Exception:
+                pass
+        elif clicked == ignore_btn:
+            try:
+                self.scheduler.resolve_off_schedule("ignore", items=items)
             except Exception:
                 pass
         elif clicked == suspend_btn:
             try:
-                self.scheduler.resolve_off_schedule("suspend")
+                self.scheduler.resolve_off_schedule("suspend", items=items)
             except Exception:
                 pass
         self._off_schedule_prompt = None
+
+    def _on_varac_wait_detected(self, payload: dict) -> None:
+        if self._shutting_down:
+            return
+        self._dismiss_varac_wait_prompt()
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Frequency Change Pending")
+        msg.setText("VarAC is waiting for frequency to clear.\nChange frequency now?")
+        apply_btn = msg.addButton("Resume Sched.", QMessageBox.AcceptRole)
+        ignore_btn = msg.addButton("Skip Once", QMessageBox.RejectRole)
+        suspend_btn = msg.addButton("Pause Sched. 30 Min", QMessageBox.DestructiveRole)
+        self._varac_wait_prompt = msg
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == apply_btn:
+            try:
+                self.scheduler.resolve_varac_wait("apply")
+            except Exception:
+                pass
+        elif clicked == suspend_btn:
+            try:
+                self.scheduler.resolve_varac_wait("suspend")
+            except Exception:
+                pass
+        else:
+            try:
+                self.scheduler.resolve_varac_wait("ignore")
+            except Exception:
+                pass
+        self._varac_wait_prompt = None
 
     # ------------------------------------------------------------------ #
     # Helpers                                                            #
@@ -597,6 +899,7 @@ class MainWindow(QMainWindow):
         if 0 <= index < self.stack.count():
             self.stack.setCurrentIndex(index)
             self._update_map_filters_visibility(index)
+            self._refresh_scheduler_status_panel()
             try:
                 widget = self.stack.widget(index)
                 if hasattr(widget, "show_loading_toast"):

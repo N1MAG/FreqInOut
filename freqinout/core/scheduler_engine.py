@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import psutil
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from freqinout.core.logger import log
@@ -182,6 +183,9 @@ class SchedulerEngine(QObject):
     active_entry_changed = Signal(dict, str)  # (entry, source: "HF" / "NET" / "NONE")
     next_change_updated = Signal(object)      # datetime or None
     off_schedule_detected = Signal(dict)
+    off_schedule_cleared = Signal()
+    varac_wait_detected = Signal(dict)
+    varac_wait_cleared = Signal()
 
     def __init__(
         self,
@@ -211,14 +215,48 @@ class SchedulerEngine(QObject):
         self._fldigi_apply_after_ts: Optional[float] = None
         self._fldigi_was_available: bool = False
         self._fldigi_apply_pending: bool = False
-        self._last_resync_ts: float = 0.0
-        self._off_schedule_prompt_active: bool = False
-        self._last_off_schedule_key: Optional[Tuple] = None
+        self._fldigi_force_apply_once: bool = False
+        self._prompt_active: bool = False
+        self._prompt_items: List[str] = []
+        self._prompt_entry_key: Optional[Tuple] = None
+        self._prompt_state = {
+            "frequency": {"last_prompt_ts": 0.0},
+            "mode": {"last_prompt_ts": 0.0},
+            "offset": {"last_prompt_ts": 0.0},
+        }
+        self._varac_wait_prompt_active: bool = False
+        self._varac_wait_prompt_entry_key: Optional[Tuple] = None
+        self._proc_snapshot: List[str] = []
+        self._proc_snapshot_ts: float = 0.0
         self._control_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-control")
         self._control_future = None
+        self._control_future_started_at: Optional[float] = None
+        self._control_timeout_s: float = 8.0
         self._control_backoff_until: float = 0.0
         self._control_fail_count: int = 0
         self._pending_entry_key: Optional[Tuple] = None
+        self._force_retry_after_control: bool = False
+        self._forced_retry_attempts_left: int = 0
+        self._latest_intent: Optional[Dict[str, object]] = None
+        self._latest_intent_ts: float = 0.0
+        self._retry_scheduled: bool = False
+        self._manual_qsy_active: bool = False
+        self._manual_qsy_entry_key: Optional[Tuple] = None
+        self._manual_net_fldigi_active: bool = False
+        self._manual_net_js8_active: bool = False
+        self._net_schedule_active: bool = False
+        self._net_fldigi_apply_allowed_once: bool = False
+        self._net_resume_apply_once: bool = False
+        self._net_schedule_started_at: Optional[float] = None
+        self._net_schedule_entry_key: Optional[Tuple] = None
+        self._last_off_schedule_flags = {
+            "frequency": False,
+            "mode": False,
+            "offset": False,
+            "fldigi_offset": False,
+        }
+        self._fldigi_available_cache: Optional[bool] = None
+        self._fldigi_available_ts: float = 0.0
 
         self.current_source: str = "NONE"
         self.current_schedule_entry: Dict = {}
@@ -237,6 +275,47 @@ class SchedulerEngine(QObject):
             except Exception as e:
                 log.error("SchedulerEngine: error probing FLRig availability: %s", e)
         self._ensure_js8_offset_default()
+
+    def set_manual_net_active(self, kind: str, active: bool) -> None:
+        """
+        Track manual net sessions started from NCS tabs.
+
+        kind: "FLDIGI" or "JS8"
+        """
+        key = (kind or "").strip().upper()
+        if key == "FLDIGI":
+            self._manual_net_fldigi_active = bool(active)
+        elif key == "JS8":
+            self._manual_net_js8_active = bool(active)
+        if active:
+            self._net_fldigi_apply_allowed_once = False
+        if not active:
+            try:
+                self.force_refresh()
+            except Exception:
+                pass
+            # End of net should resume schedule enforcement fully.
+            self._manual_qsy_active = False
+            self._manual_qsy_entry_key = None
+            self._control_backoff_until = 0.0
+            self._control_fail_count = 0
+            self._pending_entry_key = None
+            self._reset_control_if_running("end net (force resume)")
+            self._force_retry_after_control = True
+            self._forced_retry_attempts_left = 5
+            self._net_resume_apply_once = True
+            self.apply_current_entry(
+                force=True,
+                ignore_wait_prompt=True,
+                ignore_suspend=True,
+                ignore_net_suppression=True,
+            )
+            self._maybe_apply_fldigi()
+            self._net_resume_apply_once = False
+            self._schedule_forced_retry()
+
+    def _net_corrections_suppressed(self) -> bool:
+        return bool(self._net_schedule_active or self._manual_net_fldigi_active or self._manual_net_js8_active)
 
     # ------------------------------------------------------------------
     # Paths / DB helpers
@@ -405,45 +484,6 @@ class SchedulerEngine(QObject):
         """
         return
 
-    def _enforcement_mode(self) -> str:
-        try:
-            mode = (self.settings.get("schedule_enforcement_mode", "Strict") or "Strict").strip()
-        except Exception:
-            mode = "Strict"
-        norm = str(mode or "").strip().lower()
-        legacy_map = {"shack": "Normal", "pota": "Loose", "emcomms": "Strict"}
-        if norm in legacy_map:
-            return legacy_map[norm]
-        if norm in {"normal", "loose", "strict"}:
-            return norm.title()
-        return "Strict"
-
-    def _maybe_resync_frequency(self) -> None:
-        if self._enforcement_mode() != "Strict":
-            return
-        # Strict now uses the off-schedule prompt with timeout apply.
-        return
-        entry = self.current_schedule_entry or {}
-        if not entry:
-            return
-        if self.current_source == "NET":
-            return
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        if self._scheduling_suspended(now_utc):
-            return
-        now_ts = time.time()
-        if now_ts - self._last_resync_ts < 15 * 60:
-            return
-        freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
-        if not freq_hz:
-            return
-        cur = self._current_rig_frequency()
-        if cur is not None and abs(cur - freq_hz) <= 5:
-            self._last_resync_ts = now_ts
-            return
-        self._apply_schedule_entry(entry, self.current_source, force=True, apply_js8_offset=False, apply_fldigi=False)
-        self._last_resync_ts = now_ts
-
     def _control_can_attempt(self) -> bool:
         return time.time() >= (self._control_backoff_until or 0.0)
 
@@ -451,6 +491,85 @@ class SchedulerEngine(QObject):
         base = 5.0
         max_backoff = 300.0
         return min(base * (2 ** max(0, self._control_fail_count - 1)), max_backoff)
+
+    def _record_latest_intent(
+        self,
+        entry: Dict,
+        source: str,
+        *,
+        now_utc: Optional[datetime.datetime] = None,
+        force: bool = False,
+        ignore_suspend: bool = False,
+        ignore_wait_prompt: bool = False,
+        apply_js8_offset: bool = True,
+        apply_fldigi: bool = True,
+    ) -> None:
+        self._latest_intent = {
+            "entry": dict(entry),
+            "source": source,
+            "now_utc": now_utc,
+            "force": bool(force),
+            "ignore_suspend": bool(ignore_suspend),
+            "ignore_wait_prompt": bool(ignore_wait_prompt),
+            "apply_js8_offset": bool(apply_js8_offset),
+            "apply_fldigi": bool(apply_fldigi),
+        }
+        self._latest_intent_ts = time.time()
+
+    def _apply_latest_intent_if_any(self) -> bool:
+        intent = self._latest_intent
+        if not intent:
+            return False
+        self._latest_intent = None
+        entry = intent.get("entry") or {}
+        if not isinstance(entry, dict) or not entry:
+            return False
+        now_utc = intent.get("now_utc")
+        if not isinstance(now_utc, datetime.datetime):
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+        self._apply_schedule_entry(
+            entry,
+            intent.get("source") or self.current_source or "NONE",
+            now_utc=now_utc,
+            force=bool(intent.get("force")),
+            ignore_suspend=bool(intent.get("ignore_suspend")),
+            ignore_wait_prompt=bool(intent.get("ignore_wait_prompt")),
+            apply_js8_offset=bool(intent.get("apply_js8_offset")),
+            apply_fldigi=bool(intent.get("apply_fldigi")),
+        )
+        return True
+
+    def _reset_control_executor(self, reason: str) -> None:
+        try:
+            self._control_executor.shutdown(wait=False)
+        except Exception:
+            pass
+        self._control_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="freqinout-control",
+        )
+        self._control_future = None
+        self._control_future_started_at = None
+        self._pending_entry_key = None
+        self._control_backoff_until = 0.0
+        self._control_fail_count = 0
+        log.warning("SchedulerEngine: control executor reset (%s).", reason)
+
+    def _reset_control_if_running(self, reason: str) -> None:
+        """
+        Force-clear any in-flight control task so an immediate user action
+        (resume schedule / end net) can apply without waiting on backoff.
+        """
+        if self._control_future is None:
+            return
+        if not self._control_future.done():
+            self._reset_control_executor(reason)
+
+    def _control_future_stuck(self) -> bool:
+        if self._control_future is None or self._control_future.done():
+            return False
+        started_at = self._control_future_started_at or 0.0
+        return (time.time() - started_at) > self._control_timeout_s
 
     def _queue_control_action(
         self,
@@ -466,10 +585,16 @@ class SchedulerEngine(QObject):
         js8_group: str,
     ) -> bool:
         if not self._control_can_attempt():
+            log.debug("SchedulerEngine: control action skipped (backoff active).")
             return False
         if self._control_future is not None and not self._control_future.done():
-            return False
+            if self._control_future_stuck():
+                self._reset_control_executor("timeout waiting for control task")
+            else:
+                log.debug("SchedulerEngine: control action skipped (control task running).")
+                return False
         if self._pending_entry_key == entry_key:
+            log.debug("SchedulerEngine: control action skipped (pending entry key).")
             return False
         self._pending_entry_key = entry_key
 
@@ -520,6 +645,7 @@ class SchedulerEngine(QObject):
         def _on_done(fut):
             def _apply_result():
                 self._pending_entry_key = None
+                self._control_future_started_at = None
                 ok = False
                 try:
                     ok = bool(fut.result())
@@ -542,9 +668,23 @@ class SchedulerEngine(QObject):
                         backoff,
                         self._control_fail_count,
                     )
+                if self._latest_intent:
+                    self._force_retry_after_control = False
+                    QTimer.singleShot(0, self._apply_latest_intent_if_any)
+                elif self._force_retry_after_control:
+                    self._force_retry_after_control = False
+                    QTimer.singleShot(
+                        0,
+                        lambda: self.apply_current_entry(
+                            force=True,
+                            ignore_wait_prompt=True,
+                            ignore_suspend=True,
+                        ),
+                    )
             QTimer.singleShot(0, _apply_result)
 
         self._control_future = self._control_executor.submit(_task)
+        self._control_future_started_at = time.time()
         self._control_future.add_done_callback(_on_done)
         return True
 
@@ -575,6 +715,20 @@ class SchedulerEngine(QObject):
         except Exception:
             return None
 
+    def _fldigi_available(self) -> bool:
+        if not self.rig or not hasattr(self.rig, "is_fldigi_available"):
+            return False
+        now_ts = time.time()
+        if now_ts - self._fldigi_available_ts < 5.0 and self._fldigi_available_cache is not None:
+            return self._fldigi_available_cache
+        try:
+            available = bool(self.rig.is_fldigi_available())
+        except Exception:
+            available = False
+        self._fldigi_available_cache = available
+        self._fldigi_available_ts = now_ts
+        return available
+
     def _current_fldigi_mode(self) -> Optional[str]:
         if not self.rig or not hasattr(self.rig, "get_fldigi_mode"):
             return None
@@ -584,66 +738,458 @@ class SchedulerEngine(QObject):
             return None
         return mode.strip().upper() if isinstance(mode, str) else None
 
-    def _maybe_prompt_off_schedule(self) -> None:
-        if self._enforcement_mode() not in {"Loose", "Strict"}:
+    def _enforcement_mode(self, key: str, default: str = "On Schedule Change") -> str:
+        try:
+            raw = (self.settings.get(key, default) or default).strip()
+        except Exception:
+            raw = default
+        if raw not in {"On Schedule Change", "Prompt"}:
+            return default
+        return raw
+
+    def _prompt_interval_minutes(self, key: str, default: int = 60) -> int:
+        try:
+            raw = (self.settings.get(key, "Hourly") or "Hourly").strip()
+        except Exception:
+            raw = "Hourly"
+        mapping = {
+            "Hourly": 60,
+            "Every 5 minutes": 5,
+            "Every 10 minutes": 10,
+            "Every 15 minutes": 15,
+            "Every 30 minutes": 30,
+        }
+        return mapping.get(raw, default)
+
+    def _refresh_proc_snapshot(self) -> None:
+        now_ts = time.time()
+        if now_ts - self._proc_snapshot_ts < 2.0:
+            return
+        snap: List[str] = []
+        for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                exe_path = (proc.info.get("exe") or "")
+                exe = exe_path.lower()
+                exe_base = Path(exe_path).name.lower() if exe_path else ""
+                cmdline_list = proc.info.get("cmdline") or []
+                first_arg = (cmdline_list[0] if cmdline_list else "")
+                cmd_base = Path(first_arg).name.lower() if first_arg else ""
+                for token in (name, exe, exe_base, cmd_base):
+                    if token:
+                        snap.append(token)
+            except Exception:
+                continue
+        self._proc_snapshot = snap
+        self._proc_snapshot_ts = now_ts
+
+    def _process_running(self, name: str) -> bool:
+        target = (name or "").strip().lower()
+        if not target:
+            return False
+        self._refresh_proc_snapshot()
+        targets = {target, f"{target}.exe"}
+        return any(entry in targets for entry in self._proc_snapshot)
+
+    def _js8_running(self) -> bool:
+        return self._process_running("js8call")
+
+    def _varac_running(self) -> bool:
+        return self._process_running("varac")
+
+    def _js8_busy_ok(self) -> bool:
+        if not self.js8:
+            return True
+        if not self._js8_running():
+            return True
+        try:
+            return not self.js8.is_busy()
+        except Exception:
+            return True
+
+    def _varac_status(self) -> Dict[str, object]:
+        if not self.varac or not self._varac_running():
+            return {"busy": False, "waiting_for_frequency": False, "reason": None}
+        if hasattr(self.varac, "get_status"):
+            try:
+                status = self.varac.get_status()
+                if isinstance(status, dict):
+                    return status
+            except Exception:
+                return {"busy": False, "waiting_for_frequency": False, "reason": None}
+        try:
+            return {"busy": bool(self.varac.is_busy()), "waiting_for_frequency": False, "reason": None}
+        except Exception:
+            return {"busy": False, "waiting_for_frequency": False, "reason": None}
+
+    def _varac_busy_ok(self, status: Optional[Dict[str, object]] = None) -> bool:
+        status = status or self._varac_status()
+        try:
+            return not bool(status.get("busy"))
+        except Exception:
+            return True
+
+    def apply_current_entry(
+        self,
+        *,
+        force: bool = False,
+        ignore_wait_prompt: bool = False,
+        ignore_suspend: bool = False,
+        ignore_net_suppression: bool = False,
+    ) -> None:
+        entry = self.current_schedule_entry or {}
+        if not entry:
+            return
+        source = self.current_source or "NONE"
+        now = datetime.datetime.now(datetime.timezone.utc)
+        self._apply_schedule_entry(
+            entry,
+            source,
+            now_utc=now,
+            force=force,
+            ignore_wait_prompt=ignore_wait_prompt,
+            ignore_suspend=ignore_suspend,
+            ignore_net_suppression=ignore_net_suppression,
+        )
+
+    def resolve_varac_wait(self, action: str) -> None:
+        self._varac_wait_prompt_active = False
+        self._varac_wait_prompt_entry_key = None
+        self.varac_wait_cleared.emit()
+        if action == "apply":
+            self.apply_current_entry(force=True, ignore_wait_prompt=True, ignore_suspend=True)
+        elif action == "suspend":
+            self._suspend_for_minutes(30)
+
+    def resume_schedule(self) -> None:
+        try:
+            if hasattr(self.settings, "set"):
+                self.settings.set("schedule_suspend_until", 0)
+        except Exception:
+            pass
+        self._manual_qsy_active = False
+        self._manual_qsy_entry_key = None
+        self._prompt_active = False
+        self._prompt_items = []
+        self._prompt_entry_key = None
+        self._reset_prompt_timers()
+        self._fldigi_force_apply_once = True
+        self._latest_intent = None
+        self._latest_intent_ts = 0.0
+        self._retry_scheduled = False
+        self._control_backoff_until = 0.0
+        self._control_fail_count = 0
+        self._pending_entry_key = None
+        self._force_retry_after_control = True
+        self._forced_retry_attempts_left = 5
+        self._reset_control_if_running("resume schedule (force apply)")
+        if self._control_future_stuck():
+            self._reset_control_executor("resume schedule (stuck control task)")
+        self._net_resume_apply_once = True
+        self.apply_current_entry(
+            force=True,
+            ignore_wait_prompt=True,
+            ignore_suspend=True,
+            ignore_net_suppression=True,
+        )
+        self._maybe_apply_fldigi()
+        self._net_resume_apply_once = False
+        self._schedule_forced_retry()
+
+    def _schedule_forced_retry(self) -> None:
+        if self._retry_scheduled:
+            return
+        if self._forced_retry_attempts_left <= 0:
+            return
+        self._retry_scheduled = True
+
+        def _try():
+            self._retry_scheduled = False
+            if self._control_future_stuck():
+                self._reset_control_executor("forced retry (stuck control task)")
+            if not self._control_can_attempt():
+                self._schedule_forced_retry()
+                return
+            if self._control_future is not None and not self._control_future.done():
+                self._schedule_forced_retry()
+                return
+            if self._forced_retry_attempts_left <= 0:
+                return
+            self._forced_retry_attempts_left -= 1
+            if self._apply_latest_intent_if_any():
+                return
+            self.apply_current_entry(
+                force=True,
+                ignore_wait_prompt=True,
+                ignore_suspend=True,
+            )
+
+        QTimer.singleShot(1000, _try)
+
+    def get_status_summary(self) -> Dict[str, object]:
+        try:
+            use_scheduler = bool(self.settings.get("use_scheduler", True))
+        except Exception:
+            use_scheduler = True
+        control_mode = self._control_mode()
+        entry = self.current_schedule_entry or {}
+        flags = (
+            self._off_schedule_flags(entry)
+            if entry
+            else {"frequency": False, "mode": False, "offset": False, "fldigi_offset": False}
+        )
+        off_schedule = any(flags.values())
+        varac_status = self._varac_status()
+        js8_busy = False
+        if self.js8 and self._js8_running():
+            try:
+                js8_busy = bool(self.js8.is_busy())
+            except Exception:
+                js8_busy = False
+        ptt_active = False
+        if self.rig and hasattr(self.rig, "get_ptt"):
+            try:
+                ptt_active = bool(self.rig.get_ptt())
+            except Exception:
+                ptt_active = False
+        suspended_until = self._suspend_until_dt()
+        freq_hz = self._current_rig_frequency()
+        freq_label = ""
+        if isinstance(freq_hz, (int, float)) and freq_hz > 0:
+            freq_label = f"{freq_hz / 1_000_000:.3f}"
+        source = self.current_source or "NONE"
+        net_kind = None
+        if source == "NET":
+            if entry.get("primary_js8call_group"):
+                net_kind = "JS8 Net"
+            else:
+                net_kind = "FLDigi Net"
+        elif source == "HF":
+            net_kind = "HF Schedule"
+        fldigi_mode_off = False
+        fldigi_offset_off = False
+        if entry and self._fldigi_available():
+            desired_mode = self._expected_fldigi_mode(entry)
+            desired_offset = self._expected_fldigi_offset(entry)
+            try:
+                current_mode = self._current_fldigi_mode()
+                if desired_mode and current_mode is not None and current_mode != desired_mode.strip().upper():
+                    fldigi_mode_off = True
+            except Exception:
+                pass
+            try:
+                current_offset = self._current_fldigi_offset()
+                if desired_offset is not None and current_offset is not None and desired_offset != current_offset:
+                    fldigi_offset_off = True
+            except Exception:
+                pass
+        return {
+            "use_scheduler": use_scheduler,
+            "control_mode": control_mode,
+            "off_schedule": off_schedule,
+            "off_schedule_flags": flags,
+            "varac_waiting": bool(varac_status.get("waiting_for_frequency")),
+            "js8_busy": js8_busy,
+            "varac_busy": bool(varac_status.get("busy")),
+            "ptt_active": ptt_active,
+            "suspended_until": suspended_until,
+            "freq_label": freq_label,
+            "net_kind": net_kind,
+            "fldigi_mode_off": fldigi_mode_off,
+            "fldigi_offset_off": fldigi_offset_off,
+        }
+
+    def _off_schedule_flags(
+        self,
+        entry: Dict,
+        *,
+        check_frequency: bool = True,
+        check_mode: bool = True,
+        check_offset: bool = True,
+    ) -> Dict[str, bool]:
+        flags = {"frequency": False, "mode": False, "offset": False, "fldigi_offset": False}
+        if not entry:
+            return flags
+        if check_frequency:
+            freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
+            if freq_hz:
+                cur = self._current_rig_frequency()
+                if cur is not None and abs(cur - freq_hz) > 5:
+                    flags["frequency"] = True
+        if check_offset and self._js8_running() and self.js8:
+            try:
+                desired_js8 = self._js8_offset_setting()
+                current_js8 = self.js8.get_offset()
+                if current_js8 is not None and desired_js8 != current_js8:
+                    flags["offset"] = True
+            except Exception:
+                pass
+        if check_mode and self._fldigi_available():
+            desired_mode = self._expected_fldigi_mode(entry)
+            desired_offset = self._expected_fldigi_offset(entry)
+            if desired_mode:
+                current_mode = self._current_fldigi_mode()
+                if current_mode is not None and current_mode != desired_mode.strip().upper():
+                    flags["mode"] = True
+            if desired_offset is not None:
+                current_offset = self._current_fldigi_offset()
+                if current_offset is not None and desired_offset != current_offset:
+                    flags["mode"] = True
+                    flags["fldigi_offset"] = True
+        return flags
+
+    def _reset_prompt_timers(self, now_ts: Optional[float] = None, items: Optional[List[str]] = None) -> None:
+        ts = now_ts if now_ts is not None else time.time()
+        if not items:
+            for state in self._prompt_state.values():
+                state["last_prompt_ts"] = ts
+            return
+        mapping = {"Frequency": "frequency", "Mode": "mode", "Offset": "offset"}
+        for label in items:
+            key = mapping.get(label)
+            if key and key in self._prompt_state:
+                self._prompt_state[key]["last_prompt_ts"] = ts
+
+    def _maybe_prompt_enforcement(self) -> None:
+        try:
+            if not bool(self.settings.get("use_scheduler", True)):
+                self._prompt_active = False
+                self._prompt_items = []
+                return
+        except Exception:
+            pass
+        if self._control_mode() in ("MANUAL", "NONE"):
+            self._prompt_active = False
+            self._prompt_items = []
+            return
+        if self._net_corrections_suppressed():
+            self._prompt_active = False
+            self._prompt_items = []
+            return
+        entry = self.current_schedule_entry or {}
+        if not entry:
+            self._prompt_active = False
+            self._prompt_items = []
+            return
+        entry_key = (entry.get("frequency"), entry.get("band"), entry.get("mode"), entry.get("group_name"))
+        now_ts = time.time()
+        if self._prompt_entry_key and entry_key != self._prompt_entry_key:
+            self._prompt_active = False
+            self._prompt_items = []
+            self._prompt_entry_key = entry_key
+            self._reset_prompt_timers(now_ts)
+            try:
+                self.off_schedule_cleared.emit()
+            except Exception:
+                pass
+            return
+        self._prompt_entry_key = entry_key
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        if self._scheduling_suspended(now_utc):
+            return
+        freq_prompt = self._enforcement_mode("freq_enforcement_mode") == "Prompt"
+        fldigi_prompt = self._enforcement_mode("fldigi_enforcement_mode") == "Prompt"
+        js8_prompt = self._enforcement_mode("js8_enforcement_mode") == "Prompt"
+        if not (freq_prompt or fldigi_prompt or js8_prompt):
+            self._prompt_active = False
+            self._prompt_items = []
+            return
+        flags = self._off_schedule_flags(
+            entry,
+            check_frequency=freq_prompt,
+            check_mode=fldigi_prompt,
+            check_offset=js8_prompt,
+        )
+        if not any(flags.values()):
+            self._prompt_active = False
+            self._prompt_items = []
+            self._last_off_schedule_flags = {
+                "frequency": False,
+                "mode": False,
+                "offset": False,
+                "fldigi_offset": False,
+            }
+            return
+        if self._prompt_active:
+            return
+        prev_flags = self._last_off_schedule_flags or {}
+        items: List[str] = []
+        if flags["frequency"] and freq_prompt:
+            interval = self._prompt_interval_minutes("freq_prompt_interval")
+            if (not prev_flags.get("frequency")) or (
+                now_ts - self._prompt_state["frequency"]["last_prompt_ts"] >= interval * 60
+            ):
+                items.append("Frequency")
+        if flags["mode"] and fldigi_prompt:
+            interval = self._prompt_interval_minutes("fldigi_prompt_interval")
+            if (not prev_flags.get("mode")) or (
+                now_ts - self._prompt_state["mode"]["last_prompt_ts"] >= interval * 60
+            ):
+                items.append("Mode")
+        if flags["offset"] and js8_prompt:
+            interval = self._prompt_interval_minutes("js8_prompt_interval")
+            if (not prev_flags.get("offset")) or (
+                now_ts - self._prompt_state["offset"]["last_prompt_ts"] >= interval * 60
+            ):
+                items.append("Offset")
+        if not items:
+            self._last_off_schedule_flags = dict(flags)
+            return
+        if "Mode" in items:
+            self._fldigi_force_apply_once = False
+        self._prompt_active = True
+        self._prompt_items = items
+        for item in items:
+            if item == "Frequency":
+                self._prompt_state["frequency"]["last_prompt_ts"] = now_ts
+            elif item == "Mode":
+                self._prompt_state["mode"]["last_prompt_ts"] = now_ts
+            elif item == "Offset":
+                self._prompt_state["offset"]["last_prompt_ts"] = now_ts
+        self.off_schedule_detected.emit({"entry": entry, "items": items})
+        self._last_off_schedule_flags = dict(flags)
+
+    def resolve_off_schedule(self, action: str, items: Optional[List[str]] = None) -> None:
+        self._prompt_active = False
+        self._prompt_items = []
+        if action == "suspend":
+            if items and "Mode" in items:
+                self._fldigi_force_apply_once = False
+            self._reset_prompt_timers(items=items)
+            self._suspend_for_minutes(30)
+            return
+        if action == "ignore":
+            if items and "Mode" in items:
+                self._fldigi_force_apply_once = False
+            self._reset_prompt_timers(items=items)
+            return
+        if action != "apply":
             return
         entry = self.current_schedule_entry or {}
         if not entry:
             return
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        if self._scheduling_suspended(now_utc):
-            return
-        freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
-        if not freq_hz:
-            return
-        cur = self._current_rig_frequency()
-        off_freq = cur is not None and abs(cur - freq_hz) > 5
-        js8_off = False
-        try:
-            desired_js8 = self._js8_offset_setting()
-            current_js8 = self.js8.get_offset() if self.js8 else None
-            js8_off = current_js8 is not None and desired_js8 != current_js8
-        except Exception:
-            js8_off = False
-        fldigi_off = False
-        desired_fldigi = self._expected_fldigi_offset(entry)
-        if desired_fldigi is not None:
-            current_fldigi = self._current_fldigi_offset()
-            fldigi_off = current_fldigi is not None and desired_fldigi != current_fldigi
-        desired_fldigi_mode = self._expected_fldigi_mode(entry)
-        if desired_fldigi_mode:
-            current_mode = self._current_fldigi_mode()
-            if current_mode is not None:
-                fldigi_off = fldigi_off or (current_mode != desired_fldigi_mode.strip().upper())
-        if not (off_freq or js8_off or fldigi_off):
-            self._off_schedule_prompt_active = False
-            self._last_off_schedule_key = None
-            return
-        key = (entry.get("frequency"), entry.get("band"), entry.get("mode"), entry.get("group_name"))
-        if self._off_schedule_prompt_active and self._last_off_schedule_key == key:
-            return
-        self._off_schedule_prompt_active = True
-        self._last_off_schedule_key = key
-        self.off_schedule_detected.emit(entry)
-
-    def resolve_off_schedule(self, action: str) -> None:
-        self._off_schedule_prompt_active = False
-        if action == "suspend":
-            self._suspend_for_minutes(30)
-            return
-        if action == "apply":
-            entry = self.current_schedule_entry or {}
-            if entry:
-                self._apply_schedule_entry(
-                    entry,
-                    self.current_source,
-                    force=True,
-                    apply_js8_offset=True,
-                    apply_fldigi=True,
-                )
-                if self._desired_fldigi_mode or self._desired_fldigi_offset is not None:
-                    self._fldigi_apply_pending = True
-                    self._maybe_apply_fldigi()
+        apply_items = items or []
+        if "Frequency" in apply_items:
+            self._apply_schedule_entry(
+                entry,
+                self.current_source,
+                force=True,
+                apply_js8_offset=False,
+                apply_fldigi=False,
+            )
+        if "Mode" in apply_items:
+            self._update_desired_fldigi_settings(entry)
+            if self._desired_fldigi_mode or self._desired_fldigi_offset is not None:
+                self._fldigi_apply_pending = True
+                self._fldigi_force_apply_once = True
+                self._maybe_apply_fldigi()
+        if "Offset" in apply_items:
+            try:
+                desired = self._js8_offset_setting()
+                if self.js8:
+                    self.js8.set_offset(desired)
+            except Exception:
+                pass
 
     def _suspend_for_minutes(self, minutes: int) -> None:
         try:
@@ -661,9 +1207,8 @@ class SchedulerEngine(QObject):
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         try:
             self._evaluate(now_utc=now_utc)
-            self._maybe_resync_frequency()
             self._maybe_apply_fldigi()
-            self._maybe_prompt_off_schedule()
+            self._maybe_prompt_enforcement()
         except Exception as e:
             log.error("SchedulerEngine timer tick failed: %s", e)
 
@@ -713,7 +1258,7 @@ class SchedulerEngine(QObject):
         self._desired_fldigi_offset = offset
         if mode is None and offset is None:
             self._fldigi_apply_pending = False
-        elif self._enforcement_mode() == "Normal":
+        else:
             self._fldigi_apply_pending = True
         if mode or offset is not None:
             # Request immediate apply if FLDigi is already available.
@@ -731,11 +1276,69 @@ class SchedulerEngine(QObject):
             pass
         if self._control_mode() in ("MANUAL", "NONE"):
             return
+        entry = self.current_schedule_entry or {}
+        if self._net_corrections_suppressed():
+            band = (entry.get("band") or "").strip().upper()
+            freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
+            js8_group = (entry.get("primary_js8call_group") or "").strip()
+            og = self._resolve_operating_group(entry)
+            vfo_source = og.get("vfo") if isinstance(og, dict) else None
+            vfo_raw = (vfo_source or entry.get("vfo") or "A").strip().upper()
+            vfo = vfo_raw if vfo_raw in ("A", "B") else None
+            entry_key = (
+                band,
+                freq_hz,
+                self._expected_fldigi_offset(entry),
+                None,
+                vfo,
+                js8_group,
+            )
+            if self._net_schedule_active and self._net_schedule_entry_key is None:
+                self._net_schedule_entry_key = entry_key
+            if self._manual_net_fldigi_active or self._manual_net_js8_active:
+                if not self._net_resume_apply_once:
+                    return
+            if not self._net_fldigi_apply_allowed_once:
+                if not self._net_resume_apply_once:
+                    return
+            if self._net_schedule_active and not self._net_resume_apply_once:
+                if self._net_schedule_started_at is not None:
+                    if time.time() - self._net_schedule_started_at > 12:
+                        self._net_fldigi_apply_allowed_once = False
+                        return
+            if self._last_entry_key == entry_key and not self._fldigi_force_apply_once:
+                return
+        if self._enforcement_mode("fldigi_enforcement_mode") == "Prompt":
+            flags = self._off_schedule_flags(entry, check_frequency=False, check_mode=True, check_offset=False)
+            if flags.get("mode"):
+                if self._prompt_active and "Mode" in self._prompt_items:
+                    return
+                if self._fldigi_force_apply_once:
+                    band = (entry.get("band") or "").strip().upper()
+                    freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
+                    js8_group = (entry.get("primary_js8call_group") or "").strip()
+                    og = self._resolve_operating_group(entry)
+                    vfo_source = og.get("vfo") if isinstance(og, dict) else None
+                    vfo_raw = (vfo_source or entry.get("vfo") or "A").strip().upper()
+                    vfo = vfo_raw if vfo_raw in ("A", "B") else None
+                    entry_key = (
+                        band,
+                        freq_hz,
+                        self._expected_fldigi_offset(entry),
+                        None,
+                        vfo,
+                        js8_group,
+                    )
+                    if self._last_entry_key == entry_key:
+                        self._fldigi_force_apply_once = False
+                        return
+                if not self._fldigi_force_apply_once:
+                    return
         if not self._fldigi_apply_pending:
             return
         if not (self._desired_fldigi_mode or self._desired_fldigi_offset is not None):
             return
-        available = self.rig.is_fldigi_available()
+        available = self._fldigi_available()
         now_ts = time.time()
         if not available:
             self._fldigi_was_available = False
@@ -753,6 +1356,9 @@ class SchedulerEngine(QObject):
             self._last_fldigi_apply = desired
             self._fldigi_apply_after_ts = None
             self._fldigi_apply_pending = False
+            self._fldigi_force_apply_once = False
+            self._net_fldigi_apply_allowed_once = False
+            self._net_resume_apply_once = False
 
     def _load_daily_schedule_from_db(self) -> Optional[List[Dict]]:
         """
@@ -1197,6 +1803,10 @@ class SchedulerEngine(QObject):
         self.next_change_utc = compute_next_change_time(now_utc, hf_active, net_active)
         self.next_change_updated.emit(self.next_change_utc)
 
+        prev_source = self.current_source
+        net_ended = prev_source == "NET" and source != "NET"
+        net_started = prev_source != "NET" and source == "NET"
+
         if not active_entry:
             # No active schedule; if we previously had something applied,
             # we keep the rig where it was (no auto "clear") but still
@@ -1205,10 +1815,42 @@ class SchedulerEngine(QObject):
                 self.current_source = "NONE"
                 self.current_schedule_entry = {}
                 self.active_entry_changed.emit({}, "NONE")
+            self._net_schedule_active = False
+            self._net_fldigi_apply_allowed_once = False
+            self._net_schedule_started_at = None
+            self._net_schedule_entry_key = None
             return
 
         # Apply to rig (if needed) and emit active_entry_changed
-        self._apply_schedule_entry(active_entry, source, now_utc=now_utc, force=force)
+        if net_ended:
+            # Clear control conflicts so resume can apply immediately.
+            self._manual_qsy_active = False
+            self._manual_qsy_entry_key = None
+            self._control_backoff_until = 0.0
+            self._control_fail_count = 0
+            self._pending_entry_key = None
+            self._reset_control_if_running("net schedule end (force resume)")
+            self._force_retry_after_control = True
+            self._forced_retry_attempts_left = max(self._forced_retry_attempts_left, 5)
+            self._net_fldigi_apply_allowed_once = False
+            self._net_schedule_started_at = None
+            self._net_schedule_entry_key = None
+            self._varac_wait_prompt_active = False
+            self._varac_wait_prompt_entry_key = None
+
+        self._net_schedule_active = bool(source == "NET")
+        if net_started:
+            self._net_schedule_started_at = time.time()
+            self._net_schedule_entry_key = None
+            self._net_fldigi_apply_allowed_once = True
+        self._apply_schedule_entry(
+            active_entry,
+            source,
+            now_utc=now_utc,
+            force=force or net_ended,
+            ignore_wait_prompt=net_ended,
+            ignore_net_suppression=net_ended,
+        )
 
     def apply_manual_qsy(self, entry: Dict) -> None:
         """
@@ -1218,7 +1860,26 @@ class SchedulerEngine(QObject):
         are honored when provided.
         """
         now = datetime.datetime.now(datetime.timezone.utc)
-        self._apply_schedule_entry(entry, "QSY", now_utc=now, force=True, ignore_suspend=True)
+        self._manual_qsy_active = True
+        self._manual_qsy_entry_key = (
+            (entry.get("band") or "").strip().upper(),
+            self._parse_freq_hz((entry.get("frequency") or "").strip()),
+            (entry.get("vfo") or "A").strip().upper(),
+            (entry.get("primary_js8call_group") or "").strip(),
+        )
+        self._control_backoff_until = 0.0
+        self._control_fail_count = 0
+        self._pending_entry_key = None
+        self._force_retry_after_control = True
+        self._forced_retry_attempts_left = max(self._forced_retry_attempts_left, 5)
+        self._apply_schedule_entry(
+            entry,
+            "QSY",
+            now_utc=now,
+            force=True,
+            ignore_suspend=True,
+            ignore_wait_prompt=True,
+        )
 
     # ------------------------------------------------------------------
     # Active entry lookup
@@ -1403,6 +2064,8 @@ class SchedulerEngine(QObject):
         now_utc: Optional[datetime.datetime] = None,
         force: bool = False,
         ignore_suspend: bool = False,
+        ignore_wait_prompt: bool = False,
+        ignore_net_suppression: bool = False,
         apply_js8_offset: bool = True,
         apply_fldigi: bool = True,
     ) -> None:
@@ -1430,6 +2093,10 @@ class SchedulerEngine(QObject):
         self.current_source = source
         self.current_schedule_entry = entry
         self._scheduled_vfo = vfo
+        if source != "QSY" and self._manual_qsy_active:
+            log.debug("SchedulerEngine: manual QSY active; skipping scheduled frequency change.")
+            self.active_entry_changed.emit(entry, source)
+            return
 
         control_mode = self._control_mode()
         # If we're not in JS8CALL mode and have no rig backend, just update UI state.
@@ -1464,6 +2131,30 @@ class SchedulerEngine(QObject):
                 return
         except Exception:
             pass
+        # Parse frequency text early to support VarAC wait prompts.
+        if not freq_text:
+            log.warning("SchedulerEngine: schedule entry missing 'frequency'; skipping.")
+            return
+        freq_hz = self._parse_freq_hz(freq_text)
+        if freq_hz is None:
+            log.error("SchedulerEngine: invalid frequency text '%s'; skipping.", freq_text)
+            return
+        current_freq_hz = self._current_rig_frequency()
+        freq_matches = current_freq_hz is not None and abs(current_freq_hz - freq_hz) <= 5
+        want_freq_change = current_freq_hz is None or not freq_matches
+        varac_status = self._varac_status()
+        if self._varac_wait_prompt_active and not bool(varac_status.get("waiting_for_frequency")):
+            self._varac_wait_prompt_active = False
+            self._varac_wait_prompt_entry_key = None
+            self.varac_wait_cleared.emit()
+        prompt_key = (band, freq_hz, vfo, js8_group)
+        if want_freq_change and bool(varac_status.get("waiting_for_frequency")) and not ignore_wait_prompt:
+            if (not self._varac_wait_prompt_active) or (self._varac_wait_prompt_entry_key != prompt_key):
+                self._varac_wait_prompt_active = True
+                self._varac_wait_prompt_entry_key = prompt_key
+                self.varac_wait_detected.emit({"entry": entry, "source": source})
+            self.active_entry_changed.emit(entry, source)
+            return
         # Safety: avoid changing frequency while a backend is busy transmitting.
         busy_reasons = []
         if self.rig and hasattr(self.rig, "get_ptt"):
@@ -1473,19 +2164,11 @@ class SchedulerEngine(QObject):
             except Exception as e:
                 log.warning("SchedulerEngine: get_ptt() failed: %s", e)
 
-        if self.js8 and hasattr(self.js8, "is_busy"):
-            try:
-                if self.js8.is_busy():
-                    busy_reasons.append("JS8Call is busy (RX/TX)")
-            except Exception as e:
-                log.warning("SchedulerEngine: js8.is_busy() failed: %s", e)
+        if not self._js8_busy_ok():
+            busy_reasons.append("JS8Call is busy (RX/TX)")
 
-        if self.varac and hasattr(self.varac, "is_busy"):
-            try:
-                if self.varac.is_busy():
-                    busy_reasons.append("VarAC is busy")
-            except Exception as e:
-                log.warning("SchedulerEngine: varac.is_busy() failed: %s", e)
+        if not self._varac_busy_ok(status=varac_status):
+            busy_reasons.append("VarAC is busy")
 
         if busy_reasons:
             log.warning(
@@ -1506,15 +2189,6 @@ class SchedulerEngine(QObject):
             comment,
         )
 
-        # Parse frequency text to MHz
-        if not freq_text:
-            log.warning("SchedulerEngine: schedule entry missing 'frequency'; skipping.")
-            return
-        freq_hz = self._parse_freq_hz(freq_text)
-        if freq_hz is None:
-            log.error("SchedulerEngine: invalid frequency text '%s'; skipping.", freq_text)
-            return
-
         fldigi_offset_text = (og.get("fldigi_offset") or "").strip() if isinstance(og, dict) else ""
         fldigi_center = None
         js8_tune = None
@@ -1523,8 +2197,6 @@ class SchedulerEngine(QObject):
                 fldigi_center = int(float(fldigi_offset_text))
         except Exception:
             fldigi_center = None
-
-        current_freq_hz = self._current_rig_frequency()
 
         # Avoid redundant commands
         entry_key = (
@@ -1535,11 +2207,27 @@ class SchedulerEngine(QObject):
             vfo,
             js8_group,
         )
+        if self._net_corrections_suppressed() and not force and not ignore_net_suppression:
+            if source == "NET" and self._last_entry_key != entry_key:
+                self._net_fldigi_apply_allowed_once = True
+            if self._manual_net_fldigi_active or self._manual_net_js8_active:
+                log.debug("SchedulerEngine: net active; skipping schedule enforcement.")
+                self.active_entry_changed.emit(entry, source)
+                return
+            if self._last_entry_key == entry_key:
+                log.debug("SchedulerEngine: net schedule active; skipping corrections for current entry.")
+                self.active_entry_changed.emit(entry, source)
+                return
+        if source in ("HF", "NET") and entry_key != self._last_entry_key:
+            # Ensure schedule transitions always enforce FLDigi mode/offset,
+            # even if the user previously skipped a prompt.
+            self._fldigi_force_apply_once = True
+        if self._pending_entry_key == entry_key and not force:
+            log.debug("SchedulerEngine: control action skipped (pending entry key).")
+            self.active_entry_changed.emit(entry, source)
+            return
         already_applied = (
             self._last_entry_key == entry_key and self._last_source == source
-        )
-        freq_matches = (
-            current_freq_hz is None or abs(current_freq_hz - freq_hz) <= 5
         )
         if not force and already_applied:
             log.debug("SchedulerEngine: schedule entry already applied; skipping re-apply.")
@@ -1569,5 +2257,19 @@ class SchedulerEngine(QObject):
         )
         if not queued:
             log.debug("SchedulerEngine: control action skipped (pending/backoff).")
+            self._record_latest_intent(
+                entry,
+                source,
+                now_utc=now_utc,
+                force=force,
+                ignore_suspend=ignore_suspend,
+                ignore_wait_prompt=ignore_wait_prompt,
+                apply_js8_offset=apply_js8_offset,
+                apply_fldigi=apply_fldigi,
+            )
+            self._forced_retry_attempts_left = max(self._forced_retry_attempts_left, 5)
+            if self._control_future is not None and not self._control_future.done():
+                self._force_retry_after_control = True
+            self._schedule_forced_retry()
         # Update UI state immediately regardless of control action.
         self.active_entry_changed.emit(entry, source)

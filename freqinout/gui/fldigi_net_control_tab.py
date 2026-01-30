@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import re
 
-from PySide6.QtCore import Qt, QTimer, QEvent
+from PySide6.QtCore import Qt, QTimer, QEvent, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -57,6 +57,7 @@ class FldigiNetControlTab(QWidget):
         * Net Check-in Macro File (main log)
         * Late Check-in Macro File (feed for late/new check-ins)
     """
+    net_status_changed = Signal(str, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1461,6 +1462,7 @@ class FldigiNetControlTab(QWidget):
 
         self._net_in_progress = True
         self._net_start_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
+        self.net_status_changed.emit("FLDIGI", True)
         self._set_net_button_styles(active=True)
         log.info("FLDigi net started: %s (%s)", self.net_name_combo.currentText().strip(), self.role_combo.currentText())
         self._refresh_operator_history_views()
@@ -1650,6 +1652,7 @@ class FldigiNetControlTab(QWidget):
                 return
             # End net even though no check-ins exist
             self._net_in_progress = False
+            self.net_status_changed.emit("FLDIGI", False)
             self._set_net_button_styles(active=False)
             log.info("FLDigi net ended (no check-ins file content).")
             return
@@ -1724,6 +1727,7 @@ class FldigiNetControlTab(QWidget):
             )
 
         self._net_in_progress = False
+        self.net_status_changed.emit("FLDIGI", False)
         self._set_net_button_styles(active=False)
         log.info("FLDigi net ended: %s (%s)", net_name, role)
 

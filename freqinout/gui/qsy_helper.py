@@ -57,6 +57,7 @@ def build_qsy_options(og_list: List[Dict]) -> Dict[str, Dict]:
             continue
         key = f"{fval:.3f}"
         auto = bool(g.get("auto_tune", False))
+        vfo = (g.get("vfo") or "").strip().upper()
         existing = meta.get(key)
         if existing:
             existing["auto_tune"] = existing.get("auto_tune", False) or auto
@@ -64,12 +65,15 @@ def build_qsy_options(og_list: List[Dict]) -> Dict[str, Dict]:
                 existing["mode"] = g.get("mode", "")
             if auto and g.get("band"):
                 existing["band"] = g.get("band", "")
+            if vfo and not existing.get("vfo"):
+                existing["vfo"] = vfo
         else:
             meta[key] = {
                 "freq": fval,
                 "mode": g.get("mode", ""),
                 "band": g.get("band", ""),
                 "auto_tune": auto,
+                "vfo": vfo,
             }
     return meta
 
@@ -117,6 +121,7 @@ def perform_qsy(window, meta: Dict) -> bool:
         "band": meta.get("band", ""),
         "mode": meta.get("mode", ""),
         "auto_tune": bool(meta.get("auto_tune", False)),
+        "vfo": meta.get("vfo", ""),
     }
     scheduler.apply_manual_qsy(entry)
     return True

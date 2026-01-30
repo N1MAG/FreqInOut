@@ -10,7 +10,7 @@ import socket
 from pathlib import Path
 from typing import List, Dict, Set, Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget,
@@ -97,6 +97,7 @@ class JS8CallNetControlTab(QWidget):
           is within next 20 minutes.
         * Prefills net name if the field is empty and no net is in progress.
     """
+    net_status_changed = Signal(str, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -740,6 +741,7 @@ class JS8CallNetControlTab(QWidget):
         self._net_in_progress = True
         self._net_start_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
         self._net_end_utc = None
+        self.net_status_changed.emit("JS8", True)
         self._all_calls_seen.clear()
         self._queried_msg_ids.clear()
         self._pending_queries.clear()
@@ -842,6 +844,7 @@ class JS8CallNetControlTab(QWidget):
         self._write_net_log_file()
 
         self._net_in_progress = False
+        self.net_status_changed.emit("JS8", False)
         if hasattr(self, "ad_hoc_btn"):
             self.ad_hoc_btn.setEnabled(True)
         self._auto_query_paused_by_net = False

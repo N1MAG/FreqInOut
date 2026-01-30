@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import datetime
 import json
 import logging
+import re
 import socket
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 import psutil
 
@@ -213,6 +215,135 @@ class VarACStatusClient:
 
     def __init__(self) -> None:
         self.settings = SettingsManager()
+        self._last_status: Dict[str, object] = {}
+
+    def _operator_callsign(self) -> str:
+        return (self.settings.get("operator_callsign", "") or "").strip().upper()
+
+    def _split_events(self, text: str) -> List[str]:
+        pattern = re.compile(r"\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2} - ")
+        matches = list(pattern.finditer(text))
+        if not matches:
+            return [ln.strip() for ln in text.splitlines() if ln.strip()]
+        events: List[str] = []
+        prefix = text[: matches[0].start()].strip()
+        if prefix:
+            events.append(" ".join(prefix.splitlines()).strip())
+        for idx, match in enumerate(matches):
+            start = match.start()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+            chunk = text[start:end].strip()
+            if chunk:
+                cleaned = " ".join(chunk.splitlines()).strip()
+                if cleaned:
+                    events.append(cleaned)
+        return events
+
+    def _evaluate_status(self, text: str) -> Dict[str, object]:
+        now_local = datetime.datetime.now()
+        events = self._split_events(text)
+        callsign = self._operator_callsign()
+        last_connected: Optional[datetime.datetime] = None
+        last_disconnected: Optional[datetime.datetime] = None
+        last_incoming: Optional[datetime.datetime] = None
+        last_no_luck: Optional[datetime.datetime] = None
+        last_broadcast: Optional[datetime.datetime] = None
+        last_broadcast_complete: Optional[bool] = None
+        last_wait_freq: Optional[datetime.datetime] = None
+        last_file_wait: Optional[datetime.datetime] = None
+        last_transfer: Optional[datetime.datetime] = None
+        last_transfer_done: Optional[datetime.datetime] = None
+
+        def _is_newer(a: Optional[datetime.datetime], b: Optional[datetime.datetime]) -> bool:
+            return a is not None and (b is None or a > b)
+
+        for raw in events:
+            upper = raw.upper()
+            ts_val: Optional[datetime.datetime] = None
+            if len(raw) >= 19:
+                try:
+                    ts_val = datetime.datetime.strptime(raw[:19], "%d/%m/%Y %H:%M:%S")
+                except Exception:
+                    ts_val = None
+
+            if "WAITING FOR FREQUENCY TO CLEAR" in upper:
+                last_wait_freq = ts_val or now_local
+                continue
+            if "INCOMING CONNECTION REQUEST" in upper:
+                last_incoming = ts_val or now_local
+                continue
+            if "NO LUCK." in upper:
+                last_no_luck = ts_val or now_local
+                continue
+            if "CONNECTED TO" in upper:
+                last_connected = ts_val or now_local
+                continue
+            if "DISCONNECTED FROM" in upper:
+                last_disconnected = ts_val or now_local
+                continue
+            if "FILE SENT. WAITING FOR CONFIRMATION OF RECEIPT" in upper:
+                last_file_wait = ts_val or now_local
+                last_transfer = ts_val or now_local
+                continue
+            if "RECEIVING FILE TRANSFER DATA" in upper:
+                last_transfer = ts_val or now_local
+                continue
+            if "FILE SUCCESSFULLY RECEIVED" in upper or "FILE SUCCESSFULLY SENT" in upper:
+                last_transfer_done = ts_val or now_local
+                continue
+            if " - BROADCAST - " in upper:
+                last_broadcast = ts_val or now_local
+                last_broadcast_complete = raw.rstrip().endswith("-")
+                continue
+            if "<SENDING ASYNC MESSAGE>" in upper and "VMAIL RELAY NOTIFICATION" in upper:
+                continue
+            if "SENDING" in upper and "BEACON" in upper:
+                if callsign and upper.rstrip().endswith(f"DE {callsign}"):
+                    continue
+
+        waiting_for_frequency = _is_newer(last_wait_freq, last_disconnected) and _is_newer(
+            last_wait_freq, last_connected
+        )
+        connected_active = _is_newer(last_connected, last_disconnected)
+        incoming_active = (
+            _is_newer(last_incoming, last_no_luck)
+            and _is_newer(last_incoming, last_connected)
+            and _is_newer(last_incoming, last_disconnected)
+        )
+        file_wait_active = _is_newer(last_file_wait, last_disconnected)
+        transfer_active = _is_newer(last_transfer, last_disconnected)
+        broadcast_active = False
+        if last_broadcast and last_broadcast_complete is False:
+            delta = abs((now_local - last_broadcast).total_seconds())
+            broadcast_active = delta <= 12.0
+
+        busy = bool(
+            waiting_for_frequency
+            or connected_active
+            or incoming_active
+            or file_wait_active
+            or transfer_active
+            or broadcast_active
+        )
+        reason = None
+        if waiting_for_frequency:
+            reason = "waiting_for_frequency"
+        elif connected_active:
+            reason = "connected"
+        elif incoming_active:
+            reason = "incoming"
+        elif file_wait_active:
+            reason = "file_wait"
+        elif transfer_active:
+            reason = "transfer"
+        elif broadcast_active:
+            reason = "broadcast_incomplete"
+
+        return {
+            "busy": busy,
+            "waiting_for_frequency": waiting_for_frequency,
+            "reason": reason,
+        }
 
     def _resolve_log_path(self) -> Optional[Path]:
         raw_install = (self.settings.get("varac_path", "") or "").strip()
@@ -227,10 +358,11 @@ class VarACStatusClient:
             return None
         return base / "VarAC_traffic.log"
 
-    def is_busy(self) -> bool:
+    def get_status(self) -> Dict[str, object]:
         log_path = self._resolve_log_path()
         if not log_path or not log_path.exists():
-            return False
+            self._last_status = {"busy": False, "waiting_for_frequency": False, "reason": None}
+            return self._last_status
         try:
             # Read tail to avoid loading large logs
             with log_path.open("rb") as fh:
@@ -239,17 +371,14 @@ class VarACStatusClient:
                 except OSError:
                     fh.seek(0)
                 tail = fh.read().decode("utf-8", errors="replace")
-            lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
-            last_state: Optional[str] = None
-            for line in lines:
-                upper = line.upper()
-                if "INCOMING CONNECTION REQUEST" in upper:
-                    last_state = "incoming"
-                elif "CONNECTED TO" in upper:
-                    last_state = "connected"
-                elif "DISCONNECTED FROM" in upper:
-                    last_state = "disconnected"
-            return last_state in {"incoming", "connected"}
+            status = self._evaluate_status(tail)
+            self._last_status = status
+            return status
         except Exception as e:
             log.debug("VarACStatusClient: failed to read log: %s", e)
-            return False
+            self._last_status = {"busy": False, "waiting_for_frequency": False, "reason": None}
+            return self._last_status
+
+    def is_busy(self) -> bool:
+        status = self.get_status()
+        return bool(status.get("busy"))

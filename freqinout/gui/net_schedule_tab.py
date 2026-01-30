@@ -381,13 +381,26 @@ class NetScheduleTab(QWidget):
         Returns day name and hh:mm in target zone.
         """
         day = (day or "").strip()
-        if not day or day == "ALL" or day not in DAY_NAMES or not hhmm:
+        if not day or not hhmm:
             return day, hhmm
         try:
             h, m = hhmm.split(":")
             h_i = int(h)
             m_i = int(m)
         except Exception:
+            return day, hhmm
+        if day == "ALL":
+            if to_local:
+                anchor = self._anchor_utc_sunday()
+                tz = get_timezone(self.settings.get("timezone", "UTC") or "UTC")
+                dt_utc = anchor + datetime.timedelta(hours=h_i, minutes=m_i)
+                dt_loc = dt_utc.astimezone(tz)
+                return "ALL", dt_loc.strftime("%H:%M")
+            anchor_loc = self._anchor_local_sunday()
+            dt_loc = anchor_loc + datetime.timedelta(hours=h_i, minutes=m_i)
+            dt_utc = dt_loc.astimezone(datetime.timezone.utc)
+            return "ALL", dt_utc.strftime("%H:%M")
+        if day not in DAY_NAMES:
             return day, hhmm
         idx = self._day_offset(day)
         if to_local:

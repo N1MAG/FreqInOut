@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.1.1]
+- Fixed: Scheduled net handling now matches ad hoc net behavior (no forced corrections during active net).
+- Fixed: Net end now clears control backoff/pending state before resuming schedule frequency/offsets.
+- Changed: Resume Schedule and end-net resume enforce full schedule immediately when allowed.
+- Updated: Guide to document net handling behavior and resume rules.
+
+## [1.1.0]
+- Added: VarAC database integration for messages, operator/map context, and delete support.
+- Added: Messages tab bulk select/delete with confirmation summaries and flagging (red/green) for follow-up.
+- Added: Operator History export by group (multi-select) and group editing in modal.
+- Added: Schedule Status panel under tabs with Resume Schedule and off-schedule context.
+- Added: Scheduler enforcement timers (Frequency / FLDigi Mode / JS8 Offset) with prompt intervals.
+- Added: VarAC busy detection from VarAC_traffic.log to gate schedule changes.
+- Added: Fldigi file senders and net check-ins tracking for map tooltip modes.
+- Added: Overlap display for peer schedules with counts and details.
+- Added: FreqPlanner band/frequency toggle and per-band color picker with persistent storage.
+- Changed: Net schedule recurrence UI (periodic weeks of month, daily option, validation).
+- Changed: Messages filters and search UX (searchable from/to, spotter message type).
+- Changed: Scheduler prompts and labels (Resume/Skip/Pause wording) and prompt behavior.
+- Fixed: Multiple UI alignment/visibility issues across tabs (headers, dropdowns, buttons).
+- Updated: Guide documentation for new UI, scheduler logic, messages, operators, and overlaps.
+
 ## [1.0.7]
 - Added: JS8 RX hub for live ingest fanout and map updates without queue starvation.
 - Added: Map updates via JS API (no full reload) with payload deduplication.
