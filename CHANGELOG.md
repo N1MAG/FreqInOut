@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.2]
+- Added: FLDigi log folder setting to detect RX activity from latest fldigi*.log.
+- Added: FLDigi log-based busy detection to delay schedule frequency changes when recent RX traffic is present.
+- Changed: FLDigi RX busy delay is skipped during scheduled and ad hoc nets; mode/offset auto-apply waits for FLDigi idle.
+
 ## [1.1.1]
 - Fixed: Scheduled net handling now matches ad hoc net behavior (no forced corrections during active net).
 - Fixed: Net end now clears control backoff/pending state before resuming schedule frequency/offsets.

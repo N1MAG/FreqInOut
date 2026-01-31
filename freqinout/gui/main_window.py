@@ -28,6 +28,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.radio_interface.rigctl_client import FLRigClient
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
+from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.version import __version__
 
@@ -222,11 +223,13 @@ class MainWindow(QMainWindow):
         self.rig_client = FLRigClient()
         self.js8_control = JS8ControlClient()
         self.varac_status = VarACStatusClient()
+        self.fldigi_log_status = FldigiLogStatusClient()
         self.scheduler = SchedulerEngine(
             self,
             rig=self.rig_client,
             js8=self.js8_control,
             varac=self.varac_status,
+            fldigi_log=self.fldigi_log_status,
         )
         self.scheduler.start()
         try:
@@ -561,6 +564,7 @@ class MainWindow(QMainWindow):
         varac_waiting = bool(status.get("varac_waiting"))
         ptt_active = bool(status.get("ptt_active"))
         js8_busy = bool(status.get("js8_busy"))
+        fldigi_busy = bool(status.get("fldigi_busy"))
         varac_busy = bool(status.get("varac_busy"))
         net_kind = status.get("net_kind")
         flags = status.get("off_schedule_flags") or {}
@@ -589,6 +593,15 @@ class MainWindow(QMainWindow):
             return
 
         reasons = []
+        busy_sources = []
+        if js8_busy:
+            busy_sources.append("JS8")
+        if varac_busy:
+            busy_sources.append("VarAC")
+        if fldigi_busy:
+            busy_sources.append("FLDigi")
+        busy_line = f"BUSY RX: {'; '.join(busy_sources)}" if busy_sources else ""
+
         if off_schedule:
             if flags.get("frequency"):
                 reasons.append("Frequency")
@@ -607,6 +620,8 @@ class MainWindow(QMainWindow):
                 reasons.append("Sending Traffic")
             if js8_busy or varac_busy:
                 reasons.append("QSO")
+            if busy_line and not net_kind:
+                reasons.append(busy_line)
         else:
             if varac_waiting:
                 reasons.append("Waiting to Clear")
@@ -616,6 +631,8 @@ class MainWindow(QMainWindow):
                 reasons.append("QSO")
             if net_kind:
                 reasons.append(net_kind)
+            if busy_line and not net_kind:
+                reasons.append(busy_line)
 
         if off_schedule:
             self.scheduler_status_header.setText("Off Schedule")

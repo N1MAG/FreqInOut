@@ -193,6 +193,7 @@ class SchedulerEngine(QObject):
         rig: Optional[FLRigClient] = None,
         js8: Optional[JS8ControlClient] = None,
         varac: Optional[object] = None,
+        fldigi_log: Optional[object] = None,
         poll_interval_ms: int = 5_000,
     ) -> None:
         super().__init__(parent)
@@ -200,6 +201,7 @@ class SchedulerEngine(QObject):
         self.rig: Optional[FLRigClient] = rig
         self.js8: Optional[JS8ControlClient] = js8
         self.varac: Optional[object] = varac
+        self.fldigi_log: Optional[object] = fldigi_log
 
         # We keep a small cache of the last applied entry so we don't
         # spam the rig with identical commands.
@@ -257,6 +259,9 @@ class SchedulerEngine(QObject):
         }
         self._fldigi_available_cache: Optional[bool] = None
         self._fldigi_available_ts: float = 0.0
+        self._fldigi_busy_entry_key: Optional[Tuple] = None
+        self._fldigi_busy_since_ts: Optional[float] = None
+        self._fldigi_busy_last_reason: Optional[str] = None
 
         self.current_source: str = "NONE"
         self.current_schedule_entry: Dict = {}
@@ -501,6 +506,7 @@ class SchedulerEngine(QObject):
         force: bool = False,
         ignore_suspend: bool = False,
         ignore_wait_prompt: bool = False,
+        ignore_fldigi_busy: bool = False,
         apply_js8_offset: bool = True,
         apply_fldigi: bool = True,
     ) -> None:
@@ -511,6 +517,7 @@ class SchedulerEngine(QObject):
             "force": bool(force),
             "ignore_suspend": bool(ignore_suspend),
             "ignore_wait_prompt": bool(ignore_wait_prompt),
+            "ignore_fldigi_busy": bool(ignore_fldigi_busy),
             "apply_js8_offset": bool(apply_js8_offset),
             "apply_fldigi": bool(apply_fldigi),
         }
@@ -534,6 +541,7 @@ class SchedulerEngine(QObject):
             force=bool(intent.get("force")),
             ignore_suspend=bool(intent.get("ignore_suspend")),
             ignore_wait_prompt=bool(intent.get("ignore_wait_prompt")),
+            ignore_fldigi_busy=bool(intent.get("ignore_fldigi_busy")),
             apply_js8_offset=bool(intent.get("apply_js8_offset")),
             apply_fldigi=bool(intent.get("apply_fldigi")),
         )
@@ -829,6 +837,66 @@ class SchedulerEngine(QObject):
         except Exception:
             return True
 
+    def _fldigi_log_status(self) -> Dict[str, object]:
+        if not self.fldigi_log:
+            return {"busy": False, "reason": None, "last_valid_age_s": None}
+        if hasattr(self.fldigi_log, "get_status"):
+            try:
+                status = self.fldigi_log.get_status()
+                if isinstance(status, dict):
+                    return status
+                if hasattr(status, "busy"):
+                    return {
+                        "busy": bool(getattr(status, "busy", False)),
+                        "reason": getattr(status, "reason", None),
+                        "last_valid_age_s": getattr(status, "last_valid_age_s", None),
+                    }
+            except Exception:
+                return {"busy": False, "reason": None, "last_valid_age_s": None}
+        try:
+            return {"busy": bool(self.fldigi_log.is_busy()), "reason": None, "last_valid_age_s": None}
+        except Exception:
+            return {"busy": False, "reason": None, "last_valid_age_s": None}
+
+    def _should_delay_for_fldigi(
+        self,
+        *,
+        entry_key: Tuple,
+        source: str,
+        want_freq_change: bool,
+        ignore_fldigi_busy: bool,
+        now_ts: Optional[float] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        if ignore_fldigi_busy or not want_freq_change:
+            return False, None
+        if self._manual_net_fldigi_active or self._manual_net_js8_active:
+            return False, None
+        if (source or "").upper() == "NET":
+            return False, None
+        if not self._fldigi_available():
+            return False, None
+        status = self._fldigi_log_status()
+        busy = bool(status.get("busy"))
+        if not busy:
+            self._fldigi_busy_entry_key = None
+            self._fldigi_busy_since_ts = None
+            self._fldigi_busy_last_reason = None
+            return False, None
+        now_ts = now_ts if now_ts is not None else time.time()
+        if entry_key != self._fldigi_busy_entry_key:
+            self._fldigi_busy_entry_key = entry_key
+            self._fldigi_busy_since_ts = now_ts
+        self._fldigi_busy_last_reason = str(status.get("reason") or "") or None
+        if (source or "").upper() == "HF":
+            since = self._fldigi_busy_since_ts or now_ts
+            if now_ts - since > 600:
+                # Max 10-minute delay for HF schedule changes.
+                self._fldigi_busy_entry_key = None
+                self._fldigi_busy_since_ts = None
+                self._fldigi_busy_last_reason = None
+                return False, None
+        return True, self._fldigi_busy_last_reason or "RX activity"
+
     def apply_current_entry(
         self,
         *,
@@ -836,6 +904,7 @@ class SchedulerEngine(QObject):
         ignore_wait_prompt: bool = False,
         ignore_suspend: bool = False,
         ignore_net_suppression: bool = False,
+        ignore_fldigi_busy: bool = False,
     ) -> None:
         entry = self.current_schedule_entry or {}
         if not entry:
@@ -850,6 +919,7 @@ class SchedulerEngine(QObject):
             ignore_wait_prompt=ignore_wait_prompt,
             ignore_suspend=ignore_suspend,
             ignore_net_suppression=ignore_net_suppression,
+            ignore_fldigi_busy=ignore_fldigi_busy,
         )
 
     def resolve_varac_wait(self, action: str) -> None:
@@ -857,7 +927,12 @@ class SchedulerEngine(QObject):
         self._varac_wait_prompt_entry_key = None
         self.varac_wait_cleared.emit()
         if action == "apply":
-            self.apply_current_entry(force=True, ignore_wait_prompt=True, ignore_suspend=True)
+            self.apply_current_entry(
+                force=True,
+                ignore_wait_prompt=True,
+                ignore_suspend=True,
+                ignore_fldigi_busy=True,
+            )
         elif action == "suspend":
             self._suspend_for_minutes(30)
 
@@ -891,6 +966,7 @@ class SchedulerEngine(QObject):
             ignore_wait_prompt=True,
             ignore_suspend=True,
             ignore_net_suppression=True,
+            ignore_fldigi_busy=True,
         )
         self._maybe_apply_fldigi()
         self._net_resume_apply_once = False
@@ -946,6 +1022,11 @@ class SchedulerEngine(QObject):
                 js8_busy = bool(self.js8.is_busy())
             except Exception:
                 js8_busy = False
+        fldigi_busy = False
+        try:
+            fldigi_busy = bool(self._fldigi_log_status().get("busy"))
+        except Exception:
+            fldigi_busy = False
         ptt_active = False
         if self.rig and hasattr(self.rig, "get_ptt"):
             try:
@@ -990,6 +1071,7 @@ class SchedulerEngine(QObject):
             "off_schedule_flags": flags,
             "varac_waiting": bool(varac_status.get("waiting_for_frequency")),
             "js8_busy": js8_busy,
+            "fldigi_busy": fldigi_busy,
             "varac_busy": bool(varac_status.get("busy")),
             "ptt_active": ptt_active,
             "suspended_until": suspended_until,
@@ -1348,6 +1430,9 @@ class SchedulerEngine(QObject):
             self._fldigi_apply_after_ts = now_ts + 5
             return
         if self._fldigi_apply_after_ts is not None and now_ts < self._fldigi_apply_after_ts:
+            return
+        status = self._fldigi_log_status()
+        if bool(status.get("busy")):
             return
         desired = (self._desired_fldigi_mode, self._desired_fldigi_offset)
         if self._last_fldigi_apply == desired and self._fldigi_apply_after_ts is None:
@@ -1879,6 +1964,7 @@ class SchedulerEngine(QObject):
             force=True,
             ignore_suspend=True,
             ignore_wait_prompt=True,
+            ignore_fldigi_busy=True,
         )
 
     # ------------------------------------------------------------------
@@ -2066,6 +2152,7 @@ class SchedulerEngine(QObject):
         ignore_suspend: bool = False,
         ignore_wait_prompt: bool = False,
         ignore_net_suppression: bool = False,
+        ignore_fldigi_busy: bool = False,
         apply_js8_offset: bool = True,
         apply_fldigi: bool = True,
     ) -> None:
@@ -2155,6 +2242,12 @@ class SchedulerEngine(QObject):
                 self.varac_wait_detected.emit({"entry": entry, "source": source})
             self.active_entry_changed.emit(entry, source)
             return
+        fldigi_delay, fldigi_reason = self._should_delay_for_fldigi(
+            entry_key=prompt_key,
+            source=source,
+            want_freq_change=want_freq_change,
+            ignore_fldigi_busy=ignore_fldigi_busy,
+        )
         # Safety: avoid changing frequency while a backend is busy transmitting.
         busy_reasons = []
         if self.rig and hasattr(self.rig, "get_ptt"):
@@ -2169,6 +2262,12 @@ class SchedulerEngine(QObject):
 
         if not self._varac_busy_ok(status=varac_status):
             busy_reasons.append("VarAC is busy")
+
+        if fldigi_delay:
+            reason = "FLDigi RX activity"
+            if fldigi_reason:
+                reason = f"FLDigi RX activity ({fldigi_reason})"
+            busy_reasons.append(reason)
 
         if busy_reasons:
             log.warning(
@@ -2264,6 +2363,7 @@ class SchedulerEngine(QObject):
                 force=force,
                 ignore_suspend=ignore_suspend,
                 ignore_wait_prompt=ignore_wait_prompt,
+                ignore_fldigi_busy=ignore_fldigi_busy,
                 apply_js8_offset=apply_js8_offset,
                 apply_fldigi=apply_fldigi,
             )

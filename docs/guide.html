@@ -27,7 +27,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.1.0</p>
+  <p><strong>Current version</strong>: 1.1.2</p>
   <p>This guide describes every tab, button, field, and function in FreqInOut. Times are stored in UTC; the "Showing: Local/UTC" toggle only changes what you see.</p>
   <p><strong>Responsibility notice</strong>: FreqInOut assists licensed amateur operators by coordinating complex radio software and schedules. It assumes you follow applicable band plans and regulations. Disabling safeguards (for example, scheduling) can let you tune outside legal allocations. You are solely responsible for compliant operation; the authors and contributors are not liable for misuse.</p>
 
@@ -57,7 +57,7 @@
     <li><strong>Sidebar navigation</strong>: Click a left-side button to switch tabs. After saving a callsign in Settings, each tab label becomes <em>Tab [CALLSIGN]</em>.</li>
     <li><strong>Logs indicator</strong>: If the log level is not DISABLED, the sidebar label changes to <em>Logs Enabled</em> and is highlighted in a warning color.</li>
     <li><strong>Map Layers sidebar</strong>: Only visible while the Map tab is active. Controls Callsigns, States, Cities, Grids, Regions, and City Pop. filtering.</li>
-    <li><strong>Schedule Status panel</strong>: Below the tab buttons (hidden on Map), shows On Schedule / Off Schedule with specific reasons (e.g., Frequency, FLDigi Mode, JS8 Offset, QSO traffic, or Sending Traffic when PTT is active). When scheduling is disabled or Frequency Control is Manual, it shows the current frequency only. Includes a blue <em>Resume Schedule</em> button that immediately applies the schedule and overrides any prior Skip/Pause state.</li>
+    <li><strong>Schedule Status panel</strong>: Below the tab buttons (hidden on Map), shows On Schedule / Off Schedule with specific reasons (e.g., Frequency, FLDigi Mode, JS8 Offset, QSO traffic, or Sending Traffic when PTT is active). When scheduling is disabled or Frequency Control is Manual, it shows the current frequency only. Includes a blue <em>Resume Schedule</em> button that immediately applies the schedule and overrides any prior Skip/Pause state. When JS8/VarAC/FLDigi have recent RX activity, an informational <em>BUSY RX: ...</em> line appears; it is hidden during nets.</li>
     <li><strong>Off-schedule prompt</strong>: When a configured enforcement item first goes off schedule, a dialog appears listing only those items (e.g., <em>Frequency and Offset are Off Schedule</em>) with buttons <em>Resume Sched.</em>, <em>Skip Once</em>, and <em>Pause Sched. 30 Min</em>. <em>Resume Sched.</em> enforces only the listed items; <em>Pause Sched. 30 Min</em> pauses enforcement for 30 minutes; <em>Skip Once</em> resets the prompt timer. If you do not respond within 2 minutes, the listed items are applied automatically. Repeat prompts follow the selected prompt interval.</li>
   </ul>
 
@@ -80,11 +80,12 @@
     <li><strong>Export to PDF</strong>: Exports the currently viewed message from the viewer pane.</li>
     <li><strong>Pending JS8 MSGs</strong>: Shows pending message IDs and actions. <em>Get</em> sends a JS8 QUERY MSG to the callsign; <em>Mark Retrieved</em> clears the pending entry (and can mark JS8 inbox rows READ if enabled in Settings).</li>
     <li><strong>Filters row</strong>: MSG Type, Status, From, To dropdowns plus free-text Search and <em>Clear Filters</em>. From/To fields are searchable; typing replaces the hint and narrows matches. Status includes <em>Action Needed</em> when red flags exist.</li>
-    <li><strong>Messages table</strong>: Columns are MSG Type, Status, From, To, RCV_DT, Message Title, Actions. Actions show <em>View</em> for all rows; a flag icon (between View/Delete) for all rows; and <em>Delete</em> for JS8/VarAC/file-based entries and Spotter (F!###) messages.</li>
+    <li><strong>Messages table</strong>: Columns are MSG Type, Status, From, To, RCV_DT (UTC), Message Title, Actions. Actions show <em>View</em> for all rows; a flag icon (between View/Delete) for all rows; and <em>Delete</em> for JS8/VarAC/file-based entries and Spotter (F!###) messages.</li>
     <li><strong>Flags</strong>: Click the flag icon to cycle None -> Red -> Green -> None. Red flags indicate follow-up needed and are included in the Status filter as <em>Action Needed</em>.</li>
     <li><strong>Sorting</strong>: Click headers to sort by MSG Type, Status, From, To, RCV_DT, or Message Title (Actions is not sortable).</li>
     <li><strong>Reader panel</strong>: The lower pane shows the selected message and remains open while you review entries.</li>
     <li><strong>Loading indicator</strong>: A “Brewing it fresh...” message appears to the right of the Messages tab title while data refresh is running, and disappears when refresh completes.</li>
+    <li><strong>Time display</strong>: All message timestamps are displayed in UTC for consistency across message sources.</li>
   </ol>
   <p><strong>Notifications and prompts</strong>:</p>
   <ul class="section-list">
@@ -303,7 +304,7 @@
     <li><strong>Enforcement timers</strong>: Frequency, FLDigi Mode, and JS8 Offset each have their own enforcement dial. Default is <em>On Schedule Change</em>. Choosing <em>Prompt</em> enables a per-item interval (Hourly / 5 / 10 / 15 / 30 minutes).</li>
     <li><strong>Off-schedule prompts</strong>: When one or more enabled items first go off schedule, a combined prompt appears listing only the items that are currently off (e.g., <em>Frequency and Offset are Off Schedule</em>). <em>Resume Sched.</em> immediately enforces only the listed items (frequency/mode/offset) and leaves others unchanged. <em>Skip Once</em> dismisses the prompt and resets the timer for those items without applying changes. <em>Pause Sched. 30 Min</em> pauses enforcement for 30 minutes. If unanswered for 2 minutes, the listed items are applied automatically. Repeat prompts follow the selected interval. Using <em>Resume Schedule</em> from the status panel overrides any prior Skip/Pause state.</li>
     <li><strong>Net handling (scheduled + ad hoc)</strong>: While any net is active (scheduled or Ad Hoc), automatic corrections are suppressed so the operator stays in control. This includes frequency, FLDigi mode/offset, and JS8 offset. At net start, the scheduler may apply the net’s FLDigi mode/offset once (a short initial window) to land you on the net settings; after that, changes you make during the net are left alone. At net end, the scheduler clears any pending/backoff state and immediately resumes the active schedule (frequency + FLDigi mode/offset + JS8 offset) unless scheduling is paused or in Manual control.</li>
-    <li><strong>Activity check</strong>: Before any scheduled frequency change, the scheduler checks for active transmissions and recent receive activity. It skips changes if FLRig PTT is active, JS8Call PTT is active, JS8 RX activity occurred in the last ~12 seconds, or VarAC reports busy.</li>
+    <li><strong>Activity check</strong>: Before any scheduled frequency change, the scheduler checks for active transmissions and recent receive activity. It skips changes if FLRig PTT is active, JS8Call PTT is active, JS8 RX activity occurred in the last ~12 seconds, or VarAC reports busy. It also checks FLDigi RX activity from the FLDigi log and delays schedule changes while recent valid traffic is being received (not used during scheduled or ad hoc nets). HF schedule frequency changes will wait up to ~10 minutes for FLDigi RX activity before proceeding.</li>
     <li><strong>VarAC busy detection</strong>: VarAC activity is read from <code>VarAC_traffic.log</code> in the VarAC install folder. Busy conditions include “WAITING FOR FREQUENCY TO CLEAR,” active connections, incoming connection requests, file transfers or “waiting for confirmation of receipt,” and incomplete broadcasts (a broadcast line without a trailing “-” within ~12 seconds). VMAIL relay notifications and your own beacon lines (ending with <code>DE YOURCALLSIGN</code>) are ignored.</li>
     <li><strong>Wait behavior</strong>: There is no fixed delay timer. Changes resume as soon as the activity checks clear (PTT off, JS8 RX window elapsed, VarAC disconnected). Manual QSY pauses schedule enforcement until you click <em>Resume Schedule</em>.</li>
   </ul>
@@ -354,6 +355,7 @@
     <li><strong>ICS/Messages</strong>: FLMsg folder plus Browse.</li>
     <li><strong>FLAMP/rx</strong>: FLAmp folder plus Browse.</li>
     <li><strong>VarAC</strong>: Browse to the VarAC install folder. FreqInOut uses this path to locate <code>VarAC.db</code> and <code>VarAC_traffic.log</code>. Also set the VarAC Incoming Files path for file-based messages.</li>
+    <li><strong>FLDigi Log Path</strong>: Select the folder that contains FLDigi log files (e.g., <code>fldigiYYYYMMDD.log</code>). The newest log in that folder is used to detect recent RX activity.</li>
     <li><strong>Launch Selected</strong>: Launches checked programs that are not already running. JS8Call is not launched from here.</li>
     <li><strong>Check-in Log Paths</strong>: Copy Main and Copy New/Late buttons copy full file paths to the clipboard.</li>
   </ul>

@@ -715,6 +715,17 @@ class SettingsTab(QWidget):
         varac_row.addWidget(varac_browse)
         prog_layout.addLayout(varac_row)
 
+        fldigi_log_row = QHBoxLayout()
+        fldigi_log_row.addWidget(QLabel("FLDigi Log Path"))
+        self.fldigi_log_path_edit = QLineEdit()
+        self.fldigi_log_path_edit.setPlaceholderText("FLDigi log folder")
+        fldigi_log_row.addWidget(self.fldigi_log_path_edit, 1)
+        fldigi_log_browse = QPushButton("Browse")
+        fldigi_log_browse.setFixedWidth(70)
+        fldigi_log_browse.clicked.connect(self._choose_fldigi_log_path)
+        fldigi_log_row.addWidget(fldigi_log_browse)
+        prog_layout.addLayout(fldigi_log_row)
+
         msg_layout.addLayout(
             build_msg_row(
                 "VarAC Incoming Files",
@@ -1037,6 +1048,9 @@ class SettingsTab(QWidget):
                     varac_path = legacy_db
         if hasattr(self, "varac_path_edit"):
             self.varac_path_edit.setText(varac_path)
+        fldigi_log_path = (data.get("fldigi_log_path", "") or "").strip()
+        if hasattr(self, "fldigi_log_path_edit"):
+            self.fldigi_log_path_edit.setText(fldigi_log_path)
         fldigi_dir = (data.get("fldigi_checkin_dir", "") or "").strip()
         if not fldigi_dir:
             fldigi_dir = str(get_fldigi_checkin_dir())
@@ -1185,6 +1199,9 @@ class SettingsTab(QWidget):
         varac_path = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
         data["varac_path"] = varac_path
         data["varac_db_path"] = str(Path(varac_path) / "VarAC.db") if varac_path else ""
+        data["fldigi_log_path"] = (
+            self.fldigi_log_path_edit.text().strip() if hasattr(self, "fldigi_log_path_edit") else ""
+        )
         fldigi_dir = self.fldigi_checkin_dir_edit.text().strip()
         if not fldigi_dir:
             fldigi_dir = str(get_fldigi_checkin_dir())
@@ -1234,6 +1251,7 @@ class SettingsTab(QWidget):
                 "message_paths": data.get("message_paths", {}),
                 "varac_path": data.get("varac_path", ""),
                 "varac_db_path": data.get("varac_db_path", ""),
+                "fldigi_log_path": data.get("fldigi_log_path", ""),
                 "fldigi_checkin_dir": data.get("fldigi_checkin_dir", ""),
                 "operating_groups": data.get("operating_groups", []),
             }
@@ -1274,6 +1292,7 @@ class SettingsTab(QWidget):
             self.settings.set("message_paths", data.get("message_paths", {}))
             self.settings.set("varac_path", data.get("varac_path", ""))
             self.settings.set("varac_db_path", data.get("varac_db_path", ""))
+            self.settings.set("fldigi_log_path", data.get("fldigi_log_path", ""))
             self.settings.set("fldigi_checkin_dir", data.get("fldigi_checkin_dir", ""))
             for prog_name, meta in self.PROGRAMS.items():
                 path_key = meta["setting_key"]
@@ -1377,6 +1396,7 @@ class SettingsTab(QWidget):
             self.js8_directed_edit,
             self.js8_forms_edit,
             self.fldigi_checkin_dir_edit,
+            self.fldigi_log_path_edit,
             self.flrig_port_edit,
         ]
         edits.extend(self.msg_paths_edits.values())
@@ -2459,6 +2479,28 @@ class SettingsTab(QWidget):
             if hasattr(self.settings, "_data"):
                 self.settings._data = data  # type: ignore[attr-defined]
         self._ensure_fldigi_checkin_files()
+
+    def _choose_fldigi_log_path(self):
+        start = self.fldigi_log_path_edit.text().strip() if hasattr(self, "fldigi_log_path_edit") else ""
+        start_dir = str(Path(start)) if start else ""
+        fn = QFileDialog.getExistingDirectory(
+            self,
+            "Select FLDigi log folder",
+            start_dir,
+        )
+        if not fn:
+            return
+        if hasattr(self, "fldigi_log_path_edit"):
+            self.fldigi_log_path_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("fldigi_log_path", fn)
+        else:
+            data = self.settings.all()
+            data["fldigi_log_path"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        self._settings_dirty = False
+        self._set_save_button_state("success")
 
     def _copy_text(self, edit: QLineEdit) -> None:
         txt = edit.text().strip()

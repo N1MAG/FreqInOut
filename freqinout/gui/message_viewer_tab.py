@@ -159,7 +159,7 @@ class UnifiedMessage:
 
 
 class MessageTableModel(QAbstractTableModel):
-    HEADERS = ["", "MSG Type", "Status", "From", "To", "RCV_DT", "Message Title", ""]
+    HEADERS = ["", "MSG Type", "Status", "From", "To", "RCV_DT (UTC)", "Message Title", ""]
 
     def __init__(self, rows: List[UnifiedMessage]):
         super().__init__()
@@ -1694,9 +1694,9 @@ class MessageViewerTab(QWidget):
         if not ts:
             return ""
         try:
-            from datetime import datetime
+            from datetime import datetime, timezone
 
-            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return ""
 
@@ -3341,9 +3341,9 @@ class MessageViewerTab(QWidget):
 
     def _fmt_mtime(self, mtime: float) -> str:
         try:
-            from datetime import datetime
+            from datetime import datetime, timezone
 
-            return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
         except Exception:
             return ""
 
