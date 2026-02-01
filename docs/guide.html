@@ -36,6 +36,7 @@
   <ol class="section-list">
     <li><strong>Start in Settings</strong>: Open <a href="#settings">Settings</a> and enter your callsign/name/state/grid, select Frequency Control, set JS8Call DIRECTED.TXT, and set message folders. Click <em>Save Settings</em> so the other tabs pick up your changes.</li>
     <li><strong>Run radio apps together</strong>: FreqInOut assumes you can run FLRig, JS8Call, and VarAC simultaneously. In JS8Call, set <em>Rig</em> to <strong>FLRig</strong>. In VarAC, open <em>Rig Settings</em>, set <em>CAT control</em> and <em>Frequency Control</em> to <strong>FLRig</strong>, and ensure <em>Read Frequency every</em> is enabled.</li>
+    <li><strong>FLDigi monitoring</strong>: To monitor if FLDigi is receiving traffic, you must enable logging in FLDigi under <em>File &gt; Text Capture &gt; Log all RX/TX text</em>.</li>
     <li><strong>Create Operating Groups</strong>: Add your go-to frequencies in <a href="#settings-op-groups">Operating Groups</a>. These drive the HF Schedule, Net Schedule, and the QSY dropdowns.</li>
     <li><strong>Build schedules</strong>: Use <a href="#hf-schedule">HF Schedule</a> for routine operating blocks and <a href="#net-schedule">Net Schedule</a> for nets. The <a href="#freqplanner">FreqPlanner</a> view updates from these schedules.</li>
     <li><strong>Populate operators and JS8 traffic</strong>: Import your operator list in <a href="#operators">Operators</a>, then return to <a href="#settings-js8call">Settings &gt; JS8Call Settings</a> and click <em>Load JS8 Traffic</em> to populate the Map and link history.</li>
@@ -357,6 +358,7 @@
     <li><strong>FLAMP/rx</strong>: FLAmp folder plus Browse.</li>
     <li><strong>VarAC</strong>: Browse to the VarAC install folder. FreqInOut uses this path to locate <code>VarAC.db</code> and <code>VarAC_traffic.log</code>. Also set the VarAC Incoming Files path for file-based messages.</li>
     <li><strong>FLDigi Log Path</strong>: Select the folder that contains FLDigi log files (e.g., <code>fldigiYYYYMMDD.log</code>). The newest log in that folder is used to detect recent RX activity.</li>
+    <li><strong>Enable FLDigi logging</strong>: FLDigi RX/TX monitoring depends on logging. In FLDigi, enable <em>File &gt; Text Capture &gt; Log all RX/TX text</em>.</li>
     <li><strong>Launch Selected</strong>: Launches checked programs that are not already running. JS8Call is not launched from here.</li>
     <li><strong>Check-in Log Paths</strong>: Copy Main and Copy New/Late buttons copy full file paths to the clipboard.</li>
   </ul>
