@@ -60,6 +60,8 @@ class FldigiLogStatusClient:
         hold_seconds: int = 90,
         flmsg_hold_seconds: int = 120,
         flamp_hold_seconds: int = 120,
+        gibberish_grace_seconds: int = 90,
+        gibberish_max_seconds: int = 120,
         gibberish_threshold: float = 0.55,
         min_words: int = 3,
         stale_mtime_seconds: int = 90,
@@ -68,6 +70,8 @@ class FldigiLogStatusClient:
         self.hold_seconds = int(hold_seconds)
         self.flmsg_hold_seconds = int(flmsg_hold_seconds)
         self.flamp_hold_seconds = int(flamp_hold_seconds)
+        self.gibberish_grace_seconds = int(gibberish_grace_seconds)
+        self.gibberish_max_seconds = int(gibberish_max_seconds)
         self.gibberish_threshold = float(gibberish_threshold)
         self.min_words = int(min_words)
         self.stale_mtime_seconds = int(stale_mtime_seconds)
@@ -75,6 +79,8 @@ class FldigiLogStatusClient:
         self._last_offset: int = 0
         self._last_valid_ts: Optional[datetime.datetime] = None
         self._last_valid_reason: Optional[str] = None
+        self._last_gibberish_ts: Optional[datetime.datetime] = None
+        self._gibberish_run_start: Optional[datetime.datetime] = None
 
     def _resolve_log_path(self) -> Optional[Path]:
         raw = (self.settings.get("fldigi_log_path", "") or "").strip()
@@ -167,6 +173,15 @@ class FldigiLogStatusClient:
             return True, "text"
         return False, None
 
+    def _is_gibberish(self, payload: str) -> bool:
+        raw = payload.strip()
+        if not raw:
+            return False
+        gib_score, token_count = self._gibberish_score(raw)
+        if token_count == 0:
+            return False
+        return gib_score >= self.gibberish_threshold
+
     def _update_from_log(self, path: Path) -> None:
         try:
             stat = path.stat()
@@ -202,6 +217,12 @@ class FldigiLogStatusClient:
             if valid:
                 self._last_valid_ts = ts_val
                 self._last_valid_reason = reason
+                self._last_gibberish_ts = None
+                self._gibberish_run_start = None
+            elif self._is_gibberish(payload):
+                self._last_gibberish_ts = ts_val
+                if self._gibberish_run_start is None:
+                    self._gibberish_run_start = ts_val
 
     def get_status(self) -> FldigiLogStatus:
         path = self._resolve_log_path()
@@ -223,10 +244,22 @@ class FldigiLogStatusClient:
             hold = self.flmsg_hold_seconds
         elif self._last_valid_reason == "flamp":
             hold = self.flamp_hold_seconds
-        busy = age <= hold
+        gibberish_run_age = None
+        if self._gibberish_run_start:
+            gibberish_run_age = (now_utc - self._gibberish_run_start).total_seconds()
+        gibberish_stale = (
+            gibberish_run_age is not None
+            and gibberish_run_age > self.gibberish_max_seconds
+        )
+        busy = age <= hold and not gibberish_stale
+        reason = self._last_valid_reason
+        if busy and self._last_gibberish_ts:
+            gib_age = (now_utc - self._last_gibberish_ts).total_seconds()
+            if gib_age <= self.gibberish_grace_seconds:
+                reason = "gibberish"
         return FldigiLogStatus(
             busy=bool(busy),
-            reason=self._last_valid_reason,
+            reason=reason,
             last_valid_age_s=age,
         )
 

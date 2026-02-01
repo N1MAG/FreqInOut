@@ -88,8 +88,7 @@ class PeerSchedTab(QWidget):
         self.delete_callsign_combo = QComboBox()
         self.delete_callsign_combo.addItem("Select callsign", None)
         self.delete_btn = QPushButton("Delete Schedule")
-        self.tz_toggle_btn = QPushButton("Show Local")
-        self.tz_toggle_btn.setCheckable(True)
+        self.tz_toggle_btn = QPushButton("Showing: UTC")
         header.addWidget(self.import_btn)
         header.addWidget(self.refresh_btn)
         header.addWidget(QLabel("Delete:"))
@@ -145,7 +144,7 @@ class PeerSchedTab(QWidget):
         self.search_edit.textChanged.connect(self._apply_filters)
         self.delete_callsign_combo.currentIndexChanged.connect(self._update_delete_button_state)
         self.delete_btn.clicked.connect(self._delete_selected)
-        self.tz_toggle_btn.toggled.connect(self._toggle_timezone_view)
+        self.tz_toggle_btn.clicked.connect(self._toggle_timezone_view)
         self.table.cellClicked.connect(self._on_table_cell_clicked)
         self._apply_theme()
         self._update_delete_button_state()
@@ -579,9 +578,9 @@ class PeerSchedTab(QWidget):
             cols[self._overlap_col] = "OVERLAP (UTC)"
         self.table.setHorizontalHeaderLabels(cols)
 
-    def _toggle_timezone_view(self, checked: bool) -> None:
-        self._show_local_times = bool(checked)
-        self.tz_toggle_btn.setText("Show UTC" if checked else "Show Local")
+    def _toggle_timezone_view(self) -> None:
+        self._show_local_times = not self._show_local_times
+        self.tz_toggle_btn.setText("Showing: Local" if self._show_local_times else "Showing: UTC")
         self._set_time_headers()
         self._update_timezone_button_style()
         self._apply_filters()
@@ -611,8 +610,7 @@ class PeerSchedTab(QWidget):
 
     def _update_timezone_button_style(self) -> None:
         theme = resolve_theme(self.settings)
-        role = "info" if self._show_local_times else "muted"
-        self.tz_toggle_btn.setStyleSheet(button_style(role, theme))
+        self.tz_toggle_btn.setStyleSheet(button_style("primary", theme))
 
     def _on_table_cell_clicked(self, row: int, col: int) -> None:
         if col != self._overlap_col:

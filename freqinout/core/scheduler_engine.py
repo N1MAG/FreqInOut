@@ -1023,10 +1023,14 @@ class SchedulerEngine(QObject):
             except Exception:
                 js8_busy = False
         fldigi_busy = False
+        fldigi_busy_reason = None
         try:
-            fldigi_busy = bool(self._fldigi_log_status().get("busy"))
+            fldigi_status = self._fldigi_log_status()
+            fldigi_busy = bool(fldigi_status.get("busy"))
+            fldigi_busy_reason = fldigi_status.get("reason")
         except Exception:
             fldigi_busy = False
+            fldigi_busy_reason = None
         ptt_active = False
         if self.rig and hasattr(self.rig, "get_ptt"):
             try:
@@ -1072,6 +1076,7 @@ class SchedulerEngine(QObject):
             "varac_waiting": bool(varac_status.get("waiting_for_frequency")),
             "js8_busy": js8_busy,
             "fldigi_busy": fldigi_busy,
+            "fldigi_busy_reason": fldigi_busy_reason,
             "varac_busy": bool(varac_status.get("busy")),
             "ptt_active": ptt_active,
             "suspended_until": suspended_until,

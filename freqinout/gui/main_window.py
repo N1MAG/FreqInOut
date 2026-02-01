@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime
+
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -565,11 +567,26 @@ class MainWindow(QMainWindow):
         ptt_active = bool(status.get("ptt_active"))
         js8_busy = bool(status.get("js8_busy"))
         fldigi_busy = bool(status.get("fldigi_busy"))
+        fldigi_busy_reason = (status.get("fldigi_busy_reason") or "").strip().lower()
         varac_busy = bool(status.get("varac_busy"))
         net_kind = status.get("net_kind")
         flags = status.get("off_schedule_flags") or {}
         fldigi_mode_off = bool(status.get("fldigi_mode_off"))
         fldigi_offset_off = bool(status.get("fldigi_offset_off"))
+        next_change_minutes = None
+        next_change = getattr(self.scheduler, "next_change_utc", None)
+        if next_change is not None:
+            try:
+                if getattr(next_change, "tzinfo", None) is None:
+                    next_change = next_change.replace(tzinfo=datetime.timezone.utc)
+                else:
+                    next_change = next_change.astimezone(datetime.timezone.utc)
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                delta = (next_change - now_utc).total_seconds()
+                if delta > 0:
+                    next_change_minutes = int((delta + 59) // 60)
+            except Exception:
+                next_change_minutes = None
 
         if (control_mode in {"MANUAL", "NONE"}) or not use_scheduler:
             self.scheduler_status_header.setText("Frequency")
@@ -599,7 +616,10 @@ class MainWindow(QMainWindow):
         if varac_busy:
             busy_sources.append("VarAC")
         if fldigi_busy:
-            busy_sources.append("FLDigi")
+            if fldigi_busy_reason == "gibberish":
+                busy_sources.append("FLDigi (gibberish)")
+            else:
+                busy_sources.append("FLDigi")
         busy_line = f"BUSY RX: {'; '.join(busy_sources)}" if busy_sources else ""
 
         if off_schedule:
@@ -622,6 +642,8 @@ class MainWindow(QMainWindow):
                 reasons.append("QSO")
             if busy_line and not net_kind:
                 reasons.append(busy_line)
+            if next_change_minutes is not None and next_change_minutes <= 15:
+                reasons.append(f"Freq Change: {next_change_minutes} min")
         else:
             if varac_waiting:
                 reasons.append("Waiting to Clear")
@@ -633,6 +655,8 @@ class MainWindow(QMainWindow):
                 reasons.append(net_kind)
             if busy_line and not net_kind:
                 reasons.append(busy_line)
+            if next_change_minutes is not None and next_change_minutes <= 15:
+                reasons.append(f"Freq Change: {next_change_minutes} min")
 
         if off_schedule:
             self.scheduler_status_header.setText("Off Schedule")

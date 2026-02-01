@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -541,7 +541,8 @@ class FreqPlannerTab(QWidget):
                 overnight = smin > emin
                 intervals: List[Tuple[str, int, int]] = []
                 if not overnight:
-                    intervals.append((targets[0], smin, emin))
+                    for dname in targets:
+                        intervals.append((dname, smin, emin))
                 else:
                     for dname in targets:
                         intervals.append((dname, smin, 24 * 60))

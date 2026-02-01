@@ -3,7 +3,11 @@
 ## [1.1.2]
 - Added: FLDigi log folder setting to detect RX activity from latest fldigi*.log.
 - Added: FLDigi log-based busy detection to delay schedule frequency changes when recent RX traffic is present.
+- Added: FLDigi gibberish detection with timeout to avoid indefinite holds; BUSY RX can show “FLDigi (gibberish)”.
+- Changed: Peer Schedule timezone toggle now matches Daily HF Schedule “Showing” style and behavior.
 - Changed: FLDigi RX busy delay is skipped during scheduled and ad hoc nets; mode/offset auto-apply waits for FLDigi idle.
+- Fixed: Daily nets now render on every day in the planner (not just the first day).
+- Added: Schedule Status shows upcoming frequency change countdown within 15 minutes.
 
 ## [1.1.1]
 - Fixed: Scheduled net handling now matches ad hoc net behavior (no forced corrections during active net).

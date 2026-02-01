@@ -53,6 +53,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
 
 
 SUPPORTED_EXT = {".b2s", ".k2s", ".txt", ".rtf", ".ff", ".xml", ".json", ".html", ".htm"}
