@@ -1,14 +1,17 @@
 # FreqInOut
 
-FreqInOut is a desktop application for HF net control and operator tracking, with built-in scheduling, JS8Call integration, and live station mapping.
+FreqInOut is a cross-workflow HF operations console for amateur radio. It unifies net control (FLDigi/JS8Call), schedule enforcement, SOP action reminders, operator database tooling, message management (JS8/FLMSG/FLAMP/VarAC), and map-based link intelligence in one desktop UI, with UTC-native data handling and practical safeguards for live operating conditions.
 
 ## Highlights
 
-- Net control workflows for FLDigi and JS8Call
-- Operator history with import/export and smart merge rules
-- Map tab with live links from JS8 traffic and log fallbacks
-- Scheduler with Operating Groups and automatic frequency changes
-- Message viewing for JS8, FLMSG, FLAMP, and VarAC
+- Net control operations for both FLDigi and JS8Call (start/track/save/end workflows)
+- UTC-native HF + Net scheduling with controlled enforcement and operator prompts
+- SOP Builder for reminder-based operating plans with per-action intervals and role/callsign targeting
+- Operator History with CSV import/export, role standardization, bulk edit tools, and trust management
+- Message center for JS8, FLMSG, FLAMP, and VarAC with filtering, flagging, and bulk actions
+- Live map/link context from JS8 traffic plus operator/log fallbacks for operational awareness
+- Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
+- Cross-platform database admin wrappers and maintenance tooling for advanced users
 
 ## Quick Start
 
