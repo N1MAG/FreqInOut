@@ -7,8 +7,8 @@ import sqlite3
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal, QTimer, QRect, QPersistentModelIndex
-from PySide6.QtGui import QColor, QStandardItemModel, QStandardItem, QPainter
+from PySide6.QtCore import Qt, Signal, QTimer, QRect
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QCheckBox,
     QComboBox,
+    QWidgetAction,
     QHeaderView,
     QStyle,
 )
@@ -192,6 +193,7 @@ class OperatorHistoryTab(QWidget):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._rows: List[Dict] = []
+        self._export_group_checks: Dict[str, QCheckBox] = {}
         self.loading_label: QLabel | None = None
         self._nav_refresh_inflight = False
         self._bulk_select_inflight = False
@@ -235,12 +237,9 @@ class OperatorHistoryTab(QWidget):
         search_row.addWidget(self.group_filter)
         self.manage_btn = QPushButton("Manage Operators")
         search_row.addWidget(self.manage_btn)
-        self.export_group_combo = QComboBox()
-        self.export_group_combo.setEditable(False)
-        self.export_group_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.export_group_combo.setMinimumWidth(160)
-        self.export_group_combo.setEditable(False)
-        search_row.addWidget(self.export_group_combo)
+        self.export_group_btn = QPushButton("Export by Group")
+        self.export_group_btn.setMinimumWidth(180)
+        search_row.addWidget(self.export_group_btn)
         self.import_btn = QPushButton("Import/Export...")
         search_row.addWidget(self.import_btn)
 
@@ -300,7 +299,7 @@ class OperatorHistoryTab(QWidget):
         self.manage_btn.clicked.connect(self._show_manage_menu)
         self.group_filter.currentTextChanged.connect(self._apply_filter)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
-        self._wire_export_group_combo()
+        self._wire_export_group_menu()
 
     def _normalize_group_role(self, value: Optional[str]) -> str:
         role = (value or "").strip().upper()
@@ -797,82 +796,50 @@ class OperatorHistoryTab(QWidget):
             self._bulk_select_inflight = False
         self._sync_header_checkbox()
 
-    def _wire_export_group_combo(self) -> None:
-        model = QStandardItemModel(self.export_group_combo)
-        self.export_group_combo.setModel(model)
-        model.itemChanged.connect(self._on_export_group_item_changed)
-        self.export_group_combo.view().pressed.connect(self._on_export_group_pressed)
+    def _wire_export_group_menu(self) -> None:
+        menu = QMenu(self.export_group_btn)
+        self.export_group_btn.setMenu(menu)
+        self._export_group_checks = {}
 
     def _refresh_export_group_options(self, groups: List[str]) -> None:
-        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
         prior = set(self._get_selected_export_groups())
-        model.blockSignals(True)
-        model.clear()
-        hint = QStandardItem("Select groups...")
-        hint.setFlags(Qt.ItemIsEnabled)
-        model.appendRow(hint)
-        for g in groups:
-            item = QStandardItem(g)
-            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-            item.setData(Qt.Checked if g in prior else Qt.Unchecked, Qt.CheckStateRole)
-            model.appendRow(item)
-        model.blockSignals(False)
-        if self.export_group_combo.currentIndex() >= 0:
-            self.export_group_combo.setCurrentIndex(-1)
-        self._update_export_group_placeholder()
+        menu = self.export_group_btn.menu()
+        if menu is None:
+            menu = QMenu(self.export_group_btn)
+            self.export_group_btn.setMenu(menu)
+        menu.clear()
+        self._export_group_checks = {}
 
-    def _on_export_group_item_changed(self, item: QStandardItem) -> None:
-        if not (item.flags() & Qt.ItemIsUserCheckable):
-            return
-        if item.checkState() != Qt.Checked:
+        hint_action = menu.addAction("Select groups...")
+        hint_action.setEnabled(False)
+
+        if not groups:
+            empty_action = menu.addAction("(no groups available)")
+            empty_action.setEnabled(False)
             self._update_export_group_placeholder()
             return
+
+        for g in groups:
+            cb = QCheckBox(g)
+            cb.setChecked(g in prior)
+            cb.stateChanged.connect(self._on_export_group_checkbox_changed)
+            action = QWidgetAction(menu)
+            action.setDefaultWidget(cb)
+            menu.addAction(action)
+            self._export_group_checks[g] = cb
         self._update_export_group_placeholder()
 
-    def _on_export_group_pressed(self, index) -> None:
-        if not index.isValid():
-            return
-        if index.row() == 0:
-            return
-        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
-        item = model.itemFromIndex(index)
-        if not item:
-            return
-        desired = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
-        pindex = QPersistentModelIndex(index)
-        # Defer the final state set to avoid Linux/Qt style double-toggle behavior.
-        QTimer.singleShot(0, lambda pi=pindex, st=desired: self._apply_export_group_check_state(pi, st))
-
-    def _apply_export_group_check_state(self, index: QPersistentModelIndex, state: Qt.CheckState) -> None:
-        if not index.isValid():
-            return
-        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
-        item = model.itemFromIndex(index)
-        if not item or not (item.flags() & Qt.ItemIsUserCheckable):
-            return
-        model.blockSignals(True)
-        item.setCheckState(state)
-        model.blockSignals(False)
+    def _on_export_group_checkbox_changed(self, _state: int) -> None:
         self._update_export_group_placeholder()
 
     def _get_selected_export_groups(self) -> List[str]:
-        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
-        selected: List[str] = []
-        for i in range(1, model.rowCount()):
-            item = model.item(i)
-            if item and item.checkState() == Qt.Checked:
-                selected.append(item.text().strip())
-        return [g for g in selected if g]
+        selected = [g for g, cb in self._export_group_checks.items() if cb.isChecked()]
+        return [g for g in selected if g.strip()]
 
     def _update_export_group_placeholder(self) -> None:
         selected = self._get_selected_export_groups()
         label = f"{len(selected)} Selected" if selected else "Export by Group"
-        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
-        if model.rowCount() > 0:
-            hint = model.item(0)
-            if hint:
-                hint.setText(label)
-        self.export_group_combo.setCurrentIndex(0)
+        self.export_group_btn.setText(label)
 
     def _filtered_rows(self) -> List[Dict]:
         term = self.search_edit.text().strip().lower()
@@ -1350,13 +1317,10 @@ class OperatorHistoryTab(QWidget):
             return
         QMessageBox.information(self, "Export CSV", f"Exported {len(rows)} record(s).")
         # Clear export group selections after successful export
-        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
-        model.blockSignals(True)
-        for i in range(1, model.rowCount()):
-            item = model.item(i)
-            if item and (item.flags() & Qt.ItemIsUserCheckable):
-                item.setCheckState(Qt.Unchecked)
-        model.blockSignals(False)
+        for cb in self._export_group_checks.values():
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
         self._update_export_group_placeholder()
 
     # ------------- CSV import ------------- #
