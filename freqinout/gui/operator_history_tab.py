@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal, QTimer, QRect
+from PySide6.QtCore import Qt, Signal, QTimer, QRect, QPersistentModelIndex
 from PySide6.QtGui import QColor, QStandardItemModel, QStandardItem, QPainter
 from PySide6.QtWidgets import (
     QWidget,
@@ -838,10 +838,21 @@ class OperatorHistoryTab(QWidget):
         item = model.itemFromIndex(index)
         if not item:
             return
-        if item.checkState() == Qt.Checked:
-            item.setCheckState(Qt.Unchecked)
-        else:
-            item.setCheckState(Qt.Checked)
+        desired = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+        pindex = QPersistentModelIndex(index)
+        # Defer the final state set to avoid Linux/Qt style double-toggle behavior.
+        QTimer.singleShot(0, lambda pi=pindex, st=desired: self._apply_export_group_check_state(pi, st))
+
+    def _apply_export_group_check_state(self, index: QPersistentModelIndex, state: Qt.CheckState) -> None:
+        if not index.isValid():
+            return
+        model: QStandardItemModel = self.export_group_combo.model()  # type: ignore[assignment]
+        item = model.itemFromIndex(index)
+        if not item or not (item.flags() & Qt.ItemIsUserCheckable):
+            return
+        model.blockSignals(True)
+        item.setCheckState(state)
+        model.blockSignals(False)
         self._update_export_group_placeholder()
 
     def _get_selected_export_groups(self) -> List[str]:
