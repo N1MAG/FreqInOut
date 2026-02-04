@@ -10,7 +10,7 @@ This guide assumes a fresh Windows system. Adjust paths as needed.
 ## 2) Get the code
 Clone or download the repository:
 ```
-git clone <your-repo-url> FreqInOut
+git clone https://github.com/N1MAG/FreqInOut.git FreqInOut
 cd FreqInOut
 ```
 
@@ -58,5 +58,8 @@ python build_executable.py
 - Ensure JS8Call API port matches `js8_port` in settings (default 2442).
 - For FLRig control, verify FLRig is running and reachable at 127.0.0.1:12345 (default).
 
-## 11) Linux AppImage (Mint/Debian/Ubuntu)
-For AppImage packaging (Linux Mint 22.1+ / Ubuntu 24.04 base), see `docs/appimage.md`.
+## 11) Linux installer
+For Linux users, prefer the guided installer:
+```
+bash install_FreqInOut_linux.sh
+```

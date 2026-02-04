@@ -1,9 +1,8 @@
 
-"""Simple installer stub.
+"""Create/update local virtual environment and install project requirements."""
 
-Creates venv and installs requirements.
-"""
-import subprocess, sys
+import subprocess
+import sys
 from pathlib import Path
 
 def main():
@@ -15,7 +14,7 @@ def main():
     req = root / "requirements.txt"
     if req.exists():
         subprocess.check_call([str(pip), "install", "-r", str(req)])
-    print("Virtualenv ready. Run: venv/bin/python -m freqinout.main (or equivalent).")
+    print("Virtualenv ready. Run: python -m freqinout.main from the activated venv.")
 
 if __name__ == "__main__":
     main()

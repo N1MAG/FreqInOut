@@ -690,20 +690,14 @@ class FldigiNetControlTab(QWidget):
         """
         Ask scheduler_engine for the next scheduled frequency change time (UTC).
         """
-        # Prefer the newer scheduler_engine compute_next_change_time(now_utc,...)
         try:
             from freqinout.core.scheduler_engine import compute_next_change_time as cnext
             now_utc = datetime.datetime.now(datetime.timezone.utc)
             hf_active, net_active = self._active_schedule_entries(now_utc)
             dt = cnext(now_utc, hf_active, net_active)
-        except Exception:
-            # Fallback to legacy helper if available
-            try:
-                from freqinout.core import scheduler_engine_orig as se_orig
-                dt = se_orig.compute_next_change_time()
-            except Exception as e:
-                log.error("FldigiNetControl: compute_next_change_time failed: %s", e)
-                return None
+        except Exception as e:
+            log.error("FldigiNetControl: compute_next_change_time failed: %s", e)
+            return None
 
         if dt is None:
             return None

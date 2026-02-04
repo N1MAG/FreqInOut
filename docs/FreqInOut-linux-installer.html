@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FreqInOut Linux Installer Guide</title>
+  <style>
+    body { font-family: Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0 18px 40px 18px; background: #fafafa; color: #222; }
+    h1, h2 { margin-top: 1.1em; }
+    h1 { border-bottom: 2px solid #ddd; padding-bottom: 0.3em; }
+    h2 { border-bottom: 1px solid #eee; padding-bottom: 0.15em; }
+    code { background: #f2f2f2; padding: 2px 4px; border-radius: 3px; }
+    pre { background: #f2f2f2; padding: 10px; border-radius: 4px; overflow-x: auto; }
+    .logo-wrap { text-align: center; padding-top: 18px; }
+    .logo-wrap img { max-width: 180px; height: auto; }
+    .callout { background: #eef5ff; border-left: 4px solid #5b8def; padding: 10px 12px; margin: 12px 0; }
+    ul { margin-top: 0.3em; }
+  </style>
+</head>
+<body>
+  <div class="logo-wrap">
+    <img src="../assets/FreqInOut_logo.png" alt="FreqInOut logo" />
+  </div>
+
+  <h1>FreqInOut Linux Installer Guide</h1>
+  <p>This guide is written for:</p>
+  <ul>
+    <li><strong>new Linux users</strong> who want a safe guided install, and</li>
+    <li><strong>advanced users</strong> who want deterministic command-line control.</li>
+  </ul>
+  <p>The installer script is <code>install_FreqInOut_linux.sh</code>.</p>
+
+  <h2>1) Fast path (recommended)</h2>
+  <p>Open a terminal and run:</p>
+  <pre><code>curl -fsSL https://raw.githubusercontent.com/N1MAG/FreqInOut/main/install_FreqInOut_linux.sh -o install_FreqInOut_linux.sh
+bash install_FreqInOut_linux.sh</code></pre>
+  <p>If you already cloned the repo:</p>
+  <pre><code>bash install_FreqInOut_linux.sh</code></pre>
+  <p>When started with no arguments, the installer opens a guided prompt flow.</p>
+
+  <h2>2) What the installer does</h2>
+  <p>It automatically:</p>
+  <ul>
+    <li>checks required tools and Python support</li>
+    <li>installs missing dependencies when possible</li>
+    <li>clones or updates FreqInOut from GitHub</li>
+    <li>creates/repairs a virtual environment and installs <code>requirements.txt</code></li>
+    <li>creates launcher + desktop entry/icon</li>
+    <li>runs a post-install self-test</li>
+    <li>writes detailed logs to <code>~/freqinout-install.log</code></li>
+    <li>cleans up deprecated files from old versions during install/update/repair</li>
+  </ul>
+  <p>Default install location: <code>~/FreqInOut</code>.</p>
+
+  <h2>3) Guided prompts (what to expect)</h2>
+  <p>The installer may ask:</p>
+  <ul>
+    <li>Is this an existing installation?</li>
+    <li>If yes: update app, desktop icon/launcher, or both?</li>
+    <li>For package installs: continue with elevated package manager commands?</li>
+    <li>For local git changes: stash/skip/fail behavior</li>
+    <li>For running app detection: close app, skip update, or fail</li>
+  </ul>
+  <p>If anything fails, recovery tips are printed and the log location is shown.</p>
+
+  <h2>4) Common commands</h2>
+  <p>Install to a custom folder:</p>
+  <pre><code>bash install_FreqInOut_linux.sh --dir "$HOME/Apps/FreqInOut"</code></pre>
+  <p>Or positional path:</p>
+  <pre><code>bash install_FreqInOut_linux.sh "$HOME/Apps/FreqInOut"</code></pre>
+  <p>Repair an existing install:</p>
+  <pre><code>bash install_FreqInOut_linux.sh --repair --dir "$HOME/FreqInOut"</code></pre>
+  <p>Preview actions without changes:</p>
+  <pre><code>bash install_FreqInOut_linux.sh --dry-run</code></pre>
+
+  <h2>5) Advanced options</h2>
+  <p>Use a specific repo:</p>
+  <pre><code>bash install_FreqInOut_linux.sh --repo "https://github.com/ORG/FreqInOut.git"</code></pre>
+  <p>Use a specific branch:</p>
+  <pre><code>bash install_FreqInOut_linux.sh --branch "main"</code></pre>
+  <p>Use channel shortcut:</p>
+  <pre><code>bash install_FreqInOut_linux.sh --channel beta</code></pre>
+  <p>Offline mode:</p>
+  <pre><code>bash install_FreqInOut_linux.sh --offline</code></pre>
+  <p>Set an explicit log file:</p>
+  <pre><code>bash install_FreqInOut_linux.sh --log-file "$HOME/freqinout-install-custom.log"</code></pre>
+  <p>Non-interactive policy-driven run:</p>
+  <pre><code>bash install_FreqInOut_linux.sh --yes --on-dirty stash --on-running fail --on-non-git replace</code></pre>
+  <p>Show help:</p>
+  <pre><code>bash install_FreqInOut_linux.sh --help</code></pre>
+
+  <h2>6) Run and uninstall</h2>
+  <p>Run FreqInOut:</p>
+  <ul>
+    <li>App menu: search <strong>FreqInOut</strong></li>
+    <li>Terminal: <code>freqinout</code></li>
+  </ul>
+  <p>Uninstall:</p>
+  <pre><code>curl -fsSL https://raw.githubusercontent.com/N1MAG/FreqInOut/main/uninstall_FreqInOut_linux.sh -o uninstall_FreqInOut_linux.sh
+bash uninstall_FreqInOut_linux.sh --dir "$HOME/FreqInOut"</code></pre>
+
+  <h2>7) Troubleshooting (quick)</h2>
+  <p>If desktop icon or launcher does not appear:</p>
+  <ul>
+    <li>log out/in (or reboot)</li>
+    <li>rerun icon step via guided existing-install mode</li>
+  </ul>
+  <p>If install fails:</p>
+  <ul>
+    <li>open <code>~/freqinout-install.log</code></li>
+    <li>rerun repair mode</li>
+  </ul>
+  <pre><code>bash install_FreqInOut_linux.sh --repair --dir "$HOME/FreqInOut"</code></pre>
+  <p>If internet checks fail:</p>
+  <ul>
+    <li>use <code>--offline</code></li>
+    <li>or configure proxy environment variables and retry</li>
+  </ul>
+
+  <h2>8) Safety and reliability features</h2>
+  <ul>
+    <li>single-instance lock (prevents concurrent runs)</li>
+    <li>running-app detection before in-place update</li>
+    <li>dirty git worktree protection (prompt/policy)</li>
+    <li>non-git folder handling (replace/skip/fail)</li>
+    <li>rollback points for launcher/desktop/icon/venv on failure</li>
+    <li>desktop cache refresh attempts across desktop environments</li>
+    <li>deprecated-file cleanup from prior releases</li>
+  </ul>
+
+  <h2>9) Suggested usage patterns</h2>
+  <p>For <strong>new users</strong>:</p>
+  <ul>
+    <li>run <code>bash install_FreqInOut_linux.sh</code></li>
+    <li>follow guided prompts</li>
+    <li>keep default install path unless you need otherwise</li>
+  </ul>
+  <p>For <strong>advanced users / automation</strong>:</p>
+  <ul>
+    <li>prefer explicit flags (<code>--dir</code>, <code>--repo</code>, <code>--branch</code>, <code>--yes</code>, policy flags)</li>
+    <li>use <code>--dry-run</code> before first unattended run</li>
+    <li>capture logs with <code>--log-file</code></li>
+  </ul>
+
+  <div class="callout">
+    Tip: If you manage multiple systems, standardize your policy flags and install path so every node behaves the same way.
+  </div>
+</body>
+</html>

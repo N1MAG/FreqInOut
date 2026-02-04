@@ -379,6 +379,107 @@ def _ensure_nets_db() -> None:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_hf_owner ON peer_hf_schedule(owner_callsign)")
 
+        # SOP profiles/actions/state
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sop_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                operating_group TEXT NOT NULL,
+                secondary_group TEXT,
+                frequency TEXT NOT NULL,
+                sop_start_utc TEXT NOT NULL,
+                active INTEGER DEFAULT 0,
+                window_hours INTEGER DEFAULT 12,
+                created_utc TEXT,
+                updated_utc TEXT
+            )
+            """
+        )
+        _ensure_columns(
+            conn,
+            "sop_profiles",
+            {
+                "name": "TEXT",
+                "operating_group": "TEXT",
+                "secondary_group": "TEXT",
+                "frequency": "TEXT",
+                "sop_start_utc": "TEXT",
+                "active": "INTEGER DEFAULT 0",
+                "window_hours": "INTEGER DEFAULT 12",
+                "created_utc": "TEXT",
+                "updated_utc": "TEXT",
+            },
+        )
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sop_profiles_name ON sop_profiles(name)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sop_profiles_active ON sop_profiles(active)")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sop_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id INTEGER NOT NULL,
+                band TEXT,
+                frequency TEXT,
+                software TEXT NOT NULL,
+                action_key TEXT NOT NULL,
+                action_label TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                interval_hours INTEGER DEFAULT 3,
+                interval_minutes INTEGER,
+                description TEXT,
+                contact_rule TEXT DEFAULT 'none',
+                contact_target TEXT,
+                sort_order INTEGER DEFAULT 0
+            )
+            """
+        )
+        _ensure_columns(
+            conn,
+            "sop_actions",
+            {
+                "profile_id": "INTEGER",
+                "band": "TEXT",
+                "frequency": "TEXT",
+                "software": "TEXT",
+                "action_key": "TEXT",
+                "action_label": "TEXT",
+                "enabled": "INTEGER DEFAULT 1",
+                "interval_hours": "INTEGER DEFAULT 3",
+                "interval_minutes": "INTEGER",
+                "description": "TEXT",
+                "contact_rule": "TEXT DEFAULT 'none'",
+                "contact_target": "TEXT",
+                "sort_order": "INTEGER DEFAULT 0",
+            },
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sop_actions_profile ON sop_actions(profile_id)")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sop_action_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id INTEGER NOT NULL,
+                action_id INTEGER NOT NULL,
+                last_completed_utc TEXT,
+                updated_utc TEXT
+            )
+            """
+        )
+        _ensure_columns(
+            conn,
+            "sop_action_state",
+            {
+                "profile_id": "INTEGER",
+                "action_id": "INTEGER",
+                "last_completed_utc": "TEXT",
+                "updated_utc": "TEXT",
+            },
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sop_state_action ON sop_action_state(profile_id, action_id)"
+        )
+
         _ensure_operator_checkins(conn)
         _ensure_js8_links(conn)
 

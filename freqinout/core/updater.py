@@ -1,11 +1,11 @@
 
-"""Simple placeholder updater.
+"""Optional in-app updater utilities.
 
-You MUST set UPDATE_INFO_URL to a real JSON endpoint before using.
+By default, update checks are disabled unless UPDATE_INFO_URL is configured.
 """
 from __future__ import annotations
 
-import sys
+import os
 import zipfile
 import shutil
 import tempfile
@@ -17,7 +17,7 @@ import requests
 from freqinout.core.logger import log
 from freqinout import __version__ as LOCAL_VERSION
 
-UPDATE_INFO_URL = "https://example.com/freqinout/update.json"
+UPDATE_INFO_URL = os.environ.get("FREQINOUT_UPDATE_INFO_URL", "").strip()
 DOWNLOAD_DIR = Path.home() / ".config" / "freqinout" / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 BACKUP_DIR_NAME = "backup_prev_version"
@@ -34,6 +34,9 @@ def is_remote_newer(local: str, remote: str) -> bool:
     return parse_version(remote) > parse_version(local)
 
 def fetch_update_info(timeout: int = 10) -> Optional[dict]:
+    if not UPDATE_INFO_URL:
+        log.info("Updater disabled: FREQINOUT_UPDATE_INFO_URL is not configured.")
+        return None
     try:
         log.info(f"Checking for updates at: {UPDATE_INFO_URL}")
         r = requests.get(UPDATE_INFO_URL, timeout=timeout)

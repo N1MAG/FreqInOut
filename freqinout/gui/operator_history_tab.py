@@ -35,6 +35,9 @@ from freqinout.core.logger import log
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.theme import resolve_theme
 
+ALLOWED_GROUP_ROLES = {"", "HUB", "HUB-ALT", "NCS", "ANCS", "PEER"}
+GROUP_ROLE_OPTIONS = ["", "HUB", "HUB-ALT", "NCS", "ANCS", "PEER"]
+
 
 def _normalize_date_only(val: Optional[str]) -> Optional[str]:
     """
@@ -299,6 +302,10 @@ class OperatorHistoryTab(QWidget):
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self._wire_export_group_combo()
 
+    def _normalize_group_role(self, value: Optional[str]) -> str:
+        role = (value or "").strip().upper()
+        return role if role in ALLOWED_GROUP_ROLES else ""
+
     # ------------- DB LOAD ------------- #
 
     def _db_path(self) -> Path | None:
@@ -428,6 +435,17 @@ class OperatorHistoryTab(QWidget):
 
         # Backfill trusted to 1 and hydrate groups_json; also seed first_seen if missing.
         cur.execute("UPDATE operator_checkins SET trusted=1 WHERE trusted IS NULL")
+        # Standardize group roles and clear unknown values.
+        cur.execute(
+            """
+            UPDATE operator_checkins
+               SET group_role = CASE
+                    WHEN TRIM(UPPER(COALESCE(group_role, ''))) IN ('HUB','HUB-ALT','NCS','ANCS','PEER')
+                        THEN TRIM(UPPER(COALESCE(group_role, '')))
+                    ELSE ''
+                  END
+            """
+        )
         cur.execute(
             "SELECT callsign, group1, group2, group3, groups_json, first_seen_utc, last_seen_utc FROM operator_checkins"
         )
@@ -561,7 +579,7 @@ class OperatorHistoryTab(QWidget):
                         "group2": (g2 or "").strip(),
                         "group3": (g3 or "").strip(),
                         "groups": groups,
-                        "group_role": (role or "").strip(),
+                        "group_role": self._normalize_group_role(role),
                         "first_seen_utc": _normalize_date_only(first_seen) or (first_seen or "").strip(),
                         "last_seen_utc": _normalize_date_only(last_seen) or (last_seen or "").strip(),
                         "checkin_count": int(count or 0),
@@ -1154,6 +1172,7 @@ class OperatorHistoryTab(QWidget):
 
             groups_source = existing_groups if merge_groups else []
             groups, g1, g2, g3 = self._normalize_groups_for_save(row, groups_source)
+            role_val = self._normalize_group_role(row.get("group_role", existing_role or ""))
             trusted = row.get("trusted")
             if trusted is None:
                 trusted = 1 if existing_trusted else 0
@@ -1180,7 +1199,7 @@ class OperatorHistoryTab(QWidget):
                     g1,
                     g2,
                     g3,
-                    row.get("group_role", existing_role or ""),
+                    role_val,
                     first_seen or last_seen or datetime.datetime.utcnow().strftime("%Y%m%d"),
                     last_seen or datetime.datetime.utcnow().strftime("%Y%m%d"),
                     row.get("last_net", existing_last_net or ""),
@@ -1337,6 +1356,7 @@ class OperatorHistoryTab(QWidget):
             return
         imported = 0
         skipped = 0
+        role_cleared = 0
         try:
             with open(fn, newline="", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
@@ -1361,6 +1381,8 @@ class OperatorHistoryTab(QWidget):
                     date_val = (lower_row.get("date added") or lower_row.get("date_added") or "").strip()
                     if not date_val:
                         date_val = datetime.datetime.utcnow().strftime("%Y%m%d")
+                    raw_role = (lower_row.get("group role") or lower_row.get("group_role") or "").strip()
+                    normalized_role = self._normalize_group_role(raw_role)
                     data = {
                         "callsign": cs,
                         "name": lower_row.get("name", "").strip(),
@@ -1370,13 +1392,15 @@ class OperatorHistoryTab(QWidget):
                         "group2": lower_row.get("group2", "").strip().upper(),
                         "group3": lower_row.get("group3", "").strip().upper(),
                         "groups": groups_list,
-                        "group_role": (lower_row.get("group role") or lower_row.get("group_role") or "").strip().upper(),
+                        "group_role": normalized_role,
                         "first_seen_utc": date_val,
                         "last_seen_utc": date_val,
                         "trusted": 1,
                     }
                     if self._upsert_record(data):
                         imported += 1
+                        if raw_role and normalized_role == "":
+                            role_cleared += 1
                     else:
                         skipped += 1
         except Exception as e:
@@ -1386,7 +1410,10 @@ class OperatorHistoryTab(QWidget):
 
         self._load_data(show_toast=True)
         self._schedule_history_update()
-        QMessageBox.information(self, "CSV Import", f"Imported {imported} record(s). Skipped {skipped}.")
+        msg = f"Imported {imported} record(s). Skipped {skipped}."
+        if role_cleared:
+            msg += f" Cleared {role_cleared} non-standard group role value(s)."
+        QMessageBox.information(self, "CSV Import", msg)
 
     # ------------- Add / Edit / Delete dialogs ------------- #
 
@@ -1403,7 +1430,10 @@ class OperatorHistoryTab(QWidget):
         g1_edit = QLineEdit(defaults.get("group1", ""))
         g2_edit = QLineEdit(defaults.get("group2", ""))
         g3_edit = QLineEdit(defaults.get("group3", ""))
-        role_edit = QLineEdit(defaults.get("group_role", ""))
+        role_combo = QComboBox()
+        for role in GROUP_ROLE_OPTIONS:
+            role_combo.addItem(role)
+        role_combo.setCurrentText(self._normalize_group_role(defaults.get("group_role", "")))
         first_edit = QLineEdit(defaults.get("first_seen_utc", ""))
         last_edit = QLineEdit(defaults.get("last_seen_utc", ""))
         date_edit = QLineEdit(defaults.get("date_added", ""))
@@ -1420,7 +1450,7 @@ class OperatorHistoryTab(QWidget):
         form.addRow("Group 1:", g1_edit)
         form.addRow("Group 2:", g2_edit)
         form.addRow("Group 3:", g3_edit)
-        form.addRow("Group Role:", role_edit)
+        form.addRow("Group Role:", role_combo)
         form.addRow("First Seen (UTC):", first_edit)
         form.addRow("Last Seen (UTC):", last_edit)
         form.addRow(date_label, date_edit)
@@ -1455,7 +1485,7 @@ class OperatorHistoryTab(QWidget):
             "group1": g1_edit.text().strip(),
             "group2": g2_edit.text().strip(),
             "group3": g3_edit.text().strip(),
-            "group_role": role_edit.text().strip(),
+            "group_role": self._normalize_group_role(role_combo.currentText()),
             "first_seen_utc": first_edit.text().strip(),
             "last_seen_utc": last_edit.text().strip(),
             "date_added": date_edit.text().strip(),
@@ -1476,20 +1506,76 @@ class OperatorHistoryTab(QWidget):
             QMessageBox.information(self, "Edit", "Select a record using the checkbox.")
             return
         if len(calls) > 1:
-            resp = QMessageBox.question(
-                self,
-                "Bulk Edit Trusted",
-                "Update Trusted flag for selected operators?\nYes = set Trusted, No = set Untrusted, Cancel = abort.",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                QMessageBox.Cancel,
-            )
-            if resp == QMessageBox.Cancel:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Bulk Edit Operators")
+            form = QFormLayout(dlg)
+
+            trusted_combo = QComboBox()
+            trusted_combo.addItem("No Change", "no_change")
+            trusted_combo.addItem("Trusted", 1)
+            trusted_combo.addItem("Untrusted", 0)
+
+            role_combo = QComboBox()
+            role_combo.addItem("No Change", "__no_change__")
+            role_combo.addItem("(Clear)", "")
+            for role in GROUP_ROLE_OPTIONS:
+                if role:
+                    role_combo.addItem(role, role)
+
+            form.addRow("Trusted:", trusted_combo)
+            form.addRow("Group Role:", role_combo)
+
+            btn_row = QHBoxLayout()
+            save_btn = QPushButton("Apply")
+            cancel_btn = QPushButton("Cancel")
+            btn_row.addStretch()
+            btn_row.addWidget(save_btn)
+            btn_row.addWidget(cancel_btn)
+            form.addRow(btn_row)
+
+            save_btn.clicked.connect(dlg.accept)
+            cancel_btn.clicked.connect(dlg.reject)
+
+            if dlg.exec() != QDialog.Accepted:
                 return
-            trusted_val = 1 if resp == QMessageBox.Yes else 0
+
+            trusted_choice = trusted_combo.currentData()
+            role_choice = role_combo.currentData()
+            trusted_update = trusted_choice != "no_change"
+            role_update = role_choice != "__no_change__"
+            if not trusted_update and not role_update:
+                QMessageBox.information(self, "Bulk Edit Operators", "No changes selected.")
+                return
+
+            trusted_txt = "No Change"
+            if trusted_update:
+                trusted_txt = "Trusted" if int(trusted_choice) == 1 else "Untrusted"
+            role_txt = "No Change"
+            if role_update:
+                role_txt = "(Clear)" if str(role_choice) == "" else str(role_choice)
+            confirm = QMessageBox.question(
+                self,
+                "Confirm Bulk Update",
+                (
+                    f"Apply bulk update to {len(calls)} selected operator(s)?\n\n"
+                    f"Trusted: {trusted_txt}\n"
+                    f"Group Role: {role_txt}"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+
             changed = 0
             failed = 0
             for cs in calls:
-                if self._upsert_record({"callsign": cs, "trusted": trusted_val}):
+                payload: Dict[str, object] = {"callsign": cs}
+                if trusted_update:
+                    payload["trusted"] = int(trusted_choice)
+                if role_update:
+                    payload["group_role"] = self._normalize_group_role(str(role_choice))
+                if self._upsert_record(payload):
                     changed += 1
                 else:
                     failed += 1
@@ -1498,7 +1584,7 @@ class OperatorHistoryTab(QWidget):
                 self._schedule_history_update()
             QMessageBox.information(
                 self,
-                "Bulk Edit Trusted",
+                "Bulk Edit Operators",
                 f"Updated {changed} record(s). Failed {failed}.",
             )
             return

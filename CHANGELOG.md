@@ -1,10 +1,20 @@
 # Changelog
 
+## [1.1.3]
+- Added: SOP Builder tab with per-row band/frequency/software/action/interval/contact rules and manual completion reminders.
+- Added: SOP import/export and hidden-row preservation for actions tied to software not yet configured.
+- Added: SOP role and callsign contact targeting with primary+secondary group filtering.
+- Added: SOP due-state styling (warning/success), overdue grace handling, and Schedule Status "SOP Action in" countdown support.
+- Changed: SOP time display now supports UTC/Local toggle with matching start-time label behavior.
+- Changed: SOP contact display now omits empty role groups and orders by role priority (HUB then HUB-ALT, NCS then ANCS).
+- Updated: Linux installer/docs and DB tooling wrappers/documentation refinements.
+- Updated: Release hygiene docs, security policy, and version/license metadata consistency.
+
 ## [1.1.2]
 - Added: FLDigi log folder setting to detect RX activity from latest fldigi*.log.
 - Added: FLDigi log-based busy detection to delay schedule frequency changes when recent RX traffic is present.
-- Added: FLDigi gibberish detection with timeout to avoid indefinite holds; BUSY RX can show “FLDigi (gibberish)”.
-- Changed: Peer Schedule timezone toggle now matches Daily HF Schedule “Showing” style and behavior.
+- Added: FLDigi gibberish detection with timeout to avoid indefinite holds; BUSY RX can show "FLDigi (gibberish)".
+- Changed: Peer Schedule timezone toggle now matches Daily HF Schedule "Showing" style and behavior.
 - Changed: FLDigi RX busy delay is skipped during scheduled and ad hoc nets; mode/offset auto-apply waits for FLDigi idle.
 - Fixed: Daily nets now render on every day in the planner (not just the first day).
 - Added: Schedule Status shows upcoming frequency change countdown within 15 minutes.

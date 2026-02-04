@@ -4,11 +4,11 @@ Thanks for your interest in contributing. This guide covers how to set up the pr
 
 ## Quick Start
 
-- Python 3.11+ is required.
+- Python 3.9+ is required (3.11 recommended).
 - Clone the repo and set up a virtual environment:
 
 ```bash
-git clone <your-repo-url> FreqInOut
+git clone https://github.com/N1MAG/FreqInOut.git FreqInOut
 cd FreqInOut
 python -m venv venv
 ```
@@ -57,6 +57,19 @@ Please include:
 - Describe the behavior change and how you verified it.
 - Include screenshots or short clips for UI changes.
 
+## Release Readiness (Maintainer)
+
+Before pushing a release commit, run:
+
+```bash
+python tools/release_preflight.py
+```
+
+Then verify packaging flows:
+- Linux installer: guided install/update/repair paths.
+- Windows build: PyInstaller + Inno setup.
+- Docs: user-facing behavior matches current UI.
+
 ## Tests and Verification
 
 There is no formal test suite yet. Please include manual verification steps, such as:
@@ -86,4 +99,3 @@ There is no formal test suite yet. Please include manual verification steps, suc
 ## License
 
 By contributing, you agree that your contributions will be licensed under the GNU GPLv3 (see `LICENSE.md`).
-

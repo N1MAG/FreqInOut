@@ -40,6 +40,7 @@ from freqinout.gui.net_schedule_tab import NetScheduleTab
 from freqinout.gui.fldigi_net_control_tab import FldigiNetControlTab
 from freqinout.gui.js8call_net_control_tab import JS8CallNetControlTab
 from freqinout.gui.freq_planner_tab import FreqPlannerTab
+from freqinout.gui.sop_tab import SOPTab
 from freqinout.gui.operator_history_tab import OperatorHistoryTab
 from freqinout.gui.log_viewer import LogViewerTab
 from freqinout.gui.stations_map_tab import StationsMapTab
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
         self.fldigi_tab = FldigiNetControlTab(self)
         self.js8_tab = JS8CallNetControlTab(self)
         self.freq_planner_tab = FreqPlannerTab(self)
+        self.sop_tab = SOPTab(self)
         self.operator_history_tab = OperatorHistoryTab(self)
         self.message_viewer_tab = MessageViewerTab(self)
         self.log_tab = LogViewerTab(self)
@@ -93,6 +95,7 @@ class MainWindow(QMainWindow):
         # Sidebar navigation order (as requested)
         self._screens = [
             ("FreqPlanner", self.freq_planner_tab),
+            ("SOP", self.sop_tab),
             ("Messages", self.message_viewer_tab),
             ("FLDigi NCS", self.fldigi_tab),
             ("JS8 NCS", self.js8_tab),
@@ -211,6 +214,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 600)
 
         self._apply_app_theme()
+        self._sop_next_due_cache_ts = 0.0
+        self._sop_next_due_minutes = None
 
         # Default selection
         if self.nav_buttons:
@@ -294,6 +299,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.settings_tab.settings_saved.connect(self.freq_planner_tab.on_settings_saved)
+        except Exception:
+            pass
+        try:
+            self.settings_tab.settings_saved.connect(self.sop_tab.on_settings_saved)
         except Exception:
             pass
         try:
@@ -574,6 +583,7 @@ class MainWindow(QMainWindow):
         fldigi_mode_off = bool(status.get("fldigi_mode_off"))
         fldigi_offset_off = bool(status.get("fldigi_offset_off"))
         next_change_minutes = None
+        sop_next_minutes = self._get_next_sop_action_minutes()
         next_change = getattr(self.scheduler, "next_change_utc", None)
         if next_change is not None:
             try:
@@ -675,7 +685,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         else:
-            self.scheduler_status_header.setText("On Schedule")
+            if sop_next_minutes is not None and 0 <= sop_next_minutes <= 180:
+                hours = sop_next_minutes // 60
+                minutes = sop_next_minutes % 60
+                self.scheduler_status_header.setText(f"SOP Action in: {hours}:{minutes:02d}")
+            else:
+                self.scheduler_status_header.setText("On Schedule")
             self.scheduler_status_header.setStyleSheet("")
             self._set_scheduler_reasons([])
             self.resume_schedule_btn.setVisible(False)
@@ -689,6 +704,30 @@ class MainWindow(QMainWindow):
             self.scheduler_status_container.adjustSize()
         except Exception:
             pass
+
+    def _get_next_sop_action_minutes(self):
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+            # Refresh every 30s to avoid querying SOP DB on every 2s status timer tick.
+            if (now - float(self._sop_next_due_cache_ts or 0.0)) < 30:
+                return self._sop_next_due_minutes
+            self._sop_next_due_cache_ts = now
+            self._sop_next_due_minutes = None
+            if not hasattr(self, "sop_tab") or not hasattr(self.sop_tab, "manager"):
+                return None
+            rows = self.sop_tab.manager.build_upcoming_actions(horizon_hours=3, only_active=True)
+            if not rows:
+                return None
+            next_due = rows[0].get("next_due_utc")
+            if next_due is None:
+                return None
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            delta = (next_due - now_utc).total_seconds()
+            mins = max(0, int((delta + 59) // 60))
+            self._sop_next_due_minutes = mins
+            return mins
+        except Exception:
+            return None
 
     def _on_app_about_to_quit(self):
         if self._shutting_down:
@@ -904,6 +943,7 @@ class MainWindow(QMainWindow):
         self._update_log_indicator()
         for widget in (
             self.freq_planner_tab,
+            self.sop_tab,
             self.hf_schedule_tab,
             self.net_tab,
             self.fldigi_tab,

@@ -13,11 +13,10 @@ env/
 # Build / dist
 build/
 dist/
+Output/
 *.egg-info/
 .eggs/
-*.iss
 *-Setup.exe
-installer.iss
 dist/*.exe
 
 # IDE / editor
@@ -35,9 +34,24 @@ config/config.json
 config/*.db
 __pycache__/
 *.pyc
+*.db-wal
+*.db-shm
+*.db-journal
+*.tmp
+*.bak
 freqinout/config/config.json
 freqinout/config/freqinout_nets.db
 freqinout/config/freqinout.db
 freqinout/logs/
 venv/
 *.log
+
+# Python tooling caches / reports
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/

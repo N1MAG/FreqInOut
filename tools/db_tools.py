@@ -17,29 +17,22 @@ NOTE: Values are JSON-encoded. For complex values, pass valid JSON to --set.
 """
 
 import argparse
+from datetime import datetime
 import json
+import shutil
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from db_schema import ALL_TABLES, CONFIG_DIR, NETS_DB, SETTINGS_DB, db_for_table
 
 def db_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "config" / "freqinout.db"
+    return SETTINGS_DB
 
 def nets_db_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "config" / "freqinout_nets.db"
+    return NETS_DB
 
-ALLOWED_TABLES = {
-    "kv": "freqinout.db",
-    "operator_checkins": "freqinout_nets.db",
-    "js8_links": "freqinout_nets.db",
-    "daily_schedule_tab": "freqinout_nets.db",
-    "net_schedule_tab": "freqinout_nets.db",
-    "net_schedule": "freqinout_nets.db",
-    "message_viewer_paths": "freqinout_nets.db",
-    "autoquery_backlog": "freqinout_nets.db",
-    "peer_hf_schedule": "freqinout_nets.db",
-}
+ALLOWED_TABLES = {name: table.db.name for name, table in ALL_TABLES.items()}
 
 
 def ensure_db(conn: sqlite3.Connection) -> None:
@@ -82,12 +75,17 @@ def help_examples() -> str:
 
 
 def resolve_table_db(table: str) -> Optional[Path]:
-    db_name = ALLOWED_TABLES.get(table)
-    if not db_name:
+    return db_for_table(table)
+
+def backup_db_file(path: Path, reason: str) -> Optional[Path]:
+    if not path.exists():
         return None
-    if db_name == "freqinout.db":
-        return db_path()
-    return nets_db_path()
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = CONFIG_DIR / "backups" / f"{reason}-{stamp}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    dst = backup_dir / path.name
+    shutil.copy2(path, dst)
+    return dst
 
 def list_dbs_and_tables() -> None:
     dbs = [db_path(), nets_db_path()]
@@ -139,6 +137,9 @@ def main() -> None:
     if args.truncate:
         if not args.yes:
             parser.error("--truncate requires --yes")
+        backup = backup_db_file(path, "truncate-kv")
+        if backup:
+            print(f"Backed up DB to {backup}")
         with conn:
             conn.execute("DELETE FROM kv")
         print("Truncated kv table.")
@@ -196,6 +197,9 @@ def main() -> None:
             if args.table_truncate:
                 if not args.yes:
                     parser.error("--table-truncate requires --yes")
+                backup = backup_db_file(table_db, f"truncate-{args.table}")
+                if backup:
+                    print(f"Backed up DB to {backup}")
                 with table_conn:
                     table_conn.execute(f"DELETE FROM {args.table}")
                 print(f"Truncated {args.table} in {table_db.name}.")
