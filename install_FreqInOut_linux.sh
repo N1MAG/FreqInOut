@@ -45,6 +45,7 @@ DESKTOP_FILE_NAME="freqinout.desktop"
 DESKTOP_ENTRY_PATH="$HOME/.local/share/applications/$DESKTOP_FILE_NAME"
 ICON_THEME_ROOT="$HOME/.local/share/icons/hicolor"
 ICON_PRIMARY_PATH="$ICON_THEME_ROOT/1024x1024/apps/freqinout.png"
+ICON_CACHE_DIR="$HOME/.local/state/freqinout/cache"
 BACKUP_ROOT="$HOME/.local/state/freqinout/backups"
 ICON_ZOOM_PERCENT="${ICON_ZOOM_PERCENT:-320}"
 PRIMARY_ICON_NAME="FreqInOut-desktop.png"
@@ -1243,16 +1244,19 @@ refresh_desktop_caches() {
 
 prepare_icon_source() {
   local primary_icon="$INSTALL_DIR/assets/$PRIMARY_ICON_NAME"
+  local cache_icon="$ICON_CACHE_DIR/$PRIMARY_ICON_NAME"
   local input_icon=""
   local output_icon="$INSTALL_DIR/.freqinout_icon_prepared.png"
 
   if [[ -f "$primary_icon" ]]; then
+    log "Using icon from install assets: $primary_icon"
     input_icon="$primary_icon"
   else
-    log "Icon file not found in install assets; attempting download of $PRIMARY_ICON_NAME"
-    if download_icon_from_github "$primary_icon"; then
-      log "Downloaded icon to $primary_icon"
-      input_icon="$primary_icon"
+    log "Icon file not found in install assets; attempting cached download of $PRIMARY_ICON_NAME"
+    run_cmd mkdir -p "$ICON_CACHE_DIR"
+    if download_icon_from_github "$cache_icon"; then
+      log "Downloaded icon to cache: $cache_icon"
+      input_icon="$cache_icon"
     else
       return 1
     fi
@@ -1289,10 +1293,7 @@ create_desktop_icon() {
   local icon_value="applications-utilities"
   local desktop_shortcut=""
   local prepared_icon=""
-  local primary_icon="$INSTALL_DIR/assets/$PRIMARY_ICON_NAME"
-  local desktop_entry_exists=0
   if [[ -f "$DESKTOP_ENTRY_PATH" ]]; then
-    desktop_entry_exists=1
     log "Existing desktop entry detected at $DESKTOP_ENTRY_PATH; it will be replaced."
   fi
   if [[ -z "$ROLLBACK_DESKTOP_BACKUP" ]]; then
@@ -1303,26 +1304,12 @@ create_desktop_icon() {
   if [[ -z "$ROLLBACK_ICON_BACKUP_DIR" ]]; then
     backup_icon_targets_for_rollback
   fi
-  if [[ ! -f "$primary_icon" ]]; then
-    if [[ $desktop_entry_exists -eq 1 ]]; then
-      log "Required icon missing locally; downloading $PRIMARY_ICON_NAME from GitHub before replacing desktop entry."
-    else
-      log "Required icon missing locally; downloading $PRIMARY_ICON_NAME from GitHub."
-    fi
-    if download_icon_from_github "$primary_icon"; then
-      log "Downloaded icon to $primary_icon"
-    else
-      warn "Could not download $PRIMARY_ICON_NAME from GitHub."
-    fi
-  fi
-  if [[ -f "$primary_icon" ]]; then
-    log "Desktop icon source found: $primary_icon"
-    icon_value="$primary_icon"
-  fi
   log "Preparing desktop entry at $DESKTOP_ENTRY_PATH"
   if prepared_icon="$(prepare_icon_source)"; then
     log "Installing desktop icon assets in $ICON_THEME_ROOT"
     install_icon_files "$prepared_icon"
+    # Use icon theme name to avoid absolute paths into the git checkout.
+    icon_value="freqinout"
     if [[ "$prepared_icon" == "$INSTALL_DIR/.freqinout_icon_prepared.png" ]]; then
       run_cmd rm -f "$prepared_icon"
     fi
