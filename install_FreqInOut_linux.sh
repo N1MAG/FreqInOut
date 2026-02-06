@@ -1276,6 +1276,42 @@ prepare_icon_source() {
   return 0
 }
 
+refresh_icon_asset() {
+  local primary_icon="$INSTALL_DIR/assets/$PRIMARY_ICON_NAME"
+  local branch=""
+
+  if [[ $OFFLINE_MODE -eq 1 ]]; then
+    log "Offline mode enabled; skipping icon refresh."
+    return 0
+  fi
+  if [[ -d "$INSTALL_DIR/.git" ]]; then
+    branch="$(git_current_branch)"
+    if [[ -z "$branch" ]]; then
+      warn "Could not determine current git branch; skipping icon refresh."
+      return 0
+    fi
+    if git -C "$INSTALL_DIR" status --porcelain -- "$primary_icon" | grep -q .; then
+      warn "Local changes detected in icon asset; skipping icon refresh."
+      return 0
+    fi
+    log "Refreshing icon asset from origin/$branch"
+    run_cmd git -C "$INSTALL_DIR" fetch origin "$branch"
+    run_cmd git -C "$INSTALL_DIR" checkout "origin/$branch" -- "assets/$PRIMARY_ICON_NAME"
+    return 0
+  fi
+
+  if [[ -f "$primary_icon" ]]; then
+    log "Non-git install detected; attempting to refresh icon from GitHub."
+    run_cmd mkdir -p "$ICON_CACHE_DIR"
+    if download_icon_from_github "$ICON_CACHE_DIR/$PRIMARY_ICON_NAME"; then
+      run_cmd mkdir -p "$(dirname "$primary_icon")"
+      run_cmd cp -f "$ICON_CACHE_DIR/$PRIMARY_ICON_NAME" "$primary_icon"
+      log "Replaced local icon asset from GitHub."
+    fi
+  fi
+  return 0
+}
+
 install_icon_files() {
   local source_icon="$1"
   local size
@@ -1307,6 +1343,7 @@ create_desktop_icon() {
   if [[ -f "$DESKTOP_ENTRY_PATH" ]]; then
     log "Existing desktop entry detected at $DESKTOP_ENTRY_PATH; it will be replaced."
   fi
+  refresh_icon_asset
   if [[ -z "$ROLLBACK_DESKTOP_BACKUP" ]]; then
     init_rollback_dir
     ROLLBACK_DESKTOP_BACKUP="$ROLLBACK_DIR/desktop-entry.bak"
@@ -1320,8 +1357,8 @@ create_desktop_icon() {
     log "Installing desktop icon assets in $ICON_THEME_ROOT"
     install_icon_files "$prepared_icon"
     install_pixmaps_icon "$prepared_icon"
-    # Use icon theme name to avoid absolute paths into the git checkout.
-    icon_value="freqinout"
+    # Prefer absolute icon path to reduce theme-cache issues.
+    icon_value="$ICON_THEME_ROOT/1024x1024/apps/freqinout.png"
     if [[ "$prepared_icon" == "$INSTALL_DIR/.freqinout_icon_prepared.png" ]]; then
       run_cmd rm -f "$prepared_icon"
     fi
