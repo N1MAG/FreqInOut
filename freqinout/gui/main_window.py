@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QLayout,
     QSpacerItem,
 )
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, QTimer
 from pathlib import Path
@@ -71,6 +71,7 @@ class MainWindow(QMainWindow):
 
         self.settings = SettingsManager()
         self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
+        self._set_window_icon()
 
         # Central widget with sidebar navigation + stacked pages
         central = QWidget()
@@ -958,6 +959,19 @@ class MainWindow(QMainWindow):
                     widget.apply_theme()
                 except Exception:
                     pass
+
+    def _set_window_icon(self):
+        assets_dir = Path(__file__).resolve().parents[2] / "assets"
+        icon_path = assets_dir / "FreqInOut-desktop.png"
+        if not icon_path.exists():
+            return
+        icon = QIcon(str(icon_path))
+        if icon.isNull():
+            return
+        self.setWindowIcon(icon)
+        app = QApplication.instance()
+        if app is not None:
+            app.setWindowIcon(icon)
 
     def _set_logo_pixmap(self):
         if not hasattr(self, "logo_label"):

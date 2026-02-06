@@ -1251,6 +1251,8 @@ prepare_icon_source() {
   if [[ -f "$primary_icon" ]]; then
     log "Using icon from install assets: $primary_icon"
     input_icon="$primary_icon"
+    run_cmd mkdir -p "$ICON_CACHE_DIR"
+    run_cmd cp -f "$primary_icon" "$cache_icon"
   else
     log "Icon file not found in install assets; attempting cached download of $PRIMARY_ICON_NAME"
     run_cmd mkdir -p "$ICON_CACHE_DIR"
@@ -1283,8 +1285,17 @@ install_icon_files() {
   for size in "${sizes[@]}"; do
     icon_target="$ICON_THEME_ROOT/${size}x${size}/apps/freqinout.png"
     run_cmd mkdir -p "$(dirname "$icon_target")"
+    run_cmd rm -f "$icon_target"
     run_cmd cp -f "$source_icon" "$icon_target"
   done
+}
+
+install_pixmaps_icon() {
+  local source_icon="$1"
+  local pixmaps_target="$HOME/.local/share/pixmaps/freqinout.png"
+  run_cmd mkdir -p "$(dirname "$pixmaps_target")"
+  run_cmd rm -f "$pixmaps_target"
+  run_cmd cp -f "$source_icon" "$pixmaps_target"
 }
 
 create_desktop_icon() {
@@ -1308,6 +1319,7 @@ create_desktop_icon() {
   if prepared_icon="$(prepare_icon_source)"; then
     log "Installing desktop icon assets in $ICON_THEME_ROOT"
     install_icon_files "$prepared_icon"
+    install_pixmaps_icon "$prepared_icon"
     # Use icon theme name to avoid absolute paths into the git checkout.
     icon_value="freqinout"
     if [[ "$prepared_icon" == "$INSTALL_DIR/.freqinout_icon_prepared.png" ]]; then
