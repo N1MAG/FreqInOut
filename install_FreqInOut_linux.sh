@@ -1357,8 +1357,8 @@ create_desktop_icon() {
     log "Installing desktop icon assets in $ICON_THEME_ROOT"
     install_icon_files "$prepared_icon"
     install_pixmaps_icon "$prepared_icon"
-    # Prefer absolute icon path to reduce theme-cache issues.
-    icon_value="$ICON_THEME_ROOT/1024x1024/apps/freqinout.png"
+    # Use the install asset path for reliable desktop icon updates.
+    icon_value="$INSTALL_DIR/assets/$PRIMARY_ICON_NAME"
     if [[ "$prepared_icon" == "$INSTALL_DIR/.freqinout_icon_prepared.png" ]]; then
       run_cmd rm -f "$prepared_icon"
     fi
