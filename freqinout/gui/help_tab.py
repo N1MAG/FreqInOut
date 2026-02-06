@@ -61,6 +61,7 @@ class HelpTab(QWidget):
         viewer_col.addLayout(header_row)
 
         self.viewer = QTextBrowser()
+        self.viewer.setOpenExternalLinks(True)
         if self._doc_path.exists():
             self.viewer.setSource(QUrl.fromLocalFile(str(self._doc_path)))
             self._build_toc()
