@@ -51,16 +51,30 @@ from reportlab.pdfgen import canvas
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
+from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.theme import resolve_theme, button_style
 from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
 
 
-SUPPORTED_EXT = {".b2s", ".k2s", ".txt", ".rtf", ".ff", ".xml", ".json", ".html", ".htm"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".raw"}
+IMAGE_PREVIEW_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
+SUPPORTED_EXT = {
+    ".b2s",
+    ".k2s",
+    ".txt",
+    ".rtf",
+    ".ff",
+    ".xml",
+    ".json",
+    ".html",
+    ".htm",
+    *IMAGE_EXTS,
+}
 ORIGIN_EXTS = {
-    "flmsg": {".b2s", ".k2s", ".txt", ".rtf"},
+    "flmsg": {".b2s", ".k2s", ".txt", ".rtf", *IMAGE_EXTS},
     "flamp": {".b2s", ".k2s", ".txt", ".rtf"},
-    "varac": {".txt", ".html", ".htm", ".b2s", ".k2s"},
+    "varac": {".txt", ".html", ".htm", ".b2s", ".k2s", *IMAGE_EXTS},
 }
 
 DEFAULT_WATCH_DIRS = [
@@ -200,13 +214,12 @@ class UnifiedMessage:
 
 
 class MessageTableModel(QAbstractTableModel):
-    HEADERS = ["", "MSG Type", "Status", "From", "To", "RCV_DT (UTC)", "Message Title", ""]
-
     def __init__(self, rows: List[UnifiedMessage]):
         super().__init__()
         self._rows = rows
         self._selected_keys: set[tuple] = set()
         self._select_column_index = 0
+        self._headers = ["", "MSG Type", "Status", "From", "To", "RCV_DT (UTC)", "Message Title", ""]
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         if parent.isValid():
@@ -216,7 +229,7 @@ class MessageTableModel(QAbstractTableModel):
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
         if parent.isValid():
             return 0
-        return len(self.HEADERS)
+        return len(self._headers)
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
@@ -254,9 +267,13 @@ class MessageTableModel(QAbstractTableModel):
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
         if role != Qt.DisplayRole:
             return None
-        if orientation == Qt.Horizontal and 0 <= section < len(self.HEADERS):
-            return self.HEADERS[section]
+        if orientation == Qt.Horizontal and 0 <= section < len(self._headers):
+            return self._headers[section]
         return None
+
+    def set_time_header(self, label: str) -> None:
+        self._headers[5] = label
+        self.headerDataChanged.emit(Qt.Horizontal, 5, 5)
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
         if not index.isValid():
@@ -585,6 +602,9 @@ class MessageViewerTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
+        self._time_mode_override: str | None = None
+        self._show_local_time = default_mode != "UTC"
         cfg = self.settings.get("message_viewer", {}) or {}
         msg_paths = self.settings.get("message_paths", {}) or {}
         self.watch_dirs: List[Dict] = []
@@ -594,6 +614,14 @@ class MessageViewerTab(QWidget):
                 self.watch_dirs.append({"path": p, "origin": origin})
         if not self.watch_dirs:
             self.watch_dirs = DEFAULT_WATCH_DIRS
+        fldigi_log_path = (self.settings.get("fldigi_log_path", "") or "").strip()
+        if fldigi_log_path:
+            images_dir = Path(fldigi_log_path) / "images"
+            if images_dir.exists():
+                existing = {(w.get("origin"), w.get("path")) for w in self.watch_dirs}
+                entry = ("flmsg", str(images_dir))
+                if entry not in existing:
+                    self.watch_dirs.append({"path": str(images_dir), "origin": "flmsg"})
         self.scan_minutes: int = cfg.get("scan_minutes") or 15
         if self.scan_minutes not in SCAN_CHOICES:
             self.scan_minutes = 15
@@ -627,6 +655,7 @@ class MessageViewerTab(QWidget):
         self._file_scan_thread: QThread | None = None
         self._file_scan_worker: _FileScanWorker | None = None
         self._file_scan_start_ts: float = 0.0
+        self._open_external_path: Path | None = None
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -946,6 +975,11 @@ class MessageViewerTab(QWidget):
         self.delete_selected_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
         header.addWidget(self.delete_selected_btn)
 
+        self.time_toggle_btn = QPushButton("Showing: UTC")
+        self.time_toggle_btn.setStyleSheet(button_style("primary", resolve_theme(self.settings)))
+        self.time_toggle_btn.clicked.connect(self._toggle_time_view)
+        header.addWidget(self.time_toggle_btn)
+
         layout.addLayout(header)
 
         # Main layout
@@ -962,7 +996,7 @@ class MessageViewerTab(QWidget):
 
         self.pending_table = QTableWidget(0, 5)
         self.pending_table.setHorizontalHeaderLabels(
-            ["Callsign", "Msg ID", "Last Seen", "Status", "Actions"]
+            ["Callsign", "Msg ID", "Last Seen (UTC)", "Status", "Actions"]
         )
         self.pending_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.pending_table.setSelectionMode(QAbstractItemView.NoSelection)
@@ -1008,6 +1042,8 @@ class MessageViewerTab(QWidget):
         msg_header.setVisible(True)
         msg_header.sectionClicked.connect(self._on_sort_clicked)
         msg_header.checkboxToggled.connect(self._on_header_checkbox_toggled)
+
+        self._update_time_ui()
         self._actions_delegate = MessageActionDelegate(self, QColor(resolve_theme(self.settings)["danger"]))
         self.messages_table.setItemDelegateForColumn(7, self._actions_delegate)
         self.messages_table.setItemDelegateForColumn(0, MessageCheckboxDelegate(self.messages_table))
@@ -1021,7 +1057,14 @@ class MessageViewerTab(QWidget):
         viewer_layout = QVBoxLayout(viewer_container)
         self.info_label = QLabel("No file selected")
         self.info_label.setStyleSheet("font-weight: bold;")
-        viewer_layout.addWidget(self.info_label)
+        info_row = QHBoxLayout()
+        info_row.addWidget(self.info_label)
+        info_row.addStretch()
+        self.open_external_btn = QPushButton("Open Image")
+        self.open_external_btn.clicked.connect(self._open_external_file)
+        self.open_external_btn.setVisible(False)
+        info_row.addWidget(self.open_external_btn)
+        viewer_layout.addLayout(info_row)
         self.viewer = QTextEdit()
         self.viewer.setReadOnly(True)
         self.viewer.setAcceptRichText(False)
@@ -1173,8 +1216,13 @@ class MessageViewerTab(QWidget):
     def _refresh_files(self, force: bool = False):
         if self._is_shutting_down or self._refresh_files_inflight:
             return
-        if self._file_scan_thread and self._file_scan_thread.isRunning():
-            return
+        if self._file_scan_thread:
+            try:
+                if self._file_scan_thread.isRunning():
+                    return
+            except RuntimeError:
+                self._file_scan_thread = None
+                self._file_scan_worker = None
         self._refresh_files_inflight = True
         self._file_scan_start_ts = time.time()
         self._load_paths_lists()
@@ -1185,8 +1233,13 @@ class MessageViewerTab(QWidget):
         self._file_scan_worker.finished.connect(self._on_file_scan_finished)
         self._file_scan_worker.finished.connect(self._file_scan_thread.quit)
         self._file_scan_worker.finished.connect(self._file_scan_worker.deleteLater)
+        self._file_scan_thread.finished.connect(self._on_file_scan_thread_finished)
         self._file_scan_thread.finished.connect(self._file_scan_thread.deleteLater)
         self._file_scan_thread.start()
+
+    def _on_file_scan_thread_finished(self) -> None:
+        self._file_scan_thread = None
+        self._file_scan_worker = None
 
     def _on_file_scan_finished(self, records: Dict[str, List[FileRecord]], force: bool) -> None:
         if self._is_shutting_down:
@@ -1736,16 +1789,91 @@ class MessageViewerTab(QWidget):
             .upper()
         )
 
-    @staticmethod
-    def _fmt_ts(ts: float) -> str:
+    def _current_time_mode(self) -> str:
+        if self._time_mode_override:
+            return self._time_mode_override
+        return "LOCAL" if self._show_local_time else "UTC"
+
+    def _current_timezone_label(self) -> tuple[str, str]:
+        tz_name = self.settings.get("timezone", "UTC") or "UTC"
+        tz = get_timezone(tz_name)
+        now = datetime.datetime.now(tz)
+        fallback = now.tzname() or tz_name
+        abbr = self._ui_tz_abbr(tz_name, fallback)
+        if abbr and len(abbr) > 5:
+            abbr = self._ui_tz_abbr(tz_name, abbr)
+        return str(tz_name), str(abbr)
+
+    def _ui_tz_abbr(self, tz_name: str, fallback: str) -> str:
+        mapping = {
+            "UTC": "UTC",
+            "America/New_York": "ET",
+            "America/Chicago": "CT",
+            "America/Denver": "MT",
+            "America/Los_Angeles": "PT",
+            "Mountain Standard Time": "MST",
+            "Central Standard Time": "CST",
+            "Eastern Standard Time": "EST",
+            "Pacific Standard Time": "PST",
+        }
+        return mapping.get(tz_name, fallback)
+
+    def _fmt_ts(self, ts: float) -> str:
         if not ts:
             return ""
         try:
-            from datetime import datetime, timezone
-
-            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            mode = self._current_time_mode()
+            if mode == "UTC":
+                return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            tz_name = self.settings.get("timezone", "UTC") or "UTC"
+            tz = get_timezone(tz_name)
+            return datetime.datetime.fromtimestamp(ts, tz=tz).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return ""
+
+    def _format_rcv_display(self, ts: float, utc_str: str | None) -> str:
+        mode = self._current_time_mode()
+        if mode == "UTC":
+            if utc_str:
+                return utc_str
+            return self._fmt_ts(ts)
+        if ts:
+            return self._fmt_ts(ts)
+        if utc_str:
+            try:
+                dt = datetime.datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                tz_name = self.settings.get("timezone", "UTC") or "UTC"
+                tz = get_timezone(tz_name)
+                return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return utc_str
+        return ""
+
+    def _update_time_ui(self) -> None:
+        mode = self._current_time_mode()
+        tz_name, tz_abbr = self._current_timezone_label()
+        if mode == "UTC":
+            self.time_toggle_btn.setText("Showing: UTC")
+            self._messages_model.set_time_header("RCV_DT (UTC)")
+            self.pending_table.setHorizontalHeaderLabels(
+                ["Callsign", "Msg ID", "Last Seen (UTC)", "Status", "Actions"]
+            )
+        else:
+            self.time_toggle_btn.setText("Showing: Local")
+            self._messages_model.set_time_header(f"RCV_DT ({tz_abbr})")
+            self.pending_table.setHorizontalHeaderLabels(
+                ["Callsign", "Msg ID", f"Last Seen ({tz_abbr})", "Status", "Actions"]
+            )
+
+    def _toggle_time_view(self) -> None:
+        mode = self._current_time_mode()
+        self._time_mode_override = "UTC" if mode == "LOCAL" else "LOCAL"
+        if (self._time_mode_override == "LOCAL" and self._show_local_time) or (
+            self._time_mode_override == "UTC" and not self._show_local_time
+        ):
+            self._time_mode_override = None
+        self._update_time_ui()
+        self._populate_messages_table(force=True)
 
     def _populate_messages_table(self, force: bool = False):
         rows = self._build_message_rows()
@@ -2309,7 +2437,7 @@ class MessageViewerTab(QWidget):
             msg_type = msg.msg_type if msg.msg_type.startswith("F!") else "JS8 MSG"
             status = "READ" if msg.state.upper() == "READ" else "NEW"
             rcv_ts = msg.utc_ts or 0.0
-            rcv_display = msg.utc_str or self._fmt_ts(rcv_ts)
+            rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
             title = ""
             if msg.msg_type.startswith("F!"):
                 form_id = msg.msg_type[2:].strip()
@@ -2336,7 +2464,7 @@ class MessageViewerTab(QWidget):
             msg_type = msg.msg_type or "F!"
             status = "READ" if msg.state.upper() == "READ" else "NEW"
             rcv_ts = msg.utc_ts or 0.0
-            rcv_display = msg.utc_str or self._fmt_ts(rcv_ts)
+            rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
             title = ""
             if msg_type.startswith("F!"):
                 form_id = msg_type[2:].strip()
@@ -2363,7 +2491,7 @@ class MessageViewerTab(QWidget):
             msg_type = "VarAC"
             status = "NEW" if (msg.read_status == 0 and msg.msg_type.upper() != "QSO") else "READ"
             rcv_ts = msg.ts or 0.0
-            rcv_display = self._fmt_ts(rcv_ts)
+            rcv_display = self._format_rcv_display(rcv_ts, None)
             if (msg.msg_type or "").upper() == "VMAIL":
                 title_base = (msg.subject or "").strip()
             else:
@@ -2388,13 +2516,17 @@ class MessageViewerTab(QWidget):
         for origin, recs in self.files.items():
             for rec in recs:
                 status = self._get_read_state(rec)
-                from_call = self._extract_sender_from_file(rec)
-                title = rec.path.name
+                is_image = self._is_image_file(rec.path)
+                from_call = "" if is_image else self._extract_sender_from_file(rec)
+                title = "Image Received" if is_image else rec.path.name
                 rcv_ts = rec.mtime or 0.0
-                rcv_display = self._fmt_ts(rcv_ts)
+                rcv_display = self._format_rcv_display(rcv_ts, None)
+                msg_type = origin.upper() if origin != "varac" else "VarAC"
+                if origin == "flmsg":
+                    msg_type = "FLMSG"
                 rows.append(
                     UnifiedMessage(
-                        msg_type=origin.upper() if origin != "varac" else "VarAC",
+                        msg_type=msg_type,
                         status=status,
                         from_call=from_call,
                         to_call="",
@@ -2418,6 +2550,7 @@ class MessageViewerTab(QWidget):
         )
         self._has_active_view = True
         self._freeze_messages_table = True
+        self._set_open_external_path(None)
         if isinstance(row.payload, JS8Message):
             self.current_record = None
             self.current_js8 = row.payload
@@ -2614,6 +2747,39 @@ class MessageViewerTab(QWidget):
         if not m:
             return ""
         return MessageViewerTab._strip_html(m.group(1))
+
+    @staticmethod
+    def _is_image_file(path: Path) -> bool:
+        return path.suffix.lower() in IMAGE_EXTS
+
+    @staticmethod
+    def _can_preview_image(path: Path) -> bool:
+        return path.suffix.lower() in IMAGE_PREVIEW_EXTS
+
+    def _set_open_external_path(self, path: Path | None, *, label: str = "Open Image") -> None:
+        self._open_external_path = path
+        if hasattr(self, "open_external_btn"):
+            if path:
+                self.open_external_btn.setText(label)
+                self.open_external_btn.setVisible(True)
+                self.open_external_btn.setEnabled(True)
+            else:
+                self.open_external_btn.setVisible(False)
+                self.open_external_btn.setEnabled(False)
+
+    def _open_external_file(self) -> None:
+        path = self._open_external_path
+        if not path:
+            return
+        try:
+            if platform.system() == "Darwin":
+                subprocess.Popen(["open", str(path)])
+            elif os.name == "nt":
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as e:
+            QMessageBox.critical(self, "Open File", f"Could not open file:\n{e}")
 
     @staticmethod
     def _extract_template_labels(template: str) -> List[Tuple[str, str]]:
@@ -3241,6 +3407,38 @@ class MessageViewerTab(QWidget):
 
     def _load_content(self, rec: FileRecord):
         log.debug("MessageViewer: loading file %s", rec.path)
+        if self._is_image_file(rec.path):
+            ext = rec.path.suffix.lower()
+            self._set_open_external_path(rec.path, label="Open Image")
+            info = f"Image Received - {rec.path.name} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
+            self.info_label.setText(info)
+            if self._can_preview_image(rec.path) and rec.path.exists():
+                try:
+                    uri = rec.path.resolve().as_uri()
+                except Exception:
+                    uri = ""
+                html_out = [
+                    "<div style='font-family: sans-serif;'>",
+                    f"<div><b>File:</b> {html.escape(rec.path.name)}</div>",
+                ]
+                if uri:
+                    html_out.append(
+                        f"<div style='margin-top:8px;'><img src='{uri}' "
+                        "style='max-width: 100%; height: auto;'></div>"
+                    )
+                else:
+                    html_out.append("<div>Preview unavailable for this image.</div>")
+                html_out.append("</div>")
+                self.viewer.setAcceptRichText(True)
+                self.viewer.setHtml("".join(html_out))
+            else:
+                self.viewer.setAcceptRichText(False)
+                self.viewer.setPlainText(
+                    f"Image file: {rec.path.name}\n\nPreview is not available for {ext}.\n"
+                    "Use 'Open Image' to view it in an external application."
+                )
+            return
+        self._set_open_external_path(None)
         try:
             data = rec.path.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
@@ -3371,11 +3569,14 @@ class MessageViewerTab(QWidget):
             pass
 
     def _load_js8_content(self, msg: JS8Message | SpotterMessage):
+        mode = self._current_time_mode()
+        label = "UTC" if mode == "UTC" else "Local"
+        ts_display = self._format_rcv_display(msg.utc_ts or 0.0, msg.utc_str)
         header = [
             f"FROM: {msg.from_call}",
             f"TO:   {msg.to_call}",
             f"TYPE: {msg.msg_type}",
-            f"UTC:  {msg.utc_str}",
+            f"{label}:  {ts_display}",
             "",
         ]
         relay_via = getattr(msg, "relay_via", "") or ""
@@ -3387,10 +3588,15 @@ class MessageViewerTab(QWidget):
         self.viewer.setPlainText("\n".join(header + [body]))
 
     def _fmt_mtime(self, mtime: float) -> str:
+        if not mtime:
+            return ""
         try:
-            from datetime import datetime, timezone
-
-            return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+            mode = self._current_time_mode()
+            if mode == "UTC":
+                return datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+            tz_name = self.settings.get("timezone", "UTC") or "UTC"
+            tz = get_timezone(tz_name)
+            return datetime.datetime.fromtimestamp(mtime, tz=tz).strftime("%Y-%m-%d %H:%M")
         except Exception:
             return ""
 
