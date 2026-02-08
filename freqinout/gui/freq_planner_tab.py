@@ -69,7 +69,8 @@ class FreqPlannerTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
-        self._show_local = True
+        default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
+        self._show_local = default_mode != "UTC"
         self._show_band = True
         self._band_colors: Dict[str, str] = {}
         self._visible_bands: List[str] = []

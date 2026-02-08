@@ -142,7 +142,8 @@ class DailyScheduleTab(QWidget):
             pass
         self.operating_groups: List[Dict] = self._load_operating_groups()
         self._operating_groups_sig = self._snapshot_operating_groups(self.operating_groups)
-        self._show_local: bool = True  # default to Local view
+        default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
+        self._show_local: bool = default_mode != "UTC"
         self._raw_schedule: List[Dict] = []
 
         self._clock_timer: Optional[QTimer] = None

@@ -435,6 +435,7 @@ class StationsMapTab(QWidget):
         self._map_visible: bool = False
         self._map_dirty: bool = False
         self._ingest_started: bool = False
+        self._map_load_ok: bool = False
 
         self._build_ui()
         self._refresh_group_filter_options()
@@ -552,6 +553,9 @@ class StationsMapTab(QWidget):
         if not self._map_visible:
             self._map_dirty = True
             return
+        if not self._map_initialized:
+            self._map_dirty = True
+            return
         now_ts = time.time()
         if now_ts - self._last_map_render_ts >= 1.0:
             self._last_map_render_ts = now_ts
@@ -581,9 +585,8 @@ class StationsMapTab(QWidget):
             self._start_js8_ingest_timer()
             # Initial ingest to catch up since last run (looks back to last exit time if available)
             QTimer.singleShot(500, lambda: self._auto_ingest_and_refresh(initial=True))
-        if self._map_visible and self._map_dirty:
-            self._map_dirty = False
-            self._schedule_render()
+        if self._map_visible:
+            QTimer.singleShot(0, self._on_map_visible_deferred)
 
     def _on_js8_rx_messages(self, messages: List[dict]) -> None:
         """
@@ -2180,12 +2183,27 @@ class StationsMapTab(QWidget):
 
     def _on_map_load_finished(self, ok: bool) -> None:
         self._map_initialized = bool(ok)
+        self._map_load_ok = bool(ok)
         if not ok or self.web is None:
             return
         if self._pending_map_payload:
             payload = self._pending_map_payload
             self._pending_map_payload = None
             self._push_map_payload(payload.get("markers", []), payload.get("links", []))
+        if self._map_visible and self._map_dirty:
+            self._map_dirty = False
+            self._schedule_render()
+
+    def _on_map_visible_deferred(self) -> None:
+        if not self._map_visible or self._is_shutting_down:
+            return
+        if not self._map_initialized:
+            # First visible render: build/load the map HTML before waiting on loadFinished.
+            self._render_map(preserve_view=True)
+            return
+        if self._map_dirty:
+            self._map_dirty = False
+            self._schedule_render()
 
     def _push_map_payload(self, markers: List[Dict], links: List[Dict]) -> None:
         if self.web is None:

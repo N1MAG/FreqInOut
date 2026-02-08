@@ -86,7 +86,8 @@ class SOPTab(QWidget):
         self._loading_ui = False
         self._operating_groups: List[Dict[str, Any]] = []
         self._hidden_actions: List[Dict[str, Any]] = []
-        self._show_local = True
+        default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
+        self._show_local = default_mode != "UTC"
         self._dirty = False
 
         self._build_ui()

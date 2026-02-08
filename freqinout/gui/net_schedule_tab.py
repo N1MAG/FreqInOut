@@ -159,7 +159,8 @@ class NetScheduleTab(QWidget):
         self._proc_snapshot_ts: float = 0.0
         self._clock_timer: QTimer | None = None
         self._suppress_autostart: bool = True  # avoid auto-start during initial load
-        self._show_local: bool = True  # default to Local view
+        default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
+        self._show_local: bool = default_mode != "UTC"
         self._raw_rows: List[Dict] = []
 
         self._build_ui()

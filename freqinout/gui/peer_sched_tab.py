@@ -70,7 +70,8 @@ class PeerSchedTab(QWidget):
         self._operator_meta: Dict[str, Dict[str, str]] = {}
         self._my_schedule: List[Dict] = []
         self._my_schedule_by_mode: Dict[str, List[Dict]] = {}
-        self._show_local_times = False
+        default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
+        self._show_local_times = default_mode != "UTC"
         self._build_ui()
         self._load_operator_meta()
         self._load_data()
