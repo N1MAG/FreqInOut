@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.4]
+- Added: Window icon now uses the FreqInOut desktop asset for consistent taskbar display.
+- Changed: Lazy-load heavy tabs (Messages, FreqPlanner, Map) to reduce startup time and tab-switch stutter.
+- Changed: Pause tab-specific timers when their tab is hidden to reduce background work.
+- Changed: Message file scanning now runs asynchronously to prevent UI freezes.
+- Changed: Map JS8 ingest starts on first Map activation to reduce idle overhead.
+- Changed: FreqPlanner rebuild checks are throttled to reduce unnecessary refresh work.
+- Fixed: Single-instance lock cleanup now supports both PySide6 stale-lock API names.
+- Updated: Linux installer icon refresh/overwrite to reliably apply the latest desktop icon asset.
+- Updated: Help tab now opens external links in the system browser.
+
 ## [1.1.3]
 - Added: SOP Builder tab with per-row band/frequency/software/action/interval/contact rules and manual completion reminders.
 - Added: SOP import/export and hidden-row preservation for actions tied to software not yet configured.

@@ -78,30 +78,38 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(central)
         self.setCentralWidget(central)
 
-        # Instantiate screens
+        # Instantiate screens (lazy-load heavy tabs to improve perceived performance)
         self.settings_tab = SettingsTab(self)
         self.hf_schedule_tab = DailyScheduleTab(self)  # this tab is labeled "HF Frequency Schedule"
         self.net_tab = NetScheduleTab(self)
         self.fldigi_tab = FldigiNetControlTab(self)
         self.js8_tab = JS8CallNetControlTab(self)
-        self.freq_planner_tab = FreqPlannerTab(self)
         self.sop_tab = SOPTab(self)
         self.operator_history_tab = OperatorHistoryTab(self)
-        self.message_viewer_tab = MessageViewerTab(self)
         self.log_tab = LogViewerTab(self)
-        self.stations_map_tab = StationsMapTab(self)
         self.peer_sched_tab = PeerSchedTab(self)
         self.help_tab = HelpTab(self)
 
+        self.freq_planner_tab = None
+        self.message_viewer_tab = None
+        self.stations_map_tab = None
+
+        self._lazy_placeholders = {}
+        self._lazy_factories = {
+            "FreqPlanner": self._create_freq_planner_tab,
+            "Messages": self._create_message_viewer_tab,
+            "Map": self._create_stations_map_tab,
+        }
+
         # Sidebar navigation order (as requested)
         self._screens = [
-            ("FreqPlanner", self.freq_planner_tab),
+            ("FreqPlanner", self._placeholder_widget("FreqPlanner")),
             ("SOP", self.sop_tab),
-            ("Messages", self.message_viewer_tab),
+            ("Messages", self._placeholder_widget("Messages")),
             ("FLDigi NCS", self.fldigi_tab),
             ("JS8 NCS", self.js8_tab),
             ("Operators", self.operator_history_tab),
-            ("Map", self.stations_map_tab),
+            ("Map", self._placeholder_widget("Map")),
             ("HF Schedule", self.hf_schedule_tab),
             ("Net Schedule", self.net_tab),
             ("Peer Schedules", self.peer_sched_tab),
@@ -217,12 +225,12 @@ class MainWindow(QMainWindow):
         self._apply_app_theme()
         self._sop_next_due_cache_ts = 0.0
         self._sop_next_due_minutes = None
+        self._active_tab_index = None
 
         # Default selection
         if self.nav_buttons:
             self.nav_buttons[0].setChecked(True)
-            self.stack.setCurrentIndex(0)
-            self._update_map_filters_visibility(0)
+            self._set_screen(0)
 
         # Optional: apply callsign to tab captions if already configured
         self._apply_callsign_to_tab_titles()
@@ -298,18 +306,12 @@ class MainWindow(QMainWindow):
             self.settings_tab.settings_saved.connect(self.net_tab.on_settings_saved)
         except Exception:
             pass
-        try:
-            self.settings_tab.settings_saved.connect(self.freq_planner_tab.on_settings_saved)
-        except Exception:
-            pass
+        self.settings_tab.settings_saved.connect(self._on_settings_saved_for_lazy_tabs)
         try:
             self.settings_tab.settings_saved.connect(self.sop_tab.on_settings_saved)
         except Exception:
             pass
-        try:
-            self.settings_tab.settings_saved.connect(self.message_viewer_tab.on_settings_saved)
-        except Exception:
-            pass
+        # Message tab settings saved handled by _on_settings_saved_for_lazy_tabs
         try:
             if hasattr(self.operator_history_tab, "operator_history_updated"):
                 self.operator_history_tab.operator_history_updated.connect(self.refresh_operator_history_views)
@@ -319,16 +321,10 @@ class MainWindow(QMainWindow):
             self.settings_tab.settings_saved.connect(self._apply_app_theme)
         except Exception:
             pass
-        try:
-            self.hf_schedule_tab.schedule_saved.connect(self.freq_planner_tab.rebuild_table)
-            self.hf_schedule_tab.schedule_saved.connect(self.scheduler.force_refresh)
-        except Exception:
-            pass
-        try:
-            self.net_tab.schedule_saved.connect(self.freq_planner_tab.rebuild_table)
-            self.net_tab.schedule_saved.connect(self.scheduler.force_refresh)
-        except Exception:
-            pass
+        self.hf_schedule_tab.schedule_saved.connect(self._refresh_freq_planner_if_loaded)
+        self.hf_schedule_tab.schedule_saved.connect(self.scheduler.force_refresh)
+        self.net_tab.schedule_saved.connect(self._refresh_freq_planner_if_loaded)
+        self.net_tab.schedule_saved.connect(self.scheduler.force_refresh)
 
         log.info("Main window initialized.")
         # Sync sidebar filters initially
@@ -352,7 +348,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.debug("MainWindow: operator_history_tab refresh failed: %s", e)
         try:
-            if hasattr(self.stations_map_tab, "_load_operator_history"):
+            if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "_load_operator_history"):
                 self.stations_map_tab._load_operator_history()
                 if hasattr(self.stations_map_tab, "_schedule_render"):
                     self.stations_map_tab._schedule_render()
@@ -444,7 +440,7 @@ class MainWindow(QMainWindow):
         Update sidebar controls from current map tab state.
         """
         tab = getattr(self, "stations_map_tab", None)
-        if not tab:
+        if tab is None:
             return
         block = [
             self.map_cb_callsigns,
@@ -479,7 +475,7 @@ class MainWindow(QMainWindow):
         Push sidebar filter changes into the map tab and refresh the map.
         """
         tab = getattr(self, "stations_map_tab", None)
-        if not tab:
+        if tab is None:
             return
         tab.show_callsigns = self.map_cb_callsigns.isChecked()
         tab.show_states = self.map_cb_states.isChecked()
@@ -512,11 +508,11 @@ class MainWindow(QMainWindow):
         """
         Show the stations-map 'Show' filters in the sidebar only when the Map view is active.
         """
-        is_map = 0 <= index < len(self._screens) and self._screens[index][1] is self.stations_map_tab
+        is_map = 0 <= index < len(self._screens) and self._screens[index][0] == "Map"
         if hasattr(self, "scheduler_status_container"):
             self.scheduler_status_container.setVisible(not is_map)
         try:
-            if hasattr(self.stations_map_tab, "set_map_visible"):
+            if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "set_map_visible"):
                 self.stations_map_tab.set_map_visible(is_map)
         except Exception:
             pass
@@ -954,11 +950,85 @@ class MainWindow(QMainWindow):
             self.operator_history_tab,
             self.settings_tab,
         ):
+            if widget is None:
+                continue
             if hasattr(widget, "apply_theme"):
                 try:
                     widget.apply_theme()
                 except Exception:
                     pass
+
+    def _placeholder_widget(self, label: str) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(QLabel(f"Loading {label}..."))
+        self._lazy_placeholders[label] = w
+        return w
+
+    def _create_freq_planner_tab(self) -> QWidget:
+        self.freq_planner_tab = FreqPlannerTab(self)
+        try:
+            self.settings_tab.settings_saved.connect(self.freq_planner_tab.on_settings_saved)
+        except Exception:
+            pass
+        return self.freq_planner_tab
+
+    def _create_message_viewer_tab(self) -> QWidget:
+        self.message_viewer_tab = MessageViewerTab(self)
+        try:
+            self.settings_tab.settings_saved.connect(self.message_viewer_tab.on_settings_saved)
+        except Exception:
+            pass
+        return self.message_viewer_tab
+
+    def _create_stations_map_tab(self) -> QWidget:
+        self.stations_map_tab = StationsMapTab(self)
+        return self.stations_map_tab
+
+    def _ensure_lazy_tab_loaded(self, label: str, index: int) -> None:
+        if label not in self._lazy_factories:
+            return
+        existing = self._get_tab_by_label(label)
+        if existing is not None and existing is not self._lazy_placeholders.get(label):
+            return
+        factory = self._lazy_factories[label]
+        new_widget = factory()
+        try:
+            if hasattr(new_widget, "apply_theme"):
+                new_widget.apply_theme()
+        except Exception:
+            pass
+        placeholder = self._lazy_placeholders.get(label)
+        if placeholder is not None:
+            self.stack.removeWidget(placeholder)
+        self.stack.insertWidget(index, new_widget)
+        self._screens[index] = (label, new_widget)
+
+    def _get_tab_by_label(self, label: str) -> QWidget | None:
+        for name, widget in self._screens:
+            if name == label:
+                return widget
+        return None
+
+    def _on_settings_saved_for_lazy_tabs(self) -> None:
+        try:
+            if self.freq_planner_tab is not None:
+                self.freq_planner_tab.on_settings_saved()
+        except Exception:
+            pass
+        try:
+            if self.message_viewer_tab is not None:
+                self.message_viewer_tab.on_settings_saved()
+        except Exception:
+            pass
+
+    def _refresh_freq_planner_if_loaded(self) -> None:
+        try:
+            if self.freq_planner_tab is not None:
+                self.freq_planner_tab.rebuild_table()
+        except Exception:
+            pass
 
     def _set_window_icon(self):
         assets_dir = Path(__file__).resolve().parents[2] / "assets"
@@ -992,7 +1062,25 @@ class MainWindow(QMainWindow):
 
     def _set_screen(self, index: int) -> None:
         if 0 <= index < self.stack.count():
+            prev_index = self._active_tab_index
+            if prev_index is not None and 0 <= prev_index < self.stack.count():
+                try:
+                    prev_widget = self.stack.widget(prev_index)
+                    if hasattr(prev_widget, "set_tab_active"):
+                        prev_widget.set_tab_active(False)
+                except Exception:
+                    pass
+
+            label = self._screens[index][0]
+            self._ensure_lazy_tab_loaded(label, index)
             self.stack.setCurrentIndex(index)
+            self._active_tab_index = index
+            try:
+                widget_active = self.stack.widget(index)
+                if hasattr(widget_active, "set_tab_active"):
+                    widget_active.set_tab_active(True)
+            except Exception:
+                pass
             self._update_map_filters_visibility(index)
             self._refresh_scheduler_status_panel()
             try:

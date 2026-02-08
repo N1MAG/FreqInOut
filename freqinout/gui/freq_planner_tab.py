@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import time
 import sqlite3
 from typing import List, Dict, Tuple, Optional
 
@@ -74,6 +75,7 @@ class FreqPlannerTab(QWidget):
         self._visible_bands: List[str] = []
         self._clock_timer: QTimer | None = None
         self._last_snapshot: str = ""
+        self._last_rebuild_check_ts: float = 0.0
         self._build_ui()
         self._apply_theme()
         self.rebuild_table()
@@ -866,7 +868,22 @@ class FreqPlannerTab(QWidget):
 
     def _on_clock_tick(self):
         self._update_clock_labels()
-        self._maybe_rebuild_if_changed()
+        now_ts = time.time()
+        if now_ts - self._last_rebuild_check_ts >= 2.0:
+            self._last_rebuild_check_ts = now_ts
+            self._maybe_rebuild_if_changed()
+
+    def set_tab_active(self, active: bool) -> None:
+        if active:
+            if self._clock_timer is None:
+                self._setup_clock_timer()
+            elif not self._clock_timer.isActive():
+                self._clock_timer.start(1000)
+            self._update_clock_labels()
+            self._maybe_rebuild_if_changed()
+            return
+        if self._clock_timer and self._clock_timer.isActive():
+            self._clock_timer.stop()
 
     def _toggle_time_view(self):
         self._show_local = not self._show_local

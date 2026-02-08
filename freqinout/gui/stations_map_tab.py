@@ -434,6 +434,7 @@ class StationsMapTab(QWidget):
         self._render_pending: bool = False
         self._map_visible: bool = False
         self._map_dirty: bool = False
+        self._ingest_started: bool = False
 
         self._build_ui()
         self._refresh_group_filter_options()
@@ -442,9 +443,6 @@ class StationsMapTab(QWidget):
         self._load_operator_history()
         self._refresh_band_options()
         self._render_map()
-        self._start_js8_ingest_timer()
-        # Initial ingest to catch up since last run (looks back to last exit time if available)
-        QTimer.singleShot(500, lambda: self._auto_ingest_and_refresh(initial=True))
 
     def _bool_setting(self, key: str, default: bool = False) -> bool:
         if not self.settings:
@@ -578,6 +576,11 @@ class StationsMapTab(QWidget):
         if self._map_visible == is_visible:
             return
         self._map_visible = is_visible
+        if self._map_visible and not self._ingest_started:
+            self._ingest_started = True
+            self._start_js8_ingest_timer()
+            # Initial ingest to catch up since last run (looks back to last exit time if available)
+            QTimer.singleShot(500, lambda: self._auto_ingest_and_refresh(initial=True))
         if self._map_visible and self._map_dirty:
             self._map_dirty = False
             self._schedule_render()

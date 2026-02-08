@@ -45,6 +45,7 @@ freqinout/config/freqinout.db
 freqinout/logs/
 venv/
 *.log
+tools/publish-release.ps1
 
 # Python tooling caches / reports
 .coverage

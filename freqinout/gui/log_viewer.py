@@ -113,6 +113,14 @@ class LogViewerTab(QWidget):
         if saved != "ALL":
             set_log_level(saved)
 
+    def set_tab_active(self, active: bool) -> None:
+        if active:
+            if not self.timer.isActive():
+                self.timer.start(self.REFRESH_INTERVAL_MS)
+            return
+        if self.timer.isActive():
+            self.timer.stop()
+
     def _read_log_tail(self, max_lines=800):
         try:
             with open(self.log_file, "r", encoding="utf-8") as f:

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent, QRect, Signal
+from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent, QRect, Signal, QObject, QThread
 from PySide6.QtGui import QPainter, QColor, QPalette, QFont
 from PySide6.QtWidgets import (
     QWidget,
@@ -125,6 +125,46 @@ class SpotterMessage:
     def display_line(self) -> str:
         return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
 
+
+class _FileScanWorker(QObject):
+    finished = Signal(object, bool)
+
+    def __init__(self, watch_dirs: List[Dict], force: bool):
+        super().__init__()
+        self._watch_dirs = list(watch_dirs)
+        self._force = force
+
+    def run(self) -> None:
+        records: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
+        for entry in self._watch_dirs:
+            origin = entry.get("origin", "unknown")
+            if origin not in records:
+                continue
+            allowed_exts = ORIGIN_EXTS.get(origin)
+            p = entry.get("path", "")
+            if not p:
+                continue
+            base = Path(p)
+            if not base.exists():
+                continue
+            for f in base.glob("**/*"):
+                if not f.is_file():
+                    continue
+                if f.suffix.lower() not in SUPPORTED_EXT:
+                    continue
+                if allowed_exts and f.suffix.lower() not in allowed_exts:
+                    continue
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                rec = FileRecord(path=f, origin=origin, size=st.st_size, mtime=st.st_mtime)
+                records[origin].append(rec)
+
+        for origin in records:
+            records[origin].sort(key=lambda r: r.mtime, reverse=True)
+
+        self.finished.emit(records, self._force)
 
 @dataclass
 class VarACMessage:
@@ -584,6 +624,9 @@ class MessageViewerTab(QWidget):
         self._is_shutting_down = False
         self._refresh_files_inflight = False
         self.loading_label: QLabel | None = None
+        self._file_scan_thread: QThread | None = None
+        self._file_scan_worker: _FileScanWorker | None = None
+        self._file_scan_start_ts: float = 0.0
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -1082,6 +1125,17 @@ class MessageViewerTab(QWidget):
         finally:
             self._set_loading(False)
 
+    def set_tab_active(self, active: bool) -> None:
+        self._has_active_view = bool(active)
+        if active:
+            self._setup_timer()
+            self._setup_js8_timer()
+            self._setup_pending_timer()
+            return
+        for timer in (self._timer, self._js8_timer, self._pending_timer):
+            if timer:
+                timer.stop()
+
     # ---------- Paths ----------
 
     def _load_paths_lists(self):
@@ -1119,40 +1173,26 @@ class MessageViewerTab(QWidget):
     def _refresh_files(self, force: bool = False):
         if self._is_shutting_down or self._refresh_files_inflight:
             return
+        if self._file_scan_thread and self._file_scan_thread.isRunning():
+            return
         self._refresh_files_inflight = True
-        start_ts = time.time()
+        self._file_scan_start_ts = time.time()
+        self._load_paths_lists()
+        self._file_scan_thread = QThread(self)
+        self._file_scan_worker = _FileScanWorker(self.watch_dirs, force)
+        self._file_scan_worker.moveToThread(self._file_scan_thread)
+        self._file_scan_thread.started.connect(self._file_scan_worker.run)
+        self._file_scan_worker.finished.connect(self._on_file_scan_finished)
+        self._file_scan_worker.finished.connect(self._file_scan_thread.quit)
+        self._file_scan_worker.finished.connect(self._file_scan_worker.deleteLater)
+        self._file_scan_thread.finished.connect(self._file_scan_thread.deleteLater)
+        self._file_scan_thread.start()
+
+    def _on_file_scan_finished(self, records: Dict[str, List[FileRecord]], force: bool) -> None:
+        if self._is_shutting_down:
+            self._refresh_files_inflight = False
+            return
         try:
-            self._load_paths_lists()
-            records: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
-            for entry in self.watch_dirs:
-                origin = entry.get("origin", "unknown")
-                if origin not in records:
-                    continue
-                allowed_exts = ORIGIN_EXTS.get(origin)
-                p = entry.get("path", "")
-                if not p:
-                    continue
-                base = Path(p)
-                if not base.exists():
-                    continue
-                for f in base.glob("**/*"):
-                    if not f.is_file():
-                        continue
-                    if f.suffix.lower() not in SUPPORTED_EXT:
-                        continue
-                    if allowed_exts and f.suffix.lower() not in allowed_exts:
-                        continue
-                    try:
-                        st = f.stat()
-                    except OSError:
-                        continue
-                    rec = FileRecord(path=f, origin=origin, size=st.st_size, mtime=st.st_mtime)
-                    records[origin].append(rec)
-
-            # Sort by mtime desc
-            for origin in records:
-                records[origin].sort(key=lambda r: r.mtime, reverse=True)
-
             self.files = records
             self._update_fldigi_senders(records)
             self._read_state_map = self._load_read_state_map()
@@ -1160,7 +1200,7 @@ class MessageViewerTab(QWidget):
             self._populate_messages_table(force=force)
         finally:
             self._refresh_files_inflight = False
-            elapsed = time.time() - start_ts
+            elapsed = time.time() - self._file_scan_start_ts
             if elapsed > 0.5:
                 log.debug("MessageViewer: refresh_files took %.2fs", elapsed)
 
@@ -1533,6 +1573,12 @@ class MessageViewerTab(QWidget):
         try:
             if self._filter_timer:
                 self._filter_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._file_scan_thread and self._file_scan_thread.isRunning():
+                self._file_scan_thread.quit()
+                self._file_scan_thread.wait(1000)
         except Exception:
             pass
 
