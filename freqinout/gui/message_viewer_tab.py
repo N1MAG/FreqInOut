@@ -656,6 +656,8 @@ class MessageViewerTab(QWidget):
         self._file_scan_worker: _FileScanWorker | None = None
         self._file_scan_start_ts: float = 0.0
         self._open_external_path: Path | None = None
+        self._loading_timer: QTimer | None = None
+        self._loading_text: str = "Getting messages..."
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -947,7 +949,7 @@ class MessageViewerTab(QWidget):
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Message Viewer</h3>"))
         header.addSpacing(8)
-        self.loading_label = QLabel("Brewing it fresh...")
+        self.loading_label = QLabel("Getting messages...")
         self.loading_label.setStyleSheet("color: #888;")
         self.loading_label.setVisible(False)
         header.addWidget(self.loading_label)
@@ -1148,17 +1150,38 @@ class MessageViewerTab(QWidget):
         self._refresh_varac_messages(force=True)
         self._refresh_pending_backlog()
 
-    def _set_loading(self, active: bool, text: str = "Brewing it fresh...") -> None:
+    def _set_loading(self, active: bool, text: str = "Getting messages...") -> None:
         if not self.loading_label:
             return
+        if self._loading_timer and self._loading_timer.isActive():
+            self._loading_timer.stop()
         self.loading_label.setText(text)
         self.loading_label.setVisible(bool(active))
+
+    def _schedule_loading(self, text: str = "Getting messages...", delay_ms: int = 350) -> None:
+        if not self.loading_label:
+            return
+        if self._loading_timer is None:
+            self._loading_timer = QTimer(self)
+            self._loading_timer.setSingleShot(True)
+            self._loading_timer.timeout.connect(self._show_loading_delayed)
+        self._loading_text = text
+        self._loading_timer.stop()
+        self._loading_timer.start(max(0, int(delay_ms)))
+
+    def _show_loading_delayed(self) -> None:
+        self._set_loading(True, self._loading_text)
 
     def show_loading_toast(self) -> None:
         self._set_loading(True)
 
     def on_tab_activated(self) -> None:
         self._unfreeze_table()
+        if self._message_rows:
+            self._refresh_message_filters(self._message_rows)
+            self._apply_message_filters_preserve_scroll()
+        self._update_pending_table()
+        self._schedule_loading("Getting messages...")
         try:
             self._load_paths_lists()
             self._refresh_files(force=True)
