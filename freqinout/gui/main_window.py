@@ -461,11 +461,24 @@ class MainWindow(QMainWindow):
         mode_row.addWidget(self.map_prop_mode_combo)
         mode_row.addStretch()
         v.addLayout(mode_row)
+        window_row = QHBoxLayout()
+        window_row.addWidget(QLabel("Window:"))
+        self.map_prop_window_combo = QComboBox()
+        self.map_prop_window_combo.addItem("1h", 1)
+        self.map_prop_window_combo.addItem("3h", 3)
+        self.map_prop_window_combo.addItem("6h", 6)
+        self.map_prop_window_combo.addItem("12h", 12)
+        self.map_prop_window_combo.addItem("24h", 24)
+        self.map_prop_window_combo.addItem("History (7 days)", 168)
+        window_row.addWidget(self.map_prop_window_combo)
+        window_row.addStretch()
+        v.addLayout(window_row)
         self.map_prop_badge = QLabel("Best Band: --")
         self.map_prop_badge.setStyleSheet("font-weight: bold; color: #1E88E5;")
         v.addWidget(self.map_prop_badge)
         self.map_cb_prop_overlay.stateChanged.connect(self._on_sidebar_prop_changed)
         self.map_prop_mode_combo.currentIndexChanged.connect(self._on_sidebar_prop_mode_changed)
+        self.map_prop_window_combo.currentIndexChanged.connect(self._on_sidebar_prop_window_changed)
         v.addStretch()
         self.map_filters_layout.addWidget(box)
 
@@ -484,6 +497,7 @@ class MainWindow(QMainWindow):
             self.map_cb_regions,
             self.map_cb_prop_overlay,
             self.map_prop_mode_combo,
+            self.map_prop_window_combo,
         ]
         for cb in block:
             cb.blockSignals(True)
@@ -497,6 +511,13 @@ class MainWindow(QMainWindow):
         idx = self.map_prop_mode_combo.findData(str(mode).lower())
         if idx >= 0:
             self.map_prop_mode_combo.setCurrentIndex(idx)
+        try:
+            window_hours = int(getattr(tab, "prop_window_hours", 6))
+        except Exception:
+            window_hours = 6
+        idx = self.map_prop_window_combo.findData(window_hours)
+        if idx >= 0:
+            self.map_prop_window_combo.setCurrentIndex(idx)
         for cb in block:
             cb.blockSignals(False)
         # Pop combo sync
@@ -566,6 +587,20 @@ class MainWindow(QMainWindow):
         mode = self.map_prop_mode_combo.currentData()
         if mode:
             tab.prop_mode = str(mode)
+        if hasattr(tab, "_save_display_preferences"):
+            tab._save_display_preferences()
+        if hasattr(tab, "_render_map"):
+            tab._render_map()
+
+    def _on_sidebar_prop_window_changed(self, _=None) -> None:
+        tab = getattr(self, "stations_map_tab", None)
+        if tab is None:
+            return
+        try:
+            hours = int(self.map_prop_window_combo.currentData())
+        except Exception:
+            hours = 6
+        tab.prop_window_hours = hours
         if hasattr(tab, "_save_display_preferences"):
             tab._save_display_preferences()
         if hasattr(tab, "_render_map"):
@@ -1055,6 +1090,7 @@ class MainWindow(QMainWindow):
                 getattr(self, "map_cb_prop_overlay", None),
                 getattr(self, "map_prop_badge", None),
                 getattr(self, "map_prop_mode_combo", None),
+                getattr(self, "map_prop_window_combo", None),
             )
         except Exception:
             pass

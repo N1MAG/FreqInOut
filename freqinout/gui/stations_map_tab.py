@@ -460,6 +460,7 @@ class StationsMapTab(QWidget):
         self.prop_overlay_enabled: bool = False
         self.prop_adaptive_enabled: bool = True
         self.prop_mode: str = "blended"
+        self.prop_window_hours: int = 6
         self._prop_region_scores: Dict[str, Dict] = {}
         self._prop_best_band_info: Dict[str, str] = {}
         self._prop_profiles: Dict[str, Dict] | None = None
@@ -468,6 +469,7 @@ class StationsMapTab(QWidget):
         self.prop_adaptive_chk: Optional[QCheckBox] = None
         self.prop_badge: Optional[QLabel] = None
         self.prop_mode_combo: Optional[QComboBox] = None
+        self.prop_window_combo: Optional[QComboBox] = None
         self._prop_db_cache: Dict[tuple, float] = {}
         self._prop_db_loaded: bool = False
         self._prop_db_available: bool = False
@@ -531,6 +533,10 @@ class StationsMapTab(QWidget):
         if mode not in ("model", "actual", "blended"):
             mode = "blended"
         self.prop_mode = mode
+        try:
+            self.prop_window_hours = int(self.settings.get("map_prop_window_hours", 6) or 6)
+        except Exception:
+            self.prop_window_hours = 6
         # show_grid_labels mirrors show_grids
         self.show_grid_labels = self.show_grids
 
@@ -565,6 +571,7 @@ class StationsMapTab(QWidget):
                 self.settings.set("map_prop_overlay", int(bool(self.prop_overlay_enabled)))
             self.settings.set("map_prop_adaptive", int(bool(self.prop_adaptive_enabled)))
             self.settings.set("map_prop_mode", (self.prop_mode or "blended").lower())
+            self.settings.set("map_prop_window_hours", int(self.prop_window_hours or 6))
         except Exception:
             pass
 
@@ -2000,10 +2007,12 @@ class StationsMapTab(QWidget):
         overlay_chk: QCheckBox | None,
         badge: QLabel | None,
         mode_combo: QComboBox | None = None,
+        window_combo: QComboBox | None = None,
     ) -> None:
         self.prop_overlay_chk = overlay_chk
         self.prop_badge = badge
         self.prop_mode_combo = mode_combo
+        self.prop_window_combo = window_combo
         # Sync checkbox state from settings
         if self.prop_overlay_chk is not None:
             self.prop_overlay_chk.blockSignals(True)
@@ -2029,6 +2038,17 @@ class StationsMapTab(QWidget):
                 self.prop_mode_combo.blockSignals(True)
                 self.prop_mode_combo.setCurrentIndex(idx)
                 self.prop_mode_combo.blockSignals(False)
+        if self.prop_window_combo is not None:
+            try:
+                hours = int(self.settings.get("map_prop_window_hours", 6) or 6)
+            except Exception:
+                hours = 6
+            self.prop_window_hours = hours
+            idx = self.prop_window_combo.findData(hours)
+            if idx >= 0:
+                self.prop_window_combo.blockSignals(True)
+                self.prop_window_combo.setCurrentIndex(idx)
+                self.prop_window_combo.blockSignals(False)
         # Update badge immediately with current filter
         if hasattr(self, "region_filter_combo"):
             region_filter = self.region_filter_combo.currentData() or ""
@@ -2051,6 +2071,14 @@ class StationsMapTab(QWidget):
         if mode not in ("model", "actual", "blended"):
             mode = "blended"
         return mode
+
+    def _prop_window_seconds(self) -> int:
+        try:
+            hours = int(self.prop_window_hours or 6)
+        except Exception:
+            hours = 6
+        hours = max(1, min(hours, 168))
+        return hours * 3600
 
     # ------------- Propagation overlay ------------- #
     def _load_prop_profiles(self) -> Dict[str, Dict]:
@@ -2239,7 +2267,7 @@ class StationsMapTab(QWidget):
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         schedule_presence = self._load_peer_schedule_presence(now_utc)
-        observed_by_band = self._load_observed_band_presence(30 * 60)
+        observed_by_band = self._load_observed_band_presence(self._prop_window_seconds())
 
         sched_region: Dict[str, Dict[str, Set[str]]] = {}
         sched_state: Dict[str, Dict[str, Set[str]]] = {}
@@ -2659,6 +2687,7 @@ class StationsMapTab(QWidget):
             bool(self.prop_adaptive_enabled),
             str(self._effective_prop_mode()),
             theme_key,
+            int(self.prop_window_hours or 6),
         )
         force_reload = self._map_initialized and self._last_map_config and config_sig != self._last_map_config
         if force_reload and self.web is not None and preserve_view is True:
