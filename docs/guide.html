@@ -11,6 +11,8 @@
     h2 { border-bottom: 1px solid #eee; padding-bottom: 0.15em; }
     code { background: #f2f2f2; padding: 2px 4px; border-radius: 3px; }
     pre { background: #f2f2f2; padding: 10px; border-radius: 4px; overflow-x: auto; }
+    pre.cmd { background: #f0f4f8; border-left: 4px solid #5b8def; }
+    pre.cmd code { color: #111; }
     ul { margin-top: 0.3em; }
     .section-list { padding-left: 18px; }
     .logo-wrap { text-align: center; padding-top: 18px; }
@@ -316,8 +318,8 @@
   </ul>
 
 <h2 id="map">Map Tab</h2>
-  <p><strong>Purpose</strong>: Visualize operators, grids, and JS8/VarAC link history.</p>
-  <p><strong>Typical workflow</strong>: Start broad (All paths / Any recency), then narrow by group, region, band, and recency until only actionable paths remain.</p>
+  <p><strong>Purpose</strong>: Visualize operators, grids, JS8/VarAC link history, and live propagation guidance.</p>
+  <p><strong>Typical workflow</strong>: Start broad (All paths / Any recency), then narrow by group, region, band, and recency until only actionable paths remain. When you want propagation guidance, enable the propagation overlay and pick a mode.</p>
   <p><strong>Expected UI behavior</strong>:</p>
   <ul class="section-list">
     <li><strong>WebEngine dependency</strong>: If Qt WebEngine is unavailable, map panel shows a disabled/fallback state.</li>
@@ -327,11 +329,60 @@
   <ol class="section-list">
     <li><strong>Map link controls row</strong>: Paths (Off/My Station/All), Group, Region, Band, Recency (Any, 15m, 30m, 1h, 3h, 6h, 12h, 24h, 7d), Paths to (editable callsign), and <em>Refresh Links</em>.</li>
     <li><strong>Map Layers (sidebar)</strong>: Only visible when Map is active. Checkboxes for Callsigns, States, Cities, Grids, Regions plus a City Pop. dropdown.</li>
+    <li><strong>Propagation controls</strong>: Propagation Overlay toggle, Mode selector (Actual / Blended / Modeled), and Propagation Window.</li>
     <li><strong>Paths to</strong>: Filters link highlights to paths that reach a specific callsign.</li>
     <li><strong>Refresh Links</strong>: Forces JS8 log ingest and redraw.</li>
     <li><strong>Map view</strong>: Requires Qt WebEngine; if unavailable, a disabled message is shown instead of the map.</li>
     <li><strong>Tooltips</strong>: Station tooltips include JS8 and VarAC fields when data exists: JS8 Last Seen, JS8 Spotter, JS8 Last Band, JS8 Direct SNR (and traffic count), JS8 Avg SNR (and traffic count), VarAC Last Seen, VarAC Last Band, VarAC SNR.</li>
   </ol>
+  <h3 id="map-propagation">Propagation Overlay (New)</h3>
+  <p><strong>Purpose</strong>: Show the best probable band from <em>your station</em> to each region/state based on the selected mode, time-of-day, and available observed data.</p>
+  <ul class="section-list">
+    <li><strong>Overlay activation</strong>: Turn on <em>Propagation Overlay</em> in the Map Layers box to color the map by recommended band.</li>
+    <li><strong>Mode selection</strong>: Choose <em>Actual</em>, <em>Blended</em>, or <em>Modeled</em> for how the recommendation is computed.</li>
+    <li><strong>Propagation Window</strong>: Controls how far back observed traffic is considered for Actual/Blended. Modeled ignores this window.</li>
+    <li><strong>Band colors</strong>: Band colors are pulled from your FreqPlanner band color palette.</li>
+  </ul>
+  <h3 id="map-propagation-modes">Mode meanings (Actual / Blended / Modeled)</h3>
+  <ul class="section-list">
+    <li><strong>Actual</strong>: Ignores the propagation model and uses observed data only (JS8/VarAC link history + peer schedules). This is the most literal view of where stations were and what bands they were actually using.</li>
+    <li><strong>Blended</strong>: Combines the propagation model with observed data. Use this when you want real-world evidence to temper model predictions.</li>
+    <li><strong>Modeled</strong>: Uses the offline propagation model only. This is best when you have limited recent traffic or want a baseline prediction.</li>
+  </ul>
+  <h3 id="map-propagation-window">Propagation Window</h3>
+  <p><strong>Purpose</strong>: Define how much recent traffic informs the <em>Actual</em> and <em>Blended</em> modes.</p>
+  <ul class="section-list">
+    <li><strong>Options</strong>: 1h, 3h, 6h, 12h, 24h, or History (7d).</li>
+    <li><strong>Recency vs propagation</strong>: <em>Recency</em> filters the visible map links; <em>Propagation Window</em> controls the actual/observed weighting for the overlay. They are independent.</li>
+  </ul>
+  <h3 id="map-propagation-reading">How to read the overlay</h3>
+  <ul class="section-list">
+    <li><strong>State colors</strong>: When propagation is enabled and Regions are off, each state is colored by its best band for your station.</li>
+    <li><strong>Region colors</strong>: When Regions are on, regions keep their regional color. The recommended band for each region appears as a band label beneath the region label.</li>
+    <li><strong>Tooltips</strong>: Labels show <em>Band (LOW/MED/HIGH)</em> confidence. Lower confidence suggests marginal propagation or sparse observation.</li>
+    <li><strong>Best Now summary</strong>: The Propagation badge shows a short summary (Filter / Best Now / Schedule) for quick validation.</li>
+  </ul>
+  <h3 id="map-propagation-novice">Novice workflow</h3>
+  <ol class="section-list">
+    <li>Enable <strong>Propagation Overlay</strong>.</li>
+    <li>Select <strong>Blended</strong> for balanced guidance.</li>
+    <li>Choose a <strong>Propagation Window</strong> of 6h or 12h.</li>
+    <li>Pick a Region filter to focus on your target area.</li>
+    <li>Use the colored state/region guidance to decide which band to check first.</li>
+  </ol>
+  <h3 id="map-propagation-expert">Expert notes</h3>
+  <ul class="section-list">
+    <li><strong>Distance + day/night behavior</strong>: Modeled uses distance class (NVIS / regional / long-path) and local day/night weighting based on midpoint time between you and the target.</li>
+    <li><strong>Grid accuracy matters</strong>: Operator Grid 6 fields directly influence distance and weighting. Missing/incorrect grids degrade predictions.</li>
+    <li><strong>Peer schedules vs traffic</strong>: Peer schedules are treated as observed intent. Actual/Blended mode will weight them within the Propagation Window.</li>
+    <li><strong>Use Modeled for planning</strong>: If you are planning for expected conditions rather than recent activity, Modeled gives you a clean baseline.</li>
+  </ul>
+  <p><strong>Troubleshooting tips</strong>:</p>
+  <ul class="section-list">
+    <li><strong>Overlay looks empty</strong>: Ensure your own Grid 6 is set in Settings and the Propagation Overlay is enabled.</li>
+    <li><strong>Unexpected band choice</strong>: Try Modeled to compare, then Blended to see how recent activity changes the result.</li>
+    <li><strong>No observed impact</strong>: Confirm JS8 Traffic load has run and that peer schedules have been imported.</li>
+  </ul>
 
 <h2 id="hf-schedule">HF Schedule Tab</h2>
   <p><strong>Purpose</strong>: Plan routine operating blocks.</p>
@@ -610,13 +661,24 @@
   <h3 id="db-tools">Database Tools</h3>
   <p><strong>Purpose</strong>: Inspect or clean the SQLite databases used by FreqInOut.</p>
   <ul class="section-list">
-    <li><strong>freqinout_db.py + wrappers</strong>: Cross-platform DB wrapper with shell launchers. Examples: <code>python tools/freqinout_db.py status</code>, <code>bash tools/freqinout-db.sh status</code>, <code>powershell -ExecutionPolicy Bypass -File .\tools\freqinout-db.ps1 status</code>.</li>
-    <li><strong>db_tools.py</strong>: Simple CLI to list, show, export, and truncate tables. Examples: <code>python tools/db_tools.py --list-dbs</code>, <code>python tools/db_tools.py --table operator_checkins --table-show</code>.</li>
-    <li><strong>db_admin.py</strong>: Admin CLI to initialize or truncate full tables (settings + nets). Examples: <code>python tools/db_admin.py --init all</code>, <code>python tools/db_admin.py --truncate nets_all --yes</code>.</li>
-    <li><strong>js8_links_check.py</strong>: Quick inspection of JS8 link ingestion. Example: <code>python tools/js8_links_check.py --limit 20</code>.</li>
-    <li><strong>dedupe_operator_groups.py</strong>: Cleanup tool for legacy duplicate group assignments in operator records. Run a dry run with <code>python tools/dedupe_operator_groups.py</code>, then apply with <code>python tools/dedupe_operator_groups.py --apply</code>.</li>
+    <li><strong>freqinout_db.py + wrappers</strong>: Cross-platform DB wrapper with shell launchers.</li>
+    <li><strong>db_tools.py</strong>: Simple CLI to list, show, export, and truncate tables.</li>
+    <li><strong>db_admin.py</strong>: Admin CLI to initialize or truncate full tables (settings + nets).</li>
+    <li><strong>js8_links_check.py</strong>: Quick inspection of JS8 link ingestion.</li>
+    <li><strong>dedupe_operator_groups.py</strong>: Cleanup tool for legacy duplicate group assignments in operator records.</li>
     <li><strong>Database locations</strong>: Settings live in <code>config/freqinout.db</code>. Operator and net data live in <code>config/freqinout_nets.db</code>.</li>
   </ul>
+  <p><strong>Command examples</strong> (copy/paste):</p>
+  <pre class="cmd"><code>python tools/freqinout_db.py status</code></pre>
+  <pre class="cmd"><code>bash tools/freqinout-db.sh status</code></pre>
+  <pre class="cmd"><code>powershell -ExecutionPolicy Bypass -File .\tools\freqinout-db.ps1 status</code></pre>
+  <pre class="cmd"><code>python tools/db_tools.py --list-dbs</code></pre>
+  <pre class="cmd"><code>python tools/db_tools.py --table operator_checkins --table-show</code></pre>
+  <pre class="cmd"><code>python tools/db_admin.py --init all</code></pre>
+  <pre class="cmd"><code>python tools/db_admin.py --truncate nets_all --yes</code></pre>
+  <pre class="cmd"><code>python tools/js8_links_check.py --limit 20</code></pre>
+  <pre class="cmd"><code>python tools/dedupe_operator_groups.py</code></pre>
+  <pre class="cmd"><code>python tools/dedupe_operator_groups.py --apply</code></pre>
 
   <h2 id="licensing">Licensing</h2>
   <p><strong>Purpose</strong>: Licensing and copyright.</p>

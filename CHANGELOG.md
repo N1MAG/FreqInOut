@@ -2,11 +2,15 @@
 
 ## [1.1.4]
 - Added: Window icon now uses the FreqInOut desktop asset for consistent taskbar display.
+- Added: Propagation overlay with Actual/Blended/Modeled modes and best-band labels for regions/states.
+- Added: Propagation window selector (1h/3h/6h/12h/24h/History) for observed-data weighting.
+- Added: Propagation legend colors now follow FreqPlanner band color palette.
 - Changed: Lazy-load heavy tabs (Messages, FreqPlanner, Map) to reduce startup time and tab-switch stutter.
 - Changed: Pause tab-specific timers when their tab is hidden to reduce background work.
 - Changed: Message file scanning now runs asynchronously to prevent UI freezes.
 - Changed: Map JS8 ingest starts on first Map activation to reduce idle overhead.
 - Changed: FreqPlanner rebuild checks are throttled to reduce unnecessary refresh work.
+- Changed: Propagation model uses distance + day/night weighting for more realistic band guidance.
 - Fixed: Single-instance lock cleanup now supports both PySide6 stale-lock API names.
 - Updated: Linux installer icon refresh/overwrite to reliably apply the latest desktop icon asset.
 - Updated: Help tab now opens external links in the system browser.
