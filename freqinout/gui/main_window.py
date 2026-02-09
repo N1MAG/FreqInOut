@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)
         self._logs_nav_index = None
+        self._map_nav_index = None
         for idx, (label, _w) in enumerate(self._screens):
             btn = QPushButton(label)
             btn.setCheckable(True)
@@ -147,6 +148,8 @@ class MainWindow(QMainWindow):
             nav_layout.addWidget(btn)
             if label == "Logs":
                 self._logs_nav_index = idx
+            if label == "Map":
+                self._map_nav_index = idx
         # Placeholder for map filters (shown only on Map view)
         self.map_filters_container = QWidget()
         self.map_filters_container.setMinimumWidth(120)
@@ -610,6 +613,10 @@ class MainWindow(QMainWindow):
         Show the stations-map 'Show' filters in the sidebar only when the Map view is active.
         """
         is_map = 0 <= index < len(self._screens) and self._screens[index][0] == "Map"
+        if hasattr(self, "logo_label"):
+            self.logo_label.setVisible(not is_map)
+        if self._map_nav_index is not None and self._map_nav_index < len(self.nav_buttons):
+            self.nav_buttons[self._map_nav_index].setVisible(not is_map)
         if hasattr(self, "scheduler_status_container"):
             self.scheduler_status_container.setVisible(not is_map)
         try:

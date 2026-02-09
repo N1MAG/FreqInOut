@@ -3458,7 +3458,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .label-text {{ font-size: 10px; color: {label_color}; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; text-shadow: 0 1px 2px #000; }}
     .label-text.no-border {{ background: transparent; border: none; box-shadow: none; pointer-events: none; }}
     .region-label {{ color: {region_label_color}; font-weight: 700; pointer-events: auto; }}
-    .region-band-label {{ color: #111; font-weight: 600; pointer-events: none; }}
+    .region-band-label {{ color: #000; font-weight: 400; pointer-events: none; }}
     .cs-tooltip {{ background: {tooltip_bg}; color: {tooltip_text}; border: 1px solid {tooltip_border}; padding: 5px 7px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.4); z-index: 10000; }}
     .leaflet-tooltip.cs-tooltip {{ z-index: 10000; pointer-events: none; }}
     .leaflet-popup.cs-tooltip {{ z-index: 10001; }}
