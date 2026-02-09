@@ -49,6 +49,9 @@ from freqinout.core.logger import log
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
+from freqinout.gui.qsy_helper import current_scheduler_freq
+from freqinout.gui.theme import resolve_theme, BAND_COLORS_DARK, BAND_COLORS_LIGHT
+from freqinout.utils.timezones import get_timezone
 
 
 def _ensure_webengine_imported() -> bool:
@@ -94,6 +97,24 @@ FEMA_REGIONS = {
     "R10": ["AK", "ID", "OR", "WA"],
 }
 STATE_TO_FEMA_REGION = {state: region for region, states in FEMA_REGIONS.items() for state in states}
+
+PROP_BANDS = ["80M", "40M", "30M", "20M", "15M", "10M"]
+PROP_BAND_COLORS = {
+    "80M": "#4B2E83",
+    "40M": "#1E88E5",
+    "30M": "#00897B",
+    "20M": "#43A047",
+    "15M": "#FB8C00",
+    "10M": "#E53935",
+}
+PROP_DEFAULT_PROFILES = {
+    "80M": {"ideal_km": 600, "spread_km": 1200, "day": 0.35, "night": 1.0},
+    "40M": {"ideal_km": 1200, "spread_km": 1800, "day": 0.65, "night": 0.95},
+    "30M": {"ideal_km": 1800, "spread_km": 2200, "day": 0.8, "night": 0.85},
+    "20M": {"ideal_km": 2800, "spread_km": 2600, "day": 1.0, "night": 0.6},
+    "15M": {"ideal_km": 3600, "spread_km": 3000, "day": 0.9, "night": 0.35},
+    "10M": {"ideal_km": 4200, "spread_km": 3600, "day": 0.8, "night": 0.2},
+}
 
 US_STATE_NAMES = {
     "AL": "ALABAMA",
@@ -436,6 +457,22 @@ class StationsMapTab(QWidget):
         self._map_dirty: bool = False
         self._ingest_started: bool = False
         self._map_load_ok: bool = False
+        self.prop_overlay_enabled: bool = False
+        self.prop_adaptive_enabled: bool = True
+        self.prop_mode: str = "blended"
+        self._prop_region_scores: Dict[str, Dict] = {}
+        self._prop_best_band_info: Dict[str, str] = {}
+        self._prop_profiles: Dict[str, Dict] | None = None
+        self._last_prop_region_filter: str = ""
+        self.prop_overlay_chk: Optional[QCheckBox] = None
+        self.prop_adaptive_chk: Optional[QCheckBox] = None
+        self.prop_badge: Optional[QLabel] = None
+        self.prop_mode_combo: Optional[QComboBox] = None
+        self._prop_db_cache: Dict[tuple, float] = {}
+        self._prop_db_loaded: bool = False
+        self._prop_db_available: bool = False
+        self._presence_weights_cache: Optional[Dict[str, Dict]] = None
+        self._presence_weights_ts: float = 0.0
 
         self._build_ui()
         self._refresh_group_filter_options()
@@ -474,6 +511,26 @@ class StationsMapTab(QWidget):
         apply_chk(self.show_states_chk, "show_states", "map_show_states", False)
         apply_chk(self.show_cities_chk, "show_cities", "map_show_cities", False)
         apply_chk(self.show_grid_labels_chk, "show_grids", "map_show_grids", False)
+        if self.prop_overlay_chk is not None:
+            apply_chk(self.prop_overlay_chk, "prop_overlay_enabled", "map_prop_overlay", False)
+        else:
+            try:
+                self.prop_overlay_enabled = self._bool_setting("map_prop_overlay", False)
+            except Exception:
+                pass
+        try:
+            self.prop_adaptive_enabled = self._bool_setting("map_prop_adaptive", True)
+        except Exception:
+            pass
+        try:
+            mode = (self.settings.get("map_prop_mode", "blended") or "blended").strip().lower()
+        except Exception:
+            mode = "blended"
+        if mode == "adaptive":
+            mode = "actual"
+        if mode not in ("model", "actual", "blended"):
+            mode = "blended"
+        self.prop_mode = mode
         # show_grid_labels mirrors show_grids
         self.show_grid_labels = self.show_grids
 
@@ -502,6 +559,12 @@ class StationsMapTab(QWidget):
             self.settings.set("map_show_cities", int(self.show_cities_chk.isChecked()))
             self.settings.set("map_show_grids", int(self.show_grid_labels_chk.isChecked()))
             self.settings.set("map_city_pop_idx", self.city_pop_combo.currentIndex())
+            if self.prop_overlay_chk is not None:
+                self.settings.set("map_prop_overlay", int(self.prop_overlay_chk.isChecked()))
+            else:
+                self.settings.set("map_prop_overlay", int(bool(self.prop_overlay_enabled)))
+            self.settings.set("map_prop_adaptive", int(bool(self.prop_adaptive_enabled)))
+            self.settings.set("map_prop_mode", (self.prop_mode or "blended").lower())
         except Exception:
             pass
 
@@ -1932,12 +1995,658 @@ class StationsMapTab(QWidget):
         )
         return bool(combo_mode and combo_mode.lower() != "off")
 
+    def attach_prop_controls(
+        self,
+        overlay_chk: QCheckBox | None,
+        badge: QLabel | None,
+        mode_combo: QComboBox | None = None,
+    ) -> None:
+        self.prop_overlay_chk = overlay_chk
+        self.prop_badge = badge
+        self.prop_mode_combo = mode_combo
+        # Sync checkbox state from settings
+        if self.prop_overlay_chk is not None:
+            self.prop_overlay_chk.blockSignals(True)
+            self.prop_overlay_chk.setChecked(bool(self._bool_setting("map_prop_overlay", False)))
+            self.prop_overlay_chk.blockSignals(False)
+            self.prop_overlay_enabled = self.prop_overlay_chk.isChecked()
+        try:
+            self.prop_adaptive_enabled = self._bool_setting("map_prop_adaptive", True)
+        except Exception:
+            pass
+        if self.prop_mode_combo is not None:
+            try:
+                mode = (self.settings.get("map_prop_mode", "blended") or "blended").strip().lower()
+            except Exception:
+                mode = "blended"
+            if mode == "adaptive":
+                mode = "actual"
+            if mode not in ("model", "actual", "blended"):
+                mode = "blended"
+            self.prop_mode = mode
+            idx = self.prop_mode_combo.findData(mode)
+            if idx >= 0:
+                self.prop_mode_combo.blockSignals(True)
+                self.prop_mode_combo.setCurrentIndex(idx)
+                self.prop_mode_combo.blockSignals(False)
+        # Update badge immediately with current filter
+        if hasattr(self, "region_filter_combo"):
+            region_filter = self.region_filter_combo.currentData() or ""
+        else:
+            region_filter = ""
+        if self.prop_overlay_enabled:
+            scores = self._compute_region_scores(region_filter)
+            if region_filter:
+                best_band, best_score = self._best_band_for_region(scores, region_filter)
+            else:
+                best_band, best_score = self._best_band_overall(scores)
+            self._update_prop_badge(region_filter, best_band, best_score)
+        else:
+            self._update_prop_badge(region_filter, "", 0.0)
+
+    def _effective_prop_mode(self) -> str:
+        mode = (self.prop_mode or "blended").strip().lower()
+        if mode == "adaptive":
+            mode = "actual"
+        if mode not in ("model", "actual", "blended"):
+            mode = "blended"
+        return mode
+
+    # ------------- Propagation overlay ------------- #
+    def _load_prop_profiles(self) -> Dict[str, Dict]:
+        if self._prop_profiles is not None:
+            return self._prop_profiles
+        profiles = dict(PROP_DEFAULT_PROFILES)
+        try:
+            base = Path(__file__).resolve().parents[2]
+            path = base / "config" / "propagation" / "prop_profiles.json"
+            if path.exists():
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        if k in profiles and isinstance(v, dict):
+                            profiles[k].update(v)
+        except Exception:
+            pass
+        self._prop_profiles = profiles
+        return profiles
+
+    def _load_prop_db_cache(self) -> None:
+        if self._prop_db_loaded:
+            return
+        self._prop_db_loaded = True
+        try:
+            base = Path(__file__).resolve().parents[2]
+            db_path = base / "config" / "propagation" / "prop_climatology.db"
+            if not db_path.exists():
+                return
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT month, band, lat_idx, lon_idx, muf_score FROM muf_grid")
+            rows = cur.fetchall()
+            conn.close()
+            for month, band, lat_idx, lon_idx, score in rows:
+                key = (int(month), str(band).upper(), int(lat_idx), int(lon_idx))
+                self._prop_db_cache[key] = float(score)
+            self._prop_db_available = bool(self._prop_db_cache)
+        except Exception:
+            self._prop_db_available = False
+
+    def _lookup_db_score(self, band: str, lat: float, lon: float, month: int) -> Optional[float]:
+        self._load_prop_db_cache()
+        if not self._prop_db_available:
+            return None
+        lat_idx = int((lat + 90.0) // 5)
+        lon_idx = int((lon + 180.0) // 5)
+        lat_idx = max(0, min(35, lat_idx))
+        lon_idx = max(0, min(71, lon_idx))
+        key = (int(month), band.upper(), lat_idx, lon_idx)
+        return self._prop_db_cache.get(key)
+
+    def _get_user_latlon(self) -> Optional[tuple[float, float]]:
+        if not self.settings:
+            return None
+        grid = (self.settings.get("operator_grid6", "") or self.settings.get("operator_grid", "") or "").strip().upper()
+        if grid:
+            ll = maidenhead_to_latlon(grid)
+            if ll:
+                return ll
+        return None
+
+    @staticmethod
+    def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        r = 6371.0
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dl = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2
+        return 2 * r * math.asin(math.sqrt(a))
+
+    def _band_score(self, band: str, distance_km: float, hour_utc: int) -> float:
+        profiles = self._load_prop_profiles()
+        prof = profiles.get(band, {})
+        ideal = float(prof.get("ideal_km", 2000))
+        spread = float(prof.get("spread_km", 2000))
+        day_factor = float(prof.get("day", 0.8))
+        night_factor = float(prof.get("night", 0.8))
+        is_day = 6 <= hour_utc < 18
+        factor = day_factor if is_day else night_factor
+        if spread <= 0:
+            spread = 1.0
+        dist_pen = max(0.0, 1.0 - abs(distance_km - ideal) / spread)
+        score = 100.0 * factor * dist_pen
+        return max(0.0, min(100.0, score))
+
+    def _band_score_db(self, band: str, lat: float, lon: float, month: int) -> Optional[float]:
+        score = self._lookup_db_score(band, lat, lon, month)
+        if score is None:
+            return None
+        if score <= 1.0:
+            return max(0.0, min(100.0, score * 100.0))
+        return max(0.0, min(100.0, score))
+
+    def _diurnal_weight(self, band: str, hour_local: int) -> float:
+        profiles = self._load_prop_profiles()
+        prof = profiles.get(band, {})
+        day_factor = float(prof.get("day", 0.8))
+        night_factor = float(prof.get("night", 0.8))
+        is_day = 6 <= hour_local < 18
+        return day_factor if is_day else night_factor
+
+    def _stations_for_region(self, region_id: str) -> List[StationPoint]:
+        region_id = (region_id or "").strip().upper()
+        if not region_id:
+            return []
+        out = []
+        for pt in self.stations:
+            region = self.operator_index.get(pt.callsign, {}).get("region")
+            if region == region_id:
+                out.append(pt)
+        return out
+
+    def _stations_for_state(self, state_abbr: str) -> List[StationPoint]:
+        state_abbr = (state_abbr or "").strip().upper()
+        if not state_abbr:
+            return []
+        out = []
+        for pt in self.stations:
+            state = self.operator_index.get(pt.callsign, {}).get("state")
+            if state == state_abbr:
+                out.append(pt)
+        return out
+
+    def _region_centroid(self, region_id: str) -> Optional[tuple[float, float]]:
+        region_id = (region_id or "").strip().upper()
+        if not region_id:
+            return None
+        states = FEMA_REGIONS.get(region_id, [])
+        if not states:
+            return None
+        lat_sum = 0.0
+        lon_sum = 0.0
+        count = 0
+        for st in states:
+            center = STATE_CENTERS.get(st)
+            if center:
+                lat_sum += center[0]
+                lon_sum += center[1]
+                count += 1
+        if count == 0:
+            return None
+        return (lat_sum / count, lon_sum / count)
+
+    def _state_centroid(self, state_abbr: str) -> Optional[tuple[float, float]]:
+        state_abbr = (state_abbr or "").strip().upper()
+        if not state_abbr:
+            return None
+        return STATE_CENTERS.get(state_abbr)
+
+    def _adaptive_adjustment(self, band: str, region_id: str) -> float:
+        if not self.prop_adaptive_enabled:
+            return 0.0
+        max_age = self.recency_seconds or 24 * 60 * 60
+        recent = self._load_recent_calls(max_age, band_filter={"type": "band", "value": band})
+        if not recent:
+            return 0.0
+        stations = self._stations_for_region(region_id)
+        if not stations:
+            return 0.0
+        hit = sum(1 for s in stations if s.callsign.upper() in recent)
+        ratio = hit / max(1, len(stations))
+        adj = (ratio - 0.5) * 20.0
+        return max(-12.0, min(12.0, adj))
+
+    def _adaptive_adjustment_state(self, band: str, state_abbr: str) -> float:
+        if not self.prop_adaptive_enabled:
+            return 0.0
+        max_age = self.recency_seconds or 24 * 60 * 60
+        recent = self._load_recent_calls(max_age, band_filter={"type": "band", "value": band})
+        if not recent:
+            return 0.0
+        stations = self._stations_for_state(state_abbr)
+        if not stations:
+            return 0.0
+        hit = sum(1 for s in stations if s.callsign.upper() in recent)
+        ratio = hit / max(1, len(stations))
+        adj = (ratio - 0.5) * 20.0
+        return max(-12.0, min(12.0, adj))
+
+    def _presence_band_weights(self) -> Dict[str, Dict]:
+        now_ts = time.time()
+        if self._presence_weights_cache and (now_ts - self._presence_weights_ts) < 10:
+            return self._presence_weights_cache
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        schedule_presence = self._load_peer_schedule_presence(now_utc)
+        observed_by_band = self._load_observed_band_presence(30 * 60)
+
+        sched_region: Dict[str, Dict[str, Set[str]]] = {}
+        sched_state: Dict[str, Dict[str, Set[str]]] = {}
+        obs_region: Dict[str, Dict[str, Set[str]]] = {}
+        obs_state: Dict[str, Dict[str, Set[str]]] = {}
+
+        for entry in schedule_presence:
+            cs = (entry.get("callsign") or "").strip().upper()
+            band = (entry.get("band") or "").strip().upper()
+            if not cs or not band:
+                continue
+            meta = self.operator_index.get(cs, {})
+            region = meta.get("region") or ""
+            state = meta.get("state") or ""
+            if region:
+                sched_region.setdefault(region, {}).setdefault(band, set()).add(cs)
+            if state:
+                sched_state.setdefault(state, {}).setdefault(band, set()).add(cs)
+
+        for band, calls in observed_by_band.items():
+            for cs in calls:
+                meta = self.operator_index.get(cs, {})
+                region = meta.get("region") or ""
+                state = meta.get("state") or ""
+                if region:
+                    obs_region.setdefault(region, {}).setdefault(band, set()).add(cs)
+                if state:
+                    obs_state.setdefault(state, {}).setdefault(band, set()).add(cs)
+
+        def _weights(
+            obs_map: Dict[str, Dict[str, Set[str]]],
+            sched_map: Dict[str, Dict[str, Set[str]]],
+        ) -> tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Set[str]]:
+            out: Dict[str, Dict[str, float]] = {}
+            ratio_out: Dict[str, Dict[str, float]] = {}
+            has_data: Set[str] = set()
+            keys = set(obs_map.keys()) | set(sched_map.keys())
+            for key in keys:
+                max_weighted = 0
+                band_weighted: Dict[str, int] = {}
+                for band in PROP_BANDS:
+                    obs_count = len(obs_map.get(key, {}).get(band, set()))
+                    sched_count = len(sched_map.get(key, {}).get(band, set()))
+                    weighted = obs_count * 2 + sched_count
+                    band_weighted[band] = weighted
+                    if weighted > max_weighted:
+                        max_weighted = weighted
+                if max_weighted > 0:
+                    has_data.add(key)
+                if max_weighted <= 0:
+                    out[key] = {band: 1.0 for band in PROP_BANDS}
+                    ratio_out[key] = {band: 0.0 for band in PROP_BANDS}
+                else:
+                    ratio_out[key] = {
+                        band: (band_weighted[band] / max_weighted) if max_weighted else 0.0
+                        for band in PROP_BANDS
+                    }
+                    out[key] = {
+                        band: max(0.6, min(1.4, 0.7 + 0.6 * ratio_out[key][band]))
+                        for band in PROP_BANDS
+                    }
+            return out, ratio_out, has_data
+
+        region_weights, region_ratio, region_has = _weights(obs_region, sched_region)
+        state_weights, state_ratio, state_has = _weights(obs_state, sched_state)
+        weights = {
+            "region": region_weights,
+            "state": state_weights,
+            "region_ratio": region_ratio,
+            "state_ratio": state_ratio,
+            "region_has_data": region_has,
+            "state_has_data": state_has,
+        }
+        self._presence_weights_cache = weights
+        self._presence_weights_ts = now_ts
+        return weights
+
+    def _load_observed_band_presence(self, max_age_sec: int) -> Dict[str, Set[str]]:
+        observed: Dict[str, Set[str]] = {band: set() for band in PROP_BANDS}
+        for band in PROP_BANDS:
+            calls = self._load_recent_calls(max_age_sec, band_filter={"type": "band", "value": band})
+            if calls:
+                observed[band] = {c.strip().upper() for c in calls if c}
+        return observed
+
+    def _load_peer_schedule_presence(self, now_utc: datetime.datetime) -> List[Dict]:
+        rows: List[Dict] = []
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return rows
+        if not db_path.exists():
+            return rows
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT owner_callsign, day_utc, start_utc, end_utc, band, mode, frequency
+                FROM peer_hf_schedule
+                """
+            )
+            raw = cur.fetchall()
+            conn.close()
+        except Exception:
+            return rows
+
+        today_name = now_utc.strftime("%A")
+        yesterday_name = (now_utc - datetime.timedelta(days=1)).strftime("%A")
+        now_min = now_utc.hour * 60 + now_utc.minute
+        active_by_callsign: Dict[str, Dict] = {}
+        for cs, day_utc, start_utc, end_utc, band, mode, freq in raw:
+            callsign = (cs or "").strip().upper()
+            if not callsign:
+                continue
+            day_val = (day_utc or "ALL").strip().title()
+            start_min = self._parse_hhmm_minutes(start_utc)
+            end_min = self._parse_hhmm_minutes(end_utc)
+            if start_min is None or end_min is None:
+                continue
+            if not self._schedule_active_now(day_val, today_name, yesterday_name, now_min, start_min, end_min):
+                continue
+            minutes_to_end = self._minutes_until_end(now_min, start_min, end_min)
+            existing = active_by_callsign.get(callsign)
+            if existing and minutes_to_end >= existing.get("minutes_to_end", 0):
+                continue
+            active_by_callsign[callsign] = {
+                "callsign": callsign,
+                "band": (band or "").strip().upper(),
+                "mode": (mode or "").strip().upper(),
+                "frequency": str(freq or "").strip(),
+                "minutes_to_end": minutes_to_end,
+            }
+        return list(active_by_callsign.values())
+
+    def _parse_hhmm_minutes(self, value: Optional[str]) -> Optional[int]:
+        txt = (value or "").strip()
+        if not txt:
+            return None
+        match = re.match(r"^(\d{1,2}):?(\d{2})$", txt)
+        if not match:
+            return None
+        h = int(match.group(1))
+        m = int(match.group(2))
+        if h < 0 or h > 23 or m < 0 or m > 59:
+            return None
+        return h * 60 + m
+
+    def _schedule_active_now(
+        self,
+        day_val: str,
+        today_name: str,
+        yesterday_name: str,
+        now_min: int,
+        start_min: int,
+        end_min: int,
+    ) -> bool:
+        day_val = (day_val or "ALL").strip().title()
+        if day_val not in {"All", today_name, yesterday_name}:
+            return False
+        if start_min <= end_min:
+            return day_val in {today_name, "All"} and start_min <= now_min < end_min
+        # Wraps past midnight
+        if day_val in {today_name, "All"} and now_min >= start_min:
+            return True
+        if day_val in {yesterday_name, "All"} and now_min < end_min:
+            return True
+        return False
+
+    def _minutes_until_end(self, now_min: int, start_min: int, end_min: int) -> int:
+        if start_min <= end_min:
+            return max(0, end_min - now_min)
+        if now_min >= start_min:
+            return (24 * 60 - now_min) + end_min
+        return max(0, end_min - now_min)
+
+    def _compute_region_scores(self, region_filter: str = "") -> Dict[str, Dict]:
+        region_filter = (region_filter or "").strip().upper()
+        regions = [region_filter] if region_filter else sorted(FEMA_REGIONS.keys())
+        user_ll = self._get_user_latlon()
+        if not user_ll:
+            return {}
+        mode = self._effective_prop_mode()
+        presence_stats = self._presence_band_weights()
+        presence_ratio = presence_stats.get("region_ratio", {})
+        presence_has_data = presence_stats.get("region_has_data", set())
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        month = now_utc.month
+        hour_utc = now_utc.hour
+        hour_local = hour_utc
+        try:
+            if self.settings:
+                tz_name = self.settings.get("timezone", "UTC") or "UTC"
+                tz = get_timezone(tz_name)
+                hour_local = now_utc.astimezone(tz).hour
+        except Exception:
+            hour_local = hour_utc
+        scores: Dict[str, Dict] = {}
+        for region_id in regions:
+            stations = self._stations_for_region(region_id)
+            use_station_weight = len(stations) >= 5
+            centroid = self._region_centroid(region_id)
+            for band in PROP_BANDS:
+                if mode == "actual":
+                    if region_id not in presence_has_data:
+                        continue
+                    ratio = presence_ratio.get(region_id, {}).get(band, 0.0)
+                    entry = scores.setdefault(region_id, {"bands": {}})
+                    entry["bands"][band] = max(0.0, min(100.0, ratio * 100.0))
+                    continue
+                base_scores = []
+                if use_station_weight and stations:
+                    for s in stations:
+                        db_score = self._band_score_db(band, s.lat, s.lon, month)
+                        if db_score is None:
+                            dist = self._haversine_km(user_ll[0], user_ll[1], s.lat, s.lon)
+                            base_scores.append(self._band_score(band, dist, hour_utc))
+                        else:
+                            base_scores.append(db_score * self._diurnal_weight(band, hour_local))
+                elif centroid:
+                    db_score = self._band_score_db(band, centroid[0], centroid[1], month)
+                    if db_score is None:
+                        dist = self._haversine_km(user_ll[0], user_ll[1], centroid[0], centroid[1])
+                        base_scores.append(self._band_score(band, dist, hour_utc))
+                    else:
+                        base_scores.append(db_score * self._diurnal_weight(band, hour_local))
+                base = sum(base_scores) / max(1, len(base_scores))
+                adj = 0.0 if mode == "model" else self._adaptive_adjustment(band, region_id)
+                total = max(0.0, min(100.0, base + adj))
+                entry = scores.setdefault(region_id, {"bands": {}})
+                entry["bands"][band] = total
+        return scores
+
+    def _compute_state_scores(self) -> Dict[str, Dict]:
+        user_ll = self._get_user_latlon()
+        if not user_ll:
+            return {}
+        mode = self._effective_prop_mode()
+        presence_stats = self._presence_band_weights()
+        presence_weights = presence_stats.get("state", {})
+        presence_ratio = presence_stats.get("state_ratio", {})
+        presence_has_data = presence_stats.get("state_has_data", set())
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        month = now_utc.month
+        hour_utc = now_utc.hour
+        hour_local = hour_utc
+        try:
+            if self.settings:
+                tz_name = self.settings.get("timezone", "UTC") or "UTC"
+                tz = get_timezone(tz_name)
+                hour_local = now_utc.astimezone(tz).hour
+        except Exception:
+            hour_local = hour_utc
+        scores: Dict[str, Dict] = {}
+        for state_abbr in USA_STATES:
+            stations = self._stations_for_state(state_abbr)
+            use_station_weight = len(stations) >= 5
+            centroid = self._state_centroid(state_abbr)
+            for band in PROP_BANDS:
+                if mode == "actual":
+                    if state_abbr not in presence_has_data:
+                        continue
+                    ratio = presence_ratio.get(state_abbr, {}).get(band, 0.0)
+                    entry = scores.setdefault(state_abbr, {"bands": {}})
+                    entry["bands"][band] = max(0.0, min(100.0, ratio * 100.0))
+                    continue
+                base_scores = []
+                if use_station_weight and stations:
+                    for s in stations:
+                        db_score = self._band_score_db(band, s.lat, s.lon, month)
+                        if db_score is None:
+                            dist = self._haversine_km(user_ll[0], user_ll[1], s.lat, s.lon)
+                            base_scores.append(self._band_score(band, dist, hour_utc))
+                        else:
+                            base_scores.append(db_score * self._diurnal_weight(band, hour_local))
+                elif centroid:
+                    db_score = self._band_score_db(band, centroid[0], centroid[1], month)
+                    if db_score is None:
+                        dist = self._haversine_km(user_ll[0], user_ll[1], centroid[0], centroid[1])
+                        base_scores.append(self._band_score(band, dist, hour_utc))
+                    else:
+                        base_scores.append(db_score * self._diurnal_weight(band, hour_local))
+                if not base_scores:
+                    continue
+                base = sum(base_scores) / max(1, len(base_scores))
+                adj = 0.0 if mode == "model" else self._adaptive_adjustment_state(band, state_abbr)
+                total = max(0.0, min(100.0, base + adj))
+                if mode in ("adaptive", "blended") and state_abbr in presence_has_data:
+                    band_weight = presence_weights.get(state_abbr, {}).get(band, 1.0)
+                    if mode == "adaptive":
+                        band_weight = max(0.4, min(1.8, band_weight * band_weight))
+                    total = max(0.0, min(100.0, total * band_weight))
+                entry = scores.setdefault(state_abbr, {"bands": {}})
+                entry["bands"][band] = total
+        return scores
+
+    def _best_band_for_region(self, region_scores: Dict[str, Dict], region_id: str) -> tuple[str, float]:
+        region_id = (region_id or "").strip().upper()
+        bands = region_scores.get(region_id, {}).get("bands", {})
+        if not bands:
+            return ("", 0.0)
+        best_band = max(bands.items(), key=lambda kv: kv[1])
+        return best_band[0], float(best_band[1])
+
+    def _best_band_overall(self, region_scores: Dict[str, Dict]) -> tuple[str, float]:
+        if not region_scores:
+            return ("", 0.0)
+        totals: Dict[str, List[float]] = {b: [] for b in PROP_BANDS}
+        for entry in region_scores.values():
+            for band, score in (entry.get("bands") or {}).items():
+                if band in totals:
+                    totals[band].append(float(score))
+        best_band = ""
+        best_score = 0.0
+        for band, scores in totals.items():
+            if not scores:
+                continue
+            avg = sum(scores) / len(scores)
+            if avg > best_score:
+                best_score = avg
+                best_band = band
+        return best_band, best_score
+
+    def _score_level(self, score: float) -> str:
+        if score >= 70:
+            return "high"
+        if score >= 45:
+            return "med"
+        return "low"
+
+    def _resolve_prop_band_colors(self) -> Dict[str, str]:
+        theme = resolve_theme(self.settings)
+        is_dark = theme.get("bg") == "#0F1216"
+        palette = BAND_COLORS_DARK if is_dark else BAND_COLORS_LIGHT
+        colors: Dict[str, str] = {k.upper(): v for k, v in palette.items()}
+        try:
+            raw = self.settings.get("band_colors", {}) or {}
+        except Exception:
+            raw = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                if not k or not v:
+                    continue
+                key = str(k).strip().lower()
+                band_key = key.upper()
+                if band_key.endswith("M"):
+                    colors[band_key] = str(v).strip()
+                else:
+                    colors[f"{band_key}M"] = str(v).strip()
+        return {b: colors.get(b, PROP_BAND_COLORS[b]) for b in PROP_BANDS if b in PROP_BAND_COLORS}
+
+    def _freq_to_band(self, freq: Optional[float]) -> str:
+        if not freq:
+            return ""
+        try:
+            mhz = float(freq)
+        except Exception:
+            return ""
+        bands = [
+            ("80M", 3.5, 4.0),
+            ("40M", 7.0, 7.3),
+            ("30M", 10.1, 10.15),
+            ("20M", 14.0, 14.35),
+            ("15M", 21.0, 21.45),
+            ("10M", 28.0, 29.7),
+        ]
+        for name, lo, hi in bands:
+            if lo <= mhz <= hi:
+                return name
+        return ""
+
+    def _update_prop_badge(self, region_filter: str, best_band: str, best_score: float) -> None:
+        if self.prop_badge is None:
+            return
+        scheduled = self._freq_to_band(current_scheduler_freq(self.window()))
+        level = self._score_level(best_score)
+        region_label = region_filter if region_filter else "National"
+        if not best_band:
+            self.prop_badge.setText("Best Band: --")
+            self.prop_badge.setStyleSheet("font-weight: bold; color: #666;")
+            return
+        text_lines = [
+            f"Filter: {region_label}",
+            f"Best Now: {best_band} ({level.upper()})",
+        ]
+        if scheduled and scheduled != best_band:
+            text_lines.append(f"Schedule: {scheduled}")
+        text = "<br/>".join(text_lines)
+        if scheduled and scheduled != best_band:
+            self.prop_badge.setStyleSheet("font-weight: bold; color: #FB8C00;")
+        else:
+            self.prop_badge.setStyleSheet("font-weight: bold; color: #1E88E5;")
+        self.prop_badge.setText(text)
+
     # ------------- Map rendering ------------- #
     def _render_map(self, preserve_view: bool = True):
         if not self._map_visible:
             self._map_dirty = True
             return
         self._map_dirty = False
+        theme_key = ""
+        try:
+            if hasattr(self.settings, "reload"):
+                self.settings.reload()
+            theme_key = str(self.settings.get("ui_theme", "") or "").strip().lower()
+        except Exception:
+            theme_key = ""
         config_sig = (
             bool(self.show_callsigns),
             bool(self.show_states),
@@ -1946,6 +2655,10 @@ class StationsMapTab(QWidget):
             bool(self.show_grid_labels),
             bool(self.show_regions),
             int(self.city_pop_min),
+            bool(self.prop_overlay_enabled),
+            bool(self.prop_adaptive_enabled),
+            str(self._effective_prop_mode()),
+            theme_key,
         )
         force_reload = self._map_initialized and self._last_map_config and config_sig != self._last_map_config
         if force_reload and self.web is not None and preserve_view is True:
@@ -2003,6 +2716,21 @@ class StationsMapTab(QWidget):
             group_filter = self.group_filter_combo.currentData() or ""
         if hasattr(self, "region_filter_combo"):
             region_filter = self.region_filter_combo.currentData() or ""
+        prop_region_scores: Dict[str, Dict] = {}
+        prop_state_scores: Dict[str, Dict] = {}
+        if self.prop_overlay_enabled:
+            prop_region_scores = self._compute_region_scores(region_filter)
+            prop_state_scores = self._compute_state_scores()
+            if region_filter:
+                best_band, best_score = self._best_band_for_region(prop_region_scores, region_filter)
+            else:
+                best_band, best_score = self._best_band_overall(prop_region_scores)
+            self._update_prop_badge(region_filter, best_band, best_score)
+            if region_filter != self._last_prop_region_filter:
+                force_reload = True
+        else:
+            self._update_prop_badge(region_filter, "", 0.0)
+        self._last_prop_region_filter = region_filter
 
         # init stats and links
         stats_lookup: Dict[str, Dict] = {}
@@ -2164,6 +2892,9 @@ class StationsMapTab(QWidget):
             city_min_pop=self.city_pop_min,
             show_city_labels=self.show_city_labels,
             initial_view=view_state or self._last_map_view,
+            prop_overlay_enabled=self.prop_overlay_enabled,
+            prop_region_scores=prop_region_scores,
+            prop_state_scores=prop_state_scores,
         )
 
         if self.web is not None:
@@ -2255,7 +2986,16 @@ class StationsMapTab(QWidget):
         city_min_pop: int,
         show_city_labels: bool,
         initial_view: Optional[Dict[str, float]] = None,
+        prop_overlay_enabled: bool = False,
+        prop_region_scores: Optional[Dict[str, Dict]] = None,
+        prop_state_scores: Optional[Dict[str, Dict]] = None,
     ) -> str:
+        theme = resolve_theme(self.settings)
+        try:
+            ui_theme = str(self.settings.get("ui_theme", "") or "").strip().lower()
+        except Exception:
+            ui_theme = ""
+        is_dark = theme.get("bg") == "#0F1216" or ui_theme == "dark"
         markers_json = json.dumps(markers)
         links_json = json.dumps(links)
         init_lat = initial_view.get("lat") if initial_view else 45
@@ -2299,10 +3039,10 @@ function addGrid(res, maxCells) {
   let latCount = Math.ceil((north - south) / stepLat);
   if (lonCount * latCount > maxCells) return false;
   for (let lon = Math.floor(west / stepLon) * stepLon; lon <= east; lon += stepLon) {
-    gridLayer.addLayer(L.polyline([[ south, lon ], [ north, lon ]], {color:'#666', weight:0.5, opacity:0.3}));
+    gridLayer.addLayer(L.polyline([[ south, lon ], [ north, lon ]], {color:'{grid_color}', weight:0.5, opacity:{grid_opacity}}));
   }
   for (let lat = Math.floor(south / stepLat) * stepLat; lat <= north; lat += stepLat) {
-    gridLayer.addLayer(L.polyline([[ lat, west ], [ lat, east ]], {color:'#666', weight:0.5, opacity:0.3}));
+    gridLayer.addLayer(L.polyline([[ lat, west ], [ lat, east ]], {color:'{grid_color}', weight:0.5, opacity:{grid_opacity}}));
   }
   return true;
 }
@@ -2385,6 +3125,53 @@ function addGridLabels(res, level, bounds, maxLabels) {
             else ""
         )
         road_fetch = ""
+        prop_region_best: Dict[str, Dict] = {}
+        if prop_region_scores:
+            for region_id, data in prop_region_scores.items():
+                bands = (data or {}).get("bands", {})
+                if not bands:
+                    continue
+                best_band, best_score = max(bands.items(), key=lambda kv: kv[1])
+                level = "low"
+                if best_score >= 70:
+                    level = "high"
+                elif best_score >= 45:
+                    level = "med"
+                prop_region_best[region_id] = {
+                    "band": best_band,
+                    "score": round(float(best_score), 1),
+                    "level": level,
+                }
+        prop_state_best: Dict[str, Dict] = {}
+        if prop_state_scores:
+            for state_abbr, data in prop_state_scores.items():
+                bands = (data or {}).get("bands", {})
+                if not bands:
+                    continue
+                best_band, best_score = max(bands.items(), key=lambda kv: kv[1])
+                level = "low"
+                if best_score >= 70:
+                    level = "high"
+                elif best_score >= 45:
+                    level = "med"
+                prop_state_best[state_abbr] = {
+                    "band": best_band,
+                    "score": round(float(best_score), 1),
+                    "level": level,
+                }
+        prop_colors = self._resolve_prop_band_colors()
+        label_color = "#E6E8EE" if is_dark else "#000"
+        region_label_color = "#B8C7FF" if is_dark else "#1E88E5"
+        tooltip_bg = "#1A1F26" if is_dark else "#fff"
+        tooltip_text = "#E6E8EE" if is_dark else "#000"
+        tooltip_border = "#3A4452" if is_dark else "#444"
+        legend_bg = "rgba(26,31,38,0.92)" if is_dark else "rgba(255,255,255,0.92)"
+        legend_text = "#C6CBD4" if is_dark else "#000"
+        grid_color = "#5F6B7A" if is_dark else "#666"
+        grid_opacity = "0.3" if is_dark else "0.3"
+        state_border = "#8A93A6" if is_dark else "#666"
+        state_border_opacity = "0.7" if is_dark else "0.5"
+        region_fill_opacity = "0.05" if is_dark else "0.08"
         geojson_fetches = "\n".join(
             [
                 f"""
@@ -2395,20 +3182,32 @@ function addGridLabels(res, level, bounds, maxLabels) {
         L.geoJSON(data, {{
           style: function() {{
             const props = arguments[0].properties || {{}};
-            const abbrev = (props.state_abbrev || props.state || props.name || '').toUpperCase();
             const fullName = (props.STATE_NAME || props.name || props.state || '').toUpperCase();
+            let stateAbbr = (props.state_abbrev || props.state || '').toUpperCase();
+            if (!stateAbbr && fullName && window.STATE_ABBR_FROM_NAME && window.STATE_ABBR_FROM_NAME[fullName]) {{
+              stateAbbr = window.STATE_ABBR_FROM_NAME[fullName];
+            }}
             let reg = props.fema_region;
-            if (!reg && abbrev && window.FEMA_LOOKUP_ABBR && window.FEMA_LOOKUP_ABBR[abbrev]) {{
-              reg = window.FEMA_LOOKUP_ABBR[abbrev];
+            if (!reg && stateAbbr && window.FEMA_LOOKUP_ABBR && window.FEMA_LOOKUP_ABBR[stateAbbr]) {{
+              reg = window.FEMA_LOOKUP_ABBR[stateAbbr];
             }}
             if (!reg && fullName && window.FEMA_LOOKUP_NAME && window.FEMA_LOOKUP_NAME[fullName]) {{
               reg = window.FEMA_LOOKUP_NAME[fullName];
             }}
+            if (window.propOverlayEnabled && !{str(self.show_regions).lower()}) {{
+              const st = stateAbbr || '';
+              const stEntry = st && window.propStateScores[st];
+              if (stEntry) {{
+                const bandColor = window.propBandColors[stEntry.band] || '#6D4C41';
+                const opacity = stEntry.level === 'high' ? 0.28 : (stEntry.level === 'med' ? 0.2 : 0.12);
+                return {{color: bandColor, weight: 1, opacity: 0.9, fillOpacity: opacity, fillColor: bandColor}};
+              }}
+            }}
             if ({str(self.show_regions).lower()} && reg) {{
               const color = regionColors[(parseInt(reg, 10) - 1) % regionColors.length];
-              return {{color: color, weight: 1, opacity: 0.8, fillOpacity: 0.08, fillColor: color}};
+              return {{color: color, weight: 1, opacity: 0.8, fillOpacity: {region_fill_opacity}, fillColor: color}};
             }} else {{
-              return {{color: '#666', weight: 1, opacity: 0.5, fillOpacity: 0}};
+              return {{color: '{state_border}', weight: 1, opacity: {state_border_opacity}, fillOpacity: 0}};
             }}
           }},
           onEachFeature: function (feature, layer) {{
@@ -2424,6 +3223,20 @@ function addGridLabels(res, level, bounds, maxLabels) {
               tooltip.setContent(displayLabel);
               layer.bindTooltip(tooltip);
             }}
+            if ({str(self.show_states).lower()} && window.propOverlayEnabled) {{
+              const st = stateAbbr || '';
+              const stEntry = st && window.propStateScores[st];
+              if (stEntry) {{
+                const tip = stEntry.band + ' (' + stEntry.level.toUpperCase() + ')';
+                layer.on('mouseover', function() {{
+                  this.bindTooltip(tip, {{direction:'top', sticky:true}});
+                  this.openTooltip();
+                }});
+                layer.on('mouseout', function() {{
+                  this.closeTooltip();
+                }});
+              }}
+            }}
             // FEMA region tooltip from state
             if ({str(self.show_regions).lower()}) {{
               const abbrev = (props.state_abbrev || props.state || props.name || '').toUpperCase();
@@ -2436,6 +3249,18 @@ function addGridLabels(res, level, bounds, maxLabels) {
               }}
               if (reg) {{
                 const labelTxt = 'R' + reg.toString().padStart(2,'0');
+                if (window.propOverlayEnabled) {{
+                  const st = stateAbbr || '';
+                  const stEntry = st && window.propStateScores[st];
+                  if (stEntry) {{
+                    const tip = stEntry.band + ' (' + stEntry.level.toUpperCase() + ')';
+                    layer.bindTooltip(tip);
+                  }} else if (window.propRegionScores[labelTxt]) {{
+                    const entry = window.propRegionScores[labelTxt];
+                    const tip = entry.band + ' (' + entry.level.toUpperCase() + ')';
+                    layer.bindTooltip(tip);
+                  }}
+                }}
                 // accumulate center per region
                 const c = layer.getBounds().getCenter();
                 const key = labelTxt;
@@ -2458,8 +3283,22 @@ function addGridLabels(res, level, bounds, maxLabels) {
             const entry = regionCenters[k];
             const lat = entry.lat / entry.count;
             const lon = entry.lon / entry.count;
-            const icon = L.divIcon({{className:'label-text no-border region-label', html: k}});
-            regionLabelLayer.addLayer(L.marker([lat, lon], {{icon}}));
+            const icon = L.divIcon({{className:'label-text no-border region-label', html: k, iconAnchor:[0,0]}});
+            const marker = L.marker([lat, lon], {{icon}});
+            if (window.propOverlayEnabled && window.propRegionScores[k]) {{
+              const entry = window.propRegionScores[k];
+              const tip = '<span style="white-space:nowrap;">' + entry.band + ' (' + entry.level.toUpperCase() + ')</span>';
+              marker.on('mouseover', function() {{
+                this.bindTooltip(tip, {{direction:'top', sticky:true}});
+                this.openTooltip();
+              }});
+              marker.on('mouseout', function() {{
+                this.closeTooltip();
+              }});
+              const bandIcon = L.divIcon({{className:'label-text no-border region-band-label', html: tip, iconAnchor:[0,-14]}});
+              regionLabelLayer.addLayer(L.marker([lat, lon], {{icon: bandIcon}}));
+            }}
+            regionLabelLayer.addLayer(marker);
           }});
           regionLabelLayer.addTo(map);
         }}
@@ -2542,6 +3381,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     map.on('zoomend', updateCityVisibility);
     updateCityVisibility();
             """
+        dark_map_filter = "filter: brightness(0.75) saturate(0.85) contrast(1.05);" if is_dark else ""
         return f"""
 <!DOCTYPE html>
 <html>
@@ -2551,15 +3391,17 @@ function addGridLabels(res, level, bounds, maxLabels) {
   <link rel="stylesheet" href="{leaflet_css}" />
   <style>
     html, body, #map {{ height: 100%; margin: 0; padding: 0; }}
-    .label-text {{ font-size: 10px; color: #000; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; }}
+    #map {{ {dark_map_filter} }}
+    .label-text {{ font-size: 10px; color: {label_color}; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; text-shadow: 0 1px 2px #000; }}
     .label-text.no-border {{ background: transparent; border: none; box-shadow: none; pointer-events: none; }}
-    .region-label {{ color: #1E88E5; font-weight: 700; }}
-    .cs-tooltip {{ background: #fff; color: #000; border: 1px solid #444; padding: 4px 6px; border-radius: 3px; box-shadow: 0 1px 3px rgba(0,0,0,0.2); z-index: 10000; }}
+    .region-label {{ color: {region_label_color}; font-weight: 700; pointer-events: auto; }}
+    .region-band-label {{ color: #111; font-weight: 600; pointer-events: none; }}
+    .cs-tooltip {{ background: {tooltip_bg}; color: {tooltip_text}; border: 1px solid {tooltip_border}; padding: 5px 7px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.4); z-index: 10000; }}
     .leaflet-tooltip.cs-tooltip {{ z-index: 10000; pointer-events: none; }}
     .leaflet-popup.cs-tooltip {{ z-index: 10001; }}
-    .detail-panel {{ background: rgba(255,255,255,0.92); padding: 6px 8px; border: 1px solid #666; border-radius: 4px; min-width: 150px; max-width: 220px; font-size: 11px; }}
-    .zoom-display {{ padding: 4px 8px; font-size: 11px; background: rgba(255,255,255,0.85); }}
-    .legend-box {{ background: rgba(255,255,255,0.92); padding: 6px 8px; border: 1px solid #666; border-radius: 4px; font-size: 11px; line-height: 1.3; }}
+    .detail-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; min-width: 150px; max-width: 220px; font-size: 11px; }}
+    .zoom-display {{ padding: 4px 8px; font-size: 11px; background: {legend_bg}; color: {legend_text}; border: 1px solid {tooltip_border}; }}
+    .legend-box {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: 11px; line-height: 1.3; }}
   </style>
 </head>
 <body>
@@ -2568,6 +3410,10 @@ function addGridLabels(res, level, bounds, maxLabels) {
   <script>
     window.FEMA_LOOKUP = {json.dumps({s:r[1:] for r,states in FEMA_REGIONS.items() for s in states})};
     const regionColors = ['#1E88E5','#43A047','#FB8C00','#8E24AA','#00ACC1','#F4511E','#3949AB','#FB8C00','#6D4C41','#00897B'];
+    window.propOverlayEnabled = {str(bool(prop_overlay_enabled)).lower()};
+    window.propRegionScores = {json.dumps(prop_region_best)};
+    window.propStateScores = {json.dumps(prop_state_best)};
+    window.propBandColors = {json.dumps(prop_colors)};
     const markers = {markers_json};
     const links = {links_json};
     window.FEMA_LOOKUP_ABBR = {json.dumps({s:r[1:] for r,states in FEMA_REGIONS.items() for s in states})};
@@ -2644,7 +3490,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
         '<span style="color:#2e7d32;">&#9632;</span> 0 to &lt;5<br/>' +
         '<span style="color:#fbc02d;">&#9632;</span> -5 to &lt;0<br/>' +
         '<span style=\"color:#f57c00;\">&#9632;</span> -10 to &lt;-5<br/>' +
-        '<span style=\"color:#c62828;\">&#9632;</span> &lt; -10';
+        '<span style=\"color:#c62828;\">&#9632;</span> &lt; -10' +
+        ({'true' if prop_overlay_enabled else 'false'} ? ('<br/><br/><b>Best Band Now</b><br/>' +
+        Object.keys(window.propBandColors).map(k => '<span style="color:' + window.propBandColors[k] + ';">&#9632;</span> ' + k).join('<br/>')) : '');
       return div;
     }};
     legend.addTo(map);
@@ -2817,6 +3665,16 @@ function addGridLabels(res, level, bounds, maxLabels) {
 
     def _on_relay_target_changed(self, text: str):
         self.relay_target = (text or "").strip().upper()
+        self._render_map()
+
+    def _on_prop_overlay_changed(self, state):
+        self.prop_overlay_enabled = bool(state)
+        self._save_display_preferences()
+        self._render_map()
+
+    def _on_prop_adaptive_changed(self, state):
+        self.prop_adaptive_enabled = bool(state)
+        self._save_display_preferences()
         self._render_map()
     def _ensure_leaflet_assets(self) -> tuple[str, str]:
         """

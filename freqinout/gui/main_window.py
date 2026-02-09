@@ -398,10 +398,23 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(box)
         v.setContentsMargins(4, 4, 4, 4)
         self.map_cb_callsigns = QCheckBox("Callsigns")
+        self.map_cb_regions = QCheckBox("Regions")
+        self.map_cb_grids = QCheckBox("Grids")
         self.map_cb_states = QCheckBox("States")
         self.map_cb_cities = QCheckBox("Cities")
-        self.map_cb_grids = QCheckBox("Grids")
-        self.map_cb_regions = QCheckBox("Regions")
+        v.addWidget(self.map_cb_callsigns)
+        grid_row1 = QHBoxLayout()
+        self.map_cb_regions.setMinimumWidth(90)
+        self.map_cb_states.setMinimumWidth(90)
+        grid_row1.addWidget(self.map_cb_regions)
+        grid_row1.addWidget(self.map_cb_grids)
+        grid_row1.setAlignment(Qt.AlignLeft)
+        v.addLayout(grid_row1)
+        grid_row2 = QHBoxLayout()
+        grid_row2.addWidget(self.map_cb_states)
+        grid_row2.addWidget(self.map_cb_cities)
+        grid_row2.setAlignment(Qt.AlignLeft)
+        v.addLayout(grid_row2)
         for cb in (
             self.map_cb_callsigns,
             self.map_cb_states,
@@ -409,7 +422,6 @@ class MainWindow(QMainWindow):
             self.map_cb_grids,
             self.map_cb_regions,
         ):
-            v.addWidget(cb)
             cb.stateChanged.connect(self._on_sidebar_map_filter_changed)
 
         # Population threshold
@@ -430,8 +442,30 @@ class MainWindow(QMainWindow):
         for label, val in self.map_pop_options:
             self.map_pop_combo.addItem(label, val)
         self.map_pop_combo.currentIndexChanged.connect(self._on_sidebar_map_filter_changed)
-        v.addWidget(QLabel("City Pop."))
-        v.addWidget(self.map_pop_combo)
+        pop_row = QHBoxLayout()
+        pop_row.addWidget(QLabel("City Pop."))
+        pop_row.addWidget(self.map_pop_combo)
+        pop_row.addStretch()
+        v.addLayout(pop_row)
+
+        v.addSpacing(8)
+        v.addWidget(QLabel("Propagation"))
+        self.map_cb_prop_overlay = QCheckBox("Propagation Overlay")
+        v.addWidget(self.map_cb_prop_overlay)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode:"))
+        self.map_prop_mode_combo = QComboBox()
+        self.map_prop_mode_combo.addItem("Actual", "actual")
+        self.map_prop_mode_combo.addItem("Blended", "blended")
+        self.map_prop_mode_combo.addItem("Modeled", "model")
+        mode_row.addWidget(self.map_prop_mode_combo)
+        mode_row.addStretch()
+        v.addLayout(mode_row)
+        self.map_prop_badge = QLabel("Best Band: --")
+        self.map_prop_badge.setStyleSheet("font-weight: bold; color: #1E88E5;")
+        v.addWidget(self.map_prop_badge)
+        self.map_cb_prop_overlay.stateChanged.connect(self._on_sidebar_prop_changed)
+        self.map_prop_mode_combo.currentIndexChanged.connect(self._on_sidebar_prop_mode_changed)
         v.addStretch()
         self.map_filters_layout.addWidget(box)
 
@@ -448,6 +482,8 @@ class MainWindow(QMainWindow):
             self.map_cb_cities,
             self.map_cb_grids,
             self.map_cb_regions,
+            self.map_cb_prop_overlay,
+            self.map_prop_mode_combo,
         ]
         for cb in block:
             cb.blockSignals(True)
@@ -456,6 +492,11 @@ class MainWindow(QMainWindow):
         self.map_cb_cities.setChecked(bool(getattr(tab, "show_cities", False)))
         self.map_cb_grids.setChecked(bool(getattr(tab, "show_grids", False)))
         self.map_cb_regions.setChecked(bool(getattr(tab, "show_regions", False)))
+        self.map_cb_prop_overlay.setChecked(bool(getattr(tab, "prop_overlay_enabled", False)))
+        mode = getattr(tab, "prop_mode", "blended") or "blended"
+        idx = self.map_prop_mode_combo.findData(str(mode).lower())
+        if idx >= 0:
+            self.map_prop_mode_combo.setCurrentIndex(idx)
         for cb in block:
             cb.blockSignals(False)
         # Pop combo sync
@@ -500,6 +541,31 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         # Persist and redraw
+        if hasattr(tab, "_save_display_preferences"):
+            tab._save_display_preferences()
+        if hasattr(tab, "_render_map"):
+            tab._render_map()
+
+    def _on_sidebar_prop_changed(self, _=None) -> None:
+        tab = getattr(self, "stations_map_tab", None)
+        if tab is None:
+            return
+        tab.prop_overlay_enabled = self.map_cb_prop_overlay.isChecked()
+        mode = self.map_prop_mode_combo.currentData() if hasattr(self, "map_prop_mode_combo") else None
+        if mode:
+            tab.prop_mode = str(mode)
+        if hasattr(tab, "_save_display_preferences"):
+            tab._save_display_preferences()
+        if hasattr(tab, "_render_map"):
+            tab._render_map()
+
+    def _on_sidebar_prop_mode_changed(self, _=None) -> None:
+        tab = getattr(self, "stations_map_tab", None)
+        if tab is None:
+            return
+        mode = self.map_prop_mode_combo.currentData()
+        if mode:
+            tab.prop_mode = str(mode)
         if hasattr(tab, "_save_display_preferences"):
             tab._save_display_preferences()
         if hasattr(tab, "_render_map"):
@@ -984,6 +1050,14 @@ class MainWindow(QMainWindow):
 
     def _create_stations_map_tab(self) -> QWidget:
         self.stations_map_tab = StationsMapTab(self)
+        try:
+            self.stations_map_tab.attach_prop_controls(
+                getattr(self, "map_cb_prop_overlay", None),
+                getattr(self, "map_prop_badge", None),
+                getattr(self, "map_prop_mode_combo", None),
+            )
+        except Exception:
+            pass
         return self.stations_map_tab
 
     def _ensure_lazy_tab_loaded(self, label: str, index: int) -> None:

@@ -1780,6 +1780,7 @@ class SettingsTab(QWidget):
             self._update_launch_selected_state()
             self._update_op_group_action_buttons()
             self._set_save_button_state("info" if self._settings_dirty else "success")
+            self._update_enforcement_visibility()
         except Exception:
             pass
 
