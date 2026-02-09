@@ -1,0 +1,8 @@
+﻿{
+  "80M": {"ideal_km": 600, "spread_km": 1200, "day": 0.35, "night": 1.0},
+  "40M": {"ideal_km": 1200, "spread_km": 1800, "day": 0.65, "night": 0.95},
+  "30M": {"ideal_km": 1800, "spread_km": 2200, "day": 0.8, "night": 0.85},
+  "20M": {"ideal_km": 2800, "spread_km": 2600, "day": 1.0, "night": 0.6},
+  "15M": {"ideal_km": 3600, "spread_km": 3000, "day": 0.9, "night": 0.35},
+  "10M": {"ideal_km": 4200, "spread_km": 3600, "day": 0.8, "night": 0.2}
+}
