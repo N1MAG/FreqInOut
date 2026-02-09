@@ -2166,6 +2166,56 @@ class StationsMapTab(QWidget):
         score = 100.0 * factor * dist_pen
         return max(0.0, min(100.0, score))
 
+    def _local_hour_from_lon(self, utc_dt: datetime.datetime, lon: float) -> int:
+        try:
+            offset = lon / 15.0
+        except Exception:
+            offset = 0.0
+        hour = (utc_dt.hour + offset) % 24
+        return int(hour)
+
+    def _path_band_weight(self, band: str, distance_km: float, hour_local: int) -> float:
+        band = (band or "").upper()
+        is_day = 6 <= hour_local < 18
+        if distance_km < 300:
+            if is_day:
+                weights = {"80M": 1.0, "40M": 1.2, "30M": 0.8, "20M": 0.4, "15M": 0.2, "10M": 0.1}
+            else:
+                weights = {"80M": 1.3, "40M": 1.1, "30M": 0.6, "20M": 0.3, "15M": 0.15, "10M": 0.1}
+        elif distance_km < 900:
+            if is_day:
+                weights = {"80M": 0.6, "40M": 1.0, "30M": 1.0, "20M": 0.8, "15M": 0.5, "10M": 0.3}
+            else:
+                weights = {"80M": 0.9, "40M": 1.1, "30M": 0.9, "20M": 0.5, "15M": 0.2, "10M": 0.1}
+        else:
+            if is_day:
+                weights = {"80M": 0.2, "40M": 0.6, "30M": 0.9, "20M": 1.2, "15M": 1.0, "10M": 0.7}
+            else:
+                weights = {"80M": 0.4, "40M": 1.2, "30M": 1.0, "20M": 0.7, "15M": 0.3, "10M": 0.2}
+        return float(weights.get(band, 0.5))
+
+    def _modeled_band_score(
+        self,
+        band: str,
+        dest_lat: float,
+        dest_lon: float,
+        now_utc: datetime.datetime,
+        distance_km: float,
+    ) -> float:
+        user_ll = self._get_user_latlon()
+        if not user_ll:
+            return 0.0
+        mid_lat = (user_ll[0] + dest_lat) / 2.0
+        mid_lon = (user_ll[1] + dest_lon) / 2.0
+        hour_local = self._local_hour_from_lon(now_utc, mid_lon)
+        base = self._band_score_db(band, mid_lat, mid_lon, now_utc.month)
+        if base is None:
+            base = self._band_score(band, distance_km, now_utc.hour)
+        diurnal = self._diurnal_weight(band, hour_local)
+        path_weight = self._path_band_weight(band, distance_km, hour_local)
+        score = float(base) * float(diurnal) * float(path_weight)
+        return max(0.0, min(100.0, score))
+
     def _band_score_db(self, band: str, lat: float, lon: float, month: int) -> Optional[float]:
         score = self._lookup_db_score(band, lat, lon, month)
         if score is None:
@@ -2481,19 +2531,11 @@ class StationsMapTab(QWidget):
                 base_scores = []
                 if use_station_weight and stations:
                     for s in stations:
-                        db_score = self._band_score_db(band, s.lat, s.lon, month)
-                        if db_score is None:
-                            dist = self._haversine_km(user_ll[0], user_ll[1], s.lat, s.lon)
-                            base_scores.append(self._band_score(band, dist, hour_utc))
-                        else:
-                            base_scores.append(db_score * self._diurnal_weight(band, hour_local))
+                        dist = self._haversine_km(user_ll[0], user_ll[1], s.lat, s.lon)
+                        base_scores.append(self._modeled_band_score(band, s.lat, s.lon, now_utc, dist))
                 elif centroid:
-                    db_score = self._band_score_db(band, centroid[0], centroid[1], month)
-                    if db_score is None:
-                        dist = self._haversine_km(user_ll[0], user_ll[1], centroid[0], centroid[1])
-                        base_scores.append(self._band_score(band, dist, hour_utc))
-                    else:
-                        base_scores.append(db_score * self._diurnal_weight(band, hour_local))
+                    dist = self._haversine_km(user_ll[0], user_ll[1], centroid[0], centroid[1])
+                    base_scores.append(self._modeled_band_score(band, centroid[0], centroid[1], now_utc, dist))
                 base = sum(base_scores) / max(1, len(base_scores))
                 adj = 0.0 if mode == "model" else self._adaptive_adjustment(band, region_id)
                 total = max(0.0, min(100.0, base + adj))
@@ -2537,19 +2579,11 @@ class StationsMapTab(QWidget):
                 base_scores = []
                 if use_station_weight and stations:
                     for s in stations:
-                        db_score = self._band_score_db(band, s.lat, s.lon, month)
-                        if db_score is None:
-                            dist = self._haversine_km(user_ll[0], user_ll[1], s.lat, s.lon)
-                            base_scores.append(self._band_score(band, dist, hour_utc))
-                        else:
-                            base_scores.append(db_score * self._diurnal_weight(band, hour_local))
+                        dist = self._haversine_km(user_ll[0], user_ll[1], s.lat, s.lon)
+                        base_scores.append(self._modeled_band_score(band, s.lat, s.lon, now_utc, dist))
                 elif centroid:
-                    db_score = self._band_score_db(band, centroid[0], centroid[1], month)
-                    if db_score is None:
-                        dist = self._haversine_km(user_ll[0], user_ll[1], centroid[0], centroid[1])
-                        base_scores.append(self._band_score(band, dist, hour_utc))
-                    else:
-                        base_scores.append(db_score * self._diurnal_weight(band, hour_local))
+                    dist = self._haversine_km(user_ll[0], user_ll[1], centroid[0], centroid[1])
+                    base_scores.append(self._modeled_band_score(band, centroid[0], centroid[1], now_utc, dist))
                 if not base_scores:
                     continue
                 base = sum(base_scores) / max(1, len(base_scores))
