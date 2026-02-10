@@ -101,7 +101,7 @@ class FldigiNetControlTab(QWidget):
 
         # Header with clocks
         header = QHBoxLayout()
-        header.addWidget(QLabel("<h3>FLDigi Net Control</h3>"))
+        header.addWidget(QLabel("<h3>FLDigi / SSB Net Control</h3>"))
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
