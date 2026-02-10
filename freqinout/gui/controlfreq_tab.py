@@ -173,13 +173,13 @@ class ControlFreqTab(QWidget):
         freq_layout.addSpacing(4)
 
         inter_header_row = QHBoxLayout()
-        self.intersection_label = QLabel("Schedule Intersections (Now +1h)")
+        self.intersection_label = QLabel("Schedule Intersections (Now +2h)")
         self.intersection_label.setStyleSheet("font-weight: bold;")
         inter_header_row.addWidget(self.intersection_label)
         self.intersection_info = QLabel("?")
         self.intersection_info.setToolTip(
             "Exact-frequency overlaps between your schedule and peer schedules\n"
-            "for now and the next hour."
+            "for now and the next two hours."
         )
         self.intersection_info.setStyleSheet(
             "font-weight: bold; border: 1px solid #888; border-radius: 8px; "
@@ -640,7 +640,7 @@ class ControlFreqTab(QWidget):
         rows: List[List[str]] = []
         now_utc = dt.datetime.now(dt.timezone.utc)
         now_min = now_utc.hour * 60 + now_utc.minute
-        horizon_min = min(now_min + 60, 1440)
+        horizon_min = min(now_min + 120, 1440)
         today_name = now_utc.strftime("%A")
         tz = self._get_display_tz()
 
@@ -670,6 +670,8 @@ class ControlFreqTab(QWidget):
 
         now_calls: Set[str] = set()
         next_calls: Set[str] = set()
+        now_labels: Set[str] = set()
+        next_labels: Set[str] = set()
         for r in peer_rows:
             day = (r["day_utc"] or "ALL").strip()
             if not self._day_matches_today(day, today_name):
@@ -702,13 +704,32 @@ class ControlFreqTab(QWidget):
                 if end > start:
                     if start <= now_min < end:
                         now_calls.add(cs)
+                        now_labels.add(self._format_group_band_freq_label(entry))
                     else:
                         next_calls.add(cs)
+                        next_labels.add(self._format_group_band_freq_label(entry))
 
-        sched_label = self._format_current_schedule_label()
-        rows.append(["Now", str(len(now_calls)), sched_label])
-        rows.append(["Next hour", str(len(next_calls)), sched_label])
+        rows.append(["Now", str(len(now_calls)), self._summarize_labels(now_labels)])
+        rows.append(["Next 2 hours", str(len(next_calls)), self._summarize_labels(next_labels)])
         return rows
+
+    def _format_group_band_freq_label(self, entry: Dict[str, object]) -> str:
+        grp = (entry.get("group") or "--").strip().upper()
+        band = (entry.get("band") or "--").strip().upper()
+        freq = entry.get("freq")
+        try:
+            freq_txt = f"{float(freq):.3f} MHz"
+        except Exception:
+            freq_txt = "--"
+        return f"{grp} {band} {freq_txt}"
+
+    def _summarize_labels(self, labels: Set[str]) -> str:
+        if not labels:
+            return "--"
+        ordered = sorted(labels)
+        if len(ordered) <= 2:
+            return ", ".join(ordered)
+        return f"{ordered[0]}, {ordered[1]} +{len(ordered) - 2} more"
 
     def _style_intersection_rows(self) -> None:
         # Emphasize "Now" and de-emphasize "Next hour"
@@ -757,7 +778,7 @@ class ControlFreqTab(QWidget):
     def _load_my_schedule_entries(self, today_name: str) -> List[Dict[str, object]]:
         entries: List[Dict[str, object]] = []
 
-        def add_entry(day: str, start: str, end: str, band: str, freq_val) -> None:
+        def add_entry(day: str, start: str, end: str, band: str, freq_val, group: str) -> None:
             if not self._day_matches_today(day, today_name):
                 return
             start_min = self._parse_time_minutes(start)
@@ -774,6 +795,7 @@ class ControlFreqTab(QWidget):
                     "end_min": end_min,
                     "freq": freq_num,
                     "band": (band or "").strip().upper(),
+                    "group": (group or "").strip().upper(),
                 }
             )
 
@@ -783,11 +805,18 @@ class ControlFreqTab(QWidget):
                 conn = sqlite3.connect(db_path)
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
-                cur.execute("SELECT day_utc, start_utc, end_utc, band, frequency FROM daily_schedule_tab")
+                cur.execute("SELECT day_utc, start_utc, end_utc, band, frequency, group_name FROM daily_schedule_tab")
                 rows = cur.fetchall()
                 conn.close()
                 for r in rows:
-                    add_entry(r["day_utc"], r["start_utc"], r["end_utc"], r["band"], r["frequency"])
+                    add_entry(
+                        r["day_utc"],
+                        r["start_utc"],
+                        r["end_utc"],
+                        r["band"],
+                        r["frequency"],
+                        r["group_name"],
+                    )
             except Exception as e:
                 log.debug("ControlFreq: failed to load daily schedule for overlaps: %s", e)
 
@@ -797,11 +826,21 @@ class ControlFreqTab(QWidget):
                 conn = sqlite3.connect(db_path)
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
-                cur.execute("SELECT day_utc, start_utc, end_utc, band, frequency FROM net_schedule_tab")
+                cur.execute(
+                    "SELECT day_utc, start_utc, end_utc, band, frequency, group_name, net_name FROM net_schedule_tab"
+                )
                 rows = cur.fetchall()
                 conn.close()
                 for r in rows:
-                    add_entry(r["day_utc"], r["start_utc"], r["end_utc"], r["band"], r["frequency"])
+                    group = r["group_name"] or r["net_name"]
+                    add_entry(
+                        r["day_utc"],
+                        r["start_utc"],
+                        r["end_utc"],
+                        r["band"],
+                        r["frequency"],
+                        group,
+                    )
             except Exception as e:
                 log.debug("ControlFreq: failed to load net schedule for overlaps: %s", e)
 
