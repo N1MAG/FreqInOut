@@ -29,7 +29,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.1.4</p>
+  <p><strong>Current version</strong>: 1.1.5</p>
   <p>This guide describes every tab, button, field, and function in FreqInOut. Times are stored in UTC; the "Showing: Local/UTC" toggle only changes what you see.</p>
   <p><strong>Responsibility notice</strong>: FreqInOut assists licensed amateur operators by coordinating complex radio software and schedules. It assumes you follow applicable band plans and regulations. Disabling safeguards (for example, scheduling) can let you tune outside legal allocations. You are solely responsible for compliant operation; the authors and contributors are not liable for misuse.</p>
 
@@ -43,7 +43,7 @@
     <li><strong>Create Operating Groups</strong>: Add your go-to frequencies in <a href="#settings-op-groups">Operating Groups</a>. These drive HF Schedule, Net Schedule, QSY controls, SOP filters, and scheduler enforcement targets.</li>
     <li><strong>Build schedules</strong>: Use <a href="#hf-schedule">HF Schedule</a> for routine blocks and <a href="#net-schedule">Net Schedule</a> for net windows (including early check-in). Confirm layout in <a href="#freqplanner">FreqPlanner</a>.</li>
     <li><strong>Load operators and traffic context</strong>: Import your list in <a href="#operators">Operators</a>. For JS8 workflows, go to <a href="#settings-js8call">Settings &gt; JS8Call Settings</a> and run <em>Load JS8 Traffic</em> to seed map/link history.</li>
-    <li><strong>Run your first cycle</strong>: QSY to an Operating Group, verify Schedule Status, start/monitor a net from FLDigi NCS or JS8 NCS, then review outcomes in Messages, Operators, and Map.</li>
+    <li><strong>Run your first cycle</strong>: QSY to an Operating Group, verify Schedule Status, start/monitor a net from Digi/SSB NCS or JS8 NCS, then review outcomes in Messages, Operators, and Map.</li>
   </ol>
 
   <h2 id="onboarding-new-operator">New Operator Onboarding (First Session)</h2>
@@ -55,7 +55,7 @@
     <li><strong>Build one HF schedule row</strong>: In <a href="#hf-schedule">HF Schedule</a>, add one row for current day/time and save. Verify it appears in <a href="#freqplanner">FreqPlanner</a>.</li>
     <li><strong>Test QSY behavior</strong>: From HF Schedule or NCS tab, use QSY once and confirm Schedule Status reflects pause/resume behavior.</li>
     <li><strong>Load operator context</strong>: In <a href="#operators">Operators</a>, import CSV if available; otherwise continue with manual additions as contacts are observed.</li>
-    <li><strong>Run one controlled net session</strong>: Use <a href="#fldigi-ncs">FLDigi NCS</a> or <a href="#js8-ncs">JS8 NCS</a>, start a test net, record at least one check-in, save, and end cleanly.</li>
+    <li><strong>Run one controlled net session</strong>: Use <a href="#digi-ssb-ncs">Digi/SSB NCS</a> or <a href="#js8-ncs">JS8 NCS</a>, start a test net, record at least one check-in, save, and end cleanly.</li>
     <li><strong>Review outputs</strong>: Confirm results in Operators, Messages, Map, and Logs. Keep logs at INFO or DISABLED for routine use.</li>
   </ol>
   <div class="callout">
@@ -78,7 +78,7 @@
     </thead>
     <tbody>
       <tr><td>Confirm current operating plan</td><td>FreqPlanner</td><td>Schedule Status panel</td></tr>
-      <tr><td>Execute net operations</td><td>FLDigi NCS / JS8 NCS</td><td>Messages + Operators</td></tr>
+      <tr><td>Execute net operations</td><td>Digi/SSB NCS / JS8 NCS</td><td>Messages + Operators</td></tr>
       <tr><td>Run reminder actions</td><td>SOP</td><td>Schedule mismatch highlighting</td></tr>
       <tr><td>Validate contact/link context</td><td>Map</td><td>Operators + Peer Schedules</td></tr>
       <tr><td>Troubleshoot anomalies</td><td>Logs</td><td>Settings integration paths</td></tr>
@@ -162,6 +162,45 @@
     <li><strong>Import/export</strong>: SOP profiles export/import as JSON; actions for unconfigured software are preserved for later use.</li>
   </ol>
 
+<h2 id="controlfreq">ControlFreq Tab</h2>
+  <p><strong>Purpose</strong>: Single-pane operational console for live activity, schedules, messages, propagation, and frequency control.</p>
+  <p><strong>Typical workflow</strong>: Use ControlFreq as your primary “dashboard.” Verify your schedule, scan activity, check upcoming SOP/Net windows, review inbox counts, and QSY if needed.</p>
+  <p><strong>Key concepts</strong>:</p>
+  <ul class="section-list">
+    <li><strong>Filter by keyword</strong>: The search box filters all cards. Use callsigns, group names, or keywords like <em>SOP</em>, <em>NET</em>, or <em>JS8</em>.</li>
+    <li><strong>Local/UTC toggle</strong>: The “Showing: Local/UTC” button affects time displays in Today/7 Days and intersections.</li>
+    <li><strong>Live updates</strong>: Activity and frequency status update in the background while the tab is active.</li>
+  </ul>
+  <h3 id="controlfreq-activity">Activity (Recent)</h3>
+  <ul class="section-list">
+    <li><strong>Window</strong>: Choose 30m/1h/2h/6h/12h/24h to control what “Recent” means.</li>
+    <li><strong>Group-only view</strong>: Only groups with actual activity appear.</li>
+    <li><strong>Traffic</strong>: Includes JS8 links, JS8/Spotter/VarAC messages, and FLDigi check-ins (voice nets).</li>
+  </ul>
+  <h3 id="controlfreq-frequency">Frequency Control</h3>
+  <ul class="section-list">
+    <li><strong>Scheduled / Active</strong>: Shows the scheduler’s current target and the rig’s active frequency.</li>
+    <li><strong>Set Frequency</strong>: Select an Operating Group frequency and apply it. This pauses the schedule until resumed.</li>
+    <li><strong>Resume Schedule</strong>: Forces the scheduler to reapply the current plan immediately.</li>
+    <li><strong>Schedule Intersections</strong>: Summary of overlaps between your schedule and peer schedules for <em>Now</em> and the next hour (exact frequency match).</li>
+  </ul>
+  <h3 id="controlfreq-today">Today / 7 Days</h3>
+  <ul class="section-list">
+    <li><strong>Today</strong>: Shows upcoming SOP actions and scheduled nets (with Band/Freq and type).</li>
+    <li><strong>7 Days</strong>: Shows upcoming SOP actions and nets only (daily schedule excluded for clarity).</li>
+  </ul>
+  <h3 id="controlfreq-inbox">Inbox Summary</h3>
+  <ul class="section-list">
+    <li><strong>Unread counts</strong>: JS8, Spotter, and VarAC unread message totals.</li>
+    <li><strong>Top senders</strong>: Shows the most active senders; hover for full lists when truncated.</li>
+  </ul>
+  <h3 id="controlfreq-propagation">Propagation Forecast</h3>
+  <ul class="section-list">
+    <li><strong>Schedule-based forecast</strong>: Uses bands in today’s schedule to provide Morning/Day/Night guidance.</li>
+    <li><strong>Modeled forecast</strong>: A single best-band recommendation based on the offline model.</li>
+    <li><strong>Origin Grid</strong>: Uses your Grid 6 from Settings.</li>
+  </ul>
+  
 <h2 id="messages">Messages Tab</h2>
   <p><strong>Purpose</strong>: View and manage FLDigi/FLMsg/FLAmp/VarAC files and JS8 inbox messages.</p>
   <p><strong>Typical workflow</strong>: Filter first, open/read second, then flag or delete. Use Pending JS8 MSG tools to drive retrieval and keep queue hygiene high during net operations.</p>
@@ -195,14 +234,16 @@
     <li><strong>Delete Spotter</strong>: Spotter (F!###) messages are deleted from the local <code>spotter_traffic</code> table after confirmation.</li>
   </ul>
 
-<h2 id="fldigi-ncs">FLDigi NCS Tab</h2>
-  <p><strong>Purpose</strong>: Manage FLDigi net check-ins and logs.</p>
+<h2 id="digi-ssb-ncs">Digi/SSB NCS Tab</h2>
+  <p><strong>Purpose</strong>: Manage FLDigi-based digital nets and SSB voice nets using the same workflow.</p>
+  <p><strong>SSB note</strong>: For voice nets, you manually enter check-ins; activity is still captured via check-in files so ControlFreq and Operators reflect participation.</p>
   <p><strong>Typical workflow</strong>: Pick role and net name, QSY if needed, start net, collect check-ins into Main/New-Late, save/merge as needed, then end net to persist and import results.</p>
   <p><strong>Expected UI behavior</strong>:</p>
   <ul class="section-list">
     <li><strong>Net lifecycle gating</strong>: Start/End/Save workflows follow net-in-progress state and prompt when required fields are missing.</li>
     <li><strong>Schedule interaction</strong>: QSY pauses scheduler enforcement until resumed; scheduled transitions can auto-end active net when applicable.</li>
     <li><strong>Lookup ergonomics</strong>: Operator lookup and Add-to-panel controls support keyboard-centric net operations.</li>
+    <li><strong>Voice net capture</strong>: Manual check-in entries are saved to check-in files and counted as activity.</li>
   </ul>
   <ol class="section-list">
     <li><strong>Header clocks</strong>: UTC and Local update live at the top.</li>

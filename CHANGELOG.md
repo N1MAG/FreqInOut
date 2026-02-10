@@ -1,10 +1,20 @@
 # Changelog
 
+## [1.1.5]
+- Added: ControlFreq refinements (activity window filter, intersections summary, frequency control status, and keyword search).
+- Added: ControlFreq now includes net check-ins in activity totals to capture voice net traffic.
+- Changed: ControlFreq timezone toggle defaults to Local and supports UTC/Local switching.
+- Changed: ControlFreq layout polish (spacing, divider, label tweaks, and column sizing).
+- Updated: FLDigi NCS label to Digi/SSB NCS with tab title aligned to FLDigi / SSB Net Control.
+- Fixed: ControlFreq SOP rows, inbox column sizing/tooltip behavior, and theme refresh on live theme changes.
+
 ## [1.1.4]
 - Added: Window icon now uses the FreqInOut desktop asset for consistent taskbar display.
+- Added: ControlFreq tab (console-style summary of activity, inbox, schedules, and SOPs).
 - Added: Propagation overlay with Actual/Blended/Modeled modes and best-band labels for regions/states.
 - Added: Propagation window selector (1h/3h/6h/12h/24h/History) for observed-data weighting.
 - Added: Propagation legend colors now follow FreqPlanner band color palette.
+- Added: Background ingest for JS8 links, JS8 inbox, spotter traffic, and VarAC to improve tab responsiveness.
 - Changed: Lazy-load heavy tabs (Messages, FreqPlanner, Map) to reduce startup time and tab-switch stutter.
 - Changed: Pause tab-specific timers when their tab is hidden to reduce background work.
 - Changed: Message file scanning now runs asynchronously to prevent UI freezes.
