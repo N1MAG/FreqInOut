@@ -28,6 +28,7 @@ from pathlib import Path
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.scheduler_engine import SchedulerEngine
+from freqinout.core.background_ingest import BackgroundIngestController
 from freqinout.radio_interface.rigctl_client import FLRigClient
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
@@ -47,6 +48,7 @@ from freqinout.gui.stations_map_tab import StationsMapTab
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.peer_sched_tab import PeerSchedTab
 from freqinout.gui.help_tab import HelpTab
+from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.theme import resolve_theme, apply_app_theme, button_style
 
 
@@ -89,6 +91,7 @@ class MainWindow(QMainWindow):
         self.log_tab = LogViewerTab(self)
         self.peer_sched_tab = PeerSchedTab(self)
         self.help_tab = HelpTab(self)
+        self.controlfreq_tab = ControlFreqTab(self)
 
         self.freq_planner_tab = None
         self.message_viewer_tab = None
@@ -103,10 +106,11 @@ class MainWindow(QMainWindow):
 
         # Sidebar navigation order (as requested)
         self._screens = [
+            ("ControlFreq", self.controlfreq_tab),
             ("FreqPlanner", self._placeholder_widget("FreqPlanner")),
             ("SOP", self.sop_tab),
             ("Messages", self._placeholder_widget("Messages")),
-            ("FLDigi NCS", self.fldigi_tab),
+            ("Digi/SSB NCS", self.fldigi_tab),
             ("JS8 NCS", self.js8_tab),
             ("Operators", self.operator_history_tab),
             ("Map", self._placeholder_widget("Map")),
@@ -251,6 +255,8 @@ class MainWindow(QMainWindow):
             fldigi_log=self.fldigi_log_status,
         )
         self.scheduler.start()
+        self.background_ingest = BackgroundIngestController(self.settings)
+        self.background_ingest.start()
         try:
             self.scheduler.off_schedule_detected.connect(self._on_off_schedule_detected)
         except Exception:
@@ -849,6 +855,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            if hasattr(self, "background_ingest"):
+                self.background_ingest.stop()
+        except Exception:
+            pass
+        try:
             if hasattr(self, "js8_control"):
                 self.js8_control.stop()
         except Exception:
@@ -1057,6 +1068,7 @@ class MainWindow(QMainWindow):
             self.log_tab,
             self.operator_history_tab,
             self.settings_tab,
+            self.controlfreq_tab,
         ):
             if widget is None:
                 continue
@@ -1137,6 +1149,11 @@ class MainWindow(QMainWindow):
         try:
             if self.message_viewer_tab is not None:
                 self.message_viewer_tab.on_settings_saved()
+        except Exception:
+            pass
+        try:
+            if self.controlfreq_tab is not None:
+                self.controlfreq_tab.on_settings_saved()
         except Exception:
             pass
 
