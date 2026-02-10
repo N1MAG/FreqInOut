@@ -1,0 +1,612 @@
+from __future__ import annotations
+
+import datetime
+import json
+import re
+import sqlite3
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+from freqinout.core.config_paths import get_config_dir
+from freqinout.core.logger import log
+from freqinout.core.settings_manager import SettingsManager
+
+
+JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
+
+
+class JS8FormDecoder:
+    def __init__(self, settings: SettingsManager):
+        self.settings = settings
+        self._form_cache: Dict[str, List[Dict]] = {}
+
+    def decode_form(self, form_id: str, responses: str, comment: str, raw: str = "") -> str:
+        form_id = (form_id or "").strip()
+        if not form_id:
+            return raw or responses
+        form = self._load_form_definition(form_id)
+        if not form:
+            return raw or responses
+        out_lines: List[str] = []
+        for idx, q in enumerate(form):
+            question = (q.get("q", "") or "").strip()
+            answers = q.get("ans", {}) or {}
+            out_lines.append(question)
+            if idx < len(responses):
+                code = responses[idx]
+                ans = answers.get(code, f"(unknown: {code})")
+                out_lines.append(ans)
+            else:
+                out_lines.append("(no response)")
+            out_lines.append("")
+        if comment:
+            out_lines.append("Comment:")
+            out_lines.append(comment.strip())
+        return "\n".join(out_lines).strip() or (raw or responses)
+
+    def _load_form_definition(self, form_id: str) -> List[Dict]:
+        if form_id in self._form_cache:
+            return self._form_cache[form_id]
+        forms_dir = (self.settings.get("js8_forms_path", "") or "").strip()
+        if not forms_dir:
+            return []
+        path = Path(forms_dir) / f"MCF{form_id}.txt"
+        if not path.exists():
+            return []
+        questions: List[Dict] = []
+        current_q = None
+        try:
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("."):
+                    continue
+                if line.startswith("?"):
+                    if current_q:
+                        questions.append(current_q)
+                    current_q = {"q": line[1:].strip(), "ans": {}}
+                elif line.startswith("@") and current_q:
+                    try:
+                        key, text = line[1], line[2:].strip()
+                        current_q["ans"][key] = text
+                    except Exception:
+                        continue
+            if current_q:
+                questions.append(current_q)
+        except Exception as e:
+            log.debug("MessageIngest: failed to parse form %s: %s", form_id, e)
+            questions = []
+        self._form_cache[form_id] = questions
+        return questions
+
+
+class MessageIngestor:
+    def __init__(self, settings: SettingsManager):
+        self.settings = settings
+        self._decoder = JS8FormDecoder(settings)
+
+    def ingest_js8_messages(self) -> None:
+        inbox_path = self._inbox_path()
+        if not inbox_path or not inbox_path.exists():
+            return
+        self._ensure_local_js8_tables()
+        max_local_id = self._local_max_js8_id()
+        try:
+            conn = sqlite3.connect(inbox_path)
+            cur = conn.cursor()
+            queries = [
+                ("inbox_v1", "id, json, type, value"),
+                ("inbox_v1", "rowid as id, json, type, value"),
+                ("inbox_v1", "id, message, type, value"),
+                ("inbox_v1", "id, blob"),
+                ("inbox", "id, json, type, value"),
+                ("inbox", "rowid as id, json, type, value"),
+                ("inbox", "id, message, type, value"),
+            ]
+            rows = []
+            for table, cols in queries:
+                try:
+                    cur.execute(f"SELECT {cols} FROM {table} WHERE id > ?", (max_local_id,))
+                    rows = cur.fetchall()
+                    break
+                except Exception:
+                    rows = []
+            conn.close()
+        except Exception as e:
+            log.debug("MessageIngest: JS8 ingest read failed: %s", e)
+            rows = []
+
+        state_map = self._load_js8_state_map()
+        now_ts = time.time()
+        for row in rows:
+            rid = row[0] if len(row) > 0 else 0
+            if rid <= max_local_id:
+                continue
+            blob = row[1] if len(row) > 1 else ""
+            state = row[2] if len(row) > 2 else ""
+            js = blob
+            try:
+                parsed = json.loads(js or "{}")
+                if "params" not in parsed and len(row) >= 4:
+                    parsed = {
+                        "params": parsed,
+                        "type": row[2] if len(row) > 2 else "",
+                        "value": row[3] if len(row) > 3 else "",
+                    }
+                params = parsed.get("params", {}) or {}
+                if not state:
+                    state = parsed.get("type", "") or parsed.get("TYPE", "")
+            except Exception:
+                params = {}
+            text = (params.get("TEXT") or "").strip()
+            from_call = (params.get("FROM") or "").strip().upper()
+            to_call = (params.get("TO") or "").strip()
+            utc_str = (params.get("UTC") or "").strip()
+            try:
+                utc_ts = datetime.datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
+            except Exception:
+                utc_ts = 0.0
+            if utc_ts and (now_ts - utc_ts) > JS8_MAX_AGE_SECONDS:
+                continue
+            msg_type = "MSG"
+            decoded = text
+            if text.startswith("F!"):
+                form_part, resp, comment = self._parse_form_parts(text)
+                msg_type = f"F!{form_part}" if form_part else "MSG"
+                decoded = self._decoder.decode_form(form_part, resp, comment, raw=text)
+            saved_state = state_map.get(rid)
+            if saved_state:
+                eff_state = saved_state[0]
+                read_ts = saved_state[1]
+            else:
+                eff_state = (state or "").upper() or "UNREAD"
+                read_ts = 0.0
+            self._insert_js8_local(
+                rid,
+                from_call,
+                to_call,
+                msg_type,
+                utc_str,
+                utc_ts,
+                text,
+                decoded,
+                eff_state,
+                read_ts,
+            )
+            try:
+                self._enqueue_next_msg_id(from_call, text)
+            except Exception:
+                pass
+
+    def ingest_spotter_from_directed(self) -> None:
+        directed_path = self._resolve_directed_path()
+        if not directed_path or not directed_path.exists():
+            return
+        self._ensure_spotter_table()
+        try:
+            offset = int(self.settings.get(self._spotter_offset_key(), 0) or 0)
+        except Exception:
+            offset = 0
+        try:
+            size_now = directed_path.stat().st_size
+            if offset < 0 or offset > size_now:
+                offset = 0
+            with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                if offset:
+                    fh.seek(offset)
+                for line in fh:
+                    parsed = self._parse_directed_spotter_line(line)
+                    if not parsed:
+                        continue
+                    form_id = str(parsed.get("form_id") or "").strip()
+                    raw_form = str(parsed.get("raw_form") or "").strip()
+                    if not form_id or not raw_form:
+                        continue
+                    from_call = str(parsed.get("from_call") or "").strip().upper()
+                    token = str(parsed.get("spotter_token") or "").strip().upper()
+                    if not from_call:
+                        continue
+                    if self._spotter_exists(from_call, form_id, token, raw_form):
+                        continue
+                    form_part, resp, comment = self._parse_form_parts(raw_form)
+                    decoded = self._decoder.decode_form(form_part, resp, comment, raw=raw_form)
+                    db_path = self._db_path()
+                    if not db_path:
+                        continue
+                    conn = sqlite3.connect(db_path)
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        INSERT INTO spotter_traffic
+                            (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
+                             raw_text, decoded_text, state, read_ts, relay_via, ingested_ts)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?)
+                        """,
+                        (
+                            float(parsed.get("utc_ts") or 0.0),
+                            str(parsed.get("utc_str") or ""),
+                            from_call,
+                            str(parsed.get("to_call") or "").strip().upper(),
+                            form_id,
+                            token,
+                            raw_form,
+                            decoded or raw_form,
+                            str(parsed.get("relay_via") or "").strip().upper(),
+                            float(time.time()),
+                        ),
+                    )
+                    conn.commit()
+                    conn.close()
+                self.settings.set(self._spotter_offset_key(), int(fh.tell()))
+                if hasattr(self.settings, "save"):
+                    self.settings.save()
+        except Exception as e:
+            log.debug("MessageIngest: spotter ingest failed reading DIRECTED.TXT: %s", e)
+
+    def _db_path(self) -> Path | None:
+        try:
+            return get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception as e:
+            log.debug("MessageIngest: failed to resolve DB path: %s", e)
+            return None
+
+    def _backlog_db_path(self) -> Path | None:
+        return self._db_path()
+
+    def _ensure_backlog_table(self) -> None:
+        db_path = self._backlog_db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS autoquery_backlog (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    callsign TEXT NOT NULL,
+                    msg_id TEXT,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    attempts INTEGER DEFAULT 0,
+                    last_attempt_ts REAL,
+                    created_ts REAL
+                )
+                """
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageIngest: failed to ensure backlog table: %s", e)
+
+    def _enqueue_next_msg_id(self, from_call: str, text: str) -> None:
+        call = (from_call or "").strip().upper()
+        if not call or not text:
+            return
+        m = re.search(r"NEXT\s+MSG\s+ID\s+(\d+)", text.upper())
+        if not m:
+            return
+        next_id = m.group(1)
+        if not next_id:
+            return
+        self._ensure_backlog_table()
+        db_path = self._backlog_db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT 1 FROM autoquery_backlog
+                WHERE callsign=? AND COALESCE(msg_id,'')=COALESCE(?, '') AND kind='MSG'
+                LIMIT 1
+                """,
+                (call, next_id),
+            )
+            if cur.fetchone():
+                conn.close()
+                return
+            now_ts = time.time()
+            cur.execute(
+                """
+                INSERT INTO autoquery_backlog (callsign, msg_id, kind, status, attempts, last_attempt_ts, created_ts)
+                VALUES (?, ?, 'MSG', 'PENDING', 0, ?, ?)
+                """,
+                (call, next_id, now_ts, now_ts),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageIngest: failed to enqueue NEXT MSG ID: %s", e)
+
+    def _spotter_offset_key(self) -> str:
+        return "spotter_directed_offset"
+
+    def _resolve_directed_path(self) -> Optional[Path]:
+        directed = (self.settings.get("js8_directed_path", "") or "").strip()
+        if not directed:
+            return None
+        return Path(directed)
+
+    def _spotter_exists(self, from_call: str, form_id: str, token: str, raw_text: str) -> bool:
+        db_path = self._db_path()
+        if not db_path:
+            return False
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            if token:
+                cur.execute(
+                    """
+                    SELECT 1 FROM spotter_traffic
+                    WHERE from_call=? AND form_id=? AND spotter_token=?
+                    LIMIT 1
+                    """,
+                    (from_call, form_id, token),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT 1 FROM spotter_traffic
+                    WHERE from_call=? AND form_id=? AND raw_text=?
+                    LIMIT 1
+                    """,
+                    (from_call, form_id, raw_text),
+                )
+            exists = cur.fetchone() is not None
+            conn.close()
+            return exists
+        except Exception:
+            return False
+
+    def _parse_directed_spotter_line(self, line: str) -> Optional[Dict[str, str | float]]:
+        if not line:
+            return None
+        if not line.rstrip().endswith("\u2662"):
+            return None
+        parts = [p for p in line.strip().split("\t") if p]
+        if len(parts) < 5:
+            parts = re.split(r"\s+", line.strip(), maxsplit=4)
+        if len(parts) < 5:
+            return None
+        dt_str, _freq_txt, _shift, _snr_txt, msg = parts[0], parts[1], parts[2], parts[3], parts[4]
+        if ":" not in msg:
+            return None
+        msg_upper = msg.upper()
+        if "?" in msg_upper or "E?" in msg_upper:
+            return None
+        if "..." in msg:
+            return None
+        if re.search(r"\bMSG\b", msg_upper):
+            return None
+        form_match = re.search(r"F!(\d{3})", msg_upper)
+        if not form_match:
+            return None
+        try:
+            ts = datetime.datetime.strptime(dt_str[:19], "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc
+            )
+        except Exception:
+            return None
+        relay_via, rest = msg.split(":", 1)
+        relay_via = relay_via.strip().upper()
+        rest = rest.strip()
+        dest_token = (rest.split() or [""])[0]
+        dest = dest_token.split(">")[0].strip().strip(",").upper()
+        if not dest:
+            return None
+        de_match = re.search(r"\*DE\*\s*([A-Z0-9/]+)", msg_upper)
+        from_call = de_match.group(1) if de_match else relay_via
+        form_start = msg_upper.find("F!")
+        if form_start < 0:
+            return None
+        raw_form = msg[form_start:].strip()
+        raw_form = re.split(r"\*DE\*", raw_form, 1, flags=re.IGNORECASE)[0].strip()
+        if raw_form.endswith("\u2662"):
+            raw_form = raw_form[:-1].rstrip()
+        token_match = re.search(r"(#[A-Z0-9]{3,})", raw_form.upper())
+        token = token_match.group(1) if token_match else ""
+        form_id = form_match.group(1)
+        return {
+            "utc_ts": ts.timestamp(),
+            "utc_str": ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "from_call": from_call.strip().upper(),
+            "to_call": dest.strip().upper(),
+            "form_id": form_id,
+            "spotter_token": token,
+            "raw_form": raw_form,
+            "relay_via": relay_via,
+        }
+
+    @staticmethod
+    def _parse_form_parts(text: str) -> tuple[str, str, str]:
+        parts = (text or "").split()
+        if not parts or not parts[0].startswith("F!"):
+            return "", "", ""
+        form_part = parts[0][2:] if len(parts[0]) > 2 else ""
+        resp = parts[1] if len(parts) > 1 else ""
+        comment = " ".join(parts[2:]) if len(parts) > 2 else ""
+        return form_part, resp, comment
+
+    def _ensure_spotter_table(self) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS spotter_traffic (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    utc_ts REAL,
+                    utc_str TEXT,
+                    from_call TEXT,
+                    to_call TEXT,
+                    form_id TEXT,
+                    spotter_token TEXT,
+                    raw_text TEXT,
+                    decoded_text TEXT,
+                    state TEXT,
+                    read_ts REAL,
+                    flag_state INTEGER DEFAULT 0,
+                    relay_via TEXT,
+                    ingested_ts REAL
+                )
+                """
+            )
+            try:
+                cur.execute("ALTER TABLE spotter_traffic ADD COLUMN flag_state INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageIngest: failed to ensure spotter table: %s", e)
+
+    def _inbox_path(self) -> Path | None:
+        directed = (self.settings.get("js8_directed_path", "") or "").strip()
+        if not directed:
+            return None
+        p = Path(directed)
+        candidates = [
+            p.parent / "inbox_v1",
+            p.parent / "inbox_v1.sqlite",
+            p.parent / "inbox_v1.db",
+            p.parent / "inbox.db3",
+        ]
+        for c in candidates:
+            if c.exists():
+                return c
+        for c in p.parent.glob("inbox*"):
+            if c.is_file():
+                return c
+        return candidates[0]
+
+    def _local_js8_db(self) -> Path | None:
+        try:
+            return get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception as e:
+            log.debug("MessageIngest: failed to resolve local JS8 DB path: %s", e)
+            return None
+
+    def _load_js8_state_map(self) -> Dict[int, Tuple[str, float]]:
+        db_path = self._local_js8_db()
+        if not db_path or not db_path.exists():
+            return {}
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
+            )
+            cur.execute("SELECT id, state, read_ts FROM js8_inbox_state")
+            rows = cur.fetchall()
+            conn.close()
+            return {int(r[0]): ((r[1] or "").upper(), float(r[2] or 0.0)) for r in rows if r and r[0] is not None}
+        except Exception as e:
+            log.debug("MessageIngest: failed to load js8 state map: %s", e)
+            return {}
+
+    def _ensure_local_js8_tables(self) -> None:
+        db_path = self._local_js8_db()
+        if not db_path:
+            return
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS js8_messages (
+                id INTEGER PRIMARY KEY,
+                from_call TEXT,
+                to_call TEXT,
+                msg_type TEXT,
+                utc_str TEXT,
+                utc_ts REAL,
+                raw_text TEXT,
+                decoded_text TEXT,
+                state TEXT,
+                read_ts REAL,
+                flag_state INTEGER DEFAULT 0
+            )
+            """
+        )
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
+        )
+        try:
+            cur.execute("ALTER TABLE js8_messages ADD COLUMN read_ts REAL")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE js8_messages ADD COLUMN flag_state INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN read_ts REAL")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN last_ingested_id INTEGER")
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+
+    def _local_max_js8_id(self) -> int:
+        db_path = self._local_js8_db()
+        if not db_path or not db_path.exists():
+            return 0
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(id) FROM js8_messages")
+            row = cur.fetchone()
+            conn.close()
+            return int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            return 0
+
+    def _insert_js8_local(
+        self,
+        msg_id: int,
+        from_call: str,
+        to_call: str,
+        msg_type: str,
+        utc_str: str,
+        utc_ts: float,
+        raw_text: str,
+        decoded_text: str,
+        state: str,
+        read_ts: float,
+    ) -> None:
+        db_path = self._local_js8_db()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO js8_messages (id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (
+                    int(msg_id),
+                    from_call,
+                    to_call,
+                    msg_type,
+                    utc_str,
+                    float(utc_ts or 0.0),
+                    raw_text,
+                    decoded_text,
+                    state,
+                    float(read_ts or 0.0),
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageIngest: failed to insert local js8 message: %s", e)
