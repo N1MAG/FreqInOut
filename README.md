@@ -4,14 +4,28 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 
 ## Highlights
 
+- ControlFreq operations dashboard with Frequency Control, Schedule Outlook, Message Summary, Focus Mode, and propagation forecast
+- Offline propagation modeling (Modeled/Actual/Blended) with lower-48 targeting (Region/State/Operator) and historical-outcome blending
+- SitRep status pipeline from JS8Spotter forms (`F!104`, `F!301`, `F!304`) with latest-signal-wins logic across ControlFreq, Operators, and Map
+- Map intelligence with link filters, propagation overlay, SitRep-only mode, and schedule-risk/QSY awareness
+- UTC-native HF + Net scheduling with controlled enforcement, busy deferral, and NET override behavior
 - Net control operations for both FLDigi and JS8Call (start/track/save/end workflows)
-- UTC-native HF + Net scheduling with controlled enforcement and operator prompts
-- SOP Builder for reminder-based operating plans with per-action intervals and role/callsign targeting
-- Operator History with CSV import/export, role standardization, bulk edit tools, and trust management
-- Message center for JS8, FLMSG, FLAMP, and VarAC with filtering, flagging, and bulk actions
-- Live map/link context from JS8 traffic plus operator/log fallbacks for operational awareness
+- Settings redesign for v1.1.6: `Fast Light Settings`, `VarAC Settings`, `Launch Control`, and `Logging & Diagnostics`
+- Launch orchestration with configurable start order, per-app startup toggles, global startup mode, and continue-on-failure handling
+- Messages center for JS8/FLMSG/FLAMP/VarAC plus VarAC BBS workflows (view/archive/delete, aging visibility, auto-archive support)
+- Operator History with CSV import/export, group/role standardization, trust tools, sorting/filtering, and SitRep chip updates
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
+
+## What’s New in v1.1.6
+
+- Shared offline propagation core service used by both ControlFreq and Map
+- Offline empirical propagation calibration/blending from local historical outcomes
+- SitRep status expansion (`F!104` + `F!301`) with manual operator override support
+- Map controls panel/drawer refactor with improved control discoverability
+- Settings information architecture overhaul and integrated launch orchestration
+- VarAC BBS handling in Messages and ControlFreq summaries
+- UI consistency pass across sorting/filtering/highlighting and schedule-action affordances
 
 ## Quick Start
 
