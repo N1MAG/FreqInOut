@@ -16,16 +16,22 @@ import logging
 import sys
 import queue
 
-from PySide6.QtCore import QUrl, Qt, QTimer, QCoreApplication
+from PySide6.QtCore import QUrl, Qt, QTimer, QCoreApplication, QSize
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
-    QGroupBox,
     QCheckBox,
     QComboBox,
     QPushButton,
+    QFrame,
+    QGridLayout,
+    QScrollArea,
+    QSplitter,
+    QStackedWidget,
+    QToolButton,
+    QStyle,
 )
 from freqinout.core.config_paths import get_config_dir
 
@@ -46,6 +52,7 @@ try:
 except Exception:
     js8net = None
 from freqinout.core.logger import log
+from freqinout.core.propagation_service import PropagationService
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
@@ -78,6 +85,7 @@ USA_STATES = [
     "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
     "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
 ]
+LOWER48_STATES = [s for s in USA_STATES if s not in {"AK", "HI"}]
 
 CANADA_PROVINCES = ["AB", "BC", "MB", "NB", "NL", "NT", "NS", "NU", "ON", "PE", "QC", "SK", "YT"]
 
@@ -416,6 +424,13 @@ class StationsMapTab(QWidget):
         self.link_mode = "off"
         self.link_value = ""
         self.relay_target = ""
+        self._now_reachable_enabled: bool = False
+        self._now_reachable_callsigns: Set[str] = set()
+        self._now_reachable_meta: Dict[str, Dict] = {}
+        self._now_reachable_button: Optional[QPushButton] = None
+        self._now_reachable_label: Optional[QLabel] = None
+        self._sitrep_status_only_enabled: bool = False
+        self._sitrep_status_button: Optional[QPushButton] = None
         self.selected_band = "All"
         self.recency_seconds: Optional[int] = None
         self.operator_rows: List[Dict] = []
@@ -463,16 +478,34 @@ class StationsMapTab(QWidget):
         self.prop_window_hours: int = 6
         self._prop_region_scores: Dict[str, Dict] = {}
         self._prop_best_band_info: Dict[str, str] = {}
-        self._prop_profiles: Dict[str, Dict] | None = None
         self._last_prop_region_filter: str = ""
         self.prop_overlay_chk: Optional[QCheckBox] = None
         self.prop_adaptive_chk: Optional[QCheckBox] = None
         self.prop_badge: Optional[QLabel] = None
         self.prop_mode_combo: Optional[QComboBox] = None
         self.prop_window_combo: Optional[QComboBox] = None
-        self._prop_db_cache: Dict[tuple, float] = {}
-        self._prop_db_loaded: bool = False
-        self._prop_db_available: bool = False
+        self.prop_target_type_combo: Optional[QComboBox] = None
+        self.prop_target_value_combo: Optional[QComboBox] = None
+        self._prop_target_syncing: bool = False
+        self._map_stack: Optional[QStackedWidget] = None
+        self._map_loading_label: Optional[QLabel] = None
+        self._controls_button: Optional[QPushButton] = None
+        self._controls_drawer_open: bool = False
+        self._controls_drawer_threshold: int = 1280
+        self._drawer_mode: bool = False
+        self._main_splitter: Optional[QSplitter] = None
+        self._controls_panel: Optional[QWidget] = None
+        self._controls_handle_button: Optional[QToolButton] = None
+        self._controls_top_spacer: Optional[QWidget] = None
+        self._map_filter_bar: Optional[QWidget] = None
+        base = Path(__file__).resolve().parents[2]
+        self._prop_service = PropagationService(
+            default_profiles=PROP_DEFAULT_PROFILES,
+            profiles_path=base / "config" / "propagation" / "prop_profiles.json",
+            climatology_db_path=base / "config" / "propagation" / "prop_climatology.db",
+            outcome_db_path=get_config_dir() / "config" / "freqinout_nets.db",
+            db_index_mode="floor5",
+        )
         self._presence_weights_cache: Optional[Dict[str, Dict]] = None
         self._presence_weights_ts: float = 0.0
 
@@ -513,13 +546,12 @@ class StationsMapTab(QWidget):
         apply_chk(self.show_states_chk, "show_states", "map_show_states", False)
         apply_chk(self.show_cities_chk, "show_cities", "map_show_cities", False)
         apply_chk(self.show_grid_labels_chk, "show_grids", "map_show_grids", False)
+        # Map propagation overlay defaults OFF on every app launch.
+        self.prop_overlay_enabled = False
         if self.prop_overlay_chk is not None:
-            apply_chk(self.prop_overlay_chk, "prop_overlay_enabled", "map_prop_overlay", False)
-        else:
-            try:
-                self.prop_overlay_enabled = self._bool_setting("map_prop_overlay", False)
-            except Exception:
-                pass
+            self.prop_overlay_chk.blockSignals(True)
+            self.prop_overlay_chk.setChecked(False)
+            self.prop_overlay_chk.blockSignals(False)
         try:
             self.prop_adaptive_enabled = self._bool_setting("map_prop_adaptive", True)
         except Exception:
@@ -533,10 +565,22 @@ class StationsMapTab(QWidget):
         if mode not in ("model", "actual", "blended"):
             mode = "blended"
         self.prop_mode = mode
+        if self.prop_mode_combo is not None:
+            idx_mode = self.prop_mode_combo.findData(mode)
+            if idx_mode >= 0:
+                self.prop_mode_combo.blockSignals(True)
+                self.prop_mode_combo.setCurrentIndex(idx_mode)
+                self.prop_mode_combo.blockSignals(False)
         try:
             self.prop_window_hours = int(self.settings.get("map_prop_window_hours", 6) or 6)
         except Exception:
             self.prop_window_hours = 6
+        if self.prop_window_combo is not None:
+            idx_window = self.prop_window_combo.findData(int(self.prop_window_hours or 6))
+            if idx_window >= 0:
+                self.prop_window_combo.blockSignals(True)
+                self.prop_window_combo.setCurrentIndex(idx_window)
+                self.prop_window_combo.blockSignals(False)
         # show_grid_labels mirrors show_grids
         self.show_grid_labels = self.show_grids
 
@@ -552,8 +596,9 @@ class StationsMapTab(QWidget):
             self.city_pop_min = int(self.city_pop_combo.itemData(idx))
         except Exception:
             pass
-        self.city_pop_combo.setEnabled(self.show_cities)
+        self._sync_city_pop_enabled()
         self.show_city_labels = self.show_cities
+        self._refresh_prop_target_controls()
 
     def _save_display_preferences(self):
         if not self.settings:
@@ -656,6 +701,7 @@ class StationsMapTab(QWidget):
             # Initial ingest to catch up since last run (looks back to last exit time if available)
             QTimer.singleShot(500, lambda: self._auto_ingest_and_refresh(initial=True))
         if self._map_visible:
+            self._map_dirty = True
             QTimer.singleShot(0, self._on_map_visible_deferred)
 
     def _on_js8_rx_messages(self, messages: List[dict]) -> None:
@@ -867,36 +913,92 @@ class StationsMapTab(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 4, 8, 8)
+        layout.setSpacing(6)
 
-        # Compact vertical "Show" block (kept hidden on this tab; sidebar uses its own proxies)
-        show_group = QGroupBox("Show")
-        show_group.setParent(self)  # retain ownership even if reparented
-        show_group.setMaximumWidth(160)
-        show_group.hide()
-        show_layout = QVBoxLayout(show_group)
-        show_layout.setContentsMargins(8, 4, 8, 8)
+        self._controls_button = QPushButton("Show Map Controls")
+        self._controls_button.setVisible(False)
+        self._controls_button.clicked.connect(self._toggle_controls_drawer)
+        layout.addWidget(self._controls_button, alignment=Qt.AlignLeft)
 
-        # Top controls
-        ctrl_row = QHBoxLayout()
+        splitter = QSplitter(Qt.Horizontal, self)
+        splitter.setHandleWidth(14)
+        self._main_splitter = splitter
+        layout.addWidget(splitter, stretch=1)
+
+        controls_scroll = QScrollArea(self)
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QFrame.NoFrame)
+        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        controls_scroll.setMinimumWidth(220)
+        controls_scroll.setMaximumWidth(320)
+
+        self._controls_panel = QWidget()
+        controls_layout = QVBoxLayout(self._controls_panel)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+        self._controls_top_spacer = QWidget(self._controls_panel)
+        self._controls_top_spacer.setFixedHeight(0)
+        controls_layout.addWidget(self._controls_top_spacer)
+        controls_scroll.setWidget(self._controls_panel)
+        splitter.addWidget(controls_scroll)
+
+        self.link_mode_combo = QComboBox()
+        self.link_mode_combo.addItem("Off", ("off", ""))
+        self.link_mode_combo.addItem("My Station", ("my_station", ""))
+        self.link_mode_combo.addItem("All", ("all", ""))
+        self.link_mode_combo.setCurrentText("My Station")
+
+        self.group_filter_combo = QComboBox()
+        self.group_filter_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.group_filter_combo.setMinimumContentsLength(14)
+        self.group_filter_combo.view().setMinimumWidth(220)
+
+        self.region_filter_combo = QComboBox()
+        self.region_filter_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.region_filter_combo.setMinimumContentsLength(12)
+        self.region_filter_combo.view().setMinimumWidth(200)
+
+        self.band_combo = QComboBox()
+        self.recency_combo = QComboBox()
+        self.recency_combo.addItems(["Any", "15m", "30m", "1h", "3h", "6h", "12h", "24h", "7d"])
+        self.recency_combo.setCurrentText("3h")
+        self.recency_seconds = 3 * 60 * 60
+
+        self.relay_target_combo = QComboBox()
+        self.relay_target_combo.setEditable(True)
+        self.relay_target_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.relay_target_combo.setDuplicatesEnabled(False)
+        try:
+            self.relay_target_combo.view().setMinimumWidth(520)
+        except Exception:
+            pass
+        try:
+            relay_edit = self.relay_target_combo.lineEdit()
+            if relay_edit is not None:
+                relay_edit.setPlaceholderText("Search Callsign or Name...")
+        except Exception:
+            pass
+        relay_completer = self.relay_target_combo.completer()
+        if relay_completer:
+            relay_completer.setFilterMode(Qt.MatchContains)
+            relay_completer.setCaseSensitivity(Qt.CaseInsensitive)
+
+        layers_layout = self._add_collapsible_group(controls_layout, "Layers Display", expanded=True)
         self.show_calls_chk = QCheckBox("Callsigns")
-        self.show_calls_chk.setChecked(False)
-        self.show_calls_chk.stateChanged.connect(self._on_show_calls_changed)
-        show_layout.addWidget(self.show_calls_chk)
-
         self.show_regions_chk = QCheckBox("Regions")
-        self.show_regions_chk.setChecked(False)
-        self.show_regions_chk.stateChanged.connect(self._on_show_regions_changed)
-        show_layout.addWidget(self.show_regions_chk)
-
         self.show_states_chk = QCheckBox("States")
-        self.show_states_chk.setChecked(False)
-        self.show_states_chk.stateChanged.connect(self._on_show_states_changed)
-        show_layout.addWidget(self.show_states_chk)
-
         self.show_cities_chk = QCheckBox("Cities")
-        self.show_cities_chk.setChecked(False)
-        self.show_cities_chk.stateChanged.connect(self._on_show_cities_changed)
-        show_layout.addWidget(self.show_cities_chk)
+        self.show_grid_labels_chk = QCheckBox("Grids")
+        layer_grid = QGridLayout()
+        layer_grid.setContentsMargins(0, 0, 0, 0)
+        layer_grid.setHorizontalSpacing(8)
+        layer_grid.setVerticalSpacing(6)
+        layer_grid.addWidget(self.show_calls_chk, 0, 0)
+        layer_grid.addWidget(self.show_regions_chk, 0, 1)
+        layer_grid.addWidget(self.show_states_chk, 1, 0)
+        layer_grid.addWidget(self.show_cities_chk, 1, 1)
+        layer_grid.addWidget(self.show_grid_labels_chk, 2, 0)
+        layers_layout.addLayout(layer_grid)
 
         self.city_pop_combo = QComboBox()
         self._city_pop_options = [
@@ -914,98 +1016,335 @@ class StationsMapTab(QWidget):
         ]
         for label, val in self._city_pop_options:
             self.city_pop_combo.addItem(label, val)
-        self.city_pop_combo.setCurrentIndex(4)  # default ≥100k
-        self.city_pop_combo.setEnabled(False)
-        self.city_pop_combo.currentIndexChanged.connect(self._on_city_pop_changed)
+        self.city_pop_combo.setCurrentIndex(4)
+        pop_grid = QGridLayout()
+        pop_grid.setContentsMargins(0, 0, 0, 0)
+        pop_grid.setHorizontalSpacing(8)
+        pop_grid.addWidget(QLabel("Population"), 0, 0)
+        pop_grid.addWidget(self.city_pop_combo, 0, 1)
+        layers_layout.addLayout(pop_grid)
 
-        pop_row = QHBoxLayout()
-        pop_row.setContentsMargins(0, 0, 0, 0)
-        pop_row.addWidget(QLabel('Pop.'))
-        pop_row.addWidget(self.city_pop_combo)
-        show_layout.addLayout(pop_row)
+        prop_layout = self._add_collapsible_group(controls_layout, "Propagation", expanded=True)
+        self.prop_overlay_chk = QCheckBox("Enable Propagation Overlay")
+        prop_layout.addWidget(self.prop_overlay_chk)
 
-        # JS8 link controls
-        ctrl_row.addWidget(QLabel("Paths"))
-        self.link_mode_combo = QComboBox()
-        ctrl_row.addWidget(self.link_mode_combo)
-        self.link_mode_combo.addItem("Off", ("off", ""))
-        self.link_mode_combo.addItem("My Station", ("my_station", ""))
-        self.link_mode_combo.addItem("All", ("all", ""))
-        # Default to My Station so the filter is applied immediately
-        self.link_mode_combo.setCurrentText("My Station")
-        self.link_mode_combo.currentIndexChanged.connect(self._on_link_mode_changed)
+        self.prop_mode_combo = QComboBox()
+        self.prop_mode_combo.addItem("Actual", "actual")
+        self.prop_mode_combo.addItem("Blended", "blended")
+        self.prop_mode_combo.addItem("Modeled", "model")
 
-        ctrl_row.addWidget(QLabel("Group"))
-        self.group_filter_combo = QComboBox()
-        self.group_filter_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.group_filter_combo.setMinimumContentsLength(14)
-        self.group_filter_combo.view().setMinimumWidth(220)
-        self.group_filter_combo.currentIndexChanged.connect(self._on_group_filter_changed)
-        ctrl_row.addWidget(self.group_filter_combo)
+        self.prop_window_combo = QComboBox()
+        self.prop_window_combo.addItem("1h", 1)
+        self.prop_window_combo.addItem("3h", 3)
+        self.prop_window_combo.addItem("6h", 6)
+        self.prop_window_combo.addItem("12h", 12)
+        self.prop_window_combo.addItem("24h", 24)
+        self.prop_window_combo.addItem("7 Days", 168)
 
-        ctrl_row.addWidget(QLabel("Region"))
-        self.region_filter_combo = QComboBox()
-        self.region_filter_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.region_filter_combo.setMinimumContentsLength(12)
-        self.region_filter_combo.view().setMinimumWidth(200)
-        self.region_filter_combo.currentIndexChanged.connect(self._on_region_filter_changed)
-        ctrl_row.addWidget(self.region_filter_combo)
+        self.prop_target_type_combo = QComboBox()
+        self.prop_target_type_combo.addItem("Region", "REGION")
+        self.prop_target_type_combo.addItem("State", "STATE")
+        self.prop_target_type_combo.addItem("Operator", "OPERATOR")
 
-        self.band_combo = QComboBox()
-        ctrl_row.addWidget(QLabel("Band"))
-        ctrl_row.addWidget(self.band_combo)
+        self.prop_target_value_combo = QComboBox()
+        self.prop_target_value_combo.setEditable(True)
+        self.prop_target_value_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.prop_target_value_combo.setDuplicatesEnabled(False)
+        try:
+            self.prop_target_value_combo.view().setMinimumWidth(260)
+        except Exception:
+            pass
 
-        ctrl_row.addWidget(QLabel("Recency"))
-        self.recency_combo = QComboBox()
-        self.recency_combo.addItems(
-            ["Any", "15m", "30m", "1h", "3h", "6h", "12h", "24h", "7d"]
-        )
-        self.recency_combo.setCurrentText("3h")
-        self.recency_seconds = 3 * 60 * 60
-        ctrl_row.addWidget(self.recency_combo)
+        prop_grid = QGridLayout()
+        prop_grid.setContentsMargins(0, 0, 0, 0)
+        prop_grid.setHorizontalSpacing(8)
+        prop_grid.setVerticalSpacing(6)
+        prop_grid.addWidget(QLabel("Mode"), 0, 0)
+        prop_grid.addWidget(self.prop_mode_combo, 0, 1)
+        prop_grid.addWidget(QLabel("Window"), 1, 0)
+        prop_grid.addWidget(self.prop_window_combo, 1, 1)
+        prop_grid.addWidget(QLabel("Target"), 2, 0)
+        prop_grid.addWidget(self.prop_target_type_combo, 2, 1)
+        prop_grid.addWidget(QLabel("Value"), 3, 0)
+        prop_grid.addWidget(self.prop_target_value_combo, 3, 1)
+        prop_layout.addLayout(prop_grid)
 
-        ctrl_row.addWidget(QLabel("Paths to:"))
-        self.relay_target_combo = QComboBox()
-        self.relay_target_combo.setEditable(True)
-        self.relay_target_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.relay_target_combo.setDuplicatesEnabled(False)
-        completer = self.relay_target_combo.completer()
-        if completer:
-            completer.setFilterMode(Qt.MatchContains)
-            completer.setCaseSensitivity(Qt.CaseInsensitive)
-        ctrl_row.addWidget(self.relay_target_combo)
-        self.show_grid_labels_chk = QCheckBox("Grids")
-        self.show_grid_labels_chk.setChecked(False)
-        self.show_grid_labels_chk.stateChanged.connect(self._on_show_grid_labels_changed)
+        self.prop_badge = QLabel("Best Band: --")
+        self.prop_badge.setWordWrap(True)
+        self.prop_badge.setStyleSheet("font-weight: bold; color: #1E88E5;")
+        prop_layout.addWidget(self.prop_badge)
+        controls_layout.addStretch()
 
-        # Manual refresh for platforms where signals may not fire reliably
+        map_container = QWidget(self)
+        map_layout = QVBoxLayout(map_container)
+        map_layout.setContentsMargins(0, 0, 0, 0)
+        map_layout.setSpacing(4)
+        splitter.addWidget(map_container)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([260, 1084])
+
+        # Keep filters highly accessible at the top of the map content area.
+        self.link_mode_combo.setMinimumWidth(120)
+        self.group_filter_combo.setMinimumWidth(170)
+        self.region_filter_combo.setMinimumWidth(150)
+        self.band_combo.setMinimumWidth(120)
+        self.recency_combo.setMinimumWidth(90)
+        self.relay_target_combo.setMinimumWidth(280)
         refresh_btn = QPushButton("Refresh Links")
         refresh_btn.clicked.connect(lambda: self._auto_ingest_and_refresh(initial=False))
-        ctrl_row.addWidget(refresh_btn)
+        self._now_reachable_button = QPushButton("Now Reachable")
+        self._now_reachable_button.setCheckable(True)
+        self._sitrep_status_button = QPushButton("SitRep Status")
+        self._sitrep_status_button.setCheckable(True)
+        self._sitrep_status_button.setToolTip(
+            "Show only stations with known SitRep status (Red/Yellow/Green).\n"
+            "This view overrides map filters and hides links."
+        )
+        self._now_reachable_label = QLabel("")
+        self._now_reachable_label.setWordWrap(True)
+        filter_bar = QFrame(map_container)
+        self._map_filter_bar = filter_bar
+        filter_grid = QGridLayout(filter_bar)
+        filter_grid.setContentsMargins(0, 0, 0, 0)
+        filter_grid.setHorizontalSpacing(8)
+        filter_grid.setVerticalSpacing(4)
+        filter_grid.addWidget(QLabel("Paths"), 0, 0)
+        filter_grid.addWidget(self.link_mode_combo, 0, 1)
+        filter_grid.addWidget(QLabel("Group"), 0, 2)
+        filter_grid.addWidget(self.group_filter_combo, 0, 3)
+        filter_grid.addWidget(QLabel("Region"), 0, 4)
+        filter_grid.addWidget(self.region_filter_combo, 0, 5)
+        filter_grid.addWidget(QLabel("Band"), 0, 6)
+        filter_grid.addWidget(self.band_combo, 0, 7)
+        filter_grid.addWidget(QLabel("Recency"), 0, 8)
+        filter_grid.addWidget(self.recency_combo, 0, 9)
+        filter_grid.addWidget(QLabel("Paths to"), 1, 0)
+        filter_grid.addWidget(self.relay_target_combo, 1, 1, 1, 7)
+        filter_grid.addWidget(refresh_btn, 1, 8, alignment=Qt.AlignRight)
+        filter_grid.addWidget(self._now_reachable_button, 1, 9, alignment=Qt.AlignRight)
+        filter_grid.addWidget(self._sitrep_status_button, 1, 10, alignment=Qt.AlignRight)
+        filter_grid.addWidget(self._now_reachable_label, 1, 11, alignment=Qt.AlignLeft)
+        filter_grid.setColumnStretch(11, 1)
+        map_layout.addWidget(filter_bar)
 
-        ctrl_row.addStretch()
-        layout.addLayout(ctrl_row)
-
-        # Map view
         if _ensure_webengine_imported():
             self.web = QWebEngineView()
             self.web.loadFinished.connect(self._on_map_load_finished)
-            layout.addWidget(self.web)
+            self._map_stack = QStackedWidget(map_container)
+            loading_widget = QWidget(self._map_stack)
+            loading_layout = QVBoxLayout(loading_widget)
+            loading_layout.setContentsMargins(0, 0, 0, 0)
+            loading_layout.addStretch()
+            self._map_loading_label = QLabel("Loading map...")
+            self._map_loading_label.setAlignment(Qt.AlignCenter)
+            loading_layout.addWidget(self._map_loading_label)
+            loading_layout.addStretch()
+            self._map_stack.addWidget(loading_widget)
+            self._map_stack.addWidget(self.web)
+            self._map_stack.setCurrentIndex(0)
+            map_layout.addWidget(self._map_stack)
         else:
             self.web = None
-            layout.addWidget(QLabel("Qt WebEngine is not available. Map preview disabled."))
+            self._map_stack = None
+            self._map_loading_label = None
+            map_layout.addWidget(QLabel("Qt WebEngine is not available. Map preview disabled."))
 
-        # extra signals
+        self.show_calls_chk.stateChanged.connect(self._on_show_calls_changed)
+        self.show_regions_chk.stateChanged.connect(self._on_show_regions_changed)
+        self.show_states_chk.stateChanged.connect(self._on_show_states_changed)
+        self.show_cities_chk.stateChanged.connect(self._on_show_cities_changed)
+        self.show_grid_labels_chk.stateChanged.connect(self._on_show_grid_labels_changed)
+        self.city_pop_combo.currentIndexChanged.connect(self._on_city_pop_changed)
         self.link_mode_combo.currentIndexChanged.connect(self._on_link_mode_changed)
+        self.group_filter_combo.currentIndexChanged.connect(self._on_group_filter_changed)
+        self.region_filter_combo.currentIndexChanged.connect(self._on_region_filter_changed)
         self.band_combo.currentIndexChanged.connect(self._on_band_changed)
         self.recency_combo.currentIndexChanged.connect(self._on_recency_changed)
-        self.relay_target_combo.currentTextChanged.connect(self._on_relay_target_changed)
-        # Apply default selections so filters take effect immediately
+        self.relay_target_combo.currentIndexChanged.connect(
+            lambda _idx: self._on_relay_target_changed(self.relay_target_combo.currentText())
+        )
+        try:
+            line_edit = self.relay_target_combo.lineEdit()
+            if line_edit is not None:
+                line_edit.editingFinished.connect(
+                    lambda: self._on_relay_target_changed(self.relay_target_combo.currentText())
+                )
+        except Exception:
+            pass
+        if self._now_reachable_button is not None:
+            self._now_reachable_button.toggled.connect(self._on_now_reachable_toggled)
+        if self._sitrep_status_button is not None:
+            self._sitrep_status_button.toggled.connect(self._on_sitrep_status_toggled)
+        self.prop_overlay_chk.stateChanged.connect(self._on_prop_overlay_changed)
+        self.prop_mode_combo.currentIndexChanged.connect(self._on_prop_mode_changed)
+        self.prop_window_combo.currentIndexChanged.connect(self._on_prop_window_changed)
+        self.prop_target_type_combo.currentIndexChanged.connect(self._on_prop_target_type_changed)
+        self.prop_target_value_combo.currentTextChanged.connect(self._on_prop_target_value_changed)
+
+        self._sync_city_pop_enabled()
         try:
             self._on_link_mode_changed(self.link_mode_combo.currentIndex())
         except Exception:
             pass
-        # Note: show_group is placed in the sidebar by MainWindow when this tab is active
+        self._install_splitter_indicator()
+        self._sync_controls_top_alignment()
+        QTimer.singleShot(0, self._update_drawer_mode)
+
+    def _add_collapsible_group(self, parent_layout: QVBoxLayout, title: str, expanded: bool) -> QVBoxLayout:
+        section = QFrame(self)
+        section.setFrameShape(QFrame.StyledPanel)
+        section_layout = QVBoxLayout(section)
+        section_layout.setContentsMargins(6, 6, 6, 6)
+        section_layout.setSpacing(6)
+        header = QToolButton(section)
+        header.setText(title)
+        header.setCheckable(True)
+        header.setChecked(bool(expanded))
+        header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        header.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        header.setStyleSheet("font-weight: 600;")
+        body = QWidget(section)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(6)
+
+        def _toggle(opened: bool) -> None:
+            body.setVisible(bool(opened))
+            header.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
+
+        header.toggled.connect(_toggle)
+        _toggle(bool(expanded))
+        section_layout.addWidget(header)
+        section_layout.addWidget(body)
+        parent_layout.addWidget(section)
+        return body_layout
+
+    def _toggle_controls_drawer(self) -> None:
+        self._set_controls_drawer_open(not self._controls_drawer_open)
+
+    def _install_splitter_indicator(self) -> None:
+        splitter = self._main_splitter
+        if splitter is None:
+            return
+        try:
+            handle = splitter.handle(1)
+        except Exception:
+            handle = None
+        if handle is None:
+            return
+        btn = QToolButton(handle)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setToolTip("Collapse map controls")
+        btn.setText("")
+        btn.setAutoRaise(True)
+        btn.setIconSize(btn.sizeHint())
+        btn.clicked.connect(self._toggle_controls_drawer)
+        btn.raise_()
+        self._controls_handle_button = btn
+        self._update_splitter_indicator_state()
+        self._position_splitter_indicator()
+
+    def _position_splitter_indicator(self) -> None:
+        btn = self._controls_handle_button
+        splitter = self._main_splitter
+        if btn is None or splitter is None:
+            return
+        try:
+            handle = splitter.handle(1)
+        except Exception:
+            return
+        if handle is None:
+            return
+        w = max(10, handle.width() - 2)
+        h = handle.height()
+        bw = min(w, 12)
+        bh = min(max(26, h // 8), 42)
+        x = max(0, (handle.width() - bw) // 2)
+        y = max(4, (h - bh) // 2)
+        btn.setGeometry(x, y, bw, bh)
+        btn.setIconSize(QSize(max(8, bw - 3), max(10, bh - 12)))
+
+    def _update_splitter_indicator_state(self) -> None:
+        btn = self._controls_handle_button
+        splitter = self._main_splitter
+        if btn is None or splitter is None:
+            return
+        style = self.style() if hasattr(self, "style") else None
+        if style is not None:
+            icon = (
+                style.standardIcon(QStyle.SP_ArrowLeft)
+                if self._controls_drawer_open
+                else style.standardIcon(QStyle.SP_ArrowRight)
+            )
+            btn.setIcon(icon)
+        btn.setToolTip("Collapse map controls" if self._controls_drawer_open else "Expand map controls")
+        btn.setVisible(True)
+        try:
+            handle = splitter.handle(1)
+            if handle is not None:
+                handle.setCursor(Qt.SplitHCursor)
+                handle.setToolTip("Drag to resize, or click chevron to show/hide map controls")
+                handle.setStyleSheet(
+                    "QSplitterHandle { background: rgba(100, 130, 170, 0.35); border-left: 1px solid rgba(140, 160, 185, 0.55); border-right: 1px solid rgba(140, 160, 185, 0.55); }"
+                )
+                btn.setStyleSheet(
+                    "QToolButton { background: rgba(20, 28, 42, 0.65); border: 1px solid rgba(148, 165, 190, 0.70); border-radius: 4px; padding: 1px; }"
+                    "QToolButton:hover { background: rgba(35, 50, 76, 0.85); }"
+                )
+        except Exception:
+            pass
+
+    def _sync_controls_top_alignment(self) -> None:
+        if self._controls_top_spacer is None or self._map_filter_bar is None:
+            return
+        h = self._map_filter_bar.height()
+        if h <= 0:
+            try:
+                h = self._map_filter_bar.sizeHint().height()
+            except Exception:
+                h = 0
+        self._controls_top_spacer.setFixedHeight(max(0, int(h)))
+
+    def _set_controls_drawer_open(self, open_drawer: bool) -> None:
+        if self._main_splitter is None:
+            return
+        self._controls_drawer_open = bool(open_drawer)
+        total = max(1, self.width())
+        panel_width = min(300, max(220, int(total * 0.27)))
+        if self._controls_drawer_open:
+            self._main_splitter.setSizes([panel_width, max(1, total - panel_width)])
+        else:
+            self._main_splitter.setSizes([0, total])
+        if self._controls_button is not None:
+            self._controls_button.setText("Hide Map Controls" if self._controls_drawer_open else "Show Map Controls")
+            self._controls_button.setVisible(self._drawer_mode)
+        self._update_splitter_indicator_state()
+        self._position_splitter_indicator()
+
+    def _update_drawer_mode(self) -> None:
+        narrow = self.width() < self._controls_drawer_threshold
+        if narrow != self._drawer_mode:
+            self._drawer_mode = narrow
+            if not narrow:
+                # On transition back to wide layouts, restore visible controls panel.
+                self._controls_drawer_open = True
+            if self._controls_button is not None:
+                self._controls_button.setVisible(narrow)
+        self._sync_controls_top_alignment()
+        self._set_controls_drawer_open(self._controls_drawer_open)
+        self._update_splitter_indicator_state()
+        self._position_splitter_indicator()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_drawer_mode()
+        self._position_splitter_indicator()
+        self._sync_controls_top_alignment()
+
+    def _sync_city_pop_enabled(self) -> None:
+        enabled = bool(self.show_cities or self.show_states)
+        self.city_pop_combo.setEnabled(enabled)
 
     # ------------- Data helpers ------------- #
     def _load_operator_history(self):
@@ -1142,6 +1481,7 @@ class StationsMapTab(QWidget):
             op_rows.append(
                 {
                     "callsign": cs_val.upper(),
+                    "name": (r[1] or "").strip(),
                     "state": (r[2] or "").strip().upper(),
                     "group1": (r[4] or "").strip(),
                     "group2": (r[5] or "").strip(),
@@ -1159,6 +1499,12 @@ class StationsMapTab(QWidget):
             self._refresh_region_filter_options()
         if hasattr(self, "relay_target_combo"):
             self._refresh_relay_targets()
+        if hasattr(self, "prop_target_type_combo") and self.prop_target_type_combo is not None:
+            self._refresh_prop_target_controls()
+        if self._now_reachable_enabled:
+            self._now_reachable_meta = self._compute_now_reachable_snapshot()
+            self._now_reachable_callsigns = set(self._now_reachable_meta.keys())
+            self._update_now_reachable_summary()
 
     def update_stations(self, stations: List[Dict]):
         pts: List[StationPoint] = []
@@ -1291,20 +1637,196 @@ class StationsMapTab(QWidget):
         self.link_mode, self.link_value = self._parse_link_selection(self.link_mode_combo.currentData())
 
     def _refresh_relay_targets(self):
-        calls = sorted({r.get("callsign", "") for r in self.operator_rows if r.get("callsign")})
         current_text = self.relay_target_combo.currentText() if hasattr(self, "relay_target_combo") else ""
+        current_call = self._relay_target_callsign_from_text(current_text)
+        entries: list[tuple[str, str, str, str]] = []
+        for row in self.operator_rows:
+            cs = (row.get("callsign") or "").strip().upper()
+            if not cs:
+                continue
+            if self._now_reachable_enabled and self._now_reachable_callsigns and cs not in self._now_reachable_callsigns:
+                continue
+            name = (row.get("name") or "").strip()
+            state = self._normalize_state_abbr(row.get("state") or "")
+            groups = row.get("groups") if isinstance(row.get("groups"), list) else []
+            if not groups:
+                groups = [
+                    (row.get("group1") or "").strip(),
+                    (row.get("group2") or "").strip(),
+                    (row.get("group3") or "").strip(),
+                ]
+            group_list = [g for g in groups if g]
+            group_text = ", ".join(group_list[:3]) if group_list else "--"
+            entries.append((cs, name, state, group_text))
+        entries = sorted(entries, key=lambda it: (it[0], it[1], it[2], it[3]))
         self.relay_target_combo.blockSignals(True)
         self.relay_target_combo.clear()
         self.relay_target_combo.addItem("")
-        for cs in calls:
-            self.relay_target_combo.addItem(cs)
-        if current_text:
-            idx = self.relay_target_combo.findText(current_text, Qt.MatchFixedString)
+        for cs, name, state, group_text in entries:
+            name_txt = name if name else "--"
+            state_txt = state if state else "--"
+            status = ""
+            if self._now_reachable_enabled:
+                meta = self._now_reachable_meta.get(cs, {})
+                qsy_text = str(meta.get("qsy_text") or "").strip()
+                if qsy_text:
+                    status = f" | {qsy_text}"
+            label = f"{cs} | {name_txt} | {state_txt} | {group_text}{status}"
+            self.relay_target_combo.addItem(label, cs)
+        if current_call:
+            idx = self.relay_target_combo.findData(current_call)
             if idx >= 0:
                 self.relay_target_combo.setCurrentIndex(idx)
-            else:
+            elif current_text:
+                self.relay_target_combo.setEditText(current_text)
+        elif current_text:
                 self.relay_target_combo.setEditText(current_text)
         self.relay_target_combo.blockSignals(False)
+
+    def _parse_frequency_mhz(self, value) -> Optional[float]:
+        try:
+            return float(str(value).strip())
+        except Exception:
+            return None
+
+    def _load_my_active_schedule_freqs(self, now_utc: datetime.datetime) -> Set[float]:
+        out: Set[float] = set()
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return out
+        if not db_path.exists():
+            return out
+        today_name = now_utc.strftime("%A")
+        yesterday_name = (now_utc - datetime.timedelta(days=1)).strftime("%A")
+        now_min = now_utc.hour * 60 + now_utc.minute
+
+        def _add_rows(conn: sqlite3.Connection, table_name: str) -> None:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    f"SELECT day_utc, start_utc, end_utc, frequency FROM {table_name}"
+                )
+                for day_utc, start_utc, end_utc, frequency in cur.fetchall():
+                    start_min = self._parse_hhmm_minutes(start_utc)
+                    end_min = self._parse_hhmm_minutes(end_utc)
+                    if start_min is None or end_min is None:
+                        continue
+                    day_val = (day_utc or "ALL").strip().title()
+                    if not self._schedule_active_now(day_val, today_name, yesterday_name, now_min, start_min, end_min):
+                        continue
+                    freq_mhz = self._parse_frequency_mhz(frequency)
+                    if freq_mhz is None:
+                        continue
+                    out.add(round(freq_mhz, 6))
+            except Exception:
+                pass
+
+        try:
+            conn = sqlite3.connect(db_path)
+            _add_rows(conn, "daily_schedule_tab")
+            _add_rows(conn, "net_schedule_tab")
+            conn.close()
+        except Exception:
+            return out
+        return out
+
+    def _compute_now_reachable_snapshot(self) -> Dict[str, Dict]:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        active_freqs = self._load_my_active_schedule_freqs(now_utc)
+        if not active_freqs:
+            return {}
+        active_peer = self._load_peer_schedule_presence(now_utc)
+        out: Dict[str, Dict] = {}
+        for entry in active_peer:
+            callsign = (entry.get("callsign") or "").strip().upper()
+            if not callsign:
+                continue
+            freq_mhz = self._parse_frequency_mhz(entry.get("frequency"))
+            if freq_mhz is None:
+                continue
+            if not any(abs(freq_mhz - mine) <= 0.0001 for mine in active_freqs):
+                continue
+            minutes_to_end = entry.get("minutes_to_end")
+            try:
+                mins = int(minutes_to_end) if minutes_to_end is not None else None
+            except Exception:
+                mins = None
+            qsy_soon = bool(mins is not None and mins <= 10)
+            if mins is None:
+                qsy_text = "QSY ?"
+            elif qsy_soon:
+                qsy_text = f"QSY in {mins}m"
+            else:
+                qsy_text = f"Stable {mins}m"
+            out[callsign] = {
+                "frequency": round(freq_mhz, 6),
+                "minutes_to_end": mins,
+                "qsy_soon": qsy_soon,
+                "qsy_text": qsy_text,
+            }
+        return out
+
+    def _update_now_reachable_summary(self) -> None:
+        if self._now_reachable_label is None:
+            return
+        if not self._now_reachable_enabled:
+            self._now_reachable_label.setText("")
+            return
+        total = len(self._now_reachable_callsigns)
+        soon = sum(1 for meta in self._now_reachable_meta.values() if meta.get("qsy_soon"))
+        unknown = sum(1 for meta in self._now_reachable_meta.values() if meta.get("minutes_to_end") is None)
+        self._now_reachable_label.setText(f"Reachable: {total} (QSY<10m: {soon}, Unknown: {unknown})")
+
+    def _on_now_reachable_toggled(self, checked: bool) -> None:
+        self._now_reachable_enabled = bool(checked)
+        if self._now_reachable_enabled:
+            snapshot = self._compute_now_reachable_snapshot()
+            self._now_reachable_meta = snapshot
+            self._now_reachable_callsigns = set(snapshot.keys())
+            if self._now_reachable_button is not None:
+                self._now_reachable_button.setText("Now Reachable: On")
+            # Ensure links are visible for the operator-centric view.
+            try:
+                mode, _ = self._parse_link_selection(self.link_mode_combo.currentData())
+                if str(mode).lower() == "off":
+                    self.link_mode_combo.setCurrentText("My Station")
+            except Exception:
+                pass
+        else:
+            self._now_reachable_meta = {}
+            self._now_reachable_callsigns = set()
+            if self._now_reachable_button is not None:
+                self._now_reachable_button.setText("Now Reachable")
+        self._update_now_reachable_summary()
+        self._refresh_relay_targets()
+        self._render_map()
+
+    def _on_sitrep_status_toggled(self, checked: bool) -> None:
+        self._sitrep_status_only_enabled = bool(checked)
+        if self._sitrep_status_button is not None:
+            self._sitrep_status_button.setText("SitRep Status: On" if checked else "SitRep Status")
+        self._render_map()
+
+    def _relay_target_callsign_from_text(self, text: str) -> str:
+        txt = (text or "").strip()
+        if not txt:
+            return ""
+        if hasattr(self, "relay_target_combo"):
+            idx = self.relay_target_combo.findText(txt, Qt.MatchFixedString)
+            if idx >= 0:
+                data = self.relay_target_combo.itemData(idx)
+                if data:
+                    return str(data).strip().upper()
+        first = txt.split("|", 1)[0].strip().upper()
+        if first in self.operator_index:
+            return first
+        exact_name = txt.upper()
+        for row in self.operator_rows:
+            name = (row.get("name") or "").strip().upper()
+            if name and name == exact_name:
+                return (row.get("callsign") or "").strip().upper()
+        return first
 
     def _load_js8_links(
         self,
@@ -1314,6 +1836,7 @@ class StationsMapTab(QWidget):
         relay_target: Optional[str] = None,
         group_filter: str = "",
         region_filter: str = "",
+        reachable_callsigns: Optional[Set[str]] = None,
         max_age_sec: Optional[int] = None,
     ) -> tuple[List[Dict], Dict[str, Dict]]:
         """
@@ -1335,6 +1858,7 @@ class StationsMapTab(QWidget):
         relay_target = (relay_target or "").strip().upper()
         group_filter = (group_filter or "").strip().upper()
         region_filter = (region_filter or "").strip().upper()
+        reachable_calls = {c.strip().upper() for c in (reachable_callsigns or set()) if c}
         if mode == "off" and not relay_target:
             return links, {}
 
@@ -1479,6 +2003,10 @@ class StationsMapTab(QWidget):
                     region_o = self.operator_index.get(o, {}).get("region")
                     region_d = self.operator_index.get(d, {}).get("region")
                     include = region_o == region_filter and region_d == region_filter
+            if include and reachable_calls:
+                include = (o in reachable_calls or d in reachable_calls)
+                if include and my_call:
+                    include = my_call in {o, d}
             if not include:
                 include = False
 
@@ -1619,6 +2147,7 @@ class StationsMapTab(QWidget):
         link_selection: Optional[tuple[str, str]] = None,
         group_filter: str = "",
         region_filter: str = "",
+        reachable_callsigns: Optional[Set[str]] = None,
         max_age_sec: Optional[int] = None,
     ) -> List[Dict]:
         links: List[Dict] = []
@@ -1633,6 +2162,7 @@ class StationsMapTab(QWidget):
         selection_value = (selection_value or "").upper() if mode == "region" else (selection_value or "")
         group_filter = (group_filter or "").strip().upper()
         region_filter = (region_filter or "").strip().upper()
+        reachable_calls = {c.strip().upper() for c in (reachable_callsigns or set()) if c}
         if mode == "off":
             return links
 
@@ -1754,6 +2284,10 @@ class StationsMapTab(QWidget):
                     region_o = self.operator_index.get(o, {}).get("region")
                     region_d = self.operator_index.get(d, {}).get("region")
                     include = region_o == region_filter and region_d == region_filter
+            if include and reachable_calls:
+                include = (o in reachable_calls or d in reachable_calls)
+                if include and my_call:
+                    include = my_call in {o, d}
             if not include:
                 include = False
 
@@ -1926,6 +2460,64 @@ class StationsMapTab(QWidget):
             return calls
         return {c for c in (checkins | senders) if c}
 
+    def _load_spotter_station_status(self) -> Dict[str, Dict]:
+        statuses: Dict[str, Dict] = {}
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return statuses
+        if not db_path.exists():
+            return statuses
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT from_call, status_key, status_label, updated_utc_ts, updated_utc_str, response_code,
+                           status_source, status_source_detail
+                    FROM spotter_station_status
+                    """
+                )
+            except Exception:
+                cur.execute(
+                    """
+                    SELECT from_call, status_key, status_label, updated_utc_ts, updated_utc_str, response_code,
+                           '' AS status_source, '' AS status_source_detail
+                    FROM spotter_station_status
+                    """
+                )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception:
+            return statuses
+        for from_call, status_key, status_label, updated_utc_ts, updated_utc_str, response_code, status_source, status_source_detail in rows:
+            call = (from_call or "").strip().upper()
+            if not call:
+                continue
+            key = (status_key or "").strip().lower()
+            if key not in {"red", "yellow", "green", "unknown"}:
+                key = "unknown"
+            updated_ts = float(updated_utc_ts or 0.0)
+            updated_str = (updated_utc_str or "").strip()
+            if not updated_str and updated_ts > 0:
+                try:
+                    updated_str = datetime.datetime.utcfromtimestamp(updated_ts).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    updated_str = ""
+            statuses[call] = {
+                "status_key": key,
+                "status_label": (status_label or "").strip(),
+                "updated_utc_ts": updated_ts,
+                "updated_utc_str": updated_str,
+                "response_code": (response_code or "").strip(),
+                "status_source": (status_source or "").strip().upper(),
+                "status_source_detail": (status_source_detail or "").strip(),
+            }
+        return statuses
+
     def _load_recent_calls(self, max_age_sec: Optional[int], band_filter=None) -> Set[str]:
         if not max_age_sec or max_age_sec <= 0:
             return set()
@@ -2002,6 +2594,105 @@ class StationsMapTab(QWidget):
         )
         return bool(combo_mode and combo_mode.lower() != "off")
 
+    def _load_prop_target_operator_callsigns(self) -> list[str]:
+        out: list[str] = []
+        try:
+            for cs in sorted(self.operator_index.keys()):
+                call = (cs or "").strip().upper()
+                if call:
+                    out.append(call)
+        except Exception:
+            out = []
+        if out:
+            return out
+        db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        if not db_path.exists():
+            return out
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT IFNULL(callsign, '')
+                FROM operator_checkins
+                ORDER BY callsign COLLATE NOCASE
+                """
+            )
+            for (callsign,) in cur.fetchall():
+                cs = (callsign or "").strip().upper()
+                if cs and cs not in out:
+                    out.append(cs)
+            conn.close()
+        except Exception as e:
+            log.debug("StationsMap: failed to load propagation operator options: %s", e)
+        return out
+
+    def _prop_target_options(self, target_type: str) -> list[str]:
+        target_type = (target_type or "REGION").strip().upper()
+        if target_type == "STATE":
+            return [s for s in LOWER48_STATES if s in STATE_CENTERS]
+        if target_type == "OPERATOR":
+            return self._load_prop_target_operator_callsigns()
+        return ["ALL"] + sorted(FEMA_REGIONS.keys())
+
+    def _set_prop_target_value_options(self, target_type: str, selected_value: str) -> None:
+        if self.prop_target_value_combo is None:
+            return
+        target_type = (target_type or "REGION").strip().upper()
+        selected_value = (selected_value or "").strip().upper()
+        if target_type == "REGION" and selected_value == "NATIONAL":
+            selected_value = "ALL"
+        options = self._prop_target_options(target_type)
+        self.prop_target_value_combo.blockSignals(True)
+        self.prop_target_value_combo.clear()
+        for value in options:
+            self.prop_target_value_combo.addItem(value)
+        if selected_value:
+            idx = self.prop_target_value_combo.findText(selected_value, Qt.MatchFixedString)
+            if idx >= 0:
+                self.prop_target_value_combo.setCurrentIndex(idx)
+            else:
+                self.prop_target_value_combo.setEditText(selected_value)
+        elif self.prop_target_value_combo.count() > 0:
+            self.prop_target_value_combo.setCurrentIndex(0)
+        else:
+            self.prop_target_value_combo.setEditText("")
+        self.prop_target_value_combo.setEditable(target_type == "OPERATOR")
+        self.prop_target_value_combo.blockSignals(False)
+
+    def _refresh_prop_target_controls(self) -> None:
+        if not self.settings or self.prop_target_type_combo is None or self.prop_target_value_combo is None:
+            return
+        self._prop_target_syncing = True
+        try:
+            if hasattr(self.settings, "reload"):
+                self.settings.reload()
+            target_type = (self.settings.get("prop_target_type", "REGION") or "REGION").strip().upper()
+            if target_type not in {"REGION", "STATE", "OPERATOR"}:
+                target_type = "REGION"
+            target_value = (self.settings.get("prop_target_value", "") or "").strip().upper()
+            idx = self.prop_target_type_combo.findData(target_type)
+            if idx < 0:
+                idx = 0
+            self.prop_target_type_combo.blockSignals(True)
+            self.prop_target_type_combo.setCurrentIndex(idx)
+            self.prop_target_type_combo.blockSignals(False)
+            self._set_prop_target_value_options(target_type, target_value)
+            current_value = (self.prop_target_value_combo.currentText() or "").strip().upper()
+            existing_type = (self.settings.get("prop_target_type", "") or "").strip().upper()
+            existing_value = (self.settings.get("prop_target_value", "") or "").strip().upper()
+            if existing_type != target_type or existing_value != current_value:
+                self.settings.set_many(
+                    {
+                        "prop_target_type": target_type,
+                        "prop_target_value": current_value,
+                    }
+                )
+        except Exception as e:
+            log.debug("StationsMap: failed to refresh propagation target controls: %s", e)
+        finally:
+            self._prop_target_syncing = False
+
     def attach_prop_controls(
         self,
         overlay_chk: QCheckBox | None,
@@ -2009,10 +2700,15 @@ class StationsMapTab(QWidget):
         mode_combo: QComboBox | None = None,
         window_combo: QComboBox | None = None,
     ) -> None:
-        self.prop_overlay_chk = overlay_chk
-        self.prop_badge = badge
-        self.prop_mode_combo = mode_combo
-        self.prop_window_combo = window_combo
+        # Backward compatibility path for legacy external controls.
+        if overlay_chk is not None:
+            self.prop_overlay_chk = overlay_chk
+        if badge is not None:
+            self.prop_badge = badge
+        if mode_combo is not None:
+            self.prop_mode_combo = mode_combo
+        if window_combo is not None:
+            self.prop_window_combo = window_combo
         # Sync checkbox state from settings
         if self.prop_overlay_chk is not None:
             self.prop_overlay_chk.blockSignals(True)
@@ -2049,20 +2745,16 @@ class StationsMapTab(QWidget):
                 self.prop_window_combo.blockSignals(True)
                 self.prop_window_combo.setCurrentIndex(idx)
                 self.prop_window_combo.blockSignals(False)
-        # Update badge immediately with current filter
-        if hasattr(self, "region_filter_combo"):
-            region_filter = self.region_filter_combo.currentData() or ""
-        else:
-            region_filter = ""
+        # Update badge immediately with current target.
+        target_ctx = self._prop_target_context()
+        target_label = str(target_ctx.get("label") or "National")
         if self.prop_overlay_enabled:
-            scores = self._compute_region_scores(region_filter)
-            if region_filter:
-                best_band, best_score = self._best_band_for_region(scores, region_filter)
-            else:
-                best_band, best_score = self._best_band_overall(scores)
-            self._update_prop_badge(region_filter, best_band, best_score)
+            region_scores = self._compute_region_scores("")
+            state_scores = self._compute_state_scores()
+            best_band, best_score = self._best_band_for_target(target_ctx, region_scores, state_scores)
+            self._update_prop_badge(target_label, best_band, best_score)
         else:
-            self._update_prop_badge(region_filter, "", 0.0)
+            self._update_prop_badge(target_label, "", 0.0)
 
     def _effective_prop_mode(self) -> str:
         mode = (self.prop_mode or "blended").strip().lower()
@@ -2082,54 +2774,13 @@ class StationsMapTab(QWidget):
 
     # ------------- Propagation overlay ------------- #
     def _load_prop_profiles(self) -> Dict[str, Dict]:
-        if self._prop_profiles is not None:
-            return self._prop_profiles
-        profiles = dict(PROP_DEFAULT_PROFILES)
-        try:
-            base = Path(__file__).resolve().parents[2]
-            path = base / "config" / "propagation" / "prop_profiles.json"
-            if path.exists():
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    for k, v in raw.items():
-                        if k in profiles and isinstance(v, dict):
-                            profiles[k].update(v)
-        except Exception:
-            pass
-        self._prop_profiles = profiles
-        return profiles
+        return self._prop_service.load_profiles()
 
     def _load_prop_db_cache(self) -> None:
-        if self._prop_db_loaded:
-            return
-        self._prop_db_loaded = True
-        try:
-            base = Path(__file__).resolve().parents[2]
-            db_path = base / "config" / "propagation" / "prop_climatology.db"
-            if not db_path.exists():
-                return
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute("SELECT month, band, lat_idx, lon_idx, muf_score FROM muf_grid")
-            rows = cur.fetchall()
-            conn.close()
-            for month, band, lat_idx, lon_idx, score in rows:
-                key = (int(month), str(band).upper(), int(lat_idx), int(lon_idx))
-                self._prop_db_cache[key] = float(score)
-            self._prop_db_available = bool(self._prop_db_cache)
-        except Exception:
-            self._prop_db_available = False
+        self._prop_service.load_climatology_cache()
 
     def _lookup_db_score(self, band: str, lat: float, lon: float, month: int) -> Optional[float]:
-        self._load_prop_db_cache()
-        if not self._prop_db_available:
-            return None
-        lat_idx = int((lat + 90.0) // 5)
-        lon_idx = int((lon + 180.0) // 5)
-        lat_idx = max(0, min(35, lat_idx))
-        lon_idx = max(0, min(71, lon_idx))
-        key = (int(month), band.upper(), lat_idx, lon_idx)
-        return self._prop_db_cache.get(key)
+        return self._prop_service.lookup_db_score(band, lat, lon, month)
 
     def _get_user_latlon(self) -> Optional[tuple[float, float]]:
         if not self.settings:
@@ -2141,58 +2792,39 @@ class StationsMapTab(QWidget):
                 return ll
         return None
 
+    def _get_origin_grid6(self) -> str:
+        if not self.settings:
+            return ""
+        grid = (self.settings.get("operator_grid6", "") or self.settings.get("operator_grid", "") or "").strip().upper()
+        return grid[:6] if len(grid) >= 4 else ""
+
+    def _blend_settings_snapshot(self) -> Dict[str, object]:
+        if not self.settings:
+            return {}
+        return {
+            "prop_blend_enabled": self.settings.get("prop_blend_enabled", 1),
+            "prop_empirical_alpha": self.settings.get("prop_empirical_alpha", 2.0),
+            "prop_empirical_beta": self.settings.get("prop_empirical_beta", 3.0),
+            "prop_decay_half_life_days": self.settings.get("prop_decay_half_life_days", 75),
+            "prop_blend_gate_attempt_min": self.settings.get("prop_blend_gate_attempt_min", 8.0),
+            "prop_blend_gate_unique_days_min": self.settings.get("prop_blend_gate_unique_days_min", 3),
+            "prop_blend_max_weight": self.settings.get("prop_blend_max_weight", 0.85),
+            "prop_blend_recent_window_days": self.settings.get("prop_blend_recent_window_days", 30),
+            "prop_blend_history_cap_days": self.settings.get("prop_blend_history_cap_days", 365),
+        }
+
     @staticmethod
     def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        r = 6371.0
-        phi1 = math.radians(lat1)
-        phi2 = math.radians(lat2)
-        dphi = math.radians(lat2 - lat1)
-        dl = math.radians(lon2 - lon1)
-        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2
-        return 2 * r * math.asin(math.sqrt(a))
+        return PropagationService.haversine_km(lat1, lon1, lat2, lon2)
 
     def _band_score(self, band: str, distance_km: float, hour_utc: int) -> float:
-        profiles = self._load_prop_profiles()
-        prof = profiles.get(band, {})
-        ideal = float(prof.get("ideal_km", 2000))
-        spread = float(prof.get("spread_km", 2000))
-        day_factor = float(prof.get("day", 0.8))
-        night_factor = float(prof.get("night", 0.8))
-        is_day = 6 <= hour_utc < 18
-        factor = day_factor if is_day else night_factor
-        if spread <= 0:
-            spread = 1.0
-        dist_pen = max(0.0, 1.0 - abs(distance_km - ideal) / spread)
-        score = 100.0 * factor * dist_pen
-        return max(0.0, min(100.0, score))
+        return self._prop_service.band_score(band, distance_km, hour_utc)
 
     def _local_hour_from_lon(self, utc_dt: datetime.datetime, lon: float) -> int:
-        try:
-            offset = lon / 15.0
-        except Exception:
-            offset = 0.0
-        hour = (utc_dt.hour + offset) % 24
-        return int(hour)
+        return self._prop_service.local_hour_from_lon(utc_dt, lon)
 
     def _path_band_weight(self, band: str, distance_km: float, hour_local: int) -> float:
-        band = (band or "").upper()
-        is_day = 6 <= hour_local < 18
-        if distance_km < 300:
-            if is_day:
-                weights = {"80M": 1.0, "40M": 1.2, "30M": 0.8, "20M": 0.4, "15M": 0.2, "10M": 0.1}
-            else:
-                weights = {"80M": 1.3, "40M": 1.1, "30M": 0.6, "20M": 0.3, "15M": 0.15, "10M": 0.1}
-        elif distance_km < 900:
-            if is_day:
-                weights = {"80M": 0.6, "40M": 1.0, "30M": 1.0, "20M": 0.8, "15M": 0.5, "10M": 0.3}
-            else:
-                weights = {"80M": 0.9, "40M": 1.1, "30M": 0.9, "20M": 0.5, "15M": 0.2, "10M": 0.1}
-        else:
-            if is_day:
-                weights = {"80M": 0.2, "40M": 0.6, "30M": 0.9, "20M": 1.2, "15M": 1.0, "10M": 0.7}
-            else:
-                weights = {"80M": 0.4, "40M": 1.2, "30M": 1.0, "20M": 0.7, "15M": 0.3, "10M": 0.2}
-        return float(weights.get(band, 0.5))
+        return self._prop_service.path_band_weight(band, distance_km, hour_local)
 
     def _modeled_band_score(
         self,
@@ -2205,32 +2837,20 @@ class StationsMapTab(QWidget):
         user_ll = self._get_user_latlon()
         if not user_ll:
             return 0.0
-        mid_lat = (user_ll[0] + dest_lat) / 2.0
-        mid_lon = (user_ll[1] + dest_lon) / 2.0
-        hour_local = self._local_hour_from_lon(now_utc, mid_lon)
-        base = self._band_score_db(band, mid_lat, mid_lon, now_utc.month)
-        if base is None:
-            base = self._band_score(band, distance_km, now_utc.hour)
-        diurnal = self._diurnal_weight(band, hour_local)
-        path_weight = self._path_band_weight(band, distance_km, hour_local)
-        score = float(base) * float(diurnal) * float(path_weight)
-        return max(0.0, min(100.0, score))
+        return self._prop_service.modeled_band_score(
+            band=band,
+            user_ll=user_ll,
+            dest_lat=dest_lat,
+            dest_lon=dest_lon,
+            now_utc=now_utc,
+            distance_km=distance_km,
+        )
 
     def _band_score_db(self, band: str, lat: float, lon: float, month: int) -> Optional[float]:
-        score = self._lookup_db_score(band, lat, lon, month)
-        if score is None:
-            return None
-        if score <= 1.0:
-            return max(0.0, min(100.0, score * 100.0))
-        return max(0.0, min(100.0, score))
+        return self._prop_service.band_score_db(band, lat, lon, month)
 
     def _diurnal_weight(self, band: str, hour_local: int) -> float:
-        profiles = self._load_prop_profiles()
-        prof = profiles.get(band, {})
-        day_factor = float(prof.get("day", 0.8))
-        night_factor = float(prof.get("night", 0.8))
-        is_day = 6 <= hour_local < 18
-        return day_factor if is_day else night_factor
+        return self._prop_service.diurnal_weight(band, hour_local)
 
     def _stations_for_region(self, region_id: str) -> List[StationPoint]:
         region_id = (region_id or "").strip().upper()
@@ -2279,6 +2899,201 @@ class StationsMapTab(QWidget):
         if not state_abbr:
             return None
         return STATE_CENTERS.get(state_abbr)
+
+    def _normalize_state_abbr(self, value: str) -> str:
+        state = (value or "").strip().upper()
+        if not state:
+            return ""
+        if len(state) <= 2:
+            return state
+        if state in US_STATE_ABBR_FROM_NAME:
+            return US_STATE_ABBR_FROM_NAME[state]
+        if state in CANADA_PROV_ABBR_FROM_NAME:
+            return CANADA_PROV_ABBR_FROM_NAME[state]
+        return ""
+
+    def _points_for_region_lower48(self, region_id: str) -> List[tuple[float, float]]:
+        region_id = (region_id or "").strip().upper()
+        if not region_id:
+            return []
+        states = FEMA_REGIONS.get(region_id, [])
+        return [STATE_CENTERS[s] for s in states if s in LOWER48_STATES and s in STATE_CENTERS]
+
+    def _operator_target_point(self, callsign: str) -> tuple[Optional[tuple[float, float]], str]:
+        callsign = (callsign or "").strip().upper()
+        if not callsign:
+            return None, ""
+        for row in self.operator_rows:
+            cs = (row.get("callsign") or "").strip().upper()
+            if cs != callsign:
+                continue
+            grid = (row.get("grid") or "").strip().upper()
+            state = self._normalize_state_abbr(row.get("state") or "")
+            ll = maidenhead_to_latlon(grid) if grid else None
+            if ll:
+                return ll, state
+            if state and state in STATE_CENTERS and state in LOWER48_STATES:
+                return STATE_CENTERS[state], state
+            return None, state
+        return None, ""
+
+    def _prop_target_context(self) -> Dict[str, object]:
+        target_type = "REGION"
+        target_value = ""
+        if self.settings:
+            try:
+                target_type = (self.settings.get("prop_target_type", "REGION") or "REGION").strip().upper()
+            except Exception:
+                target_type = "REGION"
+            try:
+                target_value = (self.settings.get("prop_target_value", "") or "").strip().upper()
+            except Exception:
+                target_value = ""
+        if target_type not in {"REGION", "STATE", "OPERATOR"}:
+            target_type = "REGION"
+        if target_type == "STATE":
+            target_value = self._normalize_state_abbr(target_value)
+        context: Dict[str, object] = {
+            "type": target_type,
+            "value": target_value,
+            "label": "National",
+            "region_id": "",
+            "state_abbr": "",
+            "point": None,
+        }
+
+        # Default/fallback target: operator state -> FEMA region.
+        operator_state = ""
+        if self.settings:
+            try:
+                operator_state = self._normalize_state_abbr(self.settings.get("operator_state", "") or "")
+            except Exception:
+                operator_state = ""
+        fallback_region = STATE_TO_FEMA_REGION.get(operator_state, "")
+
+        if target_type == "REGION":
+            if target_value in {"ALL", "NATIONAL"}:
+                context["label"] = "National"
+                context["value"] = "ALL"
+                return context
+            region_id = target_value if target_value in FEMA_REGIONS else fallback_region
+            if region_id:
+                context["label"] = f"Region {region_id}"
+                context["region_id"] = region_id
+            return context
+
+        if target_type == "STATE":
+            state_abbr = target_value if target_value in STATE_CENTERS and target_value in LOWER48_STATES else ""
+            if state_abbr:
+                context["label"] = state_abbr
+                context["state_abbr"] = state_abbr
+                context["region_id"] = STATE_TO_FEMA_REGION.get(state_abbr, "")
+            elif fallback_region:
+                context["label"] = f"Region {fallback_region}"
+                context["region_id"] = fallback_region
+            return context
+
+        callsign = target_value
+        if callsign:
+            context["label"] = callsign
+            ll, state_abbr = self._operator_target_point(callsign)
+            if ll:
+                context["point"] = ll
+            if state_abbr:
+                context["state_abbr"] = state_abbr
+                context["region_id"] = STATE_TO_FEMA_REGION.get(state_abbr, "")
+            return context
+        if fallback_region:
+            context["label"] = f"Region {fallback_region}"
+            context["region_id"] = fallback_region
+        return context
+
+    def _best_band_for_state(self, state_scores: Dict[str, Dict], state_abbr: str) -> tuple[str, float]:
+        state_abbr = (state_abbr or "").strip().upper()
+        bands = state_scores.get(state_abbr, {}).get("bands", {})
+        if not bands:
+            return ("", 0.0)
+        best_band = max(bands.items(), key=lambda kv: kv[1])
+        return best_band[0], float(best_band[1])
+
+    def _best_band_overall_states(self, state_scores: Dict[str, Dict], states: Optional[List[str]] = None) -> tuple[str, float]:
+        if not state_scores:
+            return ("", 0.0)
+        selected_states = states if states else list(state_scores.keys())
+        totals: Dict[str, List[float]] = {b: [] for b in PROP_BANDS}
+        for state in selected_states:
+            entry = state_scores.get(state, {})
+            for band, score in (entry.get("bands") or {}).items():
+                if band in totals:
+                    totals[band].append(float(score))
+        best_band = ""
+        best_score = 0.0
+        for band, vals in totals.items():
+            if not vals:
+                continue
+            avg = sum(vals) / len(vals)
+            if avg > best_score:
+                best_score = avg
+                best_band = band
+        return best_band, best_score
+
+    def _best_band_for_target(
+        self,
+        target_ctx: Dict[str, object],
+        region_scores: Dict[str, Dict],
+        state_scores: Dict[str, Dict],
+    ) -> tuple[str, float]:
+        mode = self._effective_prop_mode()
+        user_ll = self._get_user_latlon()
+        origin_grid6 = self._get_origin_grid6()
+        blend_settings = self._blend_settings_snapshot() if mode == "blended" else None
+        target_type = str(target_ctx.get("type") or "REGION").upper()
+        target_value = str(target_ctx.get("value") or "").upper()
+        region_id = str(target_ctx.get("region_id") or "").upper()
+        state_abbr = str(target_ctx.get("state_abbr") or "").upper()
+        point = target_ctx.get("point")
+
+        # Modeled/blended parity path: use the same point-set model used by ControlFreq.
+        if mode in {"model", "blended"} and user_ll:
+            points: List[tuple[float, float]] = []
+            target_id = ""
+            if target_type == "REGION" and region_id:
+                points = self._points_for_region_lower48(region_id)
+                target_id = region_id
+            elif target_type == "STATE" and state_abbr in STATE_CENTERS and state_abbr in LOWER48_STATES:
+                points = [STATE_CENTERS[state_abbr]]
+                target_id = state_abbr
+            elif target_type == "OPERATOR" and isinstance(point, tuple):
+                points = [point]
+                target_id = target_value
+            if not points:
+                points = [STATE_CENTERS[s] for s in LOWER48_STATES if s in STATE_CENTERS]
+                target_id = "NATIONAL"
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            top = self._prop_service.top_bands_modeled(
+                bands=PROP_BANDS,
+                mid_utc=now_utc,
+                user_ll=user_ll,
+                points=points,
+                origin_grid6=origin_grid6,
+                target_type=target_type,
+                target_id=target_id,
+                blend_settings=blend_settings,
+                limit=1,
+            )
+            if top:
+                return top[0][0], float(top[0][1])
+
+        if target_type == "REGION" and region_id:
+            return self._best_band_for_region(region_scores, region_id)
+        if target_type == "STATE" and state_abbr:
+            return self._best_band_for_state(state_scores, state_abbr)
+        if target_type == "OPERATOR":
+            if state_abbr:
+                return self._best_band_for_state(state_scores, state_abbr)
+            if region_id:
+                return self._best_band_for_region(region_scores, region_id)
+        return self._best_band_overall_states(state_scores, states=LOWER48_STATES)
 
     def _adaptive_adjustment(self, band: str, region_id: str) -> float:
         if not self.prop_adaptive_enabled:
@@ -2673,18 +3488,18 @@ class StationsMapTab(QWidget):
                 return name
         return ""
 
-    def _update_prop_badge(self, region_filter: str, best_band: str, best_score: float) -> None:
+    def _update_prop_badge(self, target_label: str, best_band: str, best_score: float) -> None:
         if self.prop_badge is None:
             return
         scheduled = self._freq_to_band(current_scheduler_freq(self.window()))
         level = self._score_level(best_score)
-        region_label = region_filter if region_filter else "National"
+        display_label = (target_label or "National").strip()
         if not best_band:
             self.prop_badge.setText("Best Band: --")
             self.prop_badge.setStyleSheet("font-weight: bold; color: #666;")
             return
         text_lines = [
-            f"Filter: {region_label}",
+            f"Target: {display_label}",
             f"Best Now: {best_band} ({level.upper()})",
         ]
         if scheduled and scheduled != best_band:
@@ -2748,6 +3563,10 @@ class StationsMapTab(QWidget):
             html = "<html><body><h3>No station data to display.</h3></body></html>"
             if self.web is not None:
                 self._map_initialized = False
+                if self._map_stack is not None:
+                    self._map_stack.setCurrentIndex(0)
+                if self._map_loading_label is not None:
+                    self._map_loading_label.setText("Loading map...")
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
                     f.write(html.encode("utf-8"))
                 self._map_file = Path(f.name)
@@ -2779,33 +3598,37 @@ class StationsMapTab(QWidget):
             group_filter = self.group_filter_combo.currentData() or ""
         if hasattr(self, "region_filter_combo"):
             region_filter = self.region_filter_combo.currentData() or ""
+        target_ctx = self._prop_target_context()
+        target_label = str(target_ctx.get("label") or "National")
         prop_region_scores: Dict[str, Dict] = {}
         prop_state_scores: Dict[str, Dict] = {}
         if self.prop_overlay_enabled:
-            prop_region_scores = self._compute_region_scores(region_filter)
+            # Keep overlay data broad; link filters are independent from propagation target.
+            prop_region_scores = self._compute_region_scores("")
             prop_state_scores = self._compute_state_scores()
-            if region_filter:
-                best_band, best_score = self._best_band_for_region(prop_region_scores, region_filter)
-            else:
-                best_band, best_score = self._best_band_overall(prop_region_scores)
-            self._update_prop_badge(region_filter, best_band, best_score)
-            if region_filter != self._last_prop_region_filter:
+            best_band, best_score = self._best_band_for_target(target_ctx, prop_region_scores, prop_state_scores)
+            self._update_prop_badge(target_label, best_band, best_score)
+            target_sig = f"{target_ctx.get('type','')}:{target_ctx.get('value','')}"
+            if target_sig != self._last_prop_region_filter:
                 force_reload = True
         else:
-            self._update_prop_badge(region_filter, "", 0.0)
-        self._last_prop_region_filter = region_filter
+            self._update_prop_badge(target_label, "", 0.0)
+            target_sig = f"{target_ctx.get('type','')}:{target_ctx.get('value','')}"
+        self._last_prop_region_filter = target_sig
 
         # init stats and links
         stats_lookup: Dict[str, Dict] = {}
         links: List[Dict] = []
+        sitrep_mode = bool(self._sitrep_status_only_enabled)
         band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
         my_call = ""
         try:
             my_call = (self.settings.get("operator_callsign", "") or "").upper()
         except Exception:
             my_call = ""
-        if self._links_active():
+        if not sitrep_mode and self._links_active():
             relay_target = (self.relay_target or "").strip().upper()
+            reachable_filter = self._now_reachable_callsigns if self._now_reachable_enabled else None
 
             links, stats_lookup = self._load_js8_links(
                 band_filter=band_filter,
@@ -2814,6 +3637,7 @@ class StationsMapTab(QWidget):
                 relay_target=relay_target or None,
                 group_filter=group_filter,
                 region_filter=region_filter,
+                reachable_callsigns=reachable_filter,
                 max_age_sec=self.recency_seconds,
             )
             links.extend(
@@ -2823,6 +3647,7 @@ class StationsMapTab(QWidget):
                     link_selection=selection,
                     group_filter=group_filter,
                     region_filter=region_filter,
+                    reachable_callsigns=reachable_filter,
                     max_age_sec=self.recency_seconds,
                 )
             )
@@ -2833,6 +3658,7 @@ class StationsMapTab(QWidget):
         varac_all = self._load_varac_stats(max_age_sec=None)
         js8_all = self._load_js8_presence()
         fldigi_calls = self._load_fldigi_presence()
+        spotter_status_lookup = self._load_spotter_station_status()
 
         # Spread overlapping stations with the same base lat/lon
         markers = []
@@ -2849,17 +3675,22 @@ class StationsMapTab(QWidget):
         for cs in varac_stats.keys():
             if cs:
                 traffic_calls.add(cs)
-        show_all_stations = not self._links_active()
+        show_all_stations = (not self._links_active()) or sitrep_mode
         recent_calls: Set[str] = set()
-        if show_all_stations and self.recency_seconds:
+        if show_all_stations and self.recency_seconds and not sitrep_mode:
             band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
             recent_calls = self._load_recent_calls(self.recency_seconds, band_filter=band_filter)
         for pt in self.stations:
+            cs_upper = pt.callsign.upper()
+            if sitrep_mode:
+                status_data = spotter_status_lookup.get(cs_upper, {})
+                if (status_data.get("status_key") or "").strip().lower() not in {"red", "yellow", "green"}:
+                    continue
             if not show_all_stations:
-                if pt.callsign.upper() not in traffic_calls and pt.callsign.upper() != my_call:
+                if cs_upper not in traffic_calls and cs_upper != my_call:
                     continue
             elif recent_calls:
-                if pt.callsign.upper() not in recent_calls and pt.callsign.upper() != my_call:
+                if cs_upper not in recent_calls and cs_upper != my_call:
                     continue
             key = (round(pt.lat, 4), round(pt.lon, 4))
             base_map.setdefault(key, []).append(pt)
@@ -2898,6 +3729,19 @@ class StationsMapTab(QWidget):
                     f"Group: {pt.group}" if pt.group else "",
                     f"Modes: {', '.join(modes)}" if modes else "",
                 ]
+                reach_meta = self._now_reachable_meta.get(cs_upper, {}) if self._now_reachable_enabled else {}
+                qsy_text = (reach_meta.get("qsy_text") or "").strip() if isinstance(reach_meta, dict) else ""
+                qsy_soon = bool(reach_meta.get("qsy_soon")) if isinstance(reach_meta, dict) else False
+                spotter_data = spotter_status_lookup.get(cs_upper, {})
+                spotter_status_key = str(spotter_data.get("status_key") or "unknown").strip().lower()
+                if spotter_status_key not in {"red", "yellow", "green", "unknown"}:
+                    spotter_status_key = "unknown"
+                spotter_status_label = str(spotter_data.get("status_label") or "").strip()
+                spotter_status_ts = _fmt_ts(spotter_data.get("updated_utc_ts", 0))
+                spotter_status_source = str(spotter_data.get("status_source") or "").strip()
+                spotter_status_source_detail = str(spotter_data.get("status_source_detail") or "").strip()
+                if qsy_text:
+                    detail_lines.append(f"Schedule: {qsy_text}")
                 # Filter empty lines
                 detail_lines = [d for d in detail_lines if d]
                 title = "\n".join(detail_lines)
@@ -2920,6 +3764,13 @@ class StationsMapTab(QWidget):
                         "varac_last_seen": _fmt_ts(vstats.get("last_seen_ts", 0)),
                         "varac_last_band": vstats.get("last_band", ""),
                         "varac_avg_snr": vstats.get("avg_snr"),
+                        "qsy_soon": qsy_soon,
+                        "qsy_text": qsy_text,
+                        "spotter_status_key": spotter_status_key,
+                        "spotter_status_label": spotter_status_label,
+                        "spotter_status_ts": spotter_status_ts,
+                        "spotter_status_source": spotter_status_source,
+                        "spotter_status_source_detail": spotter_status_source_detail,
                     }
                 )
 
@@ -2963,6 +3814,10 @@ class StationsMapTab(QWidget):
         if self.web is not None:
             self._last_map_config = config_sig
             self._map_initialized = False
+            if self._map_stack is not None:
+                self._map_stack.setCurrentIndex(0)
+            if self._map_loading_label is not None:
+                self._map_loading_label.setText("Loading map...")
             self._pending_map_payload = {"markers": markers, "links": links}
             with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
                 f.write(html.encode("utf-8"))
@@ -2978,6 +3833,13 @@ class StationsMapTab(QWidget):
     def _on_map_load_finished(self, ok: bool) -> None:
         self._map_initialized = bool(ok)
         self._map_load_ok = bool(ok)
+        if self._map_stack is not None:
+            if ok:
+                self._map_stack.setCurrentIndex(1)
+            else:
+                self._map_stack.setCurrentIndex(0)
+                if self._map_loading_label is not None:
+                    self._map_loading_label.setText("Map failed to load.")
         if not ok or self.web is None:
             return
         if self._pending_map_payload:
@@ -3059,6 +3921,7 @@ class StationsMapTab(QWidget):
         except Exception:
             ui_theme = ""
         is_dark = theme.get("bg") == "#0F1216" or ui_theme == "dark"
+        now_reachable_enabled = str(bool(self._now_reachable_enabled)).lower()
         markers_json = json.dumps(markers)
         links_json = json.dumps(links)
         init_lat = initial_view.get("lat") if initial_view else 45
@@ -3554,6 +4417,13 @@ function addGridLabels(res, level, bounds, maxLabels) {
         '<span style="color:#fbc02d;">&#9632;</span> -5 to &lt;0<br/>' +
         '<span style=\"color:#f57c00;\">&#9632;</span> -10 to &lt;-5<br/>' +
         '<span style=\"color:#c62828;\">&#9632;</span> &lt; -10' +
+        '<br/><br/><b>SitRep Status</b><br/>' +
+        '<span style="color:#43A047;">&#9679;</span> Functioning<br/>' +
+        '<span style="color:#FBC02D;">&#9679;</span> Partially Functioning<br/>' +
+        '<span style="color:#D32F2F;">&#9679;</span> Not Functioning<br/>' +
+        '<span style="color:#4FC3F7;">&#9679;</span> Unknown / No Report' +
+        ({now_reachable_enabled} ? ('<br/><br/><b>Schedule Risk</b><br/>' +
+        '<span style=\"color:#7E57C2;\">&#9679;</span> QSY &lt;10m (Now Reachable)') : '') +
         ({'true' if prop_overlay_enabled else 'false'} ? ('<br/><br/><b>Best Band Now</b><br/>' +
         Object.keys(window.propBandColors).map(k => '<span style="color:' + window.propBandColors[k] + ';">&#9632;</span> ' + k).join('<br/>')) : '');
       return div;
@@ -3566,11 +4436,28 @@ function addGridLabels(res, level, bounds, maxLabels) {
     function renderMarkers(list) {{
       stationsLayer.clearLayers();
       list.forEach(m => {{
+        const qsySoon = !!m.qsy_soon;
+        const statusKey = (m.spotter_status_key || 'unknown').toLowerCase();
+        const markerFillByStatus = {{
+          red: '#D32F2F',
+          yellow: '#FBC02D',
+          green: '#43A047',
+          unknown: '#4FC3F7'
+        }};
+        const markerStrokeByStatus = {{
+          red: '#8E0000',
+          yellow: '#8D6E00',
+          green: '#1B5E20',
+          unknown: '#1976D2'
+        }};
+        const baseStroke = markerStrokeByStatus[statusKey] || markerStrokeByStatus.unknown;
+        const markerStroke = qsySoon ? '#5E35B1' : baseStroke;
+        const markerFill = markerFillByStatus[statusKey] || markerFillByStatus.unknown;
         const circle = L.circleMarker([m.lat, m.lon], {{
-          radius: 6,
-          color: '#1976d2',
+          radius: qsySoon ? 7 : 6,
+          color: markerStroke,
           weight: 1,
-          fillColor: '#4FC3F7',
+          fillColor: markerFill,
           fillOpacity: 0.8,
           pane: 'stationsPane'
         }});
@@ -3585,7 +4472,11 @@ function addGridLabels(res, level, bounds, maxLabels) {
           (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/>JS8 Avg SNR: ' + m.avg_snr_excl_my.toFixed(1) : '') +
           (m.varac_last_seen ? '<br/>VarAC: ' + m.varac_last_seen : '') +
           (m.varac_last_band ? '<br/>VarAC: ' + m.varac_last_band : '') +
-          (m.varac_avg_snr !== undefined && m.varac_avg_snr !== null ? '<br/>VarAC Avg SNR: ' + m.varac_avg_snr.toFixed(1) : '');
+          (m.varac_avg_snr !== undefined && m.varac_avg_snr !== null ? '<br/>VarAC Avg SNR: ' + m.varac_avg_snr.toFixed(1) : '') +
+          (m.spotter_status_label ? '<br/>SitRep: ' + m.spotter_status_label : '') +
+          (m.spotter_status_source ? '<br/>Source: ' + m.spotter_status_source + (m.spotter_status_source_detail ? ' (' + m.spotter_status_source_detail + ')' : '') : '') +
+          (m.spotter_status_ts ? '<br/>SitRep Updated: ' + m.spotter_status_ts : '') +
+          (m.qsy_text ? '<br/>Schedule: ' + m.qsy_text : '');
         circle.on('mouseover', function() {{
           this.bringToFront();
           showDetail(tipText);
@@ -3649,12 +4540,13 @@ function addGridLabels(res, level, bounds, maxLabels) {
 
     def _on_show_states_changed(self, state):
         self.show_states = bool(state)
+        self._sync_city_pop_enabled()
         self._save_display_preferences()
         self._render_map()
 
     def _on_show_cities_changed(self, state):
         self.show_cities = bool(state)
-        self.city_pop_combo.setEnabled(self.show_cities)
+        self._sync_city_pop_enabled()
         self.show_city_labels = self.show_cities
         self._save_display_preferences()
         self._render_map()
@@ -3678,13 +4570,21 @@ function addGridLabels(res, level, bounds, maxLabels) {
         except Exception:
             val = 100000
         self.city_pop_min = val
-        if self.show_cities:
+        if self.show_cities or self.show_states:
             self._render_map()
         self._save_display_preferences()
 
     def _on_link_mode_changed(self, idx: int):
         data = self.link_mode_combo.itemData(idx) if hasattr(self, "link_mode_combo") else ("off", "")
         self.link_mode, self.link_value = self._parse_link_selection(data)
+        if self._now_reachable_enabled and (self.link_mode or "").lower() == "off":
+            try:
+                self.link_mode_combo.blockSignals(True)
+                self.link_mode_combo.setCurrentText("My Station")
+                self.link_mode_combo.blockSignals(False)
+                self.link_mode, self.link_value = self._parse_link_selection(self.link_mode_combo.currentData())
+            except Exception:
+                pass
         if (self.link_mode or "").lower() == "off":
             self.relay_target = ""
             try:
@@ -3727,12 +4627,77 @@ function addGridLabels(res, level, bounds, maxLabels) {
         self._render_map()
 
     def _on_relay_target_changed(self, text: str):
-        self.relay_target = (text or "").strip().upper()
+        normalized = self._relay_target_callsign_from_text(text)
+        if normalized == self.relay_target:
+            return
+        self.relay_target = normalized
         self._render_map()
 
     def _on_prop_overlay_changed(self, state):
         self.prop_overlay_enabled = bool(state)
         self._save_display_preferences()
+        self._render_map()
+
+    def _on_prop_mode_changed(self, _idx: int) -> None:
+        if self.prop_mode_combo is None:
+            return
+        mode = self.prop_mode_combo.currentData() or self.prop_mode_combo.currentText()
+        mode = str(mode or "blended").strip().lower()
+        if mode == "adaptive":
+            mode = "actual"
+        if mode not in {"model", "actual", "blended"}:
+            mode = "blended"
+        self.prop_mode = mode
+        self._save_display_preferences()
+        self._render_map()
+
+    def _on_prop_window_changed(self, _idx: int) -> None:
+        if self.prop_window_combo is None:
+            return
+        try:
+            hours = int(self.prop_window_combo.currentData())
+        except Exception:
+            hours = 6
+        self.prop_window_hours = hours
+        self._save_display_preferences()
+        self._render_map()
+
+    def _on_prop_target_type_changed(self, _idx: int) -> None:
+        if self._prop_target_syncing or self.prop_target_type_combo is None or not self.settings:
+            return
+        target_type = (self.prop_target_type_combo.currentData() or "REGION").strip().upper()
+        self._prop_target_syncing = True
+        try:
+            self._set_prop_target_value_options(target_type, "")
+            value = (self.prop_target_value_combo.currentText() if self.prop_target_value_combo is not None else "").strip().upper()
+            self.settings.set_many(
+                {
+                    "prop_target_type": target_type,
+                    "prop_target_value": value,
+                }
+            )
+        except Exception as e:
+            log.debug("StationsMap: propagation target type change failed: %s", e)
+        finally:
+            self._prop_target_syncing = False
+        self._render_map()
+
+    def _on_prop_target_value_changed(self, text: str) -> None:
+        if self._prop_target_syncing or self.prop_target_type_combo is None or not self.settings:
+            return
+        target_type = (self.prop_target_type_combo.currentData() or "REGION").strip().upper()
+        value = (text or "").strip().upper()
+        if target_type == "REGION" and value == "NATIONAL":
+            value = "ALL"
+        try:
+            self.settings.set_many(
+                {
+                    "prop_target_type": target_type,
+                    "prop_target_value": value,
+                }
+            )
+        except Exception as e:
+            log.debug("StationsMap: propagation target value change failed: %s", e)
         self._render_map()
 
     def _on_prop_adaptive_changed(self, state):
@@ -4752,3 +5717,4 @@ class JS8LogLinkIndexer:
             return None
         p = Path(path_txt)
         return p if p.exists() else None
+

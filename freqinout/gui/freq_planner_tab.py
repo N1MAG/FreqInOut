@@ -91,7 +91,7 @@ class FreqPlannerTab(QWidget):
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
-        self.time_toggle_btn = QPushButton("Showing: UTC")
+        self.time_toggle_btn = QPushButton("Showing: Local" if self._show_local else "Showing: UTC")
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)

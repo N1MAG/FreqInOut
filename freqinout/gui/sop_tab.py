@@ -124,6 +124,7 @@ class SOPTab(QWidget):
 
         header = QHBoxLayout()
         self.profile_combo = QComboBox()
+        self.profile_combo.setPlaceholderText("Select existing or add new...")
         self.profile_combo.currentIndexChanged.connect(self._on_profile_selected)
         header.addWidget(QLabel("SOP:"))
         header.addWidget(self.profile_combo, stretch=1)
@@ -389,11 +390,13 @@ class SOPTab(QWidget):
                     self.profile_combo.setCurrentIndex(i)
                     self._on_profile_selected(i)
                     return
-        self.profile_combo.setCurrentIndex(0)
+        self.profile_combo.setCurrentIndex(-1)
         self._new_profile()
 
     def _on_profile_selected(self, idx: int) -> None:
         if self._loading_ui:
+            return
+        if idx < 0:
             return
         profile_id = self.profile_combo.itemData(idx)
         if not profile_id:

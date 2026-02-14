@@ -176,7 +176,7 @@ class DailyScheduleTab(QWidget):
         self.local_label = QLabel()
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
-        self.time_toggle_btn = QPushButton("Showing: UTC")
+        self.time_toggle_btn = QPushButton("Showing: Local" if self._show_local else "Showing: UTC")
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
@@ -316,15 +316,16 @@ class DailyScheduleTab(QWidget):
         self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
 
     def _set_headers(self):
+        mode_label = "Local" if self._show_local else "UTC"
         headers = [
             "Selected",
-            "Day",
+            f"Day ({mode_label})",
             "Group Name",
             "Mode",
             "Band",
             "Freq (MHz)",
-            "Start",
-            "End",
+            f"Start ({mode_label})",
+            f"End ({mode_label})",
             "Auto-Tune",
         ]
         self.table.setColumnCount(len(headers))
@@ -1163,6 +1164,8 @@ class DailyScheduleTab(QWidget):
         - SSB: no auto-start
         """
         if getattr(self, "_suppress_autostart", False):
+            return
+        if self._is_truthy(self.settings.get("launch_control_enabled", True)):
             return
 
         mode = (mode or "").strip().upper()

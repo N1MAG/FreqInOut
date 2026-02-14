@@ -32,7 +32,8 @@ def ensure_tables(tables: Iterable[str]) -> None:
         tbl.db.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(tbl.db)
         try:
-            conn.execute(tbl.ddl)
+            if tbl.ddl.strip():
+                conn.executescript(tbl.ddl)
             conn.commit()
             print(f"[init] ensured {name} in {tbl.db}")
         finally:

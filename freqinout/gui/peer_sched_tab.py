@@ -124,6 +124,8 @@ class PeerSchedTab(QWidget):
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Filter by callsign/name/groups/band/mode/freq")
         filter_row.addWidget(self.search_edit, stretch=1)
+        self.clear_filters_btn = QPushButton("Clear Filters")
+        filter_row.addWidget(self.clear_filters_btn)
         filter_row.addStretch()
         layout.addLayout(filter_row)
 
@@ -131,6 +133,7 @@ class PeerSchedTab(QWidget):
         self.table = QTableWidget(0, len(self.COLS))
         self._overlap_col = self.COLS.index("OVERLAP")
         self._set_time_headers()
+        self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -143,10 +146,12 @@ class PeerSchedTab(QWidget):
         self.region_filter.currentIndexChanged.connect(self._apply_filters)
         self.group_filter.currentIndexChanged.connect(self._apply_filters)
         self.search_edit.textChanged.connect(self._apply_filters)
+        self.clear_filters_btn.clicked.connect(self._clear_filters)
         self.delete_callsign_combo.currentIndexChanged.connect(self._update_delete_button_state)
         self.delete_btn.clicked.connect(self._delete_selected)
         self.tz_toggle_btn.clicked.connect(self._toggle_timezone_view)
         self.table.cellClicked.connect(self._on_table_cell_clicked)
+        self.tz_toggle_btn.setText("Showing: Local" if self._show_local_times else "Showing: UTC")
         self._apply_theme()
         self._update_delete_button_state()
 
@@ -322,6 +327,11 @@ class PeerSchedTab(QWidget):
                     continue
             filtered.append(row)
 
+        was_sorting = self.table.isSortingEnabled()
+        sort_col = self.table.horizontalHeader().sortIndicatorSection()
+        sort_order = self.table.horizontalHeader().sortIndicatorOrder()
+        if was_sorting:
+            self.table.setSortingEnabled(False)
         self.table.setRowCount(len(filtered))
         for r, row in enumerate(filtered):
             cs = row.get("callsign", "")
@@ -354,6 +364,10 @@ class PeerSchedTab(QWidget):
                     item.setToolTip("\n".join(self._format_overlap_ranges(overlap_ranges)))
                     item.setData(Qt.UserRole, overlap_ranges)
                 self.table.setItem(r, c, item)
+        if was_sorting:
+            self.table.setSortingEnabled(True)
+            if 0 <= sort_col < self.table.columnCount():
+                self.table.sortItems(sort_col, sort_order)
 
     # ---------- helpers ----------
 
@@ -567,11 +581,10 @@ class PeerSchedTab(QWidget):
     def _set_time_headers(self) -> None:
         cols = list(self.COLS)
         if self._show_local_times:
-            tz_abbrev = datetime.datetime.now(self._current_timezone()).tzname() or "LOCAL"
-            cols[4] = f"DAY ({tz_abbrev})"
-            cols[5] = f"START ({tz_abbrev})"
-            cols[6] = f"END ({tz_abbrev})"
-            cols[self._overlap_col] = f"OVERLAP ({tz_abbrev})"
+            cols[4] = "DAY (Local)"
+            cols[5] = "START (Local)"
+            cols[6] = "END (Local)"
+            cols[self._overlap_col] = "OVERLAP (Local)"
         else:
             cols[4] = "DAY (UTC)"
             cols[5] = "START UTC"
@@ -589,7 +602,14 @@ class PeerSchedTab(QWidget):
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
         self.delete_btn.setStyleSheet(button_style("muted", theme))
+        self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
         self._update_timezone_button_style()
+
+    def _clear_filters(self) -> None:
+        self.callsign_filter.setCurrentIndex(0)
+        self.region_filter.setCurrentIndex(0)
+        self.group_filter.setCurrentIndex(0)
+        self.search_edit.clear()
 
     def _update_delete_button_state(self) -> None:
         theme = resolve_theme(self.settings)

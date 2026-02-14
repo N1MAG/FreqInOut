@@ -211,7 +211,7 @@ class JS8ControlClient(JS8StatusClient):
 
 
 class VarACStatusClient:
-    """VarAC busy check using VarAC_traffic.log in the install folder."""
+    """VarAC busy check using VarAC traffic/main logs in the install folder."""
 
     def __init__(self) -> None:
         self.settings = SettingsManager()
@@ -243,6 +243,7 @@ class VarACStatusClient:
         now_local = datetime.datetime.now()
         events = self._split_events(text)
         callsign = self._operator_callsign()
+        last_connecting: Optional[datetime.datetime] = None
         last_connected: Optional[datetime.datetime] = None
         last_disconnected: Optional[datetime.datetime] = None
         last_incoming: Optional[datetime.datetime] = None
@@ -275,6 +276,9 @@ class VarACStatusClient:
             if "NO LUCK." in upper:
                 last_no_luck = ts_val or now_local
                 continue
+            if "CONNECTING " in upper:
+                last_connecting = ts_val or now_local
+                continue
             if "CONNECTED TO" in upper:
                 last_connected = ts_val or now_local
                 continue
@@ -286,6 +290,14 @@ class VarACStatusClient:
                 last_transfer = ts_val or now_local
                 continue
             if "RECEIVING FILE TRANSFER DATA" in upper:
+                last_transfer = ts_val or now_local
+                continue
+            if (
+                "SENDFILE HEADER RECEIVED" in upper
+                or "INCOMING FILE PACKET" in upper
+                or "CONVERTING FILE" in upper
+                or "WRITING FILE TO DISK" in upper
+            ):
                 last_transfer = ts_val or now_local
                 continue
             if "FILE SUCCESSFULLY RECEIVED" in upper or "FILE SUCCESSFULLY SENT" in upper:
@@ -305,6 +317,10 @@ class VarACStatusClient:
             last_wait_freq, last_connected
         )
         connected_active = _is_newer(last_connected, last_disconnected)
+        connecting_active = (
+            _is_newer(last_connecting, last_disconnected)
+            and _is_newer(last_connecting, last_connected)
+        )
         incoming_active = (
             _is_newer(last_incoming, last_no_luck)
             and _is_newer(last_incoming, last_connected)
@@ -319,6 +335,7 @@ class VarACStatusClient:
 
         busy = bool(
             waiting_for_frequency
+            or connecting_active
             or connected_active
             or incoming_active
             or file_wait_active
@@ -328,6 +345,8 @@ class VarACStatusClient:
         reason = None
         if waiting_for_frequency:
             reason = "waiting_for_frequency"
+        elif connecting_active:
+            reason = "connecting"
         elif connected_active:
             reason = "connected"
         elif incoming_active:
@@ -345,33 +364,76 @@ class VarACStatusClient:
             "reason": reason,
         }
 
-    def _resolve_log_path(self) -> Optional[Path]:
+    def _resolve_log_paths(self) -> List[Path]:
         raw_install = (self.settings.get("varac_path", "") or "").strip()
         raw_db = (self.settings.get("varac_db_path", "") or "").strip()
-        base: Optional[Path] = None
+        bases: List[Path] = []
         if raw_install:
-            base = Path(raw_install)
+            bases.append(Path(raw_install))
         elif raw_db:
             p = Path(raw_db)
-            base = p.parent if p.is_file() or p.suffix.lower() == ".db" else p
-        if not base:
-            return None
-        return base / "VarAC_traffic.log"
+            bases.append(p.parent if p.is_file() or p.suffix.lower() == ".db" else p)
+        # Fallback: detect VarAC install folder from running process.
+        if not bases:
+            try:
+                for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
+                    try:
+                        name = (proc.info.get("name") or "").lower()
+                        exe = (proc.info.get("exe") or "").strip()
+                        if "varac" not in name and "varac" not in exe.lower():
+                            continue
+                        if exe:
+                            bases.append(Path(exe).parent)
+                            continue
+                        cmdline = proc.info.get("cmdline") or []
+                        first = str(cmdline[0]).strip() if cmdline else ""
+                        if first:
+                            bases.append(Path(first).parent)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        # De-duplicate while preserving order.
+        uniq_bases: List[Path] = []
+        seen: set[str] = set()
+        for base in bases:
+            key = str(base).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq_bases.append(base)
+
+        out: List[Path] = []
+        for base in uniq_bases:
+            for name in ("VarAC_traffic.log", "VarAC.log", "varalog.log"):
+                p = base / name
+                if p.exists():
+                    out.append(p)
+        return out
+
+    @staticmethod
+    def _read_tail(path: Path, max_bytes: int = 16384) -> str:
+        try:
+            with path.open("rb") as fh:
+                try:
+                    fh.seek(-max_bytes, 2)
+                except OSError:
+                    fh.seek(0)
+                return fh.read().decode("utf-8", errors="replace")
+        except Exception:
+            return ""
 
     def get_status(self) -> Dict[str, object]:
-        log_path = self._resolve_log_path()
-        if not log_path or not log_path.exists():
+        log_paths = self._resolve_log_paths()
+        if not log_paths:
             self._last_status = {"busy": False, "waiting_for_frequency": False, "reason": None}
             return self._last_status
         try:
-            # Read tail to avoid loading large logs
-            with log_path.open("rb") as fh:
-                try:
-                    fh.seek(-8192, 2)
-                except OSError:
-                    fh.seek(0)
-                tail = fh.read().decode("utf-8", errors="replace")
-            status = self._evaluate_status(tail)
+            # Read tails from available VarAC logs. Main and traffic logs carry
+            # different event types depending on VarAC version/settings.
+            chunks = [self._read_tail(p) for p in log_paths]
+            text = "\n".join([c for c in chunks if c])
+            status = self._evaluate_status(text)
             self._last_status = status
             return status
         except Exception as e:

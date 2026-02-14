@@ -171,6 +171,207 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> Set[str]:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    return {row[1] for row in cur.fetchall()}
+
+
+def _ensure_prop_contact_events(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prop_contact_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL,
+            ts_utc TEXT NOT NULL,
+            origin_callsign TEXT,
+            origin_grid6 TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            target_callsign TEXT,
+            target_grid6 TEXT,
+            band TEXT NOT NULL,
+            mode TEXT,
+            freq_hz REAL,
+            distance_km REAL,
+            outcome TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_ref TEXT,
+            inserted_utc TEXT NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "prop_contact_events",
+        {
+            "event_key": "TEXT",
+            "ts_utc": "TEXT",
+            "origin_callsign": "TEXT",
+            "origin_grid6": "TEXT",
+            "target_type": "TEXT",
+            "target_id": "TEXT",
+            "target_callsign": "TEXT",
+            "target_grid6": "TEXT",
+            "band": "TEXT",
+            "mode": "TEXT",
+            "freq_hz": "REAL",
+            "distance_km": "REAL",
+            "outcome": "TEXT",
+            "source": "TEXT",
+            "source_ref": "TEXT",
+            "inserted_utc": "TEXT",
+        },
+    )
+    cols = _table_columns(conn, "prop_contact_events")
+    if "id" in cols and "event_key" in cols:
+        # Safety: backfill missing keys in older/dev DBs before enforcing uniqueness.
+        cur.execute(
+            """
+            UPDATE prop_contact_events
+            SET event_key = 'legacy:' || id
+            WHERE event_key IS NULL OR TRIM(event_key) = ''
+            """
+        )
+    # Safety: normalize categorical fields to reduce downstream parsing edge-cases.
+    cur.execute("UPDATE prop_contact_events SET target_type = UPPER(TRIM(target_type)) WHERE target_type IS NOT NULL")
+    cur.execute("UPDATE prop_contact_events SET outcome = UPPER(TRIM(outcome)) WHERE outcome IS NOT NULL")
+    cur.execute("UPDATE prop_contact_events SET source = UPPER(TRIM(source)) WHERE source IS NOT NULL")
+    cur.execute("UPDATE prop_contact_events SET band = UPPER(TRIM(band)) WHERE band IS NOT NULL")
+    cur.execute("UPDATE prop_contact_events SET origin_grid6 = UPPER(TRIM(origin_grid6)) WHERE origin_grid6 IS NOT NULL")
+    cur.execute("UPDATE prop_contact_events SET target_grid6 = UPPER(TRIM(target_grid6)) WHERE target_grid6 IS NOT NULL")
+    # Safety: collapse duplicate event_key rows to avoid index creation failure.
+    cur.execute(
+        """
+        DELETE FROM prop_contact_events
+        WHERE id NOT IN (
+            SELECT MIN(id)
+            FROM prop_contact_events
+            GROUP BY event_key
+        )
+        """
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_prop_contact_events_event_key ON prop_contact_events(event_key)"
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_prop_contact_events_lookup
+        ON prop_contact_events(origin_grid6, target_type, target_id, band, ts_utc)
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_prop_contact_events_source ON prop_contact_events(source, ts_utc)"
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_prop_contact_events_inserted ON prop_contact_events(inserted_utc)")
+
+
+def _ensure_prop_ingest_checkpoint(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prop_ingest_checkpoint (
+            source TEXT PRIMARY KEY,
+            last_ts_utc TEXT,
+            last_source_ref TEXT,
+            updated_utc TEXT NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "prop_ingest_checkpoint",
+        {
+            "source": "TEXT",
+            "last_ts_utc": "TEXT",
+            "last_source_ref": "TEXT",
+            "updated_utc": "TEXT",
+        },
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_prop_ingest_checkpoint_updated ON prop_ingest_checkpoint(updated_utc)"
+    )
+
+
+def _ensure_prop_outcome_stats(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prop_outcome_stats (
+            key_hash TEXT PRIMARY KEY,
+            origin_grid6 TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            band TEXT NOT NULL,
+            mode TEXT,
+            month INTEGER NOT NULL,
+            utc_hour_bucket INTEGER NOT NULL,
+            distance_bucket TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            weighted_attempt REAL NOT NULL DEFAULT 0,
+            weighted_success REAL NOT NULL DEFAULT 0,
+            last_event_utc TEXT,
+            updated_utc TEXT NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "prop_outcome_stats",
+        {
+            "key_hash": "TEXT",
+            "origin_grid6": "TEXT",
+            "target_type": "TEXT",
+            "target_id": "TEXT",
+            "band": "TEXT",
+            "mode": "TEXT",
+            "month": "INTEGER",
+            "utc_hour_bucket": "INTEGER",
+            "distance_bucket": "TEXT",
+            "attempt_count": "INTEGER DEFAULT 0",
+            "success_count": "INTEGER DEFAULT 0",
+            "weighted_attempt": "REAL DEFAULT 0",
+            "weighted_success": "REAL DEFAULT 0",
+            "last_event_utc": "TEXT",
+            "updated_utc": "TEXT",
+        },
+    )
+    # Safety: keep stats in valid ranges after schema drift/manual edits.
+    cur.execute("UPDATE prop_outcome_stats SET month = MIN(12, MAX(1, CAST(month AS INTEGER))) WHERE month IS NOT NULL")
+    cur.execute(
+        """
+        UPDATE prop_outcome_stats
+        SET utc_hour_bucket = MIN(23, MAX(0, CAST(utc_hour_bucket AS INTEGER)))
+        WHERE utc_hour_bucket IS NOT NULL
+        """
+    )
+    cur.execute("UPDATE prop_outcome_stats SET attempt_count = MAX(0, CAST(attempt_count AS INTEGER))")
+    cur.execute("UPDATE prop_outcome_stats SET success_count = MAX(0, CAST(success_count AS INTEGER))")
+    cur.execute("UPDATE prop_outcome_stats SET weighted_attempt = MAX(0, weighted_attempt)")
+    cur.execute("UPDATE prop_outcome_stats SET weighted_success = MAX(0, weighted_success)")
+    cur.execute("UPDATE prop_outcome_stats SET band = UPPER(TRIM(band)) WHERE band IS NOT NULL")
+    cur.execute("UPDATE prop_outcome_stats SET origin_grid6 = UPPER(TRIM(origin_grid6)) WHERE origin_grid6 IS NOT NULL")
+    cur.execute("UPDATE prop_outcome_stats SET distance_bucket = UPPER(TRIM(distance_bucket)) WHERE distance_bucket IS NOT NULL")
+    cur.execute("UPDATE prop_outcome_stats SET target_type = UPPER(TRIM(target_type)) WHERE target_type IS NOT NULL")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_prop_outcome_stats_lookup
+        ON prop_outcome_stats(origin_grid6, target_type, target_id, band, month, utc_hour_bucket)
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_prop_outcome_stats_updated ON prop_outcome_stats(updated_utc)"
+    )
+
+
+def _ensure_propagation_outcome_tables(conn: sqlite3.Connection) -> None:
+    _ensure_prop_contact_events(conn)
+    _ensure_prop_ingest_checkpoint(conn)
+    _ensure_prop_outcome_stats(conn)
+
+
 def _ensure_nets_db() -> None:
     """
     Ensure nets DB (freqinout_nets.db) has required tables.
@@ -378,6 +579,9 @@ def _ensure_nets_db() -> None:
             },
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_hf_owner ON peer_hf_schedule(owner_callsign)")
+
+        # Propagation outcomes (offline scoring support)
+        _ensure_propagation_outcome_tables(conn)
 
         # SOP profiles/actions/state
         cur.execute(

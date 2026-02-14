@@ -2,9 +2,13 @@
 
 This page covers the command-line database administration tools.
 
+For a full reference of every delivered script (not just DB tools), see:
+
+- `docs/tools-and-scripts.md`
+
 ## Quick Start (recommended)
 
-Use the wrapper script from repo root:
+Use the wrapper script from repo root (recommended):
 
 ```bash
 bash tools/freqinout-db.sh status
@@ -63,3 +67,34 @@ python tools/db_tools.py --table js8_links --table-export ./js8_links.json
 
 - Settings DB: `config/freqinout.db`
 - Nets/ops DB: `config/freqinout_nets.db`
+
+## Propagation Regression Tests
+
+Run the offline propagation regression suite:
+
+```bash
+python -m unittest discover -s tests -p "test_propagation*.py" -v
+```
+
+Coverage includes:
+- ingest idempotency and checkpoint behavior
+- modeled fallback behavior with no history
+- overnight schedule window semantics
+- modeled parity path used by ControlFreq and Map
+
+## Propagation Calibration
+
+Calibrate blend/gate constants from your local historical outcome dataset:
+
+```bash
+python tools/propagation_calibrate.py --fast
+```
+
+Apply calibrated values to settings after reviewing the JSON report:
+
+```bash
+python tools/propagation_calibrate.py --apply
+```
+
+Output report default path:
+- `config/propagation/prop_calibration_recommendation.json`

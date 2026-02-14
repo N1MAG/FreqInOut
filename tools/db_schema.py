@@ -158,6 +158,83 @@ NETS_TABLES: Dict[str, TableDef] = {
         description="Peer shared HF schedule rows.",
         ddl="",
     ),
+    "prop_contact_events": TableDef(
+        name="prop_contact_events",
+        db=NETS_DB,
+        description="Raw historical propagation contact outcomes used for offline forecasting.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS prop_contact_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL,
+            ts_utc TEXT NOT NULL,
+            origin_callsign TEXT,
+            origin_grid6 TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            target_callsign TEXT,
+            target_grid6 TEXT,
+            band TEXT NOT NULL,
+            mode TEXT,
+            freq_hz REAL,
+            distance_km REAL,
+            outcome TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_ref TEXT,
+            inserted_utc TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_prop_contact_events_event_key
+            ON prop_contact_events(event_key);
+        CREATE INDEX IF NOT EXISTS idx_prop_contact_events_lookup
+            ON prop_contact_events(origin_grid6, target_type, target_id, band, ts_utc);
+        CREATE INDEX IF NOT EXISTS idx_prop_contact_events_source
+            ON prop_contact_events(source, ts_utc);
+        CREATE INDEX IF NOT EXISTS idx_prop_contact_events_inserted
+            ON prop_contact_events(inserted_utc);
+        """,
+    ),
+    "prop_ingest_checkpoint": TableDef(
+        name="prop_ingest_checkpoint",
+        db=NETS_DB,
+        description="Ingestion progress checkpoints for incremental propagation event backfill.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS prop_ingest_checkpoint (
+            source TEXT PRIMARY KEY,
+            last_ts_utc TEXT,
+            last_source_ref TEXT,
+            updated_utc TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_prop_ingest_checkpoint_updated
+            ON prop_ingest_checkpoint(updated_utc);
+        """,
+    ),
+    "prop_outcome_stats": TableDef(
+        name="prop_outcome_stats",
+        db=NETS_DB,
+        description="Aggregated propagation success stats by origin/target/time/band buckets.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS prop_outcome_stats (
+            key_hash TEXT PRIMARY KEY,
+            origin_grid6 TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            band TEXT NOT NULL,
+            mode TEXT,
+            month INTEGER NOT NULL,
+            utc_hour_bucket INTEGER NOT NULL,
+            distance_bucket TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            weighted_attempt REAL NOT NULL DEFAULT 0,
+            weighted_success REAL NOT NULL DEFAULT 0,
+            last_event_utc TEXT,
+            updated_utc TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_prop_outcome_stats_lookup
+            ON prop_outcome_stats(origin_grid6, target_type, target_id, band, month, utc_hour_bucket);
+        CREATE INDEX IF NOT EXISTS idx_prop_outcome_stats_updated
+            ON prop_outcome_stats(updated_utc);
+        """,
+    ),
 }
 
 ALL_TABLES: Dict[str, TableDef] = {**SETTINGS_TABLES, **NETS_TABLES}

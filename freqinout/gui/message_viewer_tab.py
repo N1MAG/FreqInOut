@@ -75,6 +75,7 @@ ORIGIN_EXTS = {
     "flmsg": {".b2s", ".k2s", ".txt", ".rtf", *IMAGE_EXTS},
     "flamp": {".b2s", ".k2s", ".txt", ".rtf"},
     "varac": {".txt", ".html", ".htm", ".b2s", ".k2s", *IMAGE_EXTS},
+    "bbs": set(SUPPORTED_EXT),
 }
 
 DEFAULT_WATCH_DIRS = [
@@ -149,7 +150,7 @@ class _FileScanWorker(QObject):
         self._force = force
 
     def run(self) -> None:
-        records: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
+        records: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
         for entry in self._watch_dirs:
             origin = entry.get("origin", "unknown")
             if origin not in records:
@@ -161,7 +162,11 @@ class _FileScanWorker(QObject):
             base = Path(p)
             if not base.exists():
                 continue
-            for f in base.glob("**/*"):
+            try:
+                candidates = base.iterdir() if origin == "bbs" else base.glob("**/*")
+            except OSError:
+                continue
+            for f in candidates:
                 if not f.is_file():
                     continue
                 if f.suffix.lower() not in SUPPORTED_EXT:
@@ -255,7 +260,9 @@ class MessageTableModel(QAbstractTableModel):
             if col == 6:
                 return row.title
             if col == 7:
-                if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage)):
+                if isinstance(row.payload, FileRecord) and (row.payload.origin or "").lower() == "bbs":
+                    return "View | Archive | Delete"
+                if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage, SpotterMessage)):
                     return "View | Delete"
                 return "View"
         if role == Qt.UserRole:
@@ -376,6 +383,42 @@ class MessageActionDelegate(QStyledItemDelegate):
         self._flag_color_red = QColor("#d32f2f")
         self._flag_color_green = QColor("#2e7d32")
 
+    @staticmethod
+    def _is_bbs_file_row(row: UnifiedMessage | None) -> bool:
+        return isinstance(getattr(row, "payload", None), FileRecord) and (
+            (row.payload.origin or "").strip().lower() == "bbs"
+        )
+
+    @staticmethod
+    def _action_rects(rect: QRect, fm, bbs_row: bool) -> tuple[QRect, QRect, QRect]:
+        view_text = "View"
+        view_width = fm.horizontalAdvance(view_text)
+        view_left = rect.left() + 6
+        view_rect = QRect(view_left, rect.y(), view_width, rect.height())
+
+        del_text = "Delete"
+        del_width = fm.horizontalAdvance(del_text)
+        del_right = rect.right() - 6
+        del_left = del_right - del_width + 1
+        del_rect = QRect(del_left, rect.y(), del_width, rect.height())
+
+        if bbs_row:
+            arch_text = "Archive"
+            arch_width = fm.horizontalAdvance(arch_text)
+            arch_right = del_left - 12
+            arch_left = arch_right - arch_width + 1
+            aux_rect = QRect(arch_left, rect.y(), arch_width, rect.height())
+            return view_rect, aux_rect, del_rect
+
+        flag_text = "\u2691"
+        flag_width = fm.horizontalAdvance(flag_text)
+        gap_left = view_left + view_width + 10
+        gap_right = del_left - 10
+        flag_center = (gap_left + gap_right) // 2
+        flag_left = max(gap_left, flag_center - (flag_width // 2))
+        aux_rect = QRect(flag_left, rect.y(), flag_width, rect.height())
+        return view_rect, aux_rect, del_rect
+
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         if index.column() != 7:
             super().paint(painter, option, index)
@@ -388,24 +431,17 @@ class MessageActionDelegate(QStyledItemDelegate):
         rect = option.rect
         link_color = option.palette.color(QPalette.Link)
         painter.setPen(link_color)
-        view_text = "View"
         fm = option.fontMetrics
-        view_width = fm.horizontalAdvance(view_text)
-        view_left = rect.left() + 6
-        view_rect = QRect(view_left, rect.y(), view_width, rect.height())
-        painter.drawText(view_rect, Qt.AlignVCenter | Qt.AlignLeft, view_text)
-        flag_text = "\u2691"
-        flag_width = fm.horizontalAdvance(flag_text)
-        del_text = "Delete"
-        del_width = fm.horizontalAdvance(del_text)
-        del_right = rect.right() - 6
-        del_left = del_right - del_width + 1
-        del_rect = QRect(del_left, rect.y(), del_width, rect.height())
-        gap_left = view_left + view_width + 10
-        gap_right = del_left - 10
-        flag_center = (gap_left + gap_right) // 2
-        flag_left = max(gap_left, flag_center - (flag_width // 2))
-        flag_rect = QRect(flag_left, rect.y(), flag_width, rect.height())
+        bbs_row = self._is_bbs_file_row(row)
+        view_rect, aux_rect, del_rect = self._action_rects(rect, fm, bbs_row)
+        painter.drawText(view_rect, Qt.AlignVCenter | Qt.AlignLeft, "View")
+        if bbs_row:
+            painter.setPen(link_color)
+            painter.drawText(aux_rect, Qt.AlignVCenter | Qt.AlignLeft, "Archive")
+            painter.setPen(self._danger)
+            painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
+            painter.restore()
+            return
 
         if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage, SpotterMessage)):
             flag_state = getattr(row.payload, "flag_state", 0)
@@ -418,11 +454,11 @@ class MessageActionDelegate(QStyledItemDelegate):
             font = QFont(option.font)
             font.setBold(True)
             painter.setFont(font)
-            painter.drawText(flag_rect, Qt.AlignVCenter | Qt.AlignLeft, flag_text)
+            painter.drawText(aux_rect, Qt.AlignVCenter | Qt.AlignLeft, "\u2691")
 
             painter.setPen(self._danger)
             painter.setFont(option.font)
-            painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, del_text)
+            painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
         painter.restore()
 
     def editorEvent(self, event, model, option, index):
@@ -437,45 +473,34 @@ class MessageActionDelegate(QStyledItemDelegate):
             return False
         rect = option.rect
         pos = event.position().toPoint()
-        flag_text = "\u2691"
         fm = option.fontMetrics
-        view_text = "View"
-        view_width = fm.horizontalAdvance(view_text)
-        flag_width = fm.horizontalAdvance(flag_text)
-        del_text = "Delete"
-        del_width = fm.horizontalAdvance(del_text)
-        right = rect.right() - 6
-        del_left = right - del_width + 1
-        del_rect = QRect(del_left, rect.y(), del_width, rect.height())
-        view_left = rect.left() + 6
-        gap_left = view_left + view_width + 10
-        gap_right = del_left - 10
-        flag_center = (gap_left + gap_right) // 2
-        flag_left = max(gap_left, flag_center - (flag_width // 2))
-        flag_rect = QRect(flag_left, rect.y(), flag_width, rect.height())
+        bbs_row = self._is_bbs_file_row(row)
+        _view_rect, aux_rect, del_rect = self._action_rects(rect, fm, bbs_row)
         if isinstance(row.payload, FileRecord):
-            if flag_rect.contains(pos):
+            if bbs_row and aux_rect.contains(pos):
+                self.parent()._archive_file_record(row.payload)
+            elif not bbs_row and aux_rect.contains(pos):
                 self.parent()._cycle_flag_state(row.payload)
             elif del_rect.contains(pos):
                 self.parent()._delete_file_record(row.payload)
             else:
                 self.parent()._on_view_message(row)
         elif isinstance(row.payload, JS8Message):
-            if flag_rect.contains(pos):
+            if aux_rect.contains(pos):
                 self.parent()._cycle_flag_state(row.payload)
             elif del_rect.contains(pos):
                 self.parent()._delete_js8_message(row.payload)
             else:
                 self.parent()._on_view_message(row)
         elif isinstance(row.payload, SpotterMessage):
-            if flag_rect.contains(pos):
+            if aux_rect.contains(pos):
                 self.parent()._cycle_flag_state(row.payload)
             elif del_rect.contains(pos):
                 self.parent()._delete_spotter_message(row.payload)
             else:
                 self.parent()._on_view_message(row)
         elif isinstance(row.payload, VarACMessage):
-            if flag_rect.contains(pos):
+            if aux_rect.contains(pos):
                 self.parent()._cycle_flag_state(row.payload)
             elif del_rect.contains(pos):
                 self.parent()._delete_varac_message(row.payload)
@@ -667,7 +692,7 @@ class MessageViewerTab(QWidget):
         self._ensure_fldigi_sender_table()
         self._read_state_map = self._load_read_state_map()
 
-        self.files: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": []}
+        self.files: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
         self.current_record: FileRecord | None = None
 
         self._timer: QTimer | None = None
@@ -977,7 +1002,14 @@ class MessageViewerTab(QWidget):
         self.delete_selected_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
         header.addWidget(self.delete_selected_btn)
 
-        self.time_toggle_btn = QPushButton("Showing: UTC")
+        self.mark_all_read_btn = QPushButton("Mark All as Read")
+        self.mark_all_read_btn.setMinimumWidth(160)
+        self.mark_all_read_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.mark_all_read_btn.clicked.connect(self._mark_all_filtered_read)
+        self.mark_all_read_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
+        header.addWidget(self.mark_all_read_btn)
+
+        self.time_toggle_btn = QPushButton("Showing: Local" if self._show_local_time else "Showing: UTC")
         self.time_toggle_btn.setStyleSheet(button_style("primary", resolve_theme(self.settings)))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.time_toggle_btn)
@@ -1040,7 +1072,7 @@ class MessageViewerTab(QWidget):
         msg_header.setSectionResizeMode(6, QHeaderView.Stretch)
         msg_header.setSectionResizeMode(7, QHeaderView.Fixed)
         self.messages_table.setColumnWidth(0, 32)
-        self.messages_table.setColumnWidth(7, 140)
+        self.messages_table.setColumnWidth(7, 210)
         msg_header.setVisible(True)
         msg_header.sectionClicked.connect(self._on_sort_clicked)
         msg_header.checkboxToggled.connect(self._on_header_checkbox_toggled)
@@ -1205,7 +1237,7 @@ class MessageViewerTab(QWidget):
     # ---------- Paths ----------
 
     def _load_paths_lists(self):
-        by_origin: Dict[str, List[str]] = {"varac": [], "flmsg": [], "flamp": []}
+        by_origin: Dict[str, List[str]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
         for entry in self.watch_dirs:
             origin = entry.get("origin", "unknown")
             path = entry.get("path", "")
@@ -1236,6 +1268,26 @@ class MessageViewerTab(QWidget):
 
     # ---------- Scanning ----------
 
+    def _effective_watch_dirs(self) -> List[Dict]:
+        out: List[Dict] = []
+        seen: set[tuple[str, str]] = set()
+        for entry in self.watch_dirs:
+            origin = str(entry.get("origin", "") or "").strip().lower()
+            path = str(entry.get("path", "") or "").strip()
+            if not origin or not path:
+                continue
+            key = (origin, path)
+            if key in seen:
+                continue
+            out.append({"origin": origin, "path": path})
+            seen.add(key)
+        bbs_dir = (self.settings.get("varac_bbs_dir", "") or "").strip()
+        if bbs_dir:
+            key = ("bbs", bbs_dir)
+            if key not in seen:
+                out.append({"origin": "bbs", "path": bbs_dir})
+        return out
+
     def _refresh_files(self, force: bool = False):
         if self._is_shutting_down or self._refresh_files_inflight:
             return
@@ -1250,7 +1302,7 @@ class MessageViewerTab(QWidget):
         self._file_scan_start_ts = time.time()
         self._load_paths_lists()
         self._file_scan_thread = QThread(self)
-        self._file_scan_worker = _FileScanWorker(self.watch_dirs, force)
+        self._file_scan_worker = _FileScanWorker(self._effective_watch_dirs(), force)
         self._file_scan_worker.moveToThread(self._file_scan_thread)
         self._file_scan_thread.started.connect(self._file_scan_worker.run)
         self._file_scan_worker.finished.connect(self._on_file_scan_finished)
@@ -1620,13 +1672,21 @@ class MessageViewerTab(QWidget):
             )
         header = self.messages_table.horizontalHeader()
         if isinstance(header, MessageHeaderWithCheckbox):
+            accent = QColor(theme["accent"])
+            luminance = (
+                0.299 * accent.redF()
+                + 0.587 * accent.greenF()
+                + 0.114 * accent.blueF()
+            )
+            mark = QColor("#111111") if luminance >= 0.62 else QColor("#ffffff")
             header.set_checkbox_colors(
                 bg=QColor(theme.get("surface_alt", theme["surface"])),
-                border=QColor(theme.get("text_muted", theme["border"])),
-                accent=QColor(theme["accent"]),
-                mark=QColor(theme.get("bg", "#ffffff")),
+                border=QColor(theme.get("accent", theme["border"])),
+                accent=accent,
+                mark=mark,
             )
         self._update_clear_filters_style()
+        self._update_mark_all_read_style()
         self._update_pending_table()
 
     def shutdown(self) -> None:
@@ -1665,9 +1725,12 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
         try:
-            self._refresh_varac_messages(force=True)
+            self._refresh_files(force=True)
         except Exception:
-            pass
+            try:
+                self._refresh_varac_messages(force=True)
+            except Exception:
+                pass
         self._update_pending_table()
 
     def _adjust_pending_table_height(self, rows: int) -> None:
@@ -2016,9 +2079,17 @@ class MessageViewerTab(QWidget):
                 if rcv_query not in hay:
                     continue
             filtered.append(row)
-        filtered = self._sort_rows(filtered)
+        if (
+            type_sel == "BBS"
+            and self._sort_column == self._default_sort_column
+            and self._sort_order == self._default_sort_order
+        ):
+            filtered = sorted(filtered, key=lambda r: r.rcv_ts or 0.0)
+        else:
+            filtered = self._sort_rows(filtered)
         self._render_messages_table(filtered)
         self._update_clear_filters_style()
+        self._update_mark_all_read_style()
         log.debug(
             "MessageViewer: filters type=%s status=%s from=%s to=%s rcv=%s => %d rows",
             type_sel,
@@ -2143,6 +2214,7 @@ class MessageViewerTab(QWidget):
             self.current_js8 = None
         self.messages_table.setUpdatesEnabled(True)
         self._update_bulk_delete_buttons()
+        self._update_mark_all_read_style()
 
     def _update_bulk_delete_buttons(self) -> None:
         theme = resolve_theme(self.settings)
@@ -2153,6 +2225,7 @@ class MessageViewerTab(QWidget):
             role = "danger" if has_selection else "muted"
             self.delete_selected_btn.setStyleSheet(button_style(role, theme))
         self._sync_select_all_checkbox()
+        self._update_mark_all_read_style()
 
     def _delete_selected_messages(self) -> None:
         rows = self._messages_model.selected_rows()
@@ -2259,6 +2332,293 @@ class MessageViewerTab(QWidget):
             details = f"{details}\nFailed: {failed}"
         QMessageBox.information(self, "Delete Messages", details)
 
+    def _mark_rows_read_bulk(self, rows: List[UnifiedMessage]) -> int:
+        ts = time.time()
+        js8_rows: List[JS8Message] = []
+        spotter_rows: List[SpotterMessage] = []
+        varac_rows: List[VarACMessage] = []
+        file_rows: List[FileRecord] = []
+        for row in rows:
+            payload = row.payload
+            if isinstance(payload, JS8Message) and payload.msg_id > 0 and payload.state.upper() != "READ":
+                js8_rows.append(payload)
+            elif isinstance(payload, SpotterMessage) and payload.spotter_id > 0 and payload.state.upper() != "READ":
+                spotter_rows.append(payload)
+            elif isinstance(payload, VarACMessage) and payload.msg_id > 0 and int(payload.read_status or 0) == 0:
+                varac_rows.append(payload)
+            elif isinstance(payload, FileRecord):
+                key = self._read_state_key(payload.origin, payload)
+                status = (self._read_state_map.get(key, ("NEW", 0.0, 0))[0] or "").upper()
+                if status != "READ":
+                    file_rows.append(payload)
+
+        if js8_rows:
+            self._mark_js8_rows_read_bulk(js8_rows, ts)
+        if spotter_rows:
+            self._mark_spotter_rows_read_bulk(spotter_rows, ts)
+        if varac_rows:
+            self._mark_varac_rows_read_bulk(varac_rows)
+        if file_rows:
+            self._set_read_state_bulk(file_rows, "READ", ts)
+
+        changed = 0
+        for row in rows:
+            prev = (row.status or "").upper()
+            payload = row.payload
+            now_read = False
+            if isinstance(payload, JS8Message):
+                now_read = payload.state.upper() == "READ"
+            elif isinstance(payload, SpotterMessage):
+                now_read = payload.state.upper() == "READ"
+            elif isinstance(payload, VarACMessage):
+                now_read = int(payload.read_status or 0) == 1
+            elif isinstance(payload, FileRecord):
+                key = self._read_state_key(payload.origin, payload)
+                now_read = ((self._read_state_map.get(key, ("NEW", 0.0, 0))[0] or "").upper() == "READ")
+            if now_read:
+                row.status = "READ"
+                if prev != "READ":
+                    changed += 1
+        return changed
+
+    def _mark_js8_rows_read_bulk(self, msgs: List[JS8Message], read_ts: float) -> None:
+        dedup: Dict[int, JS8Message] = {}
+        for msg in msgs:
+            if msg.msg_id > 0:
+                dedup[int(msg.msg_id)] = msg
+        if not dedup:
+            return
+        pairs = [(mid, dedup[mid].utc_ts or 0.0) for mid in sorted(dedup.keys())]
+        self._save_js8_state_bulk(pairs, read_ts)
+        self._update_local_read_bulk(sorted(dedup.keys()), read_ts)
+        if self.settings.get("js8_inbox_mark_retrieved_sync", False):
+            updated = self._mark_js8call_inbox_read_by_ids(sorted(dedup.keys()))
+            log.debug(
+                "MessageViewer: mark-all JS8 inbox sync updated %s/%s rows",
+                updated,
+                len(dedup),
+            )
+        for msg in dedup.values():
+            msg.state = "READ"
+            msg.read_ts = read_ts
+
+    def _mark_spotter_rows_read_bulk(self, msgs: List[SpotterMessage], read_ts: float) -> None:
+        ids = sorted({int(msg.spotter_id) for msg in msgs if int(msg.spotter_id or 0) > 0})
+        if not ids:
+            return
+        db_path = self._db_path()
+        if db_path and db_path.exists():
+            try:
+                conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+                for start in range(0, len(ids), 250):
+                    chunk = ids[start : start + 250]
+                    placeholders = ",".join("?" for _ in chunk)
+                    cur.execute(
+                        f"UPDATE spotter_traffic SET state='READ', read_ts=? WHERE id IN ({placeholders})",
+                        (float(read_ts), *chunk),
+                    )
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                log.debug("MessageViewer: bulk spotter read update failed: %s", e)
+        for msg in msgs:
+            msg.state = "READ"
+            msg.read_ts = read_ts
+
+    def _mark_varac_rows_read_bulk(self, msgs: List[VarACMessage]) -> None:
+        pairs = sorted({(str(msg.source or ""), int(msg.msg_id)) for msg in msgs if int(msg.msg_id or 0) > 0})
+        if not pairs:
+            return
+        db_path = self._db_path()
+        if db_path and db_path.exists():
+            try:
+                conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+                cur.executemany(
+                    "UPDATE varac_messages SET read_status=1 WHERE source=? AND id=?",
+                    pairs,
+                )
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                log.debug("MessageViewer: bulk VarAC read update failed: %s", e)
+        for msg in msgs:
+            msg.read_status = 1
+
+    def _set_read_state_bulk(self, recs: List[FileRecord], status: str, read_ts: float) -> None:
+        status = (status or "READ").upper()
+        if status != "READ":
+            return
+        dedup: Dict[tuple, FileRecord] = {}
+        for rec in recs:
+            dedup[self._read_state_key(rec.origin, rec)] = rec
+        if not dedup:
+            return
+        rows: List[Tuple[str, str, float, int, str, float, int]] = []
+        for key, rec in dedup.items():
+            flag_state = self._get_flag_state(rec)
+            self._read_state_map[key] = ("READ", float(read_ts), int(flag_state))
+            rows.append(
+                (
+                    rec.origin,
+                    str(rec.path),
+                    float(rec.mtime),
+                    int(rec.size),
+                    "READ",
+                    float(read_ts),
+                    int(flag_state),
+                )
+            )
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.executemany(
+                """
+                INSERT OR REPLACE INTO message_read_state
+                    (origin, path, mtime, size, status, read_ts, flag_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: bulk file read-state update failed: %s", e)
+
+    def _save_js8_state_bulk(self, rows: List[Tuple[int, float]], read_ts: float) -> None:
+        db_path = self._local_js8_db()
+        if not db_path:
+            return
+        if not rows:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
+            )
+            cur.executemany(
+                "INSERT INTO js8_inbox_state (id, state, last_seen, read_ts) VALUES (?, 'READ', ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET state='READ', last_seen=excluded.last_seen, read_ts=excluded.read_ts",
+                [(int(msg_id), float(last_seen or 0.0), float(read_ts)) for msg_id, last_seen in rows],
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: bulk js8 state save failed: %s", e)
+
+    def _update_local_read_bulk(self, msg_ids: List[int], read_ts: float) -> None:
+        db_path = self._local_js8_db()
+        if not db_path or not Path(db_path).exists():
+            return
+        ids = [int(i) for i in msg_ids if int(i) > 0]
+        if not ids:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.executemany(
+                "UPDATE js8_messages SET state='READ', read_ts=? WHERE id=?",
+                [(float(read_ts), int(msg_id)) for msg_id in ids],
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: bulk local js8 read update failed: %s", e)
+
+    def _mark_js8call_inbox_read_by_ids(self, row_ids: List[int]) -> int:
+        inbox_path = self._inbox_path()
+        if not inbox_path or not inbox_path.exists():
+            return 0
+        pending = {int(rid) for rid in row_ids if int(rid) > 0}
+        if not pending:
+            return 0
+        updated_count = 0
+        candidates = [
+            ("inbox_v1", "blob"),
+            ("inbox_v1", "json"),
+            ("inbox_v1", "message"),
+            ("inbox", "blob"),
+            ("inbox", "json"),
+            ("inbox", "message"),
+        ]
+        try:
+            conn = sqlite3.connect(inbox_path, timeout=1.5)
+            cur = conn.cursor()
+            cur.execute("PRAGMA busy_timeout = 1500")
+            for table, col in candidates:
+                if not pending:
+                    break
+                has_type_col = self._table_has_column(conn, table, "type")
+                for id_expr in ("id", "rowid"):
+                    if not pending:
+                        break
+                    remaining = sorted(pending)
+                    table_usable = True
+                    for start in range(0, len(remaining), 250):
+                        chunk = remaining[start : start + 250]
+                        placeholders = ",".join("?" for _ in chunk)
+                        try:
+                            cur.execute(
+                                f"SELECT {id_expr} as id, {col} FROM {table} WHERE {id_expr} IN ({placeholders})",
+                                chunk,
+                            )
+                            rows = cur.fetchall()
+                        except Exception:
+                            table_usable = False
+                            break
+                        if not rows:
+                            continue
+                        updates_blob: List[Tuple[str, str, int]] = []
+                        updates_blob_only: List[Tuple[str, int]] = []
+                        seen_ids: List[int] = []
+                        for row_id, blob in rows:
+                            rid = int(row_id or 0)
+                            if rid <= 0:
+                                continue
+                            try:
+                                parsed = json.loads(blob or "{}")
+                            except Exception:
+                                continue
+                            if not isinstance(parsed, dict):
+                                continue
+                            current_type = str(parsed.get("type", "") or "").strip().upper()
+                            if current_type == "DELIVERED":
+                                seen_ids.append(rid)
+                                continue
+                            if current_type != "READ":
+                                parsed["type"] = "READ"
+                                new_blob = json.dumps(parsed, separators=(",", ":"))
+                                if has_type_col:
+                                    updates_blob.append((new_blob, "READ", rid))
+                                else:
+                                    updates_blob_only.append((new_blob, rid))
+                                updated_count += 1
+                            seen_ids.append(rid)
+                        if updates_blob:
+                            cur.executemany(
+                                f"UPDATE {table} SET {col}=?, type=? WHERE {id_expr}=?",
+                                updates_blob,
+                            )
+                        if updates_blob_only:
+                            cur.executemany(
+                                f"UPDATE {table} SET {col}=? WHERE {id_expr}=?",
+                                updates_blob_only,
+                            )
+                        for rid in seen_ids:
+                            pending.discard(rid)
+                    if table_usable and not pending:
+                        break
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: bulk JS8Call inbox mark READ failed: %s", e)
+        return updated_count
+
     def _build_messages_header(self) -> None:
         while self.messages_header_layout.count():
             item = self.messages_header_layout.takeAt(0)
@@ -2290,6 +2650,7 @@ class MessageViewerTab(QWidget):
         self.messages_header_layout.addWidget(clear_wrap)
         self._header_cells.append(clear_wrap)
         self._update_clear_filters_style()
+        self._update_mark_all_read_style()
         self._sync_header_widths()
         self.messages_table.horizontalHeader().sectionResized.connect(self._sync_header_widths)
         self.messages_header.setMinimumHeight(self.messages_header.sizeHint().height())
@@ -2365,7 +2726,7 @@ class MessageViewerTab(QWidget):
             if idx == 0:
                 min_width = 30
             elif idx == 7:
-                min_width = 140
+                min_width = 210
             else:
                 min_width = 60
             widget.setFixedWidth(max(min_width, width))
@@ -2383,6 +2744,56 @@ class MessageViewerTab(QWidget):
         theme = resolve_theme(self.settings)
         role = "warning" if self._filters_active() else "muted"
         self.clear_filters_btn.setStyleSheet(button_style(role, theme))
+
+    def _mark_all_read_eligibility(self) -> tuple[bool, str]:
+        type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
+        if type_sel in ("", "MSG Type..."):
+            return False, "Select a Message Type filter first."
+        rows = self._messages_model.rows()
+        if not rows:
+            return False, "No messages in current filtered view."
+        if type_sel == "Spotter":
+            if any(not re.match(r"^F!\d+$", (r.msg_type or "")) for r in rows):
+                return False, "Filtered rows are not scoped to one message type."
+        else:
+            if any((r.msg_type or "") != type_sel for r in rows):
+                return False, "Filtered rows are not scoped to one message type."
+        unread = sum(1 for r in rows if (r.status or "").upper() != "READ")
+        if unread <= 0:
+            return False, "No unread rows in current filtered view."
+        return True, ""
+
+    def _update_mark_all_read_style(self) -> None:
+        theme = resolve_theme(self.settings)
+        enabled, reason = self._mark_all_read_eligibility()
+        self.mark_all_read_btn.setEnabled(enabled)
+        self.mark_all_read_btn.setToolTip(reason if not enabled else "Mark all visible rows as READ.")
+        role = "warning" if enabled else "muted"
+        self.mark_all_read_btn.setStyleSheet(button_style(role, theme))
+
+    def _mark_all_filtered_read(self) -> None:
+        enabled, reason = self._mark_all_read_eligibility()
+        if not enabled:
+            QMessageBox.information(self, "Mark All as Read", reason or "Nothing to mark.")
+            return
+        type_sel = self.type_filter.currentText()
+        rows = self._messages_model.rows()
+        unread_rows = [r for r in rows if (r.status or "").upper() != "READ"]
+        if not unread_rows:
+            QMessageBox.information(self, "Mark All as Read", "No unread rows in current filtered view.")
+            return
+        prompt = (
+            f"Mark {len(unread_rows)} unread {type_sel} message(s) as READ "
+            f"in the current filtered view?"
+        )
+        if QMessageBox.question(self, "Mark All as Read", prompt, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        changed = self._mark_rows_read_bulk(unread_rows)
+        if changed <= 0:
+            QMessageBox.information(self, "Mark All as Read", "No rows were updated.")
+            return
+        self._apply_message_filters_preserve_scroll()
+        QMessageBox.information(self, "Mark All as Read", f"Marked {changed} message(s) as READ.")
 
     def _on_sort_clicked(self, section: int) -> None:
         if section == 0 or section >= 7:
@@ -2547,6 +2958,8 @@ class MessageViewerTab(QWidget):
                 msg_type = origin.upper() if origin != "varac" else "VarAC"
                 if origin == "flmsg":
                     msg_type = "FLMSG"
+                elif origin == "bbs":
+                    msg_type = "BBS"
                 rows.append(
                     UnifiedMessage(
                         msg_type=msg_type,
@@ -3086,6 +3499,54 @@ class MessageViewerTab(QWidget):
             QMessageBox.warning(self, title, "Failed to move file to the Recycle Bin.")
             return
         log.info("MessageViewer: deleted file %s", rec.path)
+        self._remove_file_record(rec)
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+
+    def _archive_file_record(self, rec: FileRecord) -> None:
+        if not rec or (rec.origin or "").strip().lower() != "bbs":
+            return
+        if not rec.path.exists():
+            QMessageBox.warning(self, "Archive BBS File", "The selected file no longer exists.")
+            return
+        archive_dir_txt = (self.settings.get("varac_bbs_archive_dir", "") or "").strip()
+        if not archive_dir_txt:
+            QMessageBox.warning(
+                self,
+                "Archive BBS File",
+                "Set VarAC BBS Archive in Settings before archiving files.",
+            )
+            return
+        archive_dir = Path(archive_dir_txt)
+        if not archive_dir.exists() or not archive_dir.is_dir():
+            QMessageBox.warning(
+                self,
+                "Archive BBS File",
+                "Configured BBS Archive is not a valid directory.",
+            )
+            return
+        details = (
+            f"Archive this BBS file?\n\n"
+            f"{rec.path}\n"
+            f"Destination: {archive_dir}"
+        )
+        resp = QMessageBox.question(self, "Archive BBS File", details, QMessageBox.Yes | QMessageBox.No)
+        if resp != QMessageBox.Yes:
+            return
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+        dst = archive_dir / rec.path.name
+        if dst.exists():
+            dst = archive_dir / f"{rec.path.stem}_{stamp}{rec.path.suffix}"
+            attempt = 2
+            while dst.exists():
+                dst = archive_dir / f"{rec.path.stem}_{stamp}_{attempt}{rec.path.suffix}"
+                attempt += 1
+        try:
+            shutil.move(str(rec.path), str(dst))
+        except Exception as e:
+            QMessageBox.warning(self, "Archive BBS File", f"Failed to archive file:\n{e}")
+            return
+        log.info("MessageViewer: archived BBS file %s -> %s", rec.path, dst)
         self._remove_file_record(rec)
         self._unfreeze_table()
         self._populate_messages_table(force=True)

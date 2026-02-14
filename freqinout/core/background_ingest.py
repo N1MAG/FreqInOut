@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, QTimer
 
 from freqinout.core.logger import log
 from freqinout.core.message_ingest import MessageIngestor
+from freqinout.core.propagation_outcome_ingest import ingest_propagation_outcomes
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
@@ -25,6 +26,7 @@ class BackgroundIngestController(QObject):
         self._js8_links_timer: Optional[QTimer] = None
         self._messages_timer: Optional[QTimer] = None
         self._varac_timer: Optional[QTimer] = None
+        self._prop_outcome_timer: Optional[QTimer] = None
         self._running = False
 
     def start(self) -> None:
@@ -49,14 +51,21 @@ class BackgroundIngestController(QObject):
         self._varac_timer.timeout.connect(self._ingest_varac)
         self._varac_timer.start()
 
+        # Propagation outcome ingest: checkpointed incremental backfill.
+        self._prop_outcome_timer = QTimer(self)
+        self._prop_outcome_timer.setInterval(3 * 60 * 1000)  # 3 minutes
+        self._prop_outcome_timer.timeout.connect(self._ingest_prop_outcomes)
+        self._prop_outcome_timer.start()
+
         # Initial staggered ingest
         QTimer.singleShot(2000, self._ingest_js8_links)
         QTimer.singleShot(4000, self._ingest_messages)
         QTimer.singleShot(6000, self._ingest_varac)
+        QTimer.singleShot(8000, self._ingest_prop_outcomes)
 
     def stop(self) -> None:
         self._running = False
-        for t in (self._js8_links_timer, self._messages_timer, self._varac_timer):
+        for t in (self._js8_links_timer, self._messages_timer, self._varac_timer, self._prop_outcome_timer):
             if t:
                 t.stop()
 
@@ -91,3 +100,16 @@ class BackgroundIngestController(QObject):
             ingest_varac(self.settings)
         except Exception as e:
             log.debug("BackgroundIngest: VarAC ingest failed: %s", e)
+
+    def _ingest_prop_outcomes(self) -> None:
+        try:
+            stats = ingest_propagation_outcomes(self.settings, max_rows_per_source=500)
+            if int(stats.get("events_inserted", 0)) > 0:
+                log.debug(
+                    "BackgroundIngest: propagation outcomes scanned=%s inserted=%s stats=%s",
+                    stats.get("rows_scanned", 0),
+                    stats.get("events_inserted", 0),
+                    stats.get("stats_updated", 0),
+                )
+        except Exception as e:
+            log.debug("BackgroundIngest: propagation outcome ingest failed: %s", e)

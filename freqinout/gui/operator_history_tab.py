@@ -174,18 +174,19 @@ class OperatorHistoryTab(QWidget):
 
     COL_SELECT = 0
     COL_CALLSIGN = 1
-    COL_NAME = 2
-    COL_STATE = 3
-    COL_GRID = 4
-    COL_GROUPS = 5
-    COL_G1 = 6
-    COL_G2 = 7
-    COL_G3 = 8
-    COL_ROLE = 9
-    COL_FIRST_SEEN = 10
-    COL_LAST_SEEN = 11
-    COL_TRUSTED = 12
-    COL_COUNT = 13
+    COL_SITREP = 2
+    COL_NAME = 3
+    COL_STATE = 4
+    COL_GRID = 5
+    COL_GROUPS = 6
+    COL_G1 = 7
+    COL_G2 = 8
+    COL_G3 = 9
+    COL_ROLE = 10
+    COL_FIRST_SEEN = 11
+    COL_LAST_SEEN = 12
+    COL_TRUSTED = 13
+    COL_COUNT = 14
 
     operator_history_updated = Signal()
 
@@ -235,6 +236,8 @@ class OperatorHistoryTab(QWidget):
         self.group_filter.setMinimumContentsLength(12)
         self.group_filter.view().setMinimumWidth(240)
         search_row.addWidget(self.group_filter)
+        self.clear_filters_btn = QPushButton("Clear Filters")
+        search_row.addWidget(self.clear_filters_btn)
         self.manage_btn = QPushButton("Manage Operators")
         search_row.addWidget(self.manage_btn)
         self.export_group_btn = QPushButton("Export by Group")
@@ -247,11 +250,12 @@ class OperatorHistoryTab(QWidget):
 
         # Table
         self.table = QTableWidget()
-        self.table.setColumnCount(14)
+        self.table.setColumnCount(15)
         self.table.setHorizontalHeaderLabels(
             [
                 "",
                 "Callsign",
+                "SitRep",
                 "Name",
                 "State",
                 "Grid",
@@ -266,9 +270,11 @@ class OperatorHistoryTab(QWidget):
                 "Check-ins",
             ]
         )
+        self.table.setSortingEnabled(True)
         hv = OperatorHeaderWithCheckbox(Qt.Horizontal, self.table)
         self.table.setHorizontalHeader(hv)
         hv.setSectionResizeMode(self.COL_SELECT, QHeaderView.ResizeToContents)
+        hv.setSectionResizeMode(self.COL_SITREP, QHeaderView.ResizeToContents)
         hv.setMinimumSectionSize(50)
         hv.setDefaultSectionSize(100)
         for col in (
@@ -287,6 +293,7 @@ class OperatorHistoryTab(QWidget):
             self.COL_COUNT,
         ):
             hv.setSectionResizeMode(col, QHeaderView.Stretch)
+        hv.resizeSection(self.COL_SITREP, 68)
         for col in (self.COL_G1, self.COL_G2, self.COL_G3):
             self.table.setColumnHidden(col, True)
         hv.checkboxToggled.connect(self._on_header_checkbox_toggled)
@@ -295,11 +302,17 @@ class OperatorHistoryTab(QWidget):
 
         # Signals
         self.search_edit.textChanged.connect(self._apply_filter)
+        self.clear_filters_btn.clicked.connect(self._clear_filters)
         self.import_btn.clicked.connect(self._show_import_export_menu)
         self.manage_btn.clicked.connect(self._show_manage_menu)
         self.group_filter.currentTextChanged.connect(self._apply_filter)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self._wire_export_group_menu()
+
+    def _clear_filters(self) -> None:
+        self.search_edit.clear()
+        self.group_filter.setCurrentText("All")
+        self._apply_filter()
 
     def _normalize_group_role(self, value: Optional[str]) -> str:
         role = (value or "").strip().upper()
@@ -463,6 +476,224 @@ class OperatorHistoryTab(QWidget):
                 )
         conn.commit()
 
+    def _ensure_sitrep_status_schema(self, conn: sqlite3.Connection) -> None:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS spotter_station_status (
+                from_call TEXT PRIMARY KEY,
+                form_id TEXT NOT NULL,
+                status_key TEXT NOT NULL,
+                status_label TEXT NOT NULL,
+                response_code TEXT,
+                updated_utc_ts REAL NOT NULL DEFAULT 0,
+                updated_utc_str TEXT,
+                raw_text TEXT,
+                updated_ingested_ts REAL,
+                status_source TEXT,
+                status_source_detail TEXT
+            )
+            """
+        )
+        for col_name, col_ddl in (
+            ("status_source", "TEXT"),
+            ("status_source_detail", "TEXT"),
+        ):
+            try:
+                cur.execute(f"ALTER TABLE spotter_station_status ADD COLUMN {col_name} {col_ddl}")
+            except Exception:
+                pass
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_spotter_status_key_ts ON spotter_station_status(status_key, updated_utc_ts DESC)"
+        )
+        conn.commit()
+
+    @staticmethod
+    def _sitrep_status_label(status_key: str) -> str:
+        key = (status_key or "").strip().lower()
+        if key == "red":
+            return "Not Functioning"
+        if key == "yellow":
+            return "Partially Functioning"
+        if key == "green":
+            return "Functioning"
+        return "Unknown"
+
+    @staticmethod
+    def _sitrep_status_chip(status_key: str) -> str:
+        key = (status_key or "").strip().lower()
+        if key == "red":
+            return "R"
+        if key == "yellow":
+            return "Y"
+        if key == "green":
+            return "G"
+        return "?"
+
+    def _load_sitrep_status_map(self, cur: sqlite3.Cursor) -> Dict[str, Dict[str, str]]:
+        out: Dict[str, Dict[str, str]] = {}
+        try:
+            cur.execute(
+                """
+                SELECT from_call, status_key, status_label, updated_utc_ts, updated_utc_str, status_source
+                FROM spotter_station_status
+                """
+            )
+        except Exception:
+            return out
+        for from_call, status_key, status_label, updated_utc_ts, updated_utc_str, status_source in cur.fetchall():
+            cs = (from_call or "").strip().upper()
+            if not cs:
+                continue
+            key = (status_key or "").strip().lower()
+            if key not in {"red", "yellow", "green", "unknown"}:
+                key = "unknown"
+            label = (status_label or "").strip() or self._sitrep_status_label(key)
+            source = (status_source or "").strip().upper() or "UNKNOWN"
+            ts_txt = (updated_utc_str or "").strip()
+            if not ts_txt:
+                try:
+                    ts_val = float(updated_utc_ts or 0.0)
+                except Exception:
+                    ts_val = 0.0
+                if ts_val > 0:
+                    ts_txt = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
+            out[cs] = {
+                "key": key,
+                "label": label,
+                "source": source,
+                "updated": ts_txt,
+            }
+        return out
+
+    def _sitrep_tooltip(self, row: Dict) -> str:
+        key = (row.get("sitrep_status_key") or "unknown").strip().lower()
+        label = (row.get("sitrep_status_label") or self._sitrep_status_label(key)).strip()
+        src = (row.get("sitrep_status_source") or "UNKNOWN").strip().upper()
+        updated = (row.get("sitrep_status_updated") or "").strip()
+        if updated:
+            return f"SitRep: {label}\nSource: {src}\nUpdated: {updated} UTC"
+        return f"SitRep: {label}\nSource: {src}"
+
+    def _apply_sitrep_button_style(self, btn: QPushButton, status_key: str) -> None:
+        key = (status_key or "").strip().lower()
+        if key == "red":
+            bg = "#D32F2F"
+            fg = "#FFFFFF"
+            border = "#8E0000"
+        elif key == "yellow":
+            bg = "#FBC02D"
+            fg = "#111111"
+            border = "#8D6E00"
+        elif key == "green":
+            bg = "#43A047"
+            fg = "#FFFFFF"
+            border = "#1B5E20"
+        else:
+            bg = "#4FC3F7"
+            fg = "#111111"
+            border = "#1976D2"
+        btn.setStyleSheet(
+            f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {border}; border-radius: 9px; padding: 1px 8px; font-weight: 700; }}"
+            f"QPushButton:hover {{ border: 1px solid {fg}; }}"
+        )
+
+    def _show_sitrep_status_menu(self, callsign: str, anchor: QPushButton) -> None:
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return
+        menu = QMenu(self)
+        options = [
+            ("Green", "green"),
+            ("Yellow", "yellow"),
+            ("Red", "red"),
+            ("Unknown", "unknown"),
+        ]
+        actions = {}
+        for label, key in options:
+            act = menu.addAction(label)
+            actions[act] = key
+        chosen = menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        if not chosen:
+            return
+        key = actions.get(chosen, "")
+        if not key:
+            return
+        self._set_manual_sitrep_status(cs, key)
+
+    def _set_manual_sitrep_status(self, callsign: str, status_key: str) -> None:
+        cs = (callsign or "").strip().upper()
+        key = (status_key or "").strip().lower()
+        if not cs or key not in {"red", "yellow", "green", "unknown"}:
+            return
+        db_path = self._db_path()
+        if not db_path:
+            return
+        now = datetime.datetime.now(datetime.timezone.utc)
+        now_ts = float(now.timestamp())
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        label = self._sitrep_status_label(key)
+        try:
+            conn = sqlite3.connect(db_path)
+            self._ensure_sitrep_status_schema(conn)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO spotter_station_status
+                    (from_call, form_id, status_key, status_label, response_code, updated_utc_ts, updated_utc_str,
+                     raw_text, updated_ingested_ts, status_source, status_source_detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(from_call) DO UPDATE SET
+                    form_id=excluded.form_id,
+                    status_key=excluded.status_key,
+                    status_label=excluded.status_label,
+                    response_code=excluded.response_code,
+                    updated_utc_ts=excluded.updated_utc_ts,
+                    updated_utc_str=excluded.updated_utc_str,
+                    raw_text=excluded.raw_text,
+                    updated_ingested_ts=excluded.updated_ingested_ts,
+                    status_source=excluded.status_source,
+                    status_source_detail=excluded.status_source_detail
+                WHERE (
+                    excluded.updated_utc_ts > COALESCE(spotter_station_status.updated_utc_ts, 0)
+                    OR (
+                        excluded.updated_utc_ts = COALESCE(spotter_station_status.updated_utc_ts, 0)
+                        AND excluded.updated_ingested_ts >= COALESCE(spotter_station_status.updated_ingested_ts, 0)
+                    )
+                )
+                """,
+                (
+                    cs,
+                    "MANUAL",
+                    key,
+                    label,
+                    "",
+                    now_ts,
+                    now_str,
+                    f"MANUAL:{key}",
+                    now_ts,
+                    "MANUAL",
+                    "Operators Tab",
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.error("OperatorHistoryTab: failed to update SitRep status for %s: %s", cs, e)
+            QMessageBox.warning(self, "SitRep Update", f"Failed to update SitRep status for {cs}.\n{e}")
+            return
+
+        for row in self._rows:
+            if (row.get("callsign") or "").strip().upper() != cs:
+                continue
+            row["sitrep_status_key"] = key
+            row["sitrep_status_label"] = label
+            row["sitrep_status_source"] = "MANUAL"
+            row["sitrep_status_updated"] = now_str
+            break
+        self._apply_filter()
+        self._schedule_history_update()
+
     def _normalize_groups_list(self, groups: List[str]) -> List[str]:
         seen = set()
         norm: List[str] = []
@@ -523,6 +754,8 @@ class OperatorHistoryTab(QWidget):
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             self._ensure_schema(conn)
+            self._ensure_sitrep_status_schema(conn)
+            sitrep_map = self._load_sitrep_status_map(cur)
             cur.execute(
                 """
                 SELECT
@@ -583,6 +816,10 @@ class OperatorHistoryTab(QWidget):
                         "last_seen_utc": _normalize_date_only(last_seen) or (last_seen or "").strip(),
                         "checkin_count": int(count or 0),
                         "trusted": 1 if int(trusted or 0) else 0,
+                        "sitrep_status_key": sitrep_map.get((cs or "").strip().upper(), {}).get("key", "unknown"),
+                        "sitrep_status_label": sitrep_map.get((cs or "").strip().upper(), {}).get("label", "Unknown"),
+                        "sitrep_status_source": sitrep_map.get((cs or "").strip().upper(), {}).get("source", "UNKNOWN"),
+                        "sitrep_status_updated": sitrep_map.get((cs or "").strip().upper(), {}).get("updated", ""),
                     }
                 )
             conn.close()
@@ -862,6 +1099,9 @@ class OperatorHistoryTab(QWidget):
                     or term in r.get("first_seen_utc", "").lower()
                     or term in r.get("last_seen_utc", "").lower()
                     or term in ("trusted" if r.get("trusted") else "untrusted")
+                    or term in r.get("sitrep_status_key", "").lower()
+                    or term in r.get("sitrep_status_label", "").lower()
+                    or (term == "sitrep")
                 ):
                     filtered.append(r)
         if filter_term and filter_term != "all":
@@ -890,6 +1130,11 @@ class OperatorHistoryTab(QWidget):
     def _render_rows(self, rows: List[Dict] | None = None):
         if rows is None:
             rows = self._rows
+        was_sorting = self.table.isSortingEnabled()
+        sort_col = self.table.horizontalHeader().sortIndicatorSection()
+        sort_order = self.table.horizontalHeader().sortIndicatorOrder()
+        if was_sorting:
+            self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         # rebuild group filter options
         groups = set()
@@ -906,6 +1151,19 @@ class OperatorHistoryTab(QWidget):
             sel_chk.stateChanged.connect(self._on_row_checkbox_changed)
             self.table.setCellWidget(row_idx, self.COL_SELECT, sel_chk)
             set_item(self.COL_CALLSIGN, r["callsign"])
+            sitrep_key = (r.get("sitrep_status_key") or "unknown").strip().lower()
+            sitrep_item = QTableWidgetItem(self._sitrep_status_chip(sitrep_key))
+            sitrep_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row_idx, self.COL_SITREP, sitrep_item)
+            sitrep_btn = QPushButton(self._sitrep_status_chip(sitrep_key))
+            sitrep_btn.setToolTip(self._sitrep_tooltip(r))
+            sitrep_btn.setCursor(Qt.PointingHandCursor)
+            sitrep_btn.setFixedWidth(52)
+            self._apply_sitrep_button_style(sitrep_btn, sitrep_key)
+            sitrep_btn.clicked.connect(
+                lambda _checked=False, callsign=r["callsign"], anchor=sitrep_btn: self._show_sitrep_status_menu(callsign, anchor)
+            )
+            self.table.setCellWidget(row_idx, self.COL_SITREP, sitrep_btn)
             set_item(self.COL_NAME, r["name"])
             set_item(self.COL_STATE, r["state"])
             set_item(self.COL_GRID, r.get("grid", ""))
@@ -958,6 +1216,10 @@ class OperatorHistoryTab(QWidget):
         if current in [self.group_filter.itemText(i) for i in range(self.group_filter.count())]:
             self.group_filter.setCurrentText(current)
         self.group_filter.blockSignals(False)
+        if was_sorting:
+            self.table.setSortingEnabled(True)
+            if 0 <= sort_col < self.table.columnCount():
+                self.table.sortItems(sort_col, sort_order)
         self._sync_header_checkbox()
 
     # ------------- Qt events ------------- #
@@ -986,11 +1248,18 @@ class OperatorHistoryTab(QWidget):
         self.table.setStyleSheet(table_style)
         header = self.table.horizontalHeader()
         if isinstance(header, OperatorHeaderWithCheckbox):
+            accent = QColor(theme["accent"])
+            luminance = (
+                0.299 * accent.redF()
+                + 0.587 * accent.greenF()
+                + 0.114 * accent.blueF()
+            )
+            mark = QColor("#111111") if luminance >= 0.62 else QColor("#ffffff")
             header.set_checkbox_colors(
                 bg=QColor(theme.get("surface_alt", theme["surface"])),
-                border=QColor(theme.get("text_muted", theme["border"])),
-                accent=QColor(theme["accent"]),
-                mark=QColor(theme.get("bg", "#ffffff")),
+                border=QColor(theme.get("accent", theme["border"])),
+                accent=accent,
+                mark=mark,
             )
 
     def on_tab_activated(self) -> None:

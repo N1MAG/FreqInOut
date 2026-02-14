@@ -181,7 +181,7 @@ class NetScheduleTab(QWidget):
         self.local_label = QLabel()
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
-        self.time_toggle_btn = QPushButton("Showing: UTC")
+        self.time_toggle_btn = QPushButton("Showing: Local" if self._show_local else "Showing: UTC")
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
@@ -337,18 +337,19 @@ class NetScheduleTab(QWidget):
         self._update_clock_labels()
 
     def _set_headers(self):
+        mode_label = "Local" if self._show_local else "UTC"
         self.table.setHorizontalHeaderLabels(
             [
                 "Select",
-                f"Day ({'Local' if self._show_local else 'UTC'})",
+                f"Day ({mode_label})",
                 "Recurrence",
                 "Weeks of Month",
                 "Group Name",
                 "Mode",
                 "Band",
                 "Freq (MHz)",
-                "Start",
-                "End",
+                f"Start ({mode_label})",
+                f"End ({mode_label})",
                 "Early (min)",
                 "Net Name",
                 "Auto-Tune",
@@ -839,6 +840,8 @@ class NetScheduleTab(QWidget):
           SSB  → no auto-launch (RF-only)
         """
         if getattr(self, "_suppress_autostart", False):
+            return
+        if self._is_truthy(self.settings.get("launch_control_enabled", True)):
             return
 
         mode = mode.strip()

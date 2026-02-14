@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import sqlite3
 
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
     QMessageBox,
+    QProgressDialog,
+    QDialog,
     QLayout,
     QSpacerItem,
 )
@@ -26,6 +29,8 @@ from PySide6.QtCore import Qt, QTimer
 from pathlib import Path
 
 from freqinout.core.logger import log
+from freqinout.core.logger import set_log_level
+from freqinout.core.config_paths import get_config_dir
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
@@ -44,7 +49,12 @@ from freqinout.gui.freq_planner_tab import FreqPlannerTab
 from freqinout.gui.sop_tab import SOPTab
 from freqinout.gui.operator_history_tab import OperatorHistoryTab
 from freqinout.gui.log_viewer import LogViewerTab
-from freqinout.gui.stations_map_tab import StationsMapTab
+from freqinout.gui.stations_map_tab import (
+    StationsMapTab,
+    FEMA_REGIONS,
+    LOWER48_STATES,
+    STATE_CENTERS,
+)
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.peer_sched_tab import PeerSchedTab
 from freqinout.gui.help_tab import HelpTab
@@ -64,7 +74,7 @@ class MainWindow(QMainWindow):
       - JS8Call Net Control
       - FreqPlanner
       - Operator History
-      - Logs
+      - Help
     """
 
     def __init__(self):
@@ -82,13 +92,18 @@ class MainWindow(QMainWindow):
 
         # Instantiate screens (lazy-load heavy tabs to improve perceived performance)
         self.settings_tab = SettingsTab(self)
+        self.launch_orchestrator = self.settings_tab.launch_orchestrator
+        self._launch_progress_dialog: QProgressDialog | None = None
+        self._launch_progress_total = 0
+        self._launch_progress_done = 0
         self.hf_schedule_tab = DailyScheduleTab(self)  # this tab is labeled "HF Frequency Schedule"
         self.net_tab = NetScheduleTab(self)
         self.fldigi_tab = FldigiNetControlTab(self)
         self.js8_tab = JS8CallNetControlTab(self)
         self.sop_tab = SOPTab(self)
         self.operator_history_tab = OperatorHistoryTab(self)
-        self.log_tab = LogViewerTab(self)
+        self.log_tab: LogViewerTab | None = None
+        self._log_dialog: QDialog | None = None
         self.peer_sched_tab = PeerSchedTab(self)
         self.help_tab = HelpTab(self)
         self.controlfreq_tab = ControlFreqTab(self)
@@ -96,6 +111,7 @@ class MainWindow(QMainWindow):
         self.freq_planner_tab = None
         self.message_viewer_tab = None
         self.stations_map_tab = None
+        self._map_prop_target_syncing = False
 
         self._lazy_placeholders = {}
         self._lazy_factories = {
@@ -118,7 +134,6 @@ class MainWindow(QMainWindow):
             ("Net Schedule", self.net_tab),
             ("Peer Schedules", self.peer_sched_tab),
             ("Settings", self.settings_tab),
-            ("Logs", self.log_tab),
             ("Help", self.help_tab),
         ]
 
@@ -139,7 +154,6 @@ class MainWindow(QMainWindow):
         self.nav_buttons = []
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)
-        self._logs_nav_index = None
         self._map_nav_index = None
         for idx, (label, _w) in enumerate(self._screens):
             btn = QPushButton(label)
@@ -150,8 +164,6 @@ class MainWindow(QMainWindow):
             self.button_group.addButton(btn, idx)
             self.nav_buttons.append(btn)
             nav_layout.addWidget(btn)
-            if label == "Logs":
-                self._logs_nav_index = idx
             if label == "Map":
                 self._map_nav_index = idx
         # Placeholder for map filters (shown only on Map view)
@@ -195,14 +207,25 @@ class MainWindow(QMainWindow):
         self.resume_schedule_btn = QPushButton("Resume Schedule")
         self.resume_schedule_btn.setFixedWidth(140)
         self.resume_schedule_btn.clicked.connect(self._on_resume_schedule_clicked)
+        self.suspend_schedule_btn = QPushButton("Suspend Schedule")
+        self.suspend_schedule_btn.setFixedWidth(140)
+        self.suspend_schedule_btn.clicked.connect(self._on_suspend_schedule_clicked)
+        self.logs_active_btn = QPushButton("Logs Active")
+        self.logs_active_btn.setFixedWidth(140)
+        self.logs_active_btn.clicked.connect(self._open_logs_window)
+        self.logs_active_btn.setVisible(False)
         try:
             theme = resolve_theme(self.settings)
             self.resume_schedule_btn.setStyleSheet(button_style("info", theme))
+            self.suspend_schedule_btn.setStyleSheet(button_style("warning", theme))
+            self.logs_active_btn.setStyleSheet(button_style("warning", theme))
         except Exception:
             pass
         status_layout.addWidget(self.scheduler_status_header)
         status_layout.addWidget(self.scheduler_status_reasons)
+        status_layout.addWidget(self.suspend_schedule_btn, alignment=Qt.AlignCenter)
         status_layout.addWidget(self.resume_schedule_btn, alignment=Qt.AlignCenter)
+        status_layout.addWidget(self.logs_active_btn, alignment=Qt.AlignCenter)
         nav_layout.addWidget(self.scheduler_status_container)
         self.resume_schedule_btn.setVisible(False)
         nav_layout.addStretch()
@@ -292,6 +315,7 @@ class MainWindow(QMainWindow):
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(2000)
         self._status_timer.timeout.connect(self._refresh_scheduler_status_panel)
+        self._status_timer.timeout.connect(self._check_timed_debug_expiry)
         self._status_timer.start()
 
         app = QApplication.instance()
@@ -330,6 +354,18 @@ class MainWindow(QMainWindow):
             self.settings_tab.settings_saved.connect(self._apply_app_theme)
         except Exception:
             pass
+        try:
+            self.settings_tab.settings_saved.connect(self._update_log_indicator)
+        except Exception:
+            pass
+        try:
+            self.settings_tab.open_logs_requested.connect(self._open_logs_window)
+        except Exception:
+            pass
+        try:
+            self.settings_tab.log_level_changed.connect(self._update_log_indicator)
+        except Exception:
+            pass
         self.hf_schedule_tab.schedule_saved.connect(self._refresh_freq_planner_if_loaded)
         self.hf_schedule_tab.schedule_saved.connect(self.scheduler.force_refresh)
         self.net_tab.schedule_saved.connect(self._refresh_freq_planner_if_loaded)
@@ -342,9 +378,18 @@ class MainWindow(QMainWindow):
         self._refresh_scheduler_status_panel()
 
         try:
-            self.log_tab.log_level_changed.connect(self._update_log_indicator)
+            self.launch_orchestrator.sequence_started.connect(self._on_launch_sequence_started)
         except Exception:
             pass
+        try:
+            self.launch_orchestrator.sequence_progress.connect(self._on_launch_sequence_progress)
+        except Exception:
+            pass
+        try:
+            self.launch_orchestrator.sequence_finished.connect(self._on_launch_sequence_finished)
+        except Exception:
+            pass
+        QTimer.singleShot(1200, self._start_launch_control_startup)
 
     def refresh_operator_history_views(self):
         """
@@ -376,27 +421,95 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             level = (self.settings.get("log_level", "") or "INFO").upper()
-            if self._logs_nav_index is None:
-                return
-            if self._logs_nav_index >= len(self.nav_buttons):
-                return
-            btn = self.nav_buttons[self._logs_nav_index]
             if level == "DISABLED":
-                btn.setText("Logs")
-                btn.setToolTip("")
-                btn.setStyleSheet("")
+                self.logs_active_btn.setVisible(False)
             else:
-                btn.setText("Logs Enabled")
-                btn.setToolTip(
-                    "Logging is active. Disable in Logs tab unless you are troubleshooting."
+                self.logs_active_btn.setVisible(True)
+                self.logs_active_btn.setText(f"Logs: {level}")
+                self.logs_active_btn.setToolTip(
+                    "Logging is active. Disable in Settings unless you are troubleshooting."
                 )
                 try:
                     theme = resolve_theme(self.settings)
-                    btn.setStyleSheet(button_style("warning", theme))
+                    self.logs_active_btn.setStyleSheet(button_style("warning", theme))
                 except Exception:
                     pass
         except Exception as e:
             log.debug("MainWindow: log indicator update failed: %s", e)
+
+    def _open_logs_window(self) -> None:
+        try:
+            if self.log_tab is None:
+                self.log_tab = LogViewerTab(self)
+                try:
+                    self.log_tab.log_level_changed.connect(self._update_log_indicator)
+                except Exception:
+                    pass
+            if self._log_dialog is None:
+                dlg = QDialog(self)
+                dlg.setWindowTitle("Logs")
+                dlg.resize(980, 620)
+                layout = QVBoxLayout(dlg)
+                layout.setContentsMargins(8, 8, 8, 8)
+                layout.addWidget(self.log_tab)
+                try:
+                    dlg.finished.connect(lambda _=0: self.log_tab.set_tab_active(False))
+                except Exception:
+                    pass
+                self._log_dialog = dlg
+            self._log_dialog.show()
+            self._log_dialog.raise_()
+            self._log_dialog.activateWindow()
+            try:
+                self.log_tab.set_tab_active(True)
+            except Exception:
+                pass
+            try:
+                self.log_tab._refresh()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        except Exception as e:
+            log.debug("MainWindow: failed to open logs window: %s", e)
+
+    def _check_timed_debug_expiry(self) -> None:
+        try:
+            until_txt = (self.settings.get("timed_debug_until_utc", "") or "").strip()
+            if not until_txt:
+                return
+            try:
+                until_dt = datetime.datetime.fromisoformat(until_txt)
+            except Exception:
+                until_dt = None
+            if until_dt is None:
+                return
+            if until_dt.tzinfo is None:
+                until_dt = until_dt.replace(tzinfo=datetime.timezone.utc)
+            else:
+                until_dt = until_dt.astimezone(datetime.timezone.utc)
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            if now_utc < until_dt:
+                return
+            prev = (self.settings.get("timed_debug_prev_level", "") or "INFO").strip().upper()
+            if prev not in {"DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"}:
+                prev = "INFO"
+            self.settings.set_many(
+                {
+                    "log_level": prev,
+                    "timed_debug_until_utc": "",
+                    "timed_debug_prev_level": "",
+                }
+            )
+            set_log_level(prev)
+            if self.log_tab is not None:
+                try:
+                    idx = self.log_tab.level_combo.findText(prev)
+                    if idx >= 0:
+                        self.log_tab.level_combo.setCurrentIndex(idx)
+                except Exception:
+                    pass
+            self._update_log_indicator()
+        except Exception as e:
+            log.debug("MainWindow: timed debug expiry check failed: %s", e)
 
     def _init_map_filters(self) -> None:
         """
@@ -461,33 +574,77 @@ class MainWindow(QMainWindow):
         v.addWidget(QLabel("Propagation"))
         self.map_cb_prop_overlay = QCheckBox("Propagation Overlay")
         v.addWidget(self.map_cb_prop_overlay)
+        history_label = "History (7 days)"
+        prop_combo_width = max(120, self.fontMetrics().horizontalAdvance(history_label) + 42)
+        prop_label_width = 54
+
+        def _prop_label(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setMinimumWidth(prop_label_width)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            return lbl
+
+        def _style_prop_combo(combo: QComboBox) -> None:
+            combo.setMinimumWidth(prop_combo_width)
+            combo.setMaximumWidth(prop_combo_width)
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            try:
+                combo.view().setMinimumWidth(prop_combo_width)
+            except Exception:
+                pass
+
         mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Mode:"))
+        mode_row.addWidget(_prop_label("Mode:"))
         self.map_prop_mode_combo = QComboBox()
         self.map_prop_mode_combo.addItem("Actual", "actual")
         self.map_prop_mode_combo.addItem("Blended", "blended")
         self.map_prop_mode_combo.addItem("Modeled", "model")
+        _style_prop_combo(self.map_prop_mode_combo)
         mode_row.addWidget(self.map_prop_mode_combo)
         mode_row.addStretch()
         v.addLayout(mode_row)
         window_row = QHBoxLayout()
-        window_row.addWidget(QLabel("Window:"))
+        window_row.addWidget(_prop_label("Window:"))
         self.map_prop_window_combo = QComboBox()
         self.map_prop_window_combo.addItem("1h", 1)
         self.map_prop_window_combo.addItem("3h", 3)
         self.map_prop_window_combo.addItem("6h", 6)
         self.map_prop_window_combo.addItem("12h", 12)
         self.map_prop_window_combo.addItem("24h", 24)
-        self.map_prop_window_combo.addItem("History (7 days)", 168)
+        self.map_prop_window_combo.addItem("7 Days", 168)
+        _style_prop_combo(self.map_prop_window_combo)
         window_row.addWidget(self.map_prop_window_combo)
         window_row.addStretch()
         v.addLayout(window_row)
+        target_type_row = QHBoxLayout()
+        target_type_row.addWidget(_prop_label("Target:"))
+        self.map_prop_target_type_combo = QComboBox()
+        self.map_prop_target_type_combo.addItem("Region", "REGION")
+        self.map_prop_target_type_combo.addItem("State", "STATE")
+        self.map_prop_target_type_combo.addItem("Operator", "OPERATOR")
+        _style_prop_combo(self.map_prop_target_type_combo)
+        target_type_row.addWidget(self.map_prop_target_type_combo)
+        target_type_row.addStretch()
+        v.addLayout(target_type_row)
+        target_value_row = QHBoxLayout()
+        target_value_row.addWidget(_prop_label("Value:"))
+        self.map_prop_target_value_combo = QComboBox()
+        self.map_prop_target_value_combo.setEditable(True)
+        self.map_prop_target_value_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.map_prop_target_value_combo.setDuplicatesEnabled(False)
+        _style_prop_combo(self.map_prop_target_value_combo)
+        target_value_row.addWidget(self.map_prop_target_value_combo)
+        target_value_row.addStretch()
+        v.addLayout(target_value_row)
         self.map_prop_badge = QLabel("Best Band: --")
         self.map_prop_badge.setStyleSheet("font-weight: bold; color: #1E88E5;")
         v.addWidget(self.map_prop_badge)
         self.map_cb_prop_overlay.stateChanged.connect(self._on_sidebar_prop_changed)
         self.map_prop_mode_combo.currentIndexChanged.connect(self._on_sidebar_prop_mode_changed)
         self.map_prop_window_combo.currentIndexChanged.connect(self._on_sidebar_prop_window_changed)
+        self.map_prop_target_type_combo.currentIndexChanged.connect(self._on_sidebar_prop_target_type_changed)
+        self.map_prop_target_value_combo.currentTextChanged.connect(self._on_sidebar_prop_target_value_changed)
+        self._refresh_map_prop_target_controls()
         v.addStretch()
         self.map_filters_layout.addWidget(box)
 
@@ -540,6 +697,94 @@ class MainWindow(QMainWindow):
         self.map_pop_combo.blockSignals(True)
         self.map_pop_combo.setCurrentIndex(idx)
         self.map_pop_combo.blockSignals(False)
+        self._refresh_map_prop_target_controls()
+
+    def _load_map_prop_operator_callsigns(self) -> list[str]:
+        db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        if not db_path.exists():
+            return []
+        out: list[str] = []
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT IFNULL(callsign, '')
+                FROM operator_checkins
+                ORDER BY callsign COLLATE NOCASE
+                """
+            )
+            for (callsign,) in cur.fetchall():
+                cs = (callsign or "").strip().upper()
+                if cs and cs not in out:
+                    out.append(cs)
+            conn.close()
+        except Exception as e:
+            log.debug("MainWindow: failed to load map propagation operator options: %s", e)
+        return out
+
+    def _map_prop_target_options(self, target_type: str) -> list[str]:
+        target_type = (target_type or "REGION").strip().upper()
+        if target_type == "STATE":
+            return [s for s in LOWER48_STATES if s in STATE_CENTERS]
+        if target_type == "OPERATOR":
+            return self._load_map_prop_operator_callsigns()
+        return ["ALL"] + sorted(FEMA_REGIONS.keys())
+
+    def _set_map_prop_target_value_options(self, target_type: str, selected_value: str) -> None:
+        target_type = (target_type or "REGION").strip().upper()
+        selected_value = (selected_value or "").strip().upper()
+        if target_type == "REGION" and selected_value == "NATIONAL":
+            selected_value = "ALL"
+        options = self._map_prop_target_options(target_type)
+        self.map_prop_target_value_combo.blockSignals(True)
+        self.map_prop_target_value_combo.clear()
+        for value in options:
+            self.map_prop_target_value_combo.addItem(value)
+        if selected_value:
+            idx = self.map_prop_target_value_combo.findText(selected_value, Qt.MatchFixedString)
+            if idx >= 0:
+                self.map_prop_target_value_combo.setCurrentIndex(idx)
+            else:
+                self.map_prop_target_value_combo.setEditText(selected_value)
+        elif self.map_prop_target_value_combo.count() > 0:
+            self.map_prop_target_value_combo.setCurrentIndex(0)
+        else:
+            self.map_prop_target_value_combo.setEditText("")
+        self.map_prop_target_value_combo.setEditable(target_type == "OPERATOR")
+        self.map_prop_target_value_combo.blockSignals(False)
+
+    def _refresh_map_prop_target_controls(self) -> None:
+        if not hasattr(self, "map_prop_target_type_combo") or not hasattr(self, "map_prop_target_value_combo"):
+            return
+        self._map_prop_target_syncing = True
+        try:
+            self.settings.reload()
+            target_type = (self.settings.get("prop_target_type", "REGION") or "REGION").strip().upper()
+            if target_type not in {"REGION", "STATE", "OPERATOR"}:
+                target_type = "REGION"
+            target_value = (self.settings.get("prop_target_value", "") or "").strip().upper()
+            idx = self.map_prop_target_type_combo.findData(target_type)
+            if idx < 0:
+                idx = 0
+            self.map_prop_target_type_combo.blockSignals(True)
+            self.map_prop_target_type_combo.setCurrentIndex(idx)
+            self.map_prop_target_type_combo.blockSignals(False)
+            self._set_map_prop_target_value_options(target_type, target_value)
+            current_value = (self.map_prop_target_value_combo.currentText() or "").strip().upper()
+            existing_type = (self.settings.get("prop_target_type", "") or "").strip().upper()
+            existing_value = (self.settings.get("prop_target_value", "") or "").strip().upper()
+            if existing_type != target_type or existing_value != current_value:
+                self.settings.set_many(
+                    {
+                        "prop_target_type": target_type,
+                        "prop_target_value": current_value,
+                    }
+                )
+        except Exception as e:
+            log.debug("MainWindow: failed to sync map propagation target controls: %s", e)
+        finally:
+            self._map_prop_target_syncing = False
 
     def _on_sidebar_map_filter_changed(self, _=None) -> None:
         """
@@ -614,27 +859,62 @@ class MainWindow(QMainWindow):
             tab._save_display_preferences()
         if hasattr(tab, "_render_map"):
             tab._render_map()
+
+    def _on_sidebar_prop_target_type_changed(self, _=None) -> None:
+        if self._map_prop_target_syncing:
+            return
+        target_type = (self.map_prop_target_type_combo.currentData() or "REGION").strip().upper()
+        self._map_prop_target_syncing = True
+        try:
+            self._set_map_prop_target_value_options(target_type, "")
+            value = (self.map_prop_target_value_combo.currentText() or "").strip().upper()
+            self.settings.set_many(
+                {
+                    "prop_target_type": target_type,
+                    "prop_target_value": value,
+                }
+            )
+        except Exception as e:
+            log.debug("MainWindow: propagation target type change failed: %s", e)
+        finally:
+            self._map_prop_target_syncing = False
+        tab = getattr(self, "stations_map_tab", None)
+        if tab is not None and hasattr(tab, "_render_map"):
+            tab._render_map()
+
+    def _on_sidebar_prop_target_value_changed(self, text: str) -> None:
+        if self._map_prop_target_syncing:
+            return
+        target_type = (self.map_prop_target_type_combo.currentData() or "REGION").strip().upper()
+        value = (text or "").strip().upper()
+        if target_type == "REGION" and value == "NATIONAL":
+            value = "ALL"
+        try:
+            self.settings.set_many(
+                {
+                    "prop_target_type": target_type,
+                    "prop_target_value": value,
+                }
+            )
+        except Exception as e:
+            log.debug("MainWindow: propagation target value change failed: %s", e)
+        tab = getattr(self, "stations_map_tab", None)
+        if tab is not None and hasattr(tab, "_render_map"):
+            tab._render_map()
+
     def _update_map_filters_visibility(self, index: int) -> None:
         """
-        Show the stations-map 'Show' filters in the sidebar only when the Map view is active.
+        Keep map visibility/lifecycle in sync with the active tab.
+        Sidebar layout remains stable while map-specific controls live inside Map.
         """
         is_map = 0 <= index < len(self._screens) and self._screens[index][0] == "Map"
-        if hasattr(self, "logo_label"):
-            self.logo_label.setVisible(not is_map)
-        if self._map_nav_index is not None and self._map_nav_index < len(self.nav_buttons):
-            self.nav_buttons[self._map_nav_index].setVisible(not is_map)
-        if hasattr(self, "scheduler_status_container"):
-            self.scheduler_status_container.setVisible(not is_map)
         try:
             if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "set_map_visible"):
                 self.stations_map_tab.set_map_visible(is_map)
         except Exception:
             pass
-        if not is_map or self.map_filters_layout is None:
+        if hasattr(self, "map_filters_container"):
             self.map_filters_container.setVisible(False)
-            return
-        self.map_filters_container.setVisible(True)
-        self._sync_map_filters_from_tab()
 
     def _on_resume_schedule_clicked(self) -> None:
         try:
@@ -653,6 +933,27 @@ class MainWindow(QMainWindow):
                     )
         except Exception:
             pass
+
+    def _on_suspend_schedule_clicked(self) -> None:
+        try:
+            if not hasattr(self, "scheduler"):
+                return
+            status = self.scheduler.get_status_summary() if hasattr(self.scheduler, "get_status_summary") else {}
+            suspended_until = status.get("suspended_until") if isinstance(status, dict) else None
+            if suspended_until:
+                self._on_resume_schedule_clicked()
+                return
+            if hasattr(self.scheduler, "suspend_schedule"):
+                self.scheduler.suspend_schedule(30)
+            else:
+                try:
+                    until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
+                    self.scheduler.settings.set("schedule_suspend_until", until.timestamp())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._refresh_scheduler_status_panel()
 
     def _set_scheduler_reasons(self, lines: list[str]) -> None:
         if not hasattr(self, "scheduler_status_reasons_layout"):
@@ -713,6 +1014,7 @@ class MainWindow(QMainWindow):
             self.scheduler_status_header.setText("Frequency")
             self._set_scheduler_reasons([freq_label or "--"])
             self.resume_schedule_btn.setVisible(False)
+            self.suspend_schedule_btn.setVisible(False)
             try:
                 self.scheduler_status_container.adjustSize()
             except Exception:
@@ -723,7 +1025,14 @@ class MainWindow(QMainWindow):
             local_dt = suspended_until.astimezone()
             self.scheduler_status_header.setText("Suspended until")
             self._set_scheduler_reasons([f"{local_dt:%Y-%m-%d %H:%M}"])
-            self.resume_schedule_btn.setVisible(True)
+            self.resume_schedule_btn.setVisible(False)
+            self.suspend_schedule_btn.setVisible(True)
+            self.suspend_schedule_btn.setText("Resume Schedule")
+            try:
+                theme = resolve_theme(self.settings)
+                self.suspend_schedule_btn.setStyleSheet(button_style("info", theme))
+            except Exception:
+                pass
             try:
                 self.scheduler_status_container.adjustSize()
             except Exception:
@@ -784,6 +1093,13 @@ class MainWindow(QMainWindow):
             self.scheduler_status_header.setStyleSheet("font-weight: bold; color: #C62828;")
             self._set_scheduler_reasons(reasons or [""])
             self.resume_schedule_btn.setVisible(True)
+            self.suspend_schedule_btn.setVisible(True)
+            self.suspend_schedule_btn.setText("Suspend Schedule")
+            try:
+                theme = resolve_theme(self.settings)
+                self.suspend_schedule_btn.setStyleSheet(button_style("warning", theme))
+            except Exception:
+                pass
             try:
                 theme = resolve_theme(self.settings)
                 highlight = theme.get("surface_alt", theme.get("surface", "#FFFFFF"))
@@ -805,6 +1121,13 @@ class MainWindow(QMainWindow):
             self.scheduler_status_header.setStyleSheet("")
             self._set_scheduler_reasons([])
             self.resume_schedule_btn.setVisible(False)
+            self.suspend_schedule_btn.setVisible(True)
+            self.suspend_schedule_btn.setText("Suspend Schedule")
+            try:
+                theme = resolve_theme(self.settings)
+                self.suspend_schedule_btn.setStyleSheet(button_style("warning", theme))
+            except Exception:
+                pass
             try:
                 self.scheduler_status_container.setStyleSheet(
                     "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 4px; }"
@@ -857,6 +1180,28 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "background_ingest"):
                 self.background_ingest.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "launch_orchestrator"):
+                self.launch_orchestrator.stop_sequence()
+        except Exception:
+            pass
+        try:
+            if self._launch_progress_dialog is not None:
+                self._launch_progress_dialog.close()
+                self._launch_progress_dialog = None
+        except Exception:
+            pass
+        try:
+            if self._log_dialog is not None:
+                self._log_dialog.close()
+                self._log_dialog = None
+        except Exception:
+            pass
+        try:
+            if self.log_tab is not None and hasattr(self.log_tab, "set_tab_active"):
+                self.log_tab.set_tab_active(False)
         except Exception:
             pass
         try:
@@ -1104,15 +1449,6 @@ class MainWindow(QMainWindow):
 
     def _create_stations_map_tab(self) -> QWidget:
         self.stations_map_tab = StationsMapTab(self)
-        try:
-            self.stations_map_tab.attach_prop_controls(
-                getattr(self, "map_cb_prop_overlay", None),
-                getattr(self, "map_prop_badge", None),
-                getattr(self, "map_prop_mode_combo", None),
-                getattr(self, "map_prop_window_combo", None),
-            )
-        except Exception:
-            pass
         return self.stations_map_tab
 
     def _ensure_lazy_tab_loaded(self, label: str, index: int) -> None:
@@ -1156,11 +1492,116 @@ class MainWindow(QMainWindow):
                 self.controlfreq_tab.on_settings_saved()
         except Exception:
             pass
+        try:
+            self._refresh_map_prop_target_controls()
+        except Exception:
+            pass
 
     def _refresh_freq_planner_if_loaded(self) -> None:
         try:
             if self.freq_planner_tab is not None:
                 self.freq_planner_tab.rebuild_table()
+        except Exception:
+            pass
+
+    def _start_launch_control_startup(self) -> None:
+        try:
+            if hasattr(self, "launch_orchestrator"):
+                self.launch_orchestrator.start_startup_sequence()
+        except Exception as e:
+            log.debug("MainWindow: launch-control startup sequence failed to start: %s", e)
+
+    def _on_launch_sequence_started(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        queue = data.get("queue") if isinstance(data, dict) else []
+        queue_count = len(queue) if isinstance(queue, list) else 0
+        trigger = str(data.get("trigger", "")).strip().capitalize() or "Launch"
+        self._launch_progress_total = max(queue_count, 1)
+        self._launch_progress_done = 0
+        try:
+            self.statusBar().showMessage(f"{trigger}: launching {queue_count} application(s)...")
+        except Exception:
+            pass
+        try:
+            if self._launch_progress_dialog is not None:
+                self._launch_progress_dialog.close()
+        except Exception:
+            pass
+        dlg = QProgressDialog(
+            f"{trigger}: launching applications...",
+            "Stop",
+            0,
+            self._launch_progress_total,
+            self,
+        )
+        dlg.setWindowTitle("Launch Control")
+        dlg.setWindowModality(Qt.NonModal)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        try:
+            dlg.canceled.connect(self.launch_orchestrator.stop_sequence)
+        except Exception:
+            pass
+        dlg.show()
+        self._launch_progress_dialog = dlg
+
+    def _on_launch_sequence_progress(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        name = str(data.get("name", "")).strip() or "Application"
+        status = str(data.get("status", "")).strip() or "status"
+        detail = str(data.get("detail", "")).strip()
+        self._launch_progress_done = min(self._launch_progress_total, self._launch_progress_done + 1)
+        try:
+            self.statusBar().showMessage(f"Launch: {name} {status}" + (f" ({detail})" if detail else ""))
+        except Exception:
+            pass
+        if self._launch_progress_dialog is not None:
+            try:
+                label = f"{name}: {status}"
+                if detail:
+                    label = f"{label} ({detail})"
+                self._launch_progress_dialog.setLabelText(label)
+                self._launch_progress_dialog.setValue(self._launch_progress_done)
+            except Exception:
+                pass
+
+    def _on_launch_sequence_finished(self, payload: object) -> None:
+        try:
+            data = payload if isinstance(payload, dict) else {}
+            trigger = str(data.get("trigger", "")).strip().lower()
+            launched = int(data.get("launched", 0) or 0)
+            running = int(data.get("already_running", 0) or 0)
+            failed = int(data.get("failed", 0) or 0)
+            timeout = int(data.get("timeout", 0) or 0)
+            cancelled = bool(data.get("cancelled", False))
+            summary = (
+                f"Launch {trigger or 'sequence'} complete: "
+                f"launched={launched}, running={running}, failed={failed}, timeout={timeout}"
+            )
+            if cancelled:
+                summary = f"{summary}, cancelled=true"
+            try:
+                self.statusBar().showMessage(summary, 12000)
+            except Exception:
+                pass
+            if self._launch_progress_dialog is not None:
+                try:
+                    self._launch_progress_dialog.setValue(self._launch_progress_total)
+                    self._launch_progress_dialog.close()
+                except Exception:
+                    pass
+                self._launch_progress_dialog = None
+            log.info(
+                "LaunchControl summary (%s): launched=%s running=%s failed=%s timeout=%s cancelled=%s",
+                trigger or "unknown",
+                launched,
+                running,
+                failed,
+                timeout,
+                cancelled,
+            )
         except Exception:
             pass
 

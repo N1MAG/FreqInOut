@@ -29,8 +29,8 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.1.5</p>
-  <p>This guide describes every tab, button, field, and function in FreqInOut. Times are stored in UTC; the "Showing: Local/UTC" toggle only changes what you see.</p>
+  <p><strong>Current version</strong>: 1.1.6</p>
+  <p>This guide documents all tabs and primary controls in FreqInOut, including operating workflows for both new and advanced users. Times are stored in UTC; the "Showing: Local/UTC" toggle only changes what you see.</p>
   <p><strong>Responsibility notice</strong>: FreqInOut assists licensed amateur operators by coordinating complex radio software and schedules. It assumes you follow applicable band plans and regulations. Disabling safeguards (for example, scheduling) can let you tune outside legal allocations. You are solely responsible for compliant operation; the authors and contributors are not liable for misuse.</p>
 
   <h2 id="quick-start">Quick Start</h2>
@@ -107,9 +107,9 @@
   </ul>
   <ul class="section-list">
     <li><strong>Sidebar navigation</strong>: Click a left-side button to switch tabs. After saving a callsign in Settings, each tab label becomes <em>Tab [CALLSIGN]</em>.</li>
-    <li><strong>Logs indicator</strong>: If the log level is not DISABLED, the sidebar label changes to <em>Logs Enabled</em> and is highlighted in a warning color.</li>
-    <li><strong>Map Layers sidebar</strong>: Only visible while the Map tab is active. Controls Callsigns, States, Cities, Grids, Regions, and City Pop. filtering.</li>
-    <li><strong>Schedule Status panel</strong>: Below the tab buttons (hidden on Map), shows On Schedule / Off Schedule with specific reasons (e.g., Frequency, FLDigi Mode, JS8 Offset, QSO traffic, or Sending Traffic when PTT is active). When scheduling is disabled or Frequency Control is Manual, it shows the current frequency only. Includes a blue <em>Resume Schedule</em> button that immediately applies the schedule and overrides any prior Skip/Pause state. When an SOP reminder is coming within 3 hours, the header shows <em>SOP Action in: H:MM</em>. When JS8/VarAC/FLDigi have recent RX activity, an informational <em>BUSY RX: ...</em> line appears; it is hidden during nets. FLDigi may display as <em>FLDigi (gibberish)</em> when noisy RX is detected.</li>
+    <li><strong>Logs indicator</strong>: If logging is active (level is not DISABLED), the Schedule Status panel shows a warning-highlighted <em>Logs: LEVEL</em> button for quick access.</li>
+    <li><strong>Map Layers sidebar</strong>: Only visible while the Map tab is active. Controls Callsigns, States, Cities, Grids, Regions, City Pop. filtering, and propagation controls (Overlay, Mode, Window, Target Type/Value).</li>
+    <li><strong>Schedule Status panel</strong>: Below the tab buttons (hidden on Map), shows On Schedule / Off Schedule with specific reasons (e.g., Frequency, FLDigi Mode, JS8 Offset, QSO traffic, or Sending Traffic when PTT is active). When scheduling is disabled or Frequency Control is Manual, it shows the current frequency only. Includes <em>Resume Schedule</em> and <em>Suspend Schedule</em> controls for immediate operator override. Suspend toggles to Resume while active. When an SOP reminder is coming within 3 hours, the header shows <em>SOP Action in: H:MM</em>. When JS8/VarAC/FLDigi have recent RX activity, an informational <em>BUSY RX: ...</em> line appears; it is hidden during nets. FLDigi may display as <em>FLDigi (gibberish)</em> when noisy RX is detected.</li>
     <li><strong>Off-schedule prompt</strong>: When a configured enforcement item first goes off schedule, a dialog appears listing only those items (e.g., <em>Frequency and Offset are Off Schedule</em>) with buttons <em>Resume Sched.</em>, <em>Skip Once</em>, and <em>Pause Sched. 30 Min</em>. <em>Resume Sched.</em> enforces only the listed items; <em>Pause Sched. 30 Min</em> pauses enforcement for 30 minutes; <em>Skip Once</em> resets the prompt timer. If you do not respond within 2 minutes, the listed items are applied automatically. Repeat prompts follow the selected prompt interval.</li>
   </ul>
   <p><strong>Important background timers</strong>:</p>
@@ -163,42 +163,85 @@
   </ol>
 
 <h2 id="controlfreq">ControlFreq Tab</h2>
-  <p><strong>Purpose</strong>: Single-pane operational console for live activity, schedules, messages, propagation, and frequency control.</p>
-  <p><strong>Typical workflow</strong>: Use ControlFreq as your primary “dashboard.” Verify your schedule, scan activity, check upcoming SOP/Net windows, review inbox counts, and QSY if needed.</p>
-  <p><strong>Key concepts</strong>:</p>
+  <p><strong>Purpose</strong>: Primary operating dashboard for near-real-time schedule control, activity awareness, message triage, and offline propagation guidance.</p>
+  <p><strong>Typical workflow</strong>: Confirm station/software status, validate Scheduled vs Active frequency, scan Activity and Message Summary, review upcoming intersections and outlook rows, then QSY/resume as needed.</p>
+  <p><strong>Header controls</strong>:</p>
   <ul class="section-list">
-    <li><strong>Filter by keyword</strong>: The search box filters all cards. Use callsigns, group names, or keywords like <em>SOP</em>, <em>NET</em>, or <em>JS8</em>.</li>
-    <li><strong>Local/UTC toggle</strong>: The “Showing: Local/UTC” button affects time displays in Today/7 Days and intersections.</li>
-    <li><strong>Live updates</strong>: Activity and frequency status update in the background while the tab is active.</li>
+    <li><strong>Filter by keyword</strong>: Filters dashboard datasets by callsign/group/keywords (for example, <em>SOP</em>, <em>NET</em>, <em>JS8</em>).</li>
+    <li><strong>Group filter</strong>: Limits activity/schedule/intersection views to one operating group.</li>
+    <li><strong>Refresh</strong>: Immediate manual refresh of all ControlFreq widgets.</li>
+    <li><strong>Clear Filters</strong>: Resets keyword/group filters and activity window selection.</li>
+    <li><strong>Showing Local / Showing UTC</strong>: Changes displayed times for schedule-oriented views.</li>
+    <li><strong>Focus Mode</strong>: Defaults to <em>On</em>. Focus On keeps high-priority panels visible and reduces clutter.</li>
+    <li><strong>Keyboard shortcuts</strong>: <em>Ctrl+R</em> Refresh, <em>Ctrl+Enter</em> Set Frequency, <em>Ctrl+Shift+R</em> Resume Schedule.</li>
   </ul>
-  <h3 id="controlfreq-activity">Activity (Recent)</h3>
+  <p><strong>Top status strip</strong>:</p>
   <ul class="section-list">
-    <li><strong>Window</strong>: Choose 30m/1h/2h/6h/12h/24h to control what “Recent” means.</li>
-    <li><strong>Group-only view</strong>: Only groups with actual activity appear.</li>
-    <li><strong>Traffic</strong>: Includes JS8 links, JS8/Spotter/VarAC messages, and FLDigi check-ins (voice nets).</li>
+    <li><strong>Operating Status LEDs</strong>: FLRig, FLDigi, FLMsg, FLAmp, JS8, VarAC, JS8Spotter, CommStat. LEDs remain visible in both focus states.</li>
+    <li><strong>Last updated</strong>: Shows the last full dashboard refresh timestamp.</li>
+  </ul>
+  <h3 id="controlfreq-layout">Layout and Focus Mode</h3>
+  <ul class="section-list">
+    <li><strong>Focus Mode Off</strong>: Top row = <em>Frequency Control</em> (left), <em>Activity</em> (middle), <em>Message Summary</em> (right). Lower row = <em>Schedule Intersections</em> (left) and <em>Schedule Outlook</em> (right). Bottom = full-width <em>Propagation Forecast</em>.</li>
+    <li><strong>Focus Mode On</strong>: Keeps <em>Frequency Control</em>, <em>Message Summary</em>, <em>Operating Status</em>, <em>Schedule Outlook</em>, and <em>Propagation Forecast</em>. Hides lower-priority <em>Activity</em> and <em>Schedule Intersections</em>.</li>
+    <li><strong>Panel sizing</strong>: Top-row panel heights are synchronized to Frequency Control height for consistent alignment.</li>
   </ul>
   <h3 id="controlfreq-frequency">Frequency Control</h3>
   <ul class="section-list">
-    <li><strong>Scheduled / Active</strong>: Shows the scheduler’s current target and the rig’s active frequency.</li>
-    <li><strong>Set Frequency</strong>: Select an Operating Group frequency and apply it. This pauses the schedule until resumed.</li>
-    <li><strong>Resume Schedule</strong>: Forces the scheduler to reapply the current plan immediately.</li>
-    <li><strong>Schedule Intersections</strong>: Summary of overlaps between your schedule and peer schedules for <em>Now</em> and the next hour (exact frequency match).</li>
+    <li><strong>Scheduled / Active</strong>: Displays scheduler target frequency and currently active rig frequency.</li>
+    <li><strong>Status / Next / Suspend</strong>: Compact scheduler state summary (on/off schedule, next scheduled change, and suspend state).</li>
+    <li><strong>Select frequency</strong>: Operating-group frequency picker.</li>
+    <li><strong>Set Frequency</strong>: Applies selected frequency (manual QSY behavior).</li>
+    <li><strong>Resume Schedule</strong>: Reapplies scheduler targets immediately.</li>
   </ul>
-  <h3 id="controlfreq-today">Today / 7 Days</h3>
+  <h3 id="controlfreq-activity">Activity</h3>
   <ul class="section-list">
-    <li><strong>Today</strong>: Shows upcoming SOP actions and scheduled nets (with Band/Freq and type).</li>
-    <li><strong>7 Days</strong>: Shows upcoming SOP actions and nets only (daily schedule excluded for clarity).</li>
+    <li><strong>Window</strong>: 30m / 1h / 2h / 6h / 12h / 24h.</li>
+    <li><strong>Rows</strong>: Group, Band/Freq, Callsigns Seen, Traffic.</li>
+    <li><strong>Traffic sources</strong>: JS8 links/messages, Spotter traffic, VarAC messages, FLDigi check-ins.</li>
+    <li><strong>No data state</strong>: Shows explicit empty-state rows when no activity is found.</li>
   </ul>
-  <h3 id="controlfreq-inbox">Inbox Summary</h3>
+  <h3 id="controlfreq-messages">Message Summary</h3>
   <ul class="section-list">
-    <li><strong>Unread counts</strong>: JS8, Spotter, and VarAC unread message totals.</li>
-    <li><strong>Top senders</strong>: Shows the most active senders; hover for full lists when truncated.</li>
+    <li><strong>Rows</strong>: JS8, Spotter, VarAC unread counts + details; SitRep status summary row; VarAC BBS file row.</li>
+    <li><strong>SitRep row</strong>: Shows known-status callsign count and detail counts as <em>R:x  Y:y  G:z</em> (latest status per callsign).</li>
+    <li><strong>Details column</strong>: Header is <em>Details / BBS Aging Out</em>.</li>
+    <li><strong>BBS aging</strong>: Shows filenames nearing auto-archive threshold (next-day aging window).</li>
+  </ul>
+  <h3 id="controlfreq-intersections">Schedule Intersections</h3>
+  <ul class="section-list">
+    <li><strong>Scope</strong>: Exact-frequency overlaps between your schedule and peer schedules.</li>
+    <li><strong>Rows</strong>: <em>Now</em> and <em>Next 2 hours</em> summary.</li>
+    <li><strong>Display</strong>: Visible in Focus Off; hidden in Focus On.</li>
+  </ul>
+  <h3 id="controlfreq-outlook">Schedule Outlook</h3>
+  <ul class="section-list">
+    <li><strong>Sectioned table</strong>: <em>Today</em> and <em>7 Days</em> in one table.</li>
+    <li><strong>Columns</strong>: When/Day, Type, Group/Net, Band/Freq, Action.</li>
+    <li><strong>Types</strong>: HF schedule rows, NET rows, SOP reminder rows.</li>
+    <li><strong>Row actions</strong>: <em>QSY</em> (HF rows with valid frequency), <em>Open Net</em>, <em>Open SOP</em>.</li>
+    <li><strong>No data state</strong>: Explicit empty-state rows for each section when no items match.</li>
+  </ul>
+  <h3 id="controlfreq-highlighting">ControlFreq Highlighting Rules</h3>
+  <ul class="section-list">
+    <li><strong>Schedule Outlook urgency</strong>: Upcoming rows are highlighted by time-to-event: critical (<=15 min), soon (<=60 min), upcoming (<=180 min). Critical type cell is bold.</li>
+    <li><strong>Schedule Intersections emphasis</strong>: The <em>Now</em> row is emphasized; overlap-present rows receive warning highlight; secondary row text is muted.</li>
+    <li><strong>Message Summary emphasis</strong>: Non-zero message counts use positive highlight; SitRep row uses warning when red count is non-zero; VarAC BBS aging-out row uses warning highlight.</li>
+    <li><strong>Theme adaptation</strong>: Highlight palettes are theme-aware (dark/light adjusted for readability and contrast).</li>
   </ul>
   <h3 id="controlfreq-propagation">Propagation Forecast</h3>
   <ul class="section-list">
-    <li><strong>Schedule-based forecast</strong>: Uses bands in today’s schedule to provide Morning/Day/Night guidance.</li>
-    <li><strong>Modeled forecast</strong>: A single best-band recommendation based on the offline model.</li>
-    <li><strong>Origin Grid</strong>: Uses your Grid 6 from Settings.</li>
+    <li><strong>Forecast layout</strong>: Two sections: <em>Schedule-based Forecast</em> and <em>Modeled Forecast</em>, each with <em>National</em> and <em>Regional</em> rows for Morning/Day/Night.</li>
+    <li><strong>Target controls</strong>: Target Type = Region/State/Operator. Region <em>ALL</em> means lower-48 national target.</li>
+    <li><strong>Schedule-based Forecast</strong>: Uses only bands present in today’s schedule/net windows.</li>
+    <li><strong>Modeled Forecast</strong>: Uses full supported HF band set (not schedule-limited).</li>
+    <li><strong>Empirical blend</strong>: Regional scoring can blend modeled output with local historical outcomes from offline DB when confidence gates are met.</li>
+    <li><strong>Origin requirement</strong>: Requires operator Grid 6 from Settings; without it, propagation rows are not produced.</li>
+  </ul>
+  <h3 id="controlfreq-persistence">Persistence and refresh behavior</h3>
+  <ul class="section-list">
+    <li><strong>Saved UI state</strong>: Local/UTC mode, search text, group filter, and activity window are persisted. Focus Mode defaults to <em>On</em> when the tab opens.</li>
+    <li><strong>Background updates</strong>: While active, ControlFreq refreshes status/frequency indicators continuously and full data snapshots on timer/manual refresh.</li>
   </ul>
   
 <h2 id="messages">Messages Tab</h2>
@@ -216,6 +259,7 @@
     <li><strong>Export to PDF</strong>: Exports the currently viewed message from the viewer pane.</li>
     <li><strong>Pending JS8 MSGs</strong>: Shows pending message IDs and actions. <em>Get</em> sends a JS8 QUERY MSG to the callsign; <em>Mark Retrieved</em> clears the pending entry (and can mark JS8 inbox rows READ if enabled in Settings).</li>
     <li><strong>Filters row</strong>: MSG Type, Status, From, To dropdowns plus free-text Search and <em>Clear Filters</em>. From/To fields are searchable; typing replaces the hint and narrows matches. Status includes <em>Action Needed</em> when red flags exist.</li>
+    <li><strong>Mark All as Read</strong>: Enabled only when a specific <em>MSG Type</em> filter is selected. Marks unread rows in the current filtered view (same message type scope) as READ in bulk.</li>
     <li><strong>Messages table</strong>: Columns are MSG Type, Status, From, To, RCV_DT (UTC), Message Title, Actions. Actions show <em>View</em> for all rows; a flag icon (between View/Delete) for all rows; and <em>Delete</em> for JS8/VarAC/file-based entries and Spotter (F!###) messages.</li>
     <li><strong>Flags</strong>: Click the flag icon to cycle None -> Red -> Green -> None. Red flags indicate follow-up needed and are included in the Status filter as <em>Action Needed</em>.</li>
     <li><strong>Sorting</strong>: Click headers to sort by MSG Type, Status, From, To, RCV_DT, or Message Title (Actions is not sortable).</li>
@@ -332,12 +376,14 @@
   <ol class="section-list">
     <li><strong>Search</strong>: Text box that filters by any column (case-insensitive).</li>
     <li><strong>Filter by</strong>: Dropdown with All, Untrusted, Blank, and any discovered group names. Use it to scope the table and exports.</li>
+    <li><strong>Clear Filters</strong>: Resets Search and Filter by back to defaults.</li>
     <li><strong>Manage Operators</strong>: Menu with <em>Add Operator...</em>, <em>Edit Selected...</em> (bulk trusted + bulk group role update), and <em>Delete Selected...</em>. Selection is via the checkbox column.</li>
     <li><strong>Bulk select</strong>: The header checkbox selects/deselects all visible rows in the current filtered view. It is enabled only when a filter or search term is active.</li>
     <li><strong>Export by Group</strong>: Checkbox dropdown. The header shows <em>Export by Group</em> or <em>N Selected</em>. The first row says <em>Select groups...</em> (not checkable). You can select any number of groups; selections are cleared after a successful export.</li>
     <li><strong>Export by Group selection behavior</strong>: Click group rows to toggle checkmarks. On Linux and Windows, checked items should remain selected and the header should update to <em>N Selected</em>.</li>
     <li><strong>Import/Export...</strong>: Menu with <em>Import CSV...</em> and <em>Export CSV...</em>.</li>
-    <li><strong>Operators table</strong>: Columns are Select (checkbox), Callsign, Name, State, Grid, Groups (summary), Group Role, First Seen, Last Seen, Trusted, Check-ins. Group 1/2/3 are stored but hidden by default.</li>
+    <li><strong>Operators table</strong>: Columns are Select (checkbox), Callsign, SitRep, Name, State, Grid, Groups (summary), Group Role, First Seen, Last Seen, Trusted, Check-ins. Group 1/2/3 are stored but hidden by default. Click a column header to sort.</li>
+    <li><strong>SitRep column behavior</strong>: Each row shows a clickable status chip (<em>R/Y/G/?</em>). Click the chip to set manual status (Green/Yellow/Red/Unknown). Newer incoming reports can replace manual status.</li>
     <li><strong>Edit Groups</strong>: Double-click the Groups column to edit the full group list for that callsign (one group per line).</li>
     <li><strong>Bulk edit/delete summaries</strong>: Bulk trust edits and deletes show summary counts (Updated/Deleted, Skipped, Failed).</li>
     <li><strong>Loading indicator</strong>: A “Brewing it fresh...” message appears to the right of the Operators tab title while data refresh is running, and disappears when refresh completes.</li>
@@ -368,26 +414,31 @@
     <li><strong>Refresh semantics</strong>: <em>Refresh Links</em> forces ingest/redraw cycle using current filters.</li>
   </ul>
   <ol class="section-list">
-    <li><strong>Map link controls row</strong>: Paths (Off/My Station/All), Group, Region, Band, Recency (Any, 15m, 30m, 1h, 3h, 6h, 12h, 24h, 7d), Paths to (editable callsign), and <em>Refresh Links</em>.</li>
+    <li><strong>Map link controls row</strong>: Paths (Off/My Station/All), Group, Region, Band, Recency (Any, 15m, 30m, 1h, 3h, 6h, 12h, 24h, 7d), Paths to (editable/searchable callsign), <em>SitRep Status</em>, and <em>Refresh Links</em>.</li>
+    <li><strong>Map controls panel</strong>: Use the splitter chevron between the controls pane and map to collapse/expand controls quickly.</li>
     <li><strong>Map Layers (sidebar)</strong>: Only visible when Map is active. Checkboxes for Callsigns, States, Cities, Grids, Regions plus a City Pop. dropdown.</li>
-    <li><strong>Propagation controls</strong>: Propagation Overlay toggle, Mode selector (Actual / Blended / Modeled), and Propagation Window.</li>
+    <li><strong>Propagation controls</strong>: Propagation Overlay toggle, Mode selector (Actual / Blended / Modeled), Propagation Window, Target Type, and Target Value.</li>
+    <li><strong>Target vs Region filter</strong>: The map row <em>Region</em> dropdown filters displayed paths. Propagation Target controls the recommendation target used by the propagation badge and shared forecast target settings.</li>
     <li><strong>Paths to</strong>: Filters link highlights to paths that reach a specific callsign.</li>
     <li><strong>Refresh Links</strong>: Forces JS8 log ingest and redraw.</li>
     <li><strong>Map view</strong>: Requires Qt WebEngine; if unavailable, a disabled message is shown instead of the map.</li>
-    <li><strong>Tooltips</strong>: Station tooltips include JS8 and VarAC fields when data exists: JS8 Last Seen, JS8 Spotter, JS8 Last Band, JS8 Direct SNR (and traffic count), JS8 Avg SNR (and traffic count), VarAC Last Seen, VarAC Last Band, VarAC SNR.</li>
+    <li><strong>Tooltips</strong>: Station tooltips include JS8 and VarAC fields when data exists: JS8 Last Seen, JS8 Spotter, JS8 Last Band, JS8 Direct SNR (and traffic count), JS8 Avg SNR (and traffic count), VarAC Last Seen, VarAC Last Band, VarAC SNR, and SitRep status/source/timestamp.</li>
+    <li><strong>SitRep Status mode</strong>: When enabled, map shows only stations with known SitRep status (Red/Yellow/Green), hides links, and overrides normal path/link filters until toggled off.</li>
   </ol>
   <h3 id="map-propagation">Propagation Overlay (New)</h3>
   <p><strong>Purpose</strong>: Show the best probable band from <em>your station</em> to each region/state based on the selected mode, time-of-day, and available observed data.</p>
   <ul class="section-list">
-    <li><strong>Overlay activation</strong>: Turn on <em>Propagation Overlay</em> in the Map Layers box to color the map by recommended band.</li>
-    <li><strong>Mode selection</strong>: Choose <em>Actual</em>, <em>Blended</em>, or <em>Modeled</em> for how the recommendation is computed.</li>
-    <li><strong>Propagation Window</strong>: Controls how far back observed traffic is considered for Actual/Blended. Modeled ignores this window.</li>
+    <li><strong>Overlay activation</strong>: Turn on <em>Propagation Overlay</em> in the Map Layers box to color the map by recommended band and enable the propagation badge summary.</li>
+    <li><strong>Mode selection</strong>: Choose <em>Actual</em>, <em>Blended</em>, or <em>Modeled</em>. This changes both overlay scoring and badge recommendation behavior.</li>
+    <li><strong>Propagation Window</strong>: Controls how far back observed traffic is considered for Actual/Blended map scoring. Modeled ignores this window.</li>
+    <li><strong>Target Type/Value</strong>: Sets the target used by propagation recommendations. Region supports <em>ALL</em> (National lower-48), R01-R10, plus State or Operator targets.</li>
+    <li><strong>How target appears in UI</strong>: Badge first line shows <em>Target: ...</em>. Changing target immediately updates the badge recommendation. Overlay remains nationwide; target does not crop the map.</li>
     <li><strong>Band colors</strong>: Band colors are pulled from your FreqPlanner band color palette.</li>
   </ul>
   <h3 id="map-propagation-modes">Mode meanings (Actual / Blended / Modeled)</h3>
   <ul class="section-list">
-    <li><strong>Actual</strong>: Ignores the propagation model and uses observed data only (JS8/VarAC link history + peer schedules). This is the most literal view of where stations were and what bands they were actually using.</li>
-    <li><strong>Blended</strong>: Combines the propagation model with observed data. Use this when you want real-world evidence to temper model predictions.</li>
+    <li><strong>Actual</strong>: Ignores modeled baseline and uses observed evidence only (JS8/VarAC link history + peer schedule presence within the selected window).</li>
+    <li><strong>Blended</strong>: Combines modeled baseline with observed evidence. Target recommendations can also apply offline historical outcome blending when enabled and sufficiently confident.</li>
     <li><strong>Modeled</strong>: Uses the offline propagation model only. This is best when you have limited recent traffic or want a baseline prediction.</li>
   </ul>
   <h3 id="map-propagation-window">Propagation Window</h3>
@@ -401,14 +452,23 @@
     <li><strong>State colors</strong>: When propagation is enabled and Regions are off, each state is colored by its best band for your station.</li>
     <li><strong>Region colors</strong>: When Regions are on, regions keep their regional color. The recommended band for each region appears as a band label beneath the region label.</li>
     <li><strong>Tooltips</strong>: Labels show <em>Band (LOW/MED/HIGH)</em> confidence. Lower confidence suggests marginal propagation or sparse observation.</li>
-    <li><strong>Best Now summary</strong>: The Propagation badge shows a short summary (Filter / Best Now / Schedule) for quick validation.</li>
+    <li><strong>Best Now summary</strong>: The Propagation badge shows <em>Target</em>, <em>Best Now</em>, and (when different) <em>Schedule</em> band for quick validation/QSY decisions.</li>
+  </ul>
+  <h3 id="map-propagation-modeling">How Propagation Modeling Works (Offline)</h3>
+  <ul class="section-list">
+    <li><strong>Origin and targets</strong>: The model starts from your configured Grid 6 and evaluates lower-48 target points (National/Region/State/Operator-derived).</li>
+    <li><strong>Baseline modeled score</strong>: Uses local climatology/profile data, path distance, and local-day/night weighting to score each candidate band.</li>
+    <li><strong>Schedule-based vs Modeled</strong>: Schedule-based ranking is restricted to today’s scheduled bands; Modeled ranking evaluates all supported HF bands.</li>
+    <li><strong>Observed evidence input</strong>: Actual/Blended map modes incorporate local observed traffic and peer schedule presence over the selected propagation window.</li>
+    <li><strong>Historical outcomes input</strong>: Target-specific recommendations can blend in local historical contact outcomes using recency decay, confidence gates, and Bayesian smoothing.</li>
+    <li><strong>Fully offline execution</strong>: All scoring uses local app data; no internet connectivity is required for forecast generation.</li>
   </ul>
   <h3 id="map-propagation-novice">Novice workflow</h3>
   <ol class="section-list">
     <li>Enable <strong>Propagation Overlay</strong>.</li>
     <li>Select <strong>Blended</strong> for balanced guidance.</li>
     <li>Choose a <strong>Propagation Window</strong> of 6h or 12h.</li>
-    <li>Pick a Region filter to focus on your target area.</li>
+    <li>Set <strong>Target Type/Value</strong> for your destination (for broad planning, use Region = <strong>ALL</strong>).</li>
     <li>Use the colored state/region guidance to decide which band to check first.</li>
   </ol>
   <h3 id="map-propagation-expert">Expert notes</h3>
@@ -511,10 +571,10 @@
     <li><strong>Import Schedule</strong>: Loads a peer HF schedule JSON (UTC).</li>
     <li><strong>Refresh</strong>: Reloads the list from the database.</li>
     <li><strong>Delete</strong>: Dropdown for callsigns plus <em>Delete Schedule</em> to remove a single peer schedule. The dropdown also includes <em>Clear All Schedules</em>.</li>
-    <li><strong>Show Local</strong>: Toggle to display DAY/START/END/OVERLAP in local time; headers show your local TZ abbreviation in parentheses.</li>
-    <li><strong>Filters</strong>: Callsign dropdown, Region dropdown (R01-R10), Group dropdown, and Search field.</li>
+    <li><strong>Showing: Local/UTC</strong>: Toggle to display DAY/START/END/OVERLAP in Local or UTC. Local headers are labeled <em>(Local)</em> for clarity.</li>
+    <li><strong>Filters</strong>: Callsign dropdown, Region dropdown (R01-R10), Group dropdown, Search field, and <em>Clear Filters</em>.</li>
     <li><strong>Overlap</strong>: Shows upcoming overlaps for today only (UTC day) where your HF and Net schedules share the same frequency and mode with the peer schedule. Multiple overlaps show a count (e.g., <em>3 overlaps</em>); click the cell to view details.</li>
-    <li><strong>Peer schedule table</strong>: Columns are CALLSIGN, NAME, STATE, GROUPS, DAY (UTC), START UTC, END UTC, BAND, MODE, FREQ, OVERLAP. The table is not sortable.</li>
+    <li><strong>Peer schedule table</strong>: Columns are CALLSIGN, NAME, STATE, GROUPS, DAY, START, END, BAND, MODE, FREQ, OVERLAP. The table is sortable by column header click.</li>
   </ol>
   <p><strong>Notifications and prompts</strong>:</p>
   <ul class="section-list">
@@ -529,12 +589,12 @@
   <p><strong>Typical workflow</strong>: Configure identity and control mode first, then operating groups, then JS8/radio paths, then scheduler enforcement behavior, and finally save/test.</p>
   <p><strong>Expected UI behavior</strong>:</p>
   <ul class="section-list">
-    <li><strong>Collapsible sections</strong>: Expanding one integration section may collapse others for focus.</li>
+    <li><strong>Section navigator</strong>: Left-side section list selects one active settings section at a time, giving the selected section maximum workspace.</li>
+    <li><strong>Fixed top sections</strong>: <em>Operator Information</em> and <em>Operating Status</em> remain visible and are not collapsible.</li>
     <li><strong>Save propagation</strong>: Saving settings triggers downstream tab refreshes and status recalculation.</li>
     <li><strong>Theme application</strong>: Theme changes apply globally after save/refresh cycle.</li>
   </ul>
-  <p><strong>Quick links</strong>: <a href="#settings-operator">Operator Information</a> | <a href="#settings-operation">FreqInOut Settings</a> | <a href="#settings-status">Operating Status</a> | <a href="#settings-op-groups">Operating Groups</a> | <a href="#settings-js8call">JS8Call Settings</a> | <a href="#settings-radio">Radio Software</a> | <a href="#settings-actions">Save Settings</a></p>
-  <p><strong>Collapsible sections</strong>: Operating Groups, JS8Call Settings, and Radio Software are collapsible. Expanding one collapses the others; collapsed headers show a short summary.</p>
+  <p><strong>Quick links</strong>: <a href="#settings-operator">Operator Information</a> | <a href="#settings-operation">FreqInOut Settings</a> | <a href="#settings-status">Operating Status</a> | <a href="#settings-op-groups">Operating Groups</a> | <a href="#settings-js8call">JS8Call Settings</a> | <a href="#settings-fast-light">Fast Light Settings</a> | <a href="#settings-varac">VarAC Settings</a> | <a href="#settings-launch">Launch Control</a> | <a href="#settings-logging">Logging &amp; Diagnostics</a> | <a href="#settings-actions">Save Settings</a></p>
 
   <h3 id="settings-operator">Operator Information</h3>
   <ul class="section-list">
@@ -550,9 +610,10 @@
     <li><strong>Enforcement timers</strong>: Frequency, FLDigi Mode, and JS8 Offset each have their own enforcement dial. Default is <em>On Schedule Change</em>. Choosing <em>Prompt</em> enables a per-item interval (Hourly / 5 / 10 / 15 / 30 minutes).</li>
     <li><strong>Off-schedule prompts</strong>: When one or more enabled items first go off schedule, a combined prompt appears listing only the items that are currently off (e.g., <em>Frequency and Offset are Off Schedule</em>). <em>Resume Sched.</em> immediately enforces only the listed items (frequency/mode/offset) and leaves others unchanged. <em>Skip Once</em> dismisses the prompt and resets the timer for those items without applying changes. <em>Pause Sched. 30 Min</em> pauses enforcement for 30 minutes. If unanswered for 2 minutes, the listed items are applied automatically. Repeat prompts follow the selected interval. Using <em>Resume Schedule</em> from the status panel overrides any prior Skip/Pause state.</li>
     <li><strong>Net handling (scheduled + ad hoc)</strong>: While any net is active (scheduled or Ad Hoc), automatic corrections are suppressed so the operator stays in control. This includes frequency, FLDigi mode/offset, and JS8 offset. At net start, the scheduler may apply the net’s FLDigi mode/offset once (a short initial window) to land you on the net settings; after that, changes you make during the net are left alone. At net end, the scheduler clears any pending/backoff state and immediately resumes the active schedule (frequency + FLDigi mode/offset + JS8 offset) unless scheduling is paused or in Manual control.</li>
-    <li><strong>Activity check</strong>: Before any scheduled frequency change, the scheduler checks for active transmissions and recent receive activity. It skips changes if FLRig PTT is active, JS8Call PTT is active, JS8 RX activity occurred in the last ~12 seconds, or VarAC reports busy. It also checks FLDigi RX activity from the FLDigi log and delays schedule changes while recent valid traffic is being received (not used during scheduled or ad hoc nets). HF schedule frequency changes will wait up to ~10 minutes for FLDigi RX activity before proceeding. FLDigi busy detection includes a gibberish-aware grace and a timeout so noisy bursts don’t hold the schedule indefinitely.</li>
-    <li><strong>VarAC busy detection</strong>: VarAC activity is read from <code>VarAC_traffic.log</code> in the VarAC install folder. Busy conditions include “WAITING FOR FREQUENCY TO CLEAR,” active connections, incoming connection requests, file transfers or “waiting for confirmation of receipt,” and incomplete broadcasts (a broadcast line without a trailing “-” within ~12 seconds). VMAIL relay notifications and your own beacon lines (ending with <code>DE YOURCALLSIGN</code>) are ignored.</li>
-    <li><strong>Wait behavior</strong>: There is no fixed delay timer. Changes resume as soon as the activity checks clear (PTT off, JS8 RX window elapsed, VarAC disconnected). Manual QSY pauses schedule enforcement until you click <em>Resume Schedule</em>.</li>
+    <li><strong>Activity check (non-NET schedules)</strong>: Before a non-NET scheduled frequency change, the scheduler defers changes when traffic is active: FLRig PTT active, JS8Call busy (TX/RX), VarAC busy/waiting, or FLDigi recent RX activity from the FLDigi log. For HF schedule rows, FLDigi RX deferral is capped at about 10 minutes; after that, the change proceeds. FLDigi gibberish handling includes grace/timeout logic so noise bursts do not hold the schedule indefinitely.</li>
+    <li><strong>NET override behavior (scheduled/ad hoc nets)</strong>: NET-sourced changes bypass JS8Call/VarAC/FLDigi busy deferrals so the scheduled net frequency can take priority. NET override does <em>not</em> bypass global control guards: Manual mode, scheduler disabled, scheduler suspend/pause, or FLRig PTT actively transmitting.</li>
+    <li><strong>VarAC busy detection</strong>: VarAC activity is read from <code>VarAC_traffic.log</code> (and supported VarAC main logs) in the VarAC install folder. Busy conditions include “WAITING FOR FREQUENCY TO CLEAR,” active connections, incoming connection requests, file transfers or “waiting for confirmation of receipt,” and incomplete broadcasts (a broadcast line without a trailing “-” within ~12 seconds). VMAIL relay notifications and your own beacon lines (ending with <code>DE YOURCALLSIGN</code>) are ignored.</li>
+    <li><strong>Wait behavior</strong>: There is no fixed delay timer. Evaluation runs continuously (about every 5 seconds). Non-NET changes apply when activity clears; NET override changes apply on the next evaluation cycle when global guards allow. Manual QSY pauses schedule enforcement until you click <em>Resume Schedule</em>.</li>
   </ul>
 
   <h3 id="settings-status">Operating Status</h3>
@@ -583,6 +644,9 @@
     <li><strong>Mark JS8Call MSG Read?</strong>: Syncs Message Viewer <em>Mark Retrieved</em> to JS8Call inbox READ state.</li>
     <li><strong>JS8Call DIRECTED.TXT</strong>: Path field plus Browse button.</li>
     <li><strong>JS8Spotter forms</strong>: Path field plus Browse button (MCF###.txt files).</li>
+    <li><strong>JS8Call Install Folder</strong>: Install folder used by launcher/status integration.</li>
+    <li><strong>JS8Spotter Launch Path</strong>: Executable/script/desktop entry path used by Launch Control.</li>
+    <li><strong>CommStat Launch Path</strong>: Executable/script/desktop entry path used by Launch Control.</li>
     <li><strong>Load JS8 Traffic</strong>: Ingests DIRECTED.TXT/ALL.TXT into Map and Operators.</li>
   </ul>
   <p><strong>JS8Call notifications</strong>:</p>
@@ -593,24 +657,53 @@
     <li><strong>Error</strong>: Ingest failures show the underlying error.</li>
   </ul>
 
-  <h3 id="settings-radio">Radio Software</h3>
+  <h3 id="settings-fast-light">Fast Light Settings</h3>
   <ul class="section-list">
-    <li><strong>Program rows</strong>: FLRig, FLDigi, FLMsg, FLAmp each have a checkbox (for Launch Selected), path field, and Browse button.</li>
-    <li><strong>FLRig XMLRPC Port</strong>: Port field under the FLRig row.</li>
+    <li><strong>Program paths</strong>: FLRig, FLDigi, FLMsg, and FLAmp each have path fields with Browse actions.</li>
+    <li><strong>FLRig XMLRPC Port</strong>: Port used for FLRig API control.</li>
     <li><strong>Check-in File Path</strong>: FLDigi check-in folder plus Browse.</li>
+    <li><strong>FLDigi Log Path</strong>: Select the folder that contains FLDigi log files (e.g., <code>fldigiYYYYMMDD.log</code>). The newest log in that folder is used to detect recent RX activity.</li>
     <li><strong>ICS/Messages</strong>: FLMsg folder plus Browse.</li>
     <li><strong>FLAMP/rx</strong>: FLAmp folder plus Browse.</li>
-    <li><strong>VarAC</strong>: Browse to the VarAC install folder. FreqInOut uses this path to locate <code>VarAC.db</code> and <code>VarAC_traffic.log</code>. Also set the VarAC Incoming Files path for file-based messages.</li>
-    <li><strong>FLDigi Log Path</strong>: Select the folder that contains FLDigi log files (e.g., <code>fldigiYYYYMMDD.log</code>). The newest log in that folder is used to detect recent RX activity.</li>
     <li><strong>Enable FLDigi logging</strong>: FLDigi RX/TX monitoring depends on logging. In FLDigi, enable <em>File &gt; Text Capture &gt; Log all RX/TX text</em>.</li>
-    <li><strong>Launch Selected</strong>: Launches checked programs that are not already running. JS8Call is not launched from here.</li>
     <li><strong>Check-in Log Paths</strong>: Copy Main and Copy New/Late buttons copy full file paths to the clipboard.</li>
   </ul>
-  <p><strong>Radio Software notifications</strong>:</p>
+
+  <h3 id="settings-varac">VarAC Settings</h3>
   <ul class="section-list">
-    <li><strong>Launch</strong>: If no programs are selected, a message indicates that nothing was launched.</li>
+    <li><strong>VarAC Install Folder</strong>: Folder containing VarAC runtime files (used for status and traffic integrations).</li>
+    <li><strong>VarAC Incoming Files</strong>: Folder scanned for inbound VarAC message files.</li>
+    <li><strong>BBS Directory</strong>: Top-level folder for current BBS files.</li>
+    <li><strong>BBS Archive</strong>: Destination folder for archived BBS files.</li>
+    <li><strong>Auto-Archive Policy</strong>: Enable auto-archive and choose age threshold (1/3/5/7/10/14/21/30 days).</li>
+    <li><strong>Archive behavior</strong>: Files older than selected days are moved from BBS Directory to BBS Archive during periodic processing.</li>
+  </ul>
+
+  <h3 id="settings-launch">Launch Control</h3>
+  <ul class="section-list">
+    <li><strong>Launch All with FreqInOut</strong>: Global startup toggle for configured apps.</li>
+    <li><strong>Per-app controls</strong>: Each app row has <em>Enabled</em> and <em>Startup</em> toggles.</li>
+    <li><strong>Order controls</strong>: Use <em>Up</em>, <em>Down</em>, and <em>Reset Default Order</em> to set launch sequence.</li>
+    <li><strong>Manual controls</strong>: <em>Launch Configured Now</em> starts enabled configured apps in order; <em>Stop Launch Sequence</em> cancels active launch workflow.</li>
+    <li><strong>Startup timing</strong>: Launch waits up to ~30s per app for running/ready check before moving to the next app.</li>
+    <li><strong>Failure handling</strong>: Failed apps are skipped and sequence continues; summary status is shown in Launch Control.</li>
+  </ul>
+
+  <h3 id="settings-logging">Logging &amp; Diagnostics</h3>
+  <ul class="section-list">
+    <li><strong>Logging Level</strong>: DISABLED, ERROR, WARNING, INFO, DEBUG.</li>
+    <li><strong>Enable DEBUG For</strong>: Timed debug for 15/30/60 minutes, then auto-revert.</li>
+    <li><strong>Open Logs</strong>: Opens Logs viewer window.</li>
+    <li><strong>Open Log Folder</strong>: Opens folder containing the active log file.</li>
+    <li><strong>Export Diagnostics</strong>: Exports support ZIP with logs, DB snapshots, and environment metadata.</li>
+    <li><strong>Caution</strong>: Verbose logging increases disk I/O and can reduce performance; use DEBUG/ALL only for troubleshooting.</li>
+  </ul>
+
+  <p><strong>Integration notifications</strong>:</p>
+  <ul class="section-list">
     <li><strong>Invalid Path</strong>: Warning when a selected file path does not exist.</li>
     <li><strong>Copied</strong>: Copy buttons confirm the copied path.</li>
+    <li><strong>Launch Summary</strong>: Launch Control updates sequence state and per-app result details during launch operations.</li>
   </ul>
 
   <h3 id="settings-actions">Save Settings</h3>
@@ -620,16 +713,20 @@
     <li><strong>Theme change</strong>: Switching Light/Dark shows <em>Wilco. Standby for Spectrum QSY...</em> until the new theme is applied.</li>
   </ul>
 
-<h2 id="logs">Logs Tab</h2>
-  <p><strong>Purpose</strong>: View and filter application logs.</p>
-  <p><strong>Typical workflow</strong>: Keep logs at DISABLED/INFO for normal operation. Raise to DEBUG/ALL only during troubleshooting, then reduce level again.</p>
+<h2 id="logs">Logs Viewer</h2>
+  <p><strong>Purpose</strong>: View and filter application logs from Settings, without occupying a main navigation tab.</p>
+  <p><strong>Typical workflow</strong>: In <em>Settings &gt; Logging &amp; Diagnostics</em>, keep logs at DISABLED/INFO for normal operation. Raise to DEBUG only during troubleshooting, optionally using timed DEBUG, then allow automatic reversion.</p>
   <p><strong>Expected UI behavior</strong>:</p>
   <ul class="section-list">
-    <li><strong>Auto-refresh cadence</strong>: Log view refreshes continuously while tab is active.</li>
+    <li><strong>Auto-refresh cadence</strong>: Log view refreshes continuously while the Logs window is open.</li>
     <li><strong>Clear scope</strong>: Clear removes visible text only; it does not truncate the log file on disk.</li>
     <li><strong>Global level effect</strong>: Level selection affects application-wide logging behavior.</li>
   </ul>
   <ol class="section-list">
+    <li><strong>Open Logs</strong>: Opens the Logs viewer window from Settings.</li>
+    <li><strong>Open Log Folder</strong>: Opens the folder containing <code>freqinout.log</code>.</li>
+    <li><strong>Export Diagnostics</strong>: Exports a support ZIP containing logs/DB snapshots and environment metadata.</li>
+    <li><strong>Enable DEBUG For</strong>: Sets DEBUG logging for 15/30/60 minutes, then auto-reverts to the prior level.</li>
     <li><strong>Refresh</strong>: Reloads the log view (auto-refresh runs every 1.5 seconds).</li>
     <li><strong>Clear</strong>: Clears the on-screen view only.</li>
     <li><strong>Search</strong>: Prompts for a keyword and filters matches.</li>
@@ -637,7 +734,7 @@
     <li><strong>Font</strong>: Spinbox for log font size.</li>
     <li><strong>Level</strong>: Dropdown with DISABLED, ERROR, WARNING, INFO, DEBUG, ALL. This sets the global log level.</li>
     <li><strong>Log file label</strong>: Shows the active log file path.</li>
-    <li><strong>Sidebar indicator</strong>: When log level is not DISABLED, the Logs button changes to <em>Logs Enabled</em> and is highlighted in warning color.</li>
+    <li><strong>Status indicator</strong>: When log level is not DISABLED, Schedule Status shows <em>Logs: LEVEL</em> in warning color.</li>
   </ol>
   <p><strong>Notifications and prompts</strong>:</p>
   <ul class="section-list">
@@ -664,6 +761,16 @@
     <li><strong>Missing guide</strong>: <em>guide.html was not found.</em></li>
     <li><strong>Export complete</strong>: <em>Saved PDF to: ...</em></li>
     <li><strong>Export failed</strong>: <em>PDF export failed: ...</em></li>
+  </ul>
+
+<h2 id="maintenance-tools">Maintenance Tools and Scripts</h2>
+  <p><strong>Purpose</strong>: Safely run bundled maintenance, DB, calibration, and release scripts from a terminal.</p>
+  <ul class="section-list">
+    <li><strong>Beginner start</strong>: Use wrapper commands first: <code>tools/freqinout-db.ps1</code> (Windows) or <code>tools/freqinout-db.sh</code> (Linux/macOS).</li>
+    <li><strong>Safety-first sequence</strong>: Run read-only/status commands before any truncate/update command.</li>
+    <li><strong>Script index</strong>: See <code>docs/tools-and-scripts.md</code> for every delivered script with plain-language examples.</li>
+    <li><strong>DB-specific tasks</strong>: See <code>docs/db-tools.md</code> for backup, table export, and DB maintenance workflows.</li>
+    <li><strong>Release checks</strong>: Use <code>python tools/release_preflight.py</code> before tagging/building releases.</li>
   </ul>
 
 <h2 id="troubleshooting">Troubleshooting and Tips</h2>
@@ -695,7 +802,7 @@
     <li><strong>Desktop icon cache timing (Linux)</strong>: Icon/menu updates may appear after cache refresh, logout/login, or reboot depending on desktop environment.</li>
     <li><strong>Combo/list checkbox rendering</strong>: Checkbox appearance and click behavior in popup lists can vary by Qt style/theme; FreqInOut applies explicit styling for critical controls in dark mode.</li>
     <li><strong>Path conventions</strong>: Windows uses drive-letter paths; Linux uses POSIX paths. Misconfigured integration paths are a common root cause for missing data.</li>
-    <li><strong>Process detection semantics</strong>: Running-process checks and launcher behavior differ slightly by OS session model; always verify via Logs tab if behavior seems inconsistent.</li>
+    <li><strong>Process detection semantics</strong>: Running-process checks and launcher behavior differ slightly by OS session model; always verify via the Logs viewer if behavior seems inconsistent.</li>
     <li><strong>Packaged vs source environment</strong>: Startup/runtime behavior can differ when running packaged executables vs source/venv workflows; confirm your mode before troubleshooting.</li>
   </ul>
 
@@ -718,6 +825,9 @@
   <pre class="cmd"><code>python tools/db_admin.py --init all</code></pre>
   <pre class="cmd"><code>python tools/db_admin.py --truncate nets_all --yes</code></pre>
   <pre class="cmd"><code>python tools/js8_links_check.py --limit 20</code></pre>
+  <pre class="cmd"><code>python -m unittest discover -s tests -p "test_propagation*.py" -v</code></pre>
+  <pre class="cmd"><code>python tools/propagation_calibrate.py --fast</code></pre>
+  <pre class="cmd"><code>python tools/propagation_calibrate.py --apply</code></pre>
   <pre class="cmd"><code>python tools/dedupe_operator_groups.py</code></pre>
   <pre class="cmd"><code>python tools/dedupe_operator_groups.py --apply</code></pre>
 

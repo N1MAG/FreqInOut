@@ -972,6 +972,33 @@ class SchedulerEngine(QObject):
         self._net_resume_apply_once = False
         self._schedule_forced_retry()
 
+    def suspend_schedule(self, minutes: int = 30) -> None:
+        """
+        Suspend schedule-driven corrections for the requested duration.
+
+        This is intended for user-invoked temporary holds from global UI controls.
+        """
+        try:
+            mins = int(minutes)
+        except Exception:
+            mins = 30
+        mins = max(1, mins)
+        self._prompt_active = False
+        self._prompt_items = []
+        self._prompt_entry_key = None
+        self._varac_wait_prompt_active = False
+        self._varac_wait_prompt_entry_key = None
+        self._reset_prompt_timers()
+        try:
+            self.off_schedule_cleared.emit()
+        except Exception:
+            pass
+        try:
+            self.varac_wait_cleared.emit()
+        except Exception:
+            pass
+        self._suspend_for_minutes(mins)
+
     def _schedule_forced_retry(self) -> None:
         if self._retry_scheduled:
             return
@@ -2240,7 +2267,12 @@ class SchedulerEngine(QObject):
             self._varac_wait_prompt_entry_key = None
             self.varac_wait_cleared.emit()
         prompt_key = (band, freq_hz, vfo, js8_group)
-        if want_freq_change and bool(varac_status.get("waiting_for_frequency")) and not ignore_wait_prompt:
+        if (
+            source != "NET"
+            and want_freq_change
+            and bool(varac_status.get("waiting_for_frequency"))
+            and not ignore_wait_prompt
+        ):
             if (not self._varac_wait_prompt_active) or (self._varac_wait_prompt_entry_key != prompt_key):
                 self._varac_wait_prompt_active = True
                 self._varac_wait_prompt_entry_key = prompt_key
@@ -2262,10 +2294,10 @@ class SchedulerEngine(QObject):
             except Exception as e:
                 log.warning("SchedulerEngine: get_ptt() failed: %s", e)
 
-        if not self._js8_busy_ok():
+        if source != "NET" and not self._js8_busy_ok():
             busy_reasons.append("JS8Call is busy (RX/TX)")
 
-        if not self._varac_busy_ok(status=varac_status):
+        if source != "NET" and not self._varac_busy_ok(status=varac_status):
             busy_reasons.append("VarAC is busy")
 
         if fldigi_delay:

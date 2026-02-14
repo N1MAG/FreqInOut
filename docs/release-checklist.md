@@ -17,6 +17,7 @@ Use this checklist before pushing a release commit, tagging, or building install
 - `CONTRIBUTING.md` setup and release notes are current.
 - `docs/Installation.md` is accurate for source installs.
 - `docs/FreqInOut-linux-installer.md` and `.html` match installer behavior.
+- `docs/tools-and-scripts.md` reflects current script behavior and examples.
 - `SECURITY.md` contains valid private reporting contact info.
 
 ## 3) Installer / Packaging

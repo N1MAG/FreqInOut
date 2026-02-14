@@ -14,6 +14,9 @@ from freqinout.core.settings_manager import SettingsManager
 
 
 JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
+SPOTTER_STATUS_FORM_ID = "304"  # Kept for compatibility with older tests/callers.
+SPOTTER_STATUS_FORMS = {"104", "301", "304"}
+MCF304_EXPECTED_RESPONSES = 8
 
 
 class JS8FormDecoder:
@@ -215,6 +218,7 @@ class MessageIngestor:
                         continue
                     conn = sqlite3.connect(db_path)
                     cur = conn.cursor()
+                    ingested_ts = float(time.time())
                     cur.execute(
                         """
                         INSERT INTO spotter_traffic
@@ -232,8 +236,18 @@ class MessageIngestor:
                             raw_form,
                             decoded or raw_form,
                             str(parsed.get("relay_via") or "").strip().upper(),
-                            float(time.time()),
+                            ingested_ts,
                         ),
+                    )
+                    self._upsert_spotter_station_status(
+                        cur,
+                        from_call=from_call,
+                        form_id=form_id,
+                        response_code=resp,
+                        raw_form=raw_form,
+                        utc_ts=float(parsed.get("utc_ts") or 0.0),
+                        utc_str=str(parsed.get("utc_str") or ""),
+                        ingested_ts=ingested_ts,
                     )
                     conn.commit()
                     conn.close()
@@ -429,6 +443,180 @@ class MessageIngestor:
         comment = " ".join(parts[2:]) if len(parts) > 2 else ""
         return form_part, resp, comment
 
+    @staticmethod
+    def _classify_mcf304_status(response_code: str) -> tuple[str, str]:
+        digits = [ch for ch in (response_code or "") if ch in "12345"]
+        if not digits:
+            return "unknown", "Unknown"
+        if "3" in digits:
+            return "red", "Not Functioning"
+        if "2" in digits:
+            return "yellow", "Partially Functioning"
+        # Only classify green if the full form was answered and every answer is "1".
+        if len(digits) >= MCF304_EXPECTED_RESPONSES and all(ch == "1" for ch in digits[:MCF304_EXPECTED_RESPONSES]):
+            return "green", "Functioning"
+        return "unknown", "Unknown"
+
+    @staticmethod
+    def _status_label(status_key: str) -> str:
+        key = (status_key or "").strip().lower()
+        if key == "red":
+            return "Not Functioning"
+        if key == "yellow":
+            return "Partially Functioning"
+        if key == "green":
+            return "Functioning"
+        return "Unknown"
+
+    @classmethod
+    def _classify_spotter_status(
+        cls, form_id: str, response_code: str
+    ) -> tuple[str, str, str]:
+        fid = (form_id or "").strip()
+        if fid == "104":
+            code = (response_code or "").strip().upper()[:1]
+            if code == "1":
+                return "green", cls._status_label("green"), "Q1"
+            if code == "2":
+                return "yellow", cls._status_label("yellow"), "Q1"
+            if code == "3":
+                return "red", cls._status_label("red"), "Q1"
+            return "unknown", cls._status_label("unknown"), "Q1"
+
+        if fid == "301":
+            codes = list((response_code or "").strip().upper())
+            # Field Situation Report: evaluate Q2-Q9 only.
+            q2_map = {"1": "green", "2": "yellow", "3": "red", "4": "unknown"}
+            q3_map = {"1": "green", "2": "yellow", "3": "yellow", "4": "red", "5": "unknown"}
+            q4_q9_map = {"1": "green", "2": "yellow", "3": "red", "4": "unknown"}
+            eval_statuses: List[str] = []
+            for idx in range(1, 9):
+                code = codes[idx] if idx < len(codes) else ""
+                if idx == 1:
+                    eval_statuses.append(q2_map.get(code, "unknown"))
+                elif idx == 2:
+                    eval_statuses.append(q3_map.get(code, "unknown"))
+                else:
+                    eval_statuses.append(q4_q9_map.get(code, "unknown"))
+            if any(s == "red" for s in eval_statuses):
+                return "red", cls._status_label("red"), "Q2-Q9 aggregate"
+            if any(s == "yellow" for s in eval_statuses):
+                return "yellow", cls._status_label("yellow"), "Q2-Q9 aggregate"
+            if eval_statuses and all(s == "green" for s in eval_statuses):
+                return "green", cls._status_label("green"), "Q2-Q9 aggregate"
+            return "unknown", cls._status_label("unknown"), "Q2-Q9 aggregate"
+
+        if fid == "304":
+            status_key, status_label = cls._classify_mcf304_status(response_code)
+            return status_key, status_label, "Aggregate"
+
+        return "unknown", cls._status_label("unknown"), ""
+
+    def _upsert_spotter_station_status(
+        self,
+        cur: sqlite3.Cursor,
+        *,
+        from_call: str,
+        form_id: str,
+        response_code: str,
+        raw_form: str,
+        utc_ts: float,
+        utc_str: str,
+        ingested_ts: float,
+        status_source: str = "",
+    ) -> None:
+        fid = (form_id or "").strip()
+        if fid not in SPOTTER_STATUS_FORMS:
+            return
+        call = (from_call or "").strip().upper()
+        if not call:
+            return
+        status_key, status_label, source_detail = self._classify_spotter_status(fid, response_code)
+        source = (status_source or "").strip().upper() or f"F!{fid}"
+        cur.execute(
+            """
+            INSERT INTO spotter_station_status
+                (from_call, form_id, status_key, status_label, response_code, updated_utc_ts, updated_utc_str,
+                 raw_text, updated_ingested_ts, status_source, status_source_detail)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(from_call) DO UPDATE SET
+                form_id=excluded.form_id,
+                status_key=excluded.status_key,
+                status_label=excluded.status_label,
+                response_code=excluded.response_code,
+                updated_utc_ts=excluded.updated_utc_ts,
+                updated_utc_str=excluded.updated_utc_str,
+                raw_text=excluded.raw_text,
+                updated_ingested_ts=excluded.updated_ingested_ts,
+                status_source=excluded.status_source,
+                status_source_detail=excluded.status_source_detail
+            WHERE (
+                excluded.updated_utc_ts > COALESCE(spotter_station_status.updated_utc_ts, 0)
+                OR (
+                    excluded.updated_utc_ts = COALESCE(spotter_station_status.updated_utc_ts, 0)
+                    AND excluded.updated_ingested_ts >= COALESCE(spotter_station_status.updated_ingested_ts, 0)
+                )
+            )
+            """,
+            (
+                call,
+                fid,
+                status_key,
+                status_label,
+                (response_code or "").strip(),
+                float(utc_ts or 0.0),
+                (utc_str or "").strip(),
+                (raw_form or "").strip(),
+                float(ingested_ts or 0.0),
+                source,
+                source_detail,
+            ),
+        )
+
+    def _backfill_spotter_station_status(self, cur: sqlite3.Cursor) -> None:
+        try:
+            cur.execute("SELECT COUNT(1) FROM spotter_station_status")
+            row = cur.fetchone()
+            has_rows = bool(row and int(row[0] or 0) > 0)
+            if has_rows:
+                cur.execute(
+                    "SELECT COUNT(1) FROM spotter_station_status WHERE form_id IN ('104','301')"
+                )
+                upgraded = cur.fetchone()
+                if upgraded and int(upgraded[0] or 0) > 0:
+                    return
+            forms = sorted(SPOTTER_STATUS_FORMS)
+            placeholders = ",".join(["?"] * len(forms))
+            cur.execute(
+                f"""
+                SELECT from_call, form_id, raw_text, utc_ts, utc_str, ingested_ts
+                FROM spotter_traffic
+                WHERE form_id IN ({placeholders})
+                ORDER BY from_call ASC, COALESCE(utc_ts, 0) DESC, COALESCE(ingested_ts, 0) DESC, id DESC
+                """,
+                tuple(forms),
+            )
+            seen: set[str] = set()
+            for from_call, form_id, raw_text, utc_ts, utc_str, ingested_ts in cur.fetchall():
+                call = (from_call or "").strip().upper()
+                if not call or call in seen:
+                    continue
+                parsed_form_id, response_code, _ = self._parse_form_parts(str(raw_text or ""))
+                self._upsert_spotter_station_status(
+                    cur,
+                    from_call=call,
+                    form_id=str(form_id or parsed_form_id or ""),
+                    response_code=response_code,
+                    raw_form=str(raw_text or ""),
+                    utc_ts=float(utc_ts or 0.0),
+                    utc_str=str(utc_str or ""),
+                    ingested_ts=float(ingested_ts or 0.0),
+                    status_source=f"F!{str(form_id or parsed_form_id or '').strip()}",
+                )
+                seen.add(call)
+        except Exception as e:
+            log.debug("MessageIngest: spotter status backfill failed: %s", e)
+
     def _ensure_spotter_table(self) -> None:
         db_path = self._db_path()
         if not db_path:
@@ -456,10 +644,45 @@ class MessageIngestor:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS spotter_station_status (
+                    from_call TEXT PRIMARY KEY,
+                    form_id TEXT NOT NULL,
+                    status_key TEXT NOT NULL,
+                    status_label TEXT NOT NULL,
+                    response_code TEXT,
+                    updated_utc_ts REAL NOT NULL DEFAULT 0,
+                    updated_utc_str TEXT,
+                    raw_text TEXT,
+                    updated_ingested_ts REAL,
+                    status_source TEXT,
+                    status_source_detail TEXT
+                )
+                """
+            )
             try:
                 cur.execute("ALTER TABLE spotter_traffic ADD COLUMN flag_state INTEGER DEFAULT 0")
             except Exception:
                 pass
+            for col_name, col_ddl in (
+                ("status_source", "TEXT"),
+                ("status_source_detail", "TEXT"),
+            ):
+                try:
+                    cur.execute(f"ALTER TABLE spotter_station_status ADD COLUMN {col_name} {col_ddl}")
+                except Exception:
+                    pass
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_spotter_traffic_form_call_ts ON spotter_traffic(form_id, from_call, utc_ts DESC, id DESC)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_spotter_traffic_from_ts ON spotter_traffic(from_call, utc_ts DESC, id DESC)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_spotter_status_key_ts ON spotter_station_status(status_key, updated_utc_ts DESC)"
+            )
+            self._backfill_spotter_station_status(cur)
             conn.commit()
             conn.close()
         except Exception as e:

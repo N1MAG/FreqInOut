@@ -120,6 +120,7 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 - Linux installer guide: `docs/FreqInOut-linux-installer.md`
 - Linux installer guide (HTML): `docs/FreqInOut-linux-installer.html`
 - Database tools: `docs/db-tools.md`
+- Tools and scripts guide: `docs/tools-and-scripts.md`
 - User guide: `docs/guide.html`
 - Changelog: `CHANGELOG.md`
 - Contributing: `CONTRIBUTING.md`

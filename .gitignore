@@ -56,3 +56,14 @@ htmlcov/
 .hypothesis/
 .tox/
 .nox/
+
+# Local planning/docs artifacts (Codex workflow)
+AGENTS.md
+SPEC*.md
+
+# Local runtime/user artifacts
+VarAC.ini
+js8spotter.db
+
+# Local test workspace artifacts
+tests/

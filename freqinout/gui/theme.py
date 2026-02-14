@@ -110,7 +110,7 @@ def _pick_text_color(bg_hex: str, light: str, dark: str) -> str:
 
 def button_style(role: str, theme: Dict[str, str]) -> str:
     role = (role or "primary").strip().lower()
-    if role == "primary":
+    if role in {"primary", "info"}:
         bg = theme["accent"]
         hover = theme["accent_hover"]
         active = theme["accent_active"]
@@ -130,10 +130,6 @@ def button_style(role: str, theme: Dict[str, str]) -> str:
         bg = theme["danger"]
         hover = _blend_hex(theme["danger"], theme["surface"], 0.9)
         active = _blend_hex(theme["danger"], theme["surface"], 0.8)
-    elif role == "info":
-        bg = theme["info"]
-        hover = _blend_hex(theme["info"], theme["surface"], 0.9)
-        active = _blend_hex(theme["info"], theme["surface"], 0.8)
     elif role == "muted":
         bg = theme["surface_alt"]
         hover = _blend_hex(theme["surface_alt"], theme["surface"], 0.8)

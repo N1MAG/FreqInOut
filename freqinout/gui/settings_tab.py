@@ -1,20 +1,22 @@
 ﻿from __future__ import annotations
 
 import datetime
-import os
 import platform
 import subprocess
 import sqlite3
+import os
+import sys
+import zipfile
 from pathlib import Path
 from typing import Dict, Optional, List
 
-import psutil
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -33,15 +35,21 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QCompleter,
     QToolButton,
+    QListWidget,
+    QListWidgetItem,
+    QStackedWidget,
 )
 
-from freqinout.core.logger import log
+from freqinout.core.logger import log, set_log_level, get_log_level, _get_log_file
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.core.config_paths import get_fldigi_checkin_dir
+from freqinout.core.config_paths import get_fldigi_checkin_dir, get_config_dir
+from freqinout.core.launch_orchestrator import LaunchOrchestrator, LAUNCH_APP_ORDER
+from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 from freqinout.gui.theme import resolve_theme, led_style, button_style
+from freqinout.version import __version__
 
 
 TIMEZONE_CHOICES = [
@@ -236,8 +244,8 @@ class SettingsTab(QWidget):
     """
 
     settings_saved = Signal()
-
-    settings_saved = Signal()
+    open_logs_requested = Signal()
+    log_level_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -245,6 +253,8 @@ class SettingsTab(QWidget):
         self._settings_dirty = False
         self._loading_settings = False
         self.loading_label: QLabel | None = None
+        self._status_service = SoftwareStatusService(self.settings)
+        self.launch_orchestrator = LaunchOrchestrator(self.settings, self)
 
         self.PROGRAMS: Dict[str, Dict[str, str]] = {
             "FLRig": {"setting_key": "path_flrig", "autostart_key": "autostart_flrig"},
@@ -263,6 +273,10 @@ class SettingsTab(QWidget):
         self.operating_groups: List[Dict[str, str]] = []
         self._accordion_groups: List[QGroupBox] = []
         self._section_meta: Dict[QGroupBox, Dict[str, object]] = {}
+        self._section_nav_items: Dict[QGroupBox, QListWidgetItem] = {}
+        self._launch_items_cache: List[Dict[str, object]] = []
+        self._launch_visible_names: List[str] = []
+        self._launch_table_loading = False
 
         self._build_ui()
         self._load_settings()
@@ -309,9 +323,7 @@ class SettingsTab(QWidget):
         header_layout.addWidget(self.local_label)
         main_layout.addLayout(header_layout)
 
-        # Identity group
-        callsign_group = QGroupBox("Operator Information")
-        callsign_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # Operator Information
         callsign_layout = QVBoxLayout()
         self.callsign_edit = QLineEdit()
         self.callsign_edit.setMaxLength(16)
@@ -337,15 +349,19 @@ class SettingsTab(QWidget):
         row1.addWidget(self.grid6_edit)
         row1.addStretch()
         callsign_layout.addLayout(row1)
-        callsign_group.setLayout(callsign_layout)
+        callsign_container = QWidget()
+        callsign_container.setLayout(callsign_layout)
+        callsign_group = QGroupBox("Operator Information")
+        callsign_group_layout = QVBoxLayout()
+        callsign_group_layout.setContentsMargins(10, 10, 10, 12)
+        callsign_group_layout.setSpacing(6)
+        callsign_group_layout.addWidget(callsign_container)
+        callsign_group.setLayout(callsign_group_layout)
+        callsign_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         main_layout.addWidget(callsign_group)
 
-        # Operation settings (control)
-        op_group = QGroupBox("FreqInOut Settings")
-        op_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # FreqInOut settings
         op_layout = QVBoxLayout()
-        op_group.setLayout(op_layout)
-        main_layout.addWidget(op_group)
 
         # control mode (no timezone dropdown anymore)
         ctrl_row = QHBoxLayout()
@@ -365,7 +381,6 @@ class SettingsTab(QWidget):
         ctrl_row.addWidget(self.use_scheduler_chk)
         ctrl_row.addSpacing(12)
         ctrl_row.addStretch()
-        op_layout.addLayout(ctrl_row)
 
         enforcement_choices = ["On Schedule Change", "Prompt"]
         prompt_choices = [
@@ -377,11 +392,16 @@ class SettingsTab(QWidget):
             "Every 30 minutes",
         ]
 
+        left_column_layout = QVBoxLayout()
+        left_column_layout.setSpacing(6)
+        left_column_layout.addLayout(ctrl_row)
+
         freq_row = QHBoxLayout()
         self.freq_timer_label = QLabel("Frequency Timer:")
         freq_row.addWidget(self.freq_timer_label)
         self.freq_enforce_combo = QComboBox()
         self.freq_enforce_combo.addItems(enforcement_choices)
+        self.freq_enforce_combo.setMinimumWidth(150)
         self.freq_enforce_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         freq_row.addWidget(self.freq_enforce_combo)
         freq_row.addSpacing(12)
@@ -389,17 +409,19 @@ class SettingsTab(QWidget):
         freq_row.addWidget(self.freq_prompt_label)
         self.freq_prompt_combo = QComboBox()
         self.freq_prompt_combo.addItems(prompt_choices)
+        self.freq_prompt_combo.setMinimumWidth(170)
         self.freq_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         self._disable_prompt_hint_item(self.freq_prompt_combo)
         freq_row.addWidget(self.freq_prompt_combo)
         freq_row.addStretch()
-        op_layout.addLayout(freq_row)
+        left_column_layout.addLayout(freq_row)
 
         fldigi_row = QHBoxLayout()
         self.fldigi_timer_label = QLabel("FLDigi Mode Timer:")
         fldigi_row.addWidget(self.fldigi_timer_label)
         self.fldigi_enforce_combo = QComboBox()
         self.fldigi_enforce_combo.addItems(enforcement_choices)
+        self.fldigi_enforce_combo.setMinimumWidth(150)
         self.fldigi_enforce_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         fldigi_row.addWidget(self.fldigi_enforce_combo)
         fldigi_row.addSpacing(12)
@@ -407,17 +429,19 @@ class SettingsTab(QWidget):
         fldigi_row.addWidget(self.fldigi_prompt_label)
         self.fldigi_prompt_combo = QComboBox()
         self.fldigi_prompt_combo.addItems(prompt_choices)
+        self.fldigi_prompt_combo.setMinimumWidth(170)
         self.fldigi_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         self._disable_prompt_hint_item(self.fldigi_prompt_combo)
         fldigi_row.addWidget(self.fldigi_prompt_combo)
         fldigi_row.addStretch()
-        op_layout.addLayout(fldigi_row)
+        left_column_layout.addLayout(fldigi_row)
 
         js8_row = QHBoxLayout()
         self.js8_timer_label = QLabel("JS8 Offset Timer:")
         js8_row.addWidget(self.js8_timer_label)
         self.js8_enforce_combo = QComboBox()
         self.js8_enforce_combo.addItems(enforcement_choices)
+        self.js8_enforce_combo.setMinimumWidth(150)
         self.js8_enforce_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         js8_row.addWidget(self.js8_enforce_combo)
         js8_row.addSpacing(12)
@@ -425,19 +449,90 @@ class SettingsTab(QWidget):
         js8_row.addWidget(self.js8_prompt_label)
         self.js8_prompt_combo = QComboBox()
         self.js8_prompt_combo.addItems(prompt_choices)
+        self.js8_prompt_combo.setMinimumWidth(170)
         self.js8_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         self._disable_prompt_hint_item(self.js8_prompt_combo)
         js8_row.addWidget(self.js8_prompt_combo)
         js8_row.addStretch()
-        op_layout.addLayout(js8_row)
+        left_column_layout.addLayout(js8_row)
+        left_column_layout.addStretch()
+
+        log_warn_tip = (
+            "Logging may reduce performance and increase disk usage. "
+            "Enable INFO/DEBUG only while troubleshooting."
+        )
+        self.logging_group = QWidget()
+        self.logging_group.setToolTip(log_warn_tip)
+        logging_group_layout = QVBoxLayout()
+        logging_group_layout.setContentsMargins(8, 8, 8, 8)
+        logging_group_layout.setSpacing(6)
+
+        self.logging_warning_label = QLabel(
+            "Verbose logging can increase disk I/O and reduce performance."
+        )
+        self.logging_warning_label.setWordWrap(True)
+        self.logging_warning_label.setToolTip(log_warn_tip)
+        logging_group_layout.addWidget(self.logging_warning_label)
+
+        level_row = QHBoxLayout()
+        level_row.addWidget(QLabel("Logging Level:"))
+        self.log_level_combo = QComboBox()
+        self.log_level_combo.addItems(["DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"])
+        self.log_level_combo.setToolTip(log_warn_tip)
+        self.log_level_combo.currentTextChanged.connect(self._on_log_level_changed)
+        level_row.addWidget(self.log_level_combo)
+        level_row.addStretch()
+        logging_group_layout.addLayout(level_row)
+
+        timed_row = QHBoxLayout()
+        self.enable_timed_debug_btn = QPushButton("Enable DEBUG For")
+        self.enable_timed_debug_btn.setToolTip(log_warn_tip)
+        self.enable_timed_debug_btn.clicked.connect(self._enable_timed_debug)
+        timed_row.addWidget(self.enable_timed_debug_btn)
+
+        self.debug_duration_combo = QComboBox()
+        self.debug_duration_combo.addItem("15 min", 15)
+        self.debug_duration_combo.addItem("30 min", 30)
+        self.debug_duration_combo.addItem("60 min", 60)
+        self.debug_duration_combo.setCurrentIndex(1)
+        self.debug_duration_combo.setToolTip("Automatically reverts to previous logging level when timer expires.")
+        timed_row.addWidget(self.debug_duration_combo)
+        timed_row.addStretch()
+        logging_group_layout.addLayout(timed_row)
+
+        self.logging_actions_grid = QGridLayout()
+        self.logging_actions_grid.setHorizontalSpacing(8)
+        self.logging_actions_grid.setVerticalSpacing(6)
+
+        self.open_logs_btn = QPushButton("Open Logs")
+        self.open_logs_btn.setToolTip(log_warn_tip)
+        self.open_logs_btn.clicked.connect(self._request_open_logs)
+        self.logging_actions_grid.addWidget(self.open_logs_btn, 0, 0)
+
+        self.open_log_folder_btn = QPushButton("Open Log Folder")
+        self.open_log_folder_btn.setToolTip(log_warn_tip)
+        self.open_log_folder_btn.clicked.connect(self._open_log_folder)
+        self.logging_actions_grid.addWidget(self.open_log_folder_btn, 0, 1)
+
+        self.export_diag_btn = QPushButton("Export Diagnostics")
+        self.export_diag_btn.setToolTip(log_warn_tip)
+        self.export_diag_btn.clicked.connect(self._export_diagnostics)
+        self.logging_actions_grid.addWidget(self.export_diag_btn, 0, 2)
+        self.logging_actions_grid.setColumnStretch(3, 1)
+        logging_group_layout.addLayout(self.logging_actions_grid)
+
+        self.logging_group.setLayout(logging_group_layout)
+
+        left_widget = QWidget()
+        left_widget.setLayout(left_column_layout)
+        left_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        op_layout.addWidget(left_widget)
 
         self._align_enforcement_labels()
+        self._update_logging_actions_layout()
 
-        # Operating status indicators (always visible)
-        status_group = QGroupBox("Operating Status")
-        status_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # Operating status indicators
         status_layout = QHBoxLayout()
-        status_group.setLayout(status_layout)
 
         theme = resolve_theme(self.settings)
         status_items = [
@@ -459,7 +554,61 @@ class SettingsTab(QWidget):
             status_layout.addWidget(QLabel(label))
             status_layout.addSpacing(12)
         status_layout.addStretch()
+        status_container = QWidget()
+        status_container.setLayout(status_layout)
+        status_group = QGroupBox("Operating Status")
+        status_group_layout = QVBoxLayout()
+        status_group_layout.setContentsMargins(10, 10, 10, 12)
+        status_group_layout.setSpacing(6)
+        status_group_layout.addWidget(status_container)
+        status_group.setLayout(status_group_layout)
+        status_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         main_layout.addWidget(status_group)
+
+        sections_row = QHBoxLayout()
+        sections_row.setSpacing(10)
+        self.sections_nav_list = QListWidget()
+        self.sections_nav_list.setMinimumWidth(170)
+        self.sections_nav_list.setMaximumWidth(230)
+        self.sections_nav_list.setSelectionMode(QListWidget.SingleSelection)
+        self.sections_nav_list.setUniformItemSizes(True)
+        self.sections_nav_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sections_nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sections_nav_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.sections_nav_list.currentRowChanged.connect(self._on_section_nav_changed)
+        sections_row.addWidget(self.sections_nav_list, 0, Qt.AlignTop)
+
+        self.sections_stack = QStackedWidget()
+        sections_row.addWidget(self.sections_stack, 1)
+        main_layout.addLayout(sections_row, 1)
+
+        op_container = QWidget()
+        op_container.setLayout(op_layout)
+        op_group = self._make_collapsible_group(
+            "FreqInOut Settings",
+            op_container,
+            checked=True,
+            fit_content=True,
+        )
+        self._register_collapsible_group(op_group, self._summary_freqinout_settings)
+        op_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(op_group)
+
+        logging_container = QWidget()
+        logging_container_layout = QVBoxLayout()
+        logging_container_layout.setContentsMargins(0, 0, 0, 0)
+        logging_container_layout.setSpacing(0)
+        logging_container_layout.addWidget(self.logging_group)
+        logging_container_layout.addStretch()
+        logging_container.setLayout(logging_container_layout)
+        logging_section = self._make_collapsible_group(
+            "Logging & Diagnostics",
+            logging_container,
+            checked=True,
+            fit_content=True,
+        )
+        self._register_collapsible_group(logging_section, self._summary_logging_settings)
+        logging_section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Operating Groups panel
         ops_group = QGroupBox("Operating Groups")
@@ -502,7 +651,7 @@ class SettingsTab(QWidget):
         header.setMinimumSectionSize(50)
         self.op_groups_table.setColumnWidth(8, 110)
         self.op_groups_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
-        self.op_groups_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.op_groups_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.op_groups_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.op_groups_table.setEditTriggers(QTableWidget.NoEditTriggers)
         ops_layout.addWidget(self.op_groups_table)
@@ -511,28 +660,38 @@ class SettingsTab(QWidget):
         ops_group = self._make_collapsible_group("Operating Groups", ops_container, checked=True, fit_content=False)
         self._register_collapsible_group(ops_group, self._summary_operating_groups)
         ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        main_layout.addWidget(ops_group)
+        self._add_settings_section(ops_group)
 
-        # JS8Call status/settings (managed externally)
+        # JS8Call status/settings
         js8_group = QGroupBox("JS8Call Settings")
         js8_v = QVBoxLayout()
         js8_v.setSpacing(6)
+        js8_v.setAlignment(Qt.AlignTop)
         js8_group.setLayout(js8_v)
+        js8_label_width = 170
 
         js8_port_row = QHBoxLayout()
-        js8_port_row.addWidget(QLabel("TCP Port"))
+        js8_port_row.setSpacing(8)
+        js8_port_row.setContentsMargins(0, 0, 0, 0)
+        js8_port_label = QLabel("TCP Port")
+        js8_port_label.setFixedWidth(70)
+        js8_port_row.addWidget(js8_port_label)
         self.js8_port_edit = QLineEdit()
         self.js8_port_edit.setFixedWidth(80)
         self.js8_port_edit.setText("2442")
         js8_port_row.addWidget(self.js8_port_edit)
-        js8_port_row.addSpacing(12)
-        js8_port_row.addWidget(QLabel("Offset (Hz)"))
+        js8_port_row.addSpacing(8)
+        js8_offset_label = QLabel("Offset (Hz)")
+        js8_offset_label.setFixedWidth(78)
+        js8_port_row.addWidget(js8_offset_label)
         self.js8_offset_edit = QLineEdit()
         self.js8_offset_edit.setFixedWidth(80)
         self.js8_offset_edit.setText("0")
         js8_port_row.addWidget(self.js8_offset_edit)
-        js8_port_row.addSpacing(12)
-        js8_port_row.addWidget(QLabel("Mark JS8Call MSG Read?"))
+        js8_port_row.addSpacing(8)
+        js8_mark_label = QLabel("Mark JS8Call MSG Read?")
+        js8_mark_label.setFixedWidth(165)
+        js8_port_row.addWidget(js8_mark_label)
         self.js8_mark_retrieved_chk = QCheckBox()
         self.js8_mark_retrieved_chk.setToolTip(
             "When enabled, clicking 'Mark Retrieved' in Message Viewer will set JS8Call inbox entries to READ."
@@ -541,26 +700,75 @@ class SettingsTab(QWidget):
         js8_port_row.addStretch()
         js8_v.addLayout(js8_port_row)
 
+        def build_js8_path_row(label: str, edit: QLineEdit, browse_cb) -> QWidget:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(label)
+            lbl.setFixedWidth(js8_label_width)
+            row.addWidget(lbl)
+            row.addWidget(edit, 1)
+            browse_btn = QPushButton("Browse")
+            browse_btn.setFixedWidth(70)
+            browse_btn.clicked.connect(browse_cb)
+            row.addWidget(browse_btn)
+            w = QWidget()
+            w.setLayout(row)
+            w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            return w
+
         directed_forms_row = QHBoxLayout()
-        directed_forms_row.addWidget(QLabel("JS8Call DIRECTED.TXT:"))
         self.js8_directed_edit = QLineEdit()
-        directed_browse = QPushButton("Browse")
-        directed_browse.clicked.connect(self._choose_js8_directed_path)
-        directed_forms_row.addWidget(self.js8_directed_edit, stretch=1)
-        directed_forms_row.addWidget(directed_browse)
-        js8_v.addLayout(directed_forms_row)
+        js8_v.addWidget(
+            build_js8_path_row("JS8Call DIRECTED.TXT:", self.js8_directed_edit, self._choose_js8_directed_path)
+        )
+
         forms_row = QHBoxLayout()
-        forms_row.addWidget(QLabel("JS8Spotter forms:"))
         self.js8_forms_edit = QLineEdit()
-        forms_browse = QPushButton("Browse")
-        forms_browse.clicked.connect(self._choose_js8_forms_path)
-        forms_row.addWidget(self.js8_forms_edit, stretch=1)
-        forms_row.addWidget(forms_browse)
-        js8_v.addLayout(forms_row)
+        js8_v.addWidget(
+            build_js8_path_row("JS8Spotter forms:", self.js8_forms_edit, self._choose_js8_forms_path)
+        )
+
+        js8_exec_row = QHBoxLayout()
+        self.js8call_path_edit = QLineEdit()
+        self.js8call_path_edit.setPlaceholderText("Folder containing JS8Call")
+        js8_v.addWidget(
+            build_js8_path_row("JS8Call Install Folder:", self.js8call_path_edit, self._choose_js8call_install_path)
+        )
+
+        js8spotter_exec_row = QHBoxLayout()
+        self.js8spotter_path_edit = QLineEdit()
+        self.js8spotter_path_edit.setPlaceholderText("Executable/script/.desktop path")
+        js8_v.addWidget(
+            build_js8_path_row(
+                "JS8Spotter Launch Path:",
+                self.js8spotter_path_edit,
+                self._choose_js8spotter_launch_path,
+            )
+        )
+
+        commstat_exec_row = QHBoxLayout()
+        self.commstat_path_edit = QLineEdit()
+        self.commstat_path_edit.setPlaceholderText("Executable/script/.desktop path")
+        js8_v.addWidget(
+            build_js8_path_row("CommStat Launch Path:", self.commstat_path_edit, self._choose_commstat_launch_path)
+        )
+
         self.js8_directed_edit.textChanged.connect(self._refresh_section_titles)
         self.js8_forms_edit.textChanged.connect(self._refresh_section_titles)
+        self.js8call_path_edit.textChanged.connect(self._refresh_section_titles)
+        self.js8spotter_path_edit.textChanged.connect(self._refresh_section_titles)
+        self.commstat_path_edit.textChanged.connect(self._refresh_section_titles)
+        self.js8call_path_edit.textChanged.connect(self._on_launch_paths_changed)
+        self.js8spotter_path_edit.textChanged.connect(self._on_launch_paths_changed)
+        self.commstat_path_edit.textChanged.connect(self._on_launch_paths_changed)
 
         load_links_row = QHBoxLayout()
+        load_links_row.setSpacing(8)
+        load_links_row.setContentsMargins(0, 0, 0, 0)
+        load_links_label = QLabel("Tools")
+        load_links_label.setFixedWidth(js8_label_width)
+        load_links_row.addWidget(load_links_label)
         self.load_js8_btn = QPushButton("Load JS8 Traffic")
         self.load_js8_btn.clicked.connect(self._load_js8_logs)
         load_links_row.addWidget(self.load_js8_btn)
@@ -569,46 +777,41 @@ class SettingsTab(QWidget):
 
         js8_container = QWidget()
         js8_container.setLayout(js8_v)
-        js8_group = self._make_collapsible_group("JS8Call Settings", js8_container, checked=False, fit_content=True)
+        js8_group = self._make_collapsible_group("JS8Call Settings", js8_container, checked=True, fit_content=True)
         self._register_collapsible_group(js8_group, self._summary_js8_settings)
         js8_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        main_layout.addWidget(js8_group)
+        self._add_settings_section(js8_group)
 
-        # Radio software
-        radio_group = QGroupBox("Radio Software")
-        radio_v = QVBoxLayout()
-        radio_v.setSpacing(6)
-        radio_group.setLayout(radio_v)
-        radio_grid = QHBoxLayout()
+        msg_label_width = 170
 
-        # Left column: program rows
-        prog_layout = QVBoxLayout()
-        msg_layout = QVBoxLayout()
-        msg_layout.setSpacing(6)
-
-        def build_prog_row(name: str) -> QHBoxLayout:
+        def build_prog_row(name: str, label: str | None = None) -> QWidget:
             row = QHBoxLayout()
-            chk = QCheckBox(name)
-            self.radio_checkboxes[name] = chk
-            chk.stateChanged.connect(self._update_launch_selected_state)
-            row.addWidget(chk)
+            row.setSpacing(8)
+            row.setContentsMargins(0, 0, 0, 0)
+            lbl = QLabel(label or name)
+            lbl.setFixedWidth(msg_label_width)
+            row.addWidget(lbl)
 
             path_edit = QLineEdit()
             path_edit.setPlaceholderText("Path to executable")
             self.path_edits[name] = path_edit
             path_edit.textChanged.connect(self._refresh_section_titles)
-            row.addWidget(path_edit)
+            path_edit.textChanged.connect(self._on_launch_paths_changed)
+            row.addWidget(path_edit, 1)
 
             browse_btn = QPushButton("Browse")
             browse_btn.setFixedWidth(70)
             browse_btn.clicked.connect(lambda _, n=name: self._choose_program_path(n))
             row.addWidget(browse_btn)
-            return row
+            w = QWidget()
+            w.setLayout(row)
+            w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            return w
 
-        msg_label_width = 160
-
-        def build_msg_row(label: str, edit: QLineEdit, browse_cb) -> QHBoxLayout:
+        def build_msg_row(label: str, edit: QLineEdit, browse_cb) -> QWidget:
             row = QHBoxLayout()
+            row.setSpacing(8)
+            row.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(label)
             lbl.setFixedWidth(msg_label_width)
             row.addWidget(lbl)
@@ -617,38 +820,31 @@ class SettingsTab(QWidget):
             browse_btn.setFixedWidth(70)
             browse_btn.clicked.connect(browse_cb)
             row.addWidget(browse_btn)
-            return row
+            w = QWidget()
+            w.setLayout(row)
+            w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            return w
 
         # Message path edits
         self.msg_paths_edits = {}
-        varac_edit = QLineEdit()
-        self.msg_paths_edits["varac"] = varac_edit
         flmsg_edit = QLineEdit()
         self.msg_paths_edits["flmsg"] = flmsg_edit
         flamp_edit = QLineEdit()
         self.msg_paths_edits["flamp"] = flamp_edit
+        varac_edit = QLineEdit()
+        self.msg_paths_edits["varac"] = varac_edit
 
-        # FLRig row + XMLRPC port
-        flrig_row = QHBoxLayout()
-        flrig_chk = QCheckBox("FLRig")
-        self.radio_checkboxes["FLRig"] = flrig_chk
-        flrig_chk.stateChanged.connect(self._update_launch_selected_state)
-        flrig_row.addWidget(flrig_chk)
-
-        flrig_path = QLineEdit()
-        flrig_path.setPlaceholderText("Path to executable")
-        self.path_edits["FLRig"] = flrig_path
-        flrig_path.textChanged.connect(self._refresh_section_titles)
-        flrig_row.addWidget(flrig_path)
-
-        flrig_browse = QPushButton("Browse")
-        flrig_browse.setFixedWidth(70)
-        flrig_browse.clicked.connect(lambda _: self._choose_program_path("FLRig"))
-        flrig_row.addWidget(flrig_browse)
-
-        prog_layout.addLayout(flrig_row)
+        # Fast Light Settings
+        fast_light_group = QGroupBox("Fast Light Settings")
+        fast_light_v = QVBoxLayout()
+        fast_light_v.setSpacing(6)
+        fast_light_v.setAlignment(Qt.AlignTop)
+        fast_light_group.setLayout(fast_light_v)
+        fast_light_v.addWidget(build_prog_row("FLRig", "FLRig"))
 
         flrig_port_row = QHBoxLayout()
+        flrig_port_row.setContentsMargins(0, 0, 0, 0)
+        flrig_port_row.setSpacing(8)
         flrig_port_label = QLabel("FLRig XMLRPC Port")
         flrig_port_label.setFixedWidth(msg_label_width)
         flrig_port_row.addWidget(flrig_port_label)
@@ -660,13 +856,11 @@ class SettingsTab(QWidget):
         flrig_port_spacer = QWidget()
         flrig_port_spacer.setFixedWidth(70)
         flrig_port_row.addWidget(flrig_port_spacer)
-        msg_layout.addLayout(flrig_port_row)
+        fast_light_v.addLayout(flrig_port_row)
 
-        # FLDigi row + check-in path
-        prog_layout.addLayout(build_prog_row("FLDigi"))
+        fast_light_v.addWidget(build_prog_row("FLDigi", "FLDigi"))
         self.fldigi_checkin_dir_edit = QLineEdit()
-        fldigi_browse = QPushButton("Browse")
-        fldigi_browse.clicked.connect(self._choose_fldigi_checkin_dir)
+        self.fldigi_checkin_dir_edit.setPlaceholderText("Directory containing check-in files")
         self.fldigi_checkin_dir_edit.textChanged.connect(self._refresh_fldigi_checkin_file_labels)
         self.fldigi_main_file_edit = QLineEdit()
         self.fldigi_main_file_edit.setReadOnly(True)
@@ -674,17 +868,18 @@ class SettingsTab(QWidget):
         self.fldigi_late_file_edit = QLineEdit()
         self.fldigi_late_file_edit.setReadOnly(True)
         self.fldigi_late_file_edit.hide()
-        fldigi_row = QHBoxLayout()
-        fldigi_label = QLabel("Check-in File Path")
-        fldigi_label.setFixedWidth(msg_label_width)
-        fldigi_row.addWidget(fldigi_label)
-        fldigi_row.addWidget(self.fldigi_checkin_dir_edit, 1)
-        fldigi_row.addWidget(fldigi_browse)
-        msg_layout.addLayout(fldigi_row)
+        fast_light_v.addWidget(
+            build_msg_row("Check-in File Path", self.fldigi_checkin_dir_edit, self._choose_fldigi_checkin_dir)
+        )
 
-        # FLMsg row + ICS/Messages path
-        prog_layout.addLayout(build_prog_row("FLMsg"))
-        msg_layout.addLayout(
+        self.fldigi_log_path_edit = QLineEdit()
+        self.fldigi_log_path_edit.setPlaceholderText("FLDigi log folder")
+        fast_light_v.addWidget(
+            build_msg_row("FLDigi Log Path", self.fldigi_log_path_edit, self._choose_fldigi_log_path)
+        )
+
+        fast_light_v.addWidget(build_prog_row("FLMsg", "FLMsg"))
+        fast_light_v.addWidget(
             build_msg_row(
                 "ICS/Messages",
                 flmsg_edit,
@@ -692,9 +887,8 @@ class SettingsTab(QWidget):
             )
         )
 
-        # FLAmp row + FLAMP/rx path
-        prog_layout.addLayout(build_prog_row("FLAmp"))
-        msg_layout.addLayout(
+        fast_light_v.addWidget(build_prog_row("FLAmp", "FLAmp"))
+        fast_light_v.addWidget(
             build_msg_row(
                 "FLAMP/rx",
                 flamp_edit,
@@ -702,31 +896,58 @@ class SettingsTab(QWidget):
             )
         )
 
-        # VarAC status row + install path
+        # Check-in log file copy helpers
+        launch_row = QHBoxLayout()
+        launch_row.setContentsMargins(0, 0, 0, 0)
+        launch_row.setSpacing(8)
+        launch_label = QLabel("Check-in Log Paths")
+        launch_label.setFixedWidth(msg_label_width)
+        launch_row.addWidget(launch_label)
+        self.copy_main_btn = QPushButton("Copy Main")
+        self.copy_main_btn.clicked.connect(lambda: self._copy_text(self.fldigi_main_file_edit))
+        self.copy_late_btn = QPushButton("Copy New/Late")
+        self.copy_late_btn.clicked.connect(lambda: self._copy_text(self.fldigi_late_file_edit))
+        launch_row.addWidget(self.copy_main_btn)
+        launch_row.addWidget(self.copy_late_btn)
+        launch_row.addStretch()
+        fast_light_v.addLayout(launch_row)
+
+        fast_light_container = QWidget()
+        fast_light_container.setLayout(fast_light_v)
+        fast_light_group = self._make_collapsible_group(
+            "Fast Light Settings",
+            fast_light_container,
+            checked=True,
+            fit_content=True,
+        )
+        self._register_collapsible_group(fast_light_group, self._summary_fast_light_settings)
+        fast_light_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(fast_light_group)
+
+        # VarAC Settings
+        varac_group = QGroupBox("VarAC Settings")
+        varac_v = QVBoxLayout()
+        varac_v.setSpacing(6)
+        varac_v.setAlignment(Qt.AlignTop)
+        varac_group.setLayout(varac_v)
+
         varac_row = QHBoxLayout()
-        varac_row.addWidget(QLabel("VarAC"))
+        varac_row.setContentsMargins(0, 0, 0, 0)
+        varac_row.setSpacing(8)
+        varac_install_label = QLabel("VarAC Install Folder:")
+        varac_install_label.setFixedWidth(msg_label_width)
+        varac_row.addWidget(varac_install_label)
         self.varac_path_edit = QLineEdit()
-        self.varac_path_edit.setReadOnly(False)
-        self.varac_path_edit.setPlaceholderText("VarAC install folder")
+        self.varac_path_edit.setPlaceholderText("Folder containing VarAC")
+        self.varac_path_edit.textChanged.connect(self._on_launch_paths_changed)
         varac_row.addWidget(self.varac_path_edit, 1)
         varac_browse = QPushButton("Browse")
         varac_browse.setFixedWidth(70)
         varac_browse.clicked.connect(self._choose_varac_install_path)
         varac_row.addWidget(varac_browse)
-        prog_layout.addLayout(varac_row)
+        varac_v.addLayout(varac_row)
 
-        fldigi_log_row = QHBoxLayout()
-        fldigi_log_row.addWidget(QLabel("FLDigi Log Path"))
-        self.fldigi_log_path_edit = QLineEdit()
-        self.fldigi_log_path_edit.setPlaceholderText("FLDigi log folder")
-        fldigi_log_row.addWidget(self.fldigi_log_path_edit, 1)
-        fldigi_log_browse = QPushButton("Browse")
-        fldigi_log_browse.setFixedWidth(70)
-        fldigi_log_browse.clicked.connect(self._choose_fldigi_log_path)
-        fldigi_log_row.addWidget(fldigi_log_browse)
-        prog_layout.addLayout(fldigi_log_row)
-
-        msg_layout.addLayout(
+        varac_v.addWidget(
             build_msg_row(
                 "VarAC Incoming Files",
                 varac_edit,
@@ -734,34 +955,140 @@ class SettingsTab(QWidget):
             )
         )
 
-        radio_grid.addLayout(prog_layout, 3)
-        radio_grid.addLayout(msg_layout, 4)
-        radio_v.addLayout(radio_grid)
+        bbs_dir_row = QHBoxLayout()
+        bbs_dir_row.setContentsMargins(0, 0, 0, 0)
+        bbs_dir_row.setSpacing(8)
+        bbs_dir_label = QLabel("BBS Directory")
+        bbs_dir_label.setFixedWidth(msg_label_width)
+        bbs_dir_row.addWidget(bbs_dir_label)
+        self.varac_bbs_dir_edit = QLineEdit()
+        self.varac_bbs_dir_edit.setPlaceholderText("VarAC BBS directory")
+        bbs_dir_row.addWidget(self.varac_bbs_dir_edit, 1)
+        bbs_dir_browse = QPushButton("Browse")
+        bbs_dir_browse.setFixedWidth(70)
+        bbs_dir_browse.clicked.connect(self._choose_varac_bbs_dir)
+        bbs_dir_row.addWidget(bbs_dir_browse)
+        varac_v.addLayout(bbs_dir_row)
 
-        # Launch Selected + Check-in log file copy helpers (single row)
-        self.launch_selected_btn = QPushButton("Launch Selected")
-        self.launch_selected_btn.clicked.connect(self._launch_selected_programs)
-        self.launch_selected_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        launch_row = QHBoxLayout()
-        launch_row.addWidget(self.launch_selected_btn)
-        launch_row.addStretch()
-        launch_row.addWidget(QLabel("Check-in Log Paths:"))
-        self.copy_main_btn = QPushButton("Copy Main")
-        self.copy_main_btn.clicked.connect(lambda: self._copy_text(self.fldigi_main_file_edit))
-        self.copy_late_btn = QPushButton("Copy New/Late")
-        self.copy_late_btn.clicked.connect(lambda: self._copy_text(self.fldigi_late_file_edit))
-        launch_row.addWidget(self.copy_main_btn)
-        launch_row.addWidget(self.copy_late_btn)
-        radio_v.addLayout(launch_row)
+        bbs_archive_row = QHBoxLayout()
+        bbs_archive_row.setContentsMargins(0, 0, 0, 0)
+        bbs_archive_row.setSpacing(8)
+        bbs_archive_label = QLabel("BBS Archive")
+        bbs_archive_label.setFixedWidth(msg_label_width)
+        bbs_archive_row.addWidget(bbs_archive_label)
+        self.varac_bbs_archive_dir_edit = QLineEdit()
+        self.varac_bbs_archive_dir_edit.setPlaceholderText("Archive destination directory")
+        bbs_archive_row.addWidget(self.varac_bbs_archive_dir_edit, 1)
+        bbs_archive_browse = QPushButton("Browse")
+        bbs_archive_browse.setFixedWidth(70)
+        bbs_archive_browse.clicked.connect(self._choose_varac_bbs_archive_dir)
+        bbs_archive_row.addWidget(bbs_archive_browse)
+        varac_v.addLayout(bbs_archive_row)
 
-        radio_container = QWidget()
-        radio_container.setLayout(radio_v)
-        radio_group = self._make_collapsible_group("Radio Software", radio_container, checked=False, fit_content=True)
-        self._register_collapsible_group(radio_group, self._summary_radio_settings)
-        radio_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        main_layout.addWidget(radio_group)
+        bbs_policy_row = QHBoxLayout()
+        bbs_policy_row.setContentsMargins(0, 0, 0, 0)
+        bbs_policy_row.setSpacing(8)
+        bbs_policy_label = QLabel("Auto-Archive Policy")
+        bbs_policy_label.setFixedWidth(msg_label_width)
+        bbs_policy_row.addWidget(bbs_policy_label)
+        self.varac_bbs_auto_archive_chk = QCheckBox("Enable Auto-Archive")
+        bbs_policy_row.addWidget(self.varac_bbs_auto_archive_chk)
+        bbs_policy_row.addSpacing(12)
+        bbs_policy_row.addWidget(QLabel("After"))
+        self.varac_bbs_archive_days_combo = QComboBox()
+        for day in (1, 3, 5, 7, 10, 14, 21, 30):
+            self.varac_bbs_archive_days_combo.addItem(str(day), day)
+        self.varac_bbs_archive_days_combo.setCurrentText("14")
+        self.varac_bbs_archive_days_combo.setFixedWidth(80)
+        bbs_policy_row.addWidget(self.varac_bbs_archive_days_combo)
+        bbs_policy_row.addWidget(QLabel("days"))
+        bbs_policy_row.addStretch()
+        varac_hint = QLabel("Moves files older than selected days from BBS Directory to BBS Archive.")
+        varac_hint.setWordWrap(True)
+        varac_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        policy_wrap = QVBoxLayout()
+        policy_wrap.setSpacing(3)
+        policy_wrap.setContentsMargins(0, 0, 0, 0)
+        policy_wrap.addLayout(bbs_policy_row)
+        hint_row = QHBoxLayout()
+        hint_row.setContentsMargins(0, 0, 0, 0)
+        hint_row.addSpacing(msg_label_width)
+        hint_row.addWidget(varac_hint, 1, Qt.AlignLeft | Qt.AlignTop)
+        policy_wrap.addLayout(hint_row)
+        varac_v.addLayout(policy_wrap)
 
-        main_layout.addStretch(1)
+        varac_container = QWidget()
+        varac_container.setLayout(varac_v)
+        varac_group = self._make_collapsible_group("VarAC Settings", varac_container, checked=True, fit_content=True)
+        self._register_collapsible_group(varac_group, self._summary_varac_settings)
+        varac_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(varac_group)
+
+        # Launch Control
+        launch_group = QGroupBox("Launch Control")
+        launch_v = QVBoxLayout()
+        launch_v.setSpacing(6)
+        launch_group.setLayout(launch_v)
+
+        launch_hint = QLabel("Only configured apps are shown. Launch order controls startup sequence.")
+        launch_hint.setWordWrap(True)
+        launch_v.addWidget(launch_hint)
+
+        launch_global_row = QHBoxLayout()
+        self.launch_all_with_startup_chk = QCheckBox("Launch All with FreqInOut")
+        launch_global_row.addWidget(self.launch_all_with_startup_chk)
+        launch_global_row.addStretch()
+        launch_v.addLayout(launch_global_row)
+
+        self.launch_control_table = QTableWidget(0, 3)
+        self.launch_control_table.setHorizontalHeaderLabels(["Application", "Enabled", "Launch on Startup"])
+        self.launch_control_table.verticalHeader().setVisible(False)
+        self.launch_control_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.launch_control_table.setSelectionMode(QTableWidget.SingleSelection)
+        launch_header = self.launch_control_table.horizontalHeader()
+        launch_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        launch_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        launch_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        launch_v.addWidget(self.launch_control_table)
+
+        launch_btn_row = QHBoxLayout()
+        self.launch_order_up_btn = QPushButton("Up")
+        self.launch_order_down_btn = QPushButton("Down")
+        self.launch_reset_order_btn = QPushButton("Reset Default Order")
+        self.launch_configured_now_btn = QPushButton("Launch Configured Now")
+        self.launch_stop_btn = QPushButton("Stop Launch Sequence")
+        self.launch_stop_btn.setEnabled(False)
+        launch_btn_row.addWidget(self.launch_order_up_btn)
+        launch_btn_row.addWidget(self.launch_order_down_btn)
+        launch_btn_row.addWidget(self.launch_reset_order_btn)
+        launch_btn_row.addStretch()
+        launch_btn_row.addWidget(self.launch_configured_now_btn)
+        launch_btn_row.addWidget(self.launch_stop_btn)
+        launch_v.addLayout(launch_btn_row)
+
+        self.launch_summary_label = QLabel("Launch status: Idle")
+        launch_v.addWidget(self.launch_summary_label)
+
+        self.launch_order_up_btn.clicked.connect(lambda: self._move_launch_row(-1))
+        self.launch_order_down_btn.clicked.connect(lambda: self._move_launch_row(1))
+        self.launch_reset_order_btn.clicked.connect(self._reset_launch_order)
+        self.launch_configured_now_btn.clicked.connect(self._launch_configured_now)
+        self.launch_stop_btn.clicked.connect(self._stop_launch_sequence)
+        self.launch_all_with_startup_chk.stateChanged.connect(self._refresh_section_titles)
+        self.launch_control_table.itemChanged.connect(self._on_launch_table_item_changed)
+        self.launch_control_table.itemSelectionChanged.connect(self._update_launch_control_buttons)
+        self.launch_orchestrator.sequence_started.connect(self._on_launch_sequence_started)
+        self.launch_orchestrator.sequence_progress.connect(self._on_launch_sequence_progress)
+        self.launch_orchestrator.sequence_finished.connect(self._on_launch_sequence_finished)
+
+        launch_container = QWidget()
+        launch_container.setLayout(launch_v)
+        launch_group = self._make_collapsible_group("Launch Control", launch_container, checked=True, fit_content=True)
+        self._register_collapsible_group(launch_group, self._summary_launch_control)
+        launch_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(launch_group)
+        self._add_settings_section(logging_section)
+
         # bottom save
         bottom_row = QHBoxLayout()
         bottom_row.addStretch()
@@ -769,10 +1096,13 @@ class SettingsTab(QWidget):
         self.save_btn.clicked.connect(self._save_settings_button)
         bottom_row.addWidget(self.save_btn)
         main_layout.addLayout(bottom_row)
-        self.launch_selected_btn.setMinimumWidth(self.launch_selected_btn.sizeHint().width() + 12)
         self._wire_dirty_tracking()
+        self._refresh_launch_control_table()
         self._set_save_button_state("success")
         self._refresh_section_titles()
+        if self.sections_nav_list.count() > 0:
+            self.sections_nav_list.setCurrentRow(0)
+        self._update_sections_nav_size()
 
     def _make_collapsible_group(
         self,
@@ -814,6 +1144,7 @@ class SettingsTab(QWidget):
             "fit_content": fit_content,
             "title": title,
             "header_btn": header_btn,
+            "content": content,
         }
         self._apply_collapsed_state(group, content, checked)
         QTimer.singleShot(0, lambda g=group, w=content: self._apply_collapsed_state(g, w, header_btn.isChecked()))
@@ -825,9 +1156,57 @@ class SettingsTab(QWidget):
         meta.update({"summary_fn": summary_fn})
         self._section_meta[group] = meta
 
+    def _add_settings_section(self, group: QGroupBox) -> None:
+        meta = self._section_meta.get(group, {})
+        title = str(meta.get("title", group.title() if hasattr(group, "title") else "Section"))
+        item = QListWidgetItem(title)
+        self.sections_nav_list.addItem(item)
+        self._section_nav_items[group] = item
+        self.sections_stack.addWidget(group)
+        content = meta.get("content")
+        header_btn = meta.get("header_btn")
+        if isinstance(content, QWidget):
+            expanded = bool(header_btn.isChecked()) if header_btn else True
+            self._apply_collapsed_state(group, content, expanded)
+        self._update_sections_nav_size()
+
+    def _update_sections_nav_size(self) -> None:
+        if not hasattr(self, "sections_nav_list"):
+            return
+        count = self.sections_nav_list.count()
+        if count <= 0:
+            return
+        row_h = self.sections_nav_list.sizeHintForRow(0)
+        if row_h <= 0:
+            row_h = 28
+        frame = self.sections_nav_list.frameWidth()
+        target = (row_h * count) + (frame * 2) + 6
+        self.sections_nav_list.setFixedHeight(max(120, min(target, 320)))
+
+    def _on_section_nav_changed(self, row: int) -> None:
+        if row < 0:
+            return
+        if row >= self.sections_stack.count():
+            return
+        self.sections_stack.setCurrentIndex(row)
+        try:
+            page = self.sections_stack.currentWidget()
+            if isinstance(page, QGroupBox):
+                header_btn = self._section_meta.get(page, {}).get("header_btn")
+                if header_btn and not header_btn.isChecked():
+                    header_btn.setChecked(True)
+        except Exception:
+            pass
+
     def _on_section_toggled(self, group: QGroupBox, content: QWidget, checked: bool) -> None:
+        stacked_mode = hasattr(self, "sections_stack") and self.sections_stack.count() > 0
+        if stacked_mode and not checked:
+            header_btn = self._section_meta.get(group, {}).get("header_btn")
+            if header_btn:
+                QTimer.singleShot(0, lambda btn=header_btn: btn.setChecked(True))
+            return
         self._apply_collapsed_state(group, content, checked)
-        if checked:
+        if checked and not stacked_mode:
             for other in self._accordion_groups:
                 if other is not group:
                     other_btn = self._section_meta.get(other, {}).get("header_btn")
@@ -852,10 +1231,18 @@ class SettingsTab(QWidget):
                 summary = ""
             if header_btn:
                 header_btn.setText(f"{base} — {summary}" if summary else base)
+            nav_item = self._section_nav_items.get(group)
+            if nav_item:
+                nav_item.setText(base)
+                nav_item.setToolTip(summary if summary else base)
+        self._update_sections_nav_size()
 
     def _apply_collapsed_state(self, group: QGroupBox, content: QWidget, expanded: bool) -> None:
         content.setVisible(expanded)
+        stacked_mode = hasattr(self, "sections_stack") and self.sections_stack.count() > 0
         fit_content = bool(self._section_meta.get(group, {}).get("fit_content", False))
+        if stacked_mode:
+            fit_content = False
         header_btn = self._section_meta.get(group, {}).get("header_btn")
         if header_btn:
             header_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
@@ -893,6 +1280,27 @@ class SettingsTab(QWidget):
             return max(34, header_btn.sizeHint().height() + extra)
         return max(34, group.fontMetrics().height() + 24 + extra)
 
+    def _summary_operator_info(self) -> str:
+        callsign = self.callsign_edit.text().strip().upper() if hasattr(self, "callsign_edit") else ""
+        grid = self.grid6_edit.text().strip().upper() if hasattr(self, "grid6_edit") else ""
+        if callsign and grid:
+            return f"{callsign} / {grid}"
+        if callsign:
+            return callsign
+        return "operator profile"
+
+    def _summary_operating_status(self) -> str:
+        return "live software indicators"
+
+    def _summary_freqinout_settings(self) -> str:
+        ctrl = self.control_combo.currentText().strip() if hasattr(self, "control_combo") else "FLRig"
+        scheduler = "on" if (hasattr(self, "use_scheduler_chk") and self.use_scheduler_chk.isChecked()) else "off"
+        return f"Control {ctrl}, Scheduler {scheduler}"
+
+    def _summary_logging_settings(self) -> str:
+        log_level = self.log_level_combo.currentText().strip() if hasattr(self, "log_level_combo") else "INFO"
+        return f"Level {log_level}"
+
     def _summary_operating_groups(self) -> str:
         count = len(self.operating_groups)
         return f"{count} group{'s' if count != 1 else ''}"
@@ -900,16 +1308,43 @@ class SettingsTab(QWidget):
     def _summary_js8_settings(self) -> str:
         directed = "set" if self.js8_directed_edit.text().strip() else "missing"
         forms = "set" if self.js8_forms_edit.text().strip() else "missing"
-        return f"DIRECTED {directed}, Forms {forms}"
+        js8call = "set" if hasattr(self, "js8call_path_edit") and self.js8call_path_edit.text().strip() else "missing"
+        spotter = "set" if hasattr(self, "js8spotter_path_edit") and self.js8spotter_path_edit.text().strip() else "missing"
+        commstat = "set" if hasattr(self, "commstat_path_edit") and self.commstat_path_edit.text().strip() else "missing"
+        return f"JS8Call {js8call}, Spotter {spotter}, CommStat {commstat}, DIRECTED {directed}, Forms {forms}"
 
-    def _summary_radio_settings(self) -> str:
+    def _summary_fast_light_settings(self) -> str:
         total = len(self.PROGRAMS)
         set_count = 0
         for name in self.PROGRAMS:
             edit = self.path_edits.get(name)
             if edit and edit.text().strip():
                 set_count += 1
-        return f"{set_count}/{total} program paths set"
+        return f"{set_count}/{total} app paths set"
+
+    def _summary_varac_settings(self) -> str:
+        install_set = bool(hasattr(self, "varac_path_edit") and self.varac_path_edit.text().strip())
+        incoming_set = bool(self.msg_paths_edits.get("varac") and self.msg_paths_edits["varac"].text().strip())
+        bbs_set = bool(
+            hasattr(self, "varac_bbs_dir_edit")
+            and self.varac_bbs_dir_edit.text().strip()
+            and hasattr(self, "varac_bbs_archive_dir_edit")
+            and self.varac_bbs_archive_dir_edit.text().strip()
+        )
+        archive_on = bool(hasattr(self, "varac_bbs_auto_archive_chk") and self.varac_bbs_auto_archive_chk.isChecked())
+        return (
+            f"Install {'set' if install_set else 'missing'}, "
+            f"Incoming {'set' if incoming_set else 'missing'}, "
+            f"BBS {'set' if bbs_set else 'missing'}, "
+            f"Archive {'on' if archive_on else 'off'}"
+        )
+
+    def _summary_launch_control(self) -> str:
+        total = len(self._launch_items_cache)
+        enabled = sum(1 for item in self._launch_items_cache if bool(item.get("enabled", False)))
+        startup = sum(1 for item in self._launch_items_cache if bool(item.get("startup", False)))
+        launch_all = bool(hasattr(self, "launch_all_with_startup_chk") and self.launch_all_with_startup_chk.isChecked())
+        return f"{enabled}/{total} enabled, {startup} startup, launch-all {'on' if launch_all else 'off'}"
 
     def _disable_prompt_hint_item(self, combo: QComboBox) -> None:
         try:
@@ -973,6 +1408,12 @@ class SettingsTab(QWidget):
         if ctrl not in allowed_ctrl:
             ctrl = "FLRig"
         self.control_combo.setCurrentText(ctrl)
+        log_level = (data.get("log_level", "") or "INFO").strip().upper()
+        if log_level not in {"DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            log_level = "INFO"
+        if hasattr(self, "log_level_combo"):
+            idx = self.log_level_combo.findText(log_level)
+            self.log_level_combo.setCurrentIndex(idx if idx >= 0 else self.log_level_combo.findText("INFO"))
         self.use_scheduler_chk.setChecked(bool(data.get("use_scheduler", True)))
         freq_mode = (data.get("freq_enforcement_mode", "On Schedule Change") or "On Schedule Change").strip()
         fldigi_mode = (data.get("fldigi_enforcement_mode", "On Schedule Change") or "On Schedule Change").strip()
@@ -1027,6 +1468,9 @@ class SettingsTab(QWidget):
                     self.settings._data = data  # type: ignore[attr-defined]
         self.js8_offset_edit.setText(str(offset_int))
         self.js8_forms_edit.setText(data.get("js8_forms_path", "") or "")
+        self.js8call_path_edit.setText((data.get("path_js8call", "") or "").strip())
+        self.js8spotter_path_edit.setText((data.get("path_js8spotter", "") or "").strip())
+        self.commstat_path_edit.setText((data.get("path_commstat", "") or "").strip())
         self.js8_mark_retrieved_chk.setChecked(
             bool(data.get("js8_inbox_mark_retrieved_sync", False))
         )
@@ -1048,6 +1492,18 @@ class SettingsTab(QWidget):
                     varac_path = legacy_db
         if hasattr(self, "varac_path_edit"):
             self.varac_path_edit.setText(varac_path)
+        if hasattr(self, "varac_bbs_dir_edit"):
+            self.varac_bbs_dir_edit.setText((data.get("varac_bbs_dir", "") or "").strip())
+        if hasattr(self, "varac_bbs_archive_dir_edit"):
+            self.varac_bbs_archive_dir_edit.setText((data.get("varac_bbs_archive_dir", "") or "").strip())
+        if hasattr(self, "varac_bbs_auto_archive_chk"):
+            self.varac_bbs_auto_archive_chk.setChecked(bool(data.get("varac_bbs_auto_archive_enabled", False)))
+        if hasattr(self, "varac_bbs_archive_days_combo"):
+            allowed_days = {"1", "3", "5", "7", "10", "14", "21", "30"}
+            day_val = str(data.get("varac_bbs_auto_archive_days", 14) or "14")
+            if day_val not in allowed_days:
+                day_val = "14"
+            self.varac_bbs_archive_days_combo.setCurrentText(day_val)
         fldigi_log_path = (data.get("fldigi_log_path", "") or "").strip()
         if hasattr(self, "fldigi_log_path_edit"):
             self.fldigi_log_path_edit.setText(fldigi_log_path)
@@ -1102,15 +1558,17 @@ class SettingsTab(QWidget):
 
         for prog_name, meta in self.PROGRAMS.items():
             path_key = meta["setting_key"]
-            enabled_key = f"{prog_name.lower()}_enabled"
 
             if path_key:
                 self.path_edits[prog_name].setText(data.get(path_key, "") or "")
-            if prog_name in self.radio_checkboxes:
-                self.radio_checkboxes[prog_name].setChecked(bool(data.get(enabled_key, False)))
+
+        self._launch_items_cache = self.launch_orchestrator.get_launch_items()
+        launch_all = bool(self.settings.get("launch_control_enabled", data.get("launch_control_enabled", True)))
+        self.launch_all_with_startup_chk.setChecked(launch_all)
+        self._refresh_launch_control_table()
 
         log.info("SettingsTab: settings loaded.")
-        self._update_launch_selected_state()
+        self._update_launch_control_buttons()
         self._update_op_group_action_buttons()
         self._loading_settings = False
         self._settings_dirty = False
@@ -1152,6 +1610,9 @@ class SettingsTab(QWidget):
             data["timezone"] = tz
 
         data["control_via"] = self.control_combo.currentText().strip()
+        data["log_level"] = (
+            self.log_level_combo.currentText().strip().upper() if hasattr(self, "log_level_combo") else "INFO"
+        )
         data["use_scheduler"] = bool(self.use_scheduler_chk.isChecked())
         freq_mode = self.freq_enforce_combo.currentText().strip()
         fldigi_mode = self.fldigi_enforce_combo.currentText().strip()
@@ -1191,6 +1652,11 @@ class SettingsTab(QWidget):
         data["js8_offset_hz"] = offset_val
 
         data["js8_forms_path"] = self.js8_forms_edit.text().strip()
+        data["path_js8call"] = self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else ""
+        data["path_js8spotter"] = (
+            self.js8spotter_path_edit.text().strip() if hasattr(self, "js8spotter_path_edit") else ""
+        )
+        data["path_commstat"] = self.commstat_path_edit.text().strip() if hasattr(self, "commstat_path_edit") else ""
         data["js8_inbox_mark_retrieved_sync"] = bool(self.js8_mark_retrieved_chk.isChecked())
         msg_paths = {}
         for origin, edit in self.msg_paths_edits.items():
@@ -1199,6 +1665,52 @@ class SettingsTab(QWidget):
         varac_path = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
         data["varac_path"] = varac_path
         data["varac_db_path"] = str(Path(varac_path) / "VarAC.db") if varac_path else ""
+        data["varac_bbs_dir"] = (
+            self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
+        )
+        data["varac_bbs_archive_dir"] = (
+            self.varac_bbs_archive_dir_edit.text().strip() if hasattr(self, "varac_bbs_archive_dir_edit") else ""
+        )
+        days_text = (
+            self.varac_bbs_archive_days_combo.currentText().strip()
+            if hasattr(self, "varac_bbs_archive_days_combo")
+            else "14"
+        )
+        if days_text not in {"1", "3", "5", "7", "10", "14", "21", "30"}:
+            days_text = "14"
+        data["varac_bbs_auto_archive_enabled"] = bool(
+            self.varac_bbs_auto_archive_chk.isChecked() if hasattr(self, "varac_bbs_auto_archive_chk") else False
+        )
+        data["varac_bbs_auto_archive_days"] = int(days_text)
+        if data["varac_bbs_auto_archive_enabled"]:
+            bbs_dir_txt = data["varac_bbs_dir"]
+            bbs_archive_txt = data["varac_bbs_archive_dir"]
+            if not bbs_dir_txt or not bbs_archive_txt:
+                QMessageBox.warning(
+                    self,
+                    "Settings",
+                    "When Auto-Archive BBS Files is enabled, both BBS Directory and BBS Archive are required.",
+                )
+                return
+            bbs_dir = Path(bbs_dir_txt)
+            bbs_archive = Path(bbs_archive_txt)
+            if not bbs_dir.exists() or not bbs_dir.is_dir() or not bbs_archive.exists() or not bbs_archive.is_dir():
+                QMessageBox.warning(
+                    self,
+                    "Settings",
+                    "BBS Directory and BBS Archive must both exist and be directories when auto-archive is enabled.",
+                )
+                return
+            try:
+                if bbs_dir.resolve() == bbs_archive.resolve():
+                    QMessageBox.warning(
+                        self,
+                        "Settings",
+                        "BBS Directory and BBS Archive must be different directories.",
+                    )
+                    return
+            except Exception:
+                pass
         data["fldigi_log_path"] = (
             self.fldigi_log_path_edit.text().strip() if hasattr(self, "fldigi_log_path_edit") else ""
         )
@@ -1213,17 +1725,35 @@ class SettingsTab(QWidget):
 
         data["js8_directed_path"] = self.js8_directed_edit.text().strip()
 
-        # Radio software paths / autostart / enabled flags from UI
+        # Radio software paths from UI
         for prog_name, meta in self.PROGRAMS.items():
             path_key = meta["setting_key"]
-            enabled_key = f"{prog_name.lower()}_enabled"
 
             if path_key:
                 data[path_key] = self.path_edits[prog_name].text().strip()
-            if prog_name in self.radio_checkboxes:
-                data[enabled_key] = bool(self.radio_checkboxes[prog_name].isChecked())
+
+        # Launch Control settings
+        self._sync_launch_cache_from_table()
+        data["launch_control_items"] = [dict(item) for item in self._launch_items_cache]
+        data["launch_control_enabled"] = bool(self.launch_all_with_startup_chk.isChecked())
+        data["launch_control_migrated_v1"] = True
+        data["launch_readiness_timeout_sec"] = int(self.settings.get("launch_readiness_timeout_sec", 30) or 30)
+        startup_by_name = {
+            str(item.get("name", "")).strip(): bool(item.get("startup", False))
+            for item in data["launch_control_items"]
+            if isinstance(item, dict)
+        }
+        data["autostart_flrig"] = bool(startup_by_name.get("FLRig", False))
+        data["autostart_fldigi"] = bool(startup_by_name.get("FLDigi", False))
+        data["autostart_flmsg"] = bool(startup_by_name.get("FLMsg", False))
+        data["autostart_flamp"] = bool(startup_by_name.get("FLAmp", False))
+        data["autostart_js8call"] = bool(startup_by_name.get("JS8Call", False))
 
         data["operating_groups"] = self._table_to_operating_groups()
+        try:
+            set_log_level(str(data.get("log_level", "INFO") or "INFO"))
+        except Exception:
+            pass
 
         # Persist with a single write when possible.
         if hasattr(self.settings, "set_many"):
@@ -1234,6 +1764,7 @@ class SettingsTab(QWidget):
                 "operator_grid6": data["operator_grid6"],
                 "timezone": data["timezone"],
                 "control_via": data["control_via"],
+                "log_level": data.get("log_level", "INFO"),
                 "use_scheduler": data["use_scheduler"],
                 "freq_enforcement_mode": data.get("freq_enforcement_mode", "On Schedule Change"),
                 "freq_prompt_interval": data.get("freq_prompt_interval", "Hourly"),
@@ -1247,24 +1778,33 @@ class SettingsTab(QWidget):
                 "primary_js8_groups": data["primary_js8_groups"],
                 "js8_directed_path": data["js8_directed_path"],
                 "js8_forms_path": data.get("js8_forms_path", ""),
+                "path_js8call": data.get("path_js8call", ""),
+                "path_js8spotter": data.get("path_js8spotter", ""),
+                "path_commstat": data.get("path_commstat", ""),
                 "js8_inbox_mark_retrieved_sync": data.get("js8_inbox_mark_retrieved_sync", False),
                 "message_paths": data.get("message_paths", {}),
                 "varac_path": data.get("varac_path", ""),
                 "varac_db_path": data.get("varac_db_path", ""),
+                "varac_bbs_dir": data.get("varac_bbs_dir", ""),
+                "varac_bbs_archive_dir": data.get("varac_bbs_archive_dir", ""),
+                "varac_bbs_auto_archive_enabled": data.get("varac_bbs_auto_archive_enabled", False),
+                "varac_bbs_auto_archive_days": data.get("varac_bbs_auto_archive_days", 14),
                 "fldigi_log_path": data.get("fldigi_log_path", ""),
                 "fldigi_checkin_dir": data.get("fldigi_checkin_dir", ""),
+                "launch_control_items": data.get("launch_control_items", []),
+                "launch_control_enabled": data.get("launch_control_enabled", True),
+                "launch_control_migrated_v1": data.get("launch_control_migrated_v1", True),
+                "launch_readiness_timeout_sec": data.get("launch_readiness_timeout_sec", 30),
                 "operating_groups": data.get("operating_groups", []),
             }
             for prog_name, meta in self.PROGRAMS.items():
                 path_key = meta["setting_key"]
                 auto_key = meta["autostart_key"]
-                enabled_key = f"{prog_name.lower()}_enabled"
                 if path_key:
                     batch[path_key] = data.get(path_key, "")
                 if auto_key:
                     batch[auto_key] = data.get(auto_key, False)
-                if prog_name in self.radio_checkboxes:
-                    batch[enabled_key] = data.get(enabled_key, False)
+            batch["autostart_js8call"] = data.get("autostart_js8call", False)
             self.settings.set_many(batch, save=True)  # type: ignore[attr-defined]
         elif hasattr(self.settings, "set"):
             self.settings.set("operator_callsign", data["operator_callsign"])
@@ -1273,6 +1813,7 @@ class SettingsTab(QWidget):
             self.settings.set("operator_grid6", data["operator_grid6"])
             self.settings.set("timezone", data["timezone"])
             self.settings.set("control_via", data["control_via"])
+            self.settings.set("log_level", data.get("log_level", "INFO"))
             self.settings.set("ui_theme", data.get("ui_theme", "light"))
             self.settings.set("freq_enforcement_mode", data.get("freq_enforcement_mode", "On Schedule Change"))
             self.settings.set("freq_prompt_interval", data.get("freq_prompt_interval", "Hourly"))
@@ -1285,6 +1826,9 @@ class SettingsTab(QWidget):
             self.settings.set("primary_js8_groups", data["primary_js8_groups"])
             self.settings.set("js8_directed_path", data["js8_directed_path"])
             self.settings.set("js8_forms_path", data.get("js8_forms_path", ""))
+            self.settings.set("path_js8call", data.get("path_js8call", ""))
+            self.settings.set("path_js8spotter", data.get("path_js8spotter", ""))
+            self.settings.set("path_commstat", data.get("path_commstat", ""))
             self.settings.set(
                 "js8_inbox_mark_retrieved_sync",
                 data.get("js8_inbox_mark_retrieved_sync", False),
@@ -1292,18 +1836,24 @@ class SettingsTab(QWidget):
             self.settings.set("message_paths", data.get("message_paths", {}))
             self.settings.set("varac_path", data.get("varac_path", ""))
             self.settings.set("varac_db_path", data.get("varac_db_path", ""))
+            self.settings.set("varac_bbs_dir", data.get("varac_bbs_dir", ""))
+            self.settings.set("varac_bbs_archive_dir", data.get("varac_bbs_archive_dir", ""))
+            self.settings.set("varac_bbs_auto_archive_enabled", data.get("varac_bbs_auto_archive_enabled", False))
+            self.settings.set("varac_bbs_auto_archive_days", data.get("varac_bbs_auto_archive_days", 14))
             self.settings.set("fldigi_log_path", data.get("fldigi_log_path", ""))
             self.settings.set("fldigi_checkin_dir", data.get("fldigi_checkin_dir", ""))
+            self.settings.set("launch_control_items", data.get("launch_control_items", []))
+            self.settings.set("launch_control_enabled", data.get("launch_control_enabled", True))
+            self.settings.set("launch_control_migrated_v1", data.get("launch_control_migrated_v1", True))
+            self.settings.set("launch_readiness_timeout_sec", data.get("launch_readiness_timeout_sec", 30))
             for prog_name, meta in self.PROGRAMS.items():
                 path_key = meta["setting_key"]
                 auto_key = meta["autostart_key"]
-                enabled_key = f"{prog_name.lower()}_enabled"
                 if path_key:
                     self.settings.set(path_key, data.get(path_key, ""))
                 if auto_key:
                     self.settings.set(auto_key, data.get(auto_key, False))
-                if prog_name in self.radio_checkboxes:
-                    self.settings.set(enabled_key, data.get(enabled_key, False))
+            self.settings.set("autostart_js8call", data.get("autostart_js8call", False))
             self.settings.set("operating_groups", data.get("operating_groups", []))
         elif hasattr(self.settings, "_data"):
             # Fallback: update the internal dict only
@@ -1343,6 +1893,146 @@ class SettingsTab(QWidget):
         self._mark_settings_dirty()
         # apply_theme will clear the toast once the app theme is applied
 
+    def _request_open_logs(self) -> None:
+        try:
+            self.open_logs_requested.emit()
+        except Exception:
+            pass
+
+    def _on_log_level_changed(self, level: str) -> None:
+        if self._loading_settings:
+            return
+        level = (level or "INFO").strip().upper()
+        if level not in {"DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            level = "INFO"
+        prev_level = (self.settings.get("log_level", "") or "INFO").strip().upper()
+        if not prev_level:
+            try:
+                prev_level = get_log_level().strip().upper()
+            except Exception:
+                prev_level = "INFO"
+        if level == prev_level:
+            return
+        if level == "DEBUG":
+            confirm = QMessageBox.question(
+                self,
+                "Enable DEBUG Logging",
+                "DEBUG logging can impact performance and disk usage.\n\nEnable DEBUG now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                self.log_level_combo.blockSignals(True)
+                idx = self.log_level_combo.findText(prev_level)
+                self.log_level_combo.setCurrentIndex(idx if idx >= 0 else self.log_level_combo.findText("INFO"))
+                self.log_level_combo.blockSignals(False)
+                return
+        try:
+            set_log_level(level)
+            self.settings.set_many(
+                {
+                    "log_level": level,
+                    "timed_debug_until_utc": "",
+                    "timed_debug_prev_level": "",
+                }
+            )
+        except Exception:
+            pass
+        try:
+            self.log_level_changed.emit(level)
+        except Exception:
+            pass
+        self._refresh_section_titles()
+
+    def _enable_timed_debug(self) -> None:
+        minutes = int(self.debug_duration_combo.currentData() or 30)
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        until = now_utc + datetime.timedelta(minutes=minutes)
+        current = (self.settings.get("log_level", "") or "INFO").strip().upper()
+        if current not in {"DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            current = "INFO"
+        prev_level = current if current != "DEBUG" else "INFO"
+        try:
+            set_log_level("DEBUG")
+            self.settings.set_many(
+                {
+                    "log_level": "DEBUG",
+                    "timed_debug_until_utc": until.isoformat(),
+                    "timed_debug_prev_level": prev_level,
+                }
+            )
+            self.log_level_combo.blockSignals(True)
+            idx = self.log_level_combo.findText("DEBUG")
+            self.log_level_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.log_level_combo.blockSignals(False)
+        except Exception:
+            pass
+        try:
+            self.log_level_changed.emit("DEBUG")
+        except Exception:
+            pass
+        self._refresh_section_titles()
+        QMessageBox.information(
+            self,
+            "Timed DEBUG Enabled",
+            f"DEBUG logging enabled for {minutes} minutes.\n"
+            f"It will automatically revert at {until.astimezone():%Y-%m-%d %H:%M}.",
+        )
+
+    def _open_log_folder(self) -> None:
+        log_file = _get_log_file()
+        folder = str(Path(log_file).parent)
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(folder)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not open log folder:\n{e}")
+
+    def _export_diagnostics(self) -> None:
+        default_name = f"freqinout_diagnostics_{datetime.datetime.now():%Y%m%d_%H%M%S}.zip"
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Diagnostics",
+            default_name,
+            "ZIP Files (*.zip)",
+        )
+        if not out_path:
+            return
+        if not out_path.lower().endswith(".zip"):
+            out_path += ".zip"
+        cfg_dir = get_config_dir() / "config"
+        files = [
+            Path(_get_log_file()),
+            cfg_dir / "freqinout.db",
+            cfg_dir / "freqinout_nets.db",
+        ]
+        added = 0
+        try:
+            with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for p in files:
+                    if p.exists() and p.is_file():
+                        zf.write(p, arcname=p.name)
+                        added += 1
+                info = (
+                    f"FreqInOut version: {__version__}\n"
+                    f"Exported: {datetime.datetime.now(datetime.timezone.utc).isoformat()}\n"
+                    f"Platform: {platform.platform()}\n"
+                    f"Log level: {(self.settings.get('log_level', 'INFO') or 'INFO')}\n"
+                )
+                zf.writestr("diagnostics_info.txt", info)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Diagnostics", f"Failed to export diagnostics:\n{e}")
+            return
+        QMessageBox.information(
+            self,
+            "Export Diagnostics",
+            f"Export complete.\nFiles included: {added} (+ diagnostics_info.txt).",
+        )
+
     def _update_enforcement_visibility(self) -> None:
         freq_prompt = self.freq_enforce_combo.currentText().strip() == "Prompt"
         fldigi_prompt = self.fldigi_enforce_combo.currentText().strip() == "Prompt"
@@ -1375,6 +2065,45 @@ class SettingsTab(QWidget):
             else:
                 combo.setStyleSheet("")
 
+    def _update_logging_actions_layout(self) -> None:
+        if not (
+            hasattr(self, "logging_actions_grid")
+            and hasattr(self, "open_logs_btn")
+            and hasattr(self, "open_log_folder_btn")
+            and hasattr(self, "export_diag_btn")
+        ):
+            return
+
+        width = self.logging_group.width() if hasattr(self, "logging_group") else 0
+        compact = width < 640
+        very_compact = width < 480
+
+        for btn in (self.open_logs_btn, self.open_log_folder_btn, self.export_diag_btn):
+            try:
+                self.logging_actions_grid.removeWidget(btn)
+            except Exception:
+                pass
+
+        for col in range(4):
+            self.logging_actions_grid.setColumnStretch(col, 0)
+        self.logging_actions_grid.setColumnStretch(3, 1)
+
+        if very_compact:
+            self.logging_actions_grid.addWidget(self.open_logs_btn, 0, 0, 1, 2)
+            self.logging_actions_grid.addWidget(self.open_log_folder_btn, 1, 0)
+            self.logging_actions_grid.addWidget(self.export_diag_btn, 1, 1)
+            return
+
+        self.logging_actions_grid.addWidget(self.open_logs_btn, 0, 0)
+        self.logging_actions_grid.addWidget(self.open_log_folder_btn, 0, 1)
+        try:
+            if compact:
+                self.logging_actions_grid.addWidget(self.export_diag_btn, 1, 0, 1, 2)
+            else:
+                self.logging_actions_grid.addWidget(self.export_diag_btn, 0, 2)
+        except Exception:
+            self.logging_actions_grid.addWidget(self.export_diag_btn, 1, 0, 1, 2)
+
     def _on_enforcement_changed(self):
         self._update_enforcement_visibility()
         self._mark_settings_dirty()
@@ -1395,8 +2124,13 @@ class SettingsTab(QWidget):
             self.js8_offset_edit,
             self.js8_directed_edit,
             self.js8_forms_edit,
+            self.js8call_path_edit,
+            self.js8spotter_path_edit,
+            self.commstat_path_edit,
             self.fldigi_checkin_dir_edit,
             self.fldigi_log_path_edit,
+            self.varac_bbs_dir_edit,
+            self.varac_bbs_archive_dir_edit,
             self.flrig_port_edit,
         ]
         edits.extend(self.msg_paths_edits.values())
@@ -1413,11 +2147,17 @@ class SettingsTab(QWidget):
             self.fldigi_prompt_combo,
             self.js8_enforce_combo,
             self.js8_prompt_combo,
+            self.varac_bbs_archive_days_combo,
         ]
         for combo in combos:
             combo.currentIndexChanged.connect(self._mark_settings_dirty)
 
-        checks = [self.use_scheduler_chk, self.js8_mark_retrieved_chk]
+        checks = [
+            self.use_scheduler_chk,
+            self.js8_mark_retrieved_chk,
+            self.varac_bbs_auto_archive_chk,
+            self.launch_all_with_startup_chk,
+        ]
         checks.extend(self.radio_checkboxes.values())
         for chk in checks:
             chk.stateChanged.connect(self._mark_settings_dirty)
@@ -1432,6 +2172,236 @@ class SettingsTab(QWidget):
     def _set_save_button_state(self, role: str) -> None:
         theme = resolve_theme(self.settings)
         self.save_btn.setStyleSheet(button_style(role, theme))
+
+    # ---------- Launch Control ---------- #
+
+    def _on_launch_paths_changed(self, *_args) -> None:
+        if self._loading_settings:
+            return
+        self._refresh_launch_control_table()
+
+    def _is_launch_item_configured(self, name: str) -> bool:
+        if name == "VarAC":
+            path_val = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
+            return bool(path_val)
+        if name == "JS8Call":
+            return bool(self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else "")
+        if name == "JS8Spotter":
+            return bool(self.js8spotter_path_edit.text().strip() if hasattr(self, "js8spotter_path_edit") else "")
+        if name == "CommStat":
+            return bool(self.commstat_path_edit.text().strip() if hasattr(self, "commstat_path_edit") else "")
+        edit = self.path_edits.get(name)
+        return bool(edit and edit.text().strip())
+
+    def _sync_launch_cache_from_table(self) -> None:
+        if not hasattr(self, "launch_control_table"):
+            return
+        for row, name in enumerate(self._launch_visible_names):
+            enabled_item = self.launch_control_table.item(row, 1)
+            startup_item = self.launch_control_table.item(row, 2)
+            enabled = bool(enabled_item and enabled_item.checkState() == Qt.Checked)
+            startup = bool(startup_item and startup_item.checkState() == Qt.Checked)
+            for item in self._launch_items_cache:
+                if str(item.get("name", "")).strip() == name:
+                    item["enabled"] = enabled
+                    item["startup"] = startup
+                    break
+
+    def _refresh_launch_control_table(self) -> None:
+        if not hasattr(self, "launch_control_table"):
+            return
+        self._sync_launch_cache_from_table()
+        existing_map: Dict[str, Dict[str, object]] = {}
+        for item in self._launch_items_cache:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if name:
+                existing_map[name] = item
+        if not existing_map:
+            for name in LAUNCH_APP_ORDER:
+                existing_map[name] = {"name": name, "enabled": True, "startup": False}
+        ordered: List[Dict[str, object]] = []
+        seen: set[str] = set()
+        for item in self._launch_items_cache:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if name not in LAUNCH_APP_ORDER or name in seen:
+                continue
+            seen.add(name)
+            ordered.append(
+                {
+                    "name": name,
+                    "enabled": bool(item.get("enabled", True)),
+                    "startup": bool(item.get("startup", False)),
+                }
+            )
+        for name in LAUNCH_APP_ORDER:
+            if name in seen:
+                continue
+            item = existing_map.get(name, {"name": name, "enabled": True, "startup": False})
+            ordered.append(
+                {
+                    "name": name,
+                    "enabled": bool(item.get("enabled", True)),
+                    "startup": bool(item.get("startup", False)),
+                }
+            )
+        self._launch_items_cache = ordered
+
+        visible_items = [item for item in self._launch_items_cache if self._is_launch_item_configured(str(item.get("name", "")))]
+        self._launch_visible_names = [str(item.get("name", "")) for item in visible_items]
+
+        self._launch_table_loading = True
+        self.launch_control_table.blockSignals(True)
+        self.launch_control_table.setRowCount(len(visible_items))
+        for row, item in enumerate(visible_items):
+            name = str(item.get("name", "")).strip()
+            app_item = QTableWidgetItem(name)
+            app_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.launch_control_table.setItem(row, 0, app_item)
+
+            enabled_item = QTableWidgetItem()
+            enabled_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            enabled_item.setCheckState(Qt.Checked if bool(item.get("enabled", True)) else Qt.Unchecked)
+            self.launch_control_table.setItem(row, 1, enabled_item)
+
+            startup_item = QTableWidgetItem()
+            startup_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            startup_item.setCheckState(Qt.Checked if bool(item.get("startup", False)) else Qt.Unchecked)
+            self.launch_control_table.setItem(row, 2, startup_item)
+        self.launch_control_table.blockSignals(False)
+        self._launch_table_loading = False
+        if self.launch_control_table.rowCount() > 0 and self.launch_control_table.currentRow() < 0:
+            self.launch_control_table.selectRow(0)
+        self._update_launch_control_buttons()
+        self._refresh_section_titles()
+
+    def _update_launch_control_buttons(self) -> None:
+        row = self.launch_control_table.currentRow() if hasattr(self, "launch_control_table") else -1
+        has_rows = bool(hasattr(self, "launch_control_table") and self.launch_control_table.rowCount() > 0)
+        can_move = has_rows and row >= 0
+        self.launch_order_up_btn.setEnabled(bool(can_move and row > 0))
+        self.launch_order_down_btn.setEnabled(bool(can_move and row < self.launch_control_table.rowCount() - 1))
+        self.launch_reset_order_btn.setEnabled(has_rows)
+        self.launch_configured_now_btn.setEnabled(has_rows and not self.launch_orchestrator.is_active())
+        self.launch_stop_btn.setEnabled(self.launch_orchestrator.is_active())
+
+    def _move_launch_row(self, direction: int) -> None:
+        if direction == 0:
+            return
+        row = self.launch_control_table.currentRow()
+        if row < 0:
+            return
+        target_row = row + direction
+        if target_row < 0 or target_row >= self.launch_control_table.rowCount():
+            return
+        self._sync_launch_cache_from_table()
+        name_a = self._launch_visible_names[row]
+        name_b = self._launch_visible_names[target_row]
+        idx_a = next((i for i, item in enumerate(self._launch_items_cache) if str(item.get("name", "")) == name_a), -1)
+        idx_b = next((i for i, item in enumerate(self._launch_items_cache) if str(item.get("name", "")) == name_b), -1)
+        if idx_a < 0 or idx_b < 0:
+            return
+        self._launch_items_cache[idx_a], self._launch_items_cache[idx_b] = (
+            self._launch_items_cache[idx_b],
+            self._launch_items_cache[idx_a],
+        )
+        self._refresh_launch_control_table()
+        if 0 <= target_row < self.launch_control_table.rowCount():
+            self.launch_control_table.selectRow(target_row)
+        self._mark_settings_dirty()
+
+    def _reset_launch_order(self) -> None:
+        self._sync_launch_cache_from_table()
+        existing_map = {
+            str(item.get("name", "")).strip(): item
+            for item in self._launch_items_cache
+            if isinstance(item, dict)
+        }
+        reset_items: List[Dict[str, object]] = []
+        for name in LAUNCH_APP_ORDER:
+            prev = existing_map.get(name, {})
+            reset_items.append(
+                {
+                    "name": name,
+                    "enabled": bool(prev.get("enabled", True)),
+                    "startup": bool(prev.get("startup", False)),
+                }
+            )
+        self._launch_items_cache = reset_items
+        self._refresh_launch_control_table()
+        self._mark_settings_dirty()
+
+    def _on_launch_table_item_changed(self, _item: QTableWidgetItem) -> None:
+        if self._loading_settings or self._launch_table_loading:
+            return
+        self._sync_launch_cache_from_table()
+        self._mark_settings_dirty()
+        self._refresh_section_titles()
+
+    def _launch_configured_now(self) -> None:
+        self._sync_launch_cache_from_table()
+        started = self.launch_orchestrator.start_manual_sequence(self._launch_items_cache)
+        if not started:
+            QMessageBox.information(self, "Launch Control", "No enabled configured applications to launch.")
+            return
+        self._update_launch_control_buttons()
+
+    def _stop_launch_sequence(self) -> None:
+        self.launch_orchestrator.stop_sequence()
+        self._update_launch_control_buttons()
+
+    def _on_launch_sequence_started(self, payload: object) -> None:
+        try:
+            data = payload if isinstance(payload, dict) else {}
+            trigger = str(data.get("trigger", "")).strip().capitalize() or "Launch"
+            self.launch_summary_label.setText(f"Launch status: {trigger} sequence running...")
+        except Exception:
+            self.launch_summary_label.setText("Launch status: sequence running...")
+        self._update_launch_control_buttons()
+
+    def _on_launch_sequence_progress(self, payload: object) -> None:
+        try:
+            data = payload if isinstance(payload, dict) else {}
+            name = str(data.get("name", "")).strip()
+            status = str(data.get("status", "")).strip()
+            detail = str(data.get("detail", "")).strip()
+            self.launch_summary_label.setText(f"Launch status: {name} {status} ({detail})")
+        except Exception:
+            pass
+        self._update_launch_control_buttons()
+
+    def _on_launch_sequence_finished(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        launched = int(data.get("launched", 0) or 0)
+        already_running = int(data.get("already_running", 0) or 0)
+        failed = int(data.get("failed", 0) or 0)
+        timeout = int(data.get("timeout", 0) or 0)
+        cancelled = bool(data.get("cancelled", False))
+        trigger = str(data.get("trigger", "")).strip().lower()
+        status_txt = (
+            f"Launch status: done (launched={launched}, running={already_running}, failed={failed}, timeout={timeout})"
+        )
+        if cancelled:
+            status_txt = (
+                f"Launch status: cancelled (launched={launched}, running={already_running}, failed={failed}, timeout={timeout})"
+            )
+        self.launch_summary_label.setText(status_txt)
+        if trigger == "manual":
+            QMessageBox.information(
+                self,
+                "Launch Summary",
+                (
+                    f"Launched: {launched}\n"
+                    f"Already running: {already_running}\n"
+                    f"Failed: {failed}\n"
+                    f"Timeout: {timeout}\n"
+                    f"Cancelled: {'Yes' if cancelled else 'No'}"
+                ),
+            )
+        self._update_launch_control_buttons()
 
     # ---------- TIME / TIMEZONE ---------- #
 
@@ -1660,110 +2630,45 @@ class SettingsTab(QWidget):
             QTimer.singleShot(1500, self._refresh_running_status)
 
     def _update_launch_selected_state(self):
-        theme = resolve_theme(self.settings)
-        any_selected = any(chk.isChecked() for chk in self.radio_checkboxes.values())
-        role = "info" if any_selected else "muted"
-        self.launch_selected_btn.setStyleSheet(button_style(role, theme))
+        if hasattr(self, "launch_selected_btn"):
+            theme = resolve_theme(self.settings)
+            any_selected = any(chk.isChecked() for chk in self.radio_checkboxes.values())
+            role = "info" if any_selected else "muted"
+            self.launch_selected_btn.setStyleSheet(button_style(role, theme))
+        self._update_launch_control_buttons()
 
     def _program_is_running(self, program_name: str) -> bool:
-        # Cache process snapshot briefly to avoid multiple psutil walks
-        now_ts = datetime.datetime.now().timestamp()
-        if now_ts - self._proc_snapshot_ts > 2.0:
-            snap: list[str] = []
-            for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
-                try:
-                    name = (proc.info.get("name") or "").lower()
-                    exe = os.path.basename(proc.info.get("exe") or "").lower()
-                    cmdline_list = proc.info.get("cmdline") or []
-                    first_arg = os.path.basename(cmdline_list[0]).lower() if cmdline_list else ""
-                    second_arg = os.path.basename(cmdline_list[1]).lower() if len(cmdline_list) > 1 else ""
-                    for token in (name, exe, first_arg, second_arg):
-                        if token:
-                            snap.append(token)
-                except Exception:
-                    continue
-            self._proc_snapshot = snap
-            self._proc_snapshot_ts = now_ts
-        exe_path = self._get_saved_program_path(program_name)
-        target_names = {program_name.lower(), f"{program_name.lower()}.exe"}
-        if program_name in {"JS8Spotter", "CommStat"}:
-            target_names.add(f"{program_name.lower()}.py")
-        if exe_path:
-            target_names.add(exe_path.name.lower())
-        return any(entry in target_names for entry in self._proc_snapshot)
+        try:
+            return bool(self._status_service.program_is_running(program_name))
+        except Exception:
+            return False
 
     def _find_process_exe(self, program_name: str) -> Optional[str]:
-        target = (program_name or "").strip().lower()
-        if not target:
+        try:
+            return self._status_service.find_process_exe(program_name)
+        except Exception:
             return None
-        target_names = {target, f"{target}.exe"}
-        for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
-            try:
-                name = (proc.info.get("name") or "").lower()
-                exe = proc.info.get("exe") or ""
-                exe_base = os.path.basename(exe).lower()
-                cmdline_list = proc.info.get("cmdline") or []
-                first_arg = os.path.basename(cmdline_list[0]).lower() if cmdline_list else ""
-                if name in target_names or exe_base in target_names or first_arg in target_names:
-                    if exe:
-                        return exe
-                    if cmdline_list:
-                        return cmdline_list[0]
-                    return None
-            except Exception:
-                continue
-        return None
 
     def _refresh_running_status(self):
         theme = resolve_theme(self.settings)
-        running_js8 = self._program_is_running("JS8Call")
-        api_ok = self._js8_api_reachable()
-        # Update API indicator (header)
-        api_lbl = self.status_labels.get("JS8Call_API")
-        if api_lbl:
-            if api_ok:
-                api_lbl.setStyleSheet(led_style("ok", theme))
-                api_lbl.setToolTip("API reachable")
-            elif running_js8:
-                api_lbl.setStyleSheet(led_style("warn", theme))
-                api_lbl.setToolTip("Process running, API unreachable")
-            else:
-                api_lbl.setStyleSheet(led_style("idle", theme))
-                api_lbl.setToolTip("Not running")
-
-        # Update VarAC status tooltip without overwriting configured install path
-        if hasattr(self, "varac_path_edit"):
-            varac_running = self._program_is_running("VarAC")
-            exe_path = self._find_process_exe("VarAC") if varac_running else None
-            if exe_path:
-                self.varac_path_edit.setToolTip(f"Running: {exe_path}")
-            elif varac_running:
-                self.varac_path_edit.setToolTip("Running")
-            else:
-                self.varac_path_edit.setToolTip("Not running")
-
-        # Update all other indicators
+        port_override: Optional[int] = None
+        try:
+            txt = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
+            port_override = int(txt) if txt else None
+        except Exception:
+            port_override = None
+        snapshot = self._status_service.status_snapshot(port_override=port_override)
         for program_name, lbl in self.status_labels.items():
-            if program_name == "JS8Call_API":
-                continue
-            running = running_js8 if program_name == "JS8Call" else self._program_is_running(program_name)
-            if program_name == "JS8Call":
-                if api_ok:
-                    lbl.setStyleSheet(led_style("ok", theme))
-                    lbl.setToolTip("API reachable")
-                elif running:
-                    lbl.setStyleSheet(led_style("warn", theme))
-                    lbl.setToolTip("Process running, API unreachable")
-                else:
-                    lbl.setStyleSheet(led_style("idle", theme))
-                    lbl.setToolTip("Not running")
-            else:
-                if running:
-                    lbl.setStyleSheet(led_style("ok", theme))
-                    lbl.setToolTip("Running")
-                else:
-                    lbl.setStyleSheet(led_style("idle", theme))
-                    lbl.setToolTip("Not Running")
+            info = snapshot.get(program_name, {})
+            state = str(info.get("state", "idle"))
+            tooltip = str(info.get("tooltip", "Not running"))
+            lbl.setStyleSheet(led_style(state, theme))
+            lbl.setToolTip(tooltip)
+
+        # Keep VarAC path tooltip in sync with runtime status.
+        if hasattr(self, "varac_path_edit"):
+            varac_info = snapshot.get("VarAC", {})
+            self.varac_path_edit.setToolTip(str(varac_info.get("tooltip", "Not running")))
 
     def apply_theme(self):
         try:
@@ -1780,54 +2685,58 @@ class SettingsTab(QWidget):
             self._update_launch_selected_state()
             self._update_op_group_action_buttons()
             self._set_save_button_state("info" if self._settings_dirty else "success")
+            if hasattr(self, "open_logs_btn"):
+                self.open_logs_btn.setStyleSheet(button_style("primary", theme))
+            if hasattr(self, "open_log_folder_btn"):
+                self.open_log_folder_btn.setStyleSheet(button_style("secondary", theme))
+            if hasattr(self, "export_diag_btn"):
+                self.export_diag_btn.setStyleSheet(button_style("secondary", theme))
+            if hasattr(self, "enable_timed_debug_btn"):
+                self.enable_timed_debug_btn.setStyleSheet(button_style("warning", theme))
+            if hasattr(self, "logging_warning_label"):
+                self.logging_warning_label.setStyleSheet(f"color: {theme.get('text_muted', theme.get('text', '#666'))};")
+            if hasattr(self, "sections_nav_list"):
+                self.sections_nav_list.setStyleSheet(
+                    "QListWidget {"
+                    f" background: {theme.get('surface_alt', theme.get('surface', '#f2f2f2'))};"
+                    f" border: 1px solid {theme.get('border', '#cccccc')};"
+                    f" color: {theme.get('text', '#222222')};"
+                    "}"
+                    "QListWidget::item {"
+                    " padding: 6px 8px;"
+                    " border-radius: 4px;"
+                    " margin: 1px 2px;"
+                    "}"
+                    "QListWidget::item:hover {"
+                    f" background: {theme.get('surface', '#ffffff')};"
+                    f" border: 1px solid {theme.get('accent', '#2a6fd3')};"
+                    "}"
+                    "QListWidget::item:selected {"
+                    f" background: {theme.get('accent_soft', theme.get('surface', '#e6f2ff'))};"
+                    f" color: {theme.get('text', '#222222')};"
+                    " font-weight: 600;"
+                    "}"
+                )
+                self._update_sections_nav_size()
             self._update_enforcement_visibility()
+            self._update_logging_actions_layout()
         except Exception:
             pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_logging_actions_layout()
 
     def _js8_api_reachable(self) -> bool:
-        """
-        Lightweight check: attempt TCP connect to JS8Call API port.
-        """
-        import socket
-        # Prefer UI value (unsaved edits) to avoid stale settings.
         try:
-            port_txt = self.js8_port_edit.text().strip()
-            port = int(port_txt) if port_txt else int(self.settings.get("js8_port", 2442) or 2442)
+            port_txt = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
+            port_override = int(port_txt) if port_txt else None
         except Exception:
-            port = 2442
-
-        hosts = []
+            port_override = None
         try:
-            host_cfg = (self.settings.get("js8_host", "") or "").strip()
-            if host_cfg:
-                hosts.append(host_cfg)
+            return bool(self._status_service.js8_api_reachable(port_override=port_override))
         except Exception:
-            pass
-        hosts.extend(["127.0.0.1", "localhost", "::1"])
-
-        # First try raw socket connect
-        for host in hosts:
-            try:
-                with socket.create_connection((host, port), timeout=1.5):
-                    log.debug("SettingsTab: JS8 API connect ok host=%s port=%s", host, port)
-                    return True
-            except Exception as e:
-                log.debug("SettingsTab: JS8 API connect failed host=%s port=%s (%s)", host, port, e)
-                continue
-
-        # Fallback: try js8net get_freq (this also implicitly connects)
-        try:
-            from freqinout.radio_interface.js8_status import JS8ControlClient  # lazy import to avoid cycles
-
-            client = JS8ControlClient()
-            resp = client.get_frequency()
-            if resp is not None:
-                log.debug("SettingsTab: JS8 API reachable via js8net get_frequency (resp=%s)", resp)
-                return True
-            log.debug("SettingsTab: JS8 API js8net get_frequency returned None/False")
-        except Exception as e:
-            log.debug("SettingsTab: js8net probe failed: %s", e)
-        return False
+            return False
 
     def _program_autostart_enabled(self, program_name: str) -> bool:
         if program_name not in {"FLDigi", "FLMsg", "FLAmp", "JS8Call"}:
@@ -2424,6 +3333,54 @@ class SettingsTab(QWidget):
         self._settings_dirty = False
         self._set_save_button_state("success")
 
+    def _choose_js8call_install_path(self):
+        start = self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else ""
+        fn = QFileDialog.getExistingDirectory(self, "Select JS8Call install folder", start)
+        if not fn:
+            return
+        self.js8call_path_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("path_js8call", fn)
+        else:
+            data = self.settings.all()
+            data["path_js8call"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        self._settings_dirty = False
+        self._set_save_button_state("success")
+
+    def _choose_js8spotter_launch_path(self):
+        start = self.js8spotter_path_edit.text().strip() if hasattr(self, "js8spotter_path_edit") else ""
+        fn, _ = QFileDialog.getOpenFileName(self, "Select JS8Spotter launch path", start)
+        if not fn:
+            return
+        self.js8spotter_path_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("path_js8spotter", fn)
+        else:
+            data = self.settings.all()
+            data["path_js8spotter"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        self._settings_dirty = False
+        self._set_save_button_state("success")
+
+    def _choose_commstat_launch_path(self):
+        start = self.commstat_path_edit.text().strip() if hasattr(self, "commstat_path_edit") else ""
+        fn, _ = QFileDialog.getOpenFileName(self, "Select CommStat launch path", start)
+        if not fn:
+            return
+        self.commstat_path_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("path_commstat", fn)
+        else:
+            data = self.settings.all()
+            data["path_commstat"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        self._settings_dirty = False
+        self._set_save_button_state("success")
+
     def _choose_msg_path(self, origin: str, edit: QLineEdit):
         """
         Prompt for message paths used by Message Viewer (VarAC/FLMSG/FLAMP).
@@ -2464,6 +3421,38 @@ class SettingsTab(QWidget):
         if hasattr(self.settings, "set"):
             self.settings.set("varac_path", fn)
             self.settings.set("varac_db_path", str(Path(fn) / "VarAC.db"))
+        self._settings_dirty = False
+        self._set_save_button_state("success")
+
+    def _choose_varac_bbs_dir(self):
+        start = self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
+        fn = QFileDialog.getExistingDirectory(self, "Select VarAC BBS directory", start)
+        if not fn:
+            return
+        self.varac_bbs_dir_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("varac_bbs_dir", fn)
+        else:
+            data = self.settings.all()
+            data["varac_bbs_dir"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        self._settings_dirty = False
+        self._set_save_button_state("success")
+
+    def _choose_varac_bbs_archive_dir(self):
+        start = self.varac_bbs_archive_dir_edit.text().strip() if hasattr(self, "varac_bbs_archive_dir_edit") else ""
+        fn = QFileDialog.getExistingDirectory(self, "Select VarAC BBS archive directory", start)
+        if not fn:
+            return
+        self.varac_bbs_archive_dir_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("varac_bbs_archive_dir", fn)
+        else:
+            data = self.settings.all()
+            data["varac_bbs_archive_dir"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
         self._settings_dirty = False
         self._set_save_button_state("success")
 
