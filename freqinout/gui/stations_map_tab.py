@@ -1093,15 +1093,12 @@ class StationsMapTab(QWidget):
         self.relay_target_combo.setMinimumWidth(280)
         refresh_btn = QPushButton("Refresh Links")
         refresh_btn.clicked.connect(lambda: self._auto_ingest_and_refresh(initial=False))
-        self._now_reachable_button = QPushButton("Now Reachable")
+        self._now_reachable_button = QPushButton("Peer Sched Now")
         self._now_reachable_button.setCheckable(True)
         self._update_now_reachable_button_visual(False)
         self._sitrep_status_button = QPushButton("SitRep Status")
         self._sitrep_status_button.setCheckable(True)
-        self._sitrep_status_button.setToolTip(
-            "Show only stations with known SitRep status (Red/Yellow/Green).\n"
-            "This view overrides map filters and hides links."
-        )
+        self._update_sitrep_status_button_visual(False)
         self._now_reachable_label = QLabel("")
         self._now_reachable_label.setWordWrap(True)
         self._now_reachable_label.setVisible(False)
@@ -1780,13 +1777,33 @@ class StationsMapTab(QWidget):
         if self._now_reachable_button is None:
             return
         theme = resolve_theme(self.settings)
-        self._now_reachable_button.setText("Reachable")
+        self._now_reachable_button.setText("Peer Sched Now")
         if enabled:
             self._now_reachable_button.setStyleSheet(button_style("info", theme))
-            self._now_reachable_button.setToolTip("Reachable view is ON: map filters to peers on your active schedule frequency.")
+            self._now_reachable_button.setToolTip(
+                "Peer Sched Now is ON: map filters to peers whose peer schedule currently matches your active schedule frequency."
+            )
         else:
             self._now_reachable_button.setStyleSheet(button_style("muted", theme))
-            self._now_reachable_button.setToolTip("Show peers currently on your active schedule frequency.")
+            self._now_reachable_button.setToolTip(
+                "Show peers whose peer schedule currently matches your active schedule frequency."
+            )
+
+    def _update_sitrep_status_button_visual(self, enabled: bool) -> None:
+        if self._sitrep_status_button is None:
+            return
+        theme = resolve_theme(self.settings)
+        self._sitrep_status_button.setText("SitRep Status")
+        if enabled:
+            self._sitrep_status_button.setStyleSheet(button_style("info", theme))
+            self._sitrep_status_button.setToolTip(
+                "SitRep Status mode is ON: show only Red/Yellow/Green stations, hide links, and override map filters."
+            )
+        else:
+            self._sitrep_status_button.setStyleSheet(button_style("muted", theme))
+            self._sitrep_status_button.setToolTip(
+                "Show only stations with known SitRep status (Red/Yellow/Green). This view hides links and overrides map filters."
+            )
 
     def _on_now_reachable_toggled(self, checked: bool) -> None:
         self._now_reachable_enabled = bool(checked)
@@ -1811,8 +1828,7 @@ class StationsMapTab(QWidget):
 
     def _on_sitrep_status_toggled(self, checked: bool) -> None:
         self._sitrep_status_only_enabled = bool(checked)
-        if self._sitrep_status_button is not None:
-            self._sitrep_status_button.setText("SitRep Status: On" if checked else "SitRep Status")
+        self._update_sitrep_status_button_visual(self._sitrep_status_only_enabled)
         self._render_map()
 
     def _relay_target_callsign_from_text(self, text: str) -> str:
@@ -4429,8 +4445,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
         '<span style="color:#FBC02D;">&#9679;</span> Partially Functioning<br/>' +
         '<span style="color:#D32F2F;">&#9679;</span> Not Functioning<br/>' +
         '<span style="color:#4FC3F7;">&#9679;</span> Unknown / No Report' +
-        ({now_reachable_enabled} ? ('<br/><br/><b>Reachable View</b><br/>' +
-        'Filtered to peers matching your active schedule frequency.<br/>' +
+        ({now_reachable_enabled} ? ('<br/><br/><b>Peer Sched Now</b><br/>' +
+        'Filtered to peers whose peer schedule matches your active schedule frequency.<br/>' +
+        'Schedule alignment only; not a propagation/connection guarantee.<br/>' +
         '<span style=\"color:#7E57C2;\">&#9679;</span> QSY &lt;10m<br/>' +
         'Unknown timing appears as <em>QSY ?</em> in station tooltip.') : '') +
         ({'true' if prop_overlay_enabled else 'false'} ? ('<br/><br/><b>Best Band Now</b><br/>' +

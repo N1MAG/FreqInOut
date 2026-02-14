@@ -414,7 +414,7 @@
     <li><strong>Refresh semantics</strong>: <em>Refresh Links</em> forces ingest/redraw cycle using current filters.</li>
   </ul>
   <ol class="section-list">
-    <li><strong>Map link controls row</strong>: Paths (Off/My Station/All), Group, Region, Band, Recency (Any, 15m, 30m, 1h, 3h, 6h, 12h, 24h, 7d), Paths to (editable/searchable callsign), <em>SitRep Status</em>, and <em>Refresh Links</em>.</li>
+    <li><strong>Map link controls row</strong>: Paths (Off/My Station/All), Group, Region, Band, Recency (Any, 15m, 30m, 1h, 3h, 6h, 12h, 24h, 7d), Paths to (editable/searchable callsign), <em>Peer Sched Now</em>, <em>SitRep Status</em>, and <em>Refresh Links</em>.</li>
     <li><strong>Map controls panel</strong>: Use the splitter chevron between the controls pane and map to collapse/expand controls quickly.</li>
     <li><strong>Map Layers (sidebar)</strong>: Only visible when Map is active. Checkboxes for Callsigns, States, Cities, Grids, Regions plus a City Pop. dropdown.</li>
     <li><strong>Propagation controls</strong>: Propagation Overlay toggle, Mode selector (Actual / Blended / Modeled), Propagation Window, Target Type, and Target Value.</li>
@@ -423,6 +423,8 @@
     <li><strong>Refresh Links</strong>: Forces JS8 log ingest and redraw.</li>
     <li><strong>Map view</strong>: Requires Qt WebEngine; if unavailable, a disabled message is shown instead of the map.</li>
     <li><strong>Tooltips</strong>: Station tooltips include JS8 and VarAC fields when data exists: JS8 Last Seen, JS8 Spotter, JS8 Last Band, JS8 Direct SNR (and traffic count), JS8 Avg SNR (and traffic count), VarAC Last Seen, VarAC Last Band, VarAC SNR, and SitRep status/source/timestamp.</li>
+    <li><strong>Peer Sched Now</strong>: Filters to peers whose peer schedule is active now on your active schedule frequency. This is schedule alignment only, not a propagation or connection guarantee. Purple marker outline indicates QSY in less than 10 minutes; unknown timing appears as <em>QSY ?</em> in tooltips.</li>
+    <li><strong>Toggle state styling</strong>: <em>Peer Sched Now</em> and <em>SitRep Status</em> keep fixed labels; ON state is indicated by blue info styling.</li>
     <li><strong>SitRep Status mode</strong>: When enabled, map shows only stations with known SitRep status (Red/Yellow/Green), hides links, and overrides normal path/link filters until toggled off.</li>
   </ol>
   <h3 id="map-propagation">Propagation Overlay (New)</h3>
