@@ -57,7 +57,7 @@ from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.gui.qsy_helper import current_scheduler_freq
-from freqinout.gui.theme import resolve_theme, BAND_COLORS_DARK, BAND_COLORS_LIGHT
+from freqinout.gui.theme import resolve_theme, BAND_COLORS_DARK, BAND_COLORS_LIGHT, button_style
 from freqinout.utils.timezones import get_timezone
 
 
@@ -1095,6 +1095,7 @@ class StationsMapTab(QWidget):
         refresh_btn.clicked.connect(lambda: self._auto_ingest_and_refresh(initial=False))
         self._now_reachable_button = QPushButton("Now Reachable")
         self._now_reachable_button.setCheckable(True)
+        self._update_now_reachable_button_visual(False)
         self._sitrep_status_button = QPushButton("SitRep Status")
         self._sitrep_status_button.setCheckable(True)
         self._sitrep_status_button.setToolTip(
@@ -1103,6 +1104,7 @@ class StationsMapTab(QWidget):
         )
         self._now_reachable_label = QLabel("")
         self._now_reachable_label.setWordWrap(True)
+        self._now_reachable_label.setVisible(False)
         filter_bar = QFrame(map_container)
         self._map_filter_bar = filter_bar
         filter_grid = QGridLayout(filter_bar)
@@ -1770,13 +1772,21 @@ class StationsMapTab(QWidget):
     def _update_now_reachable_summary(self) -> None:
         if self._now_reachable_label is None:
             return
-        if not self._now_reachable_enabled:
-            self._now_reachable_label.setText("")
+        # Reachable details are shown in map legend/tooltip; keep header compact.
+        self._now_reachable_label.setText("")
+        self._now_reachable_label.setVisible(False)
+
+    def _update_now_reachable_button_visual(self, enabled: bool) -> None:
+        if self._now_reachable_button is None:
             return
-        total = len(self._now_reachable_callsigns)
-        soon = sum(1 for meta in self._now_reachable_meta.values() if meta.get("qsy_soon"))
-        unknown = sum(1 for meta in self._now_reachable_meta.values() if meta.get("minutes_to_end") is None)
-        self._now_reachable_label.setText(f"Reachable: {total} (QSY<10m: {soon}, Unknown: {unknown})")
+        theme = resolve_theme(self.settings)
+        self._now_reachable_button.setText("Reachable")
+        if enabled:
+            self._now_reachable_button.setStyleSheet(button_style("info", theme))
+            self._now_reachable_button.setToolTip("Reachable view is ON: map filters to peers on your active schedule frequency.")
+        else:
+            self._now_reachable_button.setStyleSheet(button_style("muted", theme))
+            self._now_reachable_button.setToolTip("Show peers currently on your active schedule frequency.")
 
     def _on_now_reachable_toggled(self, checked: bool) -> None:
         self._now_reachable_enabled = bool(checked)
@@ -1784,8 +1794,6 @@ class StationsMapTab(QWidget):
             snapshot = self._compute_now_reachable_snapshot()
             self._now_reachable_meta = snapshot
             self._now_reachable_callsigns = set(snapshot.keys())
-            if self._now_reachable_button is not None:
-                self._now_reachable_button.setText("Now Reachable: On")
             # Ensure links are visible for the operator-centric view.
             try:
                 mode, _ = self._parse_link_selection(self.link_mode_combo.currentData())
@@ -1796,8 +1804,7 @@ class StationsMapTab(QWidget):
         else:
             self._now_reachable_meta = {}
             self._now_reachable_callsigns = set()
-            if self._now_reachable_button is not None:
-                self._now_reachable_button.setText("Now Reachable")
+        self._update_now_reachable_button_visual(self._now_reachable_enabled)
         self._update_now_reachable_summary()
         self._refresh_relay_targets()
         self._render_map()
@@ -4422,8 +4429,10 @@ function addGridLabels(res, level, bounds, maxLabels) {
         '<span style="color:#FBC02D;">&#9679;</span> Partially Functioning<br/>' +
         '<span style="color:#D32F2F;">&#9679;</span> Not Functioning<br/>' +
         '<span style="color:#4FC3F7;">&#9679;</span> Unknown / No Report' +
-        ({now_reachable_enabled} ? ('<br/><br/><b>Schedule Risk</b><br/>' +
-        '<span style=\"color:#7E57C2;\">&#9679;</span> QSY &lt;10m (Now Reachable)') : '') +
+        ({now_reachable_enabled} ? ('<br/><br/><b>Reachable View</b><br/>' +
+        'Filtered to peers matching your active schedule frequency.<br/>' +
+        '<span style=\"color:#7E57C2;\">&#9679;</span> QSY &lt;10m<br/>' +
+        'Unknown timing appears as <em>QSY ?</em> in station tooltip.') : '') +
         ({'true' if prop_overlay_enabled else 'false'} ? ('<br/><br/><b>Best Band Now</b><br/>' +
         Object.keys(window.propBandColors).map(k => '<span style="color:' + window.propBandColors[k] + ';">&#9632;</span> ' + k).join('<br/>')) : '');
       return div;
