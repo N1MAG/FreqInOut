@@ -4104,15 +4104,25 @@ class StationsMapTab(QWidget):
 
         if self.web is not None:
             self._last_map_config = config_sig
+            had_visible_map = bool(self._map_initialized and self._map_load_ok)
             self._map_initialized = False
             if self._map_stack is not None:
-                self._map_stack.setCurrentIndex(0)
-            if self._map_loading_label is not None:
-                self._map_loading_label.setText("Loading map...")
+                # Keep the existing map visible for config/layer reloads to avoid
+                # a disruptive blank/loading flash between updates.
+                if had_visible_map:
+                    self._map_stack.setCurrentIndex(1)
+                else:
+                    self._map_stack.setCurrentIndex(0)
+                    if self._map_loading_label is not None:
+                        self._map_loading_label.setText("Loading map...")
             # New page context: force first payload push even if content hash matches
             # the prior page's payload.
             self._last_map_payload_sig = None
-            self._pending_map_payload = {"markers": markers, "links": links}
+            self._pending_map_payload = {
+                "markers": markers,
+                "links": links,
+                "now_reachable_enabled": bool(self._now_reachable_enabled),
+            }
             with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
                 f.write(html.encode("utf-8"))
             self._map_file = Path(f.name)
@@ -4142,7 +4152,11 @@ class StationsMapTab(QWidget):
             # Ensure payload is applied to the freshly loaded page, even when
             # marker/link data is identical to the previous render.
             self._last_map_payload_sig = None
-            self._push_map_payload(payload.get("markers", []), payload.get("links", []))
+            self._push_map_payload(
+                payload.get("markers", []),
+                payload.get("links", []),
+                payload.get("now_reachable_enabled"),
+            )
         if self._map_visible and self._map_dirty:
             self._map_dirty = False
             self._schedule_render()
@@ -4163,13 +4177,32 @@ class StationsMapTab(QWidget):
             self._map_dirty = False
             self._schedule_render()
 
-    def _push_map_payload(self, markers: List[Dict], links: List[Dict]) -> None:
+    def _push_map_payload(
+        self,
+        markers: List[Dict],
+        links: List[Dict],
+        now_reachable_enabled: Optional[bool] = None,
+    ) -> None:
         if self.web is None:
             return
+        now_reachable_flag = (
+            bool(self._now_reachable_enabled)
+            if now_reachable_enabled is None
+            else bool(now_reachable_enabled)
+        )
         try:
-            payload = json.dumps({"markers": markers, "links": links})
+            payload = json.dumps(
+                {
+                    "markers": markers,
+                    "links": links,
+                    "now_reachable_enabled": now_reachable_flag,
+                }
+            )
         except Exception:
-            payload = '{"markers": [], "links": []}'
+            payload = (
+                '{"markers": [], "links": [], '
+                f'"now_reachable_enabled": {str(now_reachable_flag).lower()}}}'
+            )
         sig = str(hash(payload))
         if sig == self._last_map_payload_sig:
             return
@@ -4717,28 +4750,38 @@ function addGridLabels(res, level, bounds, maxLabels) {
     }}
 
     // Legend for link colors
-    const legend = L.control({{position:'bottomright'}});
-    legend.onAdd = function() {{
-      const div = L.DomUtil.create('div', 'legend-box');
-      div.innerHTML = '<b>Link SNR</b><br/>' +
+    let nowReachableEnabled = {now_reachable_enabled};
+    const propOverlayLegendEnabled = {'true' if prop_overlay_enabled else 'false'};
+    function buildLegendHtml(showPeerSchedNow) {{
+      let html = '<b>Link SNR</b><br/>' +
         '<span style="color:#1b5e20;">&#9632;</span> >= 5<br/>' +
         '<span style="color:#2e7d32;">&#9632;</span> 0 to &lt;5<br/>' +
         '<span style="color:#fbc02d;">&#9632;</span> -5 to &lt;0<br/>' +
-        '<span style=\"color:#f57c00;\">&#9632;</span> -10 to &lt;-5<br/>' +
-        '<span style=\"color:#c62828;\">&#9632;</span> &lt; -10' +
+        '<span style="color:\\"#f57c00;\\">&#9632;</span> -10 to &lt;-5<br/>' +
+        '<span style="color:\\"#c62828;\\">&#9632;</span> &lt; -10' +
         '<br/><br/><b>SitRep Status</b><br/>' +
         '<span style="color:#43A047;">&#9679;</span> Functioning<br/>' +
         '<span style="color:#FBC02D;">&#9679;</span> Partially Functioning<br/>' +
         '<span style="color:#D32F2F;">&#9679;</span> Not Functioning<br/>' +
-        '<span style="color:#4FC3F7;">&#9679;</span> Unknown / No Report' +
-        ({now_reachable_enabled} ? ('<br/><br/><b>Peer Sched Now</b><br/>' +
-        'Filtered to peers whose peer schedule matches your active schedule frequency.<br/>' +
-        'Schedule alignment only; not a propagation/connection guarantee.<br/>' +
-        '<span style=\"color:#7E57C2;\">&#9679;</span> QSY &lt;10m<br/>' +
-        'Unknown timing appears as <em>QSY ?</em> in station tooltip.') : '') +
-        ({'true' if prop_overlay_enabled else 'false'} ? ('<br/><br/><b>Best Band Now</b><br/>' +
-        Object.keys(window.propBandColors).map(k => '<span style="color:' + window.propBandColors[k] + ';">&#9632;</span> ' + k).join('<br/>')) : '');
-      return div;
+        '<span style="color:#4FC3F7;">&#9679;</span> Unknown / No Report';
+      if (showPeerSchedNow) {{
+        html += '<br/><br/><b>Peer Sched Now</b><br/>' +
+          'Filtered to peers whose peer schedule matches your active schedule frequency.<br/>' +
+          'Schedule alignment only; not a propagation/connection guarantee.<br/>' +
+          '<span style=\\"color:#7E57C2;\\">&#9679;</span> QSY &lt;10m<br/>' +
+          'Unknown timing appears as <em>QSY ?</em> in station tooltip.';
+      }}
+      if (propOverlayLegendEnabled) {{
+        html += '<br/><br/><b>Best Band Now</b><br/>' +
+          Object.keys(window.propBandColors).map(k => '<span style="color:' + window.propBandColors[k] + ';">&#9632;</span> ' + k).join('<br/>');
+      }}
+      return html;
+    }}
+    const legend = L.control({{position:'bottomright'}});
+    legend.onAdd = function() {{
+      this._div = L.DomUtil.create('div', 'legend-box');
+      this._div.innerHTML = buildLegendHtml(nowReachableEnabled);
+      return this._div;
     }};
     legend.addTo(map);
 
@@ -4835,6 +4878,12 @@ function addGridLabels(res, level, bounds, maxLabels) {
       if (!payload) return;
       if (payload.markers) renderMarkers(payload.markers);
       if (payload.links) renderLinks(payload.links);
+      if (Object.prototype.hasOwnProperty.call(payload, 'now_reachable_enabled')) {{
+        nowReachableEnabled = !!payload.now_reachable_enabled;
+        if (legend && legend._div) {{
+          legend._div.innerHTML = buildLegendHtml(nowReachableEnabled);
+        }}
+      }}
     }};
     window.updateMapData({{markers: markers, links: links}});
     window._mapReady = true;
