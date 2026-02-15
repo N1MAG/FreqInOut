@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.7]
+- Added: Expanded benchmark/perf instrumentation for `controlfreq`, `digi_ncs`, and `js8_ncs` activation flows.
+- Changed: Performance pipeline updates across `Messages`, `Map`, `Operators`, and `ControlFreq` to reduce first-open and warm-switch latency.
+- Changed: ControlFreq activation path now defers heavy refresh phases and keeps status probing off the tab-switch hot path.
+- Changed: Map first-load/reload rendering now avoids duplicate work and reduces payload/bootstrap overhead.
+- Fixed: Map links no longer disappear after layer/theme changes when payload data is unchanged.
+- Fixed: Map grid-layer render regression (`grid_color` unbound local) during map visibility refresh.
+- Fixed: FLDigi check-in history writes now use unified `operator_checkins` schema fields (`first_seen_utc`/`last_seen_utc`) instead of legacy `date_added`.
+- Fixed: JS8 `DIRECTED.TXT`/`ALL.TXT` incremental read offset handling for large production logs (`telling position disabled by next() call`).
+- Fixed: ControlFreq monthly/periodic schedule evaluation now honors day-of-month week semantics (for example first-Sunday nets).
+- Fixed: Operators tab `Clear Filters` affordance now highlights when filters are active.
+- Changed: App/documentation version references updated to 1.1.7.
+
 ## [1.1.6]
 - Added: Shared offline propagation core service used by ControlFreq and Stations Map for consistent modeled/blended scoring paths.
 - Added: Offline empirical propagation blending from local historical outcomes with confidence gating and recency decay.

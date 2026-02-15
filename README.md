@@ -10,22 +10,21 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Map intelligence with link filters, propagation overlay, SitRep-only mode, and schedule-risk/QSY awareness
 - UTC-native HF + Net scheduling with controlled enforcement, busy deferral, and NET override behavior
 - Net control operations for both FLDigi and JS8Call (start/track/save/end workflows)
-- Settings redesign for v1.1.6: `Fast Light Settings`, `VarAC Settings`, `Launch Control`, and `Logging & Diagnostics`
+- Settings redesign for v1.1.7: `Fast Light Settings`, `VarAC Settings`, `Launch Control`, and `Logging & Diagnostics`
 - Launch orchestration with configurable start order, per-app startup toggles, global startup mode, and continue-on-failure handling
 - Messages center for JS8/FLMSG/FLAMP/VarAC plus VarAC BBS workflows (view/archive/delete, aging visibility, auto-archive support)
 - Operator History with CSV import/export, group/role standardization, trust tools, sorting/filtering, and SitRep chip updates
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
-## What’s New in v1.1.6
+## What's New in v1.1.7
 
-- Shared offline propagation core service used by both ControlFreq and Map
-- Offline empirical propagation calibration/blending from local historical outcomes
-- SitRep status expansion (`F!104` + `F!301`) with manual operator override support
-- Map controls panel/drawer refactor with improved control discoverability
-- Settings information architecture overhaul and integrated launch orchestration
-- VarAC BBS handling in Messages and ControlFreq summaries
-- UI consistency pass across sorting/filtering/highlighting and schedule-action affordances
+- Major responsiveness improvements across Messages, Map, Operators, and ControlFreq
+- Staged/deferred refresh pipeline updates to keep tab switching and first-paint paths snappy
+- Map rendering optimizations and improved payload handling during layer/theme reloads
+- Operators and ControlFreq workflow fixes and reliability updates
+- JS8 log ingest/read-path stability fixes for production-sized logs
+- Expanded benchmark instrumentation for controlfreq, digi_ncs, and js8_ncs activation paths
 
 ## Quick Start
 
@@ -149,4 +148,5 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 ## License
 
 GNU General Public License v3 (see `LICENSE.md`).
+
 
