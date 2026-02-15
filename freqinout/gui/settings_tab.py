@@ -3533,7 +3533,8 @@ class SettingsTab(QWidget):
 
     def _load_js8_logs(self):
         """
-        Manually ingest JS8 ALL.TXT and DIRECTED.TXT into the link index used by Stations Map.
+        Manually rebuild JS8 link traffic from DIRECTED.TXT and ALL.TXT.
+        This is intentionally a full reload, not incremental.
         """
         self._refresh_operator_history_views()
         directed_path = self.js8_directed_edit.text().strip()
@@ -3551,8 +3552,28 @@ class SettingsTab(QWidget):
             indexer = JS8LogLinkIndexer(self.settings, db_path)
             indexer._base_callsign = JS8LogLinkIndexer._base_callsign  # ensure suffix handling
             self._maybe_backfill_js8_geo()
-            indexer.update()
-            QMessageBox.information(self, "JS8 Traffic Loaded", "JS8 logs ingested successfully.")
+            # Force a true full reload so swapped/replaced logs are fully re-read.
+            self.settings.set_many(
+                {
+                    "js8_links_directed_offset": 0,
+                    "js8_links_all_offset": 0,
+                    "js8_links_last_load_utc": 0,
+                }
+            )
+            conn = sqlite3.connect(db_path)
+            try:
+                indexer._ensure_table(conn)
+                indexer._clear_table(conn)
+            finally:
+                conn.close()
+            count = int(indexer.update(since_ts=0) or 0)
+            latest_ts = float(indexer._ensure_latest_ts(last_default=0.0) or 0.0)
+            self.settings.set("js8_links_last_load_utc", latest_ts)
+            QMessageBox.information(
+                self,
+                "JS8 Traffic Loaded",
+                f"JS8 logs rebuilt successfully ({count} link rows loaded).",
+            )
             self._refresh_operator_history_views()
         except Exception as e:
             log.error("SettingsTab: JS8 log ingest failed: %s", e)

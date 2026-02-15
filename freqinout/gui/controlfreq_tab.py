@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
+from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.propagation_service import PropagationService
 from freqinout.core.software_status_service import SoftwareStatusService, PROGRAM_PATH_KEYS
 from freqinout.core.settings_manager import SettingsManager
@@ -94,6 +95,14 @@ class ControlFreqTab(QWidget):
         self._prefs_timer = QTimer(self)
         self._prefs_timer.setSingleShot(True)
         self._prefs_timer.timeout.connect(self._persist_ui_state)
+        self._activation_refresh_pending = False
+        self._activation_refresh_interval_sec = 60.0
+        self._secondary_refresh_pending = False
+        self._secondary_refresh_interval_sec = 60.0
+        self._last_secondary_refresh_ts = 0.0
+        self._heavy_refresh_pending = False
+        self._heavy_refresh_interval_sec = 120.0
+        self._last_heavy_refresh_ts = 0.0
         self._build_ui()
         self._restore_ui_state()
         self._apply_theme()
@@ -600,18 +609,21 @@ class ControlFreqTab(QWidget):
         if self._active:
             if self._timer is None:
                 self._timer = QTimer(self)
-                self._timer.timeout.connect(self._refresh_all)
+                self._timer.timeout.connect(self._on_periodic_refresh_tick)
             self._timer.start(60_000)
             if self._freq_timer is None:
                 self._freq_timer = QTimer(self)
-                self._freq_timer.timeout.connect(self._refresh_frequency_control)
+                self._freq_timer.timeout.connect(self._refresh_frequency_control_tick)
             self._freq_timer.start(2000)
             if self._status_timer is None:
                 self._status_timer = QTimer(self)
                 self._status_timer.timeout.connect(self._refresh_status_widgets)
             self._status_timer.start(2000)
-            self._refresh_frequency_control()
-            self._refresh_status_widgets()
+            # Keep tab switch snappy: defer initial refresh work until after
+            # the screen change event has returned to the UI loop.
+            QTimer.singleShot(0, self._refresh_frequency_control_tick)
+            # Slightly delay status probing so first paint is not blocked.
+            QTimer.singleShot(150, self._refresh_status_widgets)
             return
         if self._timer:
             self._timer.stop()
@@ -621,9 +633,71 @@ class ControlFreqTab(QWidget):
             self._status_timer.stop()
 
     def on_tab_activated(self) -> None:
-        self._refresh_all()
-        self._refresh_frequency_control()
-        self._refresh_status_widgets()
+        with perf_span("controlfreq.on_tab_activated", settings=self.settings, min_ms=5.0):
+            now = time.time()
+            stale = (self._last_refresh_ts <= 0.0) or (
+                now - float(self._last_refresh_ts) >= self._activation_refresh_interval_sec
+            )
+            if stale and not self._activation_refresh_pending:
+                self._activation_refresh_pending = True
+                QTimer.singleShot(0, self._run_activation_refresh)
+
+    def _refresh_frequency_control_tick(self) -> None:
+        self._refresh_frequency_control(include_intersections=False)
+
+    def _on_periodic_refresh_tick(self) -> None:
+        # Keep periodic refresh non-blocking; defer heavy sections.
+        self._refresh_all(include_secondary=False, include_heavy=False, include_status=False)
+        self._schedule_deferred_secondary_refresh(force=False)
+
+    def _run_activation_refresh(self) -> None:
+        try:
+            with perf_span("controlfreq.activation_refresh", settings=self.settings, min_ms=10.0):
+                # Status updates run on the dedicated status timer path.
+                self._refresh_all(include_secondary=False, include_heavy=False, include_status=False)
+                self._schedule_deferred_secondary_refresh(force=True)
+        finally:
+            self._activation_refresh_pending = False
+
+    def _schedule_deferred_secondary_refresh(self, force: bool = False) -> None:
+        if self._secondary_refresh_pending:
+            return
+        now = time.time()
+        if not force and (now - float(self._last_secondary_refresh_ts) < self._secondary_refresh_interval_sec):
+            return
+        self._secondary_refresh_pending = True
+        QTimer.singleShot(25, self._run_deferred_secondary_refresh)
+
+    def _run_deferred_secondary_refresh(self) -> None:
+        try:
+            with perf_span("controlfreq.secondary_refresh", settings=self.settings, min_ms=10.0):
+                self._load_group_combo()
+                self._refresh_activity()
+                self._refresh_intersections()
+                self._refresh_schedule_outlook()
+                self._refresh_prop_target_controls()
+                self._last_secondary_refresh_ts = time.time()
+                self._schedule_deferred_heavy_refresh(force=True)
+        finally:
+            self._secondary_refresh_pending = False
+
+    def _schedule_deferred_heavy_refresh(self, force: bool = False) -> None:
+        if self._heavy_refresh_pending:
+            return
+        now = time.time()
+        if not force and (now - float(self._last_heavy_refresh_ts) < self._heavy_refresh_interval_sec):
+            return
+        self._heavy_refresh_pending = True
+        QTimer.singleShot(50, self._run_deferred_heavy_refresh)
+
+    def _run_deferred_heavy_refresh(self) -> None:
+        try:
+            with perf_span("controlfreq.heavy_refresh", settings=self.settings, min_ms=10.0):
+                self._refresh_message_summary()
+                self._refresh_propagation_snapshot()
+                self._last_heavy_refresh_ts = time.time()
+        finally:
+            self._heavy_refresh_pending = False
 
     def on_settings_saved(self) -> None:
         self._apply_theme()
@@ -648,22 +722,34 @@ class ControlFreqTab(QWidget):
         self._schedule_persist_ui_state()
         self._refresh_all()
 
-    def _refresh_all(self) -> None:
-        try:
-            self.settings.reload()
-        except Exception:
-            pass
-        self._refresh_frequency_control()
-        self._load_group_combo()
-        self._refresh_activity()
-        self._refresh_schedule_outlook()
-        self._refresh_message_summary()
-        self._refresh_status_widgets()
-        self._refresh_prop_target_controls()
-        self._refresh_propagation_snapshot()
-        self._last_refresh_ts = time.time()
-        ts = dt.datetime.fromtimestamp(self._last_refresh_ts).strftime("%Y-%m-%d %H:%M:%S")
-        self.updated_label.setText(f"Last updated: {ts}")
+    def _refresh_all(
+        self,
+        include_secondary: bool = True,
+        include_heavy: bool = True,
+        include_status: bool = True,
+    ) -> None:
+        with perf_span("controlfreq.refresh_all", settings=self.settings, min_ms=10.0):
+            try:
+                self.settings.reload()
+            except Exception:
+                pass
+            self._refresh_frequency_control(include_intersections=False)
+            if include_status:
+                self._refresh_status_widgets()
+            if include_secondary:
+                self._load_group_combo()
+                self._refresh_activity()
+                self._refresh_intersections()
+                self._refresh_schedule_outlook()
+                self._refresh_prop_target_controls()
+                self._last_secondary_refresh_ts = time.time()
+            if include_heavy:
+                self._refresh_message_summary()
+                self._refresh_propagation_snapshot()
+                self._last_heavy_refresh_ts = time.time()
+            self._last_refresh_ts = time.time()
+            ts = dt.datetime.fromtimestamp(self._last_refresh_ts).strftime("%Y-%m-%d %H:%M:%S")
+            self.updated_label.setText(f"Last updated: {ts}")
 
     def _refresh_status_widgets(self) -> None:
         self._refresh_running_status()
@@ -1108,7 +1194,7 @@ class ControlFreqTab(QWidget):
             rows_out = [["No activity in selected window", "--", "--", "--"]]
         self._set_table_rows(self.activity_table, rows_out)
 
-    def _refresh_frequency_control(self) -> None:
+    def _refresh_frequency_control(self, include_intersections: bool = True) -> None:
         # Avoid clobbering selection while user is interacting
         try:
             if self.freq_combo.view().isVisible():
@@ -1169,7 +1255,8 @@ class ControlFreqTab(QWidget):
         self._update_resume_button_style(sched_freq, active_freq)
         self._update_active_label_style(sched_freq, active_freq)
         self._refresh_scheduler_strip()
-        self._refresh_intersections()
+        if include_intersections:
+            self._refresh_intersections()
 
     def _refresh_intersections(self) -> None:
         now_ts = time.time()
@@ -1876,19 +1963,26 @@ class ControlFreqTab(QWidget):
         except Exception as e:
             log.debug("ControlFreq: failed to load HF schedule: %s", e)
             return rows_out
-        today_name = start.strftime("%A")
         for r in rows:
             row = dict(r)
             day = (row.get("day") or row.get("day_utc") or row.get("day_name") or "").strip()
-            if day and day not in {today_name, "ALL"} and not include_day:
-                continue
             grp = (row.get("group_name") or row.get("group") or "").strip().upper()
             if group_filter and grp != group_filter:
                 continue
             start_hm = (row.get("start") or row.get("start_utc") or "").strip()
             band = (row.get("band") or "").strip().upper()
             freq_raw = row.get("frequency") or row.get("freq") or ""
-            when_utc = self._resolve_schedule_time_utc(start, end, day or "ALL", start_hm, include_day)
+            recurrence = row.get("recurrence") or "Weekly"
+            month_weeks = row.get("month_weeks") or ""
+            when_utc = self._resolve_schedule_time_utc(
+                start,
+                end,
+                day or "ALL",
+                start_hm,
+                include_day,
+                recurrence,
+                month_weeks,
+            )
             if when_utc is None:
                 continue
             try:
@@ -1997,12 +2091,9 @@ class ControlFreqTab(QWidget):
         except Exception as e:
             log.debug("ControlFreq: failed to load Net schedule: %s", e)
             return rows_out
-        today_name = start.strftime("%A")
         for r in rows:
             row = dict(r)
             day = (row.get("day") or row.get("day_utc") or "").strip()
-            if day and day not in {today_name, "ALL"} and not include_day:
-                continue
             grp = (row.get("group_name") or row.get("group") or "").strip().upper()
             if group_filter and grp != group_filter:
                 continue
@@ -2010,7 +2101,17 @@ class ControlFreqTab(QWidget):
             band = (row.get("band") or "").strip().upper()
             freq_raw = row.get("frequency") or row.get("freq") or ""
             net_name = (row.get("net_name") or "").strip()
-            when_utc = self._resolve_schedule_time_utc(start, end, day or "ALL", start_hm, include_day)
+            recurrence = row.get("recurrence") or "Weekly"
+            month_weeks = row.get("month_weeks") or ""
+            when_utc = self._resolve_schedule_time_utc(
+                start,
+                end,
+                day or "ALL",
+                start_hm,
+                include_day,
+                recurrence,
+                month_weeks,
+            )
             if when_utc is None:
                 continue
             try:
@@ -2043,35 +2144,74 @@ class ControlFreqTab(QWidget):
         day_value: str,
         hhmm: str,
         include_day: bool,
+        recurrence_value: str = "Weekly",
+        month_weeks_value: str = "",
     ) -> Optional[dt.datetime]:
         hm = self._parse_hhmm(hhmm)
         if not hm:
             return None
+        recurrence = self._normalize_recurrence(recurrence_value)
+        month_weeks = self._parse_month_weeks(month_weeks_value)
         day_norm = (day_value or "ALL").strip().upper()
-        if day_norm in {"", "ALL", "DAILY"}:
-            candidate = start_utc.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
-            if candidate < start_utc and include_day:
-                candidate += dt.timedelta(days=1)
-            if start_utc <= candidate <= end_utc:
+        day_span = max(0, (end_utc.date() - start_utc.date()).days)
+        for i in range(day_span + 1):
+            day_dt = start_utc + dt.timedelta(days=i)
+            candidate = day_dt.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+            if candidate < start_utc or candidate > end_utc:
+                continue
+            if self._row_applies_on_date(day_norm, candidate, recurrence, month_weeks):
                 return candidate
-            return None
-        if not include_day:
-            today = start_utc.strftime("%A").upper()
-            if not (today.startswith(day_norm[:3]) or day_norm.startswith(today[:3])):
-                return None
-            candidate = start_utc.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
-            if start_utc <= candidate <= end_utc:
-                return candidate
-            return None
-        for i in range(0, 8):
-            day_dt = (start_utc + dt.timedelta(days=i))
-            day_name = day_dt.strftime("%A").upper()
-            if day_name.startswith(day_norm[:3]) or day_norm.startswith(day_name[:3]):
-                candidate = day_dt.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
-                if start_utc <= candidate <= end_utc:
-                    return candidate
-                return None
+            if not include_day:
+                break
         return None
+
+    def _normalize_recurrence(self, value: object) -> str:
+        recurrence = str(value or "Weekly").strip().upper()
+        if recurrence == "MONTHLY":
+            recurrence = "PERIODIC"
+        if recurrence not in {"WEEKLY", "DAILY", "PERIODIC", "BI-WEEKLY"}:
+            return "WEEKLY"
+        return recurrence
+
+    def _parse_month_weeks(self, txt: object) -> List[int]:
+        weeks: List[int] = []
+        for token in str(txt or "").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                val = int(token)
+            except Exception:
+                continue
+            if 1 <= val <= 5:
+                weeks.append(val)
+        return sorted(set(weeks))
+
+    def _month_week_index(self, date_val: dt.date) -> int:
+        return 1 + ((date_val.day - 1) // 7)
+
+    def _day_matches(self, day_norm: str, candidate_utc: dt.datetime) -> bool:
+        if day_norm in {"", "ALL", "DAILY"}:
+            return True
+        day_name = candidate_utc.strftime("%A").upper()
+        day_key = day_norm[:3]
+        return day_name.startswith(day_key) or day_norm.startswith(day_name[:3])
+
+    def _row_applies_on_date(
+        self,
+        day_norm: str,
+        candidate_utc: dt.datetime,
+        recurrence: str,
+        month_weeks: List[int],
+    ) -> bool:
+        if recurrence == "DAILY":
+            return True
+        if not self._day_matches(day_norm, candidate_utc):
+            return False
+        if recurrence == "PERIODIC":
+            weeks = month_weeks or [1]
+            return self._month_week_index(candidate_utc.date()) in weeks
+        return True
 
     def _get_display_tz(self) -> dt.tzinfo:
         if not self._show_local:

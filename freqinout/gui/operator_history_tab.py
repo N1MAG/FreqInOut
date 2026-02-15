@@ -4,16 +4,18 @@ import csv
 import datetime
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal, QTimer, QRect
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import Qt, Signal, QTimer, QRect, QPoint
+from PySide6.QtGui import QColor, QPainter, QCursor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QLineEdit,
     QPushButton,
     QMenu,
@@ -33,8 +35,9 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
+from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.varac_ingest import ingest_varac
-from freqinout.gui.theme import resolve_theme
+from freqinout.gui.theme import resolve_theme, button_style
 
 ALLOWED_GROUP_ROLES = {"", "HUB", "HUB-ALT", "NCS", "ANCS", "PEER"}
 GROUP_ROLE_OPTIONS = ["", "HUB", "HUB-ALT", "NCS", "ANCS", "PEER"]
@@ -196,15 +199,29 @@ class OperatorHistoryTab(QWidget):
         self._rows: List[Dict] = []
         self._export_group_checks: Dict[str, QCheckBox] = {}
         self.loading_label: QLabel | None = None
+        self._loading_progress: QProgressBar | None = None
         self._nav_refresh_inflight = False
         self._bulk_select_inflight = False
+        self._last_load_ts: float = 0.0
+        try:
+            self._load_min_interval_sec = float(
+                self.settings.get("operator_refresh_min_interval_sec", 60.0) or 60.0
+            )
+        except Exception:
+            self._load_min_interval_sec = 60.0
+        if self._load_min_interval_sec < 10.0:
+            self._load_min_interval_sec = 10.0
+        self._rows_fingerprint: Optional[Tuple] = None
+        self._last_varac_ingest_ts: float = 0.0
+        self._varac_ingest_interval_sec: float = 60.0
+        self._last_backfill_ts: float = 0.0
+        self._backfill_interval_sec: float = 600.0
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.setInterval(300)
         self._update_timer.timeout.connect(self.operator_history_updated.emit)
 
         self._build_ui()
-        QTimer.singleShot(0, self._load_data)
 
     # ------------- UI ------------- #
 
@@ -218,6 +235,11 @@ class OperatorHistoryTab(QWidget):
         self.loading_label.setStyleSheet("color: #888;")
         self.loading_label.setVisible(False)
         header.addWidget(self.loading_label)
+        self._loading_progress = QProgressBar()
+        self._loading_progress.setRange(0, 0)
+        self._loading_progress.setFixedWidth(140)
+        self._loading_progress.setVisible(False)
+        header.addWidget(self._loading_progress)
         header.addStretch()
         layout.addLayout(header)
 
@@ -306,8 +328,11 @@ class OperatorHistoryTab(QWidget):
         self.import_btn.clicked.connect(self._show_import_export_menu)
         self.manage_btn.clicked.connect(self._show_manage_menu)
         self.group_filter.currentTextChanged.connect(self._apply_filter)
+        self.table.itemChanged.connect(self._on_table_item_changed)
+        self.table.cellClicked.connect(self._on_cell_clicked)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self._wire_export_group_menu()
+        self._update_clear_filters_button_style()
 
     def _clear_filters(self) -> None:
         self.search_edit.clear()
@@ -598,10 +623,33 @@ class OperatorHistoryTab(QWidget):
             f"QPushButton:hover {{ border: 1px solid {fg}; }}"
         )
 
-    def _show_sitrep_status_menu(self, callsign: str, anchor: QPushButton) -> None:
+    def _apply_sitrep_item_style(self, item: QTableWidgetItem, status_key: str) -> None:
+        key = (status_key or "").strip().lower()
+        if key == "red":
+            bg = QColor("#D32F2F")
+            fg = QColor("#FFFFFF")
+        elif key == "yellow":
+            bg = QColor("#FBC02D")
+            fg = QColor("#111111")
+        elif key == "green":
+            bg = QColor("#43A047")
+            fg = QColor("#FFFFFF")
+        else:
+            bg = QColor("#4FC3F7")
+            fg = QColor("#111111")
+        item.setBackground(bg)
+        item.setForeground(fg)
+
+    def _show_sitrep_status_menu(self, callsign: str, anchor_or_pos=None) -> None:
         cs = (callsign or "").strip().upper()
         if not cs:
             return
+        if isinstance(anchor_or_pos, QPoint):
+            global_pos = anchor_or_pos
+        elif isinstance(anchor_or_pos, QPushButton):
+            global_pos = anchor_or_pos.mapToGlobal(anchor_or_pos.rect().bottomLeft())
+        else:
+            global_pos = QCursor.pos()
         menu = QMenu(self)
         options = [
             ("Green", "green"),
@@ -613,7 +661,7 @@ class OperatorHistoryTab(QWidget):
         for label, key in options:
             act = menu.addAction(label)
             actions[act] = key
-        chosen = menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        chosen = menu.exec(global_pos)
         if not chosen:
             return
         key = actions.get(chosen, "")
@@ -683,6 +731,7 @@ class OperatorHistoryTab(QWidget):
             QMessageBox.warning(self, "SitRep Update", f"Failed to update SitRep status for {cs}.\n{e}")
             return
 
+        updated_row: Optional[Dict] = None
         for row in self._rows:
             if (row.get("callsign") or "").strip().upper() != cs:
                 continue
@@ -690,9 +739,36 @@ class OperatorHistoryTab(QWidget):
             row["sitrep_status_label"] = label
             row["sitrep_status_source"] = "MANUAL"
             row["sitrep_status_updated"] = now_str
+            updated_row = row
             break
-        self._apply_filter()
+        if self._rows:
+            self._rows_fingerprint = self._build_rows_fingerprint(self._rows)
+        search_term = self.search_edit.text().strip().lower()
+        if search_term:
+            # Active search can match sitrep fields, so preserve full filter behavior.
+            self._apply_filter()
+        else:
+            self._update_visible_sitrep_cell(cs, key, updated_row)
         self._schedule_history_update()
+
+    def _update_visible_sitrep_cell(self, callsign: str, status_key: str, row_data: Optional[Dict]) -> None:
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return
+        for r in range(self.table.rowCount()):
+            call_item = self.table.item(r, self.COL_CALLSIGN)
+            if not call_item:
+                continue
+            if (call_item.text() or "").strip().upper() != cs:
+                continue
+            sitrep_item = self.table.item(r, self.COL_SITREP)
+            if sitrep_item is None:
+                continue
+            sitrep_item.setText(self._sitrep_status_chip(status_key))
+            self._apply_sitrep_item_style(sitrep_item, status_key)
+            if row_data is not None:
+                sitrep_item.setToolTip(self._sitrep_tooltip(row_data))
+            break
 
     def _normalize_groups_list(self, groups: List[str]) -> List[str]:
         seen = set()
@@ -730,122 +806,180 @@ class OperatorHistoryTab(QWidget):
         """
         Load operator_checkins table into self._rows.
         """
-        if show_toast:
-            self._set_loading(True)
-        else:
-            self._set_loading(False)
-        try:
-            ingest_varac(self.settings)
-        except Exception:
-            pass
-        db_path = self._db_path()
-        if not db_path or not db_path.exists():
-            self._rows = []
-            self._render_rows()
+        with perf_span(
+            "operators.load_data",
+            settings=self.settings,
+            meta={"show_toast": bool(show_toast)},
+            min_ms=5.0,
+        ):
+            if show_toast:
+                self._set_loading(True)
+            else:
+                self._set_loading(False)
+            now = time.time()
+            if now - float(self._last_varac_ingest_ts) >= self._varac_ingest_interval_sec:
+                try:
+                    ingest_varac(self.settings)
+                    self._last_varac_ingest_ts = now
+                except Exception:
+                    pass
+            db_path = self._db_path()
+            if not db_path or not db_path.exists():
+                self._rows = []
+                empty_fp: Tuple = ()
+                if self._rows_fingerprint != empty_fp or self.table.rowCount() > 0:
+                    self._rows_fingerprint = empty_fp
+                    self._render_rows()
+                if show_toast:
+                    self._set_loading(False)
+                return
+
+            # One-time backfill: hydrate first_seen_utc from DIRECTED/ALL logs if earlier than stored
+            if now - float(self._last_backfill_ts) >= self._backfill_interval_sec:
+                self._backfill_first_seen_from_logs()
+                self._last_backfill_ts = now
+
+            rows: List[Dict] = []
+            try:
+                conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+                self._ensure_schema(conn)
+                self._ensure_sitrep_status_schema(conn)
+                sitrep_map = self._load_sitrep_status_map(cur)
+                cur.execute(
+                    """
+                    SELECT
+                        IFNULL(callsign,''),
+                        IFNULL(name,''),
+                        IFNULL(state,''),
+                        IFNULL(grid,''),
+                        IFNULL(group1,''),
+                        IFNULL(group2,''),
+                        IFNULL(group3,''),
+                        IFNULL(group_role,''),
+                        IFNULL(first_seen_utc,''),
+                        IFNULL(last_seen_utc,''),
+                        IFNULL(checkin_count,0),
+                        groups_json,
+                        COALESCE(trusted,1)
+                    FROM operator_checkins
+                    ORDER BY callsign COLLATE NOCASE
+                    """
+                )
+                for (
+                    cs,
+                    name,
+                    state,
+                    grid,
+                    g1,
+                    g2,
+                    g3,
+                    role,
+                    first_seen,
+                    last_seen,
+                    count,
+                    gj,
+                    trusted,
+                ) in cur.fetchall():
+                    groups = []
+                    try:
+                        if gj:
+                            maybe = json.loads(gj)
+                            if isinstance(maybe, list):
+                                groups = self._normalize_groups_list([str(x) for x in maybe])
+                    except Exception:
+                        groups = []
+                    if not groups:
+                        groups = self._normalize_groups_list([g1, g2, g3])
+                    rows.append(
+                        {
+                            "callsign": (cs or "").strip().upper(),
+                            "name": (name or "").strip(),
+                            "state": (state or "").strip().upper(),
+                            "grid": (grid or "").strip().upper(),
+                            "group1": (g1 or "").strip(),
+                            "group2": (g2 or "").strip(),
+                            "group3": (g3 or "").strip(),
+                            "groups": groups,
+                            "group_role": self._normalize_group_role(role),
+                            "first_seen_utc": _normalize_date_only(first_seen) or (first_seen or "").strip(),
+                            "last_seen_utc": _normalize_date_only(last_seen) or (last_seen or "").strip(),
+                            "checkin_count": int(count or 0),
+                            "trusted": 1 if int(trusted or 0) else 0,
+                            "sitrep_status_key": sitrep_map.get((cs or "").strip().upper(), {}).get("key", "unknown"),
+                            "sitrep_status_label": sitrep_map.get((cs or "").strip().upper(), {}).get("label", "Unknown"),
+                            "sitrep_status_source": sitrep_map.get((cs or "").strip().upper(), {}).get("source", "UNKNOWN"),
+                            "sitrep_status_updated": sitrep_map.get((cs or "").strip().upper(), {}).get("updated", ""),
+                        }
+                    )
+                conn.close()
+            except Exception as e:
+                log.error("OperatorHistoryTab: failed to load from DB: %s", e)
+                QMessageBox.warning(self, "DB Error", f"Failed to load operator history:\n{e}")
+                rows = []
+
+            # Ensure the operator's own callsign appears at the top if present
+            my_call = (self.settings.get("operator_callsign", "") or "").strip().upper()
+            if my_call:
+                for idx, row in enumerate(rows):
+                    if row.get("callsign") == my_call:
+                        rows.insert(0, rows.pop(idx))
+                        break
+
+            next_fp = self._build_rows_fingerprint(rows)
+            if self._rows_fingerprint is not None and next_fp == self._rows_fingerprint:
+                # Data unchanged: skip expensive table/widget rebuild.
+                self._rows = rows
+                self._last_load_ts = time.time()
+                if show_toast:
+                    self._set_loading(False)
+                return
+
+            self._rows_fingerprint = next_fp
+            self._rows = rows
+            self._apply_filter()
+            self._last_load_ts = time.time()
             if show_toast:
                 self._set_loading(False)
-            return
 
-        # One-time backfill: hydrate first_seen_utc from DIRECTED/ALL logs if earlier than stored
-        self._backfill_first_seen_from_logs()
+    @staticmethod
+    def _build_rows_fingerprint(rows: List[Dict]) -> Tuple:
+        def _norm(value: object) -> str:
+            return str(value or "").strip().upper()
 
-        rows: List[Dict] = []
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            self._ensure_schema(conn)
-            self._ensure_sitrep_status_schema(conn)
-            sitrep_map = self._load_sitrep_status_map(cur)
-            cur.execute(
-                """
-                SELECT
-                    IFNULL(callsign,''),
-                    IFNULL(name,''),
-                    IFNULL(state,''),
-                    IFNULL(grid,''),
-                    IFNULL(group1,''),
-                    IFNULL(group2,''),
-                    IFNULL(group3,''),
-                    IFNULL(group_role,''),
-                    IFNULL(first_seen_utc,''),
-                    IFNULL(last_seen_utc,''),
-                    IFNULL(checkin_count,0),
-                    groups_json,
-                    COALESCE(trusted,1)
-                FROM operator_checkins
-                ORDER BY callsign COLLATE NOCASE
-                """
-            )
-            for (
-                cs,
-                name,
-                state,
-                grid,
-                g1,
-                g2,
-                g3,
-                role,
-                first_seen,
-                last_seen,
-                count,
-                gj,
-                trusted,
-            ) in cur.fetchall():
-                groups = []
-                try:
-                    if gj:
-                        maybe = json.loads(gj)
-                        if isinstance(maybe, list):
-                            groups = self._normalize_groups_list([str(x) for x in maybe])
-                except Exception:
-                    groups = []
-                if not groups:
-                    groups = self._normalize_groups_list([g1, g2, g3])
-                rows.append(
-                    {
-                        "callsign": (cs or "").strip().upper(),
-                        "name": (name or "").strip(),
-                        "state": (state or "").strip().upper(),
-                        "grid": (grid or "").strip().upper(),
-                        "group1": (g1 or "").strip(),
-                        "group2": (g2 or "").strip(),
-                        "group3": (g3 or "").strip(),
-                        "groups": groups,
-                        "group_role": self._normalize_group_role(role),
-                        "first_seen_utc": _normalize_date_only(first_seen) or (first_seen or "").strip(),
-                        "last_seen_utc": _normalize_date_only(last_seen) or (last_seen or "").strip(),
-                        "checkin_count": int(count or 0),
-                        "trusted": 1 if int(trusted or 0) else 0,
-                        "sitrep_status_key": sitrep_map.get((cs or "").strip().upper(), {}).get("key", "unknown"),
-                        "sitrep_status_label": sitrep_map.get((cs or "").strip().upper(), {}).get("label", "Unknown"),
-                        "sitrep_status_source": sitrep_map.get((cs or "").strip().upper(), {}).get("source", "UNKNOWN"),
-                        "sitrep_status_updated": sitrep_map.get((cs or "").strip().upper(), {}).get("updated", ""),
-                    }
+        out: List[Tuple] = []
+        for row in rows:
+            groups = tuple(_norm(g) for g in (row.get("groups") or []) if _norm(g))
+            out.append(
+                (
+                    _norm(row.get("callsign")),
+                    _norm(row.get("name")),
+                    _norm(row.get("state")),
+                    _norm(row.get("grid")),
+                    _norm(row.get("group1")),
+                    _norm(row.get("group2")),
+                    _norm(row.get("group3")),
+                    _norm(row.get("group_role")),
+                    _norm(row.get("first_seen_utc")),
+                    _norm(row.get("last_seen_utc")),
+                    int(row.get("checkin_count") or 0),
+                    int(row.get("trusted") or 0),
+                    _norm(row.get("sitrep_status_key")),
+                    _norm(row.get("sitrep_status_label")),
+                    _norm(row.get("sitrep_status_source")),
+                    _norm(row.get("sitrep_status_updated")),
+                    groups,
                 )
-            conn.close()
-        except Exception as e:
-            log.error("OperatorHistoryTab: failed to load from DB: %s", e)
-            QMessageBox.warning(self, "DB Error", f"Failed to load operator history:\n{e}")
-            rows = []
-
-        # Ensure the operator's own callsign appears at the top if present
-        my_call = (self.settings.get("operator_callsign", "") or "").strip().upper()
-        if my_call:
-            for idx, row in enumerate(rows):
-                if row.get("callsign") == my_call:
-                    rows.insert(0, rows.pop(idx))
-                    break
-
-        self._rows = rows
-        self._apply_filter()
-        if show_toast:
-            self._set_loading(False)
+            )
+        return tuple(out)
 
     def _set_loading(self, active: bool, text: str = "Brewing it fresh...") -> None:
         if not self.loading_label:
             return
         self.loading_label.setText(text)
         self.loading_label.setVisible(bool(active))
+        if self._loading_progress is not None:
+            self._loading_progress.setVisible(bool(active))
 
     def _backfill_first_seen_from_logs(self):
         """
@@ -884,7 +1018,12 @@ class OperatorHistoryTab(QWidget):
             with directed.open("r", encoding="utf-8", errors="ignore") as fh:
                 if directed_offset > 0:
                     fh.seek(directed_offset)
-                for line in fh:
+                last_pos = fh.tell()
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        break
+                    last_pos = fh.tell()
                     if "\t" not in line:
                         continue
                     ts = parse_ts(line)
@@ -904,7 +1043,7 @@ class OperatorHistoryTab(QWidget):
                             if dest:
                                 earliest[dest] = min(earliest.get(dest, ts), ts)
                 try:
-                    self.settings.set("operator_backfill_directed_offset", int(fh.tell()))
+                    self.settings.set("operator_backfill_directed_offset", int(last_pos))
                 except Exception:
                     pass
         except Exception:
@@ -918,7 +1057,12 @@ class OperatorHistoryTab(QWidget):
                 with all_txt.open("r", encoding="utf-8", errors="ignore") as fh:
                     if all_offset > 0:
                         fh.seek(all_offset)
-                    for line in fh:
+                    last_pos = fh.tell()
+                    while True:
+                        line = fh.readline()
+                        if not line:
+                            break
+                        last_pos = fh.tell()
                         if "Transmitting" not in line:
                             continue
                         ts = parse_ts(line)
@@ -940,7 +1084,7 @@ class OperatorHistoryTab(QWidget):
                                 if dest:
                                     earliest[dest] = min(earliest.get(dest, ts), ts)
                     try:
-                        self.settings.set("operator_backfill_all_offset", int(fh.tell()))
+                        self.settings.set("operator_backfill_all_offset", int(last_pos))
                     except Exception:
                         pass
             except Exception:
@@ -979,11 +1123,17 @@ class OperatorHistoryTab(QWidget):
     def _apply_filter(self):
         self._render_rows(self._filtered_rows())
         self._update_bulk_select_controls()
+        self._update_clear_filters_button_style()
 
     def _is_filter_active(self) -> bool:
         term = self.search_edit.text().strip()
         filt = self.group_filter.currentText().strip().lower()
         return bool(term) or (filt and filt != "all")
+
+    def _update_clear_filters_button_style(self) -> None:
+        theme = resolve_theme(self.settings)
+        role = "warning" if self._is_filter_active() else "secondary"
+        self.clear_filters_btn.setStyleSheet(button_style(role, theme))
 
     def _update_bulk_select_controls(self) -> None:
         self._sync_header_checkbox()
@@ -999,8 +1149,8 @@ class OperatorHistoryTab(QWidget):
             return
         selected = 0
         for r in range(total):
-            w = self.table.cellWidget(r, self.COL_SELECT)
-            if isinstance(w, QCheckBox) and w.isChecked():
+            item = self.table.item(r, self.COL_SELECT)
+            if item and item.checkState() == Qt.Checked:
                 selected += 1
         if selected == 0:
             header.set_checkbox_state(Qt.Unchecked, enabled=enabled)
@@ -1024,11 +1174,9 @@ class OperatorHistoryTab(QWidget):
         self._bulk_select_inflight = True
         try:
             for r in range(self.table.rowCount()):
-                w = self.table.cellWidget(r, self.COL_SELECT)
-                if isinstance(w, QCheckBox):
-                    w.blockSignals(True)
-                    w.setChecked(bool(selected))
-                    w.blockSignals(False)
+                item = self.table.item(r, self.COL_SELECT)
+                if item is not None:
+                    item.setCheckState(Qt.Checked if selected else Qt.Unchecked)
         finally:
             self._bulk_select_inflight = False
         self._sync_header_checkbox()
@@ -1128,99 +1276,104 @@ class OperatorHistoryTab(QWidget):
         return filtered
 
     def _render_rows(self, rows: List[Dict] | None = None):
-        if rows is None:
-            rows = self._rows
-        was_sorting = self.table.isSortingEnabled()
-        sort_col = self.table.horizontalHeader().sortIndicatorSection()
-        sort_order = self.table.horizontalHeader().sortIndicatorOrder()
-        if was_sorting:
-            self.table.setSortingEnabled(False)
-        self.table.setRowCount(0)
-        # rebuild group filter options
-        groups = set()
-        for r in rows:
-            row_idx = self.table.rowCount()
-            self.table.insertRow(row_idx)
+        with perf_span(
+            "operators.render_rows",
+            settings=self.settings,
+            meta={"rows": len(rows) if rows is not None else len(self._rows)},
+            min_ms=5.0,
+        ):
+            if rows is None:
+                rows = self._rows
+            was_sorting = self.table.isSortingEnabled()
+            sort_col = self.table.horizontalHeader().sortIndicatorSection()
+            sort_order = self.table.horizontalHeader().sortIndicatorOrder()
+            self.table.setUpdatesEnabled(False)
+            self.table.blockSignals(True)
+            try:
+                if was_sorting:
+                    self.table.setSortingEnabled(False)
+                self.table.setRowCount(len(rows))
+                # rebuild group filter options
+                groups = set()
+                for row_idx, r in enumerate(rows):
 
-            def set_item(col: int, text: str):
-                item = QTableWidgetItem(text)
-                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                self.table.setItem(row_idx, col, item)
+                    def set_item(col: int, text: str):
+                        item = QTableWidgetItem(text)
+                        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                        self.table.setItem(row_idx, col, item)
 
-            sel_chk = QCheckBox()
-            sel_chk.stateChanged.connect(self._on_row_checkbox_changed)
-            self.table.setCellWidget(row_idx, self.COL_SELECT, sel_chk)
-            set_item(self.COL_CALLSIGN, r["callsign"])
-            sitrep_key = (r.get("sitrep_status_key") or "unknown").strip().lower()
-            sitrep_item = QTableWidgetItem(self._sitrep_status_chip(sitrep_key))
-            sitrep_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row_idx, self.COL_SITREP, sitrep_item)
-            sitrep_btn = QPushButton(self._sitrep_status_chip(sitrep_key))
-            sitrep_btn.setToolTip(self._sitrep_tooltip(r))
-            sitrep_btn.setCursor(Qt.PointingHandCursor)
-            sitrep_btn.setFixedWidth(52)
-            self._apply_sitrep_button_style(sitrep_btn, sitrep_key)
-            sitrep_btn.clicked.connect(
-                lambda _checked=False, callsign=r["callsign"], anchor=sitrep_btn: self._show_sitrep_status_menu(callsign, anchor)
-            )
-            self.table.setCellWidget(row_idx, self.COL_SITREP, sitrep_btn)
-            set_item(self.COL_NAME, r["name"])
-            set_item(self.COL_STATE, r["state"])
-            set_item(self.COL_GRID, r.get("grid", ""))
-            groups_all = [g for g in (r.get("groups") or []) if str(g).strip()]
-            groups_first = [g for g in groups_all if g][:3]
-            if not groups_first:
-                groups_first = [g for g in [(r.get("group1") or "").strip(), (r.get("group2") or "").strip(), (r.get("group3") or "").strip()] if g]
-            groups_display = ", ".join(groups_first)
-            set_item(self.COL_GROUPS, groups_display)
-            set_item(self.COL_G1, r.get("group1", ""))
-            set_item(self.COL_G2, r.get("group2", ""))
-            set_item(self.COL_G3, r.get("group3", ""))
-            set_item(self.COL_ROLE, r.get("group_role", ""))
-            first_fmt = _normalize_date_only(r.get("first_seen_utc", "") or "") or ""
-            last_fmt = _normalize_date_only(r.get("last_seen_utc", "") or "") or ""
-            set_item(self.COL_FIRST_SEEN, first_fmt)
-            set_item(self.COL_LAST_SEEN, last_fmt)
-            set_item(self.COL_TRUSTED, "Yes" if r.get("trusted") else "No")
-            set_item(self.COL_COUNT, str(r["checkin_count"]))
-            # Highlight untrusted rows
-            if not r.get("trusted"):
-                for c in range(self.table.columnCount()):
-                    item = self.table.item(row_idx, c)
-                    if item:
-                        item.setForeground(QColor("#D55E00"))
-            gvals = [
-                (r.get("group1", "") or "").strip(),
-                (r.get("group2", "") or "").strip(),
-                (r.get("group3", "") or "").strip(),
-            ]
-            gvals.extend((r.get("groups") or []))
-            if not any(gvals):
-                groups.add("Blank")
-            else:
-                for g in gvals:
-                    if g:
-                        groups.add(g)
-        current = self.group_filter.currentText()
-        self.group_filter.blockSignals(True)
-        self.group_filter.clear()
-        self.group_filter.addItem("All")
-        for g in sorted(groups, key=lambda x: x.lower()):
-            if g not in ("All", "Untrusted", "Blank"):
-                self.group_filter.addItem(g)
-        export_groups = sorted([g for g in groups if g not in ("All", "Untrusted", "Blank")], key=lambda x: x.lower())
-        self._refresh_export_group_options(export_groups)
-        self.group_filter.addItem("Untrusted")
-        self.group_filter.addItem("Blank")
-        # restore selection if still present
-        if current in [self.group_filter.itemText(i) for i in range(self.group_filter.count())]:
-            self.group_filter.setCurrentText(current)
-        self.group_filter.blockSignals(False)
-        if was_sorting:
-            self.table.setSortingEnabled(True)
-            if 0 <= sort_col < self.table.columnCount():
-                self.table.sortItems(sort_col, sort_order)
-        self._sync_header_checkbox()
+                    select_item = QTableWidgetItem("")
+                    select_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                    select_item.setCheckState(Qt.Unchecked)
+                    self.table.setItem(row_idx, self.COL_SELECT, select_item)
+                    set_item(self.COL_CALLSIGN, r["callsign"])
+                    sitrep_key = (r.get("sitrep_status_key") or "unknown").strip().lower()
+                    sitrep_item = QTableWidgetItem(self._sitrep_status_chip(sitrep_key))
+                    sitrep_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    sitrep_item.setTextAlignment(Qt.AlignCenter)
+                    sitrep_item.setToolTip(self._sitrep_tooltip(r))
+                    self._apply_sitrep_item_style(sitrep_item, sitrep_key)
+                    self.table.setItem(row_idx, self.COL_SITREP, sitrep_item)
+                    set_item(self.COL_NAME, r["name"])
+                    set_item(self.COL_STATE, r["state"])
+                    set_item(self.COL_GRID, r.get("grid", ""))
+                    groups_all = [g for g in (r.get("groups") or []) if str(g).strip()]
+                    groups_first = [g for g in groups_all if g][:3]
+                    if not groups_first:
+                        groups_first = [g for g in [(r.get("group1") or "").strip(), (r.get("group2") or "").strip(), (r.get("group3") or "").strip()] if g]
+                    groups_display = ", ".join(groups_first)
+                    set_item(self.COL_GROUPS, groups_display)
+                    set_item(self.COL_G1, r.get("group1", ""))
+                    set_item(self.COL_G2, r.get("group2", ""))
+                    set_item(self.COL_G3, r.get("group3", ""))
+                    set_item(self.COL_ROLE, r.get("group_role", ""))
+                    first_fmt = _normalize_date_only(r.get("first_seen_utc", "") or "") or ""
+                    last_fmt = _normalize_date_only(r.get("last_seen_utc", "") or "") or ""
+                    set_item(self.COL_FIRST_SEEN, first_fmt)
+                    set_item(self.COL_LAST_SEEN, last_fmt)
+                    set_item(self.COL_TRUSTED, "Yes" if r.get("trusted") else "No")
+                    set_item(self.COL_COUNT, str(r["checkin_count"]))
+                    # Highlight untrusted rows
+                    if not r.get("trusted"):
+                        for c in range(self.table.columnCount()):
+                            item = self.table.item(row_idx, c)
+                            if item:
+                                item.setForeground(QColor("#D55E00"))
+                    gvals = [
+                        (r.get("group1", "") or "").strip(),
+                        (r.get("group2", "") or "").strip(),
+                        (r.get("group3", "") or "").strip(),
+                    ]
+                    gvals.extend((r.get("groups") or []))
+                    if not any(gvals):
+                        groups.add("Blank")
+                    else:
+                        for g in gvals:
+                            if g:
+                                groups.add(g)
+                current = self.group_filter.currentText()
+                self.group_filter.blockSignals(True)
+                self.group_filter.clear()
+                self.group_filter.addItem("All")
+                for g in sorted(groups, key=lambda x: x.lower()):
+                    if g not in ("All", "Untrusted", "Blank"):
+                        self.group_filter.addItem(g)
+                export_groups = sorted([g for g in groups if g not in ("All", "Untrusted", "Blank")], key=lambda x: x.lower())
+                self._refresh_export_group_options(export_groups)
+                self.group_filter.addItem("Untrusted")
+                self.group_filter.addItem("Blank")
+                available = {self.group_filter.itemText(i) for i in range(self.group_filter.count())}
+                if current in available:
+                    self.group_filter.setCurrentText(current)
+                self.group_filter.blockSignals(False)
+                if was_sorting:
+                    self.table.setSortingEnabled(True)
+                    if 0 <= sort_col < self.table.columnCount():
+                        self.table.sortItems(sort_col, sort_order)
+            finally:
+                self.table.blockSignals(False)
+                self.table.setUpdatesEnabled(True)
+            self._sync_header_checkbox()
 
     # ------------- Qt events ------------- #
 
@@ -1229,13 +1382,13 @@ class OperatorHistoryTab(QWidget):
         Refresh on show so the operator history is up to date.
         """
         super().showEvent(event)
-        if self._nav_refresh_inflight:
-            return
-        self._set_loading(False)
-        self._load_data(show_toast=False)
+        # Avoid synchronous DB/table rebuild on widget show, because this event
+        # fires during tab switch and blocks navigation latency.
+        self.on_tab_activated()
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        self._update_clear_filters_button_style()
         if self.loading_label:
             bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
             fg = theme.get("accent", theme.get("text", "#222"))
@@ -1263,7 +1416,17 @@ class OperatorHistoryTab(QWidget):
             )
 
     def on_tab_activated(self) -> None:
-        self._nav_refresh_inflight = True
+        with perf_span("operators.on_tab_activated", settings=self.settings, min_ms=5.0):
+            if time.time() - float(self._last_load_ts) < self._load_min_interval_sec:
+                self._set_loading(False)
+                return
+            if self._nav_refresh_inflight:
+                return
+            self._nav_refresh_inflight = True
+            self._set_loading(True)
+            QTimer.singleShot(0, self._run_activation_refresh)
+
+    def _run_activation_refresh(self) -> None:
         try:
             self._load_data(show_toast=True)
         finally:
@@ -1277,8 +1440,8 @@ class OperatorHistoryTab(QWidget):
     def _selected_callsigns(self) -> List[str]:
         calls = []
         for r in range(self.table.rowCount()):
-            w = self.table.cellWidget(r, self.COL_SELECT)
-            if isinstance(w, QCheckBox) and w.isChecked():
+            item_sel = self.table.item(r, self.COL_SELECT)
+            if item_sel and item_sel.checkState() == Qt.Checked:
                 item = self.table.item(r, self.COL_CALLSIGN)
                 if item:
                     calls.append(item.text().strip().upper())
@@ -1294,6 +1457,27 @@ class OperatorHistoryTab(QWidget):
         if self._bulk_select_inflight:
             return
         self._sync_header_checkbox()
+
+    def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() != self.COL_SELECT:
+            return
+        if self._bulk_select_inflight:
+            return
+        self._sync_header_checkbox()
+
+    def _on_cell_clicked(self, row: int, col: int) -> None:
+        if col != self.COL_SITREP:
+            return
+        item = self.table.item(row, self.COL_CALLSIGN)
+        if not item:
+            return
+        callsign = (item.text() or "").strip().upper()
+        if not callsign:
+            return
+        anchor_item = self.table.item(row, self.COL_SITREP)
+        rect = self.table.visualItemRect(anchor_item) if anchor_item is not None else QRect()
+        pos = self.table.viewport().mapToGlobal(rect.bottomLeft())
+        self._show_sitrep_status_menu(callsign, pos)
 
     def _on_cell_double_clicked(self, row: int, col: int) -> None:
         if col != self.COL_GROUPS:

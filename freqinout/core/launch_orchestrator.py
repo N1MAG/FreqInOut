@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 import shlex
 import shutil
@@ -304,8 +305,12 @@ class LaunchOrchestrator(QObject):
             creationflags = 0
             if platform.system() == "Windows":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-            subprocess.Popen(cmd, shell=False, creationflags=creationflags)
-            log.info("LaunchOrchestrator: launched %s via %s", name, cmd_desc)
+            cwd = self._infer_launch_cwd(cmd, cmd_desc)
+            subprocess.Popen(cmd, shell=False, creationflags=creationflags, cwd=cwd)
+            if cwd:
+                log.info("LaunchOrchestrator: launched %s via %s (cwd=%s)", name, cmd_desc, cwd)
+            else:
+                log.info("LaunchOrchestrator: launched %s via %s", name, cmd_desc)
             self._current_name = name
             self._current_cmd = cmd
             self._current_started_monotonic = time.monotonic()
@@ -411,6 +416,28 @@ class LaunchOrchestrator(QObject):
             if not cand_s:
                 continue
             return [cand_s]
+        return None
+
+    def _infer_launch_cwd(self, cmd: List[str], cmd_desc: str) -> Optional[str]:
+        """
+        For configured paths, launch from the app/script directory so relative
+        resources resolve the same as direct desktop launch.
+        """
+        if cmd_desc != "configured path" or not cmd:
+            return None
+        try:
+            first = Path(str(cmd[0])).expanduser()
+            if first.exists() and first.is_file():
+                return str(first.parent)
+            if len(cmd) >= 2:
+                second = Path(str(cmd[1])).expanduser()
+                if second.exists() and second.is_file():
+                    # Covers commands like: python C:\\path\\app.py
+                    first_name = os.path.basename(str(cmd[0])).lower()
+                    if first_name.startswith("python") or second.suffix.lower() == ".py":
+                        return str(second.parent)
+        except Exception:
+            return None
         return None
 
     def _finish_sequence(self, cancelled: bool) -> None:

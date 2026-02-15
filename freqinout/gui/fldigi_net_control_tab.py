@@ -26,6 +26,7 @@ from PySide6.QtGui import QFontMetrics
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
+from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.checkins_db import upsert_checkins
 from freqinout.core.config_paths import get_fldigi_checkin_dir
 from freqinout.utils.timezones import get_timezone
@@ -397,6 +398,17 @@ class FldigiNetControlTab(QWidget):
         """
         self._maybe_reload_operating_groups()
         self._apply_theme()
+
+    def show_loading_toast(self) -> None:
+        # NCS tabs do not use a loading banner/toast.
+        return
+
+    def on_tab_activated(self) -> None:
+        with perf_span("digi_ncs.on_tab_activated", settings=self.settings, min_ms=5.0):
+            self._update_clock_labels()
+            self._update_suspend_state()
+            self._update_next_change_display()
+            self._maybe_reload_operating_groups()
 
     # ---------------- TIMERS & CLOCKS ---------------- #
 
@@ -1881,17 +1893,21 @@ class FldigiNetControlTab(QWidget):
                     cs = (e.get("callsign") or "").strip().upper()
                     if not cs:
                         continue
-                    date_added = (e.get("date_added") or "").strip() or today_str
+                    first_seen = (e.get("first_seen_utc") or "").strip() or today_str
+                    last_seen = (e.get("last_seen_utc") or "").strip() or today_str
                     trusted_in = e.get("trusted")
                     trusted_val = 0 if trusted_in is False or trusted_in == 0 else None
                     cur.execute(
                         """
-                        INSERT INTO operator_checkins (callsign, name, state, date_added, checkin_count, trusted)
-                        VALUES (?, ?, ?, ?, 1, COALESCE(?, 0))
+                        INSERT INTO operator_checkins (
+                            callsign, name, state, first_seen_utc, last_seen_utc, checkin_count, trusted
+                        )
+                        VALUES (?, ?, ?, ?, ?, 1, COALESCE(?, 0))
                         ON CONFLICT(callsign) DO UPDATE SET
                             name=excluded.name,
                             state=excluded.state,
-                            date_added=COALESCE(operator_checkins.date_added, excluded.date_added),
+                            first_seen_utc=COALESCE(operator_checkins.first_seen_utc, excluded.first_seen_utc),
+                            last_seen_utc=COALESCE(excluded.last_seen_utc, operator_checkins.last_seen_utc),
                             checkin_count=operator_checkins.checkin_count + 1,
                             trusted=COALESCE(operator_checkins.trusted, excluded.trusted)
                         """,
@@ -1899,7 +1915,8 @@ class FldigiNetControlTab(QWidget):
                             cs,
                             (e.get("name") or "").strip(),
                             (e.get("state") or "").strip().upper(),
-                            date_added,
+                            first_seen,
+                            last_seen,
                             trusted_val,
                         ),
                     )

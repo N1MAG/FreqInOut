@@ -31,6 +31,7 @@ from pathlib import Path
 from freqinout.core.logger import log
 from freqinout.core.logger import set_log_level
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
@@ -256,11 +257,14 @@ class MainWindow(QMainWindow):
         self._sop_next_due_cache_ts = 0.0
         self._sop_next_due_minutes = None
         self._active_tab_index = None
+        self._lazy_prewarm_labels = ["Messages", "Map", "FreqPlanner"]
+        self._lazy_prewarm_index = 0
 
         # Default selection
         if self.nav_buttons:
             self.nav_buttons[0].setChecked(True)
             self._set_screen(0)
+        QTimer.singleShot(2500, self._start_lazy_prewarm)
 
         # Optional: apply callsign to tab captions if already configured
         self._apply_callsign_to_tab_titles()
@@ -1431,44 +1435,85 @@ class MainWindow(QMainWindow):
         self._lazy_placeholders[label] = w
         return w
 
-    def _create_freq_planner_tab(self) -> QWidget:
-        self.freq_planner_tab = FreqPlannerTab(self)
+    def _start_lazy_prewarm(self) -> None:
+        if self._shutting_down:
+            return
+        self._prewarm_next_lazy_tab()
+
+    def _prewarm_next_lazy_tab(self) -> None:
+        if self._shutting_down:
+            return
+        if self._lazy_prewarm_index >= len(self._lazy_prewarm_labels):
+            return
+        label = self._lazy_prewarm_labels[self._lazy_prewarm_index]
+        self._lazy_prewarm_index += 1
         try:
-            self.settings_tab.settings_saved.connect(self.freq_planner_tab.on_settings_saved)
+            idx = next((i for i, (name, _w) in enumerate(self._screens) if name == label), -1)
+            if idx >= 0:
+                self._ensure_lazy_tab_loaded(label, idx)
         except Exception:
             pass
-        return self.freq_planner_tab
+        QTimer.singleShot(1500, self._prewarm_next_lazy_tab)
+
+    def _create_freq_planner_tab(self) -> QWidget:
+        with perf_span(
+            "main_window.create_freq_planner_tab",
+            settings=self.settings,
+            min_ms=5.0,
+        ):
+            self.freq_planner_tab = FreqPlannerTab(self)
+            try:
+                self.settings_tab.settings_saved.connect(self.freq_planner_tab.on_settings_saved)
+            except Exception:
+                pass
+            return self.freq_planner_tab
 
     def _create_message_viewer_tab(self) -> QWidget:
-        self.message_viewer_tab = MessageViewerTab(self)
-        try:
-            self.settings_tab.settings_saved.connect(self.message_viewer_tab.on_settings_saved)
-        except Exception:
-            pass
-        return self.message_viewer_tab
+        with perf_span(
+            "main_window.create_message_viewer_tab",
+            settings=self.settings,
+            min_ms=5.0,
+        ):
+            self.message_viewer_tab = MessageViewerTab(self)
+            try:
+                self.settings_tab.settings_saved.connect(self.message_viewer_tab.on_settings_saved)
+            except Exception:
+                pass
+            return self.message_viewer_tab
 
     def _create_stations_map_tab(self) -> QWidget:
-        self.stations_map_tab = StationsMapTab(self)
-        return self.stations_map_tab
+        with perf_span(
+            "main_window.create_stations_map_tab",
+            settings=self.settings,
+            min_ms=5.0,
+        ):
+            self.stations_map_tab = StationsMapTab(self)
+            return self.stations_map_tab
 
     def _ensure_lazy_tab_loaded(self, label: str, index: int) -> None:
-        if label not in self._lazy_factories:
-            return
-        existing = self._get_tab_by_label(label)
-        if existing is not None and existing is not self._lazy_placeholders.get(label):
-            return
-        factory = self._lazy_factories[label]
-        new_widget = factory()
-        try:
-            if hasattr(new_widget, "apply_theme"):
-                new_widget.apply_theme()
-        except Exception:
-            pass
-        placeholder = self._lazy_placeholders.get(label)
-        if placeholder is not None:
-            self.stack.removeWidget(placeholder)
-        self.stack.insertWidget(index, new_widget)
-        self._screens[index] = (label, new_widget)
+        with perf_span(
+            "main_window.ensure_lazy_tab_loaded",
+            settings=self.settings,
+            meta={"label": label, "index": index},
+            min_ms=5.0,
+        ):
+            if label not in self._lazy_factories:
+                return
+            existing = self._get_tab_by_label(label)
+            if existing is not None and existing is not self._lazy_placeholders.get(label):
+                return
+            factory = self._lazy_factories[label]
+            new_widget = factory()
+            try:
+                if hasattr(new_widget, "apply_theme"):
+                    new_widget.apply_theme()
+            except Exception:
+                pass
+            placeholder = self._lazy_placeholders.get(label)
+            if placeholder is not None:
+                self.stack.removeWidget(placeholder)
+            self.stack.insertWidget(index, new_widget)
+            self._screens[index] = (label, new_widget)
 
     def _get_tab_by_label(self, label: str) -> QWidget | None:
         for name, widget in self._screens:
@@ -1636,34 +1681,39 @@ class MainWindow(QMainWindow):
         self.logo_label.setPixmap(pix)
 
     def _set_screen(self, index: int) -> None:
-        if 0 <= index < self.stack.count():
-            prev_index = self._active_tab_index
-            if prev_index is not None and 0 <= prev_index < self.stack.count():
+        with perf_span(
+            "main_window.set_screen",
+            settings=self.settings,
+            meta={"index": index},
+            min_ms=5.0,
+        ):
+            if 0 <= index < self.stack.count():
+                prev_index = self._active_tab_index
+                if prev_index is not None and 0 <= prev_index < self.stack.count():
+                    try:
+                        prev_widget = self.stack.widget(prev_index)
+                        if hasattr(prev_widget, "set_tab_active"):
+                            prev_widget.set_tab_active(False)
+                    except Exception:
+                        pass
+
+                label = self._screens[index][0]
+                self._ensure_lazy_tab_loaded(label, index)
+                self.stack.setCurrentIndex(index)
+                self._active_tab_index = index
                 try:
-                    prev_widget = self.stack.widget(prev_index)
-                    if hasattr(prev_widget, "set_tab_active"):
-                        prev_widget.set_tab_active(False)
+                    widget_active = self.stack.widget(index)
+                    if hasattr(widget_active, "set_tab_active"):
+                        widget_active.set_tab_active(True)
                 except Exception:
                     pass
-
-            label = self._screens[index][0]
-            self._ensure_lazy_tab_loaded(label, index)
-            self.stack.setCurrentIndex(index)
-            self._active_tab_index = index
-            try:
-                widget_active = self.stack.widget(index)
-                if hasattr(widget_active, "set_tab_active"):
-                    widget_active.set_tab_active(True)
-            except Exception:
-                pass
-            self._update_map_filters_visibility(index)
-            self._refresh_scheduler_status_panel()
-            try:
-                widget = self.stack.widget(index)
-                if hasattr(widget, "show_loading_toast"):
-                    widget.show_loading_toast()
-                QApplication.processEvents()
-                if hasattr(widget, "on_tab_activated"):
-                    QTimer.singleShot(0, widget.on_tab_activated)
-            except Exception:
-                pass
+                self._update_map_filters_visibility(index)
+                QTimer.singleShot(0, self._refresh_scheduler_status_panel)
+                try:
+                    widget = self.stack.widget(index)
+                    if hasattr(widget, "show_loading_toast"):
+                        widget.show_loading_toast()
+                    if hasattr(widget, "on_tab_activated"):
+                        QTimer.singleShot(0, widget.on_tab_activated)
+                except Exception:
+                    pass

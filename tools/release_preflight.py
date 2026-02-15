@@ -14,6 +14,8 @@ CHANGELOG_FILE = ROOT / "CHANGELOG.md"
 README_FILE = ROOT / "README.md"
 CONTRIBUTING_FILE = ROOT / "CONTRIBUTING.md"
 SECURITY_FILE = ROOT / "SECURITY.md"
+PERF_BASELINE_FILE = ROOT / "docs" / "perf-baseline.md"
+PERF_BENCH_TOOL = ROOT / "tools" / "perf_benchmark.py"
 
 
 def read_text(path: Path) -> str:
@@ -119,6 +121,10 @@ def main() -> int:
 
     if (ROOT / "docs" / "appimage.md").exists():
         warnings.append("docs/appimage.md exists. Remove it if AppImage is no longer supported.")
+    if not PERF_BASELINE_FILE.exists():
+        warnings.append("docs/perf-baseline.md is missing. Add perf baseline workflow documentation.")
+    if not PERF_BENCH_TOOL.exists():
+        warnings.append("tools/perf_benchmark.py is missing. Add perf benchmark helper tool.")
 
     print_report(errors, warnings)
     return 1 if errors else 0

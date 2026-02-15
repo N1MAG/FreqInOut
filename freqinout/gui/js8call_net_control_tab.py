@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
+from freqinout.core.perf_metrics import span as perf_span
 from freqinout.utils.timezones import get_timezone
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.gui.qsy_helper import (
@@ -352,6 +353,17 @@ class JS8CallNetControlTab(QWidget):
         self._maybe_reload_operating_groups()
         self._apply_theme()
         self._refresh_group_completer()
+
+    def show_loading_toast(self) -> None:
+        # NCS tabs do not use a loading banner/toast.
+        return
+
+    def on_tab_activated(self) -> None:
+        with perf_span("js8_ncs.on_tab_activated", settings=self.settings, min_ms=5.0):
+            self._update_clock_labels()
+            self._update_suspend_state()
+            self._maybe_reload_operating_groups()
+            self._refresh_group_completer()
 
     def _load_settings(self):
         data = self.settings.all()
@@ -947,10 +959,15 @@ class JS8CallNetControlTab(QWidget):
                         f.seek(self._last_directed_size)
                     max_lines = 500
                     line_count = 0
-                    for line in f:
-                        line_count += 1
-                        if line_count > max_lines:
+                    last_pos = f.tell()
+                    while True:
+                        if line_count >= max_lines:
                             break
+                        line = f.readline()
+                        if not line:
+                            break
+                        last_pos = f.tell()
+                        line_count += 1
                         line = line.strip()
                         if not line:
                             continue
@@ -1050,7 +1067,7 @@ class JS8CallNetControlTab(QWidget):
                                 offset=offset_line,
                             )
 
-                    self._last_directed_size = f.tell()
+                    self._last_directed_size = int(last_pos)
                     try:
                         self.settings.set("js8_directed_offset", int(self._last_directed_size))
                     except Exception:
@@ -1090,7 +1107,12 @@ class JS8CallNetControlTab(QWidget):
             with all_path.open("r", encoding="utf-8", errors="ignore") as f:
                 if self._last_all_size > 0:
                     f.seek(self._last_all_size)
-                for line in f:
+                last_pos = f.tell()
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
+                    last_pos = f.tell()
                     if "Transmitting" not in line:
                         continue
                     if not self._line_ts_after_start(line):
@@ -1104,7 +1126,7 @@ class JS8CallNetControlTab(QWidget):
                         log.info("JS8CallNetControl: detected outgoing QUERY MSG in ALL.TXT: %s", line.strip())
                     # Track outbound direct transmissions to add untrusted operators
                     self._maybe_register_outgoing_call(line)
-                self._last_all_size = f.tell()
+                self._last_all_size = int(last_pos)
                 try:
                     self.settings.set("js8_all_offset", int(self._last_all_size))
                 except Exception:

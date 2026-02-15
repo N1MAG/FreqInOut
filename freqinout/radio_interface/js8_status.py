@@ -267,6 +267,30 @@ class VarACStatusClient:
                 except Exception:
                     ts_val = None
 
+            if "STARTING VARAC" in upper:
+                # Reset QSO state for a new app session so stale events in the
+                # tail from previous sessions do not pin busy=True.
+                last_connecting = None
+                last_connected = None
+                last_disconnected = None
+                last_incoming = None
+                last_no_luck = None
+                last_broadcast = None
+                last_broadcast_complete = None
+                last_wait_freq = None
+                last_file_wait = None
+                last_transfer = None
+                last_transfer_done = None
+                continue
+
+            if (
+                "CONNECTING VARA MAIN MODEM" in upper
+                or "CONNECTING VARA MONITOR MODEM" in upper
+                or "CONNECTED TO VARA MODEM" in upper
+            ):
+                # Modem transport setup should not be treated as an on-air QSO.
+                continue
+
             if "WAITING FOR FREQUENCY TO CLEAR" in upper:
                 last_wait_freq = ts_val or now_local
                 continue

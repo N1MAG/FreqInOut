@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QTextEdit,
     QFileDialog,
@@ -51,6 +52,7 @@ from reportlab.pdfgen import canvas
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
+from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.theme import resolve_theme, button_style
@@ -144,46 +146,584 @@ class SpotterMessage:
 class _FileScanWorker(QObject):
     finished = Signal(object, bool)
 
-    def __init__(self, watch_dirs: List[Dict], force: bool):
+    def __init__(
+        self,
+        watch_dirs: List[Dict],
+        force: bool,
+        base_records: Optional[Dict[str, List[FileRecord]]] = None,
+        base_dir_mtimes: Optional[Dict[str, float]] = None,
+    ):
         super().__init__()
         self._watch_dirs = list(watch_dirs)
         self._force = force
-
-    def run(self) -> None:
-        records: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
-        for entry in self._watch_dirs:
-            origin = entry.get("origin", "unknown")
-            if origin not in records:
+        self._base_records = base_records or {}
+        self._base_dir_mtimes: Dict[str, float] = {}
+        for k, v in (base_dir_mtimes or {}).items():
+            try:
+                self._base_dir_mtimes[self._norm_path(k)] = float(v)
+            except Exception:
                 continue
-            allowed_exts = ORIGIN_EXTS.get(origin)
-            p = entry.get("path", "")
+        self._roots_by_origin: Dict[str, List[str]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
+        for entry in self._watch_dirs:
+            origin = str(entry.get("origin", "") or "").strip().lower()
+            path = str(entry.get("path", "") or "").strip()
+            if origin in self._roots_by_origin and path:
+                norm = self._norm_path(path)
+                if norm not in self._roots_by_origin[origin]:
+                    self._roots_by_origin[origin].append(norm)
+
+    @staticmethod
+    def _norm_path(path: str | Path) -> str:
+        return os.path.normcase(os.path.normpath(str(path)))
+
+    @staticmethod
+    def _is_under(path_norm: str, root_norm: str) -> bool:
+        if path_norm == root_norm:
+            return True
+        return path_norm.startswith(root_norm + os.sep)
+
+    def _is_under_any(self, path_norm: str, roots: set[str] | List[str]) -> bool:
+        for root_norm in roots:
+            if self._is_under(path_norm, root_norm):
+                return True
+        return False
+
+    def _empty_result(self) -> Dict[str, Dict[str, FileRecord]]:
+        return {"varac": {}, "flmsg": {}, "flamp": {}, "bbs": {}}
+
+    def _full_scan_recursive(
+        self,
+        base: Path,
+        origin: str,
+        allowed_exts: Optional[set[str]],
+        out_map: Dict[str, Dict[str, FileRecord]],
+        dir_mtimes: Dict[str, float],
+    ) -> None:
+        base_norm = self._norm_path(base)
+        try:
+            dir_mtimes[base_norm] = float(base.stat().st_mtime)
+        except OSError:
+            return
+        try:
+            with os.scandir(base) as it:
+                for dent in it:
+                    try:
+                        if dent.is_dir(follow_symlinks=False):
+                            self._full_scan_recursive(Path(dent.path), origin, allowed_exts, out_map, dir_mtimes)
+                            continue
+                        if not dent.is_file(follow_symlinks=False):
+                            continue
+                        suffix = Path(dent.name).suffix.lower()
+                        if suffix not in SUPPORTED_EXT:
+                            continue
+                        if allowed_exts and suffix not in allowed_exts:
+                            continue
+                        st = dent.stat()
+                        rec = FileRecord(path=Path(dent.path), origin=origin, size=st.st_size, mtime=st.st_mtime)
+                        out_map[origin][self._norm_path(rec.path)] = rec
+                    except OSError:
+                        continue
+        except OSError:
+            return
+
+    def _full_scan_bbs(
+        self,
+        base: Path,
+        out_map: Dict[str, Dict[str, FileRecord]],
+        dir_mtimes: Dict[str, float],
+    ) -> None:
+        base_norm = self._norm_path(base)
+        try:
+            dir_mtimes[base_norm] = float(base.stat().st_mtime)
+        except OSError:
+            return
+        try:
+            with os.scandir(base) as it:
+                for dent in it:
+                    try:
+                        if not dent.is_file(follow_symlinks=False):
+                            continue
+                        suffix = Path(dent.name).suffix.lower()
+                        if suffix not in SUPPORTED_EXT:
+                            continue
+                        st = dent.stat()
+                        rec = FileRecord(path=Path(dent.path), origin="bbs", size=st.st_size, mtime=st.st_mtime)
+                        out_map["bbs"][self._norm_path(rec.path)] = rec
+                    except OSError:
+                        continue
+        except OSError:
+            return
+
+    def _scan_changed_recursive(
+        self,
+        base: Path,
+        origin: str,
+        allowed_exts: Optional[set[str]],
+        out_map: Dict[str, Dict[str, FileRecord]],
+        dir_mtimes: Dict[str, float],
+        seen_files: Dict[str, set[str]],
+        changed_dirs: Dict[str, set[str]],
+        reused_dirs: Dict[str, set[str]],
+    ) -> None:
+        base_norm = self._norm_path(base)
+        try:
+            base_st = base.stat()
+            cur_dir_mtime = float(base_st.st_mtime)
+        except OSError:
+            return
+        dir_mtimes[base_norm] = cur_dir_mtime
+        prev_mtime = self._base_dir_mtimes.get(base_norm)
+        if prev_mtime is not None and abs(prev_mtime - cur_dir_mtime) < 1e-6:
+            reused_dirs[origin].add(base_norm)
+            return
+        changed_dirs[origin].add(base_norm)
+        try:
+            with os.scandir(base) as it:
+                for dent in it:
+                    try:
+                        if dent.is_dir(follow_symlinks=False):
+                            self._scan_changed_recursive(
+                                Path(dent.path),
+                                origin,
+                                allowed_exts,
+                                out_map,
+                                dir_mtimes,
+                                seen_files,
+                                changed_dirs,
+                                reused_dirs,
+                            )
+                            continue
+                        if not dent.is_file(follow_symlinks=False):
+                            continue
+                        suffix = Path(dent.name).suffix.lower()
+                        if suffix not in SUPPORTED_EXT:
+                            continue
+                        if allowed_exts and suffix not in allowed_exts:
+                            continue
+                        st = dent.stat()
+                        rec = FileRecord(path=Path(dent.path), origin=origin, size=st.st_size, mtime=st.st_mtime)
+                        key = self._norm_path(rec.path)
+                        out_map[origin][key] = rec
+                        seen_files[origin].add(key)
+                    except OSError:
+                        continue
+        except OSError:
+            return
+
+    def _scan_changed_bbs(
+        self,
+        base: Path,
+        out_map: Dict[str, Dict[str, FileRecord]],
+        dir_mtimes: Dict[str, float],
+        seen_files: Dict[str, set[str]],
+        changed_dirs: Dict[str, set[str]],
+        reused_dirs: Dict[str, set[str]],
+    ) -> None:
+        base_norm = self._norm_path(base)
+        try:
+            base_st = base.stat()
+            cur_dir_mtime = float(base_st.st_mtime)
+        except OSError:
+            return
+        dir_mtimes[base_norm] = cur_dir_mtime
+        prev_mtime = self._base_dir_mtimes.get(base_norm)
+        if prev_mtime is not None and abs(prev_mtime - cur_dir_mtime) < 1e-6:
+            reused_dirs["bbs"].add(base_norm)
+            return
+        changed_dirs["bbs"].add(base_norm)
+        try:
+            with os.scandir(base) as it:
+                for dent in it:
+                    try:
+                        if not dent.is_file(follow_symlinks=False):
+                            continue
+                        suffix = Path(dent.name).suffix.lower()
+                        if suffix not in SUPPORTED_EXT:
+                            continue
+                        st = dent.stat()
+                        rec = FileRecord(path=Path(dent.path), origin="bbs", size=st.st_size, mtime=st.st_mtime)
+                        key = self._norm_path(rec.path)
+                        out_map["bbs"][key] = rec
+                        seen_files["bbs"].add(key)
+                    except OSError:
+                        continue
+        except OSError:
+            return
+
+    def _finalize_maps(self, records_map: Dict[str, Dict[str, FileRecord]]) -> Dict[str, List[FileRecord]]:
+        out: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
+        for origin in out:
+            out[origin] = sorted(records_map.get(origin, {}).values(), key=lambda r: r.mtime, reverse=True)
+        return out
+
+    def _run_full(self) -> tuple[Dict[str, List[FileRecord]], Dict[str, float]]:
+        records_map = self._empty_result()
+        dir_mtimes: Dict[str, float] = {}
+        for entry in self._watch_dirs:
+            origin = str(entry.get("origin", "") or "").strip().lower()
+            if origin not in records_map:
+                continue
+            p = str(entry.get("path", "") or "").strip()
             if not p:
                 continue
             base = Path(p)
             if not base.exists():
                 continue
-            try:
-                candidates = base.iterdir() if origin == "bbs" else base.glob("**/*")
-            except OSError:
+            if origin == "bbs":
+                self._full_scan_bbs(base, records_map, dir_mtimes)
+            else:
+                self._full_scan_recursive(base, origin, ORIGIN_EXTS.get(origin), records_map, dir_mtimes)
+        return self._finalize_maps(records_map), dir_mtimes
+
+    def _run_incremental(self) -> tuple[Dict[str, List[FileRecord]], Dict[str, float]]:
+        records_map = self._empty_result()
+        for origin, rows in (self._base_records or {}).items():
+            origin_norm = str(origin or "").strip().lower()
+            if origin_norm not in records_map:
                 continue
-            for f in candidates:
-                if not f.is_file():
-                    continue
-                if f.suffix.lower() not in SUPPORTED_EXT:
-                    continue
-                if allowed_exts and f.suffix.lower() not in allowed_exts:
-                    continue
-                try:
-                    st = f.stat()
-                except OSError:
-                    continue
-                rec = FileRecord(path=f, origin=origin, size=st.st_size, mtime=st.st_mtime)
-                records[origin].append(rec)
+            for rec in rows or []:
+                key = self._norm_path(rec.path)
+                records_map[origin_norm][key] = FileRecord(
+                    path=Path(rec.path),
+                    origin=origin_norm,
+                    size=int(rec.size or 0),
+                    mtime=float(rec.mtime or 0.0),
+                )
 
-        for origin in records:
-            records[origin].sort(key=lambda r: r.mtime, reverse=True)
+        dir_mtimes: Dict[str, float] = {}
+        seen_files: Dict[str, set[str]] = {"varac": set(), "flmsg": set(), "flamp": set(), "bbs": set()}
+        changed_dirs: Dict[str, set[str]] = {"varac": set(), "flmsg": set(), "flamp": set(), "bbs": set()}
+        reused_dirs: Dict[str, set[str]] = {"varac": set(), "flmsg": set(), "flamp": set(), "bbs": set()}
+        missing_roots: Dict[str, set[str]] = {"varac": set(), "flmsg": set(), "flamp": set(), "bbs": set()}
 
-        self.finished.emit(records, self._force)
+        for entry in self._watch_dirs:
+            origin = str(entry.get("origin", "") or "").strip().lower()
+            if origin not in records_map:
+                continue
+            p = str(entry.get("path", "") or "").strip()
+            if not p:
+                continue
+            base = Path(p)
+            base_norm = self._norm_path(base)
+            if not base.exists():
+                missing_roots[origin].add(base_norm)
+                continue
+            if origin == "bbs":
+                self._scan_changed_bbs(base, records_map, dir_mtimes, seen_files, changed_dirs, reused_dirs)
+            else:
+                self._scan_changed_recursive(
+                    base,
+                    origin,
+                    ORIGIN_EXTS.get(origin),
+                    records_map,
+                    dir_mtimes,
+                    seen_files,
+                    changed_dirs,
+                    reused_dirs,
+                )
+
+        for origin, path_map in records_map.items():
+            roots = set(self._roots_by_origin.get(origin, []))
+            changed = changed_dirs.get(origin, set())
+            reused = reused_dirs.get(origin, set())
+            seen = seen_files.get(origin, set())
+            missing = missing_roots.get(origin, set())
+            if not roots:
+                path_map.clear()
+                continue
+            for key in list(path_map.keys()):
+                if not self._is_under_any(key, roots):
+                    path_map.pop(key, None)
+                    continue
+                if missing and self._is_under_any(key, missing):
+                    path_map.pop(key, None)
+                    continue
+                if changed and self._is_under_any(key, changed):
+                    if key in seen:
+                        continue
+                    if reused and self._is_under_any(key, reused):
+                        continue
+                    path_map.pop(key, None)
+
+        return self._finalize_maps(records_map), dir_mtimes
+
+    def run(self) -> None:
+        have_base = any(bool(v) for v in (self._base_records or {}).values())
+        try:
+            if self._force or not have_base:
+                records, dir_mtimes = self._run_full()
+                self.finished.emit({"records": records, "dir_mtimes": dir_mtimes, "mode": "full"}, self._force)
+                return
+            records, dir_mtimes = self._run_incremental()
+            self.finished.emit({"records": records, "dir_mtimes": dir_mtimes, "mode": "incremental"}, self._force)
+        except Exception:
+            records, dir_mtimes = self._run_full()
+            self.finished.emit({"records": records, "dir_mtimes": dir_mtimes, "mode": "fallback"}, self._force)
+
+
+class _RowsBuildWorker(QObject):
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        *,
+        js8_messages: List[JS8Message],
+        spotter_messages: List[SpotterMessage],
+        varac_messages: List["VarACMessage"],
+        files: Dict[str, List[FileRecord]],
+        read_state_map: Dict[tuple, tuple[str, float, int]],
+        sender_cache_seed: Dict[tuple, str],
+        form_titles: Dict[str, str],
+        show_local_time: bool,
+        tz_name: str,
+        force: bool,
+        generation: int,
+    ):
+        super().__init__()
+        self._js8_messages = list(js8_messages)
+        self._spotter_messages = list(spotter_messages)
+        self._varac_messages = list(varac_messages)
+        self._files = {
+            "varac": list(files.get("varac", [])),
+            "flmsg": list(files.get("flmsg", [])),
+            "flamp": list(files.get("flamp", [])),
+            "bbs": list(files.get("bbs", [])),
+        }
+        self._read_state_map = dict(read_state_map)
+        self._sender_cache_seed = dict(sender_cache_seed)
+        self._sender_cache_updates: Dict[tuple, str] = {}
+        self._form_titles = {str(k): str(v or "") for k, v in (form_titles or {}).items()}
+        self._show_local_time = bool(show_local_time)
+        self._tz_name = str(tz_name or "UTC")
+        self._force = bool(force)
+        self._generation = int(generation)
+
+    @staticmethod
+    def _compose_search_text(
+        msg_type: str,
+        status: str,
+        from_call: str,
+        to_call: str,
+        rcv_display: str,
+        title: str,
+    ) -> str:
+        return " ".join(
+            [
+                str(msg_type or ""),
+                str(status or ""),
+                str(from_call or ""),
+                str(to_call or ""),
+                str(rcv_display or ""),
+                str(title or ""),
+            ]
+        ).lower()
+
+    def _format_rcv_display(self, rcv_ts: float, utc_str: Optional[str]) -> str:
+        if self._show_local_time:
+            try:
+                if rcv_ts:
+                    dt = datetime.datetime.fromtimestamp(float(rcv_ts), tz=datetime.timezone.utc)
+                elif utc_str:
+                    dt = datetime.datetime.strptime(str(utc_str), "%Y-%m-%d %H:%M:%S").replace(
+                        tzinfo=datetime.timezone.utc
+                    )
+                else:
+                    return ""
+                tz = get_timezone(self._tz_name)
+                return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return str(utc_str or "")
+        if utc_str:
+            return str(utc_str)
+        if rcv_ts:
+            try:
+                return datetime.datetime.fromtimestamp(float(rcv_ts), tz=datetime.timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            except Exception:
+                return ""
+        return ""
+
+    @staticmethod
+    def _read_file_head(path: Path, limit: int = 4096) -> str:
+        try:
+            with path.open("rb") as fh:
+                raw = fh.read(limit)
+            return raw.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def _extract_sender_from_file(self, rec: FileRecord) -> str:
+        cache_key = (str(rec.path), float(rec.mtime or 0.0), int(rec.size or 0))
+        if cache_key in self._sender_cache_updates:
+            return self._sender_cache_updates.get(cache_key, "")
+        if cache_key in self._sender_cache_seed:
+            return self._sender_cache_seed.get(cache_key, "")
+        text = self._read_file_head(rec.path)
+        sender = ""
+        if text:
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            for marker in (":hdr_fm:", ":hdr_ed:"):
+                for idx, line in enumerate(lines):
+                    if line.lower().startswith(marker):
+                        for nxt in lines[idx + 1 :]:
+                            match = re.search(r"\b[A-Z]{1,2}\d[A-Z0-9]{1,4}\b", nxt.upper())
+                            if match:
+                                sender = match.group(0)
+                                break
+                        break
+                if sender:
+                    break
+            if not sender:
+                tokens = re.split(r"[-_\\s]+", rec.path.stem)
+                for tok in tokens:
+                    up = tok.strip().upper()
+                    if re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9]{1,4}", up):
+                        sender = up
+                        break
+        self._sender_cache_updates[cache_key] = sender
+        return sender
+
+    def _file_status(self, rec: FileRecord) -> str:
+        key = (rec.origin, str(rec.path), float(rec.mtime), int(rec.size))
+        state = self._read_state_map.get(key)
+        if state and state[0]:
+            return str(state[0]).upper()
+        return "NEW"
+
+    def run(self) -> None:
+        start = time.perf_counter()
+        rows: List[UnifiedMessage] = []
+
+        for msg in self._js8_messages:
+            msg_type = msg.msg_type if msg.msg_type.startswith("F!") else "JS8 MSG"
+            status = "READ" if msg.state.upper() == "READ" else "NEW"
+            rcv_ts = float(msg.utc_ts or 0.0)
+            rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
+            title = ""
+            if msg.msg_type.startswith("F!"):
+                form_id = msg.msg_type[2:].strip()
+                title = self._form_titles.get(form_id, "")
+            if not title:
+                title = (msg.decoded_text or msg.raw_text or "").strip()
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+            from_call = (msg.from_call or "").strip().upper()
+            to_call = (msg.to_call or "").strip().upper()
+            rows.append(
+                UnifiedMessage(
+                    msg_type=msg_type,
+                    status=status,
+                    from_call=from_call,
+                    to_call=to_call,
+                    rcv_ts=rcv_ts,
+                    rcv_display=rcv_display,
+                    title=title,
+                    origin="js8",
+                    payload=msg,
+                    search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                )
+            )
+
+        for msg in self._spotter_messages:
+            msg_type = msg.msg_type or "F!"
+            status = "READ" if msg.state.upper() == "READ" else "NEW"
+            rcv_ts = float(msg.utc_ts or 0.0)
+            rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
+            title = ""
+            if msg_type.startswith("F!"):
+                form_id = msg_type[2:].strip()
+                title = self._form_titles.get(form_id, "")
+            if not title:
+                title = (msg.decoded_text or msg.raw_text or "").strip()
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+            from_call = (msg.from_call or "").strip().upper()
+            to_call = (msg.to_call or "").strip().upper()
+            rows.append(
+                UnifiedMessage(
+                    msg_type=msg_type,
+                    status=status,
+                    from_call=from_call,
+                    to_call=to_call,
+                    rcv_ts=rcv_ts,
+                    rcv_display=rcv_display,
+                    title=title,
+                    origin="spotter",
+                    payload=msg,
+                    search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                )
+            )
+
+        for msg in self._varac_messages:
+            msg_type = "VarAC"
+            status = "NEW" if (msg.read_status == 0 and msg.msg_type.upper() != "QSO") else "READ"
+            rcv_ts = float(msg.ts or 0.0)
+            rcv_display = self._format_rcv_display(rcv_ts, None)
+            if (msg.msg_type or "").upper() == "VMAIL":
+                title_base = (msg.subject or "").strip()
+            else:
+                title_base = (msg.subject or msg.body or "").strip()
+            title = f"{msg.msg_type}: {title_base}" if title_base else (msg.msg_type or "VarAC")
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+            from_call = (msg.from_call or "").strip().upper()
+            to_call = (msg.to_call or "").strip().upper()
+            rows.append(
+                UnifiedMessage(
+                    msg_type=msg_type,
+                    status=status,
+                    from_call=from_call,
+                    to_call=to_call,
+                    rcv_ts=rcv_ts,
+                    rcv_display=rcv_display,
+                    title=title,
+                    origin="varac",
+                    payload=msg,
+                    search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                )
+            )
+
+        for origin, recs in self._files.items():
+            for rec in recs:
+                status = self._file_status(rec)
+                is_image = rec.path.suffix.lower() in IMAGE_EXTS
+                from_call = "" if is_image else self._extract_sender_from_file(rec)
+                title = "Image Received" if is_image else rec.path.name
+                rcv_ts = float(rec.mtime or 0.0)
+                rcv_display = self._format_rcv_display(rcv_ts, None)
+                msg_type = origin.upper() if origin != "varac" else "VarAC"
+                if origin == "flmsg":
+                    msg_type = "FLMSG"
+                elif origin == "bbs":
+                    msg_type = "BBS"
+                rows.append(
+                    UnifiedMessage(
+                        msg_type=msg_type,
+                        status=status,
+                        from_call=from_call,
+                        to_call="",
+                        rcv_ts=rcv_ts,
+                        rcv_display=rcv_display,
+                        title=title,
+                        origin=origin,
+                        payload=rec,
+                        search_text=self._compose_search_text(msg_type, status, from_call, "", rcv_display, title),
+                    )
+                )
+
+        rows.sort(key=lambda r: r.rcv_ts, reverse=True)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        self.finished.emit(
+            {
+                "rows": rows,
+                "elapsed_ms": elapsed_ms,
+                "sender_cache_updates": dict(self._sender_cache_updates),
+                "generation": self._generation,
+                "force": self._force,
+            }
+        )
+
 
 @dataclass
 class VarACMessage:
@@ -216,6 +756,7 @@ class UnifiedMessage:
     title: str
     origin: str
     payload: object
+    search_text: str = ""
 
 
 class MessageTableModel(QAbstractTableModel):
@@ -223,6 +764,7 @@ class MessageTableModel(QAbstractTableModel):
         super().__init__()
         self._rows = rows
         self._selected_keys: set[tuple] = set()
+        self._row_index_by_key: Dict[tuple, int] = {}
         self._select_column_index = 0
         self._headers = ["", "MSG Type", "Status", "From", "To", "RCV_DT (UTC)", "Message Title", ""]
 
@@ -307,11 +849,45 @@ class MessageTableModel(QAbstractTableModel):
         return True
 
     def set_rows(self, rows: List[UnifiedMessage]) -> None:
+        if len(rows) == len(self._rows):
+            unchanged = True
+            for old, new in zip(self._rows, rows):
+                if old is not new:
+                    unchanged = False
+                    break
+            if unchanged:
+                return
         self.beginResetModel()
         self._rows = rows
+        row_index_by_key: Dict[tuple, int] = {}
+        for i, row in enumerate(rows):
+            key = self._row_key(row)
+            if key is not None and key not in row_index_by_key:
+                row_index_by_key[key] = i
+        self._row_index_by_key = row_index_by_key
         keep = {self._row_key(r) for r in rows if self._row_key(r) is not None}
         self._selected_keys = {k for k in self._selected_keys if k in keep}
         self.endResetModel()
+
+    def index_for_row(self, row: UnifiedMessage) -> int:
+        key = self._row_key(row)
+        if key is not None:
+            idx = self._row_index_by_key.get(key)
+            if idx is not None:
+                return int(idx)
+        for i, cur in enumerate(self._rows):
+            if cur is row:
+                return i
+        return -1
+
+    def mark_row_read(self, row: UnifiedMessage) -> bool:
+        idx_row = self.index_for_row(row)
+        if idx_row < 0:
+            return False
+        row.status = "READ"
+        idx = self.index(idx_row, 2)
+        self.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.ForegroundRole])
+        return True
 
     def rows(self) -> List[UnifiedMessage]:
         return list(self._rows)
@@ -680,9 +1256,34 @@ class MessageViewerTab(QWidget):
         self._file_scan_thread: QThread | None = None
         self._file_scan_worker: _FileScanWorker | None = None
         self._file_scan_start_ts: float = 0.0
+        self._rows_build_thread: QThread | None = None
+        self._rows_build_worker: _RowsBuildWorker | None = None
+        self._rows_build_generation: int = 0
+        self._rows_build_pending: bool = False
+        self._rows_build_pending_force: bool = False
         self._open_external_path: Path | None = None
         self._loading_timer: QTimer | None = None
         self._loading_text: str = "Getting messages..."
+        self._loading_progress: QProgressBar | None = None
+        self._persist_timer: QTimer | None = None
+        self._pending_persist_ops: List[Tuple[str, Tuple]] = []
+        self._activation_refresh_pending: bool = False
+        self._activation_refresh_interval_sec: float = 60.0
+        self._last_activation_refresh_ts: float = 0.0
+        self._varac_ingest_interval_sec: float = 20.0
+        self._last_varac_ingest_ts: float = 0.0
+        self._js8_ingest_interval_sec: float = 20.0
+        self._last_js8_ingest_ts: float = 0.0
+        self._file_refresh_interval_sec: float = 60.0
+        self._last_file_refresh_ts: float = 0.0
+        self._sender_cache: Dict[tuple, str] = {}
+        self._file_view_cache: Dict[tuple, tuple[bool, str, str, Optional[Path], str]] = {}
+        self._cache_max_sender_entries: int = 2500
+        self._cache_max_view_entries: int = 500
+        self._scan_cache_loaded: bool = False
+        self._scan_cache_saved_ts: float = 0.0
+        self._scan_dir_mtime_cache: Dict[str, float] = {}
+        self._files_snapshot_fp: Optional[Tuple[Tuple[str, int, int], ...]] = None
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -690,10 +1291,19 @@ class MessageViewerTab(QWidget):
         self._ensure_read_state_table()
         self._ensure_spotter_table()
         self._ensure_fldigi_sender_table()
+        self._ensure_file_scan_cache_table()
         self._read_state_map = self._load_read_state_map()
 
         self.files: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
         self.current_record: FileRecord | None = None
+        self._scan_cache_loaded = self._load_file_scan_cache()
+        if self._scan_cache_loaded:
+            try:
+                self._update_fldigi_senders(self.files)
+            except Exception:
+                pass
+            self._files_snapshot_fp = self._files_records_fingerprint(self.files)
+            self._last_file_refresh_ts = time.time()
 
         self._timer: QTimer | None = None
         self.paths_labels: Dict[str, QLabel] = {}
@@ -872,6 +1482,302 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to ensure fldigi sender table: %s", e)
 
+    def _ensure_file_scan_cache_table(self) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_scan_cache (
+                    origin TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    mtime REAL NOT NULL,
+                    size INTEGER NOT NULL,
+                    PRIMARY KEY (origin, path)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_scan_cache_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_scan_cache_dirs (
+                    dir_path TEXT PRIMARY KEY,
+                    mtime REAL NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_message_scan_cache_origin_mtime ON message_scan_cache(origin, mtime DESC)"
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to ensure file scan cache table: %s", e)
+
+    def _watch_dirs_signature(self, watch_dirs: List[Dict]) -> str:
+        parts: List[tuple[str, str]] = []
+        for entry in watch_dirs:
+            origin = str(entry.get("origin", "") or "").strip().lower()
+            path = str(entry.get("path", "") or "").strip()
+            if origin and path:
+                parts.append((origin, path))
+        parts.sort()
+        return json.dumps(parts, ensure_ascii=True, separators=(",", ":"))
+
+    def _load_file_scan_cache(self) -> bool:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return False
+        self._ensure_file_scan_cache_table()
+        sig = self._watch_dirs_signature(self._effective_watch_dirs())
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT value FROM message_scan_cache_meta WHERE key='watch_dirs_sig'")
+            row = cur.fetchone()
+            stored_sig = str(row[0] or "") if row else ""
+            if not stored_sig or stored_sig != sig:
+                conn.close()
+                return False
+            cur.execute("SELECT value FROM message_scan_cache_meta WHERE key='saved_ts'")
+            row = cur.fetchone()
+            try:
+                self._scan_cache_saved_ts = float(row[0]) if row and row[0] is not None else 0.0
+            except Exception:
+                self._scan_cache_saved_ts = 0.0
+            cur.execute("SELECT origin, path, mtime, size FROM message_scan_cache")
+            rows = cur.fetchall()
+            cur.execute("SELECT dir_path, mtime FROM message_scan_cache_dirs")
+            dir_rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to load file scan cache: %s", e)
+            return False
+
+        loaded_dir_mtimes: Dict[str, float] = {}
+        for dir_path, mtime in dir_rows:
+            try:
+                norm = os.path.normcase(os.path.normpath(str(dir_path or "")))
+                if not norm:
+                    continue
+                loaded_dir_mtimes[norm] = float(mtime or 0.0)
+            except Exception:
+                continue
+
+        out: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
+        for origin, path, mtime, size in rows:
+            origin_norm = str(origin or "").strip().lower()
+            if origin_norm not in out:
+                continue
+            rec_path = Path(str(path or ""))
+            suffix = rec_path.suffix.lower()
+            if suffix not in SUPPORTED_EXT:
+                continue
+            allowed = ORIGIN_EXTS.get(origin_norm)
+            if allowed and suffix not in allowed:
+                continue
+            out[origin_norm].append(
+                FileRecord(
+                    path=rec_path,
+                    origin=origin_norm,
+                    size=int(size or 0),
+                    mtime=float(mtime or 0.0),
+                )
+            )
+        total = 0
+        for origin in out:
+            out[origin].sort(key=lambda r: r.mtime, reverse=True)
+            total += len(out[origin])
+        if total <= 0:
+            self._scan_dir_mtime_cache = {}
+            return False
+        self.files = out
+        self._files_snapshot_fp = self._files_records_fingerprint(out)
+        self._scan_dir_mtime_cache = loaded_dir_mtimes
+        if self._scan_cache_saved_ts > 0:
+            self._last_file_refresh_ts = float(self._scan_cache_saved_ts)
+        log.debug("MessageViewer: loaded file scan cache (%s records)", total)
+        return True
+
+    def _save_file_scan_cache(
+        self,
+        records: Dict[str, List[FileRecord]],
+        *,
+        dir_mtimes: Optional[Dict[str, float]] = None,
+    ) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        self._ensure_file_scan_cache_table()
+        sig = self._watch_dirs_signature(self._effective_watch_dirs())
+        saved_ts = time.time()
+        payload: List[tuple[str, str, float, int]] = []
+        dir_payload: List[tuple[str, float]] = []
+        for origin, recs in records.items():
+            origin_norm = str(origin or "").strip().lower()
+            if origin_norm not in ORIGIN_EXTS:
+                continue
+            for rec in recs:
+                payload.append(
+                    (
+                        origin_norm,
+                        str(rec.path),
+                        float(rec.mtime or 0.0),
+                        int(rec.size or 0),
+                    )
+                )
+        for dir_path, mtime in (dir_mtimes or {}).items():
+            try:
+                norm = os.path.normcase(os.path.normpath(str(dir_path or "")))
+                if not norm:
+                    continue
+                dir_payload.append((norm, float(mtime or 0.0)))
+            except Exception:
+                continue
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM message_scan_cache")
+            cur.execute("DELETE FROM message_scan_cache_dirs")
+            if payload:
+                cur.executemany(
+                    "INSERT OR REPLACE INTO message_scan_cache(origin, path, mtime, size) VALUES (?, ?, ?, ?)",
+                    payload,
+                )
+            if dir_payload:
+                cur.executemany(
+                    "INSERT OR REPLACE INTO message_scan_cache_dirs(dir_path, mtime) VALUES (?, ?)",
+                    dir_payload,
+                )
+            cur.execute(
+                "INSERT OR REPLACE INTO message_scan_cache_meta(key, value) VALUES (?, ?)",
+                ("watch_dirs_sig", sig),
+            )
+            cur.execute(
+                "INSERT OR REPLACE INTO message_scan_cache_meta(key, value) VALUES (?, ?)",
+                ("saved_ts", str(saved_ts)),
+            )
+            conn.commit()
+            conn.close()
+            self._scan_cache_saved_ts = saved_ts
+            self._scan_dir_mtime_cache = {
+                os.path.normcase(os.path.normpath(str(k))): float(v or 0.0)
+                for k, v in (dir_mtimes or {}).items()
+                if str(k or "").strip()
+            }
+        except Exception as e:
+            log.debug("MessageViewer: failed to save file scan cache: %s", e)
+
+    def _save_file_scan_cache_meta_only(
+        self,
+        *,
+        dir_mtimes: Optional[Dict[str, float]] = None,
+    ) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        self._ensure_file_scan_cache_table()
+        sig = self._watch_dirs_signature(self._effective_watch_dirs())
+        saved_ts = time.time()
+        dir_payload: List[tuple[str, float]] = []
+        for dir_path, mtime in (dir_mtimes or {}).items():
+            try:
+                norm = os.path.normcase(os.path.normpath(str(dir_path or "")))
+                if not norm:
+                    continue
+                dir_payload.append((norm, float(mtime or 0.0)))
+            except Exception:
+                continue
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM message_scan_cache_dirs")
+            if dir_payload:
+                cur.executemany(
+                    "INSERT OR REPLACE INTO message_scan_cache_dirs(dir_path, mtime) VALUES (?, ?)",
+                    dir_payload,
+                )
+            cur.execute(
+                "INSERT OR REPLACE INTO message_scan_cache_meta(key, value) VALUES (?, ?)",
+                ("watch_dirs_sig", sig),
+            )
+            cur.execute(
+                "INSERT OR REPLACE INTO message_scan_cache_meta(key, value) VALUES (?, ?)",
+                ("saved_ts", str(saved_ts)),
+            )
+            conn.commit()
+            conn.close()
+            self._scan_cache_saved_ts = saved_ts
+            self._scan_dir_mtime_cache = {
+                os.path.normcase(os.path.normpath(str(k))): float(v or 0.0)
+                for k, v in (dir_mtimes or {}).items()
+                if str(k or "").strip()
+            }
+        except Exception as e:
+            log.debug("MessageViewer: failed to save file scan cache meta-only: %s", e)
+
+    @staticmethod
+    def _files_records_fingerprint(
+        records: Dict[str, List[FileRecord]],
+    ) -> Tuple[Tuple[str, int, int], ...]:
+        out: List[Tuple[str, int, int]] = []
+        for origin in ("varac", "flmsg", "flamp", "bbs"):
+            recs = records.get(origin, [])
+            digest = 1469598103934665603
+            for rec in recs:
+                item = (
+                    str(rec.path),
+                    int(rec.size or 0),
+                    int(float(rec.mtime or 0.0) * 1000.0),
+                )
+                digest ^= hash(item)
+                digest = (digest * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+            out.append((origin, int(len(recs)), int(digest)))
+        return tuple(out)
+
+    def _can_skip_file_scan_quick(self, watch_dirs: List[Dict], force: bool) -> bool:
+        if force:
+            return False
+        if not self._scan_cache_loaded:
+            return False
+        if not self._scan_dir_mtime_cache:
+            return False
+        roots: set[str] = set()
+        for entry in watch_dirs:
+            path = str(entry.get("path", "") or "").strip()
+            if not path:
+                continue
+            roots.add(os.path.normcase(os.path.normpath(path)))
+        if not roots:
+            return False
+        cached = self._scan_dir_mtime_cache
+        for root in roots:
+            if root not in cached:
+                return False
+        for dir_path, prev_mtime in cached.items():
+            norm = os.path.normcase(os.path.normpath(str(dir_path or "")))
+            if not norm:
+                return False
+            if not any(norm == root or norm.startswith(root + os.sep) for root in roots):
+                return False
+            try:
+                cur_mtime = float(Path(norm).stat().st_mtime)
+            except OSError:
+                return False
+            if abs(cur_mtime - float(prev_mtime or 0.0)) > 1e-6:
+                return False
+        return True
+
     @staticmethod
     def _read_state_key(origin: str, rec: FileRecord) -> tuple:
         return (origin, str(rec.path), float(rec.mtime), int(rec.size))
@@ -918,33 +1824,28 @@ class MessageViewerTab(QWidget):
             return int(state[2] or 0)
         return 0
 
-    def _set_read_state(self, rec: FileRecord, status: str) -> None:
-        db_path = self._db_path()
-        if not db_path:
-            return
+    def _set_read_state(self, rec: FileRecord, status: str, row_ref: Optional[UnifiedMessage] = None) -> None:
         status = (status or "READ").upper()
         key = self._read_state_key(rec.origin, rec)
         read_ts = time.time() if status == "READ" else 0.0
         flag_state = self._get_flag_state(rec)
         self._read_state_map[key] = (status, read_ts, flag_state)
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
-                """
-                INSERT OR REPLACE INTO message_read_state
-                    (origin, path, mtime, size, status, read_ts, flag_state)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (rec.origin, str(rec.path), float(rec.mtime), int(rec.size), status, float(read_ts), int(flag_state)),
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            log.debug("MessageViewer: failed to persist read state: %s", e)
+        self._queue_persist_op(
+            "file_read_state",
+            (
+                rec.origin,
+                str(rec.path),
+                float(rec.mtime),
+                int(rec.size),
+                status,
+                float(read_ts),
+                int(flag_state),
+            ),
+        )
         self._refresh_table_after_read(
             lambda row: isinstance(row.payload, FileRecord)
-            and self._read_state_key(row.payload.origin, row.payload) == key
+            and self._read_state_key(row.payload.origin, row.payload) == key,
+            row_ref=row_ref,
         )
 
     def _clear_backlog_on_upgrade(self) -> None:
@@ -978,6 +1879,11 @@ class MessageViewerTab(QWidget):
         self.loading_label.setStyleSheet("color: #888;")
         self.loading_label.setVisible(False)
         header.addWidget(self.loading_label)
+        self._loading_progress = QProgressBar()
+        self._loading_progress.setRange(0, 0)
+        self._loading_progress.setFixedWidth(140)
+        self._loading_progress.setVisible(False)
+        header.addWidget(self._loading_progress)
         header.addStretch()
 
         header.addWidget(QLabel("Scan every:"))
@@ -1035,7 +1941,7 @@ class MessageViewerTab(QWidget):
         self.pending_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.pending_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.pending_table.setAlternatingRowColors(True)
-        self.pending_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        self.pending_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
         header = self.pending_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -1060,18 +1966,23 @@ class MessageViewerTab(QWidget):
         self.messages_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.messages_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.messages_table.setAlternatingRowColors(True)
-        self.messages_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        self.messages_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
         msg_header = MessageHeaderWithCheckbox(Qt.Horizontal, self.messages_table)
         self.messages_table.setHorizontalHeader(msg_header)
-        msg_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        msg_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        msg_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        msg_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        msg_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        msg_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        msg_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        msg_header.setSectionResizeMode(1, QHeaderView.Interactive)
+        msg_header.setSectionResizeMode(2, QHeaderView.Interactive)
+        msg_header.setSectionResizeMode(3, QHeaderView.Interactive)
+        msg_header.setSectionResizeMode(4, QHeaderView.Interactive)
+        msg_header.setSectionResizeMode(5, QHeaderView.Interactive)
         msg_header.setSectionResizeMode(6, QHeaderView.Stretch)
         msg_header.setSectionResizeMode(7, QHeaderView.Fixed)
         self.messages_table.setColumnWidth(0, 32)
+        self.messages_table.setColumnWidth(1, 100)
+        self.messages_table.setColumnWidth(2, 96)
+        self.messages_table.setColumnWidth(3, 106)
+        self.messages_table.setColumnWidth(4, 106)
+        self.messages_table.setColumnWidth(5, 162)
         self.messages_table.setColumnWidth(7, 210)
         msg_header.setVisible(True)
         msg_header.sectionClicked.connect(self._on_sort_clicked)
@@ -1162,7 +2073,10 @@ class MessageViewerTab(QWidget):
         self._set_loading(True)
         try:
             self._refresh_files(force=True)
-            self._refresh_js8_messages(force=True)
+            self._refresh_js8_messages(force=True, rebuild=False)
+            self._refresh_varac_messages(force=True, rebuild=False)
+            self._populate_messages_table(force=True)
+            self._last_activation_refresh_ts = time.time()
         finally:
             self._set_loading(False)
 
@@ -1177,10 +2091,17 @@ class MessageViewerTab(QWidget):
     def _initial_refresh(self) -> None:
         self._set_loading(False)
         self._load_paths_lists()
-        self._refresh_files()
-        self._refresh_js8_messages()
-        self._refresh_varac_messages(force=True)
+        if not self._scan_cache_loaded:
+            self._refresh_files()
+        else:
+            # Cache-first startup: keep first paint fast, then reconcile in background.
+            self._last_file_refresh_ts = time.time()
+            QTimer.singleShot(1500, lambda: self._refresh_files(force=False))
+        self._refresh_js8_messages(rebuild=False)
+        self._refresh_varac_messages(force=True, rebuild=False)
+        self._populate_messages_table(force=True)
         self._refresh_pending_backlog()
+        self._last_activation_refresh_ts = time.time()
 
     def _set_loading(self, active: bool, text: str = "Getting messages...") -> None:
         if not self.loading_label:
@@ -1189,6 +2110,8 @@ class MessageViewerTab(QWidget):
             self._loading_timer.stop()
         self.loading_label.setText(text)
         self.loading_label.setVisible(bool(active))
+        if self._loading_progress is not None:
+            self._loading_progress.setVisible(bool(active))
 
     def _schedule_loading(self, text: str = "Getting messages...", delay_ms: int = 350) -> None:
         if not self.loading_label:
@@ -1208,20 +2131,53 @@ class MessageViewerTab(QWidget):
         self._set_loading(True)
 
     def on_tab_activated(self) -> None:
-        self._unfreeze_table()
-        if self._message_rows:
-            self._refresh_message_filters(self._message_rows)
-            self._apply_message_filters_preserve_scroll()
-        self._update_pending_table()
-        self._schedule_loading("Getting messages...")
-        try:
-            self._load_paths_lists()
-            self._refresh_files(force=True)
-            self._refresh_js8_messages(force=True)
-            self._refresh_varac_messages(force=True)
-            self._refresh_pending_backlog()
-        finally:
-            self._set_loading(False)
+        with perf_span(
+            "messages.on_tab_activated",
+            settings=self.settings,
+            meta={"rows": len(self._message_rows)},
+            min_ms=10.0,
+        ):
+            self._unfreeze_table()
+            if self._message_rows and self._deferred_refresh:
+                self._refresh_message_filters(self._message_rows)
+                self._apply_message_filters_preserve_scroll()
+            self._update_pending_table()
+            now = time.time()
+            stale = (not self._message_rows) or (
+                now - float(self._last_activation_refresh_ts) >= self._activation_refresh_interval_sec
+            )
+            if not stale:
+                self._set_loading(False)
+                return
+            if self._activation_refresh_pending:
+                return
+            self._activation_refresh_pending = True
+            self._schedule_loading("Getting messages...")
+            QTimer.singleShot(0, lambda: self._run_activation_refresh(force=not self._message_rows))
+
+    def _run_activation_refresh(self, force: bool = False) -> None:
+        with perf_span(
+            "messages.activation_refresh",
+            settings=self.settings,
+            meta={"force": bool(force)},
+            min_ms=5.0,
+        ):
+            try:
+                self._load_paths_lists()
+                now = time.time()
+                should_refresh_files = bool(force) or (
+                    now - float(self._last_file_refresh_ts) >= self._file_refresh_interval_sec
+                )
+                if should_refresh_files:
+                    self._refresh_files(force=force)
+                self._refresh_js8_messages(force=force, rebuild=False)
+                self._refresh_varac_messages(force=force, rebuild=False)
+                self._populate_messages_table(force=force)
+                self._refresh_pending_backlog()
+                self._last_activation_refresh_ts = time.time()
+            finally:
+                self._activation_refresh_pending = False
+                self._set_loading(False)
 
     def set_tab_active(self, active: bool) -> None:
         self._has_active_view = bool(active)
@@ -1253,6 +2209,10 @@ class MessageViewerTab(QWidget):
         if not fn:
             return
         self.watch_dirs.append({"path": fn, "origin": origin})
+        self._scan_cache_loaded = False
+        self._scan_cache_saved_ts = 0.0
+        self._scan_dir_mtime_cache = {}
+        self._files_snapshot_fp = None
         self._save_settings()
         self._refresh_files()
 
@@ -1263,6 +2223,10 @@ class MessageViewerTab(QWidget):
             return
         last = paths[-1]
         self.watch_dirs = [w for w in self.watch_dirs if not (w.get("origin") == origin and w.get("path") == last.get("path"))]
+        self._scan_cache_loaded = False
+        self._scan_cache_saved_ts = 0.0
+        self._scan_dir_mtime_cache = {}
+        self._files_snapshot_fp = None
         self._save_settings()
         self._refresh_files()
 
@@ -1301,8 +2265,39 @@ class MessageViewerTab(QWidget):
         self._refresh_files_inflight = True
         self._file_scan_start_ts = time.time()
         self._load_paths_lists()
+        watch_dirs = self._effective_watch_dirs()
+        if self._can_skip_file_scan_quick(watch_dirs, force):
+            try:
+                self._save_file_scan_cache_meta_only(dir_mtimes=self._scan_dir_mtime_cache)
+            except Exception:
+                pass
+            finally:
+                self._refresh_files_inflight = False
+                self._last_file_refresh_ts = time.time()
+                elapsed = time.time() - self._file_scan_start_ts
+                total_records = sum(len(v) for v in self.files.values())
+                emit_span(
+                    "messages.file_scan_total",
+                    elapsed * 1000.0,
+                    settings=self.settings,
+                    meta={
+                        "force": bool(force),
+                        "records": int(total_records),
+                        "mode": "quick_skip",
+                        "unchanged": True,
+                    },
+                    min_ms=5.0,
+                )
+            return
+        base_records = None if force else self.files
+        base_dir_mtimes = None if force else self._scan_dir_mtime_cache
         self._file_scan_thread = QThread(self)
-        self._file_scan_worker = _FileScanWorker(self._effective_watch_dirs(), force)
+        self._file_scan_worker = _FileScanWorker(
+            watch_dirs,
+            force,
+            base_records=base_records,
+            base_dir_mtimes=base_dir_mtimes,
+        )
         self._file_scan_worker.moveToThread(self._file_scan_thread)
         self._file_scan_thread.started.connect(self._file_scan_worker.run)
         self._file_scan_worker.finished.connect(self._on_file_scan_finished)
@@ -1316,42 +2311,112 @@ class MessageViewerTab(QWidget):
         self._file_scan_thread = None
         self._file_scan_worker = None
 
-    def _on_file_scan_finished(self, records: Dict[str, List[FileRecord]], force: bool) -> None:
+    def _on_file_scan_finished(self, payload: object, force: bool) -> None:
         if self._is_shutting_down:
             self._refresh_files_inflight = False
             return
+        records: Dict[str, List[FileRecord]]
+        dir_mtimes: Dict[str, float] = {}
+        mode = "legacy"
+        if isinstance(payload, dict) and "records" in payload:
+            maybe_records = payload.get("records")
+            if isinstance(maybe_records, dict):
+                records = maybe_records
+            else:
+                records = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
+            maybe_dirs = payload.get("dir_mtimes")
+            if isinstance(maybe_dirs, dict):
+                for k, v in maybe_dirs.items():
+                    try:
+                        dir_mtimes[os.path.normcase(os.path.normpath(str(k)))] = float(v or 0.0)
+                    except Exception:
+                        continue
+            mode = str(payload.get("mode", "unknown") or "unknown")
+        elif isinstance(payload, dict):
+            records = payload  # type: ignore[assignment]
+        else:
+            records = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
+        total_records = sum(len(v) for v in records.values())
+        records_fp = self._files_records_fingerprint(records)
+        unchanged_records = (not force) and (self._files_snapshot_fp == records_fp)
         try:
-            self.files = records
-            self._update_fldigi_senders(records)
-            self._read_state_map = self._load_read_state_map()
-            self._refresh_varac_messages(force=force)
-            self._populate_messages_table(force=force)
+            with perf_span(
+                "messages.file_scan_finished_handler",
+                settings=self.settings,
+                meta={
+                    "force": bool(force),
+                    "records": total_records,
+                    "mode": mode,
+                    "unchanged": bool(unchanged_records),
+                },
+                min_ms=5.0,
+            ):
+                if unchanged_records:
+                    self.files = records
+                    self._save_file_scan_cache_meta_only(dir_mtimes=dir_mtimes)
+                    self._scan_cache_loaded = True
+                else:
+                    self.files = records
+                    self._update_fldigi_senders(records)
+                    self._read_state_map = self._load_read_state_map()
+                    self._save_file_scan_cache(records, dir_mtimes=dir_mtimes)
+                    self._scan_cache_loaded = True
+                    self._refresh_varac_messages(force=force, rebuild=False)
+                    self._populate_messages_table(force=force)
+                self._files_snapshot_fp = records_fp
         finally:
             self._refresh_files_inflight = False
+            self._last_file_refresh_ts = time.time()
             elapsed = time.time() - self._file_scan_start_ts
+            emit_span(
+                "messages.file_scan_total",
+                elapsed * 1000.0,
+                settings=self.settings,
+                meta={
+                    "force": bool(force),
+                    "records": total_records,
+                    "mode": mode,
+                    "unchanged": bool(unchanged_records),
+                },
+                min_ms=5.0,
+            )
             if elapsed > 0.5:
                 log.debug("MessageViewer: refresh_files took %.2fs", elapsed)
 
-    def _refresh_js8_messages(self, force: bool = False):
+    def _refresh_js8_messages(self, force: bool = False, rebuild: bool = True):
         if self._is_shutting_down:
             return
-        # First ingest any new messages into local cache, then load from local cache for display
-        try:
-            self._ingest_js8_messages()
-        except Exception as e:
-            log.debug("MessageViewer: JS8 ingest failed: %s", e)
-        try:
-            self._ingest_spotter_from_directed()
-        except Exception as e:
-            log.debug("MessageViewer: spotter ingest failed: %s", e)
-        try:
-            self._load_js8_from_local(force=force)
-        except Exception as e:
-            log.debug("MessageViewer: JS8 local load failed: %s", e)
-        try:
-            self._load_spotter_from_db(force=force)
-        except Exception as e:
-            log.debug("MessageViewer: spotter load failed: %s", e)
+        with perf_span(
+            "messages.refresh_js8_messages",
+            settings=self.settings,
+            meta={"force": bool(force), "rebuild": bool(rebuild)},
+            min_ms=5.0,
+        ):
+            now = time.time()
+            should_ingest = bool(force) or (
+                now - float(self._last_js8_ingest_ts) >= self._js8_ingest_interval_sec
+            )
+            # First ingest any new messages into local cache, then load from local cache for display
+            if should_ingest:
+                try:
+                    self._ingest_js8_messages()
+                except Exception as e:
+                    log.debug("MessageViewer: JS8 ingest failed: %s", e)
+                try:
+                    self._ingest_spotter_from_directed()
+                except Exception as e:
+                    log.debug("MessageViewer: spotter ingest failed: %s", e)
+                self._last_js8_ingest_ts = now
+            try:
+                self._load_js8_from_local(force=force, rebuild=False)
+            except Exception as e:
+                log.debug("MessageViewer: JS8 local load failed: %s", e)
+            try:
+                self._load_spotter_from_db(force=force, rebuild=False)
+            except Exception as e:
+                log.debug("MessageViewer: spotter load failed: %s", e)
+            if rebuild:
+                self._populate_messages_table(force=force)
 
     def _update_fldigi_senders(self, records: Dict[str, List[FileRecord]]) -> None:
         db_path = self._db_path()
@@ -1400,17 +2465,25 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to update fldigi senders: %s", e)
 
-    def _refresh_varac_messages(self, force: bool = False) -> None:
+    def _refresh_varac_messages(self, force: bool = False, rebuild: bool = True) -> None:
         if self._is_shutting_down:
             return
+        now = time.time()
+        should_ingest = bool(force) or (
+            now - float(self._last_varac_ingest_ts) >= self._varac_ingest_interval_sec
+        )
+        if should_ingest:
+            try:
+                ingest_varac(self.settings)
+                self._last_varac_ingest_ts = now
+            except Exception as e:
+                log.debug("MessageViewer: VarAC ingest failed: %s", e)
         try:
-            ingest_varac(self.settings)
-        except Exception as e:
-            log.debug("MessageViewer: VarAC ingest failed: %s", e)
-        try:
-            self._load_varac_from_local(force=force)
+            self._load_varac_from_local(force=force, rebuild=False)
         except Exception as e:
             log.debug("MessageViewer: VarAC load failed: %s", e)
+        if rebuild:
+            self._populate_messages_table(force=force)
 
     def _cycle_flag_state(self, payload: object) -> None:
         current = int(getattr(payload, "flag_state", 0) or 0)
@@ -1502,11 +2575,13 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to update file flag: %s", e)
 
-    def _load_varac_from_local(self, force: bool = False) -> None:
+    def _load_varac_from_local(self, force: bool = False, rebuild: bool = True) -> None:
         db_path = self._db_path()
         msgs: List[VarACMessage] = []
         if not db_path or not db_path.exists():
             self.varac_messages = msgs
+            if rebuild:
+                self._populate_messages_table(force=force)
             return
         try:
             conn = sqlite3.connect(db_path)
@@ -1549,8 +2624,8 @@ class MessageViewerTab(QWidget):
             )
             msgs.append(msg)
         self.varac_messages = msgs
-        if force:
-            self._populate_messages_table(force=True)
+        if rebuild:
+            self._populate_messages_table(force=force)
 
     # ---------- Pending JS8 MSG backlog ---------- #
 
@@ -1692,6 +2767,15 @@ class MessageViewerTab(QWidget):
     def shutdown(self) -> None:
         self._is_shutting_down = True
         try:
+            if self._persist_timer and self._persist_timer.isActive():
+                self._persist_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._flush_persist_ops()
+        except Exception:
+            pass
+        try:
             if self._timer:
                 self._timer.stop()
         except Exception:
@@ -1717,6 +2801,12 @@ class MessageViewerTab(QWidget):
                 self._file_scan_thread.wait(1000)
         except Exception:
             pass
+        try:
+            if self._rows_build_thread and self._rows_build_thread.isRunning():
+                self._rows_build_thread.quit()
+                self._rows_build_thread.wait(1000)
+        except Exception:
+            pass
 
     def on_settings_saved(self) -> None:
         try:
@@ -1732,6 +2822,123 @@ class MessageViewerTab(QWidget):
             except Exception:
                 pass
         self._update_pending_table()
+
+    def _queue_persist_op(self, op: str, payload: Tuple) -> None:
+        self._pending_persist_ops.append((op, payload))
+        if self._persist_timer is None:
+            self._persist_timer = QTimer(self)
+            self._persist_timer.setSingleShot(True)
+            self._persist_timer.timeout.connect(self._flush_persist_ops)
+        if not self._persist_timer.isActive():
+            self._persist_timer.start(120)
+
+    def _flush_persist_ops(self) -> None:
+        if not self._pending_persist_ops:
+            return
+        ops = self._pending_persist_ops
+        self._pending_persist_ops = []
+        for op, payload in ops:
+            try:
+                if op == "file_read_state":
+                    origin, path_txt, mtime, size, status, read_ts, flag_state = payload
+                    self._persist_file_read_state(
+                        str(origin),
+                        str(path_txt),
+                        float(mtime),
+                        int(size),
+                        str(status),
+                        float(read_ts),
+                        int(flag_state),
+                    )
+                elif op == "spotter_read":
+                    spotter_id, read_ts = payload
+                    self._persist_spotter_read(int(spotter_id), float(read_ts))
+                elif op == "varac_read":
+                    source, msg_id = payload
+                    self._persist_varac_read(str(source), int(msg_id))
+                elif op == "js8_read":
+                    msg_id, utc_ts, read_ts, sync_flag = payload
+                    self._persist_js8_read(int(msg_id), float(utc_ts), float(read_ts), bool(sync_flag))
+            except Exception as e:
+                log.debug("MessageViewer: deferred persist op failed (%s): %s", op, e)
+
+    def _persist_file_read_state(
+        self,
+        origin: str,
+        path_txt: str,
+        mtime: float,
+        size: int,
+        status: str,
+        read_ts: float,
+        flag_state: int,
+    ) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO message_read_state
+                    (origin, path, mtime, size, status, read_ts, flag_state)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (origin, path_txt, float(mtime), int(size), status, float(read_ts), int(flag_state)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to persist read state: %s", e)
+
+    def _persist_spotter_read(self, spotter_id: int, read_ts: float) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE spotter_traffic SET state='READ', read_ts=? WHERE id=?",
+                (float(read_ts), int(spotter_id)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to update spotter read state: %s", e)
+
+    def _persist_varac_read(self, source: str, msg_id: int) -> None:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE varac_messages SET read_status=1 WHERE source=? AND id=?",
+                (source, int(msg_id)),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    def _persist_js8_read(self, msg_id: int, utc_ts: float, read_ts: float, sync_flag: bool) -> None:
+        try:
+            self._save_js8_state(msg_id, "READ", utc_ts, read_ts=read_ts)
+            self._update_local_read(msg_id, read_ts)
+        except Exception as e:
+            log.debug("MessageViewer: failed to persist JS8 READ state: %s", e)
+        if sync_flag:
+            try:
+                ok = self._mark_js8call_inbox_read_by_id(msg_id)
+                if not ok:
+                    log.debug(
+                        "MessageViewer: JS8Call inbox mark READ failed (msg_id=%s)",
+                        msg_id,
+                    )
+            except Exception:
+                pass
 
     def _adjust_pending_table_height(self, rows: int) -> None:
         header_h = self.pending_table.horizontalHeader().height()
@@ -1962,15 +3169,129 @@ class MessageViewerTab(QWidget):
         self._populate_messages_table(force=True)
 
     def _populate_messages_table(self, force: bool = False):
-        rows = self._build_message_rows()
-        self._message_rows = rows
-        if self._freeze_messages_table and not force:
-            self._deferred_refresh = True
-            log.debug("MessageViewer: table refresh deferred (freeze active)")
+        with perf_span(
+            "messages.populate_table",
+            settings=self.settings,
+            meta={"force": bool(force)},
+            min_ms=5.0,
+        ):
+            if self._freeze_messages_table and not force:
+                self._deferred_refresh = True
+                log.debug("MessageViewer: table refresh deferred (freeze active)")
+                return
+            self._deferred_refresh = False
+            self._start_rows_build(force=force)
+
+    def _snapshot_for_rows_build(self) -> Dict[str, object]:
+        form_ids: set[str] = set()
+        for msg in self.js8_messages:
+            if isinstance(msg.msg_type, str) and msg.msg_type.startswith("F!"):
+                form_ids.add(msg.msg_type[2:].strip())
+        for msg in self.spotter_messages:
+            mtype = str(msg.msg_type or "")
+            if mtype.startswith("F!"):
+                form_ids.add(mtype[2:].strip())
+        form_titles: Dict[str, str] = {}
+        for form_id in sorted({f for f in form_ids if f}):
+            form_titles[form_id] = self._load_form_title(form_id)
+        return {
+            "js8_messages": list(self.js8_messages),
+            "spotter_messages": list(self.spotter_messages),
+            "varac_messages": list(self.varac_messages),
+            "files": {k: list(v) for k, v in self.files.items()},
+            "read_state_map": dict(self._read_state_map),
+            "sender_cache_seed": dict(self._sender_cache),
+            "form_titles": form_titles,
+            "show_local_time": self._current_time_mode() != "UTC",
+            "tz_name": str(self.settings.get("timezone", "UTC") or "UTC"),
+        }
+
+    def _start_rows_build(self, force: bool = False) -> None:
+        if self._is_shutting_down:
             return
-        self._deferred_refresh = False
-        self._refresh_message_filters(rows)
-        self._apply_message_filters()
+        if self._rows_build_thread:
+            try:
+                if self._rows_build_thread.isRunning():
+                    self._rows_build_pending = True
+                    self._rows_build_pending_force = bool(self._rows_build_pending_force or force)
+                    return
+            except RuntimeError:
+                self._rows_build_thread = None
+                self._rows_build_worker = None
+        snapshot = self._snapshot_for_rows_build()
+        self._rows_build_generation += 1
+        generation = int(self._rows_build_generation)
+        self._rows_build_pending = False
+        self._rows_build_pending_force = False
+        self._rows_build_thread = QThread(self)
+        self._rows_build_worker = _RowsBuildWorker(
+            js8_messages=snapshot.get("js8_messages", []),  # type: ignore[arg-type]
+            spotter_messages=snapshot.get("spotter_messages", []),  # type: ignore[arg-type]
+            varac_messages=snapshot.get("varac_messages", []),  # type: ignore[arg-type]
+            files=snapshot.get("files", {}),  # type: ignore[arg-type]
+            read_state_map=snapshot.get("read_state_map", {}),  # type: ignore[arg-type]
+            sender_cache_seed=snapshot.get("sender_cache_seed", {}),  # type: ignore[arg-type]
+            form_titles=snapshot.get("form_titles", {}),  # type: ignore[arg-type]
+            show_local_time=bool(snapshot.get("show_local_time", False)),
+            tz_name=str(snapshot.get("tz_name", "UTC") or "UTC"),
+            force=bool(force),
+            generation=generation,
+        )
+        self._rows_build_worker.moveToThread(self._rows_build_thread)
+        self._rows_build_thread.started.connect(self._rows_build_worker.run)
+        self._rows_build_worker.finished.connect(self._on_rows_build_finished)
+        self._rows_build_worker.finished.connect(self._rows_build_thread.quit)
+        self._rows_build_worker.finished.connect(self._rows_build_worker.deleteLater)
+        self._rows_build_thread.finished.connect(self._on_rows_build_thread_finished)
+        self._rows_build_thread.finished.connect(self._rows_build_thread.deleteLater)
+        self._rows_build_thread.start()
+
+    def _on_rows_build_thread_finished(self) -> None:
+        self._rows_build_thread = None
+        self._rows_build_worker = None
+        if self._rows_build_pending and not self._is_shutting_down:
+            pending_force = bool(self._rows_build_pending_force)
+            self._rows_build_pending = False
+            self._rows_build_pending_force = False
+            self._start_rows_build(force=pending_force)
+
+    def _on_rows_build_finished(self, payload: object) -> None:
+        if self._is_shutting_down:
+            return
+        data = payload if isinstance(payload, dict) else {}
+        try:
+            generation = int(data.get("generation", 0) or 0)
+        except Exception:
+            generation = 0
+        if generation and generation != self._rows_build_generation:
+            return
+        rows = data.get("rows", [])
+        if not isinstance(rows, list):
+            rows = []
+        self._message_rows = rows
+        sender_updates = data.get("sender_cache_updates", {})
+        if isinstance(sender_updates, dict):
+            self._sender_cache.update(sender_updates)
+            self._prune_cache(self._sender_cache, self._cache_max_sender_entries)
+        try:
+            build_ms = float(data.get("elapsed_ms", 0.0) or 0.0)
+        except Exception:
+            build_ms = 0.0
+        if build_ms > 0:
+            emit_span(
+                "messages.build_rows",
+                build_ms,
+                settings=self.settings,
+                meta={"rows": len(rows), "force": bool(data.get("force", False))},
+                min_ms=5.0,
+            )
+        if self._freeze_messages_table and not bool(data.get("force", False)):
+            self._deferred_refresh = True
+            return
+        with perf_span("messages.refresh_filters", settings=self.settings, min_ms=5.0):
+            self._refresh_message_filters(rows)
+        with perf_span("messages.apply_filters", settings=self.settings, min_ms=5.0):
+            self._apply_message_filters()
         log.debug("MessageViewer: built %d unified messages", len(rows))
 
     def _refresh_message_filters(self, rows: List[UnifiedMessage]) -> None:
@@ -2051,7 +3372,7 @@ class MessageViewerTab(QWidget):
         filtered = []
         for row in rows:
             if type_sel == "Spotter":
-                if not re.match(r"^F!\d+$", row.msg_type or ""):
+                if not (row.msg_type or "").startswith("F!"):
                     continue
             elif type_sel != "MSG Type..." and row.msg_type != type_sel:
                 continue
@@ -2066,16 +3387,19 @@ class MessageViewerTab(QWidget):
             if to_sel and row.to_call != to_sel:
                 continue
             if rcv_query:
-                hay = " ".join(
-                    [
-                        row.msg_type or "",
-                        row.status or "",
-                        row.from_call or "",
-                        row.to_call or "",
-                        row.rcv_display or "",
-                        row.title or "",
-                    ]
-                ).lower()
+                hay = row.search_text
+                if not hay:
+                    hay = " ".join(
+                        [
+                            row.msg_type or "",
+                            row.status or "",
+                            row.from_call or "",
+                            row.to_call or "",
+                            row.rcv_display or "",
+                            row.title or "",
+                        ]
+                    ).lower()
+                    row.search_text = hay
                 if rcv_query not in hay:
                     continue
             filtered.append(row)
@@ -2122,6 +3446,19 @@ class MessageViewerTab(QWidget):
             return True
         return False
 
+    def _requires_full_refresh_after_read(self) -> bool:
+        status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
+        if status_sel not in ("", "Status..."):
+            return True
+        # Sorting by status can change row ordering when NEW -> READ.
+        if self._sort_column == 2:
+            return True
+        # Search text may include status terms and would require recompute.
+        query = (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip().lower()
+        if query:
+            return True
+        return False
+
     def _is_filter_active(self) -> bool:
         type_sel = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
         status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
@@ -2154,24 +3491,33 @@ class MessageViewerTab(QWidget):
         for i, row in enumerate(self._messages_model._rows):
             if match_fn(row):
                 row.status = "READ"
-                idx = self._messages_model.index(i, 1)
+                idx = self._messages_model.index(i, 2)
                 self._messages_model.dataChanged.emit(
                     idx, idx, [Qt.DisplayRole, Qt.ForegroundRole]
                 )
 
-    def _refresh_table_after_read(self, match_fn) -> None:
+    def _refresh_table_after_read(self, match_fn, row_ref: Optional[UnifiedMessage] = None) -> None:
         updated = False
-        for row in self._message_rows:
-            if match_fn(row):
-                row.status = "READ"
-                updated = True
+        if row_ref is not None:
+            row_ref.status = "READ"
+            updated = True
+        else:
+            for row in self._message_rows:
+                if match_fn(row):
+                    row.status = "READ"
+                    updated = True
         if not updated:
             return
-        self._refresh_message_filters(self._message_rows)
-        if self._is_filter_or_sort_active():
+        if self._requires_full_refresh_after_read():
+            self._refresh_message_filters(self._message_rows)
             self._apply_message_filters_preserve_scroll()
         else:
-            self._update_rendered_status(match_fn)
+            if row_ref is not None and hasattr(self, "_messages_model"):
+                if not self._messages_model.mark_row_read(row_ref):
+                    self._update_rendered_status(match_fn)
+            else:
+                self._update_rendered_status(match_fn)
+            self._update_mark_all_read_style()
 
     def _clear_filters(self) -> None:
         self._unfreeze_table()
@@ -2974,38 +4320,56 @@ class MessageViewerTab(QWidget):
                     )
                 )
 
+        for row in rows:
+            if not row.search_text:
+                row.search_text = " ".join(
+                    [
+                        row.msg_type or "",
+                        row.status or "",
+                        row.from_call or "",
+                        row.to_call or "",
+                        row.rcv_display or "",
+                        row.title or "",
+                    ]
+                ).lower()
         rows.sort(key=lambda r: r.rcv_ts, reverse=True)
         return rows
 
     def _on_view_message(self, row: UnifiedMessage) -> None:
-        log.debug(
-            "MessageViewer: view requested type=%s origin=%s title=%s",
-            row.msg_type,
-            row.origin,
-            row.title,
-        )
-        self._has_active_view = True
-        self._freeze_messages_table = True
-        self._set_open_external_path(None)
-        if isinstance(row.payload, JS8Message):
-            self.current_record = None
-            self.current_js8 = row.payload
-            self._load_js8_content(row.payload)
-            self._mark_js8_read(row.payload)
-        elif isinstance(row.payload, SpotterMessage):
-            self.current_record = None
-            self.current_js8 = None
-            self._load_js8_content(row.payload)
-            self._mark_spotter_read(row.payload)
-        elif isinstance(row.payload, FileRecord):
-            self.current_js8 = None
-            self.current_record = row.payload
-            self._load_content(row.payload)
-            self._set_read_state(row.payload, "READ")
-        elif isinstance(row.payload, VarACMessage):
-            self.current_js8 = None
-            self.current_record = None
-            self._load_varac_content(row.payload)
+        with perf_span(
+            "messages.view_message",
+            settings=self.settings,
+            meta={"msg_type": row.msg_type, "origin": row.origin},
+            min_ms=5.0,
+        ):
+            log.debug(
+                "MessageViewer: view requested type=%s origin=%s title=%s",
+                row.msg_type,
+                row.origin,
+                row.title,
+            )
+            self._has_active_view = True
+            self._freeze_messages_table = True
+            self._set_open_external_path(None)
+            if isinstance(row.payload, JS8Message):
+                self.current_record = None
+                self.current_js8 = row.payload
+                self._load_js8_content(row.payload)
+                self._mark_js8_read(row.payload, row_ref=row)
+            elif isinstance(row.payload, SpotterMessage):
+                self.current_record = None
+                self.current_js8 = None
+                self._load_js8_content(row.payload)
+                self._mark_spotter_read(row.payload, row_ref=row)
+            elif isinstance(row.payload, FileRecord):
+                self.current_js8 = None
+                self.current_record = row.payload
+                self._load_content(row.payload)
+                self._set_read_state(row.payload, "READ", row_ref=row)
+            elif isinstance(row.payload, VarACMessage):
+                self.current_js8 = None
+                self.current_record = None
+                self._load_varac_content(row.payload, row_ref=row)
 
     def _read_file_head(self, path: Path, limit: int = 4096) -> str:
         try:
@@ -3016,6 +4380,14 @@ class MessageViewerTab(QWidget):
             return ""
 
     def _extract_sender_from_file(self, rec: FileRecord) -> str:
+        cache_key = (
+            str(rec.path),
+            float(rec.mtime or 0.0),
+            int(rec.size or 0),
+        )
+        cached = self._sender_cache.get(cache_key)
+        if cached is not None:
+            return cached
         text = self._read_file_head(rec.path)
         if not text:
             log.debug("MessageViewer: sender parse empty for %s", rec.path)
@@ -3037,6 +4409,8 @@ class MessageViewerTab(QWidget):
                                 rec.path.name,
                                 sender,
                             )
+                            self._sender_cache[cache_key] = sender
+                            self._prune_cache(self._sender_cache, self._cache_max_sender_entries)
                             return sender
                     break
         tokens = re.split(r"[-_\\s]+", rec.path.stem)
@@ -3044,8 +4418,12 @@ class MessageViewerTab(QWidget):
             up = tok.strip().upper()
             if re.fullmatch(r"[A-Z]{1,2}\d[A-Z0-9]{1,4}", up):
                 log.debug("MessageViewer: sender fallback from filename %s => %s", rec.path.name, up)
+                self._sender_cache[cache_key] = up
+                self._prune_cache(self._sender_cache, self._cache_max_sender_entries)
                 return up
         log.debug("MessageViewer: sender not found for %s", rec.path.name)
+        self._sender_cache[cache_key] = ""
+        self._prune_cache(self._sender_cache, self._cache_max_sender_entries)
         return ""
 
     @staticmethod
@@ -3890,186 +5268,234 @@ class MessageViewerTab(QWidget):
         return "".join(html_out)
 
     def _load_content(self, rec: FileRecord):
-        log.debug("MessageViewer: loading file %s", rec.path)
-        if self._is_image_file(rec.path):
-            ext = rec.path.suffix.lower()
-            self._set_open_external_path(rec.path, label="Open Image")
-            info = f"Image Received - {rec.path.name} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
-            self.info_label.setText(info)
-            if self._can_preview_image(rec.path) and rec.path.exists():
-                try:
-                    uri = rec.path.resolve().as_uri()
-                except Exception:
-                    uri = ""
-                html_out = [
-                    "<div style='font-family: sans-serif;'>",
-                    f"<div><b>File:</b> {html.escape(rec.path.name)}</div>",
-                ]
-                if uri:
-                    html_out.append(
-                        f"<div style='margin-top:8px;'><img src='{uri}' "
-                        "style='max-width: 100%; height: auto;'></div>"
-                    )
+        with perf_span(
+            "messages.load_content",
+            settings=self.settings,
+            meta={"origin": rec.origin, "ext": rec.path.suffix.lower()},
+            min_ms=5.0,
+        ):
+            view_key = (
+                str(rec.path),
+                float(rec.mtime or 0.0),
+                int(rec.size or 0),
+            )
+            cached_view = self._file_view_cache.get(view_key)
+            if cached_view is not None:
+                is_html, content, info, open_path, open_label = cached_view
+                self._set_open_external_path(open_path, label=open_label)
+                self.info_label.setText(info)
+                if is_html:
+                    self.viewer.setAcceptRichText(True)
+                    self.viewer.setHtml(content)
                 else:
-                    html_out.append("<div>Preview unavailable for this image.</div>")
-                html_out.append("</div>")
-                self.viewer.setAcceptRichText(True)
-                self.viewer.setHtml("".join(html_out))
-            else:
-                self.viewer.setAcceptRichText(False)
-                self.viewer.setPlainText(
-                    f"Image file: {rec.path.name}\n\nPreview is not available for {ext}.\n"
-                    "Use 'Open Image' to view it in an external application."
-                )
-            return
-        self._set_open_external_path(None)
-        try:
-            data = rec.path.read_text(encoding="utf-8", errors="replace")
-        except Exception as e:
-            self.viewer.setPlainText(f"Failed to read file:\n{e}")
-            return
-
-        content = data
-        is_html = False
-        ext = rec.path.suffix.lower()
-        if ext in {".html", ".htm"}:
-            is_html = True
-        elif ext in {".b2s", ".k2s"}:
-            lower = data.lower()
-            form_name = self._extract_custom_form_name(data)
-            forms_dir = self._resolve_custom_forms_path()
-            if form_name and forms_dir:
-                template_path = forms_dir / form_name
-                if template_path.exists():
-                    log.debug(
-                        "MessageViewer: rendering custom form %s for %s",
-                        template_path.name,
-                        rec.path.name,
-                    )
+                    self.viewer.setAcceptRichText(False)
+                    self.viewer.setPlainText(content)
+                return
+            log.debug("MessageViewer: loading file %s", rec.path)
+            if self._is_image_file(rec.path):
+                ext = rec.path.suffix.lower()
+                self._set_open_external_path(rec.path, label="Open Image")
+                info = f"Image Received - {rec.path.name} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
+                self.info_label.setText(info)
+                if self._can_preview_image(rec.path) and rec.path.exists():
                     try:
-                        template = template_path.read_text(encoding="utf-8", errors="replace")
-                        fields = self._parse_custom_form_fields(data)
+                        uri = rec.path.resolve().as_uri()
+                    except Exception:
+                        uri = ""
+                    html_out = [
+                        "<div style='font-family: sans-serif;'>",
+                        f"<div><b>File:</b> {html.escape(rec.path.name)}</div>",
+                    ]
+                    if uri:
+                        html_out.append(
+                            f"<div style='margin-top:8px;'><img src='{uri}' "
+                            "style='max-width: 100%; height: auto;'></div>"
+                        )
+                    else:
+                        html_out.append("<div>Preview unavailable for this image.</div>")
+                    html_out.append("</div>")
+                    self.viewer.setAcceptRichText(True)
+                    rendered = "".join(html_out)
+                    self.viewer.setHtml(rendered)
+                    self._file_view_cache[view_key] = (True, rendered, info, rec.path, "Open Image")
+                    self._prune_cache(self._file_view_cache, self._cache_max_view_entries)
+                else:
+                    self.viewer.setAcceptRichText(False)
+                    rendered = (
+                        f"Image file: {rec.path.name}\n\nPreview is not available for {ext}.\n"
+                        "Use 'Open Image' to view it in an external application."
+                    )
+                    self.viewer.setPlainText(rendered)
+                    self._file_view_cache[view_key] = (False, rendered, info, rec.path, "Open Image")
+                    self._prune_cache(self._file_view_cache, self._cache_max_view_entries)
+                return
+            self._set_open_external_path(None)
+            try:
+                data = rec.path.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                self.viewer.setPlainText(f"Failed to read file:\n{e}")
+                return
+
+            content = data
+            is_html = False
+            ext = rec.path.suffix.lower()
+            if ext in {".html", ".htm"}:
+                is_html = True
+            elif ext in {".b2s", ".k2s"}:
+                lower = data.lower()
+                form_name = self._extract_custom_form_name(data)
+                forms_dir = self._resolve_custom_forms_path()
+                if form_name and forms_dir:
+                    template_path = forms_dir / form_name
+                    if template_path.exists():
                         log.debug(
-                            "MessageViewer: custom form fields %s for %s",
-                            ", ".join(sorted(fields.keys())),
+                            "MessageViewer: rendering custom form %s for %s",
+                            template_path.name,
                             rec.path.name,
                         )
-                        title = self._extract_title_from_template(template)
-                        labels = self._extract_template_labels(template)
-                        content = self._render_custom_form_fields(fields, labels, title)
+                        try:
+                            template = template_path.read_text(encoding="utf-8", errors="replace")
+                            fields = self._parse_custom_form_fields(data)
+                            log.debug(
+                                "MessageViewer: custom form fields %s for %s",
+                                ", ".join(sorted(fields.keys())),
+                                rec.path.name,
+                            )
+                            title = self._extract_title_from_template(template)
+                            labels = self._extract_template_labels(template)
+                            content = self._render_custom_form_fields(fields, labels, title)
+                            is_html = True
+                        except Exception:
+                            is_html = False
+                    else:
+                        log.debug(
+                            "MessageViewer: custom form template missing %s for %s",
+                            template_path,
+                            rec.path.name,
+                        )
+                if not is_html:
+                    if "<blankform>" in lower or "blank_form_v5." in lower:
+                        log.debug("MessageViewer: parsed blank form for %s", rec.path.name)
+                        content = self._parse_blank_form_content(data)
                         is_html = True
-                    except Exception:
-                        is_html = False
-                else:
-                    log.debug(
-                        "MessageViewer: custom form template missing %s for %s",
-                        template_path,
-                        rec.path.name,
-                    )
+                    elif "sitrep_v5." in lower:
+                        log.debug("MessageViewer: parsed sitrep form for %s", rec.path.name)
+                        content = self._parse_sitrep_content(data)
+                        is_html = True
+                    elif "statrep_v5.1" in lower:
+                        log.debug("MessageViewer: parsed statrep form for %s", rec.path.name)
+                        content = self._parse_statrep_content(data)
+                        is_html = True
+                    elif ext == ".b2s":
+                        log.debug("MessageViewer: parsed b2s form for %s", rec.path.name)
+                        content = self._parse_b2s_form_content(data)
+                        is_html = True
+                    else:
+                        log.debug("MessageViewer: parsed unknown form for %s", rec.path.name)
+                        content = self._parse_unknown_content(data)
+                        is_html = True
+
             if not is_html:
-                if "<blankform>" in lower or "blank_form_v5." in lower:
-                    log.debug("MessageViewer: parsed blank form for %s", rec.path.name)
-                    content = self._parse_blank_form_content(data)
-                    is_html = True
-                elif "sitrep_v5." in lower:
-                    log.debug("MessageViewer: parsed sitrep form for %s", rec.path.name)
-                    content = self._parse_sitrep_content(data)
-                    is_html = True
-                elif "statrep_v5.1" in lower:
-                    log.debug("MessageViewer: parsed statrep form for %s", rec.path.name)
-                    content = self._parse_statrep_content(data)
-                    is_html = True
-                elif ext == ".b2s":
-                    log.debug("MessageViewer: parsed b2s form for %s", rec.path.name)
-                    content = self._parse_b2s_form_content(data)
-                    is_html = True
-                else:
-                    log.debug("MessageViewer: parsed unknown form for %s", rec.path.name)
-                    content = self._parse_unknown_content(data)
-                    is_html = True
+                try:
+                    if ext in {".json"}:
+                        parsed = json.loads(data)
+                        content = json.dumps(parsed, indent=2)
+                    elif ext in {".xml"}:
+                        dom = xml.dom.minidom.parseString(data.encode("utf-8"))
+                        content = dom.toprettyxml()
+                except Exception:
+                    content = data  # fallback to raw
 
-        if not is_html:
+            info = f"{rec.path.name} - {rec.origin.upper()} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
+            self.info_label.setText(info)
+            if is_html:
+                self.viewer.setAcceptRichText(True)
+                self.viewer.setHtml(content)
+            else:
+                self.viewer.setAcceptRichText(False)
+                self.viewer.setPlainText(content)
+            self._file_view_cache[view_key] = (bool(is_html), str(content), info, None, "Open Image")
+            self._prune_cache(self._file_view_cache, self._cache_max_view_entries)
+
+    @staticmethod
+    def _prune_cache(cache: Dict, max_size: int) -> None:
+        if max_size <= 0:
+            cache.clear()
+            return
+        while len(cache) > max_size:
             try:
-                if ext in {".json"}:
-                    parsed = json.loads(data)
-                    content = json.dumps(parsed, indent=2)
-                elif ext in {".xml"}:
-                    dom = xml.dom.minidom.parseString(data.encode("utf-8"))
-                    content = dom.toprettyxml()
-            except Exception:
-                content = data  # fallback to raw
+                first_key = next(iter(cache))
+            except StopIteration:
+                return
+            cache.pop(first_key, None)
 
-        info = f"{rec.path.name} - {rec.origin.upper()} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
-        self.info_label.setText(info)
-        if is_html:
-            self.viewer.setAcceptRichText(True)
-            self.viewer.setHtml(content)
-        else:
+    def _load_varac_content(self, msg: VarACMessage, row_ref: Optional[UnifiedMessage] = None) -> None:
+        with perf_span(
+            "messages.load_varac_content",
+            settings=self.settings,
+            meta={"msg_type": msg.msg_type},
+            min_ms=2.0,
+        ):
+            header = [
+                f"TYPE: {msg.msg_type}",
+                f"FROM: {msg.from_call}",
+                f"TO:   {msg.to_call}",
+                f"TIME: {self._fmt_ts(msg.ts)}",
+            ]
+            if msg.band:
+                header.append(f"BAND: {msg.band}")
+            if msg.freq_hz:
+                header.append(f"FREQ: {float(msg.freq_hz) / 1_000_000.0:.3f}")
+            if msg.snr is not None:
+                header.append(f"SNR:  {msg.snr}")
+            header.append("")
+            if (msg.msg_type or "").upper() == "VMAIL":
+                body = msg.body or ""
+                if not body:
+                    body = msg.subject or ""
+            else:
+                body = msg.body or msg.subject or ""
+            self.info_label.setText(f"VarAC {msg.msg_type} {msg.from_call} -> {msg.to_call}")
             self.viewer.setAcceptRichText(False)
-            self.viewer.setPlainText(content)
+            self.viewer.setPlainText("\n".join(header + [body]))
+            self._mark_varac_read(msg, row_ref=row_ref)
 
-    def _load_varac_content(self, msg: VarACMessage) -> None:
-        header = [
-            f"TYPE: {msg.msg_type}",
-            f"FROM: {msg.from_call}",
-            f"TO:   {msg.to_call}",
-            f"TIME: {self._fmt_ts(msg.ts)}",
-        ]
-        if msg.band:
-            header.append(f"BAND: {msg.band}")
-        if msg.freq_hz:
-            header.append(f"FREQ: {float(msg.freq_hz) / 1_000_000.0:.3f}")
-        if msg.snr is not None:
-            header.append(f"SNR:  {msg.snr}")
-        header.append("")
-        if (msg.msg_type or "").upper() == "VMAIL":
-            body = msg.body or ""
-            if not body:
-                body = msg.subject or ""
-        else:
-            body = msg.body or msg.subject or ""
-        self.info_label.setText(f"VarAC {msg.msg_type} {msg.from_call} -> {msg.to_call}")
-        self.viewer.setAcceptRichText(False)
-        self.viewer.setPlainText("\n".join(header + [body]))
-        self._mark_varac_read(msg)
-
-    def _mark_varac_read(self, msg: VarACMessage) -> None:
+    def _mark_varac_read(self, msg: VarACMessage, row_ref: Optional[UnifiedMessage] = None) -> None:
         if not msg or msg.read_status:
             return
         msg.read_status = 1
-        db_path = self._db_path()
-        if not db_path or not db_path.exists():
-            return
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE varac_messages SET read_status=1 WHERE source=? AND id=?",
-                (msg.source, int(msg.msg_id)),
-            )
-            conn.commit()
-            conn.close()
-        except Exception:
-            pass
+        self._queue_persist_op("varac_read", (str(msg.source or ""), int(msg.msg_id)))
+        self._refresh_table_after_read(
+            lambda row: isinstance(row.payload, VarACMessage)
+            and int(getattr(row.payload, "msg_id", 0) or 0) == int(msg.msg_id)
+            and str(getattr(row.payload, "source", "") or "") == str(msg.source or ""),
+            row_ref=row_ref,
+        )
 
     def _load_js8_content(self, msg: JS8Message | SpotterMessage):
-        mode = self._current_time_mode()
-        label = "UTC" if mode == "UTC" else "Local"
-        ts_display = self._format_rcv_display(msg.utc_ts or 0.0, msg.utc_str)
-        header = [
-            f"FROM: {msg.from_call}",
-            f"TO:   {msg.to_call}",
-            f"TYPE: {msg.msg_type}",
-            f"{label}:  {ts_display}",
-            "",
-        ]
-        relay_via = getattr(msg, "relay_via", "") or ""
-        if relay_via:
-            header.insert(4, f"RELAY VIA: {relay_via}")
-        body = msg.decoded_text or msg.raw_text
-        self.info_label.setText(f"{msg.msg_type} {msg.from_call} -> {msg.to_call}")
-        self.viewer.setAcceptRichText(False)
-        self.viewer.setPlainText("\n".join(header + [body]))
+        with perf_span(
+            "messages.load_js8_content",
+            settings=self.settings,
+            meta={"msg_type": msg.msg_type},
+            min_ms=2.0,
+        ):
+            mode = self._current_time_mode()
+            label = "UTC" if mode == "UTC" else "Local"
+            ts_display = self._format_rcv_display(msg.utc_ts or 0.0, msg.utc_str)
+            header = [
+                f"FROM: {msg.from_call}",
+                f"TO:   {msg.to_call}",
+                f"TYPE: {msg.msg_type}",
+                f"{label}:  {ts_display}",
+                "",
+            ]
+            relay_via = getattr(msg, "relay_via", "") or ""
+            if relay_via:
+                header.insert(4, f"RELAY VIA: {relay_via}")
+            body = msg.decoded_text or msg.raw_text
+            self.info_label.setText(f"{msg.msg_type} {msg.from_call} -> {msg.to_call}")
+            self.viewer.setAcceptRichText(False)
+            self.viewer.setPlainText("\n".join(header + [body]))
 
     def _fmt_mtime(self, mtime: float) -> str:
         if not mtime:
@@ -4417,52 +5843,37 @@ class MessageViewerTab(QWidget):
 
     # ---------- JS8 Helpers ----------
 
-    def _mark_js8_read(self, msg: JS8Message):
+    def _mark_js8_read(self, msg: JS8Message, row_ref: Optional[UnifiedMessage] = None):
         if msg.state.upper() == "READ":
             return
         ts = time.time()
-        # Persist read state in local app DB
-        try:
-            self._save_js8_state(msg.msg_id, "READ", msg.utc_ts, read_ts=ts)
-            self._update_local_read(msg.msg_id, ts)
-        except Exception as e:
-            log.debug("MessageViewer: failed to persist JS8 READ state: %s", e)
-        if self.settings.get("js8_inbox_mark_retrieved_sync", False):
-            ok = self._mark_js8call_inbox_read_by_id(msg.msg_id)
-            if not ok:
-                log.debug(
-                    "MessageViewer: JS8Call inbox mark READ failed (msg_id=%s)",
-                    msg.msg_id,
-                )
+        self._queue_persist_op(
+            "js8_read",
+            (
+                int(msg.msg_id),
+                float(msg.utc_ts or 0.0),
+                float(ts),
+                bool(self.settings.get("js8_inbox_mark_retrieved_sync", False)),
+            ),
+        )
         msg.state = "READ"
         msg.read_ts = ts
         self._refresh_table_after_read(
-            lambda row: isinstance(row.payload, JS8Message) and row.payload.msg_id == msg.msg_id
+            lambda row: isinstance(row.payload, JS8Message) and row.payload.msg_id == msg.msg_id,
+            row_ref=row_ref,
         )
 
-    def _mark_spotter_read(self, msg: SpotterMessage) -> None:
+    def _mark_spotter_read(self, msg: SpotterMessage, row_ref: Optional[UnifiedMessage] = None) -> None:
         if msg.state.upper() == "READ":
             return
-        db_path = self._db_path()
-        if not db_path:
-            return
         ts = time.time()
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE spotter_traffic SET state='READ', read_ts=? WHERE id=?",
-                (float(ts), int(msg.spotter_id)),
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            log.debug("MessageViewer: failed to update spotter read state: %s", e)
+        self._queue_persist_op("spotter_read", (int(msg.spotter_id), float(ts)))
         msg.state = "READ"
         msg.read_ts = ts
         self._refresh_table_after_read(
             lambda row: isinstance(row.payload, SpotterMessage)
-            and row.payload.spotter_id == msg.spotter_id
+            and row.payload.spotter_id == msg.spotter_id,
+            row_ref=row_ref,
         )
 
     def _decode_form(self, form_id: str, responses: str, comment: str, raw: str = "") -> str:
@@ -4721,13 +6132,14 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to update local read state: %s", e)
 
-    def _load_js8_from_local(self, force: bool = False) -> None:
+    def _load_js8_from_local(self, force: bool = False, rebuild: bool = True) -> None:
         self._ensure_local_js8_tables()
         db_path = self._local_js8_db()
         msgs: List[JS8Message] = []
         if not db_path or not Path(db_path).exists():
             self.js8_messages = msgs
-            self._populate_messages_table(force=force)
+            if rebuild:
+                self._populate_messages_table(force=force)
             return
         try:
             conn = sqlite3.connect(db_path)
@@ -4774,14 +6186,16 @@ class MessageViewerTab(QWidget):
             msgs.append(msg)
         msgs.sort(key=lambda m: (m.state != "UNREAD", m.utc_ts))
         self.js8_messages = msgs
-        self._populate_messages_table(force=force)
+        if rebuild:
+            self._populate_messages_table(force=force)
 
-    def _load_spotter_from_db(self, force: bool = False) -> None:
+    def _load_spotter_from_db(self, force: bool = False, rebuild: bool = True) -> None:
         db_path = self._db_path()
         msgs: List[SpotterMessage] = []
         if not db_path or not Path(db_path).exists():
             self.spotter_messages = msgs
-            self._populate_messages_table(force=force)
+            if rebuild:
+                self._populate_messages_table(force=force)
             return
         try:
             conn = sqlite3.connect(db_path)
@@ -4816,7 +6230,8 @@ class MessageViewerTab(QWidget):
             )
             msgs.append(msg)
         self.spotter_messages = msgs
-        self._populate_messages_table(force=force)
+        if rebuild:
+            self._populate_messages_table(force=force)
 
     def _ingest_js8_messages(self) -> None:
         inbox_path = self._inbox_path()
@@ -5029,7 +6444,12 @@ class MessageViewerTab(QWidget):
             with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
                 if offset:
                     fh.seek(offset)
-                for line in fh:
+                last_pos = fh.tell()
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        break
+                    last_pos = fh.tell()
                     parsed = self._parse_directed_spotter_line(line)
                     if not parsed:
                         continue
@@ -5072,7 +6492,7 @@ class MessageViewerTab(QWidget):
                     )
                     conn.commit()
                     conn.close()
-                self.settings.set(self._spotter_offset_key(), int(fh.tell()))
+                self.settings.set(self._spotter_offset_key(), int(last_pos))
                 if hasattr(self.settings, "save"):
                     self.settings.save()
         except Exception as e:

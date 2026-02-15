@@ -9,7 +9,7 @@ import urllib.request
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Optional, Set
+from typing import Any, List, Dict, Optional, Set
 import math
 import time
 import logging
@@ -52,6 +52,7 @@ try:
 except Exception:
     js8net = None
 from freqinout.core.logger import log
+from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.propagation_service import PropagationService
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.settings_manager import SettingsManager
@@ -508,14 +509,24 @@ class StationsMapTab(QWidget):
         )
         self._presence_weights_cache: Optional[Dict[str, Dict]] = None
         self._presence_weights_ts: float = 0.0
+        self._query_cache: Dict[tuple, tuple[float, Any]] = {}
+        self._query_cache_ttl_sec: float = 3.0
+        self._prop_prewarm_done: bool = False
+        self._initial_data_loaded: bool = False
 
         self._build_ui()
         self._refresh_group_filter_options()
         self._refresh_region_filter_options()
         self._load_display_preferences()
-        self._load_operator_history()
         self._refresh_band_options()
-        self._render_map()
+        QTimer.singleShot(0, self._prewarm_map_perf_caches)
+
+    def _ensure_initial_data_loaded(self) -> None:
+        if self._initial_data_loaded:
+            return
+        with perf_span("map.initial_data_load", settings=self.settings, min_ms=10.0):
+            self._load_operator_history()
+        self._initial_data_loaded = True
 
     def _bool_setting(self, key: str, default: bool = False) -> bool:
         if not self.settings:
@@ -635,6 +646,19 @@ class StationsMapTab(QWidget):
         # JS8 RX live ingestion timer
         self._start_js8_rx_listener()
 
+    def _prewarm_map_perf_caches(self) -> None:
+        if self._is_shutting_down or self._prop_prewarm_done:
+            return
+        try:
+            self._load_prop_db_cache()
+        except Exception:
+            pass
+        try:
+            self._load_recent_calls_by_band(self._prop_window_seconds())
+        except Exception:
+            pass
+        self._prop_prewarm_done = True
+
     def _start_js8_rx_listener(self):
         """
         Attach to JS8 RX hub and ingest live traffic in real time.
@@ -674,7 +698,8 @@ class StationsMapTab(QWidget):
         now_ts = time.time()
         if now_ts - self._last_map_render_ts >= 1.0:
             self._last_map_render_ts = now_ts
-            self._render_map(preserve_view=True)
+            with perf_span("map.render_call", settings=self.settings, meta={"source": "schedule"}, min_ms=10.0):
+                self._render_map(preserve_view=True)
             return
         if not self._render_pending:
             self._render_pending = True
@@ -688,7 +713,8 @@ class StationsMapTab(QWidget):
             return
         self._render_pending = False
         self._last_map_render_ts = time.time()
-        self._render_map(preserve_view=True)
+        with perf_span("map.render_call", settings=self.settings, meta={"source": "flush"}, min_ms=10.0):
+            self._render_map(preserve_view=True)
 
     def set_map_visible(self, is_visible: bool) -> None:
         is_visible = bool(is_visible)
@@ -1345,21 +1371,57 @@ class StationsMapTab(QWidget):
         enabled = bool(self.show_cities or self.show_states)
         self.city_pop_combo.setEnabled(enabled)
 
+    def _query_cache_get(self, key: tuple, ttl_sec: Optional[float] = None):
+        ttl = self._query_cache_ttl_sec if ttl_sec is None else max(0.0, float(ttl_sec))
+        item = self._query_cache.get(key)
+        if not item:
+            return None
+        ts, value = item
+        if (time.time() - float(ts)) > ttl:
+            self._query_cache.pop(key, None)
+            return None
+        return value
+
+    def _query_cache_set(self, key: tuple, value: Any) -> None:
+        self._query_cache[key] = (time.time(), value)
+        # Keep cache bounded.
+        if len(self._query_cache) > 200:
+            try:
+                oldest_key = min(self._query_cache.items(), key=lambda kv: kv[1][0])[0]
+                self._query_cache.pop(oldest_key, None)
+            except Exception:
+                pass
+
     # ------------- Data helpers ------------- #
     def _load_operator_history(self):
         """
         Load operator_checkins (callsign, name, state, grid, group1-3) and plot as stations.
         Grid is preferred; if missing, fall back to state centroid when available.
         """
+        perf_start = time.perf_counter()
         pts: List[StationPoint] = []
         try:
             db_path = get_config_dir() / "config" / "freqinout_nets.db"
         except Exception as e:
             log.error("StationsMap: failed to resolve DB path: %s", e)
             self.stations = pts
+            emit_span(
+                "map.load_operator_history",
+                (time.perf_counter() - perf_start) * 1000.0,
+                settings=self.settings,
+                meta={"stations": 0, "status": "resolve_db_failed"},
+                min_ms=5.0,
+            )
             return
         if not db_path.exists():
             self.stations = pts
+            emit_span(
+                "map.load_operator_history",
+                (time.perf_counter() - perf_start) * 1000.0,
+                settings=self.settings,
+                meta={"stations": 0, "status": "db_missing"},
+                min_ms=5.0,
+            )
             return
         raw_rows = []
         try:
@@ -1386,6 +1448,13 @@ class StationsMapTab(QWidget):
         except Exception as e:
             log.error("StationsMap: failed to load operator history: %s", e)
             self.stations = pts
+            emit_span(
+                "map.load_operator_history",
+                (time.perf_counter() - perf_start) * 1000.0,
+                settings=self.settings,
+                meta={"stations": 0, "status": "query_failed"},
+                min_ms=5.0,
+            )
             return
 
         my_call = (self.settings.get("operator_callsign", "") or "").strip().upper()
@@ -1504,6 +1573,13 @@ class StationsMapTab(QWidget):
             self._now_reachable_meta = self._compute_now_reachable_snapshot()
             self._now_reachable_callsigns = set(self._now_reachable_meta.keys())
             self._update_now_reachable_summary()
+        emit_span(
+            "map.load_operator_history",
+            (time.perf_counter() - perf_start) * 1000.0,
+            settings=self.settings,
+            meta={"stations": len(self.stations), "rows": len(rows)},
+            min_ms=5.0,
+        )
 
     def update_stations(self, stations: List[Dict]):
         pts: List[StationPoint] = []
@@ -1882,6 +1958,36 @@ class StationsMapTab(QWidget):
         group_filter = (group_filter or "").strip().upper()
         region_filter = (region_filter or "").strip().upper()
         reachable_calls = {c.strip().upper() for c in (reachable_callsigns or set()) if c}
+        band_sig = ""
+        try:
+            band_sig = json.dumps(band_filter or {"type": "all"}, sort_keys=True, default=str)
+        except Exception:
+            band_sig = str(band_filter or {"type": "all"})
+        cache_key = (
+            "js8_links",
+            band_sig,
+            (my_call or "").strip().upper(),
+            mode,
+            selection_value,
+            relay_target,
+            group_filter,
+            region_filter,
+            ",".join(sorted(reachable_calls)),
+            int(max_age_sec or 0),
+            len(self.stations),
+            len(self.operator_index),
+        )
+        cached = self._query_cache_get(cache_key, ttl_sec=2.0)
+        if isinstance(cached, tuple) and len(cached) == 2:
+            cached_links, cached_stats = cached
+            if isinstance(cached_links, list) and isinstance(cached_stats, dict):
+                return (
+                    [dict(x) for x in cached_links if isinstance(x, dict)],
+                    {
+                        str(k): (dict(v) if isinstance(v, dict) else v)
+                        for k, v in cached_stats.items()
+                    },
+                )
         if mode == "off" and not relay_target:
             return links, {}
 
@@ -2161,6 +2267,13 @@ class StationsMapTab(QWidget):
                 "avg_snr_count": data.get("snr_excl_my_count", 0),
                 "last_band": data.get("last_band") or "",
             }
+        self._query_cache_set(
+            cache_key,
+            (
+                [dict(x) for x in links],
+                {str(k): (dict(v) if isinstance(v, dict) else v) for k, v in stats_out.items()},
+            ),
+        )
         return links, stats_out
 
     def _load_varac_links(
@@ -2173,6 +2286,26 @@ class StationsMapTab(QWidget):
         reachable_callsigns: Optional[Set[str]] = None,
         max_age_sec: Optional[int] = None,
     ) -> List[Dict]:
+        band_sig = ""
+        try:
+            band_sig = json.dumps(band_filter or {"type": "all"}, sort_keys=True, default=str)
+        except Exception:
+            band_sig = str(band_filter or {"type": "all"})
+        cache_key = (
+            "varac_links",
+            band_sig,
+            (my_call or "").strip().upper(),
+            str(link_selection or ""),
+            (group_filter or "").strip().upper(),
+            (region_filter or "").strip().upper(),
+            ",".join(sorted({c.strip().upper() for c in (reachable_callsigns or set()) if c})),
+            int(max_age_sec or 0),
+            len(self.stations),
+            len(self.operator_index),
+        )
+        cached = self._query_cache_get(cache_key, ttl_sec=2.0)
+        if isinstance(cached, list):
+            return [dict(x) for x in cached if isinstance(x, dict)]
         links: List[Dict] = []
         pos_map: Dict[str, tuple[float, float]] = {}
         for pt in self.stations:
@@ -2336,9 +2469,17 @@ class StationsMapTab(QWidget):
                 }
             )
 
+        self._query_cache_set(cache_key, [dict(x) for x in links])
         return links
 
     def _load_varac_stats(self, max_age_sec: Optional[int] = None) -> Dict[str, Dict]:
+        cache_key = ("varac_stats", int(max_age_sec) if max_age_sec else None)
+        cached = self._query_cache_get(cache_key)
+        if isinstance(cached, dict):
+            return {
+                str(k): dict(v) if isinstance(v, dict) else v
+                for k, v in cached.items()
+            }
         stats: Dict[str, Dict] = {}
         try:
             from freqinout.core.config_paths import get_config_dir
@@ -2420,9 +2561,14 @@ class StationsMapTab(QWidget):
                 "last_snr": float(last_snr) if last_snr not in (None, "") else None,
                 "avg_snr": avg_map.get((cs or "").strip().upper()),
             }
+        self._query_cache_set(cache_key, dict(stats))
         return stats
 
     def _load_js8_presence(self) -> Set[str]:
+        cache_key = ("js8_presence",)
+        cached = self._query_cache_get(cache_key)
+        if isinstance(cached, (set, list, tuple)):
+            return {str(c) for c in cached}
         calls: Set[str] = set()
         try:
             from freqinout.core.config_paths import get_config_dir
@@ -2442,9 +2588,14 @@ class StationsMapTab(QWidget):
             conn.close()
         except Exception:
             return calls
+        self._query_cache_set(cache_key, set(calls))
         return calls
 
     def _load_fldigi_presence(self) -> Set[str]:
+        cache_key = ("fldigi_presence",)
+        cached = self._query_cache_get(cache_key)
+        if isinstance(cached, (set, list, tuple)):
+            return {str(c) for c in cached}
         calls: Set[str] = set()
         try:
             from freqinout.core.config_paths import get_config_dir
@@ -2481,9 +2632,18 @@ class StationsMapTab(QWidget):
             conn.close()
         except Exception:
             return calls
-        return {c for c in (checkins | senders) if c}
+        out = {c for c in (checkins | senders) if c}
+        self._query_cache_set(cache_key, set(out))
+        return out
 
     def _load_spotter_station_status(self) -> Dict[str, Dict]:
+        cache_key = ("spotter_station_status",)
+        cached = self._query_cache_get(cache_key)
+        if isinstance(cached, dict):
+            return {
+                str(k): dict(v) if isinstance(v, dict) else v
+                for k, v in cached.items()
+            }
         statuses: Dict[str, Dict] = {}
         try:
             from freqinout.core.config_paths import get_config_dir
@@ -2539,11 +2699,21 @@ class StationsMapTab(QWidget):
                 "status_source": (status_source or "").strip().upper(),
                 "status_source_detail": (status_source_detail or "").strip(),
             }
+        self._query_cache_set(cache_key, dict(statuses))
         return statuses
 
     def _load_recent_calls(self, max_age_sec: Optional[int], band_filter=None) -> Set[str]:
         if not max_age_sec or max_age_sec <= 0:
             return set()
+        band_sig = ""
+        try:
+            band_sig = json.dumps(band_filter or {"type": "all"}, sort_keys=True, default=str)
+        except Exception:
+            band_sig = str(band_filter or {"type": "all"})
+        cache_key = ("recent_calls", int(max_age_sec), band_sig)
+        cached = self._query_cache_get(cache_key, ttl_sec=15.0)
+        if isinstance(cached, (set, list, tuple)):
+            return {str(c) for c in cached}
         try:
             from freqinout.core.config_paths import get_config_dir
 
@@ -2606,7 +2776,67 @@ class StationsMapTab(QWidget):
                     continue
             if cs:
                 calls.add((cs or "").strip().upper())
+        self._query_cache_set(cache_key, set(calls))
         return calls
+
+    def _load_recent_calls_by_band(self, max_age_sec: Optional[int]) -> Dict[str, Set[str]]:
+        out: Dict[str, Set[str]] = {band: set() for band in PROP_BANDS}
+        if not max_age_sec or max_age_sec <= 0:
+            return out
+        cache_key = ("recent_calls_by_band", int(max_age_sec))
+        cached = self._query_cache_get(cache_key, ttl_sec=15.0)
+        if isinstance(cached, dict):
+            normalized: Dict[str, Set[str]] = {band: set() for band in PROP_BANDS}
+            for band, calls in cached.items():
+                band_key = str(band or "").strip().upper()
+                if band_key not in normalized:
+                    continue
+                if isinstance(calls, (set, list, tuple)):
+                    normalized[band_key] = {str(c).strip().upper() for c in calls if str(c).strip()}
+            return normalized
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception as e:
+            log.error("StationsMap: failed to resolve DB path for recent calls by band: %s", e)
+            return out
+        if not db_path.exists():
+            return out
+        ts_cut = time.time() - max_age_sec
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT origin, destination, band FROM js8_links WHERE ts >= ?",
+                (ts_cut,),
+            )
+            rows = cur.fetchall()
+            cur.execute(
+                "SELECT callsign, last_band FROM varac_callsign_stats WHERE last_seen_ts >= ?",
+                (ts_cut,),
+            )
+            varac_rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.error("StationsMap: failed to load recent calls by band: %s", e)
+            return out
+        for o, d, band in rows:
+            band_key = (band or "").strip().upper()
+            if band_key not in out:
+                continue
+            if o:
+                out[band_key].add((o or "").strip().upper())
+            if d:
+                out[band_key].add((d or "").strip().upper())
+        for cs, last_band in varac_rows:
+            band_key = (last_band or "").strip().upper()
+            if band_key not in out:
+                continue
+            if cs:
+                out[band_key].add((cs or "").strip().upper())
+        self._query_cache_set(cache_key, {k: set(v) for k, v in out.items()})
+        return out
 
     def _is_usa_canada(self, lat: float, lon: float) -> bool:
         return 7.0 <= lat <= 83.0 and -172.0 <= lon <= -50.0
@@ -3122,7 +3352,7 @@ class StationsMapTab(QWidget):
         if not self.prop_adaptive_enabled:
             return 0.0
         max_age = self.recency_seconds or 24 * 60 * 60
-        recent = self._load_recent_calls(max_age, band_filter={"type": "band", "value": band})
+        recent = self._load_recent_calls_by_band(max_age).get((band or "").strip().upper(), set())
         if not recent:
             return 0.0
         stations = self._stations_for_region(region_id)
@@ -3137,7 +3367,7 @@ class StationsMapTab(QWidget):
         if not self.prop_adaptive_enabled:
             return 0.0
         max_age = self.recency_seconds or 24 * 60 * 60
-        recent = self._load_recent_calls(max_age, band_filter={"type": "band", "value": band})
+        recent = self._load_recent_calls_by_band(max_age).get((band or "").strip().upper(), set())
         if not recent:
             return 0.0
         stations = self._stations_for_state(state_abbr)
@@ -3235,8 +3465,9 @@ class StationsMapTab(QWidget):
 
     def _load_observed_band_presence(self, max_age_sec: int) -> Dict[str, Set[str]]:
         observed: Dict[str, Set[str]] = {band: set() for band in PROP_BANDS}
+        recent_by_band = self._load_recent_calls_by_band(max_age_sec)
         for band in PROP_BANDS:
-            calls = self._load_recent_calls(max_age_sec, band_filter={"type": "band", "value": band})
+            calls = recent_by_band.get(band, set())
             if calls:
                 observed[band] = {c.strip().upper() for c in calls if c}
         return observed
@@ -3612,6 +3843,19 @@ class StationsMapTab(QWidget):
                 pass
             return ""
 
+        def _timed_map_call(name: str, fn, *, meta: Optional[Dict[str, object]] = None):
+            start = time.perf_counter()
+            try:
+                return fn()
+            finally:
+                emit_span(
+                    name,
+                    (time.perf_counter() - start) * 1000.0,
+                    settings=self.settings,
+                    meta=meta,
+                    min_ms=5.0,
+                )
+
         selection = self._parse_link_selection(
             self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
         )
@@ -3627,8 +3871,14 @@ class StationsMapTab(QWidget):
         prop_state_scores: Dict[str, Dict] = {}
         if self.prop_overlay_enabled:
             # Keep overlay data broad; link filters are independent from propagation target.
-            prop_region_scores = self._compute_region_scores("")
-            prop_state_scores = self._compute_state_scores()
+            prop_region_scores = _timed_map_call(
+                "map.compute_region_scores",
+                lambda: self._compute_region_scores(""),
+            )
+            prop_state_scores = _timed_map_call(
+                "map.compute_state_scores",
+                self._compute_state_scores,
+            )
             best_band, best_score = self._best_band_for_target(target_ctx, prop_region_scores, prop_state_scores)
             self._update_prop_badge(target_label, best_band, best_score)
             target_sig = f"{target_ctx.get('type','')}:{target_ctx.get('value','')}"
@@ -3653,35 +3903,46 @@ class StationsMapTab(QWidget):
             relay_target = (self.relay_target or "").strip().upper()
             reachable_filter = self._now_reachable_callsigns if self._now_reachable_enabled else None
 
-            links, stats_lookup = self._load_js8_links(
-                band_filter=band_filter,
-                my_call=my_call,
-                link_selection=selection,
-                relay_target=relay_target or None,
-                group_filter=group_filter,
-                region_filter=region_filter,
-                reachable_callsigns=reachable_filter,
-                max_age_sec=self.recency_seconds,
-            )
-            links.extend(
-                self._load_varac_links(
+            links, stats_lookup = _timed_map_call(
+                "map.load_js8_links",
+                lambda: self._load_js8_links(
                     band_filter=band_filter,
                     my_call=my_call,
                     link_selection=selection,
+                    relay_target=relay_target or None,
                     group_filter=group_filter,
                     region_filter=region_filter,
                     reachable_callsigns=reachable_filter,
                     max_age_sec=self.recency_seconds,
+                ),
+                meta={"sitrep_mode": sitrep_mode},
+            )
+            links.extend(
+                _timed_map_call(
+                    "map.load_varac_links",
+                    lambda: self._load_varac_links(
+                        band_filter=band_filter,
+                        my_call=my_call,
+                        link_selection=selection,
+                        group_filter=group_filter,
+                        region_filter=region_filter,
+                        reachable_callsigns=reachable_filter,
+                        max_age_sec=self.recency_seconds,
+                    ),
+                    meta={"sitrep_mode": sitrep_mode},
                 )
             )
             if view_state:
                 self._last_map_view = view_state
 
-        varac_stats = self._load_varac_stats(max_age_sec=self.recency_seconds)
-        varac_all = self._load_varac_stats(max_age_sec=None)
-        js8_all = self._load_js8_presence()
-        fldigi_calls = self._load_fldigi_presence()
-        spotter_status_lookup = self._load_spotter_station_status()
+        varac_stats = _timed_map_call(
+            "map.load_varac_stats_recent",
+            lambda: self._load_varac_stats(max_age_sec=self.recency_seconds),
+        )
+        varac_all = _timed_map_call("map.load_varac_stats_all", lambda: self._load_varac_stats(max_age_sec=None))
+        js8_all = _timed_map_call("map.load_js8_presence", self._load_js8_presence)
+        fldigi_calls = _timed_map_call("map.load_fldigi_presence", self._load_fldigi_presence)
+        spotter_status_lookup = _timed_map_call("map.load_spotter_station_status", self._load_spotter_station_status)
 
         # Spread overlapping stations with the same base lat/lon
         markers = []
@@ -3702,7 +3963,10 @@ class StationsMapTab(QWidget):
         recent_calls: Set[str] = set()
         if show_all_stations and self.recency_seconds and not sitrep_mode:
             band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
-            recent_calls = self._load_recent_calls(self.recency_seconds, band_filter=band_filter)
+            recent_calls = _timed_map_call(
+                "map.load_recent_calls",
+                lambda: self._load_recent_calls(self.recency_seconds, band_filter=band_filter),
+            )
         for pt in self.stations:
             cs_upper = pt.callsign.upper()
             if sitrep_mode:
@@ -3818,9 +4082,13 @@ class StationsMapTab(QWidget):
         fema_geojson = self._ensure_fema_geojson()
         cities_geojson = self._ensure_cities_geojson()
         geojson_urls = [u for u in (geojson_us, geojson_ca, geojson_mx, fema_geojson) if u]
+        # For webview reloads, keep bootstrap HTML lightweight and push live data
+        # after loadFinished to avoid serializing the same payload twice.
+        bootstrap_markers = markers if self.web is None else []
+        bootstrap_links = links if self.web is None else []
         html = self._build_leaflet_html(
-            markers,
-            links=links,
+            bootstrap_markers,
+            links=bootstrap_links,
             max_zoom=12,
             leaflet_js=leaflet_js,
             leaflet_css=leaflet_css,
@@ -3841,6 +4109,9 @@ class StationsMapTab(QWidget):
                 self._map_stack.setCurrentIndex(0)
             if self._map_loading_label is not None:
                 self._map_loading_label.setText("Loading map...")
+            # New page context: force first payload push even if content hash matches
+            # the prior page's payload.
+            self._last_map_payload_sig = None
             self._pending_map_payload = {"markers": markers, "links": links}
             with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
                 f.write(html.encode("utf-8"))
@@ -3868,6 +4139,9 @@ class StationsMapTab(QWidget):
         if self._pending_map_payload:
             payload = self._pending_map_payload
             self._pending_map_payload = None
+            # Ensure payload is applied to the freshly loaded page, even when
+            # marker/link data is identical to the previous render.
+            self._last_map_payload_sig = None
             self._push_map_payload(payload.get("markers", []), payload.get("links", []))
         if self._map_visible and self._map_dirty:
             self._map_dirty = False
@@ -3876,9 +4150,14 @@ class StationsMapTab(QWidget):
     def _on_map_visible_deferred(self) -> None:
         if not self._map_visible or self._is_shutting_down:
             return
+        self._ensure_initial_data_loaded()
         if not self._map_initialized:
             # First visible render: build/load the map HTML before waiting on loadFinished.
-            self._render_map(preserve_view=True)
+            # Clear dirty before first render to avoid an immediate duplicate render in
+            # _on_map_load_finished(). Any real updates during load will set dirty again.
+            self._map_dirty = False
+            with perf_span("map.render_call", settings=self.settings, meta={"source": "visible_init"}, min_ms=10.0):
+                self._render_map(preserve_view=True)
             return
         if self._map_dirty:
             self._map_dirty = False
@@ -3944,6 +4223,8 @@ class StationsMapTab(QWidget):
         except Exception:
             ui_theme = ""
         is_dark = theme.get("bg") == "#0F1216" or ui_theme == "dark"
+        grid_color = "#5F6B7A" if is_dark else "#666"
+        grid_opacity = "0.3" if is_dark else "0.3"
         now_reachable_enabled = str(bool(self._now_reachable_enabled)).lower()
         markers_json = json.dumps(markers)
         links_json = json.dumps(links)
@@ -4073,6 +4354,13 @@ function addGridLabels(res, level, bounds, maxLabels) {
             if self.show_grids
             else ""
         )
+        if grid_layer:
+            # Replace style placeholders without converting the full JS block
+            # into an f-string (which would require escaping many braces).
+            grid_layer = (
+                grid_layer.replace("{grid_color}", str(grid_color))
+                .replace("{grid_opacity}", str(grid_opacity))
+            )
         road_fetch = ""
         prop_region_best: Dict[str, Dict] = {}
         if prop_region_scores:
@@ -4116,8 +4404,6 @@ function addGridLabels(res, level, bounds, maxLabels) {
         tooltip_border = "#3A4452" if is_dark else "#444"
         legend_bg = "rgba(26,31,38,0.92)" if is_dark else "rgba(255,255,255,0.92)"
         legend_text = "#C6CBD4" if is_dark else "#000"
-        grid_color = "#5F6B7A" if is_dark else "#666"
-        grid_opacity = "0.3" if is_dark else "0.3"
         state_border = "#8A93A6" if is_dark else "#666"
         state_border_opacity = "0.7" if is_dark else "0.5"
         region_fill_opacity = "0.05" if is_dark else "0.08"
@@ -4732,26 +5018,13 @@ function addGridLabels(res, level, bounds, maxLabels) {
         self._render_map()
     def _ensure_leaflet_assets(self) -> tuple[str, str]:
         """
-        Ensure leaflet.js/css are available locally; otherwise use CDN.
+        Resolve Leaflet asset URLs without blocking the UI thread.
+        Prefer local bundled assets; fall back to CDN when unavailable.
         Returns (js_url, css_url).
         """
         js_file = self._asset_dir / "leaflet.js"
         css_file = self._asset_dir / "leaflet.css"
         self._asset_dir.mkdir(parents=True, exist_ok=True)
-
-        def download(url: str, dest: Path):
-            import urllib.request
-            try:
-                urllib.request.urlretrieve(url, dest)
-                return True
-            except Exception as e:
-                log.warning("StationsMap: failed to download %s: %s", url, e)
-                return False
-
-        if not js_file.exists() or js_file.stat().st_size == 0:
-            download("https://unpkg.com/leaflet@1.9.4/dist/leaflet.js", js_file)
-        if not css_file.exists() or css_file.stat().st_size == 0:
-            download("https://unpkg.com/leaflet@1.9.4/dist/leaflet.css", css_file)
 
         js_url = QUrl.fromLocalFile(str(js_file)).toString() if js_file.exists() else "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         css_url = QUrl.fromLocalFile(str(css_file)).toString() if css_file.exists() else "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -4759,17 +5032,12 @@ function addGridLabels(res, level, bounds, maxLabels) {
 
     def _ensure_geojson(self, dest: Path, url: str) -> Optional[str]:
         """
-        Ensure a GeoJSON file is available locally; otherwise try to download.
+        Resolve GeoJSON URL without blocking the UI thread.
+        Prefer local file; fall back to remote URL when unavailable.
         """
-        try:
-            if not dest.exists() or dest.stat().st_size == 0:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                urllib.request.urlretrieve(url, dest)
-        except Exception as e:
-            log.warning("StationsMap: failed to fetch GeoJSON %s: %s", url, e)
-        if dest.exists():
+        if dest.exists() and dest.stat().st_size > 0:
             return QUrl.fromLocalFile(str(dest)).toString()
-        return None
+        return url
 
     def _ensure_cities_geojson(self) -> Optional[str]:
         """
@@ -5475,7 +5743,12 @@ class JS8LogLinkIndexer:
                 with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
                     if directed_offset > 0:
                         fh.seek(directed_offset)
-                    for line in fh:
+                    last_pos = fh.tell()
+                    while True:
+                        line = fh.readline()
+                        if not line:
+                            break
+                        last_pos = fh.tell()
                         parts = line.split("\t", 4)
                         msg = parts[4] if len(parts) >= 5 else ""
                         origin, _dest = self._extract_origin_dest(msg)
@@ -5489,7 +5762,7 @@ class JS8LogLinkIndexer:
                         self._maybe_capture_group_grid(line)
                         handle_parsed(self._parse_directed_line(line))
                     try:
-                        self.settings.set("js8_links_directed_offset", int(fh.tell()))
+                        self.settings.set("js8_links_directed_offset", int(last_pos))
                     except Exception:
                         pass
             except Exception as e:
@@ -5503,7 +5776,12 @@ class JS8LogLinkIndexer:
                 with all_path.open("r", encoding="utf-8", errors="ignore") as fh:
                     if all_offset > 0:
                         fh.seek(all_offset)
-                    for line in fh:
+                    last_pos = fh.tell()
+                    while True:
+                        line = fh.readline()
+                        if not line:
+                            break
+                        last_pos = fh.tell()
                         if "Transmitting" in line:
                             msg_part = ""
                             if "JS8:" in line:
@@ -5524,7 +5802,7 @@ class JS8LogLinkIndexer:
                                 self._maybe_capture_geo_tokens(origin, msg_part, freq_hz)
                         handle_parsed(self._parse_all_line(line))
                     try:
-                        self.settings.set("js8_links_all_offset", int(fh.tell()))
+                        self.settings.set("js8_links_all_offset", int(last_pos))
                     except Exception:
                         pass
             except Exception as e:

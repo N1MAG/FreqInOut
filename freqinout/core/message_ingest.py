@@ -197,7 +197,12 @@ class MessageIngestor:
             with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
                 if offset:
                     fh.seek(offset)
-                for line in fh:
+                last_pos = fh.tell()
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        break
+                    last_pos = fh.tell()
                     parsed = self._parse_directed_spotter_line(line)
                     if not parsed:
                         continue
@@ -251,7 +256,7 @@ class MessageIngestor:
                     )
                     conn.commit()
                     conn.close()
-                self.settings.set(self._spotter_offset_key(), int(fh.tell()))
+                self.settings.set(self._spotter_offset_key(), int(last_pos))
                 if hasattr(self.settings, "save"):
                     self.settings.save()
         except Exception as e:

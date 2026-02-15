@@ -2298,7 +2298,11 @@ class SchedulerEngine(QObject):
             busy_reasons.append("JS8Call is busy (RX/TX)")
 
         if source != "NET" and not self._varac_busy_ok(status=varac_status):
-            busy_reasons.append("VarAC is busy")
+            varac_reason = str(varac_status.get("reason") or "").strip()
+            if varac_reason:
+                busy_reasons.append(f"VarAC is busy ({varac_reason})")
+            else:
+                busy_reasons.append("VarAC is busy")
 
         if fldigi_delay:
             reason = "FLDigi RX activity"
