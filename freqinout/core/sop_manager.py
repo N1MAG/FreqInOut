@@ -4,10 +4,12 @@ import datetime as dt
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.local_ops_store import get_all_operators
 from freqinout.core.logger import log
+from freqinout.core.propagation_outcome_ingest import STATE_TO_FEMA_REGION
 
 
 CONFIG_DIR = get_config_dir() / "config"
@@ -44,6 +46,155 @@ def _parse_hhmm(value: str, default_hhmm: str = "00:00") -> Tuple[int, int]:
 def _day_name_from_utc(ts: dt.datetime) -> str:
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     return days[ts.weekday()]
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> Set[str]:
+    try:
+        cur = conn.execute(f"PRAGMA table_info({table_name})")
+        return {str(row[1] or "").strip().lower() for row in cur.fetchall() if row and len(row) > 1}
+    except Exception:
+        return set()
+
+
+def _norm_state(value: Any) -> str:
+    txt = str(value or "").strip().upper()
+    return txt[:2] if txt else ""
+
+
+def _norm_region(value: Any) -> str:
+    txt = str(value or "").strip().upper()
+    if not txt:
+        return ""
+    if txt.startswith("R") and len(txt) == 2 and txt[1].isdigit():
+        txt = f"R0{txt[1]}"
+    if txt.startswith("R") and len(txt) == 3 and txt[1:].isdigit():
+        txt = f"R{txt[1:].zfill(2)}"
+    if txt in {f"R{idx:02d}" for idx in range(1, 11)}:
+        return txt
+    return ""
+
+
+def _norm_sitrep(raw: Any) -> str:
+    txt = str(raw or "").strip().upper()
+    if txt in {"GREEN", "YELLOW", "RED"}:
+        return txt
+    return "UNKNOWN"
+
+
+def _norm_group(value: Any) -> str:
+    txt = str(value or "").strip().upper()
+    if not txt:
+        return ""
+    for ch in "\"'[]{}()":
+        txt = txt.replace(ch, "")
+    txt = " ".join(txt.split())
+    return txt.strip()
+
+
+def _norm_trusted_filter(value: Any) -> str:
+    txt = str(value or "").strip().upper()
+    if txt in {"TRUSTED", "UNTRUSTED"}:
+        return txt
+    return ""
+
+
+def _trusted_label(value: Any) -> str:
+    try:
+        return "TRUSTED" if int(value or 0) > 0 else "UNTRUSTED"
+    except Exception:
+        txt = str(value or "").strip().lower()
+        return "TRUSTED" if txt in {"true", "yes", "y", "trusted"} else "UNTRUSTED"
+
+
+def _group_tokens_from_json(raw: Any) -> Set[str]:
+    out: Set[str] = set()
+    if raw is None:
+        return out
+    text = str(raw).strip()
+    if not text:
+        return out
+
+    def _add(val: Any) -> None:
+        token = _norm_group(val)
+        if token:
+            out.add(token)
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, str):
+                _add(item)
+            elif isinstance(item, dict):
+                for k, v in item.items():
+                    if isinstance(v, str):
+                        _add(v)
+                    if bool(v):
+                        _add(k)
+    elif isinstance(parsed, dict):
+        for k, v in parsed.items():
+            if isinstance(v, str):
+                _add(v)
+            if bool(v):
+                _add(k)
+    elif isinstance(parsed, str):
+        inner = parsed.strip()
+        if inner:
+            try:
+                nested = json.loads(inner)
+            except Exception:
+                nested = None
+            if isinstance(nested, list):
+                for item in nested:
+                    if isinstance(item, str):
+                        _add(item)
+                    elif isinstance(item, dict):
+                        for k, v in item.items():
+                            if isinstance(v, str):
+                                _add(v)
+                            if bool(v):
+                                _add(k)
+            elif isinstance(nested, dict):
+                for k, v in nested.items():
+                    if isinstance(v, str):
+                        _add(v)
+                    if bool(v):
+                        _add(k)
+            else:
+                text = inner
+
+    for chunk in str(text).replace(";", ",").replace("|", ",").split(","):
+        _add(chunk)
+    return out
+
+
+def _collect_group_tokens(*values: Any) -> Set[str]:
+    out: Set[str] = set()
+    if len(values) >= 4:
+        raw_json = values[3]
+    else:
+        raw_json = ""
+    for raw in values[:3]:
+        token = _norm_group(raw)
+        if token:
+            out.add(token)
+    out.update(_group_tokens_from_json(raw_json))
+    return out
+
+
+def _passes_geo_filter(state: str, *, state_filter: str, region_filter: str) -> bool:
+    st = _norm_state(state)
+    sf = _norm_state(state_filter)
+    rf = _norm_region(region_filter)
+    if sf and st != sf:
+        return False
+    if rf:
+        if STATE_TO_FEMA_REGION.get(st, "") != rf:
+            return False
+    return True
 
 
 class SOPManager:
@@ -681,6 +832,259 @@ class SOPManager:
                 )
         rows.sort(key=lambda x: x["next_due_utc"])
         return rows
+
+    def list_export_regions(self) -> List[str]:
+        return sorted({str(v).strip().upper() for v in STATE_TO_FEMA_REGION.values() if str(v).strip()})
+
+    def list_hf_groups_for_export(self) -> List[str]:
+        conn = self._connect()
+        out: Set[str] = set()
+        try:
+            cols = _table_columns(conn, "operator_checkins")
+            if not cols or "callsign" not in cols:
+                return []
+            group1_expr = "IFNULL(group1, '')" if "group1" in cols else "''"
+            group2_expr = "IFNULL(group2, '')" if "group2" in cols else "''"
+            group3_expr = "IFNULL(group3, '')" if "group3" in cols else "''"
+            groups_json_expr = "IFNULL(groups_json, '')" if "groups_json" in cols else "''"
+            cur = conn.execute(
+                f"""
+                SELECT {group1_expr}, {group2_expr}, {group3_expr}, {groups_json_expr}
+                FROM operator_checkins
+                """
+            )
+            for g1, g2, g3, groups_json in cur.fetchall():
+                out.update(_collect_group_tokens(g1, g2, g3, groups_json))
+            return sorted(out)
+        except Exception as e:
+            log.debug("SOP: list_hf_groups_for_export failed: %s", e)
+            return []
+        finally:
+            conn.close()
+
+    def list_local_categories_for_export(self) -> List[str]:
+        out: Set[str] = set()
+        try:
+            for row in get_all_operators():
+                category = str(row.get("category") or "").strip()
+                if category:
+                    out.add(category)
+            return sorted(out, key=lambda x: x.upper())
+        except Exception as e:
+            log.debug("SOP: list_local_categories_for_export failed: %s", e)
+            return []
+
+    def _contact_display_for_export(
+        self,
+        *,
+        rule: str,
+        target: str,
+        contacts: Dict[str, List[str]],
+    ) -> str:
+        rule_val = (rule or "none").strip().lower()
+        tgt = (target or "").strip().upper()
+        any_role = "__ANY_ROLE__"
+        if rule_val == "hub_or_hub_alt":
+            if tgt and tgt != any_role:
+                return tgt
+            vals = contacts.get("hub", []) or []
+            return " OR ".join(vals[:4]) if vals else "Any (Role Match)"
+        if rule_val == "ncs_or_ancs":
+            if tgt and tgt != any_role:
+                return tgt
+            vals = contacts.get("ncs", []) or []
+            return " OR ".join(vals[:4]) if vals else "Any (Role Match)"
+        if rule_val in {"callsign", "peer", "local_profile"}:
+            return tgt or "--"
+        return "--"
+
+    def build_profile_export_rows(
+        self,
+        profile_id: int,
+        *,
+        now_utc: Optional[dt.datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        full = self.get_profile(profile_id)
+        if not full:
+            return []
+        now = now_utc or dt.datetime.now(dt.timezone.utc)
+        contacts = self.resolve_primary_contacts(
+            full.get("operating_group", ""),
+            full.get("secondary_group", ""),
+        )
+        rows: List[Dict[str, Any]] = []
+        for action in full.get("actions", []):
+            if not bool(action.get("enabled", True)):
+                continue
+            interval_m = int(action.get("interval_minutes") or 0)
+            if interval_m <= 0:
+                interval_m = max(1, int(action.get("interval_hours") or 3)) * 60
+            interval_td = dt.timedelta(minutes=interval_m)
+            next_due = self.compute_next_due(
+                full.get("sop_start_utc", "00:00"),
+                interval_m,
+                now_utc=now,
+                last_completed_utc=action.get("last_completed_utc"),
+            )
+            current_due = next_due - interval_td
+            status = "Upcoming"
+            if current_due <= now < next_due:
+                late = now - current_due
+                if late <= dt.timedelta(minutes=20):
+                    status = "Due Now"
+                else:
+                    status = "Overdue"
+            last_completed = _parse_iso_utc(action.get("last_completed_utc"))
+            if last_completed and current_due <= last_completed < (current_due + interval_td):
+                status = "Completed"
+            rows.append(
+                {
+                    "profile_id": int(full.get("id") or 0),
+                    "profile_name": str(full.get("name") or ""),
+                    "operating_group": str(full.get("operating_group") or ""),
+                    "secondary_group": str(full.get("secondary_group") or ""),
+                    "sop_start_utc": str(full.get("sop_start_utc") or "00:00"),
+                    "action_id": int(action.get("id") or 0),
+                    "software": str(action.get("software") or ""),
+                    "action_label": str(action.get("action_label") or ""),
+                    "band": str(action.get("band") or "").strip().upper(),
+                    "frequency": str(action.get("frequency") or "").strip() or str(full.get("frequency") or ""),
+                    "description": str(action.get("description") or ""),
+                    "interval_minutes": interval_m,
+                    "status": status,
+                    "next_due_utc": next_due,
+                    "contact_display": self._contact_display_for_export(
+                        rule=str(action.get("contact_rule") or "none"),
+                        target=str(action.get("contact_target") or ""),
+                        contacts=contacts,
+                    ),
+                }
+            )
+        rows.sort(key=lambda x: x["next_due_utc"])
+        return rows
+
+    def list_hf_operators_for_export(
+        self,
+        *,
+        state_filter: str = "",
+        region_filter: str = "",
+        group_filters: Optional[List[str]] = None,
+        trusted_filters: Optional[List[str]] = None,
+    ) -> List[Dict[str, str]]:
+        conn = self._connect()
+        out: List[Dict[str, str]] = []
+        try:
+            cols = _table_columns(conn, "operator_checkins")
+            if not cols or "callsign" not in cols:
+                return []
+            name_expr = "IFNULL(name, '')" if "name" in cols else "''"
+            state_expr = "IFNULL(state, '')" if "state" in cols else "''"
+            notes_expr = "IFNULL(notes, '')" if "notes" in cols else "''"
+            group1_expr = "IFNULL(group1, '')" if "group1" in cols else "''"
+            group2_expr = "IFNULL(group2, '')" if "group2" in cols else "''"
+            group3_expr = "IFNULL(group3, '')" if "group3" in cols else "''"
+            groups_json_expr = "IFNULL(groups_json, '')" if "groups_json" in cols else "''"
+            trusted_expr = "trusted" if "trusted" in cols else "0"
+            selected_groups = {_norm_group(v) for v in (group_filters or []) if _norm_group(v)}
+            selected_trusted = {_norm_trusted_filter(v) for v in (trusted_filters or []) if _norm_trusted_filter(v)}
+            sitrep_map: Dict[str, str] = {}
+            try:
+                cur = conn.execute("SELECT callsign, effective_status FROM sitrep_latest_by_callsign")
+                for callsign, status in cur.fetchall():
+                    cs = str(callsign or "").strip().upper()
+                    if cs:
+                        sitrep_map[cs] = _norm_sitrep(status)
+            except Exception:
+                if "sitrep_status" in cols:
+                    try:
+                        cur = conn.execute("SELECT callsign, sitrep_status FROM operator_checkins")
+                        for callsign, status in cur.fetchall():
+                            cs = str(callsign or "").strip().upper()
+                            if cs:
+                                sitrep_map[cs] = _norm_sitrep(status)
+                    except Exception:
+                        pass
+            cur = conn.execute(
+                f"""
+                SELECT
+                    IFNULL(callsign, ''),
+                    {name_expr},
+                    {state_expr},
+                    {notes_expr},
+                    {group1_expr},
+                    {group2_expr},
+                    {group3_expr},
+                    {groups_json_expr},
+                    {trusted_expr}
+                FROM operator_checkins
+                ORDER BY callsign COLLATE NOCASE
+                """
+            )
+            for callsign, name, state, notes, g1, g2, g3, groups_json, trusted in cur.fetchall():
+                cs = str(callsign or "").strip().upper()
+                st = _norm_state(state)
+                if not cs:
+                    continue
+                if not _passes_geo_filter(st, state_filter=state_filter, region_filter=region_filter):
+                    continue
+                row_groups = _collect_group_tokens(g1, g2, g3, groups_json)
+                if selected_groups and not (row_groups & selected_groups):
+                    continue
+                row_trusted = _trusted_label(trusted)
+                if selected_trusted and row_trusted not in selected_trusted:
+                    continue
+                out.append(
+                    {
+                        "callsign": cs,
+                        "name": str(name or "").strip(),
+                        "state": st,
+                        "sitrep": sitrep_map.get(cs, "UNKNOWN"),
+                        "notes": str(notes or "").strip(),
+                    }
+                )
+            return out
+        except Exception as e:
+            log.debug("SOP: list_hf_operators_for_export failed: %s", e)
+            return []
+        finally:
+            conn.close()
+
+    def list_local_operators_for_export(
+        self,
+        *,
+        state_filter: str = "",
+        region_filter: str = "",
+        category_filters: Optional[List[str]] = None,
+    ) -> List[Dict[str, str]]:
+        out: List[Dict[str, str]] = []
+        selected_categories = {_norm_group(v) for v in (category_filters or []) if _norm_group(v)}
+        try:
+            for row in get_all_operators():
+                cs = str(row.get("callsign") or "").strip().upper()
+                st = _norm_state(row.get("state"))
+                category = str(row.get("category") or "").strip()
+                if not cs:
+                    continue
+                if not _passes_geo_filter(st, state_filter=state_filter, region_filter=region_filter):
+                    continue
+                if selected_categories and _norm_group(category) not in selected_categories:
+                    continue
+                out.append(
+                    {
+                        "callsign": cs,
+                        "first_name": str(row.get("first_name") or "").strip(),
+                        "last_name": str(row.get("last_name") or "").strip(),
+                        "city": str(row.get("city") or "").strip(),
+                        "state": st,
+                        "category": category,
+                        "sitrep": _norm_sitrep(row.get("sitrep_status")),
+                        "notes": str(row.get("notes") or "").strip(),
+                    }
+                )
+            return out
+        except Exception as e:
+            log.debug("SOP: list_local_operators_for_export failed: %s", e)
+            return []
 
     def export_profile_json(self, profile_id: int) -> Dict[str, Any]:
         profile = self.get_profile(profile_id)

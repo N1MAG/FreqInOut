@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QAbstractItemView,
     QMessageBox,
+    QApplication,
     QCompleter,
     QSizePolicy,
     QAbstractScrollArea,
@@ -56,6 +57,20 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_ingest import ingest_varac
+from freqinout.core.gpg_tools import (
+    DEFAULT_INLINE_SIGNED_SUFFIXES,
+    find_detached_signature,
+    normalize_fingerprint,
+    normalize_fingerprints,
+    normalize_signature_name_suffixes,
+    verify_file_with_discovery,
+)
+from freqinout.core.hash_tools import (
+    existing_checksum_sidecars,
+    normalize_trusted_hash_entries,
+    verify_file_hash_against_registry,
+    verify_file_hash_with_discovery,
+)
 from freqinout.gui.theme import resolve_theme, button_style
 from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
 
@@ -80,6 +95,7 @@ ORIGIN_EXTS = {
     "varac": {".txt", ".html", ".htm", ".b2s", ".k2s", *IMAGE_EXTS},
     "bbs": set(SUPPORTED_EXT),
 }
+FLAMP_AUTH_EXTS = {".b2s", ".k2s"}
 
 DEFAULT_WATCH_DIRS = [
     {"path": r"C:\VarAC", "origin": "varac"},
@@ -474,6 +490,7 @@ class _RowsBuildWorker(QObject):
         sitrep_messages: List["SitrepMessage"],
         files: Dict[str, List[FileRecord]],
         read_state_map: Dict[tuple, tuple[str, float, int]],
+        signature_state_map: Dict[tuple, Dict[str, object]],
         sender_cache_seed: Dict[tuple, str],
         form_titles: Dict[str, str],
         show_local_time: bool,
@@ -495,6 +512,7 @@ class _RowsBuildWorker(QObject):
             "bbs": list(files.get("bbs", [])),
         }
         self._read_state_map = dict(read_state_map)
+        self._signature_state_map = dict(signature_state_map or {})
         self._sender_cache_seed = dict(sender_cache_seed)
         self._sender_cache_updates: Dict[tuple, str] = {}
         self._form_titles = {str(k): str(v or "") for k, v in (form_titles or {}).items()}
@@ -824,6 +842,29 @@ class _RowsBuildWorker(QObject):
             return str(state[0]).upper()
         return "NEW"
 
+    @staticmethod
+    def _signature_key(rec: FileRecord) -> tuple:
+        return (str(rec.origin or "").strip().lower(), str(rec.path), float(rec.mtime or 0.0), int(rec.size or 0))
+
+    @staticmethod
+    def _is_flamp_auth_file(rec: FileRecord) -> bool:
+        return (
+            str(rec.origin or "").strip().lower() == "flamp"
+            and str(rec.path.suffix or "").strip().lower() in FLAMP_AUTH_EXTS
+        )
+
+    def _signature_row_state(self, rec: FileRecord) -> tuple[str, str, bool]:
+        if not self._is_flamp_auth_file(rec):
+            return "", "", False
+        key = self._signature_key(rec)
+        state = self._signature_state_map.get(key, {}) if isinstance(self._signature_state_map, dict) else {}
+        if not isinstance(state, dict):
+            return "", "", False
+        status = str(state.get("status", "") or "").strip()
+        detail = str(state.get("detail", "") or "").strip()
+        trusted = bool(state.get("trusted", False))
+        return status, detail, trusted
+
     def run(self) -> None:
         start = time.perf_counter()
         rows: List[UnifiedMessage] = []
@@ -985,6 +1026,7 @@ class _RowsBuildWorker(QObject):
                     msg_type = "FLMSG"
                 elif origin == "bbs":
                     msg_type = "BBS"
+                auth_state, auth_detail, auth_trusted = self._signature_row_state(rec)
                 rows.append(
                     UnifiedMessage(
                         msg_type=msg_type,
@@ -997,6 +1039,9 @@ class _RowsBuildWorker(QObject):
                         origin=origin,
                         payload=rec,
                         search_text=self._compose_search_text(msg_type, status, from_call, "", rcv_display, title),
+                        auth_state=auth_state,
+                        auth_detail=auth_detail,
+                        auth_trusted=auth_trusted,
                     )
                 )
 
@@ -1009,6 +1054,149 @@ class _RowsBuildWorker(QObject):
                 "sender_cache_updates": dict(self._sender_cache_updates),
                 "generation": self._generation,
                 "force": self._force,
+            }
+        )
+
+
+@dataclass
+class FileSignatureState:
+    status: str = "unsigned"
+    detail: str = ""
+    signer_fingerprint: str = ""
+    signer_uid: str = ""
+    trusted: bool = False
+    signature_path: str = ""
+    signature_mtime: float = 0.0
+    signature_size: int = 0
+    hash_status: str = "unsigned"
+    hash_detail: str = ""
+    hash_algorithm: str = ""
+    hash_expected: str = ""
+    hash_actual: str = ""
+    hash_path: str = ""
+    hash_mtime: float = 0.0
+    hash_size: int = 0
+    local_hash_status: str = "unsigned"
+    local_hash_detail: str = ""
+    local_hash_algorithm: str = ""
+    local_hash_expected: str = ""
+    local_hash_actual: str = ""
+    local_hash_label: str = ""
+    local_hash_set_sig: str = ""
+    verified_ts: float = 0.0
+
+
+class _SignatureVerifyWorker(QObject):
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        records: List[FileRecord],
+        *,
+        verify_signature: bool,
+        verify_hash: bool,
+        inline_sig_name_suffixes: List[str],
+        trusted_hash_entries: List[dict],
+        trusted_hash_sig: str,
+        gpg_path: str,
+        trusted_signers: set[str],
+        generation: int,
+    ):
+        super().__init__()
+        self._records = list(records)
+        self._verify_signature = bool(verify_signature)
+        self._verify_hash = bool(verify_hash)
+        self._inline_sig_name_suffixes = [str(v or "").strip().lower() for v in (inline_sig_name_suffixes or []) if str(v or "").strip()]
+        self._trusted_hash_entries = list(trusted_hash_entries or [])
+        self._trusted_hash_sig = str(trusted_hash_sig or "")
+        self._gpg_path = str(gpg_path or "").strip()
+        self._trusted_signers = set(trusted_signers)
+        self._generation = int(generation)
+
+    @staticmethod
+    def _cache_key(rec: FileRecord) -> tuple:
+        return (str(rec.origin or "").strip().lower(), str(rec.path), float(rec.mtime or 0.0), int(rec.size or 0))
+
+    def run(self) -> None:
+        start = time.perf_counter()
+        out: Dict[tuple, dict] = {}
+        for rec in self._records:
+            key = self._cache_key(rec)
+            if self._verify_signature:
+                sig_result = verify_file_with_discovery(
+                    rec.path,
+                    configured_path=self._gpg_path,
+                    trusted_fingerprints=self._trusted_signers,
+                    allow_inline_clearsigned=True,
+                    inline_name_suffixes=self._inline_sig_name_suffixes,
+                )
+            else:
+                sig_result = None
+            if self._verify_hash:
+                hash_result = verify_file_hash_with_discovery(rec.path)
+                local_hash_result = verify_file_hash_against_registry(rec.path, self._trusted_hash_entries)
+            else:
+                hash_result = None
+                local_hash_result = None
+
+            sig_path = Path(sig_result.signature_path) if sig_result and sig_result.signature_path else find_detached_signature(rec.path)
+            sig_mtime = 0.0
+            sig_size = 0
+            sig_path_str = ""
+            if sig_path is not None:
+                sig_path_str = str(sig_path)
+                try:
+                    st = sig_path.stat()
+                    sig_mtime = float(st.st_mtime)
+                    sig_size = int(st.st_size)
+                except Exception:
+                    sig_mtime = 0.0
+                    sig_size = 0
+            hash_path_obj = Path(hash_result.checksum_path) if hash_result and hash_result.checksum_path else None
+            hash_mtime = 0.0
+            hash_size = 0
+            hash_path_str = ""
+            if hash_path_obj is not None:
+                hash_path_str = str(hash_path_obj)
+                try:
+                    st = hash_path_obj.stat()
+                    hash_mtime = float(st.st_mtime)
+                    hash_size = int(st.st_size)
+                except Exception:
+                    hash_mtime = 0.0
+                    hash_size = 0
+            out[key] = {
+                "status": str(sig_result.status or "unsigned") if sig_result else "unsigned",
+                "detail": str(sig_result.detail or "") if sig_result else "Signature verification disabled.",
+                "signer_fingerprint": str(sig_result.signer_fingerprint or "") if sig_result else "",
+                "signer_uid": str(sig_result.signer_uid or "") if sig_result else "",
+                "trusted": bool(sig_result.trusted) if sig_result else False,
+                "signature_path": sig_path_str,
+                "signature_mtime": float(sig_mtime),
+                "signature_size": int(sig_size),
+                "hash_status": str(hash_result.status or "unsigned") if hash_result else "unsigned",
+                "hash_detail": str(hash_result.detail or "") if hash_result else "Checksum verification disabled.",
+                "hash_algorithm": str(hash_result.algorithm or "") if hash_result else "",
+                "hash_expected": str(hash_result.expected_hash or "") if hash_result else "",
+                "hash_actual": str(hash_result.actual_hash or "") if hash_result else "",
+                "hash_path": hash_path_str,
+                "hash_mtime": float(hash_mtime),
+                "hash_size": int(hash_size),
+                "local_hash_status": str(local_hash_result.status or "unsigned") if local_hash_result else "unsigned",
+                "local_hash_detail": str(local_hash_result.detail or "") if local_hash_result else "Local hash verification disabled.",
+                "local_hash_algorithm": str(local_hash_result.algorithm or "") if local_hash_result else "",
+                "local_hash_expected": str(local_hash_result.expected_hash or "") if local_hash_result else "",
+                "local_hash_actual": str(local_hash_result.actual_hash or "") if local_hash_result else "",
+                "local_hash_label": str(local_hash_result.entry_label or "") if local_hash_result else "",
+                "local_hash_set_sig": str(self._trusted_hash_sig or ""),
+                "verified_ts": float(time.time()),
+            }
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        self.finished.emit(
+            {
+                "generation": self._generation,
+                "elapsed_ms": elapsed_ms,
+                "results": out,
             }
         )
 
@@ -1077,6 +1265,9 @@ class UnifiedMessage:
     origin: str
     payload: object
     search_text: str = ""
+    auth_state: str = ""
+    auth_detail: str = ""
+    auth_trusted: bool = False
 
 
 class MessageTableModel(QAbstractTableModel):
@@ -1129,6 +1320,21 @@ class MessageTableModel(QAbstractTableModel):
                 return "View"
         if role == Qt.UserRole:
             return row
+        if role == Qt.DecorationRole and col == 1:
+            auth = str(getattr(row, "auth_state", "") or "").strip().lower()
+            app = QApplication.instance()
+            style = app.style() if app is not None else None
+            if style is None:
+                return None
+            if auth == "valid":
+                return style.standardIcon(QStyle.SP_DialogApplyButton)
+            if auth in {"invalid", "error"}:
+                return style.standardIcon(QStyle.SP_MessageBoxWarning)
+            return None
+        if role == Qt.ToolTipRole and col in (1, 6):
+            detail = str(getattr(row, "auth_detail", "") or "").strip()
+            if detail:
+                return detail
         if role == Qt.ForegroundRole and col == 2 and row.status == "NEW":
             return QColor(Qt.red)
         return None
@@ -1607,6 +1813,12 @@ class MessageViewerTab(QWidget):
         self._scan_cache_saved_ts: float = 0.0
         self._scan_dir_mtime_cache: Dict[str, float] = {}
         self._files_snapshot_fp: Optional[Tuple[Tuple[str, int, int], ...]] = None
+        self._signature_state_map: Dict[tuple, FileSignatureState] = {}
+        self._signature_verify_thread: QThread | None = None
+        self._signature_verify_worker: _SignatureVerifyWorker | None = None
+        self._signature_verify_generation: int = 0
+        self._signature_verify_pending: bool = False
+        self._signature_verify_pending_records: List[FileRecord] = []
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -1615,7 +1827,9 @@ class MessageViewerTab(QWidget):
         self._ensure_spotter_table()
         self._ensure_fldigi_sender_table()
         self._ensure_file_scan_cache_table()
+        self._ensure_signature_cache_table()
         self._read_state_map = self._load_read_state_map()
+        self._signature_state_map = self._load_signature_state_map()
 
         self.files: Dict[str, List[FileRecord]] = {"varac": [], "flmsg": [], "flamp": [], "bbs": []}
         self.current_record: FileRecord | None = None
@@ -1846,6 +2060,245 @@ class MessageViewerTab(QWidget):
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to ensure file scan cache table: %s", e)
+
+    def _ensure_signature_cache_table(self) -> None:
+        db_path = self._db_path()
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_signature_cache (
+                    origin TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    mtime REAL NOT NULL,
+                    size INTEGER NOT NULL,
+                    sig_path TEXT,
+                    sig_mtime REAL,
+                    sig_size INTEGER,
+                    status TEXT NOT NULL,
+                    detail TEXT,
+                    signer_fingerprint TEXT,
+                    signer_uid TEXT,
+                    trusted INTEGER DEFAULT 0,
+                    hash_status TEXT DEFAULT 'unsigned',
+                    hash_detail TEXT,
+                    hash_algorithm TEXT,
+                    hash_expected TEXT,
+                    hash_actual TEXT,
+                    hash_path TEXT,
+                    hash_mtime REAL,
+                    hash_size INTEGER,
+                    local_hash_status TEXT DEFAULT 'unsigned',
+                    local_hash_detail TEXT,
+                    local_hash_algorithm TEXT,
+                    local_hash_expected TEXT,
+                    local_hash_actual TEXT,
+                    local_hash_label TEXT,
+                    local_hash_set_sig TEXT,
+                    verified_ts REAL,
+                    PRIMARY KEY (origin, path, mtime, size)
+                )
+                """
+            )
+            for col_def in (
+                "hash_status TEXT DEFAULT 'unsigned'",
+                "hash_detail TEXT",
+                "hash_algorithm TEXT",
+                "hash_expected TEXT",
+                "hash_actual TEXT",
+                "hash_path TEXT",
+                "hash_mtime REAL",
+                "hash_size INTEGER",
+                "local_hash_status TEXT DEFAULT 'unsigned'",
+                "local_hash_detail TEXT",
+                "local_hash_algorithm TEXT",
+                "local_hash_expected TEXT",
+                "local_hash_actual TEXT",
+                "local_hash_label TEXT",
+                "local_hash_set_sig TEXT",
+            ):
+                try:
+                    cur.execute(f"ALTER TABLE message_signature_cache ADD COLUMN {col_def}")
+                except Exception:
+                    pass
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_message_signature_cache_status ON message_signature_cache(status)"
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to ensure signature cache table: %s", e)
+
+    @staticmethod
+    def _signature_cache_key(rec: FileRecord) -> tuple:
+        return (
+            str(rec.origin or "").strip().lower(),
+            str(rec.path),
+            float(rec.mtime or 0.0),
+            int(rec.size or 0),
+        )
+
+    def _load_signature_state_map(self) -> Dict[tuple, FileSignatureState]:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return {}
+        self._ensure_signature_cache_table()
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT origin, path, mtime, size, sig_path, sig_mtime, sig_size,
+                       status, detail, signer_fingerprint, signer_uid, trusted,
+                       hash_status, hash_detail, hash_algorithm, hash_expected, hash_actual,
+                       hash_path, hash_mtime, hash_size,
+                       local_hash_status, local_hash_detail, local_hash_algorithm,
+                       local_hash_expected, local_hash_actual, local_hash_label, local_hash_set_sig,
+                       verified_ts
+                FROM message_signature_cache
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to load signature cache: %s", e)
+            return {}
+
+        out: Dict[tuple, FileSignatureState] = {}
+        for row in rows:
+            try:
+                (
+                    origin,
+                    path,
+                    mtime,
+                    size,
+                    sig_path,
+                    sig_mtime,
+                    sig_size,
+                    status,
+                    detail,
+                    signer_fpr,
+                    signer_uid,
+                    trusted,
+                    hash_status,
+                    hash_detail,
+                    hash_algorithm,
+                    hash_expected,
+                    hash_actual,
+                    hash_path,
+                    hash_mtime,
+                    hash_size,
+                    local_hash_status,
+                    local_hash_detail,
+                    local_hash_algorithm,
+                    local_hash_expected,
+                    local_hash_actual,
+                    local_hash_label,
+                    local_hash_set_sig,
+                    verified_ts,
+                ) = row
+                key = (str(origin or "").strip().lower(), str(path or ""), float(mtime or 0.0), int(size or 0))
+                out[key] = FileSignatureState(
+                    status=str(status or "unsigned"),
+                    detail=str(detail or ""),
+                    signer_fingerprint=str(signer_fpr or ""),
+                    signer_uid=str(signer_uid or ""),
+                    trusted=bool(int(trusted or 0)),
+                    signature_path=str(sig_path or ""),
+                    signature_mtime=float(sig_mtime or 0.0),
+                    signature_size=int(sig_size or 0),
+                    hash_status=str(hash_status or "unsigned"),
+                    hash_detail=str(hash_detail or ""),
+                    hash_algorithm=str(hash_algorithm or ""),
+                    hash_expected=str(hash_expected or ""),
+                    hash_actual=str(hash_actual or ""),
+                    hash_path=str(hash_path or ""),
+                    hash_mtime=float(hash_mtime or 0.0),
+                    hash_size=int(hash_size or 0),
+                    local_hash_status=str(local_hash_status or "unsigned"),
+                    local_hash_detail=str(local_hash_detail or ""),
+                    local_hash_algorithm=str(local_hash_algorithm or ""),
+                    local_hash_expected=str(local_hash_expected or ""),
+                    local_hash_actual=str(local_hash_actual or ""),
+                    local_hash_label=str(local_hash_label or ""),
+                    local_hash_set_sig=str(local_hash_set_sig or ""),
+                    verified_ts=float(verified_ts or 0.0),
+                )
+            except Exception:
+                continue
+        return out
+
+    def _save_signature_state_batch(self, values: Dict[tuple, FileSignatureState]) -> None:
+        if not values:
+            return
+        db_path = self._db_path()
+        if not db_path:
+            return
+        self._ensure_signature_cache_table()
+        payload: List[tuple] = []
+        for key, state in values.items():
+            try:
+                origin, path, mtime, size = key
+                payload.append(
+                    (
+                        str(origin),
+                        str(path),
+                        float(mtime or 0.0),
+                        int(size or 0),
+                        str(state.signature_path or ""),
+                        float(state.signature_mtime or 0.0),
+                        int(state.signature_size or 0),
+                        str(state.status or "error"),
+                        str(state.detail or ""),
+                        str(state.signer_fingerprint or ""),
+                        str(state.signer_uid or ""),
+                        1 if state.trusted else 0,
+                        str(state.hash_status or "unsigned"),
+                        str(state.hash_detail or ""),
+                        str(state.hash_algorithm or ""),
+                        str(state.hash_expected or ""),
+                        str(state.hash_actual or ""),
+                        str(state.hash_path or ""),
+                        float(state.hash_mtime or 0.0),
+                        int(state.hash_size or 0),
+                        str(state.local_hash_status or "unsigned"),
+                        str(state.local_hash_detail or ""),
+                        str(state.local_hash_algorithm or ""),
+                        str(state.local_hash_expected or ""),
+                        str(state.local_hash_actual or ""),
+                        str(state.local_hash_label or ""),
+                        str(state.local_hash_set_sig or ""),
+                        float(state.verified_ts or 0.0),
+                    )
+                )
+            except Exception:
+                continue
+        if not payload:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.executemany(
+                """
+                INSERT OR REPLACE INTO message_signature_cache
+                    (origin, path, mtime, size, sig_path, sig_mtime, sig_size,
+                     status, detail, signer_fingerprint, signer_uid, trusted,
+                     hash_status, hash_detail, hash_algorithm, hash_expected, hash_actual,
+                     hash_path, hash_mtime, hash_size,
+                     local_hash_status, local_hash_detail, local_hash_algorithm,
+                     local_hash_expected, local_hash_actual, local_hash_label, local_hash_set_sig,
+                     verified_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                payload,
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to save signature cache batch: %s", e)
 
     def _watch_dirs_signature(self, watch_dirs: List[Dict]) -> str:
         parts: List[tuple[str, str]] = []
@@ -2171,6 +2624,424 @@ class MessageViewerTab(QWidget):
             row_ref=row_ref,
         )
 
+    @staticmethod
+    def _is_flamp_auth_file(rec: FileRecord) -> bool:
+        return (
+            str(rec.origin or "").strip().lower() == "flamp"
+            and str(rec.path.suffix or "").strip().lower() in FLAMP_AUTH_EXTS
+        )
+
+    def _is_signature_verification_enabled(self) -> bool:
+        return bool(self.settings.get("gpg_verify_flamp_k2s_enabled", False))
+
+    def _is_hash_verification_enabled(self) -> bool:
+        return bool(self.settings.get("hash_verify_flamp_k2s_enabled", True))
+
+    def _is_any_auth_verification_enabled(self) -> bool:
+        return bool(self._is_signature_verification_enabled() or self._is_hash_verification_enabled())
+
+    def _trusted_hash_entries(self) -> List[dict]:
+        raw = self.settings.get("trusted_file_hashes", []) or []
+        if not isinstance(raw, list):
+            raw = []
+        return normalize_trusted_hash_entries(raw)
+
+    def _trusted_hash_set_signature(self) -> str:
+        entries = self._trusted_hash_entries()
+        compact = [
+            (
+                str(row.get("algorithm", "") or ""),
+                str(row.get("hash", "") or ""),
+                bool(row.get("enabled", True)),
+            )
+            for row in entries
+        ]
+        try:
+            return json.dumps(compact, separators=(",", ":"), ensure_ascii=True)
+        except Exception:
+            return ""
+
+    def _trusted_signer_fingerprints(self) -> set[str]:
+        raw = self.settings.get("gpg_trusted_signers", []) or []
+        if not isinstance(raw, list):
+            raw = []
+        return normalize_fingerprints(str(v) for v in raw)
+
+    def _inline_signature_name_suffixes(self) -> List[str]:
+        raw = self.settings.get("gpg_inline_signed_filename_suffixes", list(DEFAULT_INLINE_SIGNED_SUFFIXES))
+        values: List[str]
+        if isinstance(raw, str):
+            values = [v.strip() for v in raw.split(",")]
+        elif isinstance(raw, list):
+            values = [str(v) for v in raw]
+        else:
+            values = list(DEFAULT_INLINE_SIGNED_SUFFIXES)
+        normalized = normalize_signature_name_suffixes(values)
+        if not normalized:
+            normalized = normalize_signature_name_suffixes(DEFAULT_INLINE_SIGNED_SUFFIXES)
+        return normalized
+
+    def _is_inline_signature_name_candidate(self, path_obj: Path, suffixes: Optional[List[str]] = None) -> bool:
+        name = str(getattr(path_obj, "name", "") or "").strip().lower()
+        if not name:
+            return False
+        use_suffixes = suffixes if suffixes is not None else self._inline_signature_name_suffixes()
+        for suffix in use_suffixes:
+            if suffix and name.endswith(suffix):
+                return True
+        return False
+
+    def _signature_state_for_record(self, rec: FileRecord) -> FileSignatureState:
+        key = self._signature_cache_key(rec)
+        return self._signature_state_map.get(key, FileSignatureState(status="unsigned", detail="No signature state."))
+
+    def _signature_cache_fresh(
+        self,
+        rec: FileRecord,
+        state: FileSignatureState,
+        inline_name_suffixes: Optional[List[str]] = None,
+    ) -> bool:
+        if not self._is_signature_verification_enabled():
+            return True
+        if not isinstance(state, FileSignatureState):
+            return False
+        sig = find_detached_signature(rec.path)
+        if sig is None:
+            if str(state.signature_path or "").strip():
+                return False
+            # No detached signature exists. For inline-candidate names we still force one
+            # re-check if this state came from old detached-only logic.
+            if self._is_inline_signature_name_candidate(rec.path, inline_name_suffixes):
+                detail_txt = str(state.detail or "").strip().lower()
+                if detail_txt == "no detached signature found.":
+                    return False
+            return True
+        if str(state.signature_path or "").strip() != str(sig):
+            return False
+        try:
+            st = sig.stat()
+            sig_mtime = float(st.st_mtime)
+            sig_size = int(st.st_size)
+        except Exception:
+            sig_mtime = 0.0
+            sig_size = 0
+        if abs(float(state.signature_mtime or 0.0) - sig_mtime) > 1e-6:
+            return False
+        if int(state.signature_size or 0) != sig_size:
+            return False
+        return True
+
+    def _hash_cache_fresh(self, rec: FileRecord, state: FileSignatureState, hash_set_sig: str) -> bool:
+        if not self._is_hash_verification_enabled():
+            return True
+        if not isinstance(state, FileSignatureState):
+            return False
+        if str(state.local_hash_set_sig or "") != str(hash_set_sig or ""):
+            return False
+        sidecars = existing_checksum_sidecars(rec.path)
+        if not sidecars:
+            return (
+                str(state.hash_status or "").strip().lower() == "unsigned"
+                and not str(state.hash_path or "").strip()
+            )
+        # Fresh if the cached sidecar still exists with same metadata.
+        cached_path = str(state.hash_path or "").strip()
+        if not cached_path:
+            return False
+        target = None
+        for cand in sidecars:
+            if str(cand) == cached_path:
+                target = cand
+                break
+        if target is None:
+            return False
+        try:
+            st = target.stat()
+            cur_mtime = float(st.st_mtime)
+            cur_size = int(st.st_size)
+        except Exception:
+            cur_mtime = 0.0
+            cur_size = 0
+        if abs(float(state.hash_mtime or 0.0) - cur_mtime) > 1e-6:
+            return False
+        if int(state.hash_size or 0) != cur_size:
+            return False
+        return True
+
+    def _signature_candidates_to_verify(self, *, force: bool = False) -> List[FileRecord]:
+        if not self._is_any_auth_verification_enabled():
+            return []
+        hash_set_sig = self._trusted_hash_set_signature()
+        inline_sig_name_suffixes = self._inline_signature_name_suffixes()
+        out: List[FileRecord] = []
+        for rec in self.files.get("flamp", []):
+            if not self._is_flamp_auth_file(rec):
+                continue
+            key = self._signature_cache_key(rec)
+            state = self._signature_state_map.get(key)
+            if (
+                force
+                or state is None
+                or not self._signature_cache_fresh(rec, state, inline_sig_name_suffixes)
+                or not self._hash_cache_fresh(rec, state, hash_set_sig)
+            ):
+                out.append(rec)
+        return out
+
+    def _start_signature_verification(self, *, force: bool = False) -> None:
+        if self._is_shutting_down:
+            return
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        if not self._is_any_auth_verification_enabled():
+            return
+        records = self._signature_candidates_to_verify(force=force)
+        if not records:
+            return
+        if self._signature_verify_thread:
+            try:
+                if self._signature_verify_thread.isRunning():
+                    self._signature_verify_pending = True
+                    self._signature_verify_pending_records = records
+                    return
+            except RuntimeError:
+                self._signature_verify_thread = None
+                self._signature_verify_worker = None
+        self._signature_verify_generation += 1
+        generation = int(self._signature_verify_generation)
+        self._signature_verify_pending = False
+        self._signature_verify_pending_records = []
+        gpg_path = str(self.settings.get("gpg_executable_path", "") or "").strip()
+        trusted_signers = self._trusted_signer_fingerprints()
+        verify_signature = self._is_signature_verification_enabled()
+        verify_hash = self._is_hash_verification_enabled()
+        inline_sig_name_suffixes = self._inline_signature_name_suffixes()
+        trusted_hash_entries = self._trusted_hash_entries()
+        trusted_hash_sig = self._trusted_hash_set_signature()
+        self._signature_verify_thread = QThread(self)
+        self._signature_verify_worker = _SignatureVerifyWorker(
+            records,
+            verify_signature=verify_signature,
+            verify_hash=verify_hash,
+            inline_sig_name_suffixes=inline_sig_name_suffixes,
+            trusted_hash_entries=trusted_hash_entries,
+            trusted_hash_sig=trusted_hash_sig,
+            gpg_path=gpg_path,
+            trusted_signers=trusted_signers,
+            generation=generation,
+        )
+        self._signature_verify_worker.moveToThread(self._signature_verify_thread)
+        self._signature_verify_thread.started.connect(self._signature_verify_worker.run)
+        self._signature_verify_worker.finished.connect(self._on_signature_verify_finished)
+        self._signature_verify_worker.finished.connect(self._signature_verify_thread.quit)
+        self._signature_verify_worker.finished.connect(self._signature_verify_worker.deleteLater)
+        self._signature_verify_thread.finished.connect(self._on_signature_verify_thread_finished)
+        self._signature_verify_thread.finished.connect(self._signature_verify_thread.deleteLater)
+        self._signature_verify_thread.start()
+
+    def _on_signature_verify_thread_finished(self) -> None:
+        self._signature_verify_thread = None
+        self._signature_verify_worker = None
+        if self._signature_verify_pending and not self._is_shutting_down:
+            self._signature_verify_pending = False
+            self._start_signature_verification(force=False)
+
+    def _on_signature_verify_finished(self, payload: object) -> None:
+        if self._is_shutting_down:
+            return
+        data = payload if isinstance(payload, dict) else {}
+        try:
+            generation = int(data.get("generation", 0) or 0)
+        except Exception:
+            generation = 0
+        if generation and generation != self._signature_verify_generation:
+            return
+        raw_results = data.get("results", {})
+        if not isinstance(raw_results, dict) or not raw_results:
+            return
+        updates: Dict[tuple, FileSignatureState] = {}
+        for key, raw in raw_results.items():
+            if not isinstance(key, tuple) or len(key) != 4:
+                continue
+            row = raw if isinstance(raw, dict) else {}
+            state = FileSignatureState(
+                status=str(row.get("status", "error") or "error"),
+                detail=str(row.get("detail", "") or ""),
+                signer_fingerprint=normalize_fingerprint(str(row.get("signer_fingerprint", "") or "")),
+                signer_uid=str(row.get("signer_uid", "") or ""),
+                trusted=bool(row.get("trusted", False)),
+                signature_path=str(row.get("signature_path", "") or ""),
+                signature_mtime=float(row.get("signature_mtime", 0.0) or 0.0),
+                signature_size=int(row.get("signature_size", 0) or 0),
+                hash_status=str(row.get("hash_status", "unsigned") or "unsigned"),
+                hash_detail=str(row.get("hash_detail", "") or ""),
+                hash_algorithm=str(row.get("hash_algorithm", "") or ""),
+                hash_expected=str(row.get("hash_expected", "") or ""),
+                hash_actual=str(row.get("hash_actual", "") or ""),
+                hash_path=str(row.get("hash_path", "") or ""),
+                hash_mtime=float(row.get("hash_mtime", 0.0) or 0.0),
+                hash_size=int(row.get("hash_size", 0) or 0),
+                local_hash_status=str(row.get("local_hash_status", "unsigned") or "unsigned"),
+                local_hash_detail=str(row.get("local_hash_detail", "") or ""),
+                local_hash_algorithm=str(row.get("local_hash_algorithm", "") or ""),
+                local_hash_expected=str(row.get("local_hash_expected", "") or ""),
+                local_hash_actual=str(row.get("local_hash_actual", "") or ""),
+                local_hash_label=str(row.get("local_hash_label", "") or ""),
+                local_hash_set_sig=str(row.get("local_hash_set_sig", "") or ""),
+                verified_ts=float(row.get("verified_ts", time.time()) or time.time()),
+            )
+            updates[key] = state
+        if not updates:
+            return
+        self._signature_state_map.update(updates)
+        self._save_signature_state_batch(updates)
+        self._apply_signature_updates_to_rows(updates)
+        try:
+            verify_ms = float(data.get("elapsed_ms", 0.0) or 0.0)
+        except Exception:
+            verify_ms = 0.0
+        if verify_ms > 0:
+            emit_span(
+                "messages.signature_verify",
+                verify_ms,
+                settings=self.settings,
+                meta={"records": len(updates)},
+                min_ms=5.0,
+            )
+        self._refresh_current_record_signature_info()
+
+    def _apply_signature_updates_to_rows(self, updates: Dict[tuple, FileSignatureState]) -> None:
+        if not updates:
+            return
+        for row in self._message_rows:
+            payload = getattr(row, "payload", None)
+            if not isinstance(payload, FileRecord) or not self._is_flamp_auth_file(payload):
+                continue
+            key = self._signature_cache_key(payload)
+            state = updates.get(key)
+            if not state:
+                continue
+            ui_state, ui_detail, ui_trusted = self._derive_auth_ui(state)
+            row.auth_state = ui_state
+            row.auth_detail = ui_detail
+            row.auth_trusted = ui_trusted
+        if not hasattr(self, "_messages_model"):
+            return
+        rows = self._messages_model.rows()
+        if not rows:
+            return
+        changed_indices: List[int] = []
+        for idx, row in enumerate(rows):
+            payload = getattr(row, "payload", None)
+            if not isinstance(payload, FileRecord) or not self._is_flamp_auth_file(payload):
+                continue
+            key = self._signature_cache_key(payload)
+            state = updates.get(key)
+            if not state:
+                continue
+            ui_state, ui_detail, ui_trusted = self._derive_auth_ui(state)
+            row.auth_state = ui_state
+            row.auth_detail = ui_detail
+            row.auth_trusted = ui_trusted
+            changed_indices.append(idx)
+        for idx in changed_indices:
+            i1 = self._messages_model.index(idx, 1)
+            i6 = self._messages_model.index(idx, 6)
+            self._messages_model.dataChanged.emit(
+                i1,
+                i6,
+                [Qt.DecorationRole, Qt.ToolTipRole, Qt.DisplayRole],
+            )
+
+    @staticmethod
+    def _status_weight(status: str) -> int:
+        v = str(status or "").strip().lower()
+        if v in {"invalid", "error"}:
+            return 3
+        if v == "valid":
+            return 2
+        if v == "unsigned":
+            return 1
+        return 0
+
+    def _derive_auth_ui(self, state: FileSignatureState) -> tuple[str, str, bool]:
+        sig_enabled = self._is_signature_verification_enabled()
+        hash_enabled = self._is_hash_verification_enabled()
+        sig_status = str(state.status or "unsigned").strip().lower() if sig_enabled else "unsigned"
+        hash_status = str(state.hash_status or "unsigned").strip().lower() if hash_enabled else "unsigned"
+        local_status = str(state.local_hash_status or "unsigned").strip().lower() if hash_enabled else "unsigned"
+        overall = ""
+        # User requirement: any successful key/hash validation is enough to trust the file.
+        if sig_status == "valid" or hash_status == "valid" or local_status == "valid":
+            overall = "valid"
+        elif max(self._status_weight(sig_status), self._status_weight(hash_status), self._status_weight(local_status)) == 3:
+            overall = "invalid"
+        else:
+            overall = ""
+
+        success_parts: List[str] = []
+        if sig_enabled:
+            if sig_status == "valid":
+                trust_text = "trusted signer" if state.trusted else "signer not in trusted list"
+                success_parts.append(f"Signature: Valid ({trust_text})")
+
+        if hash_enabled:
+            hs = hash_status
+            algo = str(state.hash_algorithm or "").strip().upper()
+            if hs == "valid":
+                success_parts.append(f"Checksum: Valid ({algo or 'HASH'})")
+
+            ls = local_status
+            algo_local = str(state.local_hash_algorithm or "").strip().upper()
+            if ls == "valid":
+                label = str(state.local_hash_label or "").strip()
+                if label:
+                    success_parts.append(f"Local Hash: Matched ({algo_local or 'HASH'}, {label})")
+                else:
+                    success_parts.append(f"Local Hash: Matched ({algo_local or 'HASH'})")
+
+        if success_parts:
+            detail = success_parts[0]
+        else:
+            detail = "Signature: No Signatures or Hash Matches"
+        return overall, detail, bool(state.trusted)
+
+    def _format_signature_detail(self, state: FileSignatureState) -> str:
+        _overall, detail, _trusted = self._derive_auth_ui(state)
+        return detail
+
+    def _signature_detail_for_record(self, rec: Optional[FileRecord]) -> str:
+        if rec is None or not self._is_flamp_auth_file(rec):
+            return ""
+        state = self._signature_state_for_record(rec)
+        detail = self._format_signature_detail(state)
+        return detail
+
+    def _compose_info_with_signature(self, rec: Optional[FileRecord], info: str) -> str:
+        base = str(info or "").strip()
+        detail = self._signature_detail_for_record(rec)
+        if detail:
+            return f"{base}\n{detail}"
+        return base
+
+    def _refresh_current_record_signature_info(self) -> None:
+        rec = self.current_record
+        if rec is None or not self._is_flamp_auth_file(rec):
+            return
+        info_txt = self.info_label.text() if hasattr(self, "info_label") else ""
+        if not info_txt:
+            return
+        base = info_txt
+        for marker in ("\nSignature:", "\nChecksum:", "\nLocal Hash:"):
+            base = base.split(marker, 1)[0]
+        sig_detail = self._signature_detail_for_record(rec)
+        if sig_detail:
+            self.info_label.setText(f"{base}\n{sig_detail}")
+        else:
+            self.info_label.setText(base)
+
     def _clear_backlog_on_upgrade(self) -> None:
         if self.settings.get("autoquery_backlog_cleared_v1", False):
             return
@@ -2423,6 +3294,7 @@ class MessageViewerTab(QWidget):
         self._refresh_js8_messages(rebuild=False)
         self._refresh_varac_messages(force=True, rebuild=False)
         self._populate_messages_table(force=True)
+        QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
         self._refresh_pending_backlog()
         self._last_activation_refresh_ts = time.time()
 
@@ -2686,6 +3558,7 @@ class MessageViewerTab(QWidget):
                     self._scan_cache_loaded = True
                     self._refresh_varac_messages(force=force, rebuild=False)
                     self._populate_messages_table(force=force)
+                self._start_signature_verification(force=force)
                 self._files_snapshot_fp = records_fp
         finally:
             self._refresh_files_inflight = False
@@ -3226,6 +4099,12 @@ class MessageViewerTab(QWidget):
                 self._rows_build_thread.wait(1000)
         except Exception:
             pass
+        try:
+            if self._signature_verify_thread and self._signature_verify_thread.isRunning():
+                self._signature_verify_thread.quit()
+                self._signature_verify_thread.wait(1000)
+        except Exception:
+            pass
 
     def on_settings_saved(self) -> None:
         try:
@@ -3240,6 +4119,10 @@ class MessageViewerTab(QWidget):
                 self._refresh_varac_messages(force=True)
             except Exception:
                 pass
+        try:
+            self._start_signature_verification(force=True)
+        except Exception:
+            pass
         self._update_pending_table()
 
     def _queue_persist_op(self, op: str, payload: Tuple) -> None:
@@ -3613,6 +4496,25 @@ class MessageViewerTab(QWidget):
         form_titles: Dict[str, str] = {}
         for form_id in sorted({f for f in form_ids if f}):
             form_titles[form_id] = self._load_form_title(form_id)
+        signature_map: Dict[tuple, Dict[str, object]] = {}
+        if self._is_any_auth_verification_enabled():
+            current_sig_keys: set[tuple] = set()
+            for rec in self.files.get("flamp", []):
+                if not self._is_flamp_auth_file(rec):
+                    continue
+                current_sig_keys.add(self._signature_cache_key(rec))
+            for key in current_sig_keys:
+                state = self._signature_state_map.get(key)
+                if not isinstance(key, tuple) or len(key) != 4:
+                    continue
+                if not isinstance(state, FileSignatureState):
+                    continue
+                ui_state, ui_detail, ui_trusted = self._derive_auth_ui(state)
+                signature_map[key] = {
+                    "status": ui_state,
+                    "detail": ui_detail,
+                    "trusted": ui_trusted,
+                }
         return {
             "js8_messages": list(self.js8_messages),
             "spotter_messages": list(self.spotter_messages),
@@ -3620,6 +4522,7 @@ class MessageViewerTab(QWidget):
             "sitrep_messages": list(self.sitrep_messages),
             "files": {k: list(v) for k, v in self.files.items()},
             "read_state_map": dict(self._read_state_map),
+            "signature_state_map": signature_map,
             "sender_cache_seed": dict(self._sender_cache),
             "form_titles": form_titles,
             "show_local_time": self._current_time_mode() != "UTC",
@@ -3657,6 +4560,7 @@ class MessageViewerTab(QWidget):
             sitrep_messages=snapshot.get("sitrep_messages", []),  # type: ignore[arg-type]
             files=snapshot.get("files", {}),  # type: ignore[arg-type]
             read_state_map=snapshot.get("read_state_map", {}),  # type: ignore[arg-type]
+            signature_state_map=snapshot.get("signature_state_map", {}),  # type: ignore[arg-type]
             sender_cache_seed=snapshot.get("sender_cache_seed", {}),  # type: ignore[arg-type]
             form_titles=snapshot.get("form_titles", {}),  # type: ignore[arg-type]
             show_local_time=bool(snapshot.get("show_local_time", False)),
@@ -3721,6 +4625,7 @@ class MessageViewerTab(QWidget):
             self._refresh_message_filters(rows)
         with perf_span("messages.apply_filters", settings=self.settings, min_ms=5.0):
             self._apply_message_filters()
+        self._start_signature_verification(force=bool(data.get("force", False)))
         log.debug("MessageViewer: built %d unified messages", len(rows))
 
     def _refresh_message_filters(self, rows: List[UnifiedMessage]) -> None:
@@ -4810,6 +5715,12 @@ class MessageViewerTab(QWidget):
                     msg_type = "FLMSG"
                 elif origin == "bbs":
                     msg_type = "BBS"
+                auth_state = ""
+                auth_detail = ""
+                auth_trusted = False
+                if self._is_flamp_auth_file(rec):
+                    sig_state = self._signature_state_for_record(rec)
+                    auth_state, auth_detail, auth_trusted = self._derive_auth_ui(sig_state)
                 rows.append(
                     UnifiedMessage(
                         msg_type=msg_type,
@@ -4821,6 +5732,9 @@ class MessageViewerTab(QWidget):
                         title=title,
                         origin=origin,
                         payload=rec,
+                        auth_state=auth_state,
+                        auth_detail=auth_detail,
+                        auth_trusted=auth_trusted,
                     )
                 )
 
@@ -5791,7 +6705,7 @@ class MessageViewerTab(QWidget):
             if cached_view is not None:
                 is_html, content, info, open_path, open_label = cached_view
                 self._set_open_external_path(open_path, label=open_label)
-                self.info_label.setText(info)
+                self.info_label.setText(self._compose_info_with_signature(rec, info))
                 if is_html:
                     self.viewer.setAcceptRichText(True)
                     self.viewer.setHtml(content)
@@ -5804,7 +6718,7 @@ class MessageViewerTab(QWidget):
                 ext = rec.path.suffix.lower()
                 self._set_open_external_path(rec.path, label="Open Image")
                 info = f"Image Received - {rec.path.name} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
-                self.info_label.setText(info)
+                self.info_label.setText(self._compose_info_with_signature(rec, info))
                 if self._can_preview_image(rec.path) and rec.path.exists():
                     try:
                         uri = rec.path.resolve().as_uri()
@@ -5915,7 +6829,7 @@ class MessageViewerTab(QWidget):
                     content = data  # fallback to raw
 
             info = f"{rec.path.name} - {rec.origin.upper()} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
-            self.info_label.setText(info)
+            self.info_label.setText(self._compose_info_with_signature(rec, info))
             if is_html:
                 self.viewer.setAcceptRichText(True)
                 self.viewer.setHtml(content)

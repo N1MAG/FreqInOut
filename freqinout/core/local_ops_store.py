@@ -9,6 +9,8 @@ from freqinout.core.logger import log
 
 
 SITREP_ALLOWED = {"GREEN", "YELLOW", "RED"}
+_SCHEMA_READY = False
+_SCHEMA_READY_DB = ""
 
 
 def _db_path():
@@ -55,7 +57,11 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str
 
 
 def ensure_tables() -> None:
+    global _SCHEMA_READY, _SCHEMA_READY_DB
     db_path = _db_path()
+    db_key = str(db_path.resolve()) if db_path.exists() else str(db_path)
+    if _SCHEMA_READY and _SCHEMA_READY_DB == db_key and db_path.exists():
+        return
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
@@ -143,6 +149,8 @@ def ensure_tables() -> None:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ncs_checkins_ts ON local_ncs_checkins(checkin_utc)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ncs_checkins_callsign ON local_ncs_checkins(callsign)")
         conn.commit()
+        _SCHEMA_READY = True
+        _SCHEMA_READY_DB = db_key
     finally:
         conn.close()
 

@@ -71,6 +71,7 @@ class ControlFreqTab(QWidget):
         self._last_refresh_ts = 0.0
         self._freq_timer: Optional[QTimer] = None
         self._status_timer: Optional[QTimer] = None
+        self._clock_timer: Optional[QTimer] = None
         self._show_local = True
         self._intersection_cache_ts = 0.0
         self._intersection_cache_key: Tuple[str, str] = ("", "")
@@ -95,6 +96,14 @@ class ControlFreqTab(QWidget):
         self._my_schedule_entries_cache_ts = 0.0
         self._my_schedule_entries_cache_key: Tuple[float, float] = (0.0, 0.0)
         self._my_schedule_entries_cache_ttl_sec = 20.0
+        self._daily_schedule_rows_cache: List[Dict[str, Any]] = []
+        self._daily_schedule_rows_cache_ts = 0.0
+        self._daily_schedule_rows_cache_mtime = 0.0
+        self._daily_schedule_rows_cache_ttl_sec = 10.0
+        self._net_schedule_rows_cache: List[Dict[str, Any]] = []
+        self._net_schedule_rows_cache_ts = 0.0
+        self._net_schedule_rows_cache_mtime = 0.0
+        self._net_schedule_rows_cache_ttl_sec = 10.0
         self._view_cards: Dict[str, bool] = {
             "activity": True,
             "intersections": True,
@@ -202,9 +211,17 @@ class ControlFreqTab(QWidget):
         status_layout.addStretch(1)
         updated_row.addWidget(self.status_group, 3)
         updated_row.addStretch(1)
+        right_status_col = QVBoxLayout()
+        right_status_col.setContentsMargins(0, 0, 0, 0)
+        right_status_col.setSpacing(6)
+        self.current_time_label = QLabel("--")
+        self.current_time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.current_time_label.setMinimumWidth(280)
+        self.current_time_label.setStyleSheet("font-size: 14px; font-weight: 600;")
+        right_status_col.addWidget(self.current_time_label, 0, Qt.AlignRight)
         self.updated_label = QLabel("Last updated: --")
-        self.updated_label.setStyleSheet("color: #888;")
-        updated_row.addWidget(self.updated_label)
+        self.updated_label.setVisible(False)
+        updated_row.addLayout(right_status_col)
         root.addLayout(updated_row)
 
         # Top region: left = Activity/Intersections/Messages, right = Frequency/Schedule Outlook
@@ -938,14 +955,17 @@ class ControlFreqTab(QWidget):
     def _apply_theme(self) -> None:
         try:
             theme = resolve_theme(self.settings)
-            self.refresh_btn.setStyleSheet(button_style("primary", theme))
+            self.refresh_btn.setStyleSheet(button_style("muted", theme))
             self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
             self.freq_set_btn.setStyleSheet(button_style("muted", theme))
             self.freq_resume_btn.setStyleSheet(button_style("muted", theme))
-            self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
+            self._update_time_toggle_style(theme)
             self.focus_mode_btn.setStyleSheet(button_style("secondary", theme))
             self._update_view_chip_styles(theme)
             self._update_clear_filters_style()
+            self.current_time_label.setStyleSheet(
+                f"font-size: 14px; font-weight: 600; color: {theme.get('text', '#111')};"
+            )
             if hasattr(self, "schedule_action_hint"):
                 self.schedule_action_hint.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
         except Exception:
@@ -954,6 +974,7 @@ class ControlFreqTab(QWidget):
         self._set_message_summary_visible_rows(7)
         self._lock_frequency_control_height()
         self._update_time_toggle_text()
+        self._refresh_clock_display()
         self._apply_focus_mode()
         self._on_freq_selection_changed()
         self._refresh_running_status()
@@ -1030,11 +1051,16 @@ class ControlFreqTab(QWidget):
                 self._status_timer = QTimer(self)
                 self._status_timer.timeout.connect(self._refresh_status_widgets)
             self._status_timer.start(5000)
+            if self._clock_timer is None:
+                self._clock_timer = QTimer(self)
+                self._clock_timer.timeout.connect(self._refresh_clock_display)
+            self._clock_timer.start(1000)
             # Keep tab switch snappy: defer initial refresh work until after
             # the screen change event has returned to the UI loop.
             QTimer.singleShot(0, self._refresh_frequency_control_tick)
             # Slightly delay status probing so first paint is not blocked.
             QTimer.singleShot(150, self._refresh_status_widgets)
+            QTimer.singleShot(0, self._refresh_clock_display)
             return
         if self._timer:
             self._timer.stop()
@@ -1042,6 +1068,8 @@ class ControlFreqTab(QWidget):
             self._freq_timer.stop()
         if self._status_timer:
             self._status_timer.stop()
+        if self._clock_timer:
+            self._clock_timer.stop()
 
     def on_tab_activated(self) -> None:
         with perf_span("controlfreq.on_tab_activated", settings=self.settings, min_ms=5.0):
@@ -1121,10 +1149,45 @@ class ControlFreqTab(QWidget):
 
     def _update_time_toggle_text(self) -> None:
         self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
+        self._update_time_toggle_style()
+
+    def _update_time_toggle_style(self, theme: Optional[Dict[str, str]] = None) -> None:
+        if theme is None:
+            try:
+                theme = resolve_theme(self.settings)
+            except Exception:
+                theme = {}
+        # Local is default context; only highlight when user switches to UTC.
+        role = "info" if not self._show_local else "muted"
+        try:
+            self.time_toggle_btn.setStyleSheet(button_style(role, theme))
+        except Exception:
+            pass
+
+    def _format_display_datetime(self, utc_dt: dt.datetime, with_seconds: bool = True) -> str:
+        if utc_dt.tzinfo is None:
+            utc_dt = utc_dt.replace(tzinfo=dt.timezone.utc)
+        display_dt = utc_dt.astimezone(self._get_display_tz()) if self._show_local else utc_dt
+        fmt = "%a %b %d, %Y %H:%M %Z" if with_seconds else "%Y-%m-%d %H:%M %Z"
+        return display_dt.strftime(fmt)
+
+    def _sync_header_time_label_widths(self) -> None:
+        try:
+            w_clock = int(self.current_time_label.sizeHint().width())
+            target = max(320, w_clock + 12)
+            self.current_time_label.setMinimumWidth(target)
+        except Exception:
+            pass
+
+    def _refresh_clock_display(self) -> None:
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        self.current_time_label.setText(self._format_display_datetime(now_utc, with_seconds=True))
+        self._sync_header_time_label_widths()
 
     def _toggle_time_view(self) -> None:
         self._show_local = not self._show_local
         self._update_time_toggle_text()
+        self._refresh_clock_display()
         self._schedule_persist_ui_state()
         self._refresh_schedule_outlook()
 
@@ -1148,9 +1211,7 @@ class ControlFreqTab(QWidget):
             self._refresh_message_summary()
             self._last_secondary_refresh_ts = time.time()
             self._last_heavy_refresh_ts = self._last_secondary_refresh_ts
-            self.updated_label.setText(
-                f"Last updated: {dt.datetime.fromtimestamp(self._last_secondary_refresh_ts):%Y-%m-%d %H:%M:%S}"
-            )
+            self._refresh_clock_display()
             self._update_clear_filters_style()
         except Exception as e:
             log.debug("ControlFreq: filter refresh failed: %s", e)
@@ -1211,8 +1272,7 @@ class ControlFreqTab(QWidget):
                     self._refresh_propagation_snapshot()
                 self._last_heavy_refresh_ts = time.time()
             self._last_refresh_ts = time.time()
-            ts = dt.datetime.fromtimestamp(self._last_refresh_ts).strftime("%Y-%m-%d %H:%M:%S")
-            self.updated_label.setText(f"Last updated: {ts}")
+            self._refresh_clock_display()
             self._update_clear_filters_style()
 
     def _refresh_status_widgets(self) -> None:
@@ -1347,6 +1407,9 @@ class ControlFreqTab(QWidget):
                 self.prop_target_value_combo.setCurrentIndex(idx)
             else:
                 self.prop_target_value_combo.setEditText(selected_value)
+        elif target_type == "STATE":
+            self.prop_target_value_combo.setCurrentIndex(-1)
+            self.prop_target_value_combo.setEditText("")
         elif self.prop_target_value_combo.count() > 0:
             self.prop_target_value_combo.setCurrentIndex(0)
         else:
@@ -1435,6 +1498,71 @@ class ControlFreqTab(QWidget):
 
     def _settings_db_path(self) -> Path:
         return get_config_dir() / "config" / "freqinout.db"
+
+    @staticmethod
+    def _safe_db_mtime(db_path: Path) -> float:
+        try:
+            return float(db_path.stat().st_mtime) if db_path.exists() else 0.0
+        except Exception:
+            return 0.0
+
+    def _load_schedule_rows(self, db_path: Path, table_name: str) -> List[Dict[str, Any]]:
+        if not db_path.exists():
+            return []
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            has_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+            if not has_table:
+                return []
+            cur.execute(f"SELECT * FROM {table_name}")
+            return [dict(r) for r in cur.fetchall()]
+        except Exception as e:
+            log.debug("ControlFreq: failed to load %s from %s: %s", table_name, db_path, e)
+            return []
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+    def _daily_schedule_rows(self) -> List[Dict[str, Any]]:
+        db_path = self._settings_db_path()
+        now_ts = time.time()
+        db_mtime = self._safe_db_mtime(db_path)
+        if (
+            self._daily_schedule_rows_cache
+            and (now_ts - float(self._daily_schedule_rows_cache_ts) < self._daily_schedule_rows_cache_ttl_sec)
+            and abs(float(self._daily_schedule_rows_cache_mtime) - db_mtime) < 0.0001
+        ):
+            return self._daily_schedule_rows_cache
+        rows = self._load_schedule_rows(db_path, "daily_schedule_tab")
+        self._daily_schedule_rows_cache = rows
+        self._daily_schedule_rows_cache_ts = now_ts
+        self._daily_schedule_rows_cache_mtime = db_mtime
+        return rows
+
+    def _net_schedule_rows(self) -> List[Dict[str, Any]]:
+        db_path = self._db_path()
+        now_ts = time.time()
+        db_mtime = self._safe_db_mtime(db_path)
+        if (
+            self._net_schedule_rows_cache
+            and (now_ts - float(self._net_schedule_rows_cache_ts) < self._net_schedule_rows_cache_ttl_sec)
+            and abs(float(self._net_schedule_rows_cache_mtime) - db_mtime) < 0.0001
+        ):
+            return self._net_schedule_rows_cache
+        rows = self._load_schedule_rows(db_path, "net_schedule_tab")
+        self._net_schedule_rows_cache = rows
+        self._net_schedule_rows_cache_ts = now_ts
+        self._net_schedule_rows_cache_mtime = db_mtime
+        return rows
 
     def _load_group_combo(self) -> None:
         groups = self._get_operating_groups()
@@ -2700,23 +2828,13 @@ class ControlFreqTab(QWidget):
         self, start: dt.datetime, end: dt.datetime, include_day: bool, tz: dt.tzinfo
     ) -> List[Dict[str, Any]]:
         rows_out: List[Dict[str, Any]] = []
-        db_path = self._settings_db_path()
-        if not db_path.exists():
+        rows = self._daily_schedule_rows()
+        if not rows:
             return rows_out
         group_filter = self.group_combo.currentData() or ""
         search = (self.search_edit.text() or "").strip().upper()
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM daily_schedule_tab")
-            rows = cur.fetchall()
-            conn.close()
-        except Exception as e:
-            log.debug("ControlFreq: failed to load HF schedule: %s", e)
-            return rows_out
         for r in rows:
-            row = dict(r)
+            row = r
             day = (row.get("day") or row.get("day_utc") or row.get("day_name") or "").strip()
             grp = (row.get("group_name") or row.get("group") or "").strip().upper()
             if group_filter and grp != group_filter:
@@ -2765,8 +2883,8 @@ class ControlFreqTab(QWidget):
     ) -> Tuple[Dict[str, Set[float]], Dict[str, Set[str]]]:
         sched_freqs: Dict[str, Set[float]] = {}
         sched_bands: Dict[str, Set[str]] = {}
-        db_path = self._settings_db_path()
-        if not db_path.exists():
+        rows = self._daily_schedule_rows()
+        if not rows:
             return sched_freqs, sched_bands
         now_utc = dt.datetime.now(dt.timezone.utc)
         today_utc_name = now_utc.strftime("%A").upper()
@@ -2788,17 +2906,8 @@ class ControlFreqTab(QWidget):
                 return None
             return h, m
 
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM daily_schedule_tab")
-            rows = cur.fetchall()
-            conn.close()
-        except Exception:
-            rows = []
         for r in rows:
-            row = dict(r)
+            row = r
             day = (row.get("day_utc") or row.get("day") or "ALL").strip().upper()
             if day not in {"ALL", today_utc_name}:
                 continue
@@ -2828,23 +2937,13 @@ class ControlFreqTab(QWidget):
         self, start: dt.datetime, end: dt.datetime, include_day: bool, tz: dt.tzinfo
     ) -> List[Dict[str, Any]]:
         rows_out: List[Dict[str, Any]] = []
-        db_path = self._db_path()
-        if not db_path.exists():
+        rows = self._net_schedule_rows()
+        if not rows:
             return rows_out
         group_filter = self.group_combo.currentData() or ""
         search = (self.search_edit.text() or "").strip().upper()
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM net_schedule_tab")
-            rows = cur.fetchall()
-            conn.close()
-        except Exception as e:
-            log.debug("ControlFreq: failed to load Net schedule: %s", e)
-            return rows_out
         for r in rows:
-            row = dict(r)
+            row = r
             day = (row.get("day") or row.get("day_utc") or "").strip()
             grp = (row.get("group_name") or row.get("group") or "").strip().upper()
             if group_filter and grp != group_filter:
@@ -3535,68 +3634,44 @@ class ControlFreqTab(QWidget):
             return h, m
 
         # HF schedule from settings DB
-        db_path = self._settings_db_path()
-        if db_path.exists():
-            try:
-                conn = sqlite3.connect(db_path)
-                conn.row_factory = sqlite3.Row
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM daily_schedule_tab")
-                rows = cur.fetchall()
-                conn.close()
-            except Exception:
-                rows = []
-            for r in rows:
-                row = dict(r)
-                day = (row.get("day_utc") or row.get("day") or "ALL").strip().upper()
-                if day not in {"ALL", today_utc_name.upper()}:
-                    continue
-                start_hm = row.get("start_utc") or row.get("start") or ""
-                hm = parse_hhmm(str(start_hm))
-                if not hm:
-                    continue
-                band = (row.get("band") or "").strip().upper()
-                label = (row.get("group_name") or row.get("group") or "").strip().upper()
-                if group_filter and label != group_filter:
-                    continue
-                if search and search not in label and search not in band:
-                    continue
-                start_utc = now_utc.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
-                start_local = start_utc.astimezone(tz)
-                if start_local.date() == today_local:
-                    entries.append((start_local, band, label))
+        for row in self._daily_schedule_rows():
+            day = (row.get("day_utc") or row.get("day") or "ALL").strip().upper()
+            if day not in {"ALL", today_utc_name.upper()}:
+                continue
+            start_hm = row.get("start_utc") or row.get("start") or ""
+            hm = parse_hhmm(str(start_hm))
+            if not hm:
+                continue
+            band = (row.get("band") or "").strip().upper()
+            label = (row.get("group_name") or row.get("group") or "").strip().upper()
+            if group_filter and label != group_filter:
+                continue
+            if search and search not in label and search not in band:
+                continue
+            start_utc = now_utc.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+            start_local = start_utc.astimezone(tz)
+            if start_local.date() == today_local:
+                entries.append((start_local, band, label))
 
         # Net schedule from nets DB
-        db_path = self._db_path()
-        if db_path.exists():
-            try:
-                conn = sqlite3.connect(db_path)
-                conn.row_factory = sqlite3.Row
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM net_schedule_tab")
-                rows = cur.fetchall()
-                conn.close()
-            except Exception:
-                rows = []
-            for r in rows:
-                row = dict(r)
-                day = (row.get("day_utc") or row.get("day") or "ALL").strip().upper()
-                if day not in {"ALL", today_utc_name.upper()}:
-                    continue
-                start_hm = row.get("start_utc") or row.get("start") or ""
-                hm = parse_hhmm(str(start_hm))
-                if not hm:
-                    continue
-                band = (row.get("band") or "").strip().upper()
-                label = (row.get("net_name") or row.get("group_name") or "").strip().upper()
-                if group_filter and label != group_filter:
-                    continue
-                if search and search not in label and search not in band:
-                    continue
-                start_utc = now_utc.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
-                start_local = start_utc.astimezone(tz)
-                if start_local.date() == today_local:
-                    entries.append((start_local, band, label))
+        for row in self._net_schedule_rows():
+            day = (row.get("day_utc") or row.get("day") or "ALL").strip().upper()
+            if day not in {"ALL", today_utc_name.upper()}:
+                continue
+            start_hm = row.get("start_utc") or row.get("start") or ""
+            hm = parse_hhmm(str(start_hm))
+            if not hm:
+                continue
+            band = (row.get("band") or "").strip().upper()
+            label = (row.get("net_name") or row.get("group_name") or "").strip().upper()
+            if group_filter and label != group_filter:
+                continue
+            if search and search not in label and search not in band:
+                continue
+            start_utc = now_utc.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+            start_local = start_utc.astimezone(tz)
+            if start_local.date() == today_local:
+                entries.append((start_local, band, label))
         return entries
 
     def _top_bands_modeled(

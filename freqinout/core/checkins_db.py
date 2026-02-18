@@ -36,7 +36,7 @@ def _db_path() -> Path:
         return fallback
 
 
-def _ensure_table(conn: sqlite3.Connection):
+def ensure_operator_checkins_schema(conn: sqlite3.Connection):
     """
     Ensures operator_checkins exists with the unified schema, migrating
     from older layouts if necessary.
@@ -147,6 +147,13 @@ def _ensure_table(conn: sqlite3.Connection):
         cur.execute("ALTER TABLE operator_checkins_new RENAME TO operator_checkins")
     finally:
         conn.commit()
+
+
+def _ensure_table(conn: sqlite3.Connection):
+    """
+    Backward-compatible alias for older callers.
+    """
+    ensure_operator_checkins_schema(conn)
 
 
 def upsert_checkins(entries: List[Dict[str, Any]]):

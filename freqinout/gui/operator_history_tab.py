@@ -1529,16 +1529,22 @@ class OperatorHistoryTab(QWidget):
                 self.table.setRowCount(len(rows))
                 # rebuild group filter options
                 groups = set()
+                untrusted_color = QColor("#D55E00")
                 for row_idx, r in enumerate(rows):
+                    row_untrusted = not bool(r.get("trusted"))
 
                     def set_item(col: int, text: str):
                         item = QTableWidgetItem(text)
                         item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                        if row_untrusted:
+                            item.setForeground(untrusted_color)
                         self.table.setItem(row_idx, col, item)
 
                     select_item = QTableWidgetItem("")
                     select_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
                     select_item.setCheckState(Qt.Unchecked)
+                    if row_untrusted:
+                        select_item.setForeground(untrusted_color)
                     self.table.setItem(row_idx, self.COL_SELECT, select_item)
                     set_item(self.COL_CALLSIGN, r["callsign"])
                     sitrep_key = (r.get("sitrep_status_key") or "unknown").strip().lower()
@@ -1547,6 +1553,8 @@ class OperatorHistoryTab(QWidget):
                     sitrep_item.setTextAlignment(Qt.AlignCenter)
                     sitrep_item.setToolTip(self._sitrep_tooltip(r))
                     self._apply_sitrep_item_style(sitrep_item, sitrep_key)
+                    if row_untrusted:
+                        sitrep_item.setForeground(untrusted_color)
                     self.table.setItem(row_idx, self.COL_SITREP, sitrep_item)
                     set_item(self.COL_NAME, r["name"])
                     set_item(self.COL_STATE, r["state"])
@@ -1567,12 +1575,6 @@ class OperatorHistoryTab(QWidget):
                     set_item(self.COL_LAST_SEEN, last_fmt)
                     set_item(self.COL_TRUSTED, "Yes" if r.get("trusted") else "No")
                     set_item(self.COL_COUNT, str(r["checkin_count"]))
-                    # Highlight untrusted rows
-                    if not r.get("trusted"):
-                        for c in range(self.table.columnCount()):
-                            item = self.table.item(row_idx, c)
-                            if item:
-                                item.setForeground(QColor("#D55E00"))
                     gvals = [
                         (r.get("group1", "") or "").strip(),
                         (r.get("group2", "") or "").strip(),

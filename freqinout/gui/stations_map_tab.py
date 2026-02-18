@@ -52,6 +52,7 @@ except Exception:
     js8net = None
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
+from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.propagation_service import PropagationService
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.settings_manager import SettingsManager
@@ -1873,6 +1874,53 @@ class StationsMapTab(QWidget):
             if idx is not None and idx not in out:
                 out.append(idx)
         return out
+
+    def _schedule_active_now(
+        self,
+        day_val: str,
+        today_name: str,
+        yesterday_name: str,
+        now_min: int,
+        start_min: int,
+        end_min: int,
+    ) -> bool:
+        """
+        Backward-compatible helper for tests and legacy callers.
+        """
+        if start_min < 0 or start_min > 1439 or end_min < 0 or end_min > 1439:
+            return False
+        if start_min == end_min:
+            return False
+        day_indices = self._schedule_day_indices(day_val)
+        if not day_indices:
+            return False
+        today_idx = self._day_to_index(today_name)
+        yesterday_idx = self._day_to_index(yesterday_name)
+        if today_idx is None:
+            return False
+        if start_min < end_min:
+            return today_idx in day_indices and start_min <= now_min < end_min
+        if today_idx in day_indices and now_min >= start_min:
+            return True
+        return yesterday_idx in day_indices and now_min < end_min if yesterday_idx is not None else False
+
+    def _minutes_until_end(self, now_min: int, start_min: int, end_min: int) -> Optional[int]:
+        """
+        Backward-compatible helper for tests and legacy callers.
+        """
+        if start_min < 0 or start_min > 1439 or end_min < 0 or end_min > 1439:
+            return None
+        if start_min == end_min:
+            return None
+        if start_min < end_min:
+            if start_min <= now_min < end_min:
+                return end_min - now_min
+            return None
+        if now_min >= start_min:
+            return (24 * 60 - now_min) + end_min
+        if now_min < end_min:
+            return end_min - now_min
+        return None
 
     def _schedule_minutes_to_end(
         self,
@@ -5618,6 +5666,20 @@ class JS8LogLinkIndexer:
     def __init__(self, settings: SettingsManager, db_path: Path):
         self.settings = settings
         self.db_path = db_path
+        self._operator_schema_ready = False
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    def _open_operator_db(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.execute("PRAGMA busy_timeout=5000")
+        if not self._operator_schema_ready:
+            ensure_operator_checkins_schema(conn)
+            self._operator_schema_ready = True
+        return conn
 
     @staticmethod
     def _base_callsign(cs: str) -> str:
@@ -5853,43 +5915,25 @@ class JS8LogLinkIndexer:
             grid = ""
         if not state and not grid:
             return
+        conn = None
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._open_operator_db()
             cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operator_checkins (
-                    callsign TEXT PRIMARY KEY,
-                    name TEXT,
-                    state TEXT,
-                    grid TEXT,
-                    group1 TEXT,
-                    group2 TEXT,
-                    group3 TEXT,
-                    group_role TEXT,
-                    first_seen_utc TEXT,
-                    last_seen_utc TEXT,
-                    checkin_count INTEGER,
-                    groups_json TEXT,
-                    trusted INTEGER
-                )
-                """
-            )
             cur.execute(
                 "SELECT state, grid, group1, group2, group3, groups_json, trusted FROM operator_checkins WHERE callsign=?",
                 (cs,),
             )
             row = cur.fetchone()
-            now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            now_iso = self._utc_now_iso()
             group_name = (group_name or "").strip().upper()
             if row is None:
                 groups = [g for g in [group_name] if g]
                 cur.execute(
                     """
-                    INSERT OR REPLACE INTO operator_checkins (
+                    INSERT INTO operator_checkins (
                         callsign, name, state, grid, group1, group2, group3, group_role,
-                        first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted
-                    ) VALUES (?, '', ?, ?, ?, ?, ?, '', ?, ?, 0, ?, 0)
+                        first_seen_utc, last_seen_utc, last_net, last_role, checkin_count, groups_json, trusted
+                    ) VALUES (?, '', ?, ?, ?, ?, ?, '', ?, ?, '', '', 0, ?, 0)
                     """,
                     (
                         cs,
@@ -5966,9 +6010,15 @@ class JS8LogLinkIndexer:
                     ),
                 )
             conn.commit()
-            conn.close()
         except Exception as e:
+            self._operator_schema_ready = False
             log.debug("JS8LogLinkIndexer: failed to update operator geo %s: %s", callsign, e)
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
 
     def _upsert_operator_info(self, callsign: str, grid: str, group_val: str, ts: datetime.datetime) -> None:
         # Reuse js8call tab helpers not available here; implement lightweight upsert
@@ -5976,28 +6026,10 @@ class JS8LogLinkIndexer:
         if not cs:
             return
         ts_str = ts.astimezone(datetime.timezone.utc).isoformat()
+        conn = None
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._open_operator_db()
             cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operator_checkins (
-                    callsign TEXT PRIMARY KEY,
-                    name TEXT,
-                    state TEXT,
-                    grid TEXT,
-                    group1 TEXT,
-                    group2 TEXT,
-                    group3 TEXT,
-                    group_role TEXT,
-                    first_seen_utc TEXT,
-                    last_seen_utc TEXT,
-                    checkin_count INTEGER,
-                    groups_json TEXT,
-                    trusted INTEGER
-                )
-                """
-            )
             cur.execute(
                 "SELECT grid, group1, group2, group3, groups_json, trusted FROM operator_checkins WHERE callsign=?",
                 (cs,),
@@ -6010,8 +6042,8 @@ class JS8LogLinkIndexer:
                     """
                     INSERT INTO operator_checkins (
                         callsign, name, state, grid, group1, group2, group3, group_role,
-                        first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted
-                    ) VALUES (?, '', '', ?, ?, ?, ?, '', ?, ?, 0, ?, 0)
+                        first_seen_utc, last_seen_utc, last_net, last_role, checkin_count, groups_json, trusted
+                    ) VALUES (?, '', '', ?, ?, ?, ?, '', ?, ?, '', '', 0, ?, 0)
                     """,
                     (
                         cs,
@@ -6073,9 +6105,15 @@ class JS8LogLinkIndexer:
                     ),
                 )
             conn.commit()
-            conn.close()
         except Exception as e:
+            self._operator_schema_ready = False
             log.debug("JS8LogLinkIndexer: failed to upsert operator info %s: %s", callsign, e)
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
 
     def _parse_all_line(self, line: str) -> Optional[tuple]:
         """

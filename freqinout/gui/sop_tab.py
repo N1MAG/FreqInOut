@@ -2,29 +2,37 @@
 from __future__ import annotations
 
 import datetime
+import html
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QFontMetrics, QColor
+from PySide6.QtGui import QColor, QFontMetrics, QPageLayout, QPageSize, QTextDocument
+from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QLabel,
-    QComboBox,
-    QLineEdit,
-    QPushButton,
     QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMenu,
     QMessageBox,
+    QPushButton,
+    QCompleter,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
-    QHeaderView,
-    QGroupBox,
-    QSpinBox,
-    QCompleter,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 from freqinout.core.logger import log
@@ -136,14 +144,21 @@ class SOPTab(QWidget):
         self.new_btn = QPushButton("New")
         self.save_btn = QPushButton("Save")
         self.delete_btn = QPushButton("Delete")
-        self.export_btn = QPushButton("Export")
-        self.import_btn = QPushButton("Import")
+        self.export_pdf_btn = QPushButton("Export PDF")
+        self.export_import_btn = QToolButton()
+        self.export_import_btn.setText("Export/Import")
+        self.export_import_btn.setPopupMode(QToolButton.InstantPopup)
+        self.export_import_menu = QMenu(self.export_import_btn)
+        self.export_json_action = self.export_import_menu.addAction("Export JSON")
+        self.import_json_action = self.export_import_menu.addAction("Import JSON")
+        self.export_import_btn.setMenu(self.export_import_menu)
         self.new_btn.clicked.connect(self._new_profile)
         self.save_btn.clicked.connect(self._save_profile)
         self.delete_btn.clicked.connect(self._delete_profile)
-        self.export_btn.clicked.connect(self._export_profile)
-        self.import_btn.clicked.connect(self._import_profile)
-        for btn in (self.new_btn, self.save_btn, self.delete_btn, self.export_btn, self.import_btn):
+        self.export_pdf_btn.clicked.connect(self._export_pdf)
+        self.export_json_action.triggered.connect(self._export_profile)
+        self.import_json_action.triggered.connect(self._import_profile)
+        for btn in (self.new_btn, self.save_btn, self.delete_btn, self.export_pdf_btn, self.export_import_btn):
             header.addWidget(btn)
         root.addLayout(header)
 
@@ -329,16 +344,31 @@ class SOPTab(QWidget):
             if theme is None:
                 theme = resolve_theme(self.settings)
             has_profile = self._selected_profile_id is not None
-            editing = self._dirty or (not has_profile)
+            has_active_profile = any(bool(p.get("active")) for p in (self._profiles or []))
             self.new_btn.setStyleSheet(button_style("eligible_info" if has_profile else "muted", theme))
             self.save_btn.setStyleSheet(button_style("eligible_success" if self._dirty else "muted", theme))
             self.delete_btn.setEnabled(has_profile)
             self.delete_btn.setStyleSheet(button_style("eligible_danger" if has_profile else "muted", theme))
-            self.export_btn.setEnabled(has_profile)
-            self.export_btn.setStyleSheet(button_style("eligible_info" if has_profile else "muted", theme))
-            self.import_btn.setStyleSheet(button_style("muted", theme))
+            export_pdf_eligible = has_profile or has_active_profile
+            self.export_pdf_btn.setEnabled(export_pdf_eligible)
+            self.export_pdf_btn.setStyleSheet(button_style("eligible_info" if export_pdf_eligible else "muted", theme))
+            self.export_import_btn.setEnabled(True)
+            self.export_import_btn.setStyleSheet(button_style("muted", theme))
             self.refresh_btn.setStyleSheet(button_style("muted", theme))
-            self.add_row_btn.setStyleSheet(button_style("eligible_primary" if editing else "muted", theme))
+            add_row_eligible = has_profile and self.add_row_btn.isEnabled()
+            self.add_row_btn.setStyleSheet(
+                button_style("eligible_primary" if add_row_eligible else "muted", theme)
+            )
+        except Exception:
+            pass
+
+    def _update_time_toggle_style(self, theme: Dict[str, str] | None = None) -> None:
+        try:
+            if theme is None:
+                theme = resolve_theme(self.settings)
+            # Local is default display mode; only emphasize UTC override.
+            role = "info" if not self._show_local else "muted"
+            self.time_toggle_btn.setStyleSheet(button_style(role, theme))
         except Exception:
             pass
 
@@ -1200,6 +1230,507 @@ class SOPTab(QWidget):
         self._reload_profiles(select_id=None)
         self.refresh_upcoming()
 
+    def _operator_callsign(self) -> str:
+        return str(self.settings.get("operator_callsign", "") or "").strip().upper()
+
+    def _export_pdf_default_name(self, *, scope: str, now_utc: datetime.datetime) -> str:
+        tz_name = self.settings.get("timezone", "UTC") or "UTC"
+        tz = get_timezone(tz_name)
+        stamp = now_utc.astimezone(tz).strftime("%Y%m%d-%H%M")
+        callsign = self._operator_callsign() or "operator"
+        scope_tag = "selected" if scope == "selected" else "active"
+        return f"{callsign}-sop-{scope_tag}-{stamp}.pdf"
+
+    def _prompt_pdf_export_options(self) -> Dict[str, Any] | None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Export SOP to PDF")
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+
+        general_box = QGroupBox("SOP PDF Export Options")
+        general_form = QFormLayout(general_box)
+
+        selected_name = ""
+        if self._selected_profile_id:
+            sid = int(self._selected_profile_id)
+            for p in self._profiles:
+                if int(p.get("id") or 0) == sid:
+                    selected_name = str(p.get("name") or "")
+                    break
+
+        scope_combo = QComboBox()
+        selected_label = f"Selected SOP ({selected_name})" if selected_name else "Selected SOP"
+        scope_combo.addItem(selected_label, "selected")
+        scope_combo.addItem("All Active SOPs (Unified)", "active")
+        if not self._selected_profile_id:
+            scope_combo.setCurrentIndex(1)
+        general_form.addRow("Scope:", scope_combo)
+
+        time_combo = QComboBox()
+        time_combo.addItem("Local", "Local")
+        time_combo.addItem("UTC", "UTC")
+        time_combo.setCurrentIndex(0 if self._show_local else 1)
+        general_form.addRow("SOP Time Display:", time_combo)
+        layout.addWidget(general_box)
+
+        roster_box = QGroupBox("Optional Operator Appendix")
+        roster_layout = QVBoxLayout(roster_box)
+        include_roster_cb = QCheckBox("Include Operator Rosters")
+        include_roster_cb.setChecked(False)
+        roster_layout.addWidget(include_roster_cb)
+
+        roster_options_widget = QWidget()
+        roster_options_layout = QVBoxLayout(roster_options_widget)
+        roster_options_layout.setContentsMargins(0, 0, 0, 0)
+        roster_options_layout.setSpacing(6)
+
+        source_row = QHBoxLayout()
+        include_hf_cb = QCheckBox("HF Operators")
+        include_local_cb = QCheckBox("Local Operators")
+        include_hf_cb.setChecked(False)
+        include_local_cb.setChecked(False)
+        source_row.addWidget(include_hf_cb)
+        source_row.addWidget(include_local_cb)
+        source_row.addStretch()
+        roster_options_layout.addLayout(source_row)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Roster Filter:"))
+        filter_combo = QComboBox()
+        filter_combo.addItem("All", "all")
+        filter_combo.addItem("State", "state")
+        filter_combo.addItem("FEMA Region", "region")
+        filter_row.addWidget(filter_combo)
+
+        state_edit = QLineEdit()
+        state_edit.setPlaceholderText("State (e.g., TX)")
+        state_edit.setMaxLength(2)
+        state_edit.setFixedWidth(130)
+        filter_row.addWidget(state_edit)
+
+        region_combo = QComboBox()
+        for region in self.manager.list_export_regions():
+            region_combo.addItem(region, region)
+        region_combo.setFixedWidth(130)
+        filter_row.addWidget(region_combo)
+        filter_row.addStretch()
+        roster_options_layout.addLayout(filter_row)
+
+        hf_groups = self.manager.list_hf_groups_for_export()
+        hf_filter_box = QGroupBox("HF Operator Filters")
+        hf_filter_layout = QVBoxLayout(hf_filter_box)
+        hf_filter_layout.addWidget(QLabel("Groups (multi-select):"))
+        hf_group_checks: List[QCheckBox] = []
+        if hf_groups:
+            hf_groups_grid = QGridLayout()
+            for idx, grp in enumerate(hf_groups):
+                cb = QCheckBox(grp)
+                cb.setChecked(False)
+                hf_group_checks.append(cb)
+                hf_groups_grid.addWidget(cb, idx // 3, idx % 3)
+            hf_filter_layout.addLayout(hf_groups_grid)
+        else:
+            hf_filter_layout.addWidget(QLabel("No HF groups detected."))
+
+        trusted_row = QHBoxLayout()
+        trusted_row.addWidget(QLabel("Trusted (multi-select):"))
+        hf_trusted_yes_cb = QCheckBox("Trusted")
+        hf_trusted_no_cb = QCheckBox("Untrusted")
+        hf_trusted_yes_cb.setChecked(True)
+        hf_trusted_no_cb.setChecked(False)
+        trusted_row.addWidget(hf_trusted_yes_cb)
+        trusted_row.addWidget(hf_trusted_no_cb)
+        trusted_row.addStretch()
+        hf_filter_layout.addLayout(trusted_row)
+        roster_options_layout.addWidget(hf_filter_box)
+
+        local_categories = self.manager.list_local_categories_for_export()
+        local_filter_box = QGroupBox("Local Operator Filters")
+        local_filter_layout = QVBoxLayout(local_filter_box)
+        local_filter_layout.addWidget(QLabel("Category (multi-select):"))
+        local_category_checks: List[QCheckBox] = []
+        if local_categories:
+            local_grid = QGridLayout()
+            for idx, category in enumerate(local_categories):
+                cb = QCheckBox(category)
+                cb.setChecked(True)
+                local_category_checks.append(cb)
+                local_grid.addWidget(cb, idx // 3, idx % 3)
+            local_filter_layout.addLayout(local_grid)
+        else:
+            local_filter_layout.addWidget(QLabel("No local categories detected."))
+        roster_options_layout.addWidget(local_filter_box)
+
+        roster_layout.addWidget(roster_options_widget)
+
+        layout.addWidget(roster_box)
+
+        def _sync_controls() -> None:
+            roster_on = include_roster_cb.isChecked()
+            roster_options_widget.setVisible(roster_on)
+            hf_on = roster_on and include_hf_cb.isChecked()
+            local_on = roster_on and include_local_cb.isChecked()
+            include_hf_cb.setEnabled(roster_on)
+            include_local_cb.setEnabled(roster_on)
+            filter_combo.setEnabled(roster_on)
+            mode = str(filter_combo.currentData() or "all")
+            state_mode = roster_on and mode == "state"
+            region_mode = roster_on and mode == "region"
+            state_edit.setEnabled(state_mode)
+            region_combo.setEnabled(region_mode)
+            hf_filter_box.setEnabled(hf_on)
+            local_filter_box.setEnabled(local_on)
+            for cb in hf_group_checks:
+                cb.setEnabled(hf_on)
+            hf_trusted_yes_cb.setEnabled(hf_on)
+            hf_trusted_no_cb.setEnabled(hf_on)
+            for cb in local_category_checks:
+                cb.setEnabled(local_on)
+
+        include_roster_cb.toggled.connect(_sync_controls)
+        include_hf_cb.toggled.connect(_sync_controls)
+        include_local_cb.toggled.connect(_sync_controls)
+        filter_combo.currentIndexChanged.connect(_sync_controls)
+        _sync_controls()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dlg)
+
+        def _accept() -> None:
+            scope = str(scope_combo.currentData() or "selected")
+            if scope == "selected" and not self._selected_profile_id:
+                QMessageBox.warning(dlg, "Export SOP to PDF", "Select an SOP first, or choose All Active SOPs.")
+                return
+            if scope == "active" and not any(bool(p.get("active")) for p in self._profiles):
+                QMessageBox.warning(dlg, "Export SOP to PDF", "No active SOP profiles found.")
+                return
+            if include_roster_cb.isChecked() and not (include_hf_cb.isChecked() or include_local_cb.isChecked()):
+                QMessageBox.warning(dlg, "Export SOP to PDF", "Select HF Operators, Local Operators, or both.")
+                return
+            mode = str(filter_combo.currentData() or "all")
+            if include_roster_cb.isChecked() and mode == "state":
+                st = state_edit.text().strip().upper()
+                if len(st) != 2:
+                    QMessageBox.warning(dlg, "Export SOP to PDF", "State filter must be a 2-letter abbreviation.")
+                    return
+            if include_roster_cb.isChecked() and mode == "region" and not str(region_combo.currentData() or "").strip():
+                QMessageBox.warning(dlg, "Export SOP to PDF", "Select a FEMA region for filtering.")
+                return
+            if include_roster_cb.isChecked() and include_hf_cb.isChecked():
+                if hf_group_checks and not any(cb.isChecked() for cb in hf_group_checks):
+                    QMessageBox.warning(dlg, "Export SOP to PDF", "Select at least one HF group filter.")
+                    return
+                if not (hf_trusted_yes_cb.isChecked() or hf_trusted_no_cb.isChecked()):
+                    QMessageBox.warning(dlg, "Export SOP to PDF", "Select at least one HF trusted filter.")
+                    return
+            if include_roster_cb.isChecked() and include_local_cb.isChecked():
+                if local_category_checks and not any(cb.isChecked() for cb in local_category_checks):
+                    QMessageBox.warning(dlg, "Export SOP to PDF", "Select at least one local category filter.")
+                    return
+            dlg.accept()
+
+        buttons.accepted.connect(_accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.Accepted:
+            return None
+
+        mode = str(filter_combo.currentData() or "all")
+        return {
+            "scope": str(scope_combo.currentData() or "selected"),
+            "time_mode": str(time_combo.currentData() or "Local"),
+            "include_roster": bool(include_roster_cb.isChecked()),
+            "include_hf": bool(include_hf_cb.isChecked()),
+            "include_local": bool(include_local_cb.isChecked()),
+            "filter_mode": mode,
+            "state_filter": state_edit.text().strip().upper() if mode == "state" else "",
+            "region_filter": str(region_combo.currentData() or "").strip().upper() if mode == "region" else "",
+            "hf_groups": [cb.text().strip() for cb in hf_group_checks if cb.isChecked()],
+            "hf_trusted": [
+                label
+                for checked, label in (
+                    (hf_trusted_yes_cb.isChecked(), "TRUSTED"),
+                    (hf_trusted_no_cb.isChecked(), "UNTRUSTED"),
+                )
+                if checked
+            ],
+            "local_categories": [cb.text().strip() for cb in local_category_checks if cb.isChecked()],
+        }
+
+    def _collect_pdf_profiles(
+        self,
+        *,
+        scope: str,
+        now_utc: datetime.datetime,
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        if scope == "selected":
+            profile_id = int(self._selected_profile_id or 0)
+            if profile_id <= 0:
+                return rows
+            profile = self.manager.get_profile(profile_id)
+            if not profile:
+                return rows
+            rows.append(
+                {
+                    "profile": profile,
+                    "actions": self.manager.build_profile_export_rows(profile_id, now_utc=now_utc),
+                }
+            )
+            return rows
+        for p in self._profiles:
+            if not bool(p.get("active")):
+                continue
+            profile_id = int(p.get("id") or 0)
+            if profile_id <= 0:
+                continue
+            profile = self.manager.get_profile(profile_id)
+            if not profile:
+                continue
+            rows.append(
+                {
+                    "profile": profile,
+                    "actions": self.manager.build_profile_export_rows(profile_id, now_utc=now_utc),
+                }
+            )
+        rows.sort(key=lambda x: str((x.get("profile") or {}).get("name") or "").upper())
+        return rows
+
+    def _format_due_for_pdf(self, due_utc: datetime.datetime, *, time_mode: str) -> str:
+        if not isinstance(due_utc, datetime.datetime):
+            return ""
+        if str(time_mode).strip() == "UTC":
+            return due_utc.strftime("%Y-%m-%d %H:%M")
+        tz_name = self.settings.get("timezone", "UTC") or "UTC"
+        tz = get_timezone(tz_name)
+        return due_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+
+    def _build_sop_actions_html(self, actions: List[Dict[str, Any]], *, time_mode: str) -> str:
+        if not actions:
+            return "<p class='empty'>No enabled actions in this SOP profile.</p>"
+        out = [
+            "<table>",
+            "<thead><tr>"
+            "<th style='width: 14%;'>Next Due</th>"
+            "<th style='width: 10%;'>Status</th>"
+            "<th style='width: 12%;'>Software</th>"
+            "<th style='width: 12%;'>Action</th>"
+            "<th style='width: 10%;'>Band/Freq</th>"
+            "<th style='width: 12%;'>Contact</th>"
+            "<th style='width: 30%;'>Description</th>"
+            "</tr></thead><tbody>",
+        ]
+        for row in actions:
+            band = str(row.get("band") or "").strip()
+            freq = str(row.get("frequency") or "").strip()
+            band_freq = f"{band} {freq}".strip() if (band or freq) else "--"
+            out.append(
+                "<tr>"
+                f"<td>{html.escape(self._format_due_for_pdf(row.get('next_due_utc'), time_mode=time_mode))}</td>"
+                f"<td>{html.escape(str(row.get('status') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('software') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('action_label') or ''))}</td>"
+                f"<td>{html.escape(band_freq)}</td>"
+                f"<td>{html.escape(str(row.get('contact_display') or '--'))}</td>"
+                f"<td>{html.escape(str(row.get('description') or ''))}</td>"
+                "</tr>"
+            )
+        out.append("</tbody></table>")
+        return "".join(out)
+
+    def _build_hf_operators_html(self, rows: List[Dict[str, str]]) -> str:
+        if not rows:
+            return "<p class='empty'>No HF operators match the selected filter.</p>"
+        out = [
+            "<table>",
+            "<thead><tr>"
+            "<th style='width: 12%;'>Callsign</th>"
+            "<th style='width: 20%;'>Name</th>"
+            "<th style='width: 8%;'>State</th>"
+            "<th style='width: 10%;'>SitRep</th>"
+            "<th style='width: 50%;'>Notes</th>"
+            "</tr></thead><tbody>",
+        ]
+        for row in rows:
+            out.append(
+                "<tr>"
+                f"<td>{html.escape(str(row.get('callsign') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('name') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('state') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('sitrep') or 'UNKNOWN'))}</td>"
+                f"<td>{html.escape(str(row.get('notes') or ''))}</td>"
+                "</tr>"
+            )
+        out.append("</tbody></table>")
+        return "".join(out)
+
+    def _build_local_operators_html(self, rows: List[Dict[str, str]]) -> str:
+        if not rows:
+            return "<p class='empty'>No local operators match the selected filter.</p>"
+        out = [
+            "<table>",
+            "<thead><tr>"
+            "<th style='width: 11%;'>Callsign</th>"
+            "<th style='width: 10%;'>First</th>"
+            "<th style='width: 10%;'>Last</th>"
+            "<th style='width: 11%;'>City</th>"
+            "<th style='width: 7%;'>State</th>"
+            "<th style='width: 11%;'>Category</th>"
+            "<th style='width: 8%;'>SitRep</th>"
+            "<th style='width: 32%;'>Notes</th>"
+            "</tr></thead><tbody>",
+        ]
+        for row in rows:
+            out.append(
+                "<tr>"
+                f"<td>{html.escape(str(row.get('callsign') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('first_name') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('last_name') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('city') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('state') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('category') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('sitrep') or 'UNKNOWN'))}</td>"
+                f"<td>{html.escape(str(row.get('notes') or ''))}</td>"
+                "</tr>"
+            )
+        out.append("</tbody></table>")
+        return "".join(out)
+
+    def _build_pdf_html(
+        self,
+        *,
+        profiles: List[Dict[str, Any]],
+        options: Dict[str, Any],
+        now_utc: datetime.datetime,
+    ) -> str:
+        tz_name = self.settings.get("timezone", "UTC") or "UTC"
+        tz = get_timezone(tz_name)
+        as_of_local = now_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+        scope_label = "Selected SOP" if options.get("scope") == "selected" else "All Active SOPs"
+        time_label = "UTC" if str(options.get("time_mode") or "Local") == "UTC" else f"Local ({tz_name})"
+        parts = [
+            "<html><head><meta charset='utf-8'>",
+            "<style>"
+            "@page { size: Letter; margin: 0.55in; }"
+            "body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 10.5pt; color: #111; }"
+            "h1 { font-size: 18pt; margin: 0 0 6pt 0; }"
+            "h2 { font-size: 13pt; margin: 16pt 0 6pt 0; }"
+            ".meta { font-size: 9.5pt; color: #333; margin: 0 0 3pt 0; }"
+            ".section { margin-top: 8pt; }"
+            ".page-break { page-break-before: always; }"
+            "table { width: 100%; border-collapse: collapse; table-layout: fixed; margin: 6pt 0 14pt 0; }"
+            "th, td { border: 1px solid #6f7682; padding: 5px 6px; vertical-align: top; word-wrap: break-word; }"
+            "th { background: #edf1f5; font-weight: 700; }"
+            ".empty { font-style: italic; color: #444; margin: 6pt 0 10pt 0; }"
+            "</style></head><body>",
+            "<h1>SOP Export</h1>",
+            f"<div class='meta'><b>As Of:</b> {html.escape(as_of_local)} Local</div>",
+            f"<div class='meta'><b>Scope:</b> {html.escape(scope_label)}</div>",
+            f"<div class='meta'><b>SOP Time Basis:</b> {html.escape(time_label)}</div>",
+        ]
+        callsign = self._operator_callsign()
+        if callsign:
+            parts.append(f"<div class='meta'><b>Operator:</b> {html.escape(callsign)}</div>")
+
+        for idx, section in enumerate(profiles):
+            profile = section.get("profile") or {}
+            actions = section.get("actions") or []
+            page_cls = " class='page-break'" if idx > 0 else ""
+            parts.append(f"<div{page_cls}>")
+            parts.append(f"<h2>{html.escape(str(profile.get('name') or 'SOP'))}</h2>")
+            parts.append(
+                f"<div class='meta'><b>Operating Group:</b> {html.escape(str(profile.get('operating_group') or ''))}"
+                f" &nbsp; | &nbsp; <b>Secondary Group:</b> {html.escape(str(profile.get('secondary_group') or ''))}"
+                f" &nbsp; | &nbsp; <b>Daily Start (UTC):</b> {html.escape(str(profile.get('sop_start_utc') or '00:00'))}"
+                f" &nbsp; | &nbsp; <b>Active:</b> {'Yes' if bool(profile.get('active')) else 'No'}</div>"
+            )
+            parts.append(self._build_sop_actions_html(actions, time_mode=str(options.get("time_mode") or "Local")))
+            parts.append("</div>")
+
+        if options.get("include_roster"):
+            filter_mode = str(options.get("filter_mode") or "all")
+            state_filter = str(options.get("state_filter") or "").strip().upper() if filter_mode == "state" else ""
+            region_filter = str(options.get("region_filter") or "").strip().upper() if filter_mode == "region" else ""
+            filter_desc = "All"
+            if state_filter:
+                filter_desc = f"State: {state_filter}"
+            elif region_filter:
+                filter_desc = f"FEMA Region: {region_filter}"
+
+            if options.get("include_hf"):
+                selected_groups = [str(v).strip() for v in list(options.get("hf_groups") or []) if str(v).strip()]
+                selected_trusted = [str(v).strip() for v in list(options.get("hf_trusted") or []) if str(v).strip()]
+                hf_rows = self.manager.list_hf_operators_for_export(
+                    state_filter=state_filter,
+                    region_filter=region_filter,
+                    group_filters=selected_groups,
+                    trusted_filters=selected_trusted,
+                )
+                parts.append("<div class='page-break'>")
+                parts.append("<h2>HF Operators</h2>")
+                parts.append(f"<div class='meta'><b>Filter:</b> {html.escape(filter_desc)}</div>")
+                if selected_groups:
+                    parts.append(f"<div class='meta'><b>Groups:</b> {html.escape(', '.join(selected_groups))}</div>")
+                if selected_trusted:
+                    parts.append(f"<div class='meta'><b>Trusted:</b> {html.escape(', '.join(selected_trusted))}</div>")
+                parts.append(self._build_hf_operators_html(hf_rows))
+                parts.append("</div>")
+
+            if options.get("include_local"):
+                selected_categories = [
+                    str(v).strip()
+                    for v in list(options.get("local_categories") or [])
+                    if str(v).strip()
+                ]
+                local_rows = self.manager.list_local_operators_for_export(
+                    state_filter=state_filter,
+                    region_filter=region_filter,
+                    category_filters=selected_categories,
+                )
+                parts.append("<div class='page-break'>")
+                parts.append("<h2>Local Operators</h2>")
+                parts.append(f"<div class='meta'><b>Filter:</b> {html.escape(filter_desc)}</div>")
+                if selected_categories:
+                    parts.append(
+                        f"<div class='meta'><b>Category:</b> {html.escape(', '.join(selected_categories))}</div>"
+                    )
+                parts.append(self._build_local_operators_html(local_rows))
+                parts.append("</div>")
+
+        parts.append("</body></html>")
+        return "".join(parts)
+
+    def _export_pdf(self) -> None:
+        try:
+            options = self._prompt_pdf_export_options()
+            if not options:
+                return
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            profiles = self._collect_pdf_profiles(scope=str(options.get("scope") or "selected"), now_utc=now_utc)
+            if not profiles:
+                QMessageBox.information(self, "Export SOP to PDF", "No SOP data available for the selected scope.")
+                return
+            default_name = self._export_pdf_default_name(scope=str(options.get("scope") or "selected"), now_utc=now_utc)
+            out, _ = QFileDialog.getSaveFileName(self, "Export SOP to PDF", default_name, "PDF Files (*.pdf)")
+            if not out:
+                return
+
+            doc = QTextDocument(self)
+            doc.setDocumentMargin(18.0)
+            doc.setHtml(self._build_pdf_html(profiles=profiles, options=options, now_utc=now_utc))
+
+            printer = QPrinter(QPrinter.HighResolution)
+            printer.setOutputFormat(QPrinter.PdfFormat)
+            printer.setOutputFileName(out)
+            page_layout = printer.pageLayout()
+            page_layout.setPageSize(QPageSize(QPageSize.Letter))
+            page_layout.setUnits(QPageLayout.Inch)
+            printer.setPageLayout(page_layout)
+            doc.print_(printer)
+            QMessageBox.information(self, "Export SOP to PDF", f"SOP PDF exported to:\n{out}")
+        except Exception as e:
+            QMessageBox.warning(self, "Export SOP to PDF", str(e))
+
     def _export_profile(self) -> None:
         if not self._selected_profile_id:
             QMessageBox.information(self, "Export SOP", "Save the SOP first before exporting.")
@@ -1267,6 +1798,7 @@ class SOPTab(QWidget):
         except Exception:
             self.local_label.setText("<b>Local:</b> --")
         self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
+        self._update_time_toggle_style()
         tz_short = self._tz_short_name() if self._show_local else "UTC"
         self.start_label.setText(f"SOP Daily Start ({tz_short}):")
 
@@ -1419,7 +1951,7 @@ class SOPTab(QWidget):
         try:
             theme = resolve_theme(self.settings)
             self.alignment_label.setStyleSheet(f"color: {theme.get('warning', '#B71C1C')}; font-weight: 600;")
-            self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
+            self._update_time_toggle_style(theme)
             self._update_profile_action_styles(theme)
         except Exception:
             pass

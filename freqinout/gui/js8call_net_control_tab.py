@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
+from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.utils.timezones import get_timezone
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.gui.qsy_helper import (
@@ -136,6 +137,7 @@ class JS8CallNetControlTab(QWidget):
         # Track inbound triggers to map replies to groups
         self._last_inbound_triggers: Dict[str, tuple[str, float]] = {}
         self._auto_inserted_callsigns: Set[str] = set()
+        self._operator_schema_ready = False
         self._awaiting_ack_for: Optional[str] = None
         self._call_last_rx_ts: Dict[str, float] = {}
         self._last_traffic_to_me_ts: float = 0.0
@@ -1751,6 +1753,23 @@ class JS8CallNetControlTab(QWidget):
             return ""
         return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", cs_norm)
 
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+    def _open_operator_db(self) -> sqlite3.Connection:
+        db_path = _nets_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path, timeout=2.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=2000")
+        except Exception:
+            pass
+        if not self._operator_schema_ready:
+            ensure_operator_checkins_schema(conn)
+            self._operator_schema_ready = True
+        return conn
+
     def _extract_callsigns_from_line(self, line: str) -> List[str]:
         """
         JS8Check-in line examples:
@@ -1939,44 +1958,25 @@ class JS8CallNetControlTab(QWidget):
         cs = self._base_callsign(callsign)
         if not cs:
             return
+        conn: Optional[sqlite3.Connection] = None
         try:
-            root = Path(__file__).resolve().parents[2]
-            db_path = _nets_db_path()
-            conn = sqlite3.connect(db_path)
+            conn = self._open_operator_db()
             cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operator_checkins (
-                    callsign TEXT PRIMARY KEY,
-                    name TEXT,
-                    state TEXT,
-                    grid TEXT,
-                    group1 TEXT,
-                    group2 TEXT,
-                    group3 TEXT,
-                    group_role TEXT,
-                    first_seen_utc TEXT,
-                    last_seen_utc TEXT,
-                    checkin_count INTEGER,
-                    groups_json TEXT,
-                    trusted INTEGER
-                )
-                """
-            )
             # check existing
             cur.execute("SELECT trusted FROM operator_checkins WHERE callsign=?", (cs,))
             row = cur.fetchone()
             ts_str = last_seen.astimezone(datetime.timezone.utc).isoformat()
-            groups_json = json.dumps([group_val]) if group_val else None
+            group_norm = (group_val or "").strip().upper()
+            groups_json = json.dumps([group_norm]) if group_norm else None
             if row is None:
                 cur.execute(
                     """
                     INSERT INTO operator_checkins (
                         callsign, name, state, grid, group1, group2, group3, group_role,
-                        first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted
-                    ) VALUES (?, '', '', '', ?, '', '', '', ?, ?, 0, ?, 0)
+                        first_seen_utc, last_seen_utc, last_net, last_role, checkin_count, groups_json, trusted
+                    ) VALUES (?, '', '', '', ?, '', '', '', ?, ?, '', '', 0, ?, 0)
                     """,
-                    (cs, group_val, ts_str, ts_str, groups_json),
+                    (cs, group_norm, ts_str, ts_str, groups_json),
                 )
             else:
                 trusted = int(row[0] or 0)
@@ -1987,63 +1987,49 @@ class JS8CallNetControlTab(QWidget):
                         SET last_seen_utc=?, group1=COALESCE(NULLIF(group1,''), ?), groups_json=COALESCE(groups_json, ?)
                         WHERE callsign=?
                         """,
-                        (ts_str, group_val, groups_json, cs),
+                        (ts_str, group_norm, groups_json, cs),
                     )
             conn.commit()
-            conn.close()
         except Exception as e:
             log.debug("JS8CallNetControl: failed to upsert untrusted operator %s: %s", callsign, e)
+            self._operator_schema_ready = False
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _increment_checkin_counter(self, callsign: str) -> None:
         cs = self._base_callsign(callsign)
         if not cs:
             return
+        conn: Optional[sqlite3.Connection] = None
         try:
-            root = Path(__file__).resolve().parents[2]
-            db_path = _nets_db_path()
-            conn = sqlite3.connect(db_path)
+            conn = self._open_operator_db()
             cur = conn.cursor()
+            now_iso = self._utc_now_iso()
             cur.execute(
                 """
-                CREATE TABLE IF NOT EXISTS operator_checkins (
-                    callsign TEXT PRIMARY KEY,
-                    name TEXT,
-                    state TEXT,
-                    grid TEXT,
-                    group1 TEXT,
-                    group2 TEXT,
-                    group3 TEXT,
-                    group_role TEXT,
-                    first_seen_utc TEXT,
-                    last_seen_utc TEXT,
-                    last_net TEXT,
-                    last_role TEXT,
-                    checkin_count INTEGER DEFAULT 0,
-                    groups_json TEXT,
-                    trusted INTEGER DEFAULT 0
+                INSERT INTO operator_checkins (
+                    callsign, name, state, grid, group1, group2, group3, group_role,
+                    first_seen_utc, last_seen_utc, last_net, last_role, checkin_count, groups_json, trusted
                 )
-                """
+                VALUES (?, '', '', '', '', '', '', '', ?, ?, '', '', 1, NULL, 0)
+                ON CONFLICT(callsign) DO UPDATE SET
+                    checkin_count=COALESCE(operator_checkins.checkin_count, 0) + 1,
+                    last_seen_utc=excluded.last_seen_utc
+                """,
+                (cs, now_iso, now_iso),
             )
-            cur.execute("SELECT checkin_count FROM operator_checkins WHERE callsign=?", (cs,))
-            row = cur.fetchone()
-            if row:
-                count = int(row[0] or 0) + 1
-                cur.execute(
-                    "UPDATE operator_checkins SET checkin_count=?, last_seen_utc=strftime('%Y-%m-%d', 'now') WHERE callsign=?",
-                    (count, cs),
-                )
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO operator_checkins (callsign, first_seen_utc, last_seen_utc, checkin_count, trusted)
-                    VALUES (?, strftime('%Y-%m-%d','now'), strftime('%Y-%m-%d','now'), 1, 0)
-                    """,
-                    (cs,),
-                )
             conn.commit()
-            conn.close()
         except Exception as e:
+            self._operator_schema_ready = False
             log.error("JS8CallNetControl: failed to increment checkin count for %s: %s", cs, e)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
     def _maybe_capture_grid_report(self, line: str) -> None:
         """
         Capture GRID reports in DIRECTED.TXT lines (ignore GRID? queries).
@@ -2199,47 +2185,28 @@ class JS8CallNetControlTab(QWidget):
             grid = ""
         if not state and not grid:
             return
+        conn: Optional[sqlite3.Connection] = None
         try:
-            db_path = _nets_db_path()
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(db_path)
+            conn = self._open_operator_db()
             cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operator_checkins (
-                    callsign TEXT PRIMARY KEY,
-                    name TEXT,
-                    state TEXT,
-                    grid TEXT,
-                    group1 TEXT,
-                    group2 TEXT,
-                    group3 TEXT,
-                    group_role TEXT,
-                    first_seen_utc TEXT,
-                    last_seen_utc TEXT,
-                    last_net TEXT,
-                    last_role TEXT,
-                    checkin_count INTEGER DEFAULT 0,
-                    groups_json TEXT,
-                    trusted INTEGER DEFAULT 0
-                )
-                """
-            )
             cur.execute(
                 "SELECT state, grid, group1, group2, group3, groups_json, trusted FROM operator_checkins WHERE callsign=?",
                 (cs,),
             )
             row = cur.fetchone()
-            now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            now_iso = self._utc_now_iso()
             group_name = (group_name or "").strip().upper()
             if row is None:
                 groups = [g for g in [group_name] if g]
                 groups_json = json.dumps(groups) if groups else None
                 cur.execute(
                     """
-                    INSERT OR REPLACE INTO operator_checkins
-                    (callsign, name, state, grid, group1, group2, group3, group_role, first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted)
-                    VALUES (?, '', ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, 0)
+                    INSERT INTO operator_checkins
+                    (
+                        callsign, name, state, grid, group1, group2, group3, group_role,
+                        first_seen_utc, last_seen_utc, last_net, last_role, checkin_count, groups_json, trusted
+                    )
+                    VALUES (?, '', ?, ?, ?, ?, ?, NULL, ?, ?, '', '', 0, ?, 0)
                     """,
                     (
                         cs,
@@ -2308,6 +2275,7 @@ class JS8CallNetControlTab(QWidget):
                 )
             conn.commit()
         except Exception as e:
+            self._operator_schema_ready = False
             log.debug("JS8CallNetControl: failed to update operator geo for %s: %s", callsign, e)
         finally:
             try:
@@ -2320,29 +2288,10 @@ class JS8CallNetControlTab(QWidget):
         if not cs:
             return
         ts_str = ts.astimezone(datetime.timezone.utc).isoformat()
+        conn: Optional[sqlite3.Connection] = None
         try:
-            db_path = _nets_db_path()
-            conn = sqlite3.connect(db_path)
+            conn = self._open_operator_db()
             cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operator_checkins (
-                    callsign TEXT PRIMARY KEY,
-                    name TEXT,
-                    state TEXT,
-                    grid TEXT,
-                    group1 TEXT,
-                    group2 TEXT,
-                    group3 TEXT,
-                    group_role TEXT,
-                    first_seen_utc TEXT,
-                    last_seen_utc TEXT,
-                    checkin_count INTEGER,
-                    groups_json TEXT,
-                    trusted INTEGER
-                )
-                """
-            )
             cur.execute(
                 "SELECT grid, group1, group2, group3, groups_json, trusted FROM operator_checkins WHERE callsign=?",
                 (cs,),
@@ -2356,8 +2305,8 @@ class JS8CallNetControlTab(QWidget):
                     """
                     INSERT INTO operator_checkins (
                         callsign, name, state, grid, group1, group2, group3, group_role,
-                        first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted
-                    ) VALUES (?, '', '', ?, ?, ?, ?, '', ?, ?, 0, ?, 0)
+                        first_seen_utc, last_seen_utc, last_net, last_role, checkin_count, groups_json, trusted
+                    ) VALUES (?, '', '', ?, ?, ?, ?, '', ?, ?, '', '', 0, ?, 0)
                     """,
                     (
                         cs,
@@ -2425,9 +2374,14 @@ class JS8CallNetControlTab(QWidget):
                     ),
                 )
             conn.commit()
-            conn.close()
         except Exception as e:
+            self._operator_schema_ready = False
             log.debug("JS8CallNetControl: failed to upsert operator info %s: %s", callsign, e)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
     def _queue_auto_query(self, call: str, msg_id: str, snr: float | None = None, speed: int | None = None) -> None:
         """
         Queue a query for MSG ID, and process one at a time when enabled.
@@ -2972,80 +2926,65 @@ class JS8CallNetControlTab(QWidget):
         cs = self._base_callsign(callsign)
         if not cs:
             return False
+        conn: Optional[sqlite3.Connection] = None
         try:
-            db_path = _nets_db_path()
-            if not db_path.exists():
-                return True
-            conn = sqlite3.connect(db_path)
+            conn = self._open_operator_db()
             cur = conn.cursor()
             cur.execute("SELECT grid FROM operator_checkins WHERE callsign=?", (cs,))
             row = cur.fetchone()
-            conn.close()
             if row is None:
                 return True
             grid = row[0] or ""
             return grid.strip() == ""
         except Exception:
+            self._operator_schema_ready = False
             return True
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _update_operator_grid(self, callsign: str, grid: str, group_name: str = "") -> None:
         cs = self._base_callsign(callsign)
         grid = (grid or "").strip().upper()
         if not cs or not grid:
             return
+        conn: Optional[sqlite3.Connection] = None
         try:
-            db_path = _nets_db_path()
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(db_path)
+            conn = self._open_operator_db()
             cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operator_checkins (
-                    callsign TEXT PRIMARY KEY,
-                    name TEXT,
-                    state TEXT,
-                    grid TEXT,
-                    group1 TEXT,
-                    group2 TEXT,
-                    group3 TEXT,
-                    group_role TEXT,
-                    first_seen_utc TEXT,
-                    last_seen_utc TEXT,
-                    last_net TEXT,
-                    last_role TEXT,
-                    checkin_count INTEGER DEFAULT 0,
-                    groups_json TEXT,
-                    trusted INTEGER DEFAULT 0
-                )
-                """
-            )
             cur.execute("SELECT grid, group1, group2, group3, groups_json, trusted FROM operator_checkins WHERE callsign=?", (cs,))
             row = cur.fetchone()
-            now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            now_iso = self._utc_now_iso()
+            group_norm = (group_name or "").strip().upper()
             if row is None:
-                groups = [g for g in [group_name.strip()] if g]
+                groups = [g for g in [group_norm] if g]
                 groups_json = json.dumps(groups) if groups else None
                 cur.execute(
                     """
-                    INSERT OR REPLACE INTO operator_checkins
-                    (callsign, grid, group1, group2, group3, group_role, first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted)
-                    VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, 0)
+                    INSERT INTO operator_checkins
+                    (
+                        callsign, name, state, grid, group1, group2, group3, group_role,
+                        first_seen_utc, last_seen_utc, last_net, last_role, checkin_count, groups_json, trusted
+                    )
+                    VALUES (?, '', '', ?, ?, ?, ?, NULL, ?, ?, '', '', 0, ?, 0)
                     """,
-                    (cs, grid, group_name or None, None, None, now_iso, now_iso, groups_json),
+                    (cs, grid, group_norm or None, None, None, now_iso, now_iso, groups_json),
                 )
             else:
                 old_grid, g1, g2, g3, groups_json, trusted = row
                 new_grid = old_grid or grid
                 g_list = [g1 or "", g2 or "", g3 or ""]
-                if group_name and group_name not in g_list:
+                if group_norm and group_norm not in g_list:
                     for idx, val in enumerate(g_list):
                         if not val:
-                            g_list[idx] = group_name
+                            g_list[idx] = group_norm
                             break
                 try:
                     current_groups = json.loads(groups_json) if groups_json else []
-                    if group_name and group_name not in current_groups:
-                        current_groups.append(group_name)
+                    if group_norm and group_norm not in current_groups:
+                        current_groups.append(group_norm)
                     groups_json_out = json.dumps(current_groups) if current_groups else None
                 except Exception:
                     groups_json_out = groups_json
@@ -3059,6 +2998,7 @@ class JS8CallNetControlTab(QWidget):
                 )
             conn.commit()
         except Exception as e:
+            self._operator_schema_ready = False
             log.debug("JS8CallNetControl: failed to update operator grid for %s: %s", callsign, e)
         finally:
             try:

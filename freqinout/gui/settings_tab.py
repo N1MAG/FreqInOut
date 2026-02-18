@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import zipfile
+import re
 from pathlib import Path
 from typing import Dict, Optional, List
 
@@ -29,8 +30,10 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QApplication,
     QDialog,
+    QDialogButtonBox,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QHeaderView,
     QSizePolicy,
     QAbstractScrollArea,
@@ -43,10 +46,25 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.logger import log, set_log_level, get_log_level, _get_log_file
 from freqinout.core.perf_metrics import emit_span, span as perf_span
+from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.config_paths import get_fldigi_checkin_dir, get_config_dir
 from freqinout.core.launch_orchestrator import LaunchOrchestrator, LAUNCH_APP_ORDER
 from freqinout.core.software_status_service import SoftwareStatusService
+from freqinout.core.gpg_tools import (
+    gpg_available,
+    import_public_key_file,
+    import_public_key_text,
+    list_public_keys,
+    local_sign_key,
+    normalize_fingerprint,
+)
+from freqinout.core.hash_tools import (
+    infer_algorithm_from_hash,
+    normalize_hash_algorithm,
+    normalize_hash_hex,
+    normalize_trusted_hash_entries,
+)
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
@@ -293,6 +311,10 @@ class SettingsTab(QWidget):
         self._launch_items_cache: List[Dict[str, object]] = []
         self._launch_visible_names: List[str] = []
         self._launch_table_loading = False
+        self._gpg_keys_table_loading = False
+        self._gpg_trusted_fingerprints: set[str] = set()
+        self._trusted_hashes_table_loading = False
+        self._trusted_hash_entries: List[Dict[str, object]] = []
         self._active = False
         self._last_activation_refresh_ts = 0.0
         self._activation_refresh_interval_sec = 30.0
@@ -1013,6 +1035,169 @@ class SettingsTab(QWidget):
         fast_light_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(fast_light_group)
 
+        # Message Authenticity (Key/Hash)
+        gpg_group = QGroupBox("Message Auth (Key/Hash)")
+        gpg_v = QVBoxLayout()
+        gpg_v.setSpacing(6)
+        gpg_v.setAlignment(Qt.AlignTop)
+        gpg_group.setLayout(gpg_v)
+
+        self.gpg_verify_enabled_chk = QCheckBox("Verify FLAMP .k2s/.b2s signatures")
+        self.gpg_verify_enabled_chk.setToolTip(
+            "When enabled, Message Viewer verifies detached sidecars and embedded clearsigned content "
+            "for configured '-sig' filename patterns."
+        )
+        gpg_v.addWidget(self.gpg_verify_enabled_chk)
+
+        self.hash_verify_enabled_chk = QCheckBox(
+            "Verify FLAMP .k2s/.b2s checksum sidecars (SHA-256/SHA-512 preferred)"
+        )
+        self.hash_verify_enabled_chk.setToolTip(
+            "When enabled, Message Viewer checks checksum sidecar files for tamper/corruption detection."
+        )
+        gpg_v.addWidget(self.hash_verify_enabled_chk)
+
+        trusted_hash_row = QHBoxLayout()
+        trusted_hash_row.setContentsMargins(0, 0, 0, 0)
+        trusted_hash_row.setSpacing(8)
+        trusted_hash_label = QLabel("Trusted Hash")
+        trusted_hash_label.setFixedWidth(msg_label_width)
+        trusted_hash_row.addWidget(trusted_hash_label)
+        self.trusted_hash_edit = QLineEdit()
+        self.trusted_hash_edit.setPlaceholderText("Paste hash (SHA-1/SHA-256/SHA-512/MD5)")
+        trusted_hash_row.addWidget(self.trusted_hash_edit, 1)
+        self.trusted_hash_algo_combo = QComboBox()
+        self.trusted_hash_algo_combo.addItems(["Auto", "SHA-1", "SHA-256", "SHA-512", "MD5"])
+        self.trusted_hash_algo_combo.setFixedWidth(110)
+        trusted_hash_row.addWidget(self.trusted_hash_algo_combo)
+        self.trusted_hash_label_edit = QLineEdit()
+        self.trusted_hash_label_edit.setPlaceholderText("Label (optional)")
+        self.trusted_hash_label_edit.setFixedWidth(180)
+        trusted_hash_row.addWidget(self.trusted_hash_label_edit)
+        self.trusted_hash_add_btn = QPushButton("Add")
+        self.trusted_hash_add_btn.setFixedWidth(70)
+        trusted_hash_row.addWidget(self.trusted_hash_add_btn)
+        gpg_v.addLayout(trusted_hash_row)
+
+        trusted_hash_actions = QHBoxLayout()
+        trusted_hash_actions.setContentsMargins(0, 0, 0, 0)
+        trusted_hash_actions.setSpacing(8)
+        trusted_hash_spacer = QLabel("")
+        trusted_hash_spacer.setFixedWidth(msg_label_width)
+        trusted_hash_actions.addWidget(trusted_hash_spacer)
+        self.trusted_hash_import_btn = QPushButton("Import Hash File")
+        self.trusted_hash_remove_btn = QPushButton("Remove Selected")
+        self.trusted_hash_remove_btn.setEnabled(False)
+        trusted_hash_actions.addWidget(self.trusted_hash_import_btn)
+        trusted_hash_actions.addWidget(self.trusted_hash_remove_btn)
+        trusted_hash_actions.addStretch()
+        gpg_v.addLayout(trusted_hash_actions)
+
+        self.trusted_hash_table = QTableWidget(0, 4)
+        self.trusted_hash_table.setHorizontalHeaderLabels(["Use", "Algorithm", "Hash", "Label"])
+        self.trusted_hash_table.verticalHeader().setVisible(False)
+        self.trusted_hash_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.trusted_hash_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.trusted_hash_table.setAlternatingRowColors(True)
+        self.trusted_hash_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        th_hdr = self.trusted_hash_table.horizontalHeader()
+        th_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        th_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        th_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        th_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.trusted_hash_table.setMinimumHeight(150)
+        gpg_v.addWidget(self.trusted_hash_table)
+
+        gpg_path_row = QHBoxLayout()
+        gpg_path_row.setContentsMargins(0, 0, 0, 0)
+        gpg_path_row.setSpacing(8)
+        gpg_path_label = QLabel("GPG Executable")
+        gpg_path_label.setFixedWidth(msg_label_width)
+        gpg_path_row.addWidget(gpg_path_label)
+        self.gpg_path_edit = QLineEdit()
+        self.gpg_path_edit.setPlaceholderText("Auto-detect (gpg/gpg2)")
+        gpg_path_row.addWidget(self.gpg_path_edit, 1)
+        self.gpg_browse_btn = QPushButton("Browse")
+        self.gpg_browse_btn.setFixedWidth(70)
+        self.gpg_test_btn = QPushButton("Test")
+        self.gpg_test_btn.setFixedWidth(70)
+        self.gpg_refresh_keys_btn = QPushButton("Refresh Keys")
+        self.gpg_refresh_keys_btn.setFixedWidth(110)
+        gpg_path_row.addWidget(self.gpg_browse_btn)
+        gpg_path_row.addWidget(self.gpg_test_btn)
+        gpg_path_row.addWidget(self.gpg_refresh_keys_btn)
+        gpg_v.addLayout(gpg_path_row)
+
+        gpg_action_row = QHBoxLayout()
+        gpg_action_row.setContentsMargins(0, 0, 0, 0)
+        gpg_action_row.setSpacing(8)
+        gpg_action_spacer = QLabel("")
+        gpg_action_spacer.setFixedWidth(msg_label_width)
+        gpg_action_row.addWidget(gpg_action_spacer)
+        self.gpg_import_key_btn = QPushButton("Import Key File")
+        self.gpg_import_text_btn = QPushButton("Import Armored Key")
+        self.gpg_sign_key_btn = QPushButton("Local-Sign Selected")
+        self.gpg_sign_key_btn.setEnabled(False)
+        gpg_action_row.addWidget(self.gpg_import_key_btn)
+        gpg_action_row.addWidget(self.gpg_import_text_btn)
+        gpg_action_row.addWidget(self.gpg_sign_key_btn)
+        gpg_action_row.addStretch()
+        gpg_v.addLayout(gpg_action_row)
+
+        gpg_status_row = QHBoxLayout()
+        gpg_status_row.setContentsMargins(0, 0, 0, 0)
+        gpg_status_row.setSpacing(8)
+        gpg_status_spacer = QLabel("")
+        gpg_status_spacer.setFixedWidth(msg_label_width)
+        gpg_status_row.addWidget(gpg_status_spacer)
+        self.gpg_status_label = QLabel("GPG status: not checked")
+        self.gpg_status_label.setWordWrap(True)
+        gpg_status_row.addWidget(self.gpg_status_label, 1)
+        gpg_v.addLayout(gpg_status_row)
+
+        self.gpg_keys_table = QTableWidget(0, 3)
+        self.gpg_keys_table.setHorizontalHeaderLabels(["Trusted", "Fingerprint", "User IDs"])
+        self.gpg_keys_table.verticalHeader().setVisible(False)
+        self.gpg_keys_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.gpg_keys_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.gpg_keys_table.setAlternatingRowColors(True)
+        self.gpg_keys_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        gpg_hdr = self.gpg_keys_table.horizontalHeader()
+        gpg_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        gpg_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        gpg_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.gpg_keys_table.setMinimumHeight(180)
+        gpg_v.addWidget(self.gpg_keys_table)
+
+        self.gpg_verify_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
+        self.hash_verify_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
+        self.trusted_hash_edit.returnPressed.connect(self._add_trusted_hash_entry)
+        self.trusted_hash_add_btn.clicked.connect(self._add_trusted_hash_entry)
+        self.trusted_hash_import_btn.clicked.connect(self._import_trusted_hash_file)
+        self.trusted_hash_remove_btn.clicked.connect(self._remove_selected_trusted_hash_entries)
+        self.trusted_hash_table.itemChanged.connect(self._on_trusted_hash_table_item_changed)
+        self.trusted_hash_table.itemSelectionChanged.connect(self._update_trusted_hash_actions)
+        self.gpg_path_edit.textChanged.connect(self._mark_settings_dirty)
+        self.gpg_browse_btn.clicked.connect(self._choose_gpg_executable_path)
+        self.gpg_test_btn.clicked.connect(self._test_gpg_executable)
+        self.gpg_refresh_keys_btn.clicked.connect(self._refresh_gpg_keys_table)
+        self.gpg_import_key_btn.clicked.connect(self._import_gpg_key_file)
+        self.gpg_import_text_btn.clicked.connect(self._import_gpg_key_text)
+        self.gpg_sign_key_btn.clicked.connect(self._local_sign_selected_gpg_key)
+        self.gpg_keys_table.itemChanged.connect(self._on_gpg_keys_table_item_changed)
+        self.gpg_keys_table.itemSelectionChanged.connect(self._update_gpg_sign_button_state)
+
+        gpg_container = QWidget()
+        gpg_container.setLayout(gpg_v)
+        gpg_group = self._make_collapsible_group(
+            "Message Auth (Key/Hash)",
+            gpg_container,
+            checked=True,
+            fit_content=True,
+        )
+        self._register_collapsible_group(gpg_group, self._summary_gpg_settings)
+        gpg_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
         # VarAC Settings
         varac_group = QGroupBox("VarAC Settings")
         varac_v = QVBoxLayout()
@@ -1112,6 +1297,7 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(varac_group, self._summary_varac_settings)
         varac_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(varac_group)
+        self._add_settings_section(gpg_group)
 
         # Launch Control
         launch_group = QGroupBox("Launch Control")
@@ -1415,6 +1601,17 @@ class SettingsTab(QWidget):
                 set_count += 1
         return f"{set_count}/{total} app paths set"
 
+    def _summary_gpg_settings(self) -> str:
+        enabled = bool(hasattr(self, "gpg_verify_enabled_chk") and self.gpg_verify_enabled_chk.isChecked())
+        hash_enabled = bool(hasattr(self, "hash_verify_enabled_chk") and self.hash_verify_enabled_chk.isChecked())
+        path_set = bool(hasattr(self, "gpg_path_edit") and self.gpg_path_edit.text().strip())
+        trusted = len(self._gpg_trusted_fingerprints)
+        local_hashes = len([r for r in self._trusted_hash_entries if bool(r.get("enabled", True))])
+        return (
+            f"Sig {'on' if enabled else 'off'}, Hash {'on' if hash_enabled else 'off'}, "
+            f"GPG {'set' if path_set else 'auto'}, {trusted} keys, {local_hashes} hashes"
+        )
+
     def _summary_varac_settings(self) -> str:
         install_set = bool(hasattr(self, "varac_path_edit") and self.varac_path_edit.text().strip())
         incoming_set = bool(self.msg_paths_edits.get("varac") and self.msg_paths_edits["varac"].text().strip())
@@ -1572,6 +1769,25 @@ class SettingsTab(QWidget):
         msg_paths = data.get("message_paths", {})
         for origin, edit in self.msg_paths_edits.items():
             edit.setText(msg_paths.get(origin, ""))
+        gpg_enabled = bool(data.get("gpg_verify_flamp_k2s_enabled", False))
+        hash_enabled = bool(data.get("hash_verify_flamp_k2s_enabled", True))
+        gpg_path = str(data.get("gpg_executable_path", "") or "").strip()
+        trusted = data.get("gpg_trusted_signers", [])
+        if not isinstance(trusted, list):
+            trusted = []
+        trusted_hashes_raw = data.get("trusted_file_hashes", [])
+        if not isinstance(trusted_hashes_raw, list):
+            trusted_hashes_raw = []
+        self._gpg_trusted_fingerprints = {normalize_fingerprint(v) for v in trusted if normalize_fingerprint(v)}
+        self._trusted_hash_entries = normalize_trusted_hash_entries(trusted_hashes_raw)
+        if hasattr(self, "gpg_verify_enabled_chk"):
+            self.gpg_verify_enabled_chk.setChecked(gpg_enabled)
+        if hasattr(self, "hash_verify_enabled_chk"):
+            self.hash_verify_enabled_chk.setChecked(hash_enabled)
+        if hasattr(self, "gpg_path_edit"):
+            self.gpg_path_edit.setText(gpg_path)
+        self._refresh_trusted_hash_table()
+        self._refresh_gpg_keys_table(show_dialog_on_error=False)
         varac_path = (data.get("varac_path", "") or "").strip()
         if not varac_path:
             legacy_db = (data.get("varac_db_path", "") or "").strip()
@@ -1793,6 +2009,25 @@ class SettingsTab(QWidget):
         for origin, edit in self.msg_paths_edits.items():
             msg_paths[origin] = edit.text().strip()
         data["message_paths"] = msg_paths
+        data["gpg_verify_flamp_k2s_enabled"] = bool(
+            self.gpg_verify_enabled_chk.isChecked() if hasattr(self, "gpg_verify_enabled_chk") else False
+        )
+        data["hash_verify_flamp_k2s_enabled"] = bool(
+            self.hash_verify_enabled_chk.isChecked() if hasattr(self, "hash_verify_enabled_chk") else True
+        )
+        data["gpg_executable_path"] = self.gpg_path_edit.text().strip() if hasattr(self, "gpg_path_edit") else ""
+        data["gpg_trusted_signers"] = sorted(
+            [fp for fp in self._gpg_trusted_fingerprints if normalize_fingerprint(fp)]
+        )
+        data["trusted_file_hashes"] = [
+            {
+                "enabled": bool(row.get("enabled", True)),
+                "algorithm": normalize_hash_algorithm(str(row.get("algorithm", "") or "")),
+                "hash": normalize_hash_hex(str(row.get("hash", "") or "")),
+                "label": str(row.get("label", "") or "").strip(),
+            }
+            for row in normalize_trusted_hash_entries(self._trusted_hash_entries)
+        ]
         varac_path = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
         data["varac_path"] = varac_path
         data["varac_db_path"] = str(Path(varac_path) / "VarAC.db") if varac_path else ""
@@ -1915,6 +2150,11 @@ class SettingsTab(QWidget):
                 "path_commstat": data.get("path_commstat", ""),
                 "js8_inbox_mark_retrieved_sync": data.get("js8_inbox_mark_retrieved_sync", False),
                 "message_paths": data.get("message_paths", {}),
+                "gpg_verify_flamp_k2s_enabled": data.get("gpg_verify_flamp_k2s_enabled", False),
+                "hash_verify_flamp_k2s_enabled": data.get("hash_verify_flamp_k2s_enabled", True),
+                "gpg_executable_path": data.get("gpg_executable_path", ""),
+                "gpg_trusted_signers": data.get("gpg_trusted_signers", []),
+                "trusted_file_hashes": data.get("trusted_file_hashes", []),
                 "varac_path": data.get("varac_path", ""),
                 "varac_db_path": data.get("varac_db_path", ""),
                 "varac_bbs_dir": data.get("varac_bbs_dir", ""),
@@ -1967,6 +2207,11 @@ class SettingsTab(QWidget):
                 data.get("js8_inbox_mark_retrieved_sync", False),
             )
             self.settings.set("message_paths", data.get("message_paths", {}))
+            self.settings.set("gpg_verify_flamp_k2s_enabled", data.get("gpg_verify_flamp_k2s_enabled", False))
+            self.settings.set("hash_verify_flamp_k2s_enabled", data.get("hash_verify_flamp_k2s_enabled", True))
+            self.settings.set("gpg_executable_path", data.get("gpg_executable_path", ""))
+            self.settings.set("gpg_trusted_signers", data.get("gpg_trusted_signers", []))
+            self.settings.set("trusted_file_hashes", data.get("trusted_file_hashes", []))
             self.settings.set("varac_path", data.get("varac_path", ""))
             self.settings.set("varac_db_path", data.get("varac_db_path", ""))
             self.settings.set("varac_bbs_dir", data.get("varac_bbs_dir", ""))
@@ -2632,74 +2877,39 @@ class SettingsTab(QWidget):
         grid = (grid6 or "").strip().upper()
         if not cs or len(grid) < 4:
             return
+        conn = None
         try:
-            root = Path(__file__).resolve().parents[2]  # repo root
-            from freqinout.core.config_paths import get_config_dir
-
             db_path = get_config_dir() / "config" / "freqinout_nets.db"
-            conn = sqlite3.connect(db_path)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            conn.execute("PRAGMA busy_timeout=5000")
+            ensure_operator_checkins_schema(conn)
             cur = conn.cursor()
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
             cur.execute(
                 """
-                CREATE TABLE IF NOT EXISTS operator_checkins (
-                    callsign TEXT PRIMARY KEY,
-                    name TEXT,
-                    state TEXT,
-                    grid TEXT,
-                    group1 TEXT,
-                    group2 TEXT,
-                    group3 TEXT,
-                    groups_json TEXT,
-                    first_seen_utc TEXT,
-                    last_seen_utc TEXT,
-                    checkin_count INTEGER,
-                    trusted INTEGER
-                )
-                """
-            )
-            # Ensure older DBs have the expected columns.
-            cur.execute("PRAGMA table_info(operator_checkins)")
-            existing_cols = {row[1] for row in cur.fetchall()}
-            required_cols = {
-                "first_seen_utc": "TEXT",
-                "last_seen_utc": "TEXT",
-                "checkin_count": "INTEGER",
-                "trusted": "INTEGER",
-                "groups_json": "TEXT",
-                "group1": "TEXT",
-                "group2": "TEXT",
-                "group3": "TEXT",
-                "grid": "TEXT",
-                "state": "TEXT",
-                "name": "TEXT",
-            }
-            for col, col_type in required_cols.items():
-                if col not in existing_cols:
-                    cur.execute(f"ALTER TABLE operator_checkins ADD COLUMN {col} {col_type}")
-            cur.execute("PRAGMA table_info(operator_checkins)")
-            existing_cols = {row[1] for row in cur.fetchall()}
-            if "first_seen_utc" not in existing_cols:
-                log.debug("SettingsTab: operator_checkins missing first_seen_utc after migration")
-                conn.close()
-                return
-            cur.execute(
-                """
-                INSERT INTO operator_checkins (callsign, name, state, grid, first_seen_utc, last_seen_utc, checkin_count, trusted)
-                VALUES (?, ?, ?, ?, strftime('%Y-%m-%d', 'now'), strftime('%Y-%m-%d', 'now'), COALESCE((SELECT checkin_count FROM operator_checkins WHERE callsign=?), 0), COALESCE((SELECT trusted FROM operator_checkins WHERE callsign=?), 0))
+                INSERT INTO operator_checkins
+                    (callsign, name, state, grid, group1, group2, group3, group_role,
+                     first_seen_utc, last_seen_utc, last_net, last_role, checkin_count, groups_json, trusted)
+                VALUES (?, ?, ?, ?, '', '', '', '', ?, ?, '', '', 0, NULL, 0)
                 ON CONFLICT(callsign) DO UPDATE SET
                     name=excluded.name,
                     state=excluded.state,
                     grid=excluded.grid,
                     last_seen_utc=excluded.last_seen_utc,
-                    checkin_count=excluded.checkin_count,
                     trusted=COALESCE(operator_checkins.trusted, excluded.trusted)
                 """,
-                (cs, name.strip(), state.strip().upper(), grid, cs, cs),
+                (cs, name.strip(), state.strip().upper(), grid, now_iso, now_iso),
             )
             conn.commit()
-            conn.close()
         except Exception as e:
             log.debug("SettingsTab: failed to persist operator grid to DB: %s", e)
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
 
     def _refresh_operator_history_views(self) -> None:
         """
@@ -3657,6 +3867,384 @@ class SettingsTab(QWidget):
         except Exception:
             log.exception("Failed to persist Local Net Profile deletions; will remain in-memory only.")
         QMessageBox.information(self, "Delete Profiles", f"Deleted {len(to_remove)} Local Net Profile(s).")
+
+    # ---------- GPG authenticity ---------- #
+
+    def _current_gpg_path(self) -> str:
+        return self.gpg_path_edit.text().strip() if hasattr(self, "gpg_path_edit") else ""
+
+    def _set_gpg_status(self, text: str, *, error: bool = False) -> None:
+        if not hasattr(self, "gpg_status_label"):
+            return
+        self.gpg_status_label.setText(str(text or "").strip() or ("GPG status: error" if error else "GPG status: ready"))
+
+    def _refresh_gpg_keys_table(self, *, show_dialog_on_error: bool = True) -> None:
+        if not hasattr(self, "gpg_keys_table"):
+            return
+        configured = self._current_gpg_path()
+        ok, msg, resolved = gpg_available(configured)
+        if not ok:
+            self._set_gpg_status(f"GPG unavailable: {msg}", error=True)
+            self._gpg_keys_table_loading = True
+            try:
+                self.gpg_keys_table.setRowCount(0)
+            finally:
+                self._gpg_keys_table_loading = False
+            self._update_gpg_sign_button_state()
+            if show_dialog_on_error:
+                QMessageBox.warning(
+                    self,
+                    "GPG",
+                    f"{msg}\n\nInstall GPG or set the executable path in Settings.",
+                )
+            return
+
+        if resolved:
+            self._set_gpg_status(f"GPG ready: {resolved}")
+        else:
+            self._set_gpg_status("GPG ready.")
+        keys, err = list_public_keys(configured_path=configured)
+        if err:
+            self._set_gpg_status(f"GPG key list failed: {err}", error=True)
+            if show_dialog_on_error:
+                QMessageBox.warning(self, "GPG", err)
+            return
+        self._gpg_keys_table_loading = True
+        try:
+            self.gpg_keys_table.setRowCount(0)
+            for row_idx, key in enumerate(keys):
+                self.gpg_keys_table.insertRow(row_idx)
+                fpr = normalize_fingerprint(key.fingerprint)
+                trusted = fpr in self._gpg_trusted_fingerprints
+                trusted_item = QTableWidgetItem("")
+                trusted_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                trusted_item.setCheckState(Qt.Checked if trusted else Qt.Unchecked)
+                trusted_item.setData(Qt.UserRole, fpr)
+                self.gpg_keys_table.setItem(row_idx, 0, trusted_item)
+
+                fpr_item = QTableWidgetItem(fpr)
+                fpr_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.gpg_keys_table.setItem(row_idx, 1, fpr_item)
+
+                uid_text = "; ".join([u for u in key.user_ids if str(u).strip()]) or "(no user id)"
+                uid_item = QTableWidgetItem(uid_text)
+                uid_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.gpg_keys_table.setItem(row_idx, 2, uid_item)
+        finally:
+            self._gpg_keys_table_loading = False
+        self._update_gpg_sign_button_state()
+
+    def _on_gpg_keys_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._gpg_keys_table_loading:
+            return
+        if item is None or item.column() != 0:
+            return
+        fpr = normalize_fingerprint(str(item.data(Qt.UserRole) or ""))
+        if not fpr and item.row() >= 0 and hasattr(self, "gpg_keys_table"):
+            cell = self.gpg_keys_table.item(item.row(), 1)
+            fpr = normalize_fingerprint(cell.text() if cell else "")
+        if not fpr:
+            return
+        if item.checkState() == Qt.Checked:
+            self._gpg_trusted_fingerprints.add(fpr)
+        else:
+            self._gpg_trusted_fingerprints.discard(fpr)
+        self._mark_settings_dirty()
+        self._refresh_section_titles()
+
+    def _update_gpg_sign_button_state(self) -> None:
+        if not hasattr(self, "gpg_sign_key_btn"):
+            return
+        self.gpg_sign_key_btn.setEnabled(bool(self._selected_gpg_fingerprint()))
+
+    def _selected_gpg_fingerprint(self) -> str:
+        if not hasattr(self, "gpg_keys_table"):
+            return ""
+        row = self.gpg_keys_table.currentRow()
+        if row < 0:
+            return ""
+        item = self.gpg_keys_table.item(row, 1)
+        return normalize_fingerprint(item.text() if item else "")
+
+    def _choose_gpg_executable_path(self) -> None:
+        start = self._current_gpg_path()
+        fn, _ = QFileDialog.getOpenFileName(self, "Select GPG executable", start)
+        if not fn:
+            return
+        self.gpg_path_edit.setText(fn)
+        self._mark_settings_dirty()
+
+    def _test_gpg_executable(self) -> None:
+        ok, msg, resolved = gpg_available(self._current_gpg_path())
+        if ok:
+            detail = msg
+            if resolved:
+                detail = f"{msg}\nPath: {resolved}"
+            self._set_gpg_status(f"GPG ready: {resolved or msg}")
+            QMessageBox.information(self, "GPG", detail)
+            return
+        self._set_gpg_status(f"GPG unavailable: {msg}", error=True)
+        QMessageBox.warning(self, "GPG", msg)
+
+    def _import_gpg_key_file(self) -> None:
+        fn, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import GPG public key",
+            "",
+            "Key Files (*.asc *.pgp *.gpg *.key *.txt);;All Files (*)",
+        )
+        if not fn:
+            return
+        ok, msg = import_public_key_file(fn, configured_path=self._current_gpg_path())
+        if not ok:
+            self._set_gpg_status(f"Key import failed: {msg}", error=True)
+            QMessageBox.warning(self, "GPG Import", msg)
+            return
+        self._set_gpg_status("Public key imported.")
+        self._refresh_gpg_keys_table(show_dialog_on_error=False)
+        self._mark_settings_dirty()
+        QMessageBox.information(self, "GPG Import", "Public key imported successfully.")
+
+    def _import_gpg_key_text(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Import Armored GPG Key")
+        dlg.resize(720, 460)
+        layout = QVBoxLayout(dlg)
+        info = QLabel("Paste an armored public key block.")
+        layout.addWidget(info)
+        text_edit = QTextEdit()
+        text_edit.setPlaceholderText("-----BEGIN PGP PUBLIC KEY BLOCK-----")
+        layout.addWidget(text_edit, 1)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_btn = btns.button(QDialogButtonBox.Ok)
+        if ok_btn is not None:
+            ok_btn.setText("Import Key")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        payload = text_edit.toPlainText().strip()
+        if not payload:
+            QMessageBox.warning(self, "GPG Import", "No key text provided.")
+            return
+        ok, msg = import_public_key_text(payload, configured_path=self._current_gpg_path())
+        if not ok:
+            self._set_gpg_status(f"Key import failed: {msg}", error=True)
+            QMessageBox.warning(self, "GPG Import", msg)
+            return
+        self._set_gpg_status("Public key imported.")
+        self._refresh_gpg_keys_table(show_dialog_on_error=False)
+        self._mark_settings_dirty()
+        QMessageBox.information(self, "GPG Import", "Public key imported successfully.")
+
+    def _local_sign_selected_gpg_key(self) -> None:
+        fpr = self._selected_gpg_fingerprint()
+        if not fpr:
+            QMessageBox.information(self, "GPG", "Select one key to local-sign.")
+            return
+        resp = QMessageBox.question(
+            self,
+            "Local-Sign Key",
+            "This will run GPG local-sign for the selected key.\nContinue?",
+        )
+        if resp != QMessageBox.Yes:
+            return
+        ok, msg = local_sign_key(fpr, configured_path=self._current_gpg_path())
+        if not ok:
+            self._set_gpg_status(f"Local-sign failed: {msg}", error=True)
+            QMessageBox.warning(self, "GPG", msg)
+            return
+        self._set_gpg_status("Key local-sign complete.")
+        self._refresh_gpg_keys_table(show_dialog_on_error=False)
+        QMessageBox.information(self, "GPG", "Key local-sign completed.")
+
+    def _selected_hash_algo(self) -> str:
+        if not hasattr(self, "trusted_hash_algo_combo"):
+            return ""
+        txt = str(self.trusted_hash_algo_combo.currentText() or "").strip().lower()
+        if txt == "auto":
+            return ""
+        return normalize_hash_algorithm(txt)
+
+    def _normalize_single_hash_entry(self, hash_value: str, algorithm: str = "", label: str = "", enabled: bool = True) -> dict | None:
+        hash_norm = normalize_hash_hex(hash_value)
+        if not hash_norm:
+            return None
+        algo = normalize_hash_algorithm(algorithm) or infer_algorithm_from_hash(hash_norm)
+        if not algo:
+            return None
+        return {
+            "enabled": bool(enabled),
+            "algorithm": algo,
+            "hash": hash_norm,
+            "label": str(label or "").strip(),
+        }
+
+    def _refresh_trusted_hash_table(self) -> None:
+        if not hasattr(self, "trusted_hash_table"):
+            return
+        self._trusted_hash_entries = normalize_trusted_hash_entries(self._trusted_hash_entries)
+        self._trusted_hashes_table_loading = True
+        try:
+            self.trusted_hash_table.setRowCount(0)
+            for idx, row in enumerate(self._trusted_hash_entries):
+                self.trusted_hash_table.insertRow(idx)
+                use_item = QTableWidgetItem("")
+                use_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                use_item.setCheckState(Qt.Checked if bool(row.get("enabled", True)) else Qt.Unchecked)
+                self.trusted_hash_table.setItem(idx, 0, use_item)
+
+                algo = str(row.get("algorithm", "") or "").strip().upper()
+                if algo == "SHA1":
+                    algo = "SHA-1"
+                elif algo == "SHA256":
+                    algo = "SHA-256"
+                elif algo == "SHA512":
+                    algo = "SHA-512"
+                algo_item = QTableWidgetItem(algo)
+                algo_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.trusted_hash_table.setItem(idx, 1, algo_item)
+
+                hash_item = QTableWidgetItem(str(row.get("hash", "") or ""))
+                hash_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.trusted_hash_table.setItem(idx, 2, hash_item)
+
+                label_item = QTableWidgetItem(str(row.get("label", "") or ""))
+                label_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable)
+                self.trusted_hash_table.setItem(idx, 3, label_item)
+        finally:
+            self._trusted_hashes_table_loading = False
+        self._update_trusted_hash_actions()
+
+    def _update_trusted_hash_actions(self) -> None:
+        if hasattr(self, "trusted_hash_remove_btn") and hasattr(self, "trusted_hash_table"):
+            self.trusted_hash_remove_btn.setEnabled(bool(self.trusted_hash_table.selectionModel().selectedRows()))
+
+    def _on_trusted_hash_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._trusted_hashes_table_loading:
+            return
+        if item is None:
+            return
+        row_idx = int(item.row())
+        if row_idx < 0 or row_idx >= len(self._trusted_hash_entries):
+            return
+        if item.column() == 0:
+            self._trusted_hash_entries[row_idx]["enabled"] = bool(item.checkState() == Qt.Checked)
+            self._mark_settings_dirty()
+            self._refresh_section_titles()
+            return
+        if item.column() == 3:
+            self._trusted_hash_entries[row_idx]["label"] = str(item.text() or "").strip()
+            self._mark_settings_dirty()
+            self._refresh_section_titles()
+
+    def _add_trusted_hash_entry(self) -> None:
+        raw_hash = self.trusted_hash_edit.text().strip() if hasattr(self, "trusted_hash_edit") else ""
+        if not raw_hash:
+            return
+        algo = self._selected_hash_algo()
+        label = self.trusted_hash_label_edit.text().strip() if hasattr(self, "trusted_hash_label_edit") else ""
+        entry = self._normalize_single_hash_entry(raw_hash, algorithm=algo, label=label, enabled=True)
+        if not entry:
+            QMessageBox.warning(
+                self,
+                "Trusted Hash",
+                "Invalid hash value. Supported lengths are MD5, SHA-1, SHA-256, and SHA-512.",
+            )
+            return
+        key = (str(entry.get("algorithm", "")), str(entry.get("hash", "")))
+        existing_keys = {
+            (str(row.get("algorithm", "")), str(row.get("hash", "")))
+            for row in self._trusted_hash_entries
+            if isinstance(row, dict)
+        }
+        if key in existing_keys:
+            QMessageBox.information(self, "Trusted Hash", "That hash is already stored.")
+            return
+        self._trusted_hash_entries.append(entry)
+        self._refresh_trusted_hash_table()
+        self._mark_settings_dirty()
+        self._refresh_section_titles()
+        self.trusted_hash_edit.clear()
+        if hasattr(self, "trusted_hash_label_edit"):
+            self.trusted_hash_label_edit.clear()
+
+    @staticmethod
+    def _extract_hash_candidates_from_text(text: str) -> List[dict]:
+        out: List[dict] = []
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith(";"):
+                continue
+            algo = ""
+            m = re.search(r"(?i)\b(sha-?1|sha-?256|sha-?512|md5)\b", line)
+            if m:
+                algo = normalize_hash_algorithm(m.group(1))
+            hm = re.search(r"\b([A-Fa-f0-9]{32}|[A-Fa-f0-9]{40}|[A-Fa-f0-9]{64}|[A-Fa-f0-9]{128})\b", line)
+            if not hm:
+                continue
+            hash_norm = normalize_hash_hex(hm.group(1))
+            if not hash_norm:
+                continue
+            if not algo:
+                algo = infer_algorithm_from_hash(hash_norm)
+            if not algo:
+                continue
+            out.append({"enabled": True, "algorithm": algo, "hash": hash_norm, "label": ""})
+        return out
+
+    def _import_trusted_hash_file(self) -> None:
+        fn, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Trusted Hashes",
+            "",
+            "Text Files (*.txt *.sha1 *.sha256 *.sha512 *.md5 *.hash *.checksum);;All Files (*)",
+        )
+        if not fn:
+            return
+        try:
+            text = Path(fn).read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            QMessageBox.warning(self, "Trusted Hash", f"Failed to read file:\n{e}")
+            return
+        imported = self._extract_hash_candidates_from_text(text)
+        if not imported:
+            QMessageBox.information(self, "Trusted Hash", "No supported hashes found in that file.")
+            return
+        existing_keys = {
+            (str(row.get("algorithm", "")), str(row.get("hash", "")))
+            for row in self._trusted_hash_entries
+            if isinstance(row, dict)
+        }
+        added = 0
+        for row in imported:
+            key = (str(row.get("algorithm", "")), str(row.get("hash", "")))
+            if key in existing_keys:
+                continue
+            self._trusted_hash_entries.append(row)
+            existing_keys.add(key)
+            added += 1
+        self._refresh_trusted_hash_table()
+        if added > 0:
+            self._mark_settings_dirty()
+            self._refresh_section_titles()
+            QMessageBox.information(self, "Trusted Hash", f"Imported {added} hash entr{'y' if added == 1 else 'ies'}.")
+        else:
+            QMessageBox.information(self, "Trusted Hash", "All hashes from file are already stored.")
+
+    def _remove_selected_trusted_hash_entries(self) -> None:
+        if not hasattr(self, "trusted_hash_table"):
+            return
+        rows = sorted({idx.row() for idx in self.trusted_hash_table.selectionModel().selectedRows()}, reverse=True)
+        if not rows:
+            return
+        for row_idx in rows:
+            if 0 <= row_idx < len(self._trusted_hash_entries):
+                self._trusted_hash_entries.pop(row_idx)
+        self._refresh_trusted_hash_table()
+        self._mark_settings_dirty()
+        self._refresh_section_titles()
 
     # ---------- JS8 DIRECTED PATH ---------- #
 
