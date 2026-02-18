@@ -632,22 +632,26 @@ class JS8CallNetControlTab(QWidget):
         theme = resolve_theme(self.settings)
         if active:
             self.start_btn.setStyleSheet(button_style("muted", theme))
-            self.ack_btn.setStyleSheet(button_style("info", theme))
-            self.ack_callsign_btn.setStyleSheet(button_style("info", theme))
-            self.group_spotter_btn.setStyleSheet(button_style("info", theme))
-            self.single_spotter_btn.setStyleSheet(button_style("info", theme))
-            self.save_btn.setStyleSheet(button_style("success", theme))
-            self.end_btn.setStyleSheet(self._end_btn_default_style)
-            self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
+            self.ack_btn.setStyleSheet(button_style("eligible_info", theme))
+            self.ack_callsign_btn.setStyleSheet(button_style("eligible_info", theme))
+            self.group_spotter_btn.setStyleSheet(button_style("eligible_info", theme))
+            self.single_spotter_btn.setStyleSheet(button_style("eligible_info", theme))
+            self.save_btn.setStyleSheet(button_style("eligible_success", theme))
+            self.end_btn.setStyleSheet(button_style("eligible_danger", theme))
+            self.ad_hoc_btn.setStyleSheet(button_style("muted", theme))
+            self.start_btn.setEnabled(False)
+            self.ad_hoc_btn.setEnabled(False)
         else:
-            self.start_btn.setStyleSheet(self._start_btn_default_style)
+            self.start_btn.setStyleSheet(button_style("eligible_success", theme))
             self.ack_btn.setStyleSheet(button_style("muted", theme))
             self.ack_callsign_btn.setStyleSheet(button_style("muted", theme))
             self.group_spotter_btn.setStyleSheet(button_style("muted", theme))
             self.single_spotter_btn.setStyleSheet(button_style("muted", theme))
             self.save_btn.setStyleSheet(button_style("muted", theme))
             self.end_btn.setStyleSheet(button_style("muted", theme))
-            self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
+            self.ad_hoc_btn.setStyleSheet(button_style("eligible_info", theme))
+            self.start_btn.setEnabled(True)
+            self.ad_hoc_btn.setEnabled(True)
         self._update_group_button_state()
         self._update_spotter_button_state()
 
@@ -657,7 +661,6 @@ class JS8CallNetControlTab(QWidget):
         self._end_btn_default_style = button_style("danger", theme)
         self._set_net_button_styles(self._net_in_progress)
         self.suspend_btn.setStyleSheet(button_style("warning", theme))
-        self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
         self._update_group_button_state()
         self._update_spotter_button_state()
 
@@ -747,6 +750,9 @@ class JS8CallNetControlTab(QWidget):
         return True
 
     def _start_net(self):
+        if self._net_in_progress:
+            QMessageBox.information(self, "Net In Progress", "A net is already active. End it before starting a new one.")
+            return
         if not self._validate_before_start():
             return
 
@@ -768,9 +774,6 @@ class JS8CallNetControlTab(QWidget):
         self._checkins_saved.clear()
         self._clear_table()
         self._auto_query_paused_by_net = True
-        if hasattr(self, "ad_hoc_btn"):
-            self.ad_hoc_btn.setEnabled(False)
-        self.start_btn.setEnabled(False)
         self._set_net_button_styles(active=True)
         self.end_btn.setEnabled(True)
         self.ack_btn.setEnabled(True)
@@ -857,10 +860,7 @@ class JS8CallNetControlTab(QWidget):
 
         self._net_in_progress = False
         self.net_status_changed.emit("JS8", False)
-        if hasattr(self, "ad_hoc_btn"):
-            self.ad_hoc_btn.setEnabled(True)
         self._auto_query_paused_by_net = False
-        self.start_btn.setEnabled(True)
         self.end_btn.setEnabled(False)
         self._set_net_button_styles(active=False)
         self.ack_btn.setEnabled(False)
@@ -1269,7 +1269,7 @@ class JS8CallNetControlTab(QWidget):
 
     def _lookup_operator_meta(self, callsign: str) -> Dict[str, str]:
         meta = {"name": "", "state": "", "grid": "", "region": ""}
-        cs = (callsign or "").strip().upper()
+        cs = self._base_callsign(callsign)
         if not cs:
             return meta
         try:
@@ -1414,11 +1414,11 @@ class JS8CallNetControlTab(QWidget):
             current = "@" + current
         needs_set = bool(current) and current != (self._group_target or "")
         if self._group_target and not needs_set:
-            self.set_group_btn.setStyleSheet(button_style("success_muted", theme))
+            self.set_group_btn.setStyleSheet(button_style("muted", theme))
         elif needs_set:
-            self.set_group_btn.setStyleSheet(button_style("info", theme))
+            self.set_group_btn.setStyleSheet(button_style("eligible_info", theme))
         else:
-            self.set_group_btn.setStyleSheet(button_style("info", theme))
+            self.set_group_btn.setStyleSheet(button_style("muted", theme))
 
     def _set_spotter_form(self):
         if not self.spotter_combo.isEnabled():
@@ -1442,7 +1442,7 @@ class JS8CallNetControlTab(QWidget):
     def _update_spotter_button_state(self):
         theme = resolve_theme(self.settings)
         if self._spotter_form:
-            self.set_spotter_btn.setStyleSheet(button_style("success_muted", theme))
+            self.set_spotter_btn.setStyleSheet(button_style("muted", theme))
         else:
             self.set_spotter_btn.setStyleSheet(button_style("muted", theme))
 
@@ -1450,7 +1450,7 @@ class JS8CallNetControlTab(QWidget):
         theme = resolve_theme(self.settings)
         current = self._current_spotter_code()
         if current and current != (self._spotter_form or ""):
-            self.set_spotter_btn.setStyleSheet(button_style("info", theme))
+            self.set_spotter_btn.setStyleSheet(button_style("eligible_info", theme))
         else:
             self._update_spotter_button_state()
 
@@ -1936,7 +1936,7 @@ class JS8CallNetControlTab(QWidget):
         self._maybe_insert_untrusted(dest_call, ts, group_val)
 
     def _maybe_insert_untrusted(self, callsign: str, last_seen: datetime.datetime, group_val: str) -> None:
-        cs = (callsign or "").strip().upper()
+        cs = self._base_callsign(callsign)
         if not cs:
             return
         try:
@@ -1995,7 +1995,7 @@ class JS8CallNetControlTab(QWidget):
             log.debug("JS8CallNetControl: failed to upsert untrusted operator %s: %s", callsign, e)
 
     def _increment_checkin_counter(self, callsign: str) -> None:
-        cs = (callsign or "").strip().upper()
+        cs = self._base_callsign(callsign)
         if not cs:
             return
         try:
@@ -2020,7 +2020,7 @@ class JS8CallNetControlTab(QWidget):
                     last_role TEXT,
                     checkin_count INTEGER DEFAULT 0,
                     groups_json TEXT,
-                    trusted INTEGER DEFAULT 1
+                    trusted INTEGER DEFAULT 0
                 )
                 """
             )
@@ -2221,7 +2221,7 @@ class JS8CallNetControlTab(QWidget):
                     last_role TEXT,
                     checkin_count INTEGER DEFAULT 0,
                     groups_json TEXT,
-                    trusted INTEGER DEFAULT 1
+                    trusted INTEGER DEFAULT 0
                 )
                 """
             )
@@ -2239,7 +2239,7 @@ class JS8CallNetControlTab(QWidget):
                     """
                     INSERT OR REPLACE INTO operator_checkins
                     (callsign, name, state, grid, group1, group2, group3, group_role, first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted)
-                    VALUES (?, '', ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, 1)
+                    VALUES (?, '', ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, 0)
                     """,
                     (
                         cs,
@@ -2302,7 +2302,7 @@ class JS8CallNetControlTab(QWidget):
                         g_list[2] or None,
                         now_iso,
                         groups_json_out,
-                        trusted if trusted is not None else 1,
+                        trusted if trusted is not None else 0,
                         cs,
                     ),
                 )
@@ -2316,7 +2316,7 @@ class JS8CallNetControlTab(QWidget):
                 pass
 
     def _upsert_operator_info(self, callsign: str, grid: str, groups: List[str], ts: datetime.datetime) -> None:
-        cs = (callsign or "").strip().upper()
+        cs = self._base_callsign(callsign)
         if not cs:
             return
         ts_str = ts.astimezone(datetime.timezone.utc).isoformat()
@@ -3015,7 +3015,7 @@ class JS8CallNetControlTab(QWidget):
                     last_role TEXT,
                     checkin_count INTEGER DEFAULT 0,
                     groups_json TEXT,
-                    trusted INTEGER DEFAULT 1
+                    trusted INTEGER DEFAULT 0
                 )
                 """
             )
@@ -3029,7 +3029,7 @@ class JS8CallNetControlTab(QWidget):
                     """
                     INSERT OR REPLACE INTO operator_checkins
                     (callsign, grid, group1, group2, group3, group_role, first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted)
-                    VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, 1)
+                    VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, 0)
                     """,
                     (cs, grid, group_name or None, None, None, now_iso, now_iso, groups_json),
                 )
@@ -3055,7 +3055,7 @@ class JS8CallNetControlTab(QWidget):
                     SET grid=?, group1=?, group2=?, group3=?, last_seen_utc=?, groups_json=?, trusted=COALESCE(trusted, ?)
                     WHERE callsign=?
                     """,
-                    (new_grid, g_list[0] or None, g_list[1] or None, g_list[2] or None, now_iso, groups_json_out, trusted if trusted is not None else 1, cs),
+                    (new_grid, g_list[0] or None, g_list[1] or None, g_list[2] or None, now_iso, groups_json_out, trusted if trusted is not None else 0, cs),
                 )
             conn.commit()
         except Exception as e:

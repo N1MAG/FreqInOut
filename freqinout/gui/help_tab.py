@@ -68,6 +68,11 @@ class HelpTab(QWidget):
         viewer_col.addWidget(self.viewer)
 
         layout.addLayout(viewer_col, stretch=1)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        theme = resolve_theme(self.settings)
+        self.export_pdf_btn.setStyleSheet(button_style("primary", theme))
 
     def _export_pdf(self) -> None:
         if not self._doc_path.exists():

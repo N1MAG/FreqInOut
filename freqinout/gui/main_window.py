@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
 from pathlib import Path
 
 from freqinout.core.logger import log
@@ -49,6 +49,8 @@ from freqinout.gui.js8call_net_control_tab import JS8CallNetControlTab
 from freqinout.gui.freq_planner_tab import FreqPlannerTab
 from freqinout.gui.sop_tab import SOPTab
 from freqinout.gui.operator_history_tab import OperatorHistoryTab
+from freqinout.gui.local_operator_tab import LocalOperatorTab
+from freqinout.gui.local_ncs_tab import LocalNCSTab
 from freqinout.gui.log_viewer import LogViewerTab
 from freqinout.gui.stations_map_tab import (
     StationsMapTab,
@@ -103,6 +105,8 @@ class MainWindow(QMainWindow):
         self.js8_tab = JS8CallNetControlTab(self)
         self.sop_tab = SOPTab(self)
         self.operator_history_tab = OperatorHistoryTab(self)
+        self.local_operator_tab = LocalOperatorTab(self)
+        self.local_ncs_tab = LocalNCSTab(self)
         self.log_tab: LogViewerTab | None = None
         self._log_dialog: QDialog | None = None
         self.peer_sched_tab = PeerSchedTab(self)
@@ -111,14 +115,14 @@ class MainWindow(QMainWindow):
 
         self.freq_planner_tab = None
         self.message_viewer_tab = None
-        self.stations_map_tab = None
+        # Build Map eagerly (hidden) so first click does not lazy-swap widgets.
+        self.stations_map_tab = StationsMapTab(self)
         self._map_prop_target_syncing = False
 
         self._lazy_placeholders = {}
         self._lazy_factories = {
             "FreqPlanner": self._create_freq_planner_tab,
             "Messages": self._create_message_viewer_tab,
-            "Map": self._create_stations_map_tab,
         }
 
         # Sidebar navigation order (as requested)
@@ -127,10 +131,12 @@ class MainWindow(QMainWindow):
             ("FreqPlanner", self._placeholder_widget("FreqPlanner")),
             ("SOP", self.sop_tab),
             ("Messages", self._placeholder_widget("Messages")),
-            ("Digi/SSB NCS", self.fldigi_tab),
-            ("JS8 NCS", self.js8_tab),
-            ("Operators", self.operator_history_tab),
-            ("Map", self._placeholder_widget("Map")),
+            ("NCS-FLDigi/SSB", self.fldigi_tab),
+            ("NCS-JS8", self.js8_tab),
+            ("NCS-Local", self.local_ncs_tab),
+            ("HF Operators", self.operator_history_tab),
+            ("Local Operators", self.local_operator_tab),
+            ("Map", self.stations_map_tab),
             ("HF Schedule", self.hf_schedule_tab),
             ("Net Schedule", self.net_tab),
             ("Peer Schedules", self.peer_sched_tab),
@@ -156,17 +162,26 @@ class MainWindow(QMainWindow):
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)
         self._map_nav_index = None
+        self._ncs_nav_indices: dict[str, int] = {}
+        self._ncs_net_active: dict[str, bool] = {"FLDIGI": False, "JS8": False, "LOCAL": False}
         for idx, (label, _w) in enumerate(self._screens):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             btn.setMinimumWidth(120)
+            btn.setStyleSheet(self._nav_button_alignment_style())
             btn.clicked.connect(lambda _=False, i=idx: self._set_screen(i))
             self.button_group.addButton(btn, idx)
             self.nav_buttons.append(btn)
             nav_layout.addWidget(btn)
             if label == "Map":
                 self._map_nav_index = idx
+            elif label == "NCS-FLDigi/SSB":
+                self._ncs_nav_indices["FLDIGI"] = idx
+            elif label == "NCS-JS8":
+                self._ncs_nav_indices["JS8"] = idx
+            elif label == "NCS-Local":
+                self._ncs_nav_indices["LOCAL"] = idx
         # Placeholder for map filters (shown only on Map view)
         self.map_filters_container = QWidget()
         self.map_filters_container.setMinimumWidth(120)
@@ -217,7 +232,7 @@ class MainWindow(QMainWindow):
         self.logs_active_btn.setVisible(False)
         try:
             theme = resolve_theme(self.settings)
-            self.resume_schedule_btn.setStyleSheet(button_style("info", theme))
+            self.resume_schedule_btn.setStyleSheet(button_style("muted", theme))
             self.suspend_schedule_btn.setStyleSheet(button_style("warning", theme))
             self.logs_active_btn.setStyleSheet(button_style("warning", theme))
         except Exception:
@@ -257,14 +272,21 @@ class MainWindow(QMainWindow):
         self._sop_next_due_cache_ts = 0.0
         self._sop_next_due_minutes = None
         self._active_tab_index = None
-        self._lazy_prewarm_labels = ["Messages", "Map", "FreqPlanner"]
+        self._lazy_prewarm_labels = ["Messages", "FreqPlanner"]
         self._lazy_prewarm_index = 0
+        self._webengine_warmup_widget = None
+        self._webengine_warmup_done = False
+
+        # Kick WebEngine warmup during init so first Map activation is not the
+        # first WebEngine surface/process startup path seen by users.
+        self._prewarm_webengine()
 
         # Default selection
         if self.nav_buttons:
             self.nav_buttons[0].setChecked(True)
             self._set_screen(0)
-        QTimer.singleShot(2500, self._start_lazy_prewarm)
+        QTimer.singleShot(150, self._prewarm_webengine)
+        QTimer.singleShot(600, self._start_lazy_prewarm)
 
         # Optional: apply callsign to tab captions if already configured
         self._apply_callsign_to_tab_titles()
@@ -306,13 +328,11 @@ class MainWindow(QMainWindow):
             pass
         try:
             if hasattr(self.fldigi_tab, "net_status_changed"):
-                self.fldigi_tab.net_status_changed.connect(
-                    lambda kind, active: self.scheduler.set_manual_net_active(kind, active)
-                )
+                self.fldigi_tab.net_status_changed.connect(self._on_ncs_net_status_changed)
             if hasattr(self.js8_tab, "net_status_changed"):
-                self.js8_tab.net_status_changed.connect(
-                    lambda kind, active: self.scheduler.set_manual_net_active(kind, active)
-                )
+                self.js8_tab.net_status_changed.connect(self._on_ncs_net_status_changed)
+            if hasattr(self.local_ncs_tab, "net_status_changed"):
+                self.local_ncs_tab.net_status_changed.connect(self._on_ncs_net_status_changed)
         except Exception:
             pass
 
@@ -348,10 +368,31 @@ class MainWindow(QMainWindow):
             self.settings_tab.settings_saved.connect(self.sop_tab.on_settings_saved)
         except Exception:
             pass
+        try:
+            self.settings_tab.settings_saved.connect(self.local_operator_tab.on_settings_saved)
+        except Exception:
+            pass
+        try:
+            self.settings_tab.settings_saved.connect(self.local_ncs_tab.on_settings_saved)
+        except Exception:
+            pass
         # Message tab settings saved handled by _on_settings_saved_for_lazy_tabs
         try:
             if hasattr(self.operator_history_tab, "operator_history_updated"):
-                self.operator_history_tab.operator_history_updated.connect(self.refresh_operator_history_views)
+                self.operator_history_tab.operator_history_updated.connect(
+                    self._on_operator_history_local_update
+                )
+        except Exception:
+            pass
+        try:
+            if hasattr(self.local_operator_tab, "local_operator_updated"):
+                self.local_operator_tab.local_operator_updated.connect(self.local_ncs_tab.reload_operator_lookup)
+        except Exception:
+            pass
+        try:
+            if hasattr(self.local_ncs_tab, "local_data_updated"):
+                self.local_ncs_tab.local_data_updated.connect(self.local_operator_tab._load_data)
+                self.local_ncs_tab.local_data_updated.connect(self.local_ncs_tab.reload_operator_lookup)
         except Exception:
             pass
         try:
@@ -417,6 +458,27 @@ class MainWindow(QMainWindow):
                 self.fldigi_tab._load_known_operators()
         except Exception as e:
             log.debug("MainWindow: fldigi_tab refresh failed: %s", e)
+
+    def _on_operator_history_local_update(self) -> None:
+        """
+        Lightweight fanout for updates that originated inside Operators tab.
+        The Operators table already has local state applied; avoid reloading it.
+        """
+        try:
+            if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "_load_operator_history"):
+                self.stations_map_tab._load_operator_history()
+                map_visible = bool(getattr(self.stations_map_tab, "_map_visible", False))
+                if map_visible and hasattr(self.stations_map_tab, "_schedule_render"):
+                    self.stations_map_tab._schedule_render()
+                elif not map_visible and hasattr(self.stations_map_tab, "_map_dirty"):
+                    self.stations_map_tab._map_dirty = True
+        except Exception as e:
+            log.debug("MainWindow: stations_map_tab local refresh failed: %s", e)
+        try:
+            if hasattr(self.fldigi_tab, "_load_known_operators"):
+                self.fldigi_tab._load_known_operators()
+        except Exception as e:
+            log.debug("MainWindow: fldigi_tab local refresh failed: %s", e)
 
     def _update_log_indicator(self) -> None:
         try:
@@ -641,7 +703,13 @@ class MainWindow(QMainWindow):
         target_value_row.addStretch()
         v.addLayout(target_value_row)
         self.map_prop_badge = QLabel("Best Band: --")
-        self.map_prop_badge.setStyleSheet("font-weight: bold; color: #1E88E5;")
+        try:
+            theme = resolve_theme(self.settings)
+            self.map_prop_badge.setStyleSheet(
+                f"font-weight: bold; color: {theme.get('info', theme.get('accent', '#1E88E5'))};"
+            )
+        except Exception:
+            self.map_prop_badge.setStyleSheet("font-weight: bold; color: #1E88E5;")
         v.addWidget(self.map_prop_badge)
         self.map_cb_prop_overlay.stateChanged.connect(self._on_sidebar_prop_changed)
         self.map_prop_mode_combo.currentIndexChanged.connect(self._on_sidebar_prop_mode_changed)
@@ -921,10 +989,12 @@ class MainWindow(QMainWindow):
             self.map_filters_container.setVisible(False)
 
     def _on_resume_schedule_clicked(self) -> None:
+        resumed = False
         try:
             if hasattr(self, "scheduler"):
                 if hasattr(self.scheduler, "resume_schedule"):
                     self.scheduler.resume_schedule()
+                    resumed = True
                 else:
                     try:
                         self.scheduler.settings.set("schedule_suspend_until", 0)
@@ -935,8 +1005,26 @@ class MainWindow(QMainWindow):
                         ignore_wait_prompt=True,
                         ignore_suspend=True,
                     )
+                    resumed = True
         except Exception:
             pass
+        if not resumed:
+            return
+        try:
+            self._refresh_scheduler_status_panel()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "controlfreq_tab") and self.controlfreq_tab is not None:
+                self.controlfreq_tab.on_schedule_resumed()
+        except Exception:
+            pass
+        # Follow-up pulses help UI converge quickly while scheduler/radio apply completes.
+        for delay_ms in (180, 500, 1000, 1800):
+            try:
+                QTimer.singleShot(delay_ms, self._refresh_scheduler_status_panel)
+            except Exception:
+                pass
 
     def _on_suspend_schedule_clicked(self) -> None:
         try:
@@ -1097,6 +1185,11 @@ class MainWindow(QMainWindow):
             self.scheduler_status_header.setStyleSheet("font-weight: bold; color: #C62828;")
             self._set_scheduler_reasons(reasons or [""])
             self.resume_schedule_btn.setVisible(True)
+            try:
+                theme = resolve_theme(self.settings)
+                self.resume_schedule_btn.setStyleSheet(button_style("muted", theme))
+            except Exception:
+                pass
             self.suspend_schedule_btn.setVisible(True)
             self.suspend_schedule_btn.setText("Suspend Schedule")
             try:
@@ -1206,6 +1299,12 @@ class MainWindow(QMainWindow):
         try:
             if self.log_tab is not None and hasattr(self.log_tab, "set_tab_active"):
                 self.log_tab.set_tab_active(False)
+        except Exception:
+            pass
+        try:
+            if self._webengine_warmup_widget is not None:
+                self._webengine_warmup_widget.deleteLater()
+                self._webengine_warmup_widget = None
         except Exception:
             pass
         try:
@@ -1406,6 +1505,13 @@ class MainWindow(QMainWindow):
         apply_app_theme(app, theme)
         self._set_logo_pixmap()
         self._update_log_indicator()
+        if hasattr(self, "map_prop_badge"):
+            try:
+                self.map_prop_badge.setStyleSheet(
+                    f"font-weight: bold; color: {theme.get('info', theme.get('accent', '#1E88E5'))};"
+                )
+            except Exception:
+                pass
         for widget in (
             self.freq_planner_tab,
             self.sop_tab,
@@ -1415,9 +1521,14 @@ class MainWindow(QMainWindow):
             self.js8_tab,
             self.message_viewer_tab,
             self.log_tab,
+            self.stations_map_tab,
             self.operator_history_tab,
+            self.local_operator_tab,
+            self.local_ncs_tab,
+            self.peer_sched_tab,
             self.settings_tab,
             self.controlfreq_tab,
+            self.help_tab,
         ):
             if widget is None:
                 continue
@@ -1426,6 +1537,7 @@ class MainWindow(QMainWindow):
                     widget.apply_theme()
                 except Exception:
                     pass
+        self._update_ncs_nav_button_styles()
 
     def _placeholder_widget(self, label: str) -> QWidget:
         w = QWidget()
@@ -1439,6 +1551,55 @@ class MainWindow(QMainWindow):
         if self._shutting_down:
             return
         self._prewarm_next_lazy_tab()
+
+    def _prewarm_webengine(self) -> None:
+        """
+        Warm up Qt WebEngine process/components early so first Map click does not
+        incur a disruptive one-time native window/process startup flash.
+        """
+        if self._shutting_down:
+            return
+        if self._webengine_warmup_done:
+            return
+        if self._webengine_warmup_widget is not None:
+            return
+        try:
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+        except Exception:
+            return
+        try:
+            web = QWebEngineView(self)
+            web.resize(4, 4)
+            self._webengine_warmup_widget = web
+            try:
+                # Force an offscreen show once so WebEngine native surface/process
+                # startup does not occur during first visible Map activation.
+                web.setAttribute(Qt.WA_DontShowOnScreen, True)
+            except Exception:
+                pass
+
+            def _cleanup() -> None:
+                try:
+                    if self._webengine_warmup_widget is web:
+                        self._webengine_warmup_widget = None
+                    self._webengine_warmup_done = True
+                    web.hide()
+                    web.deleteLater()
+                except Exception:
+                    pass
+
+            try:
+                web.loadFinished.connect(lambda _ok: _cleanup())
+            except Exception:
+                pass
+            try:
+                web.show()
+            except Exception:
+                pass
+            web.setUrl(QUrl("about:blank"))
+            QTimer.singleShot(3000, _cleanup)
+        except Exception:
+            self._webengine_warmup_widget = None
 
     def _prewarm_next_lazy_tab(self) -> None:
         if self._shutting_down:
@@ -1708,6 +1869,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self._update_map_filters_visibility(index)
+                self._update_ncs_nav_button_styles()
                 QTimer.singleShot(0, self._refresh_scheduler_status_panel)
                 try:
                     widget = self.stack.widget(index)
@@ -1717,3 +1879,51 @@ class MainWindow(QMainWindow):
                         QTimer.singleShot(0, widget.on_tab_activated)
                 except Exception:
                     pass
+
+    def _on_ncs_net_status_changed(self, kind: str, active: bool) -> None:
+        kind_key = (kind or "").strip().upper()
+        if kind_key in self._ncs_net_active:
+            self._ncs_net_active[kind_key] = bool(active)
+        try:
+            # Scheduler only tracks FLDIGI/JS8 manual net locks.
+            if kind_key in {"FLDIGI", "JS8"} and hasattr(self, "scheduler"):
+                self.scheduler.set_manual_net_active(kind_key, bool(active))
+        except Exception:
+            pass
+        self._update_ncs_nav_button_styles()
+        self._refresh_scheduler_status_panel()
+
+    @staticmethod
+    def _nav_button_alignment_style() -> str:
+        return (
+            "QPushButton { text-align: left; padding-left: 12px; }"
+            "QToolButton { text-align: left; padding-left: 12px; }"
+        )
+
+    def _update_ncs_nav_button_styles(self) -> None:
+        if not getattr(self, "nav_buttons", None):
+            return
+        try:
+            theme = resolve_theme(self.settings)
+        except Exception:
+            theme = {}
+        align_style = self._nav_button_alignment_style()
+        # Base styling for all sidebar buttons so typography/contrast is consistent.
+        for btn in self.nav_buttons:
+            role = "primary" if btn.isChecked() else "muted"
+            try:
+                btn.setStyleSheet(button_style(role, theme) + align_style)
+            except Exception:
+                pass
+        # Overlay active-net reminder on NCS entries only.
+        for kind_key, idx in self._ncs_nav_indices.items():
+            if idx < 0 or idx >= len(self.nav_buttons):
+                continue
+            btn = self.nav_buttons[idx]
+            active = bool(self._ncs_net_active.get(kind_key))
+            if not active:
+                continue
+            try:
+                btn.setStyleSheet(button_style("warning", theme) + align_style)
+            except Exception:
+                pass

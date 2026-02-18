@@ -23,6 +23,14 @@ class JS8FormDecoder:
     def __init__(self, settings: SettingsManager):
         self.settings = settings
         self._form_cache: Dict[str, List[Dict]] = {}
+        self._form_cache_max_entries = 256
+
+    def _prune_form_cache(self) -> None:
+        while len(self._form_cache) > self._form_cache_max_entries:
+            try:
+                self._form_cache.pop(next(iter(self._form_cache)))
+            except Exception:
+                break
 
     def decode_form(self, form_id: str, responses: str, comment: str, raw: str = "") -> str:
         form_id = (form_id or "").strip()
@@ -80,6 +88,7 @@ class JS8FormDecoder:
             log.debug("MessageIngest: failed to parse form %s: %s", form_id, e)
             questions = []
         self._form_cache[form_id] = questions
+        self._prune_form_cache()
         return questions
 
 

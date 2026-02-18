@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -162,6 +163,13 @@ class PeerSchedTab(QWidget):
 
         return get_config_dir() / "config" / "freqinout_nets.db"
 
+    @staticmethod
+    def _normalize_callsign(value: object) -> str:
+        raw = str(value or "").strip().upper()
+        if not raw:
+            return ""
+        return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", raw)
+
     def _load_operator_meta(self) -> None:
         """
         Load operator info (name/state/groups) for display and region mapping.
@@ -177,6 +185,9 @@ class PeerSchedTab(QWidget):
                 "SELECT callsign, name, state, group1, group2, group3, groups_json FROM operator_checkins"
             )
             for cs, name, state, g1, g2, g3, gj in cur.fetchall():
+                cs_norm = self._normalize_callsign(cs)
+                if not cs_norm:
+                    continue
                 groups: List[str] = []
                 for g in (g1, g2, g3):
                     if g:
@@ -195,7 +206,7 @@ class PeerSchedTab(QWidget):
                     if g and g not in seen:
                         seen.add(g)
                         deduped.append(g)
-                self._operator_meta[cs.upper()] = {
+                self._operator_meta[cs_norm] = {
                     "name": (name or "").strip(),
                     "state": (state or "").strip().upper(),
                     "groups": ", ".join(deduped),
@@ -216,25 +227,103 @@ class PeerSchedTab(QWidget):
                 return
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT owner_callsign, day_utc, start_utc, end_utc, band, mode, frequency
-                FROM peer_hf_schedule
-            """
-            )
-            for cs, day, start, end, band, mode, freq in cur.fetchall():
-                self._rows.append(
-                    {
-                        "callsign": (cs or "").upper(),
-                        "day_utc": day or "ALL",
-                        "start_utc": start or "",
-                        "end_utc": end or "",
-                        "band": band or "",
-                        "mode": mode or "",
-                        "frequency": str(freq or ""),
-                        "freq_num": self._parse_freq(freq),
-                    }
+            has_effective_view = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view' AND name='peer_hf_schedule_effective'"
+            ).fetchone()
+            if has_effective_view:
+                cur.execute(
+                    """
+                    SELECT
+                        owner_callsign,
+                        day_utc,
+                        start_utc,
+                        end_utc,
+                        band,
+                        mode,
+                        frequency,
+                        source_type,
+                        confidence
+                    FROM peer_hf_schedule_effective
+                    """
                 )
+                rows = cur.fetchall()
+            else:
+                cur.execute(
+                    """
+                    SELECT owner_callsign, day_utc, start_utc, end_utc, band, mode, frequency, 'IMPORTED', NULL
+                    FROM peer_hf_schedule
+                """
+                )
+                rows = cur.fetchall()
+            # Collapse suffix variants to base callsign and dedupe by schedule identity.
+            deduped_rows: Dict[tuple, Dict] = {}
+            for cs, day, start, end, band, mode, freq, source_type, confidence in rows:
+                cs_norm = self._normalize_callsign(cs)
+                if not cs_norm:
+                    continue
+                day_val = (day or "ALL")
+                start_val = (start or "")
+                end_val = (end or "")
+                band_val = (band or "")
+                mode_val = (mode or "")
+                freq_txt = str(freq or "")
+                src = (source_type or "IMPORTED")
+                key = (
+                    cs_norm,
+                    str(day_val).strip().upper(),
+                    str(start_val).strip(),
+                    str(end_val).strip(),
+                    str(band_val).strip().upper(),
+                    str(mode_val).strip().upper(),
+                    str(freq_txt).strip(),
+                )
+                row_obj = {
+                    "callsign": cs_norm,
+                    "day_utc": day_val,
+                    "start_utc": start_val,
+                    "end_utc": end_val,
+                    "band": band_val,
+                    "mode": mode_val,
+                    "frequency": freq_txt,
+                    "freq_num": self._parse_freq(freq),
+                    "source_type": src,
+                    "confidence": confidence,
+                }
+                src_priority = 1 if str(src).strip().upper() == "IMPORTED" else 0
+                prev = deduped_rows.get(key)
+                if prev is None:
+                    row_obj["_src_priority"] = src_priority
+                    deduped_rows[key] = row_obj
+                    continue
+                prev_priority = int(prev.get("_src_priority", 0) or 0)
+                if src_priority > prev_priority:
+                    row_obj["_src_priority"] = src_priority
+                    deduped_rows[key] = row_obj
+                    continue
+                if src_priority == prev_priority:
+                    try:
+                        conf_prev = float(prev.get("confidence") or 0.0)
+                    except Exception:
+                        conf_prev = 0.0
+                    try:
+                        conf_new = float(confidence or 0.0)
+                    except Exception:
+                        conf_new = 0.0
+                    if conf_new > conf_prev:
+                        row_obj["_src_priority"] = src_priority
+                        deduped_rows[key] = row_obj
+            self._rows = sorted(
+                [
+                    {k: v for k, v in row.items() if k != "_src_priority"}
+                    for row in deduped_rows.values()
+                ],
+                key=lambda r: (
+                    str(r.get("callsign", "")),
+                    str(r.get("day_utc", "")),
+                    str(r.get("start_utc", "")),
+                    str(r.get("frequency", "")),
+                ),
+            )
             conn.close()
         except Exception as e:
             log.error("PeerSched: failed to load peer schedules: %s", e)
@@ -279,7 +368,14 @@ class PeerSchedTab(QWidget):
         self.group_filter.blockSignals(False)
 
     def _populate_delete_callsigns(self) -> None:
-        calls = sorted({row["callsign"] for row in self._rows if row.get("callsign")})
+        calls = sorted(
+            {
+                row["callsign"]
+                for row in self._rows
+                if row.get("callsign")
+                and str(row.get("source_type") or "").strip().upper() != "INFERRED"
+            }
+        )
         current = self.delete_callsign_combo.currentData()
         self.delete_callsign_combo.blockSignals(True)
         self.delete_callsign_combo.clear()
@@ -338,6 +434,9 @@ class PeerSchedTab(QWidget):
             meta = self._operator_meta.get(cs, {})
             overlap_ranges = self._compute_overlaps(row)
             overlap_display = self._format_overlap_summary(overlap_ranges)
+            mode_val = row.get("mode", "")
+            if str(row.get("source_type") or "").strip().upper() == "INFERRED":
+                mode_val = f"{mode_val} [I]"
             vals = [
                 cs,
                 meta.get("name", ""),
@@ -347,7 +446,7 @@ class PeerSchedTab(QWidget):
                 row.get("start_utc", ""),
                 row.get("end_utc", ""),
                 row.get("band", ""),
-                row.get("mode", ""),
+                mode_val,
                 row.get("frequency", ""),
                 overlap_display,
             ]
@@ -377,7 +476,30 @@ class PeerSchedTab(QWidget):
             return None
         if selected == "__CLEAR_ALL__":
             return selected
-        return str(selected).strip().upper()
+        return self._normalize_callsign(selected)
+
+    def _delete_callsign_variants(self, cur: sqlite3.Cursor, table: str, callsign: str) -> int:
+        base = self._normalize_callsign(callsign)
+        if not base:
+            return 0
+        deleted = 0
+        try:
+            cur.execute(
+                f"""
+                SELECT DISTINCT owner_callsign
+                FROM {table}
+                WHERE owner_callsign IS NOT NULL AND TRIM(owner_callsign) <> ''
+                """
+            )
+            raw_values = [str(v or "").strip() for (v,) in cur.fetchall()]
+        except Exception:
+            raw_values = []
+        for raw in raw_values:
+            if self._normalize_callsign(raw) != base:
+                continue
+            cur.execute(f"DELETE FROM {table} WHERE owner_callsign=?", (raw,))
+            deleted += int(cur.rowcount or 0)
+        return deleted
 
     def _settings_db_path(self) -> Path:
         cfg_path = getattr(self.settings, "_config_path", None)
@@ -442,19 +564,58 @@ class PeerSchedTab(QWidget):
         except Exception:
             return None
 
-    def _day_matches_today(self, day: str, today_name: str) -> bool:
-        day = (day or "ALL").strip().upper()
-        if day in ("ALL", "DAILY"):
-            return True
-        if not day:
-            return False
-        today = today_name.upper()
-        return today.startswith(day[:3]) or day.startswith(today[:3])
+    def _day_to_index(self, day_name: str) -> Optional[int]:
+        if not day_name:
+            return None
+        txt = day_name.strip().lower()
+        for idx, name in enumerate(self.DAY_CANON):
+            low = name.lower()
+            if txt.startswith(low[:3]) or low.startswith(txt[:3]):
+                return idx
+        return None
+
+    def _normalize_day(self, day: str) -> str:
+        val = (day or "ALL").strip()
+        up = val.upper()
+        if up in {"", "ALL", "DAILY"}:
+            return "ALL"
+        idx = self._day_to_index(val)
+        if idx is None:
+            return "ALL"
+        return self.DAY_CANON[idx]
+
+    def _expand_week_segments(self, day: str, start_min: int, end_min: int) -> List[tuple[int, int, int]]:
+        """
+        Expand a schedule row into weekly minute windows:
+          (weekday_index_sun0, start_minute, end_minute)
+        Supports overnight ranges by splitting across day boundary.
+        """
+        if start_min < 0 or start_min > 1439 or end_min < 0 or end_min > 1439:
+            return []
+        days: List[int]
+        day_norm = self._normalize_day(day)
+        if day_norm == "ALL":
+            days = list(range(7))
+        else:
+            idx = self._day_to_index(day_norm)
+            if idx is None:
+                return []
+            days = [idx]
+        segments: List[tuple[int, int, int]] = []
+        for d in days:
+            if end_min > start_min:
+                segments.append((d, start_min, end_min))
+                continue
+            if end_min == start_min:
+                continue
+            # Overnight: split into [start,24:00) on day d and [00:00,end) next day.
+            segments.append((d, start_min, 24 * 60))
+            segments.append(((d + 1) % 7, 0, end_min))
+        return segments
 
     def _load_my_schedule(self) -> None:
         self._my_schedule = []
         self._my_schedule_by_mode = {}
-        today_name = datetime.datetime.now(datetime.timezone.utc).strftime("%A")
 
         def add_entry(day: str, start: str, end: str, mode: str, freq) -> None:
             start_min = self._parse_time_minutes(start)
@@ -462,17 +623,17 @@ class PeerSchedTab(QWidget):
             freq_num = self._parse_freq(freq)
             if start_min is None or end_min is None or freq_num is None:
                 return
-            if end_min <= start_min:
-                return
-            if not self._day_matches_today(day, today_name):
-                return
             mode_key = (mode or "").strip().upper()
             if not mode_key:
                 return
+            segments = self._expand_week_segments(day, start_min, end_min)
+            if not segments:
+                return
             entry = {
-                "day_utc": (day or "ALL").strip(),
+                "day_utc": self._normalize_day(day),
                 "start_min": start_min,
                 "end_min": end_min,
+                "segments": segments,
                 "mode": mode_key,
                 "freq": freq_num,
             }
@@ -511,72 +672,126 @@ class PeerSchedTab(QWidget):
             except Exception as e:
                 log.debug("PeerSched: failed to load net schedule: %s", e)
 
-    def _compute_overlaps(self, row: Dict) -> List[tuple[int, int]]:
+    def _compute_overlaps(self, row: Dict) -> List[tuple[int, int, int]]:
         mode = (row.get("mode") or "").strip().upper()
         freq = row.get("freq_num")
         if not mode or freq is None:
             return []
-        today_name = datetime.datetime.now(datetime.timezone.utc).strftime("%A")
-        if not self._day_matches_today(row.get("day_utc", "ALL"), today_name):
-            return []
         peer_start = self._parse_time_minutes(row.get("start_utc", ""))
         peer_end = self._parse_time_minutes(row.get("end_utc", ""))
-        if peer_start is None or peer_end is None or peer_end <= peer_start:
+        if peer_start is None or peer_end is None:
             return []
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        now_min = now_utc.hour * 60 + now_utc.minute
-        if peer_end <= now_min:
+        peer_segments = self._expand_week_segments(row.get("day_utc", "ALL"), peer_start, peer_end)
+        if not peer_segments:
             return []
 
         matches = self._my_schedule_by_mode.get(mode, [])
-        overlaps: List[tuple[int, int]] = []
+        overlaps: List[tuple[int, int, int]] = []
+        by_day: Dict[int, List[tuple[int, int]]] = {}
+        for day_idx, seg_start, seg_end in peer_segments:
+            by_day.setdefault(day_idx, []).append((seg_start, seg_end))
         for entry in matches:
             if abs(entry["freq"] - freq) > 0.0001:
                 continue
-            start = max(peer_start, entry["start_min"], now_min)
-            end = min(peer_end, entry["end_min"])
-            if end > start:
-                overlaps.append((start, end))
-        overlaps.sort()
-        return overlaps
+            entry_segments = entry.get("segments") or []
+            for day_idx, my_start, my_end in entry_segments:
+                peers = by_day.get(int(day_idx), [])
+                if not peers:
+                    continue
+                for peer_seg_start, peer_seg_end in peers:
+                    start = max(int(peer_seg_start), int(my_start))
+                    end = min(int(peer_seg_end), int(my_end))
+                    if end > start:
+                        overlaps.append((int(day_idx), start, end))
+        if not overlaps:
+            return overlaps
+        # Merge touching/overlapping ranges per day for cleaner display.
+        overlaps.sort(key=lambda x: (x[0], x[1], x[2]))
+        merged: List[tuple[int, int, int]] = []
+        for day_idx, start, end in overlaps:
+            if not merged or merged[-1][0] != day_idx or start > merged[-1][2]:
+                merged.append((day_idx, start, end))
+                continue
+            prev_day, prev_start, prev_end = merged[-1]
+            merged[-1] = (prev_day, prev_start, max(prev_end, end))
+        return merged
 
-    def _format_overlap_ranges(self, ranges: List[tuple[int, int]]) -> List[str]:
+    def _format_overlap_ranges(self, ranges: List[tuple[int, int, int]]) -> List[str]:
         if not ranges:
             return []
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        base_date = now_utc.date()
+        base_utc = self._anchor_utc_sunday()
         tz = self._current_timezone()
         use_local = self._show_local_times
         formatted = []
-        for start_min, end_min in ranges:
-            start_dt = datetime.datetime(
-                base_date.year,
-                base_date.month,
-                base_date.day,
-                start_min // 60,
-                start_min % 60,
-                tzinfo=datetime.timezone.utc,
-            )
-            end_dt = datetime.datetime(
-                base_date.year,
-                base_date.month,
-                base_date.day,
-                end_min // 60,
-                end_min % 60,
-                tzinfo=datetime.timezone.utc,
-            )
+        for day_idx, start_min, end_min in ranges:
+            start_dt = base_utc + datetime.timedelta(days=int(day_idx), minutes=int(start_min))
+            end_dt = base_utc + datetime.timedelta(days=int(day_idx), minutes=int(end_min))
             if use_local:
                 start_dt = start_dt.astimezone(tz)
                 end_dt = end_dt.astimezone(tz)
-            formatted.append(f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}")
+            day_label = start_dt.strftime("%a")
+            formatted.append(f"{day_label} {start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}")
         return formatted
 
-    def _format_overlap_summary(self, ranges: List[tuple[int, int]]) -> str:
+    def _overlap_range_datetimes(
+        self,
+        ranges: List[tuple[int, int, int]],
+    ) -> List[tuple[datetime.datetime, datetime.datetime]]:
+        if not ranges:
+            return []
+        base_utc = self._anchor_utc_sunday()
+        use_local = self._show_local_times
+        tz = self._current_timezone() if use_local else datetime.timezone.utc
+        out: List[tuple[datetime.datetime, datetime.datetime]] = []
+        for day_idx, start_min, end_min in ranges:
+            start_utc = base_utc + datetime.timedelta(days=int(day_idx), minutes=int(start_min))
+            end_utc = base_utc + datetime.timedelta(days=int(day_idx), minutes=int(end_min))
+            if use_local:
+                start_dt = start_utc.astimezone(tz)
+                end_dt = end_utc.astimezone(tz)
+            else:
+                start_dt = start_utc
+                end_dt = end_utc
+            out.append((start_dt, end_dt))
+        out.sort(key=lambda it: it[0])
+        return out
+
+    def _format_overlap_summary(self, ranges: List[tuple[int, int, int]]) -> str:
         if not ranges:
             return ""
-        if len(ranges) == 1:
-            return self._format_overlap_ranges(ranges)[0]
-        return f"{len(ranges)} overlaps"
+        slots = self._overlap_range_datetimes(ranges)
+        if not slots:
+            return ""
+        use_local = self._show_local_times
+        tz = self._current_timezone() if use_local else datetime.timezone.utc
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_dt = now_utc.astimezone(tz) if use_local else now_utc
+
+        # 1) Action now: currently overlapping.
+        active = [slot for slot in slots if slot[0] <= now_dt < slot[1]]
+        if active:
+            start_dt, end_dt = min(active, key=lambda it: it[1])
+            return f"NOW {start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}"
+
+        # 2) Action later today.
+        later_today = [slot for slot in slots if slot[0].date() == now_dt.date() and slot[0] > now_dt]
+        if later_today:
+            start_dt, end_dt = min(later_today, key=lambda it: it[0])
+            return f"Today {start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}"
+
+        # 3) Next weekly overlap (roll past slots by +7 days).
+        rolled: List[tuple[datetime.datetime, datetime.datetime]] = []
+        for start_dt, end_dt in slots:
+            while end_dt <= now_dt:
+                start_dt += datetime.timedelta(days=7)
+                end_dt += datetime.timedelta(days=7)
+            rolled.append((start_dt, end_dt))
+        if not rolled:
+            return ""
+        next_start, next_end = min(rolled, key=lambda it: it[0])
+        if next_start.date() == now_dt.date():
+            return f"Today {next_start.strftime('%H:%M')}-{next_end.strftime('%H:%M')}"
+        return f"{next_start.strftime('%a')} {next_start.strftime('%H:%M')}-{next_end.strftime('%H:%M')}"
 
     def _set_time_headers(self) -> None:
         cols = list(self.COLS)
@@ -605,6 +820,9 @@ class PeerSchedTab(QWidget):
         self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
         self._update_timezone_button_style()
 
+    def apply_theme(self) -> None:
+        self._apply_theme()
+
     def _clear_filters(self) -> None:
         self.callsign_filter.setCurrentIndex(0)
         self.region_filter.setCurrentIndex(0)
@@ -614,7 +832,10 @@ class PeerSchedTab(QWidget):
     def _update_delete_button_state(self) -> None:
         theme = resolve_theme(self.settings)
         selection = self._selected_delete_action()
-        has_rows = bool(self._rows)
+        has_rows = any(
+            str(r.get("source_type") or "").strip().upper() != "INFERRED"
+            for r in self._rows
+        )
         if selection == "__CLEAR_ALL__":
             enabled = has_rows
             label = "Clear All"
@@ -669,7 +890,7 @@ class PeerSchedTab(QWidget):
             QMessageBox.critical(self, "Import Failed", f"Could not read JSON:\n{e}")
             return
 
-        owner = (data.get("callsign") or "").strip().upper()
+        owner = self._normalize_callsign(data.get("callsign"))
         rows = data.get("rows", [])
         if not owner or not isinstance(rows, list):
             QMessageBox.warning(self, "Invalid File", "Expected keys: 'callsign' and 'rows'.")
@@ -708,7 +929,9 @@ class PeerSchedTab(QWidget):
             db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute("DELETE FROM peer_hf_schedule WHERE owner_callsign=?", (owner,))
+            self._delete_callsign_variants(cur, "peer_hf_schedule", owner)
+            # Imported schedule is authoritative for this callsign; clear stale inferred rows.
+            self._delete_callsign_variants(cur, "peer_hf_schedule_inferred", owner)
             now_str = datetime.datetime.utcnow().isoformat()
             for row in valid_rows:
                 cur.execute(
@@ -756,17 +979,21 @@ class PeerSchedTab(QWidget):
         try:
             conn = sqlite3.connect(self._db_path())
             cur = conn.cursor()
-            cur.execute("DELETE FROM peer_hf_schedule WHERE owner_callsign=?", (cs,))
+            deleted = self._delete_callsign_variants(cur, "peer_hf_schedule", cs)
             conn.commit()
             conn.close()
             self._load_data()
-            QMessageBox.information(self, "Delete", f"Deleted schedule for {cs}.")
+            QMessageBox.information(self, "Delete", f"Deleted {deleted} imported row(s) for {cs}.")
         except Exception as e:
             QMessageBox.critical(self, "Delete Failed", f"DB delete failed:\n{e}")
             log.error("PeerSched: delete failed for %s: %s", cs, e)
 
     def _clear_all(self) -> None:
-        if not self._rows:
+        has_imported = any(
+            str(r.get("source_type") or "").strip().upper() != "INFERRED"
+            for r in self._rows
+        )
+        if not has_imported:
             return
         confirm = QMessageBox.question(
             self,

@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 from pathlib import Path
 from typing import Dict, Any, List
 
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+
+TRAILING_CALL_NOISE_RE = re.compile(r"[^A-Z0-9/]+$")
+PORTABLE_SUFFIX_RE = re.compile(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$")
+
+
+def _canonical_callsign(value: object) -> str:
+    cs = str(value or "").strip().upper()
+    if not cs:
+        return ""
+    cs = TRAILING_CALL_NOISE_RE.sub("", cs)
+    if not cs:
+        return ""
+    return PORTABLE_SUFFIX_RE.sub("", cs)
 
 
 def _db_path() -> Path:
@@ -45,7 +59,7 @@ def _ensure_table(conn: sqlite3.Connection):
             last_role TEXT,
             checkin_count INTEGER DEFAULT 0,
             groups_json TEXT,
-            trusted INTEGER DEFAULT 1
+            trusted INTEGER DEFAULT 0
         )
         """
     )
@@ -91,7 +105,7 @@ def _ensure_table(conn: sqlite3.Connection):
                 last_role TEXT,
                 checkin_count INTEGER DEFAULT 0,
                 groups_json TEXT,
-                trusted INTEGER DEFAULT 1
+                trusted INTEGER DEFAULT 0
             )
             """
         )
@@ -120,7 +134,7 @@ def _ensure_table(conn: sqlite3.Connection):
                 COALESCE(last_role,''),
                 COALESCE(checkin_count,0),
                 {groups_expr},
-                COALESCE(trusted,1)
+                COALESCE(trusted,0)
             FROM operator_checkins
         """.format(
             groups_expr="groups_json" if has_groups_json else "NULL"
@@ -155,7 +169,7 @@ def upsert_checkins(entries: List[Dict[str, Any]]):
         cur = conn.cursor()
 
         for e in entries:
-            cs = (e.get("callsign") or "").upper().strip()
+            cs = _canonical_callsign(e.get("callsign"))
             if not cs:
                 continue
 
@@ -201,7 +215,7 @@ def upsert_checkins(entries: List[Dict[str, Any]]):
                 existing_last = ""
                 existing_count = 0
                 existing_groups_json = None
-                existing_trusted = 1
+                existing_trusted = 0
                 existing_grid = ""
                 existing_g1 = existing_g2 = existing_g3 = ""
                 existing_role = ""
@@ -212,7 +226,7 @@ def upsert_checkins(entries: List[Dict[str, Any]]):
             trusted_out = (
                 int(trusted_raw)
                 if trusted_raw is not None
-                else (int(existing_trusted) if existing_trusted is not None else 1)
+                else (int(existing_trusted) if existing_trusted is not None else 0)
             )
             grid_out = grid or existing_grid
             g1_out = group1 or existing_g1
@@ -330,7 +344,7 @@ def get_all_operators() -> List[Dict[str, Any]]:
                     "last_role": last_role or "",
                     "checkin_count": count or 0,
                     "groups_json": groups_json,
-                    "trusted": trusted if trusted is not None else 1,
+                    "trusted": trusted if trusted is not None else 0,
                 }
             )
         conn.close()

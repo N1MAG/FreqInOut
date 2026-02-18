@@ -1,5 +1,62 @@
 # Changelog
 
+## [1.1.8]
+- Added: New `Local Operators` tab with roster CRUD/search and CSV import/export for local VHF/UHF/GMRS/MURS/FRS operator tracking, now using `first_name` and `last_name` fields in UI and DB.
+- Changed: Local Operators table now includes visible `SitRep` status column and supports sortable column headers.
+- Added: New `Local NCS` tab with `Start Net`/`Join Net`/`End Net` session controls, local-operator lookup, single check-in log table, SitRep status (`Green/Yellow/Red`), persistent notes, and periodic autosave.
+- Fixed: Local NCS lookup/add keyboard flow now mirrors FLDigi NCS expectations (`Enter` on lookup/completion autofills selected operator, while `Enter/Space` on `Add Check-in` performs the add) with guarded exception handling for stability.
+- Fixed: Local NCS lookup `Enter` path no longer triggers direct add/check-in writes from completion handlers, eliminating duplicate re-entrant handling that could terminate the app during lookup.
+- Changed: Local NCS check-in table is now session-scoped and clears on `End Net` so each net run starts with an empty session list.
+- Added: Shared soft CTA button styling (`eligible_*`) for low-noise, state-aware action highlighting across tabs.
+- Changed: Contextual action highlighting pass across ControlFreq, FreqPlanner, SOP, Messages, NCS tabs, Operators tabs, Map toggles, and scheduler status panel to better surface next eligible actions.
+- Fixed: ControlFreq and FreqPlanner eligibility highlights now stay in sync through selection/click, refresh/rebuild, and timer update paths.
+- Changed: ControlFreq and FreqPlanner highlight contrast increased for clearer active-state visibility in both Light and Dark themes.
+- Fixed: Shared button stylesheet generation now emits separate `QPushButton` and `QToolButton` rules, restoring runtime action-highlight rendering where combined selectors failed to apply.
+- Changed: Active-net reminder moved to sidebar NCS menu buttons (`FLDigi/SSB NCS`, `JS8 NCS`, `Local NCS`), while in-tab start actions remain muted when a net is active.
+- Changed: Sidebar NCS labels/order updated to `NCS-FLDigi/SSB`, `NCS-JS8`, `NCS-Local`, with `NCS-Local` positioned directly under `NCS-JS8`.
+- Changed: Main sidebar tab-button labels now use left-aligned text for faster scanability across mixed-length tab names.
+- Fixed: Main sidebar tab-button typography/style is now normalized across all tabs for matching active/inactive states, with NCS warning highlight only when a net is active.
+- Fixed: Map first-open stability by constructing the embedded `QWebEngineView` with an explicit parent, reducing transient close/reopen-style window flash on initial Map tab load.
+- Fixed: Additional Map first-click flash hardening by creating the `Map` tab at startup (hidden) and using early offscreen WebEngine warmup so first user activation no longer triggers widget-swap/first-surface startup paths.
+- Changed: HF Schedule and Net Schedule now highlight `Save` only when unsaved edits exist (dirty-state tracking), while row-dependent actions (`Delete`, `Move`, resource actions) highlight only when eligible.
+- Changed: Settings label `Operating Groups` is now `HF Operating Groups` for clearer separation from local-net workflows.
+- Changed: Sidebar labels updated to `FLDigi/SSB NCS` and `HF Operators`, with `Local Operators` and `Local NCS` added to navigation.
+- Added: Net Schedule tab now includes a new read-only `Net Resources` catalog with sortable headers, global search, manual set selector, and persistent last-set selection.
+- Added: Built-in seasonal net resource files are now shipped in `config/net_resources` (`sitrepnets-fall.json`, `sitrepnets-summer.json`) with in-app citation text: `Visit SitRep.net for more info.`.
+- Added: Net Resources actions to `Add Selected to Net Schedule`, `Add Filtered to Net Schedule`, and `Move Selected to Resources` for active-schedule curation workflows.
+- Changed: `Import Net Schedule` now imports JSON rows into `Net Resources` by default (resource catalog flow) instead of replacing active schedule rows.
+- Added: One-time migration that backfills existing active Net Schedule rows into `Net Resources` (`Migrated` source) without removing active schedule entries.
+- Fixed: Duplicate promotion guard now blocks net-resource adds when an active row already matches `(day + start/end + band + frequency + mode)` and shows conflict details for resolution.
+- Added: Active Net Schedule rows now persist `resource_id` linkage so edited rows moved back to resources update the corresponding resource entry.
+- Added: VarAC background data foundation in local `freqinout_nets.db` with mirrored event/lookup tables for `vmail_folder`, `vmail_relay_notification`, `broadcast` (including `via_callsign`), `cqframe`/`cqframe_type`, and `qso_snr_report`.
+- Added: VarAC ingest run telemetry (`varac_sync_status`, `varac_sync_table_counts`) with per-run success/failure, scanned/written row counts, and per-table watermark visibility for diagnostics.
+- Added: VarAC callsign trait tracking (`varac_callsign_traits`) for downstream UI/use-cases such as EmComm/BBS/alert context.
+- Added: Operators tab unified SitRep projection support (`sitrep_latest_by_callsign`) with effective status display, source summary chips, recency age, and conflict indicators when sources disagree.
+- Added: Map tab unified SitRep projection support (`sitrep_latest_by_callsign`) with source chips/conflict metadata in station detail popups for parity with Operators.
+- Added: Messages tab fast display-level SitRep dedupe that suppresses raw Spotter duplicates when equivalent normalized SitRep rows are present (`sitrep_messages_dedupe_enabled`, with optional raw override via `sitrep_messages_show_raw_duplicates`).
+- Added: One-time checkpointed local backfill from `spotter_traffic` into unified SitRep staging so pre-existing Spotter forms (`F!104/301/304`) are represented under normalized `SitRep` views.
+- Fixed: Peer Schedules overlap computation now evaluates day-aware weekly windows (including overnight ranges) instead of only current-day/current-time clipping, improving overlap accuracy.
+- Changed: Peer Schedules overlap column now prioritizes actionable reachability windows (`NOW`, `Today`, or next `Day HH:MM-HH:MM`) for faster operator decisions.
+- Added: Background inferred peer schedules from recurring observed traffic (`js8_links`/`varac_links`) with confidence metadata and effective-source precedence so imported schedules override inferred rows per callsign.
+- Changed: Peer schedule inference scoring now normalizes recurrence by each callsign's observed active weeks (instead of a fixed global window) so valid recurring peers populate in sparse/partial datasets.
+- Changed: Peer schedule inference now canonicalizes portable/mobile callsign suffix variants (for example `/P`, `/M`, `/Z`) into base callsigns for grouping, while leaving raw link records intact for provenance.
+- Fixed: Inferred schedule identity split for suffix variants (for example `K0RPG` and `K0RPG/Z`) by merging recurrence scoring to a single base callsign.
+- Fixed: ControlFreq `Schedule Intersections` overlap detection now evaluates next-2-hour weekly segments (including overnight/day-wrap) and reads schedule rows from both settings/nets DB locations, restoring peer overlap population.
+- Fixed: Map `Peer Sched Now` now computes active schedule-frequency matches using both local schedule sources plus current scheduler frequency, with normalized day/overnight evaluation and practical same-frequency tolerance; matched peers are kept visible on the map even without fresh link traffic.
+- Changed: Map `Peer Sched Now` legend is now a compact color-key (Green `NOW`, Blue `Later Today`, Purple `QSY <10m`) with matching marker-ring states, replacing the wide descriptive text block.
+- Changed: VarAC ingest pipeline now includes concurrency protection and short cadence throttling to avoid overlapping ingest runs and reduce background churn.
+- Changed: VarAC message mirror schema now stores richer metadata (`folder_label`, `urgent`, `has_attachment`, `via_callsign`) to support true folder semantics and badge-ready UI paths.
+- Changed: Operators manual SitRep override behavior now coexists with unified status projection and remains active until a newer fused report supersedes it.
+- Changed: Map SitRep status resolution now preserves manual overrides from `spotter_station_status` until newer unified fused status is available.
+- Changed: DB admin/schema tooling now includes the expanded VarAC mirror/sync tables so status/init commands report them consistently.
+- Fixed: Long-run memory stability risks by bounding previously unbounded runtime caches (propagation empirical blend cache and JS8 form-definition caches).
+- Fixed: Map HTML reload path now reuses a managed cache file with cleanup on shutdown (instead of creating unbounded temporary HTML files over time).
+- Fixed: Added/ensured `js8_links(ts)` indexing for map recency query paths to reduce progressive slowdown as traffic history grows.
+- Changed: Operator auto-ingest trust policy hardened so traffic-discovered operators default to `Untrusted` unless explicitly promoted (manual edit or trusted import workflow).
+- Changed: Operator auto-upsert paths now normalize callsigns to base form before DB writes to prevent suffix variants creating separate operator identities.
+- Changed: ControlFreq `Frequency Control` now uses a primary digital-style `Now` frequency readout with compact schedule-state badge (`On Schedule`/`Off Schedule`/`Blocked`) and condensed scheduled-vs-active metadata.
+- Changed: ControlFreq quick-frequency selector labels are now compact frequency-first entries to reduce visual clutter and speed QSY scanning.
+
 ## [1.1.7]
 - Added: Expanded benchmark/perf instrumentation for `controlfreq`, `digi_ncs`, and `js8_ncs` activation flows.
 - Changed: Performance pipeline updates across `Messages`, `Map`, `Operators`, and `ControlFreq` to reduce first-open and warm-switch latency.

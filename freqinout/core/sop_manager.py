@@ -628,13 +628,15 @@ class SOPManager:
 
                 action_band = (action.get("band") or "").strip().upper()
                 action_freq = (action.get("frequency") or "").strip() or full.get("frequency", "")
-                aligned = self.is_due_aligned_with_schedule(
-                    full.get("operating_group", ""),
-                    action_band,
-                    action_freq,
-                    due,
-                )
                 rule = (action.get("contact_rule") or "none").strip()
+                aligned = True
+                if rule != "local_profile":
+                    aligned = self.is_due_aligned_with_schedule(
+                        full.get("operating_group", ""),
+                        action_band,
+                        action_freq,
+                        due,
+                    )
                 selected_target = (action.get("contact_target") or "").strip().upper()
                 targets: List[str] = []
                 if rule == "hub_or_hub_alt":
@@ -651,6 +653,9 @@ class SOPManager:
                     target = (action.get("contact_target") or "").strip().upper()
                     targets = [target] if target else []
                 elif rule == "peer":
+                    target = (action.get("contact_target") or "").strip().upper()
+                    targets = [target] if target else []
+                elif rule == "local_profile":
                     target = (action.get("contact_target") or "").strip().upper()
                     targets = [target] if target else []
                 rows.append(

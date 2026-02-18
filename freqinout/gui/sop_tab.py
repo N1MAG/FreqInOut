@@ -64,6 +64,9 @@ class SOPTab(QWidget):
     ANY_ROLE_TOKEN = "__any_role__"
     INTERVAL_PRESETS = ["00:30", "01:00", "03:00", "06:00", "12:00"]
     SOFTWARES = ["JS8Call", "VarAC", "FLDigi"]
+    LOCAL_NET_SOFTWARE = "Local Net"
+    LOCAL_NET_ACTION_KEY = "local_open_net"
+    LOCAL_NET_ACTION_LABEL = "Open Local Net"
     BAND_CHOICES = ["160M", "80M", "60M", "40M", "30M", "20M", "17M", "15M", "12M", "10M", "6M"]
 
     COL_BAND = 0
@@ -85,6 +88,7 @@ class SOPTab(QWidget):
         self._upcoming_rows: List[Dict[str, Any]] = []
         self._loading_ui = False
         self._operating_groups: List[Dict[str, Any]] = []
+        self._local_net_profiles: List[Dict[str, str]] = []
         self._hidden_actions: List[Dict[str, Any]] = []
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
         self._show_local = default_mode != "UTC"
@@ -256,6 +260,28 @@ class SOPTab(QWidget):
         data = self.settings.all()
         og = data.get("operating_groups", [])
         self._operating_groups = [g for g in og if isinstance(g, dict)]
+        local_profiles = data.get("local_net_profiles", [])
+        self._local_net_profiles = []
+        if isinstance(local_profiles, list):
+            for raw in local_profiles:
+                if not isinstance(raw, dict):
+                    continue
+                name = str(raw.get("name", "") or "").strip()
+                if not name:
+                    continue
+                self._local_net_profiles.append(
+                    {
+                        "name": name,
+                        "service": str(raw.get("service", "") or "").strip(),
+                        "mode": str(raw.get("mode", "") or "").strip(),
+                        "target": str(raw.get("target", "") or "").strip(),
+                        "notes": str(raw.get("notes", "") or "").strip(),
+                    }
+                )
+        self._local_net_profiles = sorted(
+            self._local_net_profiles,
+            key=lambda x: str(x.get("name", "")).upper(),
+        )
 
         self.group_combo.blockSignals(True)
         self.group_combo.clear()
@@ -270,6 +296,18 @@ class SOPTab(QWidget):
         for g in self.manager.load_secondary_groups():
             self.secondary_combo.addItem(g)
 
+    def _local_profile_names(self) -> List[str]:
+        return [str(p.get("name", "")).strip() for p in self._local_net_profiles if str(p.get("name", "")).strip()]
+
+    def _local_profile_lookup(self) -> Dict[str, Dict[str, str]]:
+        out: Dict[str, Dict[str, str]] = {}
+        for row in self._local_net_profiles:
+            name = str(row.get("name", "")).strip()
+            if not name:
+                continue
+            out[name.upper()] = row
+        return out
+
     def _wire_dirty_tracking(self) -> None:
         self.name_edit.textChanged.connect(self._mark_dirty)
         self.group_combo.currentIndexChanged.connect(self._mark_dirty)
@@ -279,19 +317,30 @@ class SOPTab(QWidget):
 
     def _set_save_dirty(self, dirty: bool) -> None:
         self._dirty = bool(dirty)
-        try:
-            theme = resolve_theme(self.settings)
-            if self._dirty:
-                self.save_btn.setStyleSheet(button_style("info", theme))
-            else:
-                self.save_btn.setStyleSheet(button_style("primary", theme))
-        except Exception:
-            pass
+        self._update_profile_action_styles()
 
     def _mark_dirty(self, *_args) -> None:
         if self._loading_ui:
             return
         self._set_save_dirty(True)
+
+    def _update_profile_action_styles(self, theme: Dict[str, str] | None = None) -> None:
+        try:
+            if theme is None:
+                theme = resolve_theme(self.settings)
+            has_profile = self._selected_profile_id is not None
+            editing = self._dirty or (not has_profile)
+            self.new_btn.setStyleSheet(button_style("eligible_info" if has_profile else "muted", theme))
+            self.save_btn.setStyleSheet(button_style("eligible_success" if self._dirty else "muted", theme))
+            self.delete_btn.setEnabled(has_profile)
+            self.delete_btn.setStyleSheet(button_style("eligible_danger" if has_profile else "muted", theme))
+            self.export_btn.setEnabled(has_profile)
+            self.export_btn.setStyleSheet(button_style("eligible_info" if has_profile else "muted", theme))
+            self.import_btn.setStyleSheet(button_style("muted", theme))
+            self.refresh_btn.setStyleSheet(button_style("muted", theme))
+            self.add_row_btn.setStyleSheet(button_style("eligible_primary" if editing else "muted", theme))
+        except Exception:
+            pass
 
     def _configured_softwares(self) -> List[str]:
         data = self.settings.all()
@@ -307,6 +356,8 @@ class SOPTab(QWidget):
             or (data.get("fldigi_checkin_dir") or "").strip()
         ):
             configured.append("FLDigi")
+        if self.LOCAL_NET_SOFTWARE not in configured:
+            configured.append(self.LOCAL_NET_SOFTWARE)
         return configured
 
     def _frequency_options_for_group(self, group: str) -> List[str]:
@@ -370,6 +421,9 @@ class SOPTab(QWidget):
                 ("fldigi_send_statrep", "StatRep"),
                 ("fldigi_send_report", "General"),
             ],
+            self.LOCAL_NET_SOFTWARE: [
+                (self.LOCAL_NET_ACTION_KEY, self.LOCAL_NET_ACTION_LABEL),
+            ],
         }
         for key, label in self._load_spotter_forms():
             catalog.setdefault("JS8Call", []).append((key, label))
@@ -419,6 +473,7 @@ class SOPTab(QWidget):
         finally:
             self._loading_ui = False
         self._set_save_dirty(False)
+        self._update_profile_action_styles()
         self.refresh_upcoming()
 
     def _new_profile(self) -> None:
@@ -437,6 +492,7 @@ class SOPTab(QWidget):
         finally:
             self._loading_ui = False
         self._set_save_dirty(False)
+        self._update_profile_action_styles()
         self.refresh_upcoming()
 
     def _on_group_changed(self) -> None:
@@ -455,6 +511,8 @@ class SOPTab(QWidget):
         group = self.group_combo.currentText().strip().upper()
         band_opts = self._band_options_for_group(group)
         for r in range(self.actions_table.rowCount()):
+            if self._is_local_net_action_row(r):
+                continue
             band_combo = self.actions_table.cellWidget(r, self.COL_BAND)
             freq_combo = self.actions_table.cellWidget(r, self.COL_FREQ)
             if isinstance(band_combo, QComboBox):
@@ -498,6 +556,40 @@ class SOPTab(QWidget):
         out.append(("callsign", "CallSign"))
         return out
 
+    def _is_local_net_action_row(self, row: int) -> bool:
+        if row < 0 or row >= self.actions_table.rowCount():
+            return False
+        sw_combo = self.actions_table.cellWidget(row, self.COL_SOFTWARE)
+        action_combo = self.actions_table.cellWidget(row, self.COL_ACTION)
+        if not isinstance(sw_combo, QComboBox) or not isinstance(action_combo, QComboBox):
+            return False
+        software = sw_combo.currentText().strip()
+        action_key = str(action_combo.currentData() or "").strip()
+        return software == self.LOCAL_NET_SOFTWARE and action_key == self.LOCAL_NET_ACTION_KEY
+
+    def _contact_rule_options_for_row(self, row: int) -> List[Tuple[str, str]]:
+        if self._is_local_net_action_row(row):
+            return [("local_profile", "Local Profile")]
+        return self._contact_rule_options_for_current_filter()
+
+    def _local_profile_display(self, profile_name: str) -> str:
+        key = (profile_name or "").strip().upper()
+        if not key:
+            return "--"
+        prof = self._local_profile_lookup().get(key)
+        if not prof:
+            return profile_name
+        service = str(prof.get("service", "")).strip()
+        target = str(prof.get("target", "")).strip()
+        mode = str(prof.get("mode", "")).strip()
+        bits = [str(prof.get("name", "")).strip()]
+        detail = " ".join([x for x in [service, mode] if x]).strip()
+        if detail:
+            bits.append(detail)
+        if target:
+            bits.append(target)
+        return " | ".join([b for b in bits if b])
+
     def _refresh_all_contact_target_options(self) -> None:
         for r in range(self.actions_table.rowCount()):
             self._refresh_contact_rule_options_for_row(r)
@@ -510,7 +602,7 @@ class SOPTab(QWidget):
         if not isinstance(rule_combo, QComboBox):
             return
         current = str(rule_combo.currentData() or "none").strip()
-        opts = self._contact_rule_options_for_current_filter()
+        opts = self._contact_rule_options_for_row(row)
         rule_combo.blockSignals(True)
         rule_combo.clear()
         for code, txt in opts:
@@ -529,6 +621,7 @@ class SOPTab(QWidget):
         if not configured:
             self.add_row_btn.setEnabled(False)
             self.hidden_rows_label.setText("No software configured in Settings. Configure JS8/VarAC/FLDigi first.")
+            self._update_profile_action_styles()
             return
         self.add_row_btn.setEnabled(True)
         if self._hidden_actions:
@@ -537,6 +630,7 @@ class SOPTab(QWidget):
             )
         else:
             self.hidden_rows_label.setText("")
+        self._update_profile_action_styles()
 
     def _autosize_actions_table(self) -> None:
         try:
@@ -728,9 +822,7 @@ class SOPTab(QWidget):
         sw_combo = self._make_software_widget((existing or {}).get("software", ""))
         sw_combo.setProperty("action_id", int((existing or {}).get("id") or 0))
         sw_combo.setProperty("sort_order", int((existing or {}).get("sort_order") or row))
-        sw_combo.currentIndexChanged.connect(
-            lambda _=0, r=row: self._refresh_action_combo_for_row(r, preferred_key=None, keep_current=False)
-        )
+        sw_combo.currentIndexChanged.connect(lambda _=0, r=row: self._on_software_changed(r))
         self.actions_table.setCellWidget(row, self.COL_SOFTWARE, sw_combo)
 
         action_combo = QComboBox()
@@ -755,7 +847,7 @@ class SOPTab(QWidget):
         self.actions_table.setCellWidget(row, self.COL_INTERVAL, interval_combo)
 
         rule_combo = QComboBox()
-        for code, txt in self._contact_rule_options_for_current_filter():
+        for code, txt in self._contact_rule_options_for_row(row):
             rule_combo.addItem(txt, code)
         rule = ((existing or {}).get("contact_rule") or "none").strip()
         idx_rule = rule_combo.findData(rule)
@@ -770,6 +862,7 @@ class SOPTab(QWidget):
         self._apply_typeahead(target_combo)
         target_combo.setProperty("saved_target", ((existing or {}).get("contact_target") or "").strip().upper())
         self.actions_table.setCellWidget(row, self.COL_CONTACT_TARGET, target_combo)
+        self._sync_row_mode_for_action(row)
         self._refresh_contact_target_options_for_row(row)
         rule_combo.currentIndexChanged.connect(lambda _=0, r=row: self._on_contact_rule_changed(r))
         self._on_contact_rule_changed(row)
@@ -786,6 +879,7 @@ class SOPTab(QWidget):
         freq_combo.currentIndexChanged.connect(self._mark_dirty)
         freq_combo.currentTextChanged.connect(self._mark_dirty)
         sw_combo.currentIndexChanged.connect(self._mark_dirty)
+        action_combo.currentIndexChanged.connect(lambda _=0, r=row: self._on_action_selection_changed(r))
         action_combo.currentIndexChanged.connect(self._mark_dirty)
         interval_combo.currentIndexChanged.connect(self._mark_dirty)
         if interval_combo.lineEdit() is not None:
@@ -797,6 +891,35 @@ class SOPTab(QWidget):
         self._mark_dirty()
         self._autosize_actions_table()
 
+    def _on_software_changed(self, row: int) -> None:
+        self._refresh_action_combo_for_row(row, preferred_key=None, keep_current=False)
+        self._on_action_selection_changed(row)
+
+    def _on_action_selection_changed(self, row: int) -> None:
+        self._sync_row_mode_for_action(row)
+        self._refresh_contact_rule_options_for_row(row)
+        self._on_contact_rule_changed(row)
+        self._refresh_freq_combo_for_row(row)
+
+    def _sync_row_mode_for_action(self, row: int) -> None:
+        if row < 0 or row >= self.actions_table.rowCount():
+            return
+        is_local = self._is_local_net_action_row(row)
+        band_combo = self.actions_table.cellWidget(row, self.COL_BAND)
+        freq_combo = self.actions_table.cellWidget(row, self.COL_FREQ)
+        if isinstance(band_combo, QComboBox):
+            if is_local:
+                band_combo.blockSignals(True)
+                band_combo.setCurrentText("")
+                band_combo.blockSignals(False)
+            band_combo.setEnabled(not is_local)
+        if isinstance(freq_combo, QComboBox):
+            if is_local:
+                freq_combo.blockSignals(True)
+                freq_combo.setCurrentText("")
+                freq_combo.blockSignals(False)
+            freq_combo.setEnabled(not is_local)
+
     def _remove_row_for_button(self, btn: QPushButton) -> None:
         for r in range(self.actions_table.rowCount()):
             if self.actions_table.cellWidget(r, self.COL_REMOVE) is btn:
@@ -807,6 +930,8 @@ class SOPTab(QWidget):
 
     def _refresh_freq_combo_for_row(self, row: int) -> None:
         if row < 0 or row >= self.actions_table.rowCount():
+            return
+        if self._is_local_net_action_row(row):
             return
         group = self.group_combo.currentText().strip().upper()
         band_combo = self.actions_table.cellWidget(row, self.COL_BAND)
@@ -843,19 +968,31 @@ class SOPTab(QWidget):
     def _refresh_contact_target_options_for_row(self, row: int) -> None:
         if row < 0 or row >= self.actions_table.rowCount():
             return
+        rule_combo = self.actions_table.cellWidget(row, self.COL_CONTACT)
         target_combo = self.actions_table.cellWidget(row, self.COL_CONTACT_TARGET)
-        if not isinstance(target_combo, QComboBox):
+        if not isinstance(target_combo, QComboBox) or not isinstance(rule_combo, QComboBox):
             return
-        current = target_combo.currentText().strip().upper() or str(target_combo.property("saved_target") or "").strip().upper()
-        opts = self._available_callsign_targets()
+        current = (
+            target_combo.currentText().strip().upper()
+            or str(target_combo.property("saved_target") or "").strip().upper()
+        )
+        rule = str(rule_combo.currentData() or "none").strip()
         target_combo.blockSignals(True)
         target_combo.clear()
         target_combo.addItem("")
-        for cs in opts:
-            target_combo.addItem(cs, cs)
-        if current and target_combo.findText(current) < 0:
-            target_combo.addItem(current, current)
-        target_combo.setCurrentText(current)
+        if rule == "local_profile":
+            for name in self._local_profile_names():
+                target_combo.addItem(name, name.upper())
+            if current and target_combo.findData(current) < 0:
+                target_combo.addItem(current, current)
+            idx = target_combo.findData(current)
+            target_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        else:
+            for cs in self._available_callsign_targets():
+                target_combo.addItem(cs, cs)
+            if current and target_combo.findText(current) < 0:
+                target_combo.addItem(current, current)
+            target_combo.setCurrentText(current)
         self._fit_combo_popup(target_combo)
         target_combo.blockSignals(False)
 
@@ -908,6 +1045,14 @@ class SOPTab(QWidget):
                 target_combo.setCurrentIndex(0)
             target_combo.setEnabled(True)
             target_combo.setEditable(True)
+        elif rule == "local_profile":
+            target_combo.addItem("", "")
+            for name in self._local_profile_names():
+                target_combo.addItem(name, name.upper())
+            idx = target_combo.findData(saved_target)
+            target_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            target_combo.setEnabled(target_combo.count() > 1)
+            target_combo.setEditable(False)
         else:
             target_combo.addItem("", "")
             target_combo.setCurrentIndex(0)
@@ -935,8 +1080,6 @@ class SOPTab(QWidget):
         if not name:
             raise ValueError("SOP name is required.")
         group = self.group_combo.currentText().strip().upper()
-        if not group:
-            raise ValueError("Operating group is required.")
         start = self.start_edit.text().strip()
         if len(start) != 5 or ":" not in start:
             raise ValueError("SOP Start Time must be HH:MM.")
@@ -954,6 +1097,7 @@ class SOPTab(QWidget):
         }
 
         actions: List[Dict[str, Any]] = []
+        requires_operating_group = False
         for r in range(self.actions_table.rowCount()):
             band_combo = self.actions_table.cellWidget(r, self.COL_BAND)
             freq_combo = self.actions_table.cellWidget(r, self.COL_FREQ)
@@ -972,12 +1116,17 @@ class SOPTab(QWidget):
             action_label = action_combo.currentText().strip()
             if not software or not action_key or action_key == "__spotter_header__":
                 continue
+            is_local_action = software == self.LOCAL_NET_SOFTWARE and action_key == self.LOCAL_NET_ACTION_KEY
+            if not is_local_action:
+                requires_operating_group = True
             contact_rule = rule_combo.currentData() if isinstance(rule_combo, QComboBox) else "none"
+            if is_local_action:
+                contact_rule = "local_profile"
             contact_target = ""
             if isinstance(target_combo, QComboBox):
                 if str(contact_rule) in {"hub_or_hub_alt", "ncs_or_ancs"}:
                     contact_target = str(target_combo.currentData() or "").strip().upper()
-                elif str(contact_rule) in {"callsign", "peer"}:
+                elif str(contact_rule) in {"callsign", "peer", "local_profile"}:
                     contact_target = str(target_combo.currentData() or target_combo.currentText() or "").strip().upper()
             if str(contact_rule) != "none" and not contact_target:
                 raise ValueError(f"Contact Target is required on row {r + 1}.")
@@ -986,19 +1135,30 @@ class SOPTab(QWidget):
                 if isinstance(interval_combo, QComboBox)
                 else 180
             )
+            description = desc_edit.text().strip() if isinstance(desc_edit, QLineEdit) else ""
+            if is_local_action and not description and contact_target:
+                description = f"Open local net profile {contact_target}"
 
             actions.append(
                 {
                     "id": int(sw_combo.property("action_id") or 0),
-                    "band": band_combo.currentText().strip().upper() if isinstance(band_combo, QComboBox) else "",
-                    "frequency": freq_combo.currentText().strip() if isinstance(freq_combo, QComboBox) else "",
+                    "band": (
+                        band_combo.currentText().strip().upper()
+                        if isinstance(band_combo, QComboBox) and not is_local_action
+                        else ""
+                    ),
+                    "frequency": (
+                        freq_combo.currentText().strip()
+                        if isinstance(freq_combo, QComboBox) and not is_local_action
+                        else ""
+                    ),
                     "software": software,
                     "action_key": action_key,
                     "action_label": action_label,
                     "enabled": True,
                     "interval_minutes": interval_minutes,
                     "interval_hours": max(1, int((interval_minutes + 59) // 60)),
-                    "description": desc_edit.text().strip() if isinstance(desc_edit, QLineEdit) else "",
+                    "description": description,
                     "contact_rule": contact_rule,
                     "contact_target": contact_target,
                     "sort_order": int(sw_combo.property("sort_order") or r),
@@ -1014,6 +1174,8 @@ class SOPTab(QWidget):
 
         if not actions:
             raise ValueError("Add at least one action row.")
+        if requires_operating_group and not group:
+            raise ValueError("Operating group is required for non-local SOP actions.")
 
         return payload, actions
 
@@ -1193,7 +1355,10 @@ class SOPTab(QWidget):
             self.upcoming_table.setItem(r, 4, QTableWidgetItem(row.get("description", "")))
             self.upcoming_table.setItem(r, 5, QTableWidgetItem(self._format_due(row.get("next_due_utc"), tz_mode)))
             targets = row.get("contact_targets", []) or []
-            if targets:
+            contact_rule = str(row.get("contact_rule") or "").strip()
+            if contact_rule == "local_profile" and targets:
+                contact_txt = self._local_profile_display(str(targets[0] or "").strip().upper())
+            elif targets:
                 contact_txt = " OR ".join(targets[:4])
             else:
                 contact_txt = "--"
@@ -1255,5 +1420,6 @@ class SOPTab(QWidget):
             theme = resolve_theme(self.settings)
             self.alignment_label.setStyleSheet(f"color: {theme.get('warning', '#B71C1C')}; font-weight: 600;")
             self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
+            self._update_profile_action_styles(theme)
         except Exception:
             pass

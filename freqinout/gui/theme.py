@@ -108,12 +108,101 @@ def _pick_text_color(bg_hex: str, light: str, dark: str) -> str:
     return dark if _luminance(bg_hex) > 0.6 else light
 
 
+def _relative_luminance(value: str) -> float:
+    r, g, b = _hex_to_rgb(value)
+    srgb = [r / 255.0, g / 255.0, b / 255.0]
+
+    def _channel(c: float) -> float:
+        return c / 12.92 if c <= 0.03928 else pow((c + 0.055) / 1.055, 2.4)
+
+    rr, gg, bb = (_channel(c) for c in srgb)
+    return 0.2126 * rr + 0.7152 * gg + 0.0722 * bb
+
+
+def _contrast_ratio(fg_hex: str, bg_hex: str) -> float:
+    l1 = _relative_luminance(fg_hex)
+    l2 = _relative_luminance(bg_hex)
+    hi = max(l1, l2)
+    lo = min(l1, l2)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _best_contrast_text(bg_hex: str, candidates: Tuple[str, ...]) -> str:
+    best = candidates[0]
+    best_ratio = _contrast_ratio(best, bg_hex)
+    for cand in candidates[1:]:
+        ratio = _contrast_ratio(cand, bg_hex)
+        if ratio > best_ratio:
+            best = cand
+            best_ratio = ratio
+    return best
+
+
+def _dual_button_rules(
+    *,
+    bg: str,
+    fg: str,
+    border: str,
+    hover: str,
+    active: str,
+    disabled_bg: str,
+    disabled_fg: str,
+    disabled_border: str,
+) -> str:
+    def _rules_for(selector: str) -> str:
+        return (
+            f"{selector} {{"
+            f" background-color: {bg}; color: {fg}; border: 1px solid {border};"
+            " border-radius: 6px; padding: 4px 10px; font-weight: 600;"
+            " }"
+            f" {selector}:hover {{ background-color: {hover}; }}"
+            f" {selector}:pressed {{ background-color: {active}; }}"
+            f" {selector}:disabled {{ background-color: {disabled_bg}; color: {disabled_fg}; border-color: {disabled_border}; }}"
+        )
+
+    return _rules_for("QPushButton") + _rules_for("QToolButton")
+
+
 def button_style(role: str, theme: Dict[str, str]) -> str:
     role = (role or "primary").strip().lower()
-    if role in {"primary", "info"}:
+    if role == "primary":
         bg = theme["accent"]
         hover = theme["accent_hover"]
         active = theme["accent_active"]
+    elif role.startswith("eligible"):
+        # Soft CTA highlighting: subtle tint that signals "next eligible action"
+        # without overpowering the surrounding UI.
+        _, _, suffix = role.partition("_")
+        key = suffix or "primary"
+        base_map = {
+            "primary": theme["accent"],
+            "info": theme["info"],
+            "success": theme["success"],
+            "warning": theme["warning"],
+            "danger": theme["danger"],
+        }
+        base = base_map.get(key, theme["accent"])
+        bg = _blend_hex(base, theme["surface"], 0.38)
+        hover = _blend_hex(base, theme["surface"], 0.52)
+        active = _blend_hex(base, theme["surface"], 0.64)
+        border = _blend_hex(base, theme["border"], 0.60)
+        fg = _best_contrast_text(bg, ("#111111", "#FFFFFF"))
+        disabled_bg = _blend_hex(theme["surface_alt"], theme["surface"], 0.7)
+        disabled_fg = theme["text_muted"]
+        return _dual_button_rules(
+            bg=bg,
+            fg=fg,
+            border=border,
+            hover=hover,
+            active=active,
+            disabled_bg=disabled_bg,
+            disabled_fg=disabled_fg,
+            disabled_border=theme["border"],
+        )
+    elif role == "info":
+        bg = theme["info"]
+        hover = _blend_hex(theme["info"], theme["surface"], 0.9)
+        active = _blend_hex(theme["info"], theme["surface"], 0.8)
     elif role == "success":
         bg = theme["success"]
         hover = _blend_hex(theme["success"], theme["surface"], 0.9)
@@ -134,22 +223,27 @@ def button_style(role: str, theme: Dict[str, str]) -> str:
         bg = theme["surface_alt"]
         hover = _blend_hex(theme["surface_alt"], theme["surface"], 0.8)
         active = _blend_hex(theme["surface_alt"], theme["surface"], 0.7)
+    elif role == "secondary":
+        bg = theme["surface_alt"]
+        hover = _blend_hex(theme["surface_alt"], theme["surface"], 0.8)
+        active = _blend_hex(theme["surface_alt"], theme["surface"], 0.7)
     else:
         bg = theme["surface_alt"]
         hover = _blend_hex(theme["surface_alt"], theme["surface"], 0.8)
         active = _blend_hex(theme["surface_alt"], theme["surface"], 0.7)
-    fg = _pick_text_color(bg, theme["text"], "#111111")
+    fg = _best_contrast_text(bg, ("#111111", "#FFFFFF"))
     disabled_bg = _blend_hex(theme["surface_alt"], theme["surface"], 0.7)
     disabled_fg = theme["text_muted"]
     border = theme["border"]
-    return (
-        "QPushButton {"
-        f" background-color: {bg}; color: {fg}; border: 1px solid {border};"
-        " border-radius: 6px; padding: 4px 10px; font-weight: 600;"
-        " }"
-        f" QPushButton:hover {{ background-color: {hover}; }}"
-        f" QPushButton:pressed {{ background-color: {active}; }}"
-        f" QPushButton:disabled {{ background-color: {disabled_bg}; color: {disabled_fg}; border-color: {border}; }}"
+    return _dual_button_rules(
+        bg=bg,
+        fg=fg,
+        border=border,
+        hover=hover,
+        active=active,
+        disabled_bg=disabled_bg,
+        disabled_fg=disabled_fg,
+        disabled_border=border,
     )
 
 

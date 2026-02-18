@@ -2,15 +2,26 @@
 
 import json
 import os
+import threading
 import time
 from contextlib import ContextDecorator
+from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
 
+from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
 
 
 _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+_LOG_LEVELS = {
+    "debug": 10,
+    "info": 20,
+    "warning": 30,
+    "error": 40,
+    "critical": 50,
+}
+_PERF_FILE_LOCK = threading.Lock()
 
 
 def _to_bool(value: Any) -> bool:
@@ -68,6 +79,36 @@ def _clean_meta(meta: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _get_perf_log_file() -> Path:
+    try:
+        cfg = get_config_dir()
+    except Exception:
+        cfg = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or Path.home()) / "FreqInOut"
+    return Path(cfg) / "perf_metrics.log"
+
+
+def _logger_can_emit(level: str) -> bool:
+    try:
+        if getattr(log, "disabled", False):
+            return False
+        lvl = int(_LOG_LEVELS.get(str(level).lower(), 20))
+        return bool(log.isEnabledFor(lvl))
+    except Exception:
+        return True
+
+
+def _append_perf_line(line: str) -> None:
+    try:
+        path = _get_perf_log_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        with _PERF_FILE_LOCK:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{stamp} PERF|{line}\n")
+    except Exception:
+        pass
+
+
 def emit_span(
     name: str,
     elapsed_ms: float,
@@ -89,8 +130,16 @@ def emit_span(
     if details:
         payload["meta"] = details
     line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    writer = getattr(log, str(level).lower(), log.info)
-    writer("PERF|%s", line)
+    wrote = False
+    if _logger_can_emit(level):
+        try:
+            writer = getattr(log, str(level).lower(), log.info)
+            writer("PERF|%s", line)
+            wrote = True
+        except Exception:
+            wrote = False
+    if not wrote:
+        _append_perf_line(line)
 
 
 class PerfSpan(ContextDecorator):

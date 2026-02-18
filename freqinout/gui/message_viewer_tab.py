@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import re
@@ -470,12 +471,15 @@ class _RowsBuildWorker(QObject):
         js8_messages: List[JS8Message],
         spotter_messages: List[SpotterMessage],
         varac_messages: List["VarACMessage"],
+        sitrep_messages: List["SitrepMessage"],
         files: Dict[str, List[FileRecord]],
         read_state_map: Dict[tuple, tuple[str, float, int]],
         sender_cache_seed: Dict[tuple, str],
         form_titles: Dict[str, str],
         show_local_time: bool,
         tz_name: str,
+        sitrep_dedupe_enabled: bool,
+        sitrep_show_raw_duplicates: bool,
         force: bool,
         generation: int,
     ):
@@ -483,6 +487,7 @@ class _RowsBuildWorker(QObject):
         self._js8_messages = list(js8_messages)
         self._spotter_messages = list(spotter_messages)
         self._varac_messages = list(varac_messages)
+        self._sitrep_messages = list(sitrep_messages)
         self._files = {
             "varac": list(files.get("varac", [])),
             "flmsg": list(files.get("flmsg", [])),
@@ -495,6 +500,8 @@ class _RowsBuildWorker(QObject):
         self._form_titles = {str(k): str(v or "") for k, v in (form_titles or {}).items()}
         self._show_local_time = bool(show_local_time)
         self._tz_name = str(tz_name or "UTC")
+        self._sitrep_dedupe_enabled = bool(sitrep_dedupe_enabled)
+        self._sitrep_show_raw_duplicates = bool(sitrep_show_raw_duplicates)
         self._force = bool(force)
         self._generation = int(generation)
 
@@ -543,6 +550,232 @@ class _RowsBuildWorker(QObject):
             except Exception:
                 return ""
         return ""
+
+    @staticmethod
+    def _canonicalize_value(value: object) -> str:
+        txt = str(value or "").strip().lower()
+        if not txt:
+            return "not_reported"
+        if txt in {"red", "yellow", "green", "unknown", "not_reported"}:
+            return txt
+        if txt in {"3", "r"}:
+            return "red"
+        if txt in {"2", "y"}:
+            return "yellow"
+        if txt in {"1", "g"}:
+            return "green"
+        if txt in {"4", "u", "5"}:
+            return "unknown"
+        return "unknown"
+
+    @staticmethod
+    def _canonical_scope(value: object) -> str:
+        txt = str(value or "").strip()
+        if not txt:
+            return ""
+        low = txt.lower()
+        if low in {"1", "my location"}:
+            return "My Location"
+        if low in {"2", "my community"}:
+            return "My Community"
+        if low in {"3", "my county"}:
+            return "My County"
+        if low in {"4", "my region"}:
+            return "My Region"
+        if low in {"5", "other", "other location"}:
+            return "Other Location"
+        return txt
+
+    @staticmethod
+    def _aggregate_status(values: List[str]) -> str:
+        order = {"red": 5, "yellow": 4, "green": 3, "unknown": 2, "not_reported": 1}
+        best = "not_reported"
+        score = order[best]
+        for val in values:
+            key = _RowsBuildWorker._canonicalize_value(val)
+            cur = order.get(key, 2)
+            if cur > score:
+                best = key
+                score = cur
+        return best
+
+    @staticmethod
+    def _spotter_subtype(msg_type: str) -> str:
+        form = str(msg_type or "").strip().upper()
+        if form == "F!104":
+            return "SPOTTER_104"
+        if form == "F!301":
+            return "SPOTTER_301"
+        if form == "F!304":
+            return "SPOTTER_304"
+        return ""
+
+    @staticmethod
+    def _parse_form_responses(raw_text: str) -> str:
+        text = str(raw_text or "").strip()
+        if not text:
+            return ""
+        parts = text.split()
+        if len(parts) < 2:
+            return ""
+        if not str(parts[0]).upper().startswith("F!"):
+            return ""
+        return str(parts[1] or "").strip()
+
+    @staticmethod
+    def _spotter_304_fields(digits: str) -> Dict[str, str]:
+        out = {
+            "overall_status": "not_reported",
+            "power": "not_reported",
+            "water": "not_reported",
+            "medical": "not_reported",
+            "communications": "not_reported",
+            "internet": "not_reported",
+            "travel": "not_reported",
+            "food": "not_reported",
+            "fuel": "not_reported",
+            "crime": "not_reported",
+            "civil_unrest": "not_reported",
+            "political": "not_reported",
+        }
+        d = [ch for ch in str(digits or "").strip() if ch.isdigit()]
+        if len(d) < 6:
+            return out
+        out["communications"] = _RowsBuildWorker._canonicalize_value(d[1] if len(d) > 1 else "")
+        out["internet"] = _RowsBuildWorker._canonicalize_value(d[3] if len(d) > 3 else "")
+        out["water"] = _RowsBuildWorker._canonicalize_value(d[4] if len(d) > 4 else "")
+        out["power"] = _RowsBuildWorker._canonicalize_value(d[5] if len(d) > 5 else "")
+        out["overall_status"] = _RowsBuildWorker._aggregate_status(
+            [out["communications"], out["internet"], out["water"], out["power"]]
+        )
+        return out
+
+    @staticmethod
+    def _status_signature(fields: Dict[str, str]) -> str:
+        dims = (
+            "overall_status",
+            "power",
+            "water",
+            "medical",
+            "communications",
+            "internet",
+            "travel",
+            "food",
+            "fuel",
+            "crime",
+            "civil_unrest",
+            "political",
+        )
+        return "|".join(_RowsBuildWorker._canonicalize_value(fields.get(k, "not_reported")) for k in dims)
+
+    @staticmethod
+    def _semantic_report_key(
+        *,
+        subtype: str,
+        from_call: str,
+        target: str,
+        grid: str,
+        scope: str,
+        event_ts: float,
+        fields: Dict[str, str],
+        bucket_seconds: int = 60,
+    ) -> str:
+        call = str(from_call or "").strip().upper()
+        if not call:
+            return ""
+        bucket = int(bucket_seconds or 60)
+        if bucket <= 0:
+            bucket = 60
+        ts_bucket = int(float(event_ts or 0.0) // float(bucket)) if float(event_ts or 0.0) > 0 else 0
+        base = "|".join(
+            [
+                call,
+                str(target or "").strip().upper(),
+                str(grid or "").strip().upper(),
+                str(scope or "").strip(),
+                str(subtype or "").strip().upper(),
+                str(ts_bucket),
+                _RowsBuildWorker._status_signature(fields),
+            ]
+        )
+        return hashlib.sha1(base.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _spotter_message_report_key(msg: SpotterMessage) -> str:
+        subtype = _RowsBuildWorker._spotter_subtype(msg.msg_type)
+        if not subtype:
+            return ""
+        responses = _RowsBuildWorker._parse_form_responses(msg.raw_text)
+        fields = {
+            "overall_status": "not_reported",
+            "power": "not_reported",
+            "water": "not_reported",
+            "medical": "not_reported",
+            "communications": "not_reported",
+            "internet": "not_reported",
+            "travel": "not_reported",
+            "food": "not_reported",
+            "fuel": "not_reported",
+            "crime": "not_reported",
+            "civil_unrest": "not_reported",
+            "political": "not_reported",
+        }
+        scope = ""
+        if subtype == "SPOTTER_104":
+            first = str(responses or "")[:1]
+            fields["overall_status"] = _RowsBuildWorker._canonicalize_value(first)
+        elif subtype == "SPOTTER_301":
+            digits = [ch for ch in str(responses or "").strip() if ch.isdigit()]
+            if digits:
+                scope = _RowsBuildWorker._canonical_scope(digits[0])
+                mapped = _RowsBuildWorker._spotter_304_fields("".join(digits[1:9]))
+                fields.update(mapped)
+        elif subtype == "SPOTTER_304":
+            mapped = _RowsBuildWorker._spotter_304_fields(responses)
+            fields.update(mapped)
+        return _RowsBuildWorker._semantic_report_key(
+            subtype=subtype,
+            from_call=(msg.from_call or "").strip().upper(),
+            target=(msg.to_call or "").strip().upper(),
+            grid="",
+            scope=scope,
+            event_ts=float(msg.utc_ts or 0.0),
+            fields=fields,
+        )
+
+    @staticmethod
+    def _sitrep_message_report_key(msg: "SitrepMessage") -> str:
+        key = str(msg.report_key or "").strip().lower()
+        if key:
+            return key
+        return _RowsBuildWorker._sitrep_message_semantic_key(msg, bucket_seconds=60)
+
+    @staticmethod
+    def _sitrep_message_semantic_key(msg: "SitrepMessage", *, bucket_seconds: int = 60) -> str:
+        fields = {
+            "overall_status": _RowsBuildWorker._canonicalize_value(msg.overall_status),
+            "power": _RowsBuildWorker._canonicalize_value(msg.power),
+            "water": _RowsBuildWorker._canonicalize_value(msg.water),
+            "medical": _RowsBuildWorker._canonicalize_value(msg.medical),
+            "communications": _RowsBuildWorker._canonicalize_value(msg.communications),
+            "internet": _RowsBuildWorker._canonicalize_value(msg.internet),
+            "travel": _RowsBuildWorker._canonicalize_value(msg.travel),
+            "food": _RowsBuildWorker._canonicalize_value(msg.food),
+            "fuel": _RowsBuildWorker._canonicalize_value(msg.fuel),
+            "crime": _RowsBuildWorker._canonicalize_value(msg.crime),
+            "civil_unrest": _RowsBuildWorker._canonicalize_value(msg.civil_unrest),
+            "political": _RowsBuildWorker._canonicalize_value(msg.political),
+        }
+        return _RowsBuildWorker._semantic_report_key(
+            subtype=str(msg.subtype or "").strip().upper(),
+            from_call=(msg.from_call or "").strip().upper(),
+            target=(msg.target or "").strip().upper(),
+            grid=(msg.grid or "").strip().upper(),
+            scope=_RowsBuildWorker._canonical_scope(msg.scope),
+            event_ts=float(msg.event_ts or 0.0),
+            fields=fields,
+            bucket_seconds=int(bucket_seconds or 60),
+        )
 
     @staticmethod
     def _read_file_head(path: Path, limit: int = 4096) -> str:
@@ -594,6 +827,14 @@ class _RowsBuildWorker(QObject):
     def run(self) -> None:
         start = time.perf_counter()
         rows: List[UnifiedMessage] = []
+        dedupe_raw_spotter = bool(self._sitrep_dedupe_enabled and not self._sitrep_show_raw_duplicates)
+        sitrep_report_keys: set[str] = set()
+        sitrep_render_keys: set[str] = set()
+        if dedupe_raw_spotter:
+            for sitrep in self._sitrep_messages:
+                key = self._sitrep_message_semantic_key(sitrep, bucket_seconds=60)
+                if key:
+                    sitrep_report_keys.add(key)
 
         for msg in self._js8_messages:
             msg_type = msg.msg_type if msg.msg_type.startswith("F!") else "JS8 MSG"
@@ -626,6 +867,10 @@ class _RowsBuildWorker(QObject):
             )
 
         for msg in self._spotter_messages:
+            if dedupe_raw_spotter:
+                spotter_key = self._spotter_message_report_key(msg)
+                if spotter_key and spotter_key in sitrep_report_keys:
+                    continue
             msg_type = msg.msg_type or "F!"
             status = "READ" if msg.state.upper() == "READ" else "NEW"
             rcv_ts = float(msg.utc_ts or 0.0)
@@ -681,6 +926,49 @@ class _RowsBuildWorker(QObject):
                     origin="varac",
                     payload=msg,
                     search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                )
+            )
+
+        for msg in self._sitrep_messages:
+            if dedupe_raw_spotter:
+                ui_key = self._sitrep_message_semantic_key(msg, bucket_seconds=1)
+                if ui_key and ui_key in sitrep_render_keys:
+                    continue
+                if ui_key:
+                    sitrep_render_keys.add(ui_key)
+            rcv_ts = float(msg.event_ts or 0.0)
+            rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
+            from_call = (msg.from_call or "").strip().upper()
+            to_call = (msg.target or "").strip().upper()
+            overall = (msg.overall_status or "").strip().lower()
+            scope = (msg.scope or "").strip()
+            title_parts = [msg.subtype]
+            if scope:
+                title_parts.append(scope)
+            if overall:
+                title_parts.append(overall.upper())
+            title = " | ".join([p for p in title_parts if p]) or "SitRep"
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+            rows.append(
+                UnifiedMessage(
+                    msg_type="SitRep",
+                    status="INFO",
+                    from_call=from_call,
+                    to_call=to_call,
+                    rcv_ts=rcv_ts,
+                    rcv_display=rcv_display,
+                    title=title,
+                    origin="sitrep",
+                    payload=msg,
+                    search_text=self._compose_search_text(
+                        "SitRep",
+                        "INFO",
+                        from_call,
+                        to_call,
+                        rcv_display,
+                        f"{title} {msg.subtype}",
+                    ),
                 )
             )
 
@@ -743,6 +1031,38 @@ class VarACMessage:
     folder: str
     vmail_guid: str
     flag_state: int = 0
+
+
+@dataclass
+class SitrepMessage:
+    event_id: int
+    report_key: str
+    event_ts: float
+    event_ts_utc: str
+    from_call: str
+    target: str
+    grid: str
+    scope: str
+    subtype: str
+    overall_status: str
+    power: str
+    water: str
+    medical: str
+    communications: str
+    internet: str
+    travel: str
+    food: str
+    fuel: str
+    crime: str
+    civil_unrest: str
+    political: str
+    source_first: str
+    source_last: str
+    source_count: int
+    sources_json: str
+    source_refs_json: str
+    raw_payload_json: str
+    updated_ts: float
 
 
 @dataclass
@@ -1230,6 +1550,7 @@ class MessageViewerTab(QWidget):
         self.js8_messages: List[JS8Message] = []
         self.spotter_messages: List[SpotterMessage] = []
         self.varac_messages: List[VarACMessage] = []
+        self.sitrep_messages: List[SitrepMessage] = []
         self.current_js8: JS8Message | None = None
         self._js8_timer: QTimer | None = None
         self._pending_timer: QTimer | None = None
@@ -1280,6 +1601,8 @@ class MessageViewerTab(QWidget):
         self._file_view_cache: Dict[tuple, tuple[bool, str, str, Optional[Path], str]] = {}
         self._cache_max_sender_entries: int = 2500
         self._cache_max_view_entries: int = 500
+        self._cache_max_form_entries: int = 256
+        self._cache_max_form_title_entries: int = 256
         self._scan_cache_loaded: bool = False
         self._scan_cache_saved_ts: float = 0.0
         self._scan_dir_mtime_cache: Dict[str, float] = {}
@@ -2415,8 +2738,22 @@ class MessageViewerTab(QWidget):
                 self._load_spotter_from_db(force=force, rebuild=False)
             except Exception as e:
                 log.debug("MessageViewer: spotter load failed: %s", e)
+            try:
+                self._load_sitrep_from_local(force=force, rebuild=False)
+            except Exception as e:
+                log.debug("MessageViewer: sitrep load failed: %s", e)
             if rebuild:
                 self._populate_messages_table(force=force)
+
+    def _refresh_sitrep_messages(self, force: bool = False, rebuild: bool = True) -> None:
+        if self._is_shutting_down:
+            return
+        try:
+            self._load_sitrep_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: sitrep refresh failed: %s", e)
+        if rebuild:
+            self._populate_messages_table(force=force)
 
     def _update_fldigi_senders(self, records: Dict[str, List[FileRecord]]) -> None:
         db_path = self._db_path()
@@ -2624,6 +2961,88 @@ class MessageViewerTab(QWidget):
             )
             msgs.append(msg)
         self.varac_messages = msgs
+        if rebuild:
+            self._populate_messages_table(force=force)
+
+    @staticmethod
+    def _is_truthy(value: object, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        txt = str(value or "").strip().lower()
+        if txt in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if txt in {"0", "false", "no", "off", "disabled"}:
+            return False
+        return bool(default)
+
+    def _load_sitrep_from_local(self, force: bool = False, rebuild: bool = True) -> None:
+        db_path = self._db_path()
+        msgs: List[SitrepMessage] = []
+        enabled = self._is_truthy(self.settings.get("sitrep_unified_messages_enabled", True), True)
+        if not enabled:
+            self.sitrep_messages = msgs
+            if rebuild:
+                self._populate_messages_table(force=force)
+            return
+        if not db_path or not db_path.exists():
+            self.sitrep_messages = msgs
+            if rebuild:
+                self._populate_messages_table(force=force)
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, report_key, event_ts, event_ts_utc, from_call, target, grid, scope,
+                       subtype, overall_status, power, water, medical, communications, internet,
+                       travel, food, fuel, crime, civil_unrest, political,
+                       source_first, source_last, source_count, sources_json, source_refs_json, raw_payload_json, updated_ts
+                FROM sitrep_events
+                ORDER BY event_ts DESC, id DESC
+                LIMIT 5000
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to load sitrep events: %s", e)
+            rows = []
+        for r in rows:
+            msg = SitrepMessage(
+                event_id=int(r[0] or 0),
+                report_key=str(r[1] or ""),
+                event_ts=float(r[2] or 0.0),
+                event_ts_utc=str(r[3] or ""),
+                from_call=str(r[4] or "").strip().upper(),
+                target=str(r[5] or "").strip().upper(),
+                grid=str(r[6] or "").strip().upper(),
+                scope=str(r[7] or "").strip(),
+                subtype=str(r[8] or "").strip().upper(),
+                overall_status=str(r[9] or "").strip().lower(),
+                power=str(r[10] or "").strip().lower(),
+                water=str(r[11] or "").strip().lower(),
+                medical=str(r[12] or "").strip().lower(),
+                communications=str(r[13] or "").strip().lower(),
+                internet=str(r[14] or "").strip().lower(),
+                travel=str(r[15] or "").strip().lower(),
+                food=str(r[16] or "").strip().lower(),
+                fuel=str(r[17] or "").strip().lower(),
+                crime=str(r[18] or "").strip().lower(),
+                civil_unrest=str(r[19] or "").strip().lower(),
+                political=str(r[20] or "").strip().lower(),
+                source_first=str(r[21] or "").strip().upper(),
+                source_last=str(r[22] or "").strip().upper(),
+                source_count=int(r[23] or 0),
+                sources_json=str(r[24] or ""),
+                source_refs_json=str(r[25] or ""),
+                raw_payload_json=str(r[26] or ""),
+                updated_ts=float(r[27] or 0.0),
+            )
+            msgs.append(msg)
+        self.sitrep_messages = msgs
         if rebuild:
             self._populate_messages_table(force=force)
 
@@ -3198,12 +3617,19 @@ class MessageViewerTab(QWidget):
             "js8_messages": list(self.js8_messages),
             "spotter_messages": list(self.spotter_messages),
             "varac_messages": list(self.varac_messages),
+            "sitrep_messages": list(self.sitrep_messages),
             "files": {k: list(v) for k, v in self.files.items()},
             "read_state_map": dict(self._read_state_map),
             "sender_cache_seed": dict(self._sender_cache),
             "form_titles": form_titles,
             "show_local_time": self._current_time_mode() != "UTC",
             "tz_name": str(self.settings.get("timezone", "UTC") or "UTC"),
+            "sitrep_dedupe_enabled": self._is_truthy(
+                self.settings.get("sitrep_messages_dedupe_enabled", True), True
+            ),
+            "sitrep_show_raw_duplicates": self._is_truthy(
+                self.settings.get("sitrep_messages_show_raw_duplicates", False), False
+            ),
         }
 
     def _start_rows_build(self, force: bool = False) -> None:
@@ -3228,12 +3654,15 @@ class MessageViewerTab(QWidget):
             js8_messages=snapshot.get("js8_messages", []),  # type: ignore[arg-type]
             spotter_messages=snapshot.get("spotter_messages", []),  # type: ignore[arg-type]
             varac_messages=snapshot.get("varac_messages", []),  # type: ignore[arg-type]
+            sitrep_messages=snapshot.get("sitrep_messages", []),  # type: ignore[arg-type]
             files=snapshot.get("files", {}),  # type: ignore[arg-type]
             read_state_map=snapshot.get("read_state_map", {}),  # type: ignore[arg-type]
             sender_cache_seed=snapshot.get("sender_cache_seed", {}),  # type: ignore[arg-type]
             form_titles=snapshot.get("form_titles", {}),  # type: ignore[arg-type]
             show_local_time=bool(snapshot.get("show_local_time", False)),
             tz_name=str(snapshot.get("tz_name", "UTC") or "UTC"),
+            sitrep_dedupe_enabled=bool(snapshot.get("sitrep_dedupe_enabled", True)),
+            sitrep_show_raw_duplicates=bool(snapshot.get("sitrep_show_raw_duplicates", False)),
             force=bool(force),
             generation=generation,
         )
@@ -3301,10 +3730,26 @@ class MessageViewerTab(QWidget):
         to_vals = sorted({r.to_call for r in rows if r.to_call})
         spotter_forms = sorted({t for t in type_vals if re.match(r"^F!\d+$", t)})
         base_types = sorted([t for t in type_vals if t not in spotter_forms])
+        sitrep_subtypes = sorted(
+            {
+                str(getattr(r.payload, "subtype", "") or "").strip().upper()
+                for r in rows
+                if r.msg_type == "SitRep"
+            }
+        )
+        sitrep_subtypes = [s for s in sitrep_subtypes if s]
         if spotter_forms:
             type_vals = base_types + ["Spotter"] + spotter_forms
         else:
             type_vals = base_types
+        if sitrep_subtypes:
+            if "SitRep" in type_vals:
+                idx = type_vals.index("SitRep") + 1
+            else:
+                type_vals.append("SitRep")
+                idx = len(type_vals)
+            sitrep_filters = [f"SitRep/{s}" for s in sitrep_subtypes]
+            type_vals[idx:idx] = sitrep_filters
         if any(getattr(r.payload, "flag_state", 0) == 1 for r in rows):
             if "Action Needed" not in status_vals:
                 status_vals.append("Action Needed")
@@ -3373,6 +3818,16 @@ class MessageViewerTab(QWidget):
         for row in rows:
             if type_sel == "Spotter":
                 if not (row.msg_type or "").startswith("F!"):
+                    continue
+            elif type_sel == "SitRep":
+                if row.msg_type != "SitRep":
+                    continue
+            elif type_sel.startswith("SitRep/"):
+                subtype = type_sel.split("/", 1)[1].strip().upper()
+                if row.msg_type != "SitRep":
+                    continue
+                row_subtype = str(getattr(row.payload, "subtype", "") or "").strip().upper()
+                if row_subtype != subtype:
                     continue
             elif type_sel != "MSG Type..." and row.msg_type != type_sel:
                 continue
@@ -3568,7 +4023,7 @@ class MessageViewerTab(QWidget):
         has_selection = count > 0
         if hasattr(self, "delete_selected_btn"):
             self.delete_selected_btn.setEnabled(has_selection)
-            role = "danger" if has_selection else "muted"
+            role = "eligible_danger" if has_selection else "muted"
             self.delete_selected_btn.setStyleSheet(button_style(role, theme))
         self._sync_select_all_checkbox()
         self._update_mark_all_read_style()
@@ -4088,7 +4543,7 @@ class MessageViewerTab(QWidget):
 
     def _update_clear_filters_style(self) -> None:
         theme = resolve_theme(self.settings)
-        role = "warning" if self._filters_active() else "muted"
+        role = "eligible_warning" if self._filters_active() else "muted"
         self.clear_filters_btn.setStyleSheet(button_style(role, theme))
 
     def _mark_all_read_eligibility(self) -> tuple[bool, str]:
@@ -4114,7 +4569,7 @@ class MessageViewerTab(QWidget):
         enabled, reason = self._mark_all_read_eligibility()
         self.mark_all_read_btn.setEnabled(enabled)
         self.mark_all_read_btn.setToolTip(reason if not enabled else "Mark all visible rows as READ.")
-        role = "warning" if enabled else "muted"
+        role = "eligible_warning" if enabled else "muted"
         self.mark_all_read_btn.setStyleSheet(button_style(role, theme))
 
     def _mark_all_filtered_read(self) -> None:
@@ -4213,6 +4668,18 @@ class MessageViewerTab(QWidget):
 
     def _build_message_rows(self) -> List[UnifiedMessage]:
         rows: List[UnifiedMessage] = []
+        dedupe_raw_spotter = bool(
+            self._is_truthy(self.settings.get("sitrep_messages_dedupe_enabled", True), True)
+            and not self._is_truthy(self.settings.get("sitrep_messages_show_raw_duplicates", False), False)
+        )
+        sitrep_report_keys: set[str] = set()
+        sitrep_render_keys: set[str] = set()
+        if dedupe_raw_spotter:
+            for sitrep in self.sitrep_messages:
+                key = _RowsBuildWorker._sitrep_message_semantic_key(sitrep, bucket_seconds=60)
+                if key:
+                    sitrep_report_keys.add(key)
+
         for msg in self.js8_messages:
             msg_type = msg.msg_type if msg.msg_type.startswith("F!") else "JS8 MSG"
             status = "READ" if msg.state.upper() == "READ" else "NEW"
@@ -4241,6 +4708,10 @@ class MessageViewerTab(QWidget):
             )
 
         for msg in self.spotter_messages:
+            if dedupe_raw_spotter:
+                spotter_key = _RowsBuildWorker._spotter_message_report_key(msg)
+                if spotter_key and spotter_key in sitrep_report_keys:
+                    continue
             msg_type = msg.msg_type or "F!"
             status = "READ" if msg.state.upper() == "READ" else "NEW"
             rcv_ts = msg.utc_ts or 0.0
@@ -4289,6 +4760,39 @@ class MessageViewerTab(QWidget):
                     rcv_display=rcv_display,
                     title=title,
                     origin="varac",
+                    payload=msg,
+                )
+            )
+
+        for msg in self.sitrep_messages:
+            if dedupe_raw_spotter:
+                ui_key = _RowsBuildWorker._sitrep_message_semantic_key(msg, bucket_seconds=1)
+                if ui_key and ui_key in sitrep_render_keys:
+                    continue
+                if ui_key:
+                    sitrep_render_keys.add(ui_key)
+            rcv_ts = msg.event_ts or 0.0
+            rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
+            overall = (msg.overall_status or "").strip().lower()
+            scope = (msg.scope or "").strip()
+            title_parts = [msg.subtype]
+            if scope:
+                title_parts.append(scope)
+            if overall:
+                title_parts.append(overall.upper())
+            title = " | ".join([p for p in title_parts if p]) or "SitRep"
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+            rows.append(
+                UnifiedMessage(
+                    msg_type="SitRep",
+                    status="INFO",
+                    from_call=(msg.from_call or "").strip().upper(),
+                    to_call=(msg.target or "").strip().upper(),
+                    rcv_ts=rcv_ts,
+                    rcv_display=rcv_display,
+                    title=title,
+                    origin="sitrep",
                     payload=msg,
                 )
             )
@@ -4370,6 +4874,10 @@ class MessageViewerTab(QWidget):
                 self.current_js8 = None
                 self.current_record = None
                 self._load_varac_content(row.payload, row_ref=row)
+            elif isinstance(row.payload, SitrepMessage):
+                self.current_js8 = None
+                self.current_record = None
+                self._load_sitrep_content(row.payload)
 
     def _read_file_head(self, path: Path, limit: int = 4096) -> str:
         try:
@@ -5460,6 +5968,84 @@ class MessageViewerTab(QWidget):
             self.viewer.setPlainText("\n".join(header + [body]))
             self._mark_varac_read(msg, row_ref=row_ref)
 
+    @staticmethod
+    def _pretty_sitrep_value(value: str) -> str:
+        txt = str(value or "").strip().lower()
+        mapping = {
+            "red": "Red",
+            "yellow": "Yellow",
+            "green": "Green",
+            "unknown": "Unknown",
+            "not_reported": "Not Reported",
+        }
+        return mapping.get(txt, txt or "Not Reported")
+
+    @staticmethod
+    def _safe_json_pretty(text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return "{}"
+        try:
+            obj = json.loads(raw)
+            return json.dumps(obj, indent=2, ensure_ascii=True)
+        except Exception:
+            return raw
+
+    def _load_sitrep_content(self, msg: SitrepMessage) -> None:
+        with perf_span(
+            "messages.load_sitrep_content",
+            settings=self.settings,
+            meta={"subtype": msg.subtype},
+            min_ms=2.0,
+        ):
+            mode = self._current_time_mode()
+            label = "UTC" if mode == "UTC" else "Local"
+            ts_display = self._format_rcv_display(msg.event_ts or 0.0, msg.event_ts_utc)
+            source_list = self._safe_json_pretty(msg.sources_json)
+            source_refs = self._safe_json_pretty(msg.source_refs_json)
+            raw_payload = self._safe_json_pretty(msg.raw_payload_json)
+            lines = [
+                "Normalized SitRep",
+                "",
+                f"CALLSIGN: {msg.from_call}",
+                f"TO:       {msg.target}",
+                f"GRID:     {msg.grid}",
+                f"SCOPE:    {msg.scope or 'My Location'}",
+                f"SUBTYPE:  {msg.subtype}",
+                f"{label}:  {ts_display}",
+                f"REPORT:   {msg.report_key}",
+                f"SOURCES:  {msg.source_count}",
+                "",
+                "Status Fields",
+                f"  Overall:        {self._pretty_sitrep_value(msg.overall_status)}",
+                f"  Power:          {self._pretty_sitrep_value(msg.power)}",
+                f"  Water:          {self._pretty_sitrep_value(msg.water)}",
+                f"  Medical:        {self._pretty_sitrep_value(msg.medical)}",
+                f"  Communications: {self._pretty_sitrep_value(msg.communications)}",
+                f"  Internet:       {self._pretty_sitrep_value(msg.internet)}",
+                f"  Travel:         {self._pretty_sitrep_value(msg.travel)}",
+                f"  Food:           {self._pretty_sitrep_value(msg.food)}",
+                f"  Fuel:           {self._pretty_sitrep_value(msg.fuel)}",
+                f"  Crime:          {self._pretty_sitrep_value(msg.crime)}",
+                f"  Civil Unrest:   {self._pretty_sitrep_value(msg.civil_unrest)}",
+                f"  Political:      {self._pretty_sitrep_value(msg.political)}",
+                "",
+                "Source Metadata",
+                f"  First Source: {msg.source_first or 'Unknown'}",
+                f"  Last Source:  {msg.source_last or 'Unknown'}",
+                "  Source List JSON:",
+                source_list,
+                "",
+                "Source Refs JSON:",
+                source_refs,
+                "",
+                "Raw Payload JSON:",
+                raw_payload,
+            ]
+            self.info_label.setText(f"SitRep {msg.subtype} {msg.from_call} -> {msg.target}")
+            self.viewer.setAcceptRichText(False)
+            self.viewer.setPlainText("\n".join(lines))
+
     def _mark_varac_read(self, msg: VarACMessage, row_ref: Optional[UnifiedMessage] = None) -> None:
         if not msg or msg.read_status:
             return
@@ -5945,6 +6531,7 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to parse form %s: %s", form_id, e)
             questions = []
         self._form_cache[form_id] = questions
+        self._prune_cache(self._form_cache, self._cache_max_form_entries)
         return questions
 
     def _load_form_title(self, form_id: str) -> str:
@@ -5971,6 +6558,7 @@ class MessageViewerTab(QWidget):
         except Exception:
             title = ""
         self._form_title_cache[form_id] = title
+        self._prune_cache(self._form_title_cache, self._cache_max_form_title_entries)
         return title
 
     # ---------- JS8 state persistence (local DB) ---------- #

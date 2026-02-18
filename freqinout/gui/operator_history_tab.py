@@ -333,6 +333,7 @@ class OperatorHistoryTab(QWidget):
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self._wire_export_group_menu()
         self._update_clear_filters_button_style()
+        self._update_action_button_styles()
 
     def _clear_filters(self) -> None:
         self.search_edit.clear()
@@ -380,7 +381,7 @@ class OperatorHistoryTab(QWidget):
                 last_role TEXT,
                 checkin_count INTEGER DEFAULT 0,
                 groups_json TEXT,
-                trusted INTEGER DEFAULT 1
+                trusted INTEGER DEFAULT 0
             )
             """
         )
@@ -422,7 +423,7 @@ class OperatorHistoryTab(QWidget):
                     last_role TEXT,
                     checkin_count INTEGER DEFAULT 0,
                     groups_json TEXT,
-                    trusted INTEGER DEFAULT 1
+                    trusted INTEGER DEFAULT 0
                 )
                 """
             )
@@ -448,7 +449,7 @@ class OperatorHistoryTab(QWidget):
                         COALESCE(last_role,''),
                         COALESCE(checkin_count,0),
                         groups_json,
-                        COALESCE(trusted,1)
+                        COALESCE(trusted,0)
                     FROM operator_checkins
                     """
                 )
@@ -460,7 +461,7 @@ class OperatorHistoryTab(QWidget):
             cols = [row[1] for row in cur.fetchall()]
 
         for missing_col, ddl in (
-            ("trusted", "INTEGER DEFAULT 1"),
+            ("trusted", "INTEGER DEFAULT 0"),
             ("groups_json", "TEXT"),
             ("first_seen_utc", "TEXT"),
             ("last_seen_utc", "TEXT"),
@@ -470,8 +471,8 @@ class OperatorHistoryTab(QWidget):
             if missing_col not in cols:
                 cur.execute(f"ALTER TABLE operator_checkins ADD COLUMN {missing_col} {ddl}")
 
-        # Backfill trusted to 1 and hydrate groups_json; also seed first_seen if missing.
-        cur.execute("UPDATE operator_checkins SET trusted=1 WHERE trusted IS NULL")
+        # Backfill trusted to 0 and hydrate groups_json; also seed first_seen if missing.
+        cur.execute("UPDATE operator_checkins SET trusted=0 WHERE trusted IS NULL")
         # Standardize group roles and clear unknown values.
         cur.execute(
             """
@@ -534,6 +535,125 @@ class OperatorHistoryTab(QWidget):
         conn.commit()
 
     @staticmethod
+    def _settings_bool(settings: SettingsManager, key: str, default: bool) -> bool:
+        try:
+            value = settings.get(key, default)
+        except Exception:
+            value = default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        txt = str(value or "").strip().lower()
+        if txt in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if txt in {"0", "false", "no", "off", "disabled"}:
+            return False
+        return bool(default)
+
+    @staticmethod
+    def _safe_float(value: object, default: float = 0.0) -> float:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _decode_source_summary(value: object) -> Dict[str, str]:
+        txt = str(value or "").strip()
+        if not txt:
+            return {}
+        try:
+            obj = json.loads(txt)
+            if isinstance(obj, dict):
+                out: Dict[str, str] = {}
+                for raw_src, raw_status in obj.items():
+                    src = str(raw_src or "").strip().upper()
+                    status = str(raw_status or "").strip().lower()
+                    if not src:
+                        continue
+                    if status not in {"red", "yellow", "green", "unknown", "not_reported"}:
+                        status = "unknown"
+                    out[src] = status
+                return out
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _source_short_label(source: str) -> str:
+        src = (source or "").strip().upper()
+        if not src:
+            return "UNK"
+        if src == "JS8SPOTTER":
+            return "SPT"
+        if src == "COMMSTAT3":
+            return "CS3"
+        if src == "COMMSTAT23":
+            return "CS2"
+        if src == "MANUAL":
+            return "MAN"
+        if len(src) <= 4:
+            return src
+        return src[:4]
+
+    @classmethod
+    def _encode_source_chips(cls, source_summary: Dict[str, str]) -> str:
+        if not source_summary:
+            return ""
+        parts = []
+        for source in sorted(source_summary.keys()):
+            key = str(source_summary.get(source) or "unknown").strip().lower()
+            chip = cls._sitrep_status_chip(key)
+            parts.append(f"{cls._source_short_label(source)}:{chip}")
+        return " ".join(parts)
+
+    @staticmethod
+    def _sitrep_conflict(source_summary: Dict[str, str]) -> bool:
+        vals = {
+            str(v or "").strip().lower()
+            for v in source_summary.values()
+            if str(v or "").strip().lower() in {"red", "yellow", "green", "unknown"}
+        }
+        return len(vals) > 1
+
+    @staticmethod
+    def _utc_from_epoch(ts: float) -> str:
+        if ts <= 0:
+            return ""
+        return datetime.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _age_text_from_epoch(ts: float) -> str:
+        if ts <= 0:
+            return ""
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        age = max(0, int(now - ts))
+        if age < 60:
+            return f"{age}s"
+        mins, sec = divmod(age, 60)
+        if mins < 60:
+            return f"{mins}m {sec}s"
+        hrs, mins = divmod(mins, 60)
+        if hrs < 24:
+            return f"{hrs}h {mins}m"
+        days, hrs = divmod(hrs, 24)
+        return f"{days}d {hrs}h"
+
+    def _sitrep_display_text(self, row: Dict) -> str:
+        key = (row.get("sitrep_status_key") or "unknown").strip().lower()
+        base = self._sitrep_status_chip(key)
+        if bool(row.get("sitrep_conflict")):
+            return f"{base}!"
+        try:
+            source_count = int(row.get("sitrep_source_count") or 0)
+        except Exception:
+            source_count = 0
+        if source_count > 1:
+            return f"{base}+"
+        return base
+
+    @staticmethod
     def _sitrep_status_label(status_key: str) -> str:
         key = (status_key or "").strip().lower()
         if key == "red":
@@ -557,6 +677,7 @@ class OperatorHistoryTab(QWidget):
 
     def _load_sitrep_status_map(self, cur: sqlite3.Cursor) -> Dict[str, Dict[str, str]]:
         out: Dict[str, Dict[str, str]] = {}
+        # Legacy status table (includes manual overrides authored from Operators tab).
         try:
             cur.execute(
                 """
@@ -576,19 +697,86 @@ class OperatorHistoryTab(QWidget):
             label = (status_label or "").strip() or self._sitrep_status_label(key)
             source = (status_source or "").strip().upper() or "UNKNOWN"
             ts_txt = (updated_utc_str or "").strip()
+            ts_val = self._safe_float(updated_utc_ts, 0.0)
             if not ts_txt:
-                try:
-                    ts_val = float(updated_utc_ts or 0.0)
-                except Exception:
-                    ts_val = 0.0
                 if ts_val > 0:
-                    ts_txt = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
+                    ts_txt = self._utc_from_epoch(ts_val)
+            summary = {source: key} if source else {}
             out[cs] = {
                 "key": key,
                 "label": label,
                 "source": source,
                 "updated": ts_txt,
+                "updated_ts": ts_val,
+                "source_summary": summary,
+                "source_chips": self._encode_source_chips(summary),
+                "conflict": False,
+                "source_count": 1 if source else 0,
+                "age": self._age_text_from_epoch(ts_val),
             }
+
+        # Unified fused projection (effective status + per-source summary), behind a feature flag.
+        if not self._settings_bool(self.settings, "sitrep_unified_operators_enabled", True):
+            return out
+
+        try:
+            cur.execute(
+                """
+                SELECT
+                    callsign,
+                    effective_status,
+                    latest_event_ts,
+                    latest_event_ts_utc,
+                    source_summary_json
+                FROM sitrep_latest_by_callsign
+                """
+            )
+            fused_rows = cur.fetchall()
+        except Exception:
+            fused_rows = []
+
+        for callsign, effective_status, latest_event_ts, latest_event_ts_utc, source_summary_json in fused_rows:
+            cs = (callsign or "").strip().upper()
+            if not cs:
+                continue
+            key = str(effective_status or "").strip().lower()
+            if key not in {"red", "yellow", "green", "unknown", "not_reported"}:
+                key = "unknown"
+            if key == "not_reported":
+                key = "unknown"
+            ts_val = self._safe_float(latest_event_ts, 0.0)
+            ts_txt = (latest_event_ts_utc or "").strip() or self._utc_from_epoch(ts_val)
+            summary = self._decode_source_summary(source_summary_json)
+            if not summary:
+                summary = {"FUSED": key}
+            source_count = len(summary)
+            if source_count <= 1:
+                source = next(iter(summary.keys()), "FUSED")
+            else:
+                source = f"MULTI({source_count})"
+            candidate = {
+                "key": key,
+                "label": self._sitrep_status_label(key),
+                "source": source,
+                "updated": ts_txt,
+                "updated_ts": ts_val,
+                "source_summary": summary,
+                "source_chips": self._encode_source_chips(summary),
+                "conflict": self._sitrep_conflict(summary),
+                "source_count": source_count,
+                "age": self._age_text_from_epoch(ts_val),
+            }
+            existing = out.get(cs)
+            if not existing:
+                out[cs] = candidate
+                continue
+            existing_src = str(existing.get("source") or "").strip().upper()
+            existing_ts = self._safe_float(existing.get("updated_ts"), 0.0)
+            # Keep manual status until a newer fused report is available.
+            if existing_src == "MANUAL" and existing_ts >= ts_val:
+                continue
+            if ts_val >= existing_ts:
+                out[cs] = candidate
         return out
 
     def _sitrep_tooltip(self, row: Dict) -> str:
@@ -596,9 +784,19 @@ class OperatorHistoryTab(QWidget):
         label = (row.get("sitrep_status_label") or self._sitrep_status_label(key)).strip()
         src = (row.get("sitrep_status_source") or "UNKNOWN").strip().upper()
         updated = (row.get("sitrep_status_updated") or "").strip()
+        chips = (row.get("sitrep_source_chips") or "").strip()
+        age = (row.get("sitrep_status_age") or "").strip()
+        conflict = bool(row.get("sitrep_conflict"))
+        lines = [f"SitRep: {label}", f"Source: {src}"]
         if updated:
-            return f"SitRep: {label}\nSource: {src}\nUpdated: {updated} UTC"
-        return f"SitRep: {label}\nSource: {src}"
+            lines.append(f"Updated: {updated} UTC")
+        if age:
+            lines.append(f"Age: {age}")
+        if chips:
+            lines.append(f"Sources: {chips}")
+        if conflict:
+            lines.append("Conflict: sources disagree")
+        return "\n".join(lines)
 
     def _apply_sitrep_button_style(self, btn: QPushButton, status_key: str) -> None:
         key = (status_key or "").strip().lower()
@@ -739,6 +937,10 @@ class OperatorHistoryTab(QWidget):
             row["sitrep_status_label"] = label
             row["sitrep_status_source"] = "MANUAL"
             row["sitrep_status_updated"] = now_str
+            row["sitrep_status_age"] = "0s"
+            row["sitrep_conflict"] = False
+            row["sitrep_source_count"] = 1
+            row["sitrep_source_chips"] = "MAN:{}".format(self._sitrep_status_chip(key))
             updated_row = row
             break
         if self._rows:
@@ -764,7 +966,7 @@ class OperatorHistoryTab(QWidget):
             sitrep_item = self.table.item(r, self.COL_SITREP)
             if sitrep_item is None:
                 continue
-            sitrep_item.setText(self._sitrep_status_chip(status_key))
+            sitrep_item.setText(self._sitrep_display_text(row_data or {"sitrep_status_key": status_key}))
             self._apply_sitrep_item_style(sitrep_item, status_key)
             if row_data is not None:
                 sitrep_item.setToolTip(self._sitrep_tooltip(row_data))
@@ -861,7 +1063,7 @@ class OperatorHistoryTab(QWidget):
                         IFNULL(last_seen_utc,''),
                         IFNULL(checkin_count,0),
                         groups_json,
-                        COALESCE(trusted,1)
+                        COALESCE(trusted,0)
                     FROM operator_checkins
                     ORDER BY callsign COLLATE NOCASE
                     """
@@ -910,6 +1112,10 @@ class OperatorHistoryTab(QWidget):
                             "sitrep_status_label": sitrep_map.get((cs or "").strip().upper(), {}).get("label", "Unknown"),
                             "sitrep_status_source": sitrep_map.get((cs or "").strip().upper(), {}).get("source", "UNKNOWN"),
                             "sitrep_status_updated": sitrep_map.get((cs or "").strip().upper(), {}).get("updated", ""),
+                            "sitrep_status_age": sitrep_map.get((cs or "").strip().upper(), {}).get("age", ""),
+                            "sitrep_conflict": bool(sitrep_map.get((cs or "").strip().upper(), {}).get("conflict", False)),
+                            "sitrep_source_count": int(sitrep_map.get((cs or "").strip().upper(), {}).get("source_count", 0) or 0),
+                            "sitrep_source_chips": sitrep_map.get((cs or "").strip().upper(), {}).get("source_chips", ""),
                         }
                     )
                 conn.close()
@@ -968,6 +1174,10 @@ class OperatorHistoryTab(QWidget):
                     _norm(row.get("sitrep_status_label")),
                     _norm(row.get("sitrep_status_source")),
                     _norm(row.get("sitrep_status_updated")),
+                    _norm(row.get("sitrep_status_age")),
+                    1 if bool(row.get("sitrep_conflict")) else 0,
+                    int(row.get("sitrep_source_count") or 0),
+                    _norm(row.get("sitrep_source_chips")),
                     groups,
                 )
             )
@@ -1124,6 +1334,7 @@ class OperatorHistoryTab(QWidget):
         self._render_rows(self._filtered_rows())
         self._update_bulk_select_controls()
         self._update_clear_filters_button_style()
+        self._update_action_button_styles()
 
     def _is_filter_active(self) -> bool:
         term = self.search_edit.text().strip()
@@ -1132,8 +1343,25 @@ class OperatorHistoryTab(QWidget):
 
     def _update_clear_filters_button_style(self) -> None:
         theme = resolve_theme(self.settings)
-        role = "warning" if self._is_filter_active() else "secondary"
+        role = "eligible_warning" if self._is_filter_active() else "muted"
         self.clear_filters_btn.setStyleSheet(button_style(role, theme))
+
+    def _selected_row_count(self) -> int:
+        selected = 0
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, self.COL_SELECT)
+            if item and item.checkState() == Qt.Checked:
+                selected += 1
+        return selected
+
+    def _update_action_button_styles(self, theme: Optional[Dict[str, str]] = None) -> None:
+        if theme is None:
+            theme = resolve_theme(self.settings)
+        selected_count = self._selected_row_count()
+        has_export_groups = bool(self._get_selected_export_groups())
+        self.manage_btn.setStyleSheet(button_style("eligible_info" if selected_count > 0 else "muted", theme))
+        self.import_btn.setStyleSheet(button_style("muted", theme))
+        self.export_group_btn.setStyleSheet(button_style("eligible_info" if has_export_groups else "muted", theme))
 
     def _update_bulk_select_controls(self) -> None:
         self._sync_header_checkbox()
@@ -1225,6 +1453,7 @@ class OperatorHistoryTab(QWidget):
         selected = self._get_selected_export_groups()
         label = f"{len(selected)} Selected" if selected else "Export by Group"
         self.export_group_btn.setText(label)
+        self._update_action_button_styles()
 
     def _filtered_rows(self) -> List[Dict]:
         term = self.search_edit.text().strip().lower()
@@ -1249,6 +1478,11 @@ class OperatorHistoryTab(QWidget):
                     or term in ("trusted" if r.get("trusted") else "untrusted")
                     or term in r.get("sitrep_status_key", "").lower()
                     or term in r.get("sitrep_status_label", "").lower()
+                    or term in r.get("sitrep_status_source", "").lower()
+                    or term in r.get("sitrep_status_updated", "").lower()
+                    or term in r.get("sitrep_status_age", "").lower()
+                    or term in r.get("sitrep_source_chips", "").lower()
+                    or (term == "conflict" and bool(r.get("sitrep_conflict")))
                     or (term == "sitrep")
                 ):
                     filtered.append(r)
@@ -1308,7 +1542,7 @@ class OperatorHistoryTab(QWidget):
                     self.table.setItem(row_idx, self.COL_SELECT, select_item)
                     set_item(self.COL_CALLSIGN, r["callsign"])
                     sitrep_key = (r.get("sitrep_status_key") or "unknown").strip().lower()
-                    sitrep_item = QTableWidgetItem(self._sitrep_status_chip(sitrep_key))
+                    sitrep_item = QTableWidgetItem(self._sitrep_display_text(r))
                     sitrep_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                     sitrep_item.setTextAlignment(Qt.AlignCenter)
                     sitrep_item.setToolTip(self._sitrep_tooltip(r))
@@ -1389,6 +1623,7 @@ class OperatorHistoryTab(QWidget):
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
         self._update_clear_filters_button_style()
+        self._update_action_button_styles(theme)
         if self.loading_label:
             bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
             fg = theme.get("accent", theme.get("text", "#222"))
@@ -1464,6 +1699,7 @@ class OperatorHistoryTab(QWidget):
         if self._bulk_select_inflight:
             return
         self._sync_header_checkbox()
+        self._update_action_button_styles()
 
     def _on_cell_clicked(self, row: int, col: int) -> None:
         if col != self.COL_SITREP:
@@ -1555,7 +1791,7 @@ class OperatorHistoryTab(QWidget):
                 (cs,),
             ).fetchone()
             existing_groups: List[str] = []
-            existing_trusted = 1
+            existing_trusted = 0
             existing_count = 0
             existing_role = ""
             existing_first = ""
@@ -1606,7 +1842,7 @@ class OperatorHistoryTab(QWidget):
             role_val = self._normalize_group_role(row.get("group_role", existing_role or ""))
             trusted = row.get("trusted")
             if trusted is None:
-                trusted = 1 if existing_trusted else 0
+                trusted = 1 if int(existing_trusted or 0) == 1 else 0
             if existing:
                 first_seen = _normalize_date_only(existing_first)
                 last_seen = _normalize_date_only(existing_last)
@@ -1869,7 +2105,7 @@ class OperatorHistoryTab(QWidget):
         date_label = QLabel("Date Added (legacy):")
         date_label.setVisible(False)
         trusted_chk = QCheckBox("Trusted")
-        trusted_chk.setChecked(bool(defaults.get("trusted", 1)))
+        trusted_chk.setChecked(bool(defaults.get("trusted", 0)))
 
         form.addRow("Callsign*:", cs_edit)
         form.addRow("Name:", name_edit)

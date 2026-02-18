@@ -42,6 +42,43 @@ class PropagationService:
         self._outcome_table_available = False
         self._empirical_cache: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
         self._empirical_cache_ttl_sec = 60.0
+        self._empirical_cache_max_entries = 4000
+        self._empirical_cache_prune_interval_sec = 15.0
+        self._empirical_cache_last_prune_mono = 0.0
+
+    def _prune_empirical_cache(self, now_mono: float) -> None:
+        # Skip frequent pruning in hot paths.
+        if (now_mono - float(self._empirical_cache_last_prune_mono or 0.0)) < self._empirical_cache_prune_interval_sec:
+            return
+        self._empirical_cache_last_prune_mono = float(now_mono)
+
+        if not self._empirical_cache:
+            return
+
+        ttl = max(1.0, float(self._empirical_cache_ttl_sec))
+        stale_keys: List[Tuple[Any, ...]] = []
+        for key, item in self._empirical_cache.items():
+            ts = float(item[0]) if isinstance(item, tuple) and item else 0.0
+            if (now_mono - ts) > ttl:
+                stale_keys.append(key)
+        for key in stale_keys:
+            self._empirical_cache.pop(key, None)
+
+        if len(self._empirical_cache) <= self._empirical_cache_max_entries:
+            return
+        # Trim oldest survivors if still over cap.
+        overflow = len(self._empirical_cache) - int(self._empirical_cache_max_entries)
+        try:
+            oldest = sorted(self._empirical_cache.items(), key=lambda kv: float(kv[1][0]))[:overflow]
+            for key, _ in oldest:
+                self._empirical_cache.pop(key, None)
+        except Exception:
+            # Safe fallback if ordering fails for any reason.
+            while len(self._empirical_cache) > self._empirical_cache_max_entries:
+                try:
+                    self._empirical_cache.pop(next(iter(self._empirical_cache)))
+                except Exception:
+                    break
 
     def load_profiles(self) -> Dict[str, Dict[str, float]]:
         if self._profiles_cache is not None:
@@ -422,6 +459,7 @@ class PropagationService:
         )
         cache_key = ("blend", minute_bucket, origin, ttype, tid, bnd, sig)
         now_mono = time.monotonic()
+        self._prune_empirical_cache(now_mono)
         cached = self._empirical_cache.get(cache_key)
         if cached and (now_mono - cached[0]) < self._empirical_cache_ttl_sec:
             info = dict(cached[1])
@@ -509,6 +547,8 @@ class PropagationService:
             "pooled": bool(pooled),
         }
         self._empirical_cache[cache_key] = (now_mono, dict(info))
+        if len(self._empirical_cache) > self._empirical_cache_max_entries:
+            self._prune_empirical_cache(now_mono + self._empirical_cache_prune_interval_sec)
         return float(info["final_score"]), info
 
     def top_bands_modeled(

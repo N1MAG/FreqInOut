@@ -697,6 +697,12 @@ class SchedulerEngine(QObject):
         return True
 
     def _expected_fldigi_offset(self, entry: Dict) -> Optional[int]:
+        txt_entry = (entry.get("fldigi_offset") or "").strip()
+        if txt_entry:
+            try:
+                return int(float(txt_entry))
+            except Exception:
+                pass
         og = self._resolve_operating_group(entry)
         if not isinstance(og, dict):
             return None
@@ -709,6 +715,9 @@ class SchedulerEngine(QObject):
             return None
 
     def _expected_fldigi_mode(self, entry: Dict) -> Optional[str]:
+        mode_entry = (entry.get("fldigi_mode") or "").strip()
+        if mode_entry:
+            return mode_entry
         og = self._resolve_operating_group(entry)
         if not isinstance(og, dict):
             return None
@@ -768,6 +777,62 @@ class SchedulerEngine(QObject):
             "Every 30 minutes": 30,
         }
         return mapping.get(raw, default)
+
+    def _prompt_next_due_utc(
+        self, now_utc: datetime.datetime, flags: Dict[str, bool]
+    ) -> Optional[datetime.datetime]:
+        candidates: List[datetime.datetime] = []
+        prompt_specs = [
+            ("frequency", "freq_enforcement_mode", "freq_prompt_interval"),
+            ("mode", "fldigi_enforcement_mode", "fldigi_prompt_interval"),
+            ("offset", "js8_enforcement_mode", "js8_prompt_interval"),
+        ]
+        for flag_key, mode_key, interval_key in prompt_specs:
+            if not bool(flags.get(flag_key)):
+                continue
+            if self._enforcement_mode(mode_key) != "Prompt":
+                continue
+            interval_mins = self._prompt_interval_minutes(interval_key)
+            try:
+                state = self._prompt_state.get(flag_key, {})
+                last_ts = float(state.get("last_prompt_ts") or 0.0)
+            except Exception:
+                last_ts = 0.0
+            if last_ts <= 0.0:
+                due_utc = now_utc
+            else:
+                due_utc = datetime.datetime.fromtimestamp(last_ts, tz=datetime.timezone.utc)
+                due_utc = due_utc + datetime.timedelta(minutes=interval_mins)
+                if due_utc < now_utc:
+                    due_utc = now_utc
+            candidates.append(due_utc)
+        if not candidates:
+            return None
+        return min(candidates)
+
+    def _auto_resume_utc(
+        self,
+        now_utc: datetime.datetime,
+        suspended_until: Optional[datetime.datetime],
+        flags: Dict[str, bool],
+    ) -> Tuple[Optional[datetime.datetime], str]:
+        if isinstance(suspended_until, datetime.datetime):
+            if suspended_until.tzinfo is None:
+                suspended_until = suspended_until.replace(tzinfo=datetime.timezone.utc)
+            else:
+                suspended_until = suspended_until.astimezone(datetime.timezone.utc)
+            return suspended_until, "suspend"
+        prompt_due = self._prompt_next_due_utc(now_utc, flags)
+        if isinstance(prompt_due, datetime.datetime):
+            return prompt_due, "prompt"
+        next_change = self.next_change_utc
+        if isinstance(next_change, datetime.datetime):
+            if next_change.tzinfo is None:
+                next_change = next_change.replace(tzinfo=datetime.timezone.utc)
+            else:
+                next_change = next_change.astimezone(datetime.timezone.utc)
+            return next_change, "schedule"
+        return None, "none"
 
     def _refresh_proc_snapshot(self) -> None:
         now_ts = time.time()
@@ -1064,7 +1129,9 @@ class SchedulerEngine(QObject):
                 ptt_active = bool(self.rig.get_ptt())
             except Exception:
                 ptt_active = False
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
         suspended_until = self._suspend_until_dt()
+        auto_resume_utc, auto_resume_source = self._auto_resume_utc(now_utc, suspended_until, flags)
         freq_hz = self._current_rig_frequency()
         freq_label = ""
         if isinstance(freq_hz, (int, float)) and freq_hz > 0:
@@ -1107,6 +1174,8 @@ class SchedulerEngine(QObject):
             "varac_busy": bool(varac_status.get("busy")),
             "ptt_active": ptt_active,
             "suspended_until": suspended_until,
+            "auto_resume_utc": auto_resume_utc,
+            "auto_resume_source": auto_resume_source,
             "freq_label": freq_label,
             "net_kind": net_kind,
             "fldigi_mode_off": fldigi_mode_off,
@@ -1359,15 +1428,8 @@ class SchedulerEngine(QObject):
         return candidates[0][2]
 
     def _update_desired_fldigi_settings(self, entry: Dict) -> None:
-        og = self._resolve_operating_group(entry) or {}
-        mode = (og.get("fldigi_mode") or "").strip() or None
-        offset_txt = (og.get("fldigi_offset") or "").strip()
-        offset = None
-        if offset_txt:
-            try:
-                offset = int(offset_txt)
-            except Exception:
-                offset = None
+        mode = self._expected_fldigi_mode(entry)
+        offset = self._expected_fldigi_offset(entry)
         self._desired_fldigi_mode = mode
         self._desired_fldigi_offset = offset
         if mode is None and offset is None:
@@ -1643,204 +1705,76 @@ class SchedulerEngine(QObject):
         conn = sqlite3.connect(db_path)
         try:
             rows: List[Dict] = []
-            if self._table_exists(conn, "net_schedule_tab"):
-                try:
-                    cur = conn.execute(
-                        """
-                        SELECT
-                            day_utc,
-                            recurrence,
-                            biweekly_offset_weeks,
-                            month_weeks,
-                            band,
-                            mode,
-                            vfo,
-                            frequency,
-                            start_utc,
-                            end_utc,
-                            early_checkin,
-                            auto_tune,
-                            primary_js8call_group,
-                            comment,
-                            net_name,
-                            group_name
-                        FROM net_schedule_tab
-                        """
-                    )
-                except Exception:
-                    cur = conn.execute(
-                        """
-                        SELECT
-                            day_utc,
-                            band,
-                            mode,
-                            vfo,
-                            frequency,
-                            start_utc,
-                            end_utc,
-                            early_checkin,
-                            primary_js8call_group,
-                            comment,
-                            net_name
-                        FROM net_schedule_tab
-                        """
-                    )
-                for row in cur.fetchall():
-                    if len(row) == 16:
-                        (
-                            day_utc,
-                            recurrence,
-                            biweekly_offset_weeks,
-                            month_weeks,
-                            band,
-                            mode,
-                            vfo,
-                            freq,
-                            start_utc,
-                            end_utc,
-                            early,
-                            auto_tune,
-                            primary_group,
-                            comment,
-                            net_name,
-                            group_name,
-                        ) = row
-                    else:
-                        (
-                            day_utc,
-                            band,
-                            mode,
-                            vfo,
-                            freq,
-                            start_utc,
-                            end_utc,
-                            early,
-                            primary_group,
-                            comment,
-                            net_name,
-                        ) = row
-                        recurrence = "Weekly"
-                        biweekly_offset_weeks = 0
-                        month_weeks = ""
-                        group_name = ""
-                    rows.append(
-                        {
-                            "day_utc": day_utc or "",
-                            "recurrence": recurrence or "Weekly",
-                            "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
-                            "month_weeks": month_weeks or "",
-                            "band": band or "",
-                            "mode": mode or "",
-                            "vfo": (vfo or "A").strip().upper() or "A",
-                            "frequency": str(freq or ""),
-                            "start_utc": start_utc or "",
-                            "end_utc": end_utc or "",
-                            "early_checkin": early if early is not None else 0,
-                            "auto_tune": bool(auto_tune) if len(row) == 15 else False,
-                            "primary_js8call_group": primary_group or "",
-                            "comment": comment or "",
-                            "net_name": net_name or "",
-                            "group_name": group_name or "",
-                        }
-                    )
-                return rows
 
-            if self._table_exists(conn, "net_schedule"):
-                try:
-                    cur = conn.execute(
-                        """
-                        SELECT
-                            day_utc,
-                            recurrence,
-                            biweekly_offset_weeks,
-                            month_weeks,
-                            band,
-                            mode,
-                            frequency,
-                            start_utc,
-                            end_utc,
-                            early_checkin,
-                            auto_tune,
-                            primary_js8call_group,
-                            comment,
-                            net_name,
-                            group_name
-                        FROM net_schedule
-                        """
-                    )
-                except Exception:
-                    cur = conn.execute(
-                        """
-                        SELECT
-                            day_utc,
-                            band,
-                            mode,
-                            frequency,
-                            start_utc,
-                            end_utc,
-                            early_checkin,
-                            primary_js8call_group,
-                            comment,
-                            net_name
-                        FROM net_schedule
-                        """
-                    )
+            def _table_columns(name: str) -> set[str]:
+                cur = conn.execute(f"PRAGMA table_info({name})")
+                return {str(r[1]) for r in cur.fetchall()}
+
+            def _append_rows(table: str, *, default_vfo: str) -> bool:
+                if not self._table_exists(conn, table):
+                    return False
+                cols = _table_columns(table)
+                required = {"day_utc", "band", "mode", "frequency", "start_utc", "end_utc", "early_checkin"}
+                if not required.issubset(cols):
+                    return False
+                select_order = [
+                    "day_utc",
+                    "recurrence",
+                    "biweekly_offset_weeks",
+                    "month_weeks",
+                    "band",
+                    "mode",
+                    "vfo",
+                    "frequency",
+                    "start_utc",
+                    "end_utc",
+                    "early_checkin",
+                    "auto_tune",
+                    "primary_js8call_group",
+                    "comment",
+                    "net_name",
+                    "group_name",
+                    "fldigi_mode",
+                    "fldigi_offset",
+                ]
+                available = [c for c in select_order if c in cols]
+                cur = conn.execute(f"SELECT {', '.join(available)} FROM {table}")
                 for row in cur.fetchall():
-                    if len(row) == 15:
-                        (
-                            day_utc,
-                            recurrence,
-                            biweekly_offset_weeks,
-                            month_weeks,
-                            band,
-                            mode,
-                            freq,
-                            start_utc,
-                            end_utc,
-                            early,
-                            auto_tune,
-                            primary_group,
-                            comment,
-                            net_name,
-                            group_name,
-                        ) = row
-                    else:
-                        (
-                            day_utc,
-                            band,
-                            mode,
-                            freq,
-                            start_utc,
-                            end_utc,
-                            early,
-                            primary_group,
-                            comment,
-                            net_name,
-                        ) = row
-                        recurrence = "Weekly"
-                        biweekly_offset_weeks = 0
-                        month_weeks = ""
-                        group_name = ""
+                    row_data = dict(zip(available, row))
+                    vfo_value = (row_data.get("vfo") or default_vfo or "A").strip().upper() or "A"
+                    try:
+                        biweekly = int(row_data.get("biweekly_offset_weeks") or 0)
+                    except Exception:
+                        biweekly = 0
                     rows.append(
                         {
-                            "day_utc": day_utc or "",
-                            "recurrence": recurrence or "Weekly",
-                            "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
-                            "month_weeks": month_weeks or "",
-                            "band": band or "",
-                            "mode": mode or "",
-                            "vfo": "A",
-                            "frequency": str(freq or ""),
-                            "start_utc": start_utc or "",
-                            "end_utc": end_utc or "",
-                            "early_checkin": early if early is not None else 0,
-                            "auto_tune": bool(auto_tune) if len(row) == 14 else False,
-                            "primary_js8call_group": primary_group or "",
-                            "comment": comment or "",
-                            "net_name": net_name or "",
-                            "group_name": group_name or "",
+                            "day_utc": row_data.get("day_utc") or "",
+                            "recurrence": row_data.get("recurrence") or "Weekly",
+                            "biweekly_offset_weeks": biweekly,
+                            "month_weeks": row_data.get("month_weeks") or "",
+                            "band": row_data.get("band") or "",
+                            "mode": row_data.get("mode") or "",
+                            "vfo": vfo_value,
+                            "frequency": str(row_data.get("frequency") or ""),
+                            "start_utc": row_data.get("start_utc") or "",
+                            "end_utc": row_data.get("end_utc") or "",
+                            "early_checkin": row_data.get("early_checkin")
+                            if row_data.get("early_checkin") is not None
+                            else 0,
+                            "auto_tune": bool(row_data.get("auto_tune")),
+                            "primary_js8call_group": row_data.get("primary_js8call_group") or "",
+                            "comment": row_data.get("comment") or "",
+                            "net_name": row_data.get("net_name") or "",
+                            "group_name": row_data.get("group_name") or "",
+                            "fldigi_mode": row_data.get("fldigi_mode") or "",
+                            "fldigi_offset": row_data.get("fldigi_offset") or "",
                         }
                     )
+                return True
+
+            if _append_rows("net_schedule_tab", default_vfo="A"):
+                return rows
+            _append_rows("net_schedule", default_vfo="A")
             return rows
         except Exception as e:
             log.error("SchedulerEngine: failed to load net schedule from DB %s: %s", db_path, e)
@@ -2329,13 +2263,9 @@ class SchedulerEngine(QObject):
             comment,
         )
 
-        fldigi_offset_text = (og.get("fldigi_offset") or "").strip() if isinstance(og, dict) else ""
-        fldigi_center = None
+        fldigi_center = self._expected_fldigi_offset(entry)
         js8_tune = None
-        try:
-            if apply_fldigi and fldigi_offset_text:
-                fldigi_center = int(float(fldigi_offset_text))
-        except Exception:
+        if not apply_fldigi:
             fldigi_center = None
 
         # Avoid redundant commands

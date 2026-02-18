@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from freqinout.core import logger as fio_logger
+from freqinout.core.config_paths import get_config_dir
 from freqinout.core.perf_metrics import summarize_samples
 
 
@@ -24,15 +25,23 @@ def _candidate_log_files() -> List[Path]:
         candidates.append(Path(fio_logger._get_log_file()))
     except Exception:
         pass
+    try:
+        candidates.append(get_config_dir() / "perf_metrics.log")
+    except Exception:
+        pass
     appdata = Path(os.environ.get("APPDATA", "")) if os.environ.get("APPDATA") else None
     localapp = Path(os.environ.get("LOCALAPPDATA", "")) if os.environ.get("LOCALAPPDATA") else None
     if appdata is not None:
         candidates.append(appdata / "FreqInOut" / "freqinout.log")
+        candidates.append(appdata / "FreqInOut" / "perf_metrics.log")
     if localapp is not None:
         candidates.append(localapp / "FreqInOut" / "freqinout.log")
+        candidates.append(localapp / "FreqInOut" / "perf_metrics.log")
     home = Path.home()
     candidates.append(home / "AppData" / "Roaming" / "FreqInOut" / "freqinout.log")
     candidates.append(home / "AppData" / "Local" / "FreqInOut" / "freqinout.log")
+    candidates.append(home / "AppData" / "Roaming" / "FreqInOut" / "perf_metrics.log")
+    candidates.append(home / "AppData" / "Local" / "FreqInOut" / "perf_metrics.log")
     # Deduplicate while preserving order.
     seen = set()
     out: List[Path] = []
@@ -148,12 +157,23 @@ def _markdown_summary(rows: List[Tuple[str, Dict[str, float]]]) -> str:
 
 def summarize_command(args: argparse.Namespace) -> int:
     log_paths = _resolve_log_paths(args.log)
-    events: List[Dict] = []
+    all_events: List[Dict] = []
     for path in log_paths:
-        events.extend(_load_perf_events(path))
-    events = _filter_events(events, args.name)
-    if not events:
+        all_events.extend(_load_perf_events(path))
+    if not all_events:
         print("No PERF events found in:")
+        for path in log_paths:
+            print(f"  - {path}")
+        return 0
+    events = _filter_events(all_events, args.name)
+    if not events:
+        if args.name:
+            print(f"No PERF events matched filter: {args.name}")
+            print(f"Unfiltered PERF events available: {len(all_events)}")
+            print("Tip: in PowerShell, quote regex with single quotes, e.g. --name '^settings\\.'")
+        else:
+            print("No PERF events found after filtering.")
+        print("Log files:")
         for path in log_paths:
             print(f"  - {path}")
         return 0

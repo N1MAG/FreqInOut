@@ -59,7 +59,7 @@ def _ensure_operator_checkins(conn: sqlite3.Connection) -> None:
             last_role TEXT,
             checkin_count INTEGER DEFAULT 0,
             groups_json TEXT,
-            trusted INTEGER DEFAULT 1
+            trusted INTEGER DEFAULT 0
         )
         """
     )
@@ -102,7 +102,7 @@ def _ensure_operator_checkins(conn: sqlite3.Connection) -> None:
                 last_role TEXT,
                 checkin_count INTEGER DEFAULT 0,
                 groups_json TEXT,
-                trusted INTEGER DEFAULT 1
+                trusted INTEGER DEFAULT 0
             )
             """
         )
@@ -135,6 +135,96 @@ def _ensure_operator_checkins(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE operator_checkins_new RENAME TO operator_checkins")
 
 
+def _ensure_local_operator_tables(conn: sqlite3.Connection) -> None:
+    """
+    Ensure local operator and local NCS check-in tables exist.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS local_operator_checkins (
+            callsign TEXT PRIMARY KEY,
+            first_name TEXT,
+            last_name TEXT,
+            name TEXT,
+            city TEXT,
+            state TEXT,
+            category TEXT,
+            first_seen_utc TEXT,
+            last_seen_utc TEXT,
+            checkin_count INTEGER DEFAULT 0,
+            notes TEXT,
+            sitrep_status TEXT DEFAULT 'GREEN',
+            updated_utc TEXT
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "local_operator_checkins",
+        {
+            "callsign": "TEXT",
+            "first_name": "TEXT",
+            "last_name": "TEXT",
+            "name": "TEXT",
+            "city": "TEXT",
+            "state": "TEXT",
+            "category": "TEXT",
+            "first_seen_utc": "TEXT",
+            "last_seen_utc": "TEXT",
+            "checkin_count": "INTEGER DEFAULT 0",
+            "notes": "TEXT",
+            "sitrep_status": "TEXT DEFAULT 'GREEN'",
+            "updated_utc": "TEXT",
+        },
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ops_last_seen ON local_operator_checkins(last_seen_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ops_category ON local_operator_checkins(category)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ops_status ON local_operator_checkins(sitrep_status)")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS local_ncs_checkins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checkin_utc TEXT NOT NULL,
+            net_name TEXT,
+            channels TEXT,
+            callsign TEXT NOT NULL,
+            first_name TEXT,
+            last_name TEXT,
+            name TEXT,
+            city TEXT,
+            state TEXT,
+            category TEXT,
+            sitrep_status TEXT DEFAULT 'GREEN',
+            notes TEXT,
+            updated_utc TEXT
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "local_ncs_checkins",
+        {
+            "checkin_utc": "TEXT",
+            "net_name": "TEXT",
+            "channels": "TEXT",
+            "callsign": "TEXT",
+            "first_name": "TEXT",
+            "last_name": "TEXT",
+            "name": "TEXT",
+            "city": "TEXT",
+            "state": "TEXT",
+            "category": "TEXT",
+            "sitrep_status": "TEXT DEFAULT 'GREEN'",
+            "notes": "TEXT",
+            "updated_utc": "TEXT",
+        },
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ncs_checkins_ts ON local_ncs_checkins(checkin_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_local_ncs_checkins_callsign ON local_ncs_checkins(callsign)")
+
+
 def _ensure_js8_links(conn: sqlite3.Connection) -> None:
     """
     Ensure js8_links exists with the expected columns.
@@ -159,6 +249,7 @@ def _ensure_js8_links(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in cur.fetchall()}
     if "last_seen_utc" not in cols:
         cur.execute("ALTER TABLE js8_links ADD COLUMN last_seen_utc TEXT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_ts ON js8_links(ts)")
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
@@ -366,6 +457,302 @@ def _ensure_prop_outcome_stats(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_sitrep_ingest_tables(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sitrep_ingest_checkpoint (
+            source_key TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            source_table TEXT NOT NULL,
+            source_db_path TEXT,
+            last_id INTEGER NOT NULL DEFAULT 0,
+            updated_ts REAL NOT NULL,
+            last_error TEXT
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "sitrep_ingest_checkpoint",
+        {
+            "source_key": "TEXT",
+            "source": "TEXT",
+            "source_table": "TEXT",
+            "source_db_path": "TEXT",
+            "last_id": "INTEGER DEFAULT 0",
+            "updated_ts": "REAL",
+            "last_error": "TEXT",
+        },
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sitrep_source_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            source_table TEXT NOT NULL,
+            source_db_path TEXT,
+            source_id INTEGER NOT NULL,
+            subtype TEXT NOT NULL,
+            from_call TEXT,
+            target TEXT,
+            grid TEXT,
+            scope TEXT,
+            status_payload TEXT,
+            raw_payload TEXT,
+            event_ts REAL,
+            event_ts_utc TEXT,
+            ingested_ts REAL NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "sitrep_source_events",
+        {
+            "source": "TEXT",
+            "source_table": "TEXT",
+            "source_db_path": "TEXT",
+            "source_id": "INTEGER",
+            "subtype": "TEXT",
+            "from_call": "TEXT",
+            "target": "TEXT",
+            "grid": "TEXT",
+            "scope": "TEXT",
+            "status_payload": "TEXT",
+            "raw_payload": "TEXT",
+            "event_ts": "REAL",
+            "event_ts_utc": "TEXT",
+            "ingested_ts": "REAL",
+        },
+    )
+    # Safety: remove duplicates before enforcing uniqueness in upgraded DBs.
+    cur.execute(
+        """
+        DELETE FROM sitrep_source_events
+        WHERE id NOT IN (
+            SELECT MIN(id)
+            FROM sitrep_source_events
+            GROUP BY source, source_table, source_db_path, source_id
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sitrep_source_events_source_id
+            ON sitrep_source_events(source, source_table, source_db_path, source_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sitrep_source_events_recent
+            ON sitrep_source_events(source, event_ts DESC, id DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sitrep_source_events_call_recent
+            ON sitrep_source_events(from_call, event_ts DESC, id DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sitrep_checkpoint_updated
+            ON sitrep_ingest_checkpoint(updated_ts)
+        """
+    )
+
+
+def _ensure_sitrep_fusion_tables(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sitrep_fusion_checkpoint (
+            pipeline_key TEXT PRIMARY KEY,
+            last_source_event_id INTEGER NOT NULL DEFAULT 0,
+            updated_ts REAL NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "sitrep_fusion_checkpoint",
+        {
+            "pipeline_key": "TEXT",
+            "last_source_event_id": "INTEGER DEFAULT 0",
+            "updated_ts": "REAL",
+        },
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sitrep_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_key TEXT NOT NULL UNIQUE,
+            event_ts REAL,
+            event_ts_utc TEXT,
+            from_call TEXT NOT NULL,
+            target TEXT,
+            grid TEXT,
+            scope TEXT,
+            overall_status TEXT NOT NULL DEFAULT 'not_reported',
+            power TEXT NOT NULL DEFAULT 'not_reported',
+            water TEXT NOT NULL DEFAULT 'not_reported',
+            medical TEXT NOT NULL DEFAULT 'not_reported',
+            communications TEXT NOT NULL DEFAULT 'not_reported',
+            internet TEXT NOT NULL DEFAULT 'not_reported',
+            travel TEXT NOT NULL DEFAULT 'not_reported',
+            food TEXT NOT NULL DEFAULT 'not_reported',
+            fuel TEXT NOT NULL DEFAULT 'not_reported',
+            crime TEXT NOT NULL DEFAULT 'not_reported',
+            civil_unrest TEXT NOT NULL DEFAULT 'not_reported',
+            political TEXT NOT NULL DEFAULT 'not_reported',
+            subtype TEXT,
+            source_first TEXT,
+            source_last TEXT,
+            sources_json TEXT,
+            source_count INTEGER DEFAULT 1,
+            source_refs_json TEXT,
+            raw_payload_json TEXT,
+            inserted_ts REAL NOT NULL,
+            updated_ts REAL NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "sitrep_events",
+        {
+            "report_key": "TEXT",
+            "event_ts": "REAL",
+            "event_ts_utc": "TEXT",
+            "from_call": "TEXT",
+            "target": "TEXT",
+            "grid": "TEXT",
+            "scope": "TEXT",
+            "overall_status": "TEXT DEFAULT 'not_reported'",
+            "power": "TEXT DEFAULT 'not_reported'",
+            "water": "TEXT DEFAULT 'not_reported'",
+            "medical": "TEXT DEFAULT 'not_reported'",
+            "communications": "TEXT DEFAULT 'not_reported'",
+            "internet": "TEXT DEFAULT 'not_reported'",
+            "travel": "TEXT DEFAULT 'not_reported'",
+            "food": "TEXT DEFAULT 'not_reported'",
+            "fuel": "TEXT DEFAULT 'not_reported'",
+            "crime": "TEXT DEFAULT 'not_reported'",
+            "civil_unrest": "TEXT DEFAULT 'not_reported'",
+            "political": "TEXT DEFAULT 'not_reported'",
+            "subtype": "TEXT",
+            "source_first": "TEXT",
+            "source_last": "TEXT",
+            "sources_json": "TEXT",
+            "source_count": "INTEGER DEFAULT 1",
+            "source_refs_json": "TEXT",
+            "raw_payload_json": "TEXT",
+            "inserted_ts": "REAL",
+            "updated_ts": "REAL",
+        },
+    )
+    # Safety: collapse duplicate report keys before enforcing uniqueness.
+    cur.execute(
+        """
+        DELETE FROM sitrep_events
+        WHERE id NOT IN (
+            SELECT MIN(id)
+            FROM sitrep_events
+            GROUP BY report_key
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sitrep_events_report_key
+            ON sitrep_events(report_key)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sitrep_events_recent
+            ON sitrep_events(event_ts DESC, id DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sitrep_events_call_recent
+            ON sitrep_events(from_call, event_ts DESC, id DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sitrep_events_source_last
+            ON sitrep_events(source_last, event_ts DESC, id DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sitrep_latest_by_callsign (
+            callsign TEXT PRIMARY KEY,
+            latest_event_id INTEGER NOT NULL,
+            latest_event_ts REAL,
+            latest_event_ts_utc TEXT,
+            effective_status TEXT NOT NULL DEFAULT 'not_reported',
+            scope TEXT,
+            overall_status TEXT NOT NULL DEFAULT 'not_reported',
+            power TEXT NOT NULL DEFAULT 'not_reported',
+            water TEXT NOT NULL DEFAULT 'not_reported',
+            medical TEXT NOT NULL DEFAULT 'not_reported',
+            communications TEXT NOT NULL DEFAULT 'not_reported',
+            internet TEXT NOT NULL DEFAULT 'not_reported',
+            travel TEXT NOT NULL DEFAULT 'not_reported',
+            food TEXT NOT NULL DEFAULT 'not_reported',
+            fuel TEXT NOT NULL DEFAULT 'not_reported',
+            crime TEXT NOT NULL DEFAULT 'not_reported',
+            civil_unrest TEXT NOT NULL DEFAULT 'not_reported',
+            political TEXT NOT NULL DEFAULT 'not_reported',
+            source_summary_json TEXT,
+            updated_ts REAL NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "sitrep_latest_by_callsign",
+        {
+            "callsign": "TEXT",
+            "latest_event_id": "INTEGER",
+            "latest_event_ts": "REAL",
+            "latest_event_ts_utc": "TEXT",
+            "effective_status": "TEXT DEFAULT 'not_reported'",
+            "scope": "TEXT",
+            "overall_status": "TEXT DEFAULT 'not_reported'",
+            "power": "TEXT DEFAULT 'not_reported'",
+            "water": "TEXT DEFAULT 'not_reported'",
+            "medical": "TEXT DEFAULT 'not_reported'",
+            "communications": "TEXT DEFAULT 'not_reported'",
+            "internet": "TEXT DEFAULT 'not_reported'",
+            "travel": "TEXT DEFAULT 'not_reported'",
+            "food": "TEXT DEFAULT 'not_reported'",
+            "fuel": "TEXT DEFAULT 'not_reported'",
+            "crime": "TEXT DEFAULT 'not_reported'",
+            "civil_unrest": "TEXT DEFAULT 'not_reported'",
+            "political": "TEXT DEFAULT 'not_reported'",
+            "source_summary_json": "TEXT",
+            "updated_ts": "REAL",
+        },
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sitrep_latest_effective
+            ON sitrep_latest_by_callsign(effective_status, latest_event_ts DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sitrep_fusion_checkpoint_updated
+            ON sitrep_fusion_checkpoint(updated_ts)
+        """
+    )
+
+
 def _ensure_propagation_outcome_tables(conn: sqlite3.Connection) -> None:
     _ensure_prop_contact_events(conn)
     _ensure_prop_ingest_checkpoint(conn)
@@ -431,7 +818,10 @@ def _ensure_nets_db() -> None:
                 auto_tune INTEGER DEFAULT 0,
                 primary_js8call_group TEXT,
                 comment TEXT,
-                net_name TEXT
+                net_name TEXT,
+                fldigi_mode TEXT,
+                fldigi_offset TEXT,
+                resource_id INTEGER
             )
             """
         )
@@ -454,6 +844,9 @@ def _ensure_nets_db() -> None:
                 "primary_js8call_group": "TEXT",
                 "comment": "TEXT",
                 "net_name": "TEXT",
+                "fldigi_mode": "TEXT",
+                "fldigi_offset": "TEXT",
+                "resource_id": "INTEGER",
             },
         )
         cur.execute(
@@ -473,7 +866,9 @@ def _ensure_nets_db() -> None:
                 auto_tune INTEGER DEFAULT 0,
                 primary_js8call_group TEXT,
                 comment TEXT,
-                net_name TEXT
+                net_name TEXT,
+                fldigi_mode TEXT,
+                fldigi_offset TEXT
             )
             """
         )
@@ -495,6 +890,65 @@ def _ensure_nets_db() -> None:
                 "primary_js8call_group": "TEXT",
                 "comment": "TEXT",
                 "net_name": "TEXT",
+                "fldigi_mode": "TEXT",
+                "fldigi_offset": "TEXT",
+            },
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS net_resources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                resource_set TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_ref TEXT,
+                readonly INTEGER DEFAULT 1,
+                day_utc TEXT NOT NULL,
+                recurrence TEXT DEFAULT 'Weekly',
+                biweekly_offset_weeks INTEGER DEFAULT 0,
+                month_weeks TEXT,
+                group_name TEXT,
+                band TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                frequency TEXT NOT NULL,
+                start_utc TEXT NOT NULL,
+                end_utc TEXT NOT NULL,
+                early_checkin INTEGER NOT NULL,
+                primary_js8call_group TEXT,
+                coverage TEXT,
+                comment TEXT,
+                net_name TEXT,
+                fldigi_mode TEXT,
+                fldigi_offset TEXT,
+                updated_utc TEXT
+            )
+            """
+        )
+        _ensure_columns(
+            conn,
+            "net_resources",
+            {
+                "resource_set": "TEXT",
+                "source_type": "TEXT",
+                "source_ref": "TEXT",
+                "readonly": "INTEGER DEFAULT 1",
+                "day_utc": "TEXT",
+                "recurrence": "TEXT",
+                "biweekly_offset_weeks": "INTEGER DEFAULT 0",
+                "month_weeks": "TEXT",
+                "group_name": "TEXT",
+                "band": "TEXT",
+                "mode": "TEXT",
+                "frequency": "TEXT",
+                "start_utc": "TEXT",
+                "end_utc": "TEXT",
+                "early_checkin": "INTEGER DEFAULT 0",
+                "primary_js8call_group": "TEXT",
+                "coverage": "TEXT",
+                "comment": "TEXT",
+                "net_name": "TEXT",
+                "fldigi_mode": "TEXT",
+                "fldigi_offset": "TEXT",
+                "updated_utc": "TEXT",
             },
         )
         cur.execute(
@@ -579,9 +1033,104 @@ def _ensure_nets_db() -> None:
             },
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_hf_owner ON peer_hf_schedule(owner_callsign)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS peer_hf_schedule_inferred (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_callsign TEXT NOT NULL,
+                day_utc TEXT NOT NULL,
+                start_utc TEXT NOT NULL,
+                end_utc TEXT NOT NULL,
+                band TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                frequency TEXT NOT NULL,
+                source TEXT,
+                confidence REAL DEFAULT 0,
+                sample_count INTEGER DEFAULT 0,
+                weeks_seen INTEGER DEFAULT 0,
+                weeks_observed INTEGER DEFAULT 0,
+                last_seen_ts REAL,
+                updated_ts REAL
+            )
+            """
+        )
+        _ensure_columns(
+            conn,
+            "peer_hf_schedule_inferred",
+            {
+                "owner_callsign": "TEXT",
+                "day_utc": "TEXT",
+                "start_utc": "TEXT",
+                "end_utc": "TEXT",
+                "band": "TEXT",
+                "mode": "TEXT",
+                "frequency": "TEXT",
+                "source": "TEXT",
+                "confidence": "REAL DEFAULT 0",
+                "sample_count": "INTEGER DEFAULT 0",
+                "weeks_seen": "INTEGER DEFAULT 0",
+                "weeks_observed": "INTEGER DEFAULT 0",
+                "last_seen_ts": "REAL",
+                "updated_ts": "REAL",
+            },
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_peer_hf_inferred_owner ON peer_hf_schedule_inferred(owner_callsign)"
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_peer_hf_inferred_owner_day
+            ON peer_hf_schedule_inferred(owner_callsign, day_utc, start_utc, end_utc)
+            """
+        )
+        # Imported schedules are authoritative; inferred rows are a fallback per callsign.
+        cur.execute("DROP VIEW IF EXISTS peer_hf_schedule_effective")
+        cur.execute(
+            """
+            CREATE VIEW IF NOT EXISTS peer_hf_schedule_effective AS
+            SELECT
+                owner_callsign,
+                day_utc,
+                start_utc,
+                end_utc,
+                band,
+                mode,
+                frequency,
+                'IMPORTED' AS source_type,
+                NULL AS confidence,
+                NULL AS sample_count,
+                NULL AS weeks_seen,
+                NULL AS weeks_observed,
+                NULL AS last_seen_ts
+            FROM peer_hf_schedule
+            UNION ALL
+            SELECT
+                i.owner_callsign,
+                i.day_utc,
+                i.start_utc,
+                i.end_utc,
+                i.band,
+                i.mode,
+                i.frequency,
+                'INFERRED' AS source_type,
+                i.confidence,
+                i.sample_count,
+                i.weeks_seen,
+                i.weeks_observed,
+                i.last_seen_ts
+            FROM peer_hf_schedule_inferred i
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM peer_hf_schedule e
+                WHERE UPPER(TRIM(e.owner_callsign)) = UPPER(TRIM(i.owner_callsign))
+            )
+            """
+        )
 
         # Propagation outcomes (offline scoring support)
         _ensure_propagation_outcome_tables(conn)
+        _ensure_sitrep_ingest_tables(conn)
+        _ensure_sitrep_fusion_tables(conn)
 
         # SOP profiles/actions/state
         cur.execute(
@@ -685,6 +1234,7 @@ def _ensure_nets_db() -> None:
         )
 
         _ensure_operator_checkins(conn)
+        _ensure_local_operator_tables(conn)
         _ensure_js8_links(conn)
 
         conn.commit()

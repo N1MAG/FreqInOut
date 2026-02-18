@@ -4,7 +4,6 @@ import datetime
 import json
 import shutil
 import sqlite3
-import tempfile
 import urllib.request
 import re
 from dataclasses import dataclass, field
@@ -408,6 +407,8 @@ class StationsMapTab(QWidget):
         self.show_callsigns = False
         self.stations: List[StationPoint] = []
         self._map_file: Optional[Path] = None
+        self._map_cache_dir = get_config_dir() / "cache"
+        self._managed_map_file = self._map_cache_dir / "stations_map_view.html"
         self._asset_dir = Path(__file__).resolve().parents[2] / "config" / "leaflet"
         self._geojson_path = self._asset_dir / "us_states.geojson"
         self._geojson_canada = self._asset_dir / "canada_provinces.geojson"
@@ -428,6 +429,7 @@ class StationsMapTab(QWidget):
         self._now_reachable_enabled: bool = False
         self._now_reachable_callsigns: Set[str] = set()
         self._now_reachable_meta: Dict[str, Dict] = {}
+        self._refresh_links_button: Optional[QPushButton] = None
         self._now_reachable_button: Optional[QPushButton] = None
         self._now_reachable_label: Optional[QLabel] = None
         self._sitrep_status_only_enabled: bool = False
@@ -519,6 +521,7 @@ class StationsMapTab(QWidget):
         self._refresh_region_filter_options()
         self._load_display_preferences()
         self._refresh_band_options()
+        self.apply_theme()
         QTimer.singleShot(0, self._prewarm_map_perf_caches)
 
     def _ensure_initial_data_loaded(self) -> None:
@@ -917,6 +920,11 @@ class StationsMapTab(QWidget):
             QCoreApplication.processEvents()
         except Exception:
             pass
+        try:
+            if self._managed_map_file.exists():
+                self._managed_map_file.unlink()
+        except Exception:
+            pass
 
 
     @staticmethod
@@ -935,6 +943,52 @@ class StationsMapTab(QWidget):
                 if len(parts) >= 2:
                     return parts[0], parts[1]
         return "off", ""
+
+    @staticmethod
+    def _hex_to_rgba(value: str, alpha: float) -> str:
+        try:
+            raw = (value or "").strip().lstrip("#")
+            if len(raw) != 6:
+                raise ValueError("invalid hex color")
+            r = int(raw[0:2], 16)
+            g = int(raw[2:4], 16)
+            b = int(raw[4:6], 16)
+        except Exception:
+            r, g, b = 0, 0, 0
+        a = max(0.0, min(1.0, float(alpha)))
+        return f"rgba({r}, {g}, {b}, {a:.2f})"
+
+    def _theme_snapshot(self, force_reload: bool = False) -> Dict[str, str]:
+        if force_reload and self.settings is not None:
+            try:
+                if hasattr(self.settings, "reload"):
+                    self.settings.reload()
+            except Exception:
+                pass
+        return resolve_theme(self.settings)
+
+    def apply_theme(self) -> None:
+        theme = self._theme_snapshot(force_reload=True)
+        if self._controls_button is not None:
+            self._controls_button.setStyleSheet(button_style("muted", theme))
+        if self._refresh_links_button is not None:
+            self._refresh_links_button.setStyleSheet(button_style("primary", theme))
+        self._update_now_reachable_button_visual(bool(self._now_reachable_enabled), theme=theme)
+        self._update_sitrep_status_button_visual(bool(self._sitrep_status_only_enabled), theme=theme)
+        self._update_splitter_indicator_state(theme=theme)
+        try:
+            target_ctx = self._prop_target_context()
+            target_label = str(target_ctx.get("label") or "National")
+            if self.prop_overlay_enabled:
+                region_scores = self._compute_region_scores("")
+                state_scores = self._compute_state_scores()
+                best_band, best_score = self._best_band_for_target(target_ctx, region_scores, state_scores)
+                self._update_prop_badge(target_label, best_band, best_score, theme=theme)
+            else:
+                self._update_prop_badge(target_label, "", 0.0, theme=theme)
+        except Exception:
+            # Keep theme updates resilient if propagation data is unavailable.
+            self._update_prop_badge("National", "", 0.0, theme=theme)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -1097,7 +1151,10 @@ class StationsMapTab(QWidget):
 
         self.prop_badge = QLabel("Best Band: --")
         self.prop_badge.setWordWrap(True)
-        self.prop_badge.setStyleSheet("font-weight: bold; color: #1E88E5;")
+        theme = resolve_theme(self.settings)
+        self.prop_badge.setStyleSheet(
+            f"font-weight: bold; color: {theme.get('info', theme.get('accent', '#1E88E5'))};"
+        )
         prop_layout.addWidget(self.prop_badge)
         controls_layout.addStretch()
 
@@ -1117,8 +1174,8 @@ class StationsMapTab(QWidget):
         self.band_combo.setMinimumWidth(120)
         self.recency_combo.setMinimumWidth(90)
         self.relay_target_combo.setMinimumWidth(280)
-        refresh_btn = QPushButton("Refresh Links")
-        refresh_btn.clicked.connect(lambda: self._auto_ingest_and_refresh(initial=False))
+        self._refresh_links_button = QPushButton("Refresh Links")
+        self._refresh_links_button.clicked.connect(lambda: self._auto_ingest_and_refresh(initial=False))
         self._now_reachable_button = QPushButton("Peer Sched Now")
         self._now_reachable_button.setCheckable(True)
         self._update_now_reachable_button_visual(False)
@@ -1146,7 +1203,7 @@ class StationsMapTab(QWidget):
         filter_grid.addWidget(self.recency_combo, 0, 9)
         filter_grid.addWidget(QLabel("Paths to"), 1, 0)
         filter_grid.addWidget(self.relay_target_combo, 1, 1, 1, 7)
-        filter_grid.addWidget(refresh_btn, 1, 8, alignment=Qt.AlignRight)
+        filter_grid.addWidget(self._refresh_links_button, 1, 8, alignment=Qt.AlignRight)
         filter_grid.addWidget(self._now_reachable_button, 1, 9, alignment=Qt.AlignRight)
         filter_grid.addWidget(self._sitrep_status_button, 1, 10, alignment=Qt.AlignRight)
         filter_grid.addWidget(self._now_reachable_label, 1, 11, alignment=Qt.AlignLeft)
@@ -1154,8 +1211,6 @@ class StationsMapTab(QWidget):
         map_layout.addWidget(filter_bar)
 
         if _ensure_webengine_imported():
-            self.web = QWebEngineView()
-            self.web.loadFinished.connect(self._on_map_load_finished)
             self._map_stack = QStackedWidget(map_container)
             loading_widget = QWidget(self._map_stack)
             loading_layout = QVBoxLayout(loading_widget)
@@ -1166,6 +1221,10 @@ class StationsMapTab(QWidget):
             loading_layout.addWidget(self._map_loading_label)
             loading_layout.addStretch()
             self._map_stack.addWidget(loading_widget)
+            # Create the web view with a parent to avoid transient top-level native
+            # window behavior during first map-tab construction.
+            self.web = QWebEngineView(self._map_stack)
+            self.web.loadFinished.connect(self._on_map_load_finished)
             self._map_stack.addWidget(self.web)
             self._map_stack.setCurrentIndex(0)
             map_layout.addWidget(self._map_stack)
@@ -1290,11 +1349,13 @@ class StationsMapTab(QWidget):
         btn.setGeometry(x, y, bw, bh)
         btn.setIconSize(QSize(max(8, bw - 3), max(10, bh - 12)))
 
-    def _update_splitter_indicator_state(self) -> None:
+    def _update_splitter_indicator_state(self, theme: Optional[Dict[str, str]] = None) -> None:
         btn = self._controls_handle_button
         splitter = self._main_splitter
         if btn is None or splitter is None:
             return
+        if theme is None:
+            theme = self._theme_snapshot()
         style = self.style() if hasattr(self, "style") else None
         if style is not None:
             icon = (
@@ -1310,12 +1371,24 @@ class StationsMapTab(QWidget):
             if handle is not None:
                 handle.setCursor(Qt.SplitHCursor)
                 handle.setToolTip("Drag to resize, or click chevron to show/hide map controls")
+                border_color = self._hex_to_rgba(theme.get("border", "#2A313A"), 0.80)
+                handle_bg = self._hex_to_rgba(theme.get("surface_alt", "#202632"), 0.55)
+                button_bg = self._hex_to_rgba(theme.get("surface", "#171B21"), 0.90)
+                button_hover = self._hex_to_rgba(theme.get("surface_alt", "#202632"), 0.95)
+                button_border = self._hex_to_rgba(theme.get("focus", theme.get("accent", "#4C9BD3")), 0.75)
                 handle.setStyleSheet(
-                    "QSplitterHandle { background: rgba(100, 130, 170, 0.35); border-left: 1px solid rgba(140, 160, 185, 0.55); border-right: 1px solid rgba(140, 160, 185, 0.55); }"
+                    "QSplitterHandle {"
+                    f" background: {handle_bg};"
+                    f" border-left: 1px solid {border_color};"
+                    f" border-right: 1px solid {border_color};"
+                    " }"
                 )
                 btn.setStyleSheet(
-                    "QToolButton { background: rgba(20, 28, 42, 0.65); border: 1px solid rgba(148, 165, 190, 0.70); border-radius: 4px; padding: 1px; }"
-                    "QToolButton:hover { background: rgba(35, 50, 76, 0.85); }"
+                    "QToolButton {"
+                    f" background: {button_bg};"
+                    f" border: 1px solid {button_border};"
+                    " border-radius: 4px; padding: 1px; }"
+                    f"QToolButton:hover {{ background: {button_hover}; }}"
                 )
         except Exception:
             pass
@@ -1438,7 +1511,7 @@ class StationsMapTab(QWidget):
                     IFNULL(group2,''),
                     IFNULL(group3,''),
                     groups_json,
-                    COALESCE(trusted,1)
+                    COALESCE(trusted,0)
                 FROM operator_checkins
                 ORDER BY callsign COLLATE NOCASE
                 """
@@ -1760,25 +1833,99 @@ class StationsMapTab(QWidget):
 
     def _parse_frequency_mhz(self, value) -> Optional[float]:
         try:
-            return float(str(value).strip())
+            txt = str(value).strip()
+            if not txt:
+                return None
+            match = re.search(r"[-+]?\d+(?:[.,]\d+)?", txt)
+            if not match:
+                return None
+            return float(match.group(0).replace(",", "."))
         except Exception:
             return None
+
+    @staticmethod
+    def _day_to_index(day_val: str) -> Optional[int]:
+        txt = (day_val or "").strip().lower()
+        if not txt:
+            return None
+        names = [
+            "sunday",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+        ]
+        for idx, name in enumerate(names):
+            if txt.startswith(name[:3]) or name.startswith(txt[:3]):
+                return idx
+        return None
+
+    def _schedule_day_indices(self, day_val: str) -> List[int]:
+        txt = (day_val or "ALL").strip().upper()
+        if txt in {"", "ALL", "DAILY"}:
+            return list(range(7))
+        parts = re.split(r"[,/;|]+", txt)
+        out: List[int] = []
+        for part in parts:
+            idx = self._day_to_index(part)
+            if idx is not None and idx not in out:
+                out.append(idx)
+        return out
+
+    def _schedule_minutes_to_end(
+        self,
+        day_val: str,
+        now_utc: datetime.datetime,
+        start_min: int,
+        end_min: int,
+    ) -> Optional[int]:
+        if start_min < 0 or start_min > 1439 or end_min < 0 or end_min > 1439:
+            return None
+        if start_min == end_min:
+            return None
+        day_indices = self._schedule_day_indices(day_val)
+        if not day_indices:
+            return None
+        now_day_idx = (now_utc.weekday() + 1) % 7  # Sunday=0
+        now_min = now_utc.hour * 60 + now_utc.minute
+        candidates: List[int] = []
+        for day_idx in day_indices:
+            if start_min < end_min:
+                if day_idx == now_day_idx and start_min <= now_min < end_min:
+                    candidates.append(end_min - now_min)
+                continue
+            # Overnight interval
+            if day_idx == now_day_idx and now_min >= start_min:
+                candidates.append((24 * 60 - now_min) + end_min)
+            if ((day_idx + 1) % 7) == now_day_idx and now_min < end_min:
+                candidates.append(end_min - now_min)
+        if not candidates:
+            return None
+        return max(0, min(candidates))
 
     def _load_my_active_schedule_freqs(self, now_utc: datetime.datetime) -> Set[float]:
         out: Set[float] = set()
         try:
-            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+            nets_db_path = get_config_dir() / "config" / "freqinout_nets.db"
+            settings_db_path = get_config_dir() / "config" / "freqinout.db"
         except Exception:
             return out
-        if not db_path.exists():
-            return out
-        today_name = now_utc.strftime("%A")
-        yesterday_name = (now_utc - datetime.timedelta(days=1)).strftime("%A")
-        now_min = now_utc.hour * 60 + now_utc.minute
 
-        def _add_rows(conn: sqlite3.Connection, table_name: str) -> None:
+        def _add_rows(db_path: Path, table_name: str) -> None:
+            if not db_path.exists():
+                return
             try:
+                conn = sqlite3.connect(db_path)
                 cur = conn.cursor()
+                cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,),
+                )
+                if not cur.fetchone():
+                    conn.close()
+                    return
                 cur.execute(
                     f"SELECT day_utc, start_utc, end_utc, frequency FROM {table_name}"
                 )
@@ -1787,21 +1934,27 @@ class StationsMapTab(QWidget):
                     end_min = self._parse_hhmm_minutes(end_utc)
                     if start_min is None or end_min is None:
                         continue
-                    day_val = (day_utc or "ALL").strip().title()
-                    if not self._schedule_active_now(day_val, today_name, yesterday_name, now_min, start_min, end_min):
+                    minutes_to_end = self._schedule_minutes_to_end(
+                        str(day_utc or "ALL"),
+                        now_utc,
+                        start_min,
+                        end_min,
+                    )
+                    if minutes_to_end is None:
                         continue
                     freq_mhz = self._parse_frequency_mhz(frequency)
                     if freq_mhz is None:
                         continue
                     out.add(round(freq_mhz, 6))
+                conn.close()
             except Exception:
                 pass
 
         try:
-            conn = sqlite3.connect(db_path)
-            _add_rows(conn, "daily_schedule_tab")
-            _add_rows(conn, "net_schedule_tab")
-            conn.close()
+            _add_rows(settings_db_path, "daily_schedule_tab")
+            _add_rows(nets_db_path, "daily_schedule_tab")
+            _add_rows(nets_db_path, "net_schedule_tab")
+            _add_rows(settings_db_path, "net_schedule_tab")
         except Exception:
             return out
         return out
@@ -1809,6 +1962,13 @@ class StationsMapTab(QWidget):
     def _compute_now_reachable_snapshot(self) -> Dict[str, Dict]:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         active_freqs = self._load_my_active_schedule_freqs(now_utc)
+        try:
+            sched_freq = current_scheduler_freq(self.window())
+            sched_freq_mhz = self._parse_frequency_mhz(sched_freq)
+            if sched_freq_mhz is not None:
+                active_freqs.add(round(sched_freq_mhz, 6))
+        except Exception:
+            pass
         if not active_freqs:
             return {}
         active_peer = self._load_peer_schedule_presence(now_utc)
@@ -1820,7 +1980,7 @@ class StationsMapTab(QWidget):
             freq_mhz = self._parse_frequency_mhz(entry.get("frequency"))
             if freq_mhz is None:
                 continue
-            if not any(abs(freq_mhz - mine) <= 0.0001 for mine in active_freqs):
+            if not any(abs(freq_mhz - mine) <= 0.001 for mine in active_freqs):
                 continue
             minutes_to_end = entry.get("minutes_to_end")
             try:
@@ -1849,13 +2009,14 @@ class StationsMapTab(QWidget):
         self._now_reachable_label.setText("")
         self._now_reachable_label.setVisible(False)
 
-    def _update_now_reachable_button_visual(self, enabled: bool) -> None:
+    def _update_now_reachable_button_visual(self, enabled: bool, theme: Optional[Dict[str, str]] = None) -> None:
         if self._now_reachable_button is None:
             return
-        theme = resolve_theme(self.settings)
+        if theme is None:
+            theme = self._theme_snapshot()
         self._now_reachable_button.setText("Peer Sched Now")
         if enabled:
-            self._now_reachable_button.setStyleSheet(button_style("info", theme))
+            self._now_reachable_button.setStyleSheet(button_style("eligible_info", theme))
             self._now_reachable_button.setToolTip(
                 "Peer Sched Now is ON: map filters to peers whose peer schedule currently matches your active schedule frequency."
             )
@@ -1865,24 +2026,32 @@ class StationsMapTab(QWidget):
                 "Show peers whose peer schedule currently matches your active schedule frequency."
             )
 
-    def _update_sitrep_status_button_visual(self, enabled: bool) -> None:
+    def _update_sitrep_status_button_visual(self, enabled: bool, theme: Optional[Dict[str, str]] = None) -> None:
         if self._sitrep_status_button is None:
             return
-        theme = resolve_theme(self.settings)
+        if theme is None:
+            theme = self._theme_snapshot()
         self._sitrep_status_button.setText("SitRep Status")
         if enabled:
-            self._sitrep_status_button.setStyleSheet(button_style("info", theme))
+            self._sitrep_status_button.setStyleSheet(button_style("eligible_info", theme))
             self._sitrep_status_button.setToolTip(
-                "SitRep Status mode is ON: show only Red/Yellow/Green stations, hide links, and override map filters."
+                "SitRep Status mode is ON: show only Red/Yellow/Green stations and override map filters."
             )
         else:
             self._sitrep_status_button.setStyleSheet(button_style("muted", theme))
             self._sitrep_status_button.setToolTip(
-                "Show only stations with known SitRep status (Red/Yellow/Green). This view hides links and overrides map filters."
+                "Show only stations with known SitRep status (Red/Yellow/Green). This view overrides map filters."
             )
 
     def _on_now_reachable_toggled(self, checked: bool) -> None:
         self._now_reachable_enabled = bool(checked)
+        if self._now_reachable_enabled and self._sitrep_status_only_enabled and self._sitrep_status_button is not None:
+            # Pin modes are mutually exclusive; Peer Sched Now takes precedence when enabled.
+            self._sitrep_status_button.blockSignals(True)
+            self._sitrep_status_button.setChecked(False)
+            self._sitrep_status_button.blockSignals(False)
+            self._sitrep_status_only_enabled = False
+            self._update_sitrep_status_button_visual(False)
         if self._now_reachable_enabled:
             snapshot = self._compute_now_reachable_snapshot()
             self._now_reachable_meta = snapshot
@@ -1904,6 +2073,25 @@ class StationsMapTab(QWidget):
 
     def _on_sitrep_status_toggled(self, checked: bool) -> None:
         self._sitrep_status_only_enabled = bool(checked)
+        if self._sitrep_status_only_enabled and self._now_reachable_enabled and self._now_reachable_button is not None:
+            # Pin modes are mutually exclusive; SitRep takes precedence when enabled.
+            self._now_reachable_button.blockSignals(True)
+            self._now_reachable_button.setChecked(False)
+            self._now_reachable_button.blockSignals(False)
+            self._now_reachable_enabled = False
+            self._now_reachable_meta = {}
+            self._now_reachable_callsigns = set()
+            self._update_now_reachable_button_visual(False)
+            self._update_now_reachable_summary()
+            self._refresh_relay_targets()
+        if self._sitrep_status_only_enabled:
+            # Keep links available by default when this mode is enabled.
+            try:
+                mode, _ = self._parse_link_selection(self.link_mode_combo.currentData())
+                if str(mode).lower() == "off":
+                    self.link_mode_combo.setCurrentText("My Station")
+            except Exception:
+                pass
         self._update_sitrep_status_button_visual(self._sitrep_status_only_enabled)
         self._render_map()
 
@@ -2636,8 +2824,135 @@ class StationsMapTab(QWidget):
         self._query_cache_set(cache_key, set(out))
         return out
 
+    @staticmethod
+    def _settings_bool(settings: SettingsManager, key: str, default: bool) -> bool:
+        try:
+            value = settings.get(key, default)
+        except Exception:
+            value = default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        txt = str(value or "").strip().lower()
+        if txt in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if txt in {"0", "false", "no", "off", "disabled"}:
+            return False
+        return bool(default)
+
+    @staticmethod
+    def _safe_float(value: object, default: float = 0.0) -> float:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _sitrep_status_label(status_key: str) -> str:
+        key = (status_key or "").strip().lower()
+        if key == "red":
+            return "Not Functioning"
+        if key == "yellow":
+            return "Partially Functioning"
+        if key == "green":
+            return "Functioning"
+        return "Unknown"
+
+    @staticmethod
+    def _sitrep_status_chip(status_key: str) -> str:
+        key = (status_key or "").strip().lower()
+        if key == "red":
+            return "R"
+        if key == "yellow":
+            return "Y"
+        if key == "green":
+            return "G"
+        return "?"
+
+    @staticmethod
+    def _source_short_label(source: str) -> str:
+        src = (source or "").strip().upper()
+        if not src:
+            return "UNK"
+        if src == "JS8SPOTTER":
+            return "SPT"
+        if src == "COMMSTAT3":
+            return "CS3"
+        if src == "COMMSTAT23":
+            return "CS2"
+        if src == "MANUAL":
+            return "MAN"
+        if len(src) <= 4:
+            return src
+        return src[:4]
+
+    @classmethod
+    def _encode_source_chips(cls, source_summary: Dict[str, str]) -> str:
+        if not source_summary:
+            return ""
+        parts: List[str] = []
+        for source in sorted(source_summary.keys()):
+            key = str(source_summary.get(source) or "unknown").strip().lower()
+            if key not in {"red", "yellow", "green", "unknown", "not_reported"}:
+                key = "unknown"
+            if key == "not_reported":
+                key = "unknown"
+            parts.append(f"{cls._source_short_label(source)}:{cls._sitrep_status_chip(key)}")
+        return " ".join(parts)
+
+    @staticmethod
+    def _decode_source_summary(value: object) -> Dict[str, str]:
+        txt = str(value or "").strip()
+        if not txt:
+            return {}
+        try:
+            obj = json.loads(txt)
+            if isinstance(obj, dict):
+                out: Dict[str, str] = {}
+                for raw_src, raw_status in obj.items():
+                    src = str(raw_src or "").strip().upper()
+                    status = str(raw_status or "").strip().lower()
+                    if not src:
+                        continue
+                    if status not in {"red", "yellow", "green", "unknown", "not_reported"}:
+                        status = "unknown"
+                    out[src] = "unknown" if status == "not_reported" else status
+                return out
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _sitrep_conflict(source_summary: Dict[str, str]) -> bool:
+        vals = {
+            str(v or "").strip().lower()
+            for v in source_summary.values()
+            if str(v or "").strip().lower() in {"red", "yellow", "green", "unknown"}
+        }
+        return len(vals) > 1
+
+    @staticmethod
+    def _sitrep_age_text(ts_val: float) -> str:
+        ts = float(ts_val or 0.0)
+        if ts <= 0:
+            return ""
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        age = max(0, int(now - ts))
+        if age < 60:
+            return f"{age}s"
+        mins, sec = divmod(age, 60)
+        if mins < 60:
+            return f"{mins}m {sec}s"
+        hrs, mins = divmod(mins, 60)
+        if hrs < 24:
+            return f"{hrs}h {mins}m"
+        days, hrs = divmod(hrs, 24)
+        return f"{days}d {hrs}h"
+
     def _load_spotter_station_status(self) -> Dict[str, Dict]:
-        cache_key = ("spotter_station_status",)
+        unified_enabled = self._settings_bool(self.settings, "sitrep_unified_map_enabled", True)
+        cache_key = ("spotter_station_status", unified_enabled)
         cached = self._query_cache_get(cache_key)
         if isinstance(cached, dict):
             return {
@@ -2673,9 +2988,27 @@ class StationsMapTab(QWidget):
                     """
                 )
             rows = cur.fetchall()
+            fused_rows = []
+            if unified_enabled:
+                try:
+                    cur.execute(
+                        """
+                        SELECT
+                            callsign,
+                            effective_status,
+                            latest_event_ts,
+                            latest_event_ts_utc,
+                            source_summary_json
+                        FROM sitrep_latest_by_callsign
+                        """
+                    )
+                    fused_rows = cur.fetchall()
+                except Exception:
+                    fused_rows = []
             conn.close()
         except Exception:
             return statuses
+
         for from_call, status_key, status_label, updated_utc_ts, updated_utc_str, response_code, status_source, status_source_detail in rows:
             call = (from_call or "").strip().upper()
             if not call:
@@ -2683,22 +3016,81 @@ class StationsMapTab(QWidget):
             key = (status_key or "").strip().lower()
             if key not in {"red", "yellow", "green", "unknown"}:
                 key = "unknown"
-            updated_ts = float(updated_utc_ts or 0.0)
+            updated_ts = self._safe_float(updated_utc_ts, 0.0)
             updated_str = (updated_utc_str or "").strip()
             if not updated_str and updated_ts > 0:
                 try:
                     updated_str = datetime.datetime.utcfromtimestamp(updated_ts).strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     updated_str = ""
+            source = (status_source or "").strip().upper()
+            source_summary = {source: key} if source else {}
+            source_chips = self._encode_source_chips(source_summary)
+            status_label_text = (status_label or "").strip() or self._sitrep_status_label(key)
+            source_detail = (status_source_detail or "").strip()
+            if not source_detail and source_chips:
+                source_detail = source_chips
             statuses[call] = {
                 "status_key": key,
-                "status_label": (status_label or "").strip(),
+                "status_label": status_label_text,
                 "updated_utc_ts": updated_ts,
                 "updated_utc_str": updated_str,
                 "response_code": (response_code or "").strip(),
-                "status_source": (status_source or "").strip().upper(),
-                "status_source_detail": (status_source_detail or "").strip(),
+                "status_source": source,
+                "status_source_detail": source_detail,
+                "status_source_chips": source_chips,
+                "status_conflict": False,
+                "status_age": self._sitrep_age_text(updated_ts),
+                "status_source_count": len(source_summary),
             }
+
+        for callsign, effective_status, latest_event_ts, latest_event_ts_utc, source_summary_json in fused_rows:
+            call = (callsign or "").strip().upper()
+            if not call:
+                continue
+            key = str(effective_status or "").strip().lower()
+            if key not in {"red", "yellow", "green", "unknown", "not_reported"}:
+                key = "unknown"
+            if key == "not_reported":
+                key = "unknown"
+            summary = self._decode_source_summary(source_summary_json)
+            if not summary:
+                summary = {"FUSED": key}
+            source_count = len(summary)
+            source_chips = self._encode_source_chips(summary)
+            source = next(iter(summary.keys()), "FUSED") if source_count <= 1 else f"MULTI({source_count})"
+            updated_ts = self._safe_float(latest_event_ts, 0.0)
+            updated_str = (latest_event_ts_utc or "").strip()
+            if not updated_str and updated_ts > 0:
+                try:
+                    updated_str = datetime.datetime.utcfromtimestamp(updated_ts).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    updated_str = ""
+            candidate = {
+                "status_key": key,
+                "status_label": self._sitrep_status_label(key),
+                "updated_utc_ts": updated_ts,
+                "updated_utc_str": updated_str,
+                "response_code": "",
+                "status_source": source,
+                "status_source_detail": "Unified SitRep",
+                "status_source_chips": source_chips,
+                "status_conflict": self._sitrep_conflict(summary),
+                "status_age": self._sitrep_age_text(updated_ts),
+                "status_source_count": source_count,
+            }
+            existing = statuses.get(call)
+            if existing is None:
+                statuses[call] = candidate
+                continue
+            existing_source = str(existing.get("status_source") or "").strip().upper()
+            existing_ts = self._safe_float(existing.get("updated_utc_ts"), 0.0)
+            # Preserve manual operator override until newer unified data arrives.
+            if existing_source == "MANUAL" and existing_ts >= updated_ts:
+                continue
+            if updated_ts >= existing_ts:
+                statuses[call] = candidate
+
         self._query_cache_set(cache_key, dict(statuses))
         return statuses
 
@@ -3483,33 +3875,45 @@ class StationsMapTab(QWidget):
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT owner_callsign, day_utc, start_utc, end_utc, band, mode, frequency
-                FROM peer_hf_schedule
-                """
-            )
+            has_effective_view = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view' AND name='peer_hf_schedule_effective'"
+            ).fetchone()
+            if has_effective_view:
+                cur.execute(
+                    """
+                    SELECT owner_callsign, day_utc, start_utc, end_utc, band, mode, frequency
+                    FROM peer_hf_schedule_effective
+                    """
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT owner_callsign, day_utc, start_utc, end_utc, band, mode, frequency
+                    FROM peer_hf_schedule
+                    """
+                )
             raw = cur.fetchall()
             conn.close()
         except Exception:
             return rows
 
-        today_name = now_utc.strftime("%A")
-        yesterday_name = (now_utc - datetime.timedelta(days=1)).strftime("%A")
-        now_min = now_utc.hour * 60 + now_utc.minute
         active_by_callsign: Dict[str, Dict] = {}
         for cs, day_utc, start_utc, end_utc, band, mode, freq in raw:
-            callsign = (cs or "").strip().upper()
+            callsign = self._normalize_peer_callsign(cs)
             if not callsign:
                 continue
-            day_val = (day_utc or "ALL").strip().title()
             start_min = self._parse_hhmm_minutes(start_utc)
             end_min = self._parse_hhmm_minutes(end_utc)
             if start_min is None or end_min is None:
                 continue
-            if not self._schedule_active_now(day_val, today_name, yesterday_name, now_min, start_min, end_min):
+            minutes_to_end = self._schedule_minutes_to_end(
+                str(day_utc or "ALL"),
+                now_utc,
+                start_min,
+                end_min,
+            )
+            if minutes_to_end is None:
                 continue
-            minutes_to_end = self._minutes_until_end(now_min, start_min, end_min)
             existing = active_by_callsign.get(callsign)
             if existing and minutes_to_end >= existing.get("minutes_to_end", 0):
                 continue
@@ -3521,6 +3925,13 @@ class StationsMapTab(QWidget):
                 "minutes_to_end": minutes_to_end,
             }
         return list(active_by_callsign.values())
+
+    @staticmethod
+    def _normalize_peer_callsign(value: object) -> str:
+        raw = str(value or "").strip().upper()
+        if not raw:
+            return ""
+        return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", raw)
 
     def _parse_hhmm_minutes(self, value: Optional[str]) -> Optional[int]:
         txt = (value or "").strip()
@@ -3534,34 +3945,6 @@ class StationsMapTab(QWidget):
         if h < 0 or h > 23 or m < 0 or m > 59:
             return None
         return h * 60 + m
-
-    def _schedule_active_now(
-        self,
-        day_val: str,
-        today_name: str,
-        yesterday_name: str,
-        now_min: int,
-        start_min: int,
-        end_min: int,
-    ) -> bool:
-        day_val = (day_val or "ALL").strip().title()
-        if day_val not in {"All", today_name, yesterday_name}:
-            return False
-        if start_min <= end_min:
-            return day_val in {today_name, "All"} and start_min <= now_min < end_min
-        # Wraps past midnight
-        if day_val in {today_name, "All"} and now_min >= start_min:
-            return True
-        if day_val in {yesterday_name, "All"} and now_min < end_min:
-            return True
-        return False
-
-    def _minutes_until_end(self, now_min: int, start_min: int, end_min: int) -> int:
-        if start_min <= end_min:
-            return max(0, end_min - now_min)
-        if now_min >= start_min:
-            return (24 * 60 - now_min) + end_min
-        return max(0, end_min - now_min)
 
     def _compute_region_scores(self, region_filter: str = "") -> Dict[str, Dict]:
         region_filter = (region_filter or "").strip().upper()
@@ -3742,15 +4125,23 @@ class StationsMapTab(QWidget):
                 return name
         return ""
 
-    def _update_prop_badge(self, target_label: str, best_band: str, best_score: float) -> None:
+    def _update_prop_badge(
+        self,
+        target_label: str,
+        best_band: str,
+        best_score: float,
+        theme: Optional[Dict[str, str]] = None,
+    ) -> None:
         if self.prop_badge is None:
             return
+        if theme is None:
+            theme = self._theme_snapshot()
         scheduled = self._freq_to_band(current_scheduler_freq(self.window()))
         level = self._score_level(best_score)
         display_label = (target_label or "National").strip()
         if not best_band:
             self.prop_badge.setText("Best Band: --")
-            self.prop_badge.setStyleSheet("font-weight: bold; color: #666;")
+            self.prop_badge.setStyleSheet(f"font-weight: bold; color: {theme.get('text_muted', '#666666')};")
             return
         text_lines = [
             f"Target: {display_label}",
@@ -3760,10 +4151,34 @@ class StationsMapTab(QWidget):
             text_lines.append(f"Schedule: {scheduled}")
         text = "<br/>".join(text_lines)
         if scheduled and scheduled != best_band:
-            self.prop_badge.setStyleSheet("font-weight: bold; color: #FB8C00;")
+            self.prop_badge.setStyleSheet(f"font-weight: bold; color: {theme.get('warning', '#FB8C00')};")
         else:
-            self.prop_badge.setStyleSheet("font-weight: bold; color: #1E88E5;")
+            self.prop_badge.setStyleSheet(
+                f"font-weight: bold; color: {theme.get('info', theme.get('accent', '#1E88E5'))};"
+            )
         self.prop_badge.setText(text)
+
+    def _write_map_html(self, html: str) -> Optional[Path]:
+        try:
+            self._map_cache_dir.mkdir(parents=True, exist_ok=True)
+            self._managed_map_file.write_text(html, encoding="utf-8")
+            return self._managed_map_file
+        except Exception as e:
+            log.error("StationsMap: failed writing map html: %s", e)
+            return None
+
+    def _load_web_map_file(self, path: Path) -> bool:
+        if self.web is None:
+            return False
+        try:
+            url = QUrl.fromLocalFile(str(path))
+            # Cache-bust while reusing the same local file path to avoid temp-file growth.
+            url.setQuery(f"v={int(time.time() * 1000)}")
+            self.web.setUrl(url)
+            return True
+        except Exception as e:
+            log.error("StationsMap: failed loading map html in webview: %s", e)
+            return False
 
     # ------------- Map rendering ------------- #
     def _render_map(self, preserve_view: bool = True):
@@ -3821,15 +4236,18 @@ class StationsMapTab(QWidget):
                     self._map_stack.setCurrentIndex(0)
                 if self._map_loading_label is not None:
                     self._map_loading_label.setText("Loading map...")
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
-                    f.write(html.encode("utf-8"))
-                self._map_file = Path(f.name)
-                self.web.setUrl(QUrl.fromLocalFile(str(self._map_file)))
+                path = self._write_map_html(html)
+                if path is not None:
+                    self._map_file = path
+                    if not self._load_web_map_file(path):
+                        self.web.setHtml(html)
+                else:
+                    self.web.setHtml(html)
             else:
-                tmp = Path(tempfile.gettempdir()) / "freqinout_map.html"
-                tmp.write_text(html, encoding="utf-8")
-                self._map_file = tmp
-                log.info("StationsMap: map written to %s (open in browser).", tmp)
+                path = self._write_map_html(html)
+                if path is not None:
+                    self._map_file = path
+                    log.info("StationsMap: map written to %s (open in browser).", path)
             self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
             return
 
@@ -3899,7 +4317,7 @@ class StationsMapTab(QWidget):
             my_call = (self.settings.get("operator_callsign", "") or "").upper()
         except Exception:
             my_call = ""
-        if not sitrep_mode and self._links_active():
+        if self._links_active():
             relay_target = (self.relay_target or "").strip().upper()
             reachable_filter = self._now_reachable_callsigns if self._now_reachable_enabled else None
 
@@ -3943,6 +4361,14 @@ class StationsMapTab(QWidget):
         js8_all = _timed_map_call("map.load_js8_presence", self._load_js8_presence)
         fldigi_calls = _timed_map_call("map.load_fldigi_presence", self._load_fldigi_presence)
         spotter_status_lookup = _timed_map_call("map.load_spotter_station_status", self._load_spotter_station_status)
+        if sitrep_mode and links:
+            allowed = {"red", "yellow", "green"}
+            links = [
+                link
+                for link in links
+                if str(spotter_status_lookup.get((link.get("origin") or "").strip().upper(), {}).get("status_key") or "").strip().lower() in allowed
+                and str(spotter_status_lookup.get((link.get("destination") or "").strip().upper(), {}).get("status_key") or "").strip().lower() in allowed
+            ]
 
         # Spread overlapping stations with the same base lat/lon
         markers = []
@@ -3959,6 +4385,8 @@ class StationsMapTab(QWidget):
         for cs in varac_stats.keys():
             if cs:
                 traffic_calls.add(cs)
+        if self._now_reachable_enabled:
+            traffic_calls.update({c for c in self._now_reachable_callsigns if c})
         show_all_stations = (not self._links_active()) or sitrep_mode
         recent_calls: Set[str] = set()
         if show_all_stations and self.recency_seconds and not sitrep_mode:
@@ -3969,6 +4397,11 @@ class StationsMapTab(QWidget):
             )
         for pt in self.stations:
             cs_upper = pt.callsign.upper()
+            if self._now_reachable_enabled:
+                # Peer Sched Now is a strict station filter: only peers whose
+                # schedule alignment is in the computed reachable set (plus me).
+                if cs_upper != my_call and cs_upper not in self._now_reachable_callsigns:
+                    continue
             if sitrep_mode:
                 status_data = spotter_status_lookup.get(cs_upper, {})
                 if (status_data.get("status_key") or "").strip().lower() not in {"red", "yellow", "green"}:
@@ -4023,10 +4456,13 @@ class StationsMapTab(QWidget):
                 spotter_status_key = str(spotter_data.get("status_key") or "unknown").strip().lower()
                 if spotter_status_key not in {"red", "yellow", "green", "unknown"}:
                     spotter_status_key = "unknown"
-                spotter_status_label = str(spotter_data.get("status_label") or "").strip()
+                spotter_status_label = str(spotter_data.get("status_label") or "").strip() or self._sitrep_status_label(spotter_status_key)
                 spotter_status_ts = _fmt_ts(spotter_data.get("updated_utc_ts", 0))
                 spotter_status_source = str(spotter_data.get("status_source") or "").strip()
                 spotter_status_source_detail = str(spotter_data.get("status_source_detail") or "").strip()
+                spotter_status_source_chips = str(spotter_data.get("status_source_chips") or "").strip()
+                spotter_status_conflict = bool(spotter_data.get("status_conflict"))
+                spotter_status_age = str(spotter_data.get("status_age") or "").strip()
                 if qsy_text:
                     detail_lines.append(f"Schedule: {qsy_text}")
                 # Filter empty lines
@@ -4058,6 +4494,9 @@ class StationsMapTab(QWidget):
                         "spotter_status_ts": spotter_status_ts,
                         "spotter_status_source": spotter_status_source,
                         "spotter_status_source_detail": spotter_status_source_detail,
+                        "spotter_status_source_chips": spotter_status_source_chips,
+                        "spotter_status_conflict": spotter_status_conflict,
+                        "spotter_status_age": spotter_status_age,
                     }
                 )
 
@@ -4123,15 +4562,18 @@ class StationsMapTab(QWidget):
                 "links": links,
                 "now_reachable_enabled": bool(self._now_reachable_enabled),
             }
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
-                f.write(html.encode("utf-8"))
-            self._map_file = Path(f.name)
-            self.web.setUrl(QUrl.fromLocalFile(str(self._map_file)))
+            path = self._write_map_html(html)
+            if path is not None:
+                self._map_file = path
+                if not self._load_web_map_file(path):
+                    self.web.setHtml(html)
+            else:
+                self.web.setHtml(html)
         else:
-            tmp = Path(tempfile.gettempdir()) / "freqinout_map.html"
-            tmp.write_text(html, encoding="utf-8")
-            self._map_file = tmp
-            log.info("StationsMap: map written to %s (open in browser).", tmp)
+            path = self._write_map_html(html)
+            if path is not None:
+                self._map_file = path
+                log.info("StationsMap: map written to %s (open in browser).", path)
         self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
 
     def _on_map_load_finished(self, ok: bool) -> None:
@@ -4766,10 +5208,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
         '<span style="color:#4FC3F7;">&#9679;</span> Unknown / No Report';
       if (showPeerSchedNow) {{
         html += '<br/><br/><b>Peer Sched Now</b><br/>' +
-          'Filtered to peers whose peer schedule matches your active schedule frequency.<br/>' +
-          'Schedule alignment only; not a propagation/connection guarantee.<br/>' +
-          '<span style=\\"color:#7E57C2;\\">&#9679;</span> QSY &lt;10m<br/>' +
-          'Unknown timing appears as <em>QSY ?</em> in station tooltip.';
+          '<span style="color:#2E7D32;">&#9679;</span> NOW<br/>' +
+          '<span style="color:#1E88E5;">&#9679;</span> Later Today<br/>' +
+          '<span style="color:#7E57C2;">&#9679;</span> QSY &lt;10m';
       }}
       if (propOverlayLegendEnabled) {{
         html += '<br/><br/><b>Best Band Now</b><br/>' +
@@ -4792,6 +5233,15 @@ function addGridLabels(res, level, bounds, maxLabels) {
       stationsLayer.clearLayers();
       list.forEach(m => {{
         const qsySoon = !!m.qsy_soon;
+        const qsyText = String(m.qsy_text || '').toLowerCase();
+        const scheduleState = qsySoon
+          ? 'qsy_soon'
+          : (qsyText.startsWith('stable') ? 'now' : 'later_today');
+        const scheduleStrokeByState = {{
+          now: '#2E7D32',
+          later_today: '#1E88E5',
+          qsy_soon: '#7E57C2'
+        }};
         const statusKey = (m.spotter_status_key || 'unknown').toLowerCase();
         const markerFillByStatus = {{
           red: '#D32F2F',
@@ -4806,7 +5256,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
           unknown: '#1976D2'
         }};
         const baseStroke = markerStrokeByStatus[statusKey] || markerStrokeByStatus.unknown;
-        const markerStroke = qsySoon ? '#5E35B1' : baseStroke;
+        const markerStroke = nowReachableEnabled
+          ? (scheduleStrokeByState[scheduleState] || baseStroke)
+          : (qsySoon ? '#5E35B1' : baseStroke);
         const markerFill = markerFillByStatus[statusKey] || markerFillByStatus.unknown;
         const circle = L.circleMarker([m.lat, m.lon], {{
           radius: qsySoon ? 7 : 6,
@@ -4830,7 +5282,10 @@ function addGridLabels(res, level, bounds, maxLabels) {
           (m.varac_avg_snr !== undefined && m.varac_avg_snr !== null ? '<br/>VarAC Avg SNR: ' + m.varac_avg_snr.toFixed(1) : '') +
           (m.spotter_status_label ? '<br/>SitRep: ' + m.spotter_status_label : '') +
           (m.spotter_status_source ? '<br/>Source: ' + m.spotter_status_source + (m.spotter_status_source_detail ? ' (' + m.spotter_status_source_detail + ')' : '') : '') +
+          (m.spotter_status_source_chips ? '<br/>Sources: ' + m.spotter_status_source_chips : '') +
+          (m.spotter_status_conflict ? '<br/>Conflict: sources disagree' : '') +
           (m.spotter_status_ts ? '<br/>SitRep Updated: ' + m.spotter_status_ts : '') +
+          (m.spotter_status_age ? '<br/>SitRep Age: ' + m.spotter_status_age : '') +
           (m.qsy_text ? '<br/>Schedule: ' + m.qsy_text : '');
         circle.on('mouseover', function() {{
           this.bringToFront();

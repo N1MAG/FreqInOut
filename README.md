@@ -10,21 +10,23 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Map intelligence with link filters, propagation overlay, SitRep-only mode, and schedule-risk/QSY awareness
 - UTC-native HF + Net scheduling with controlled enforcement, busy deferral, and NET override behavior
 - Net control operations for both FLDigi and JS8Call (start/track/save/end workflows)
-- Settings redesign for v1.1.7: `Fast Light Settings`, `VarAC Settings`, `Launch Control`, and `Logging & Diagnostics`
+- Settings redesign: `Fast Light Settings`, `VarAC Settings`, `Launch Control`, and `Logging & Diagnostics`
+- Local operations expansion: `Local Operators` roster tab and `NCS-Local` net control tab
+- Net resources catalog workflow: import JSON into managed Net Resources and promote selected entries into active Net Schedule
 - Launch orchestration with configurable start order, per-app startup toggles, global startup mode, and continue-on-failure handling
 - Messages center for JS8/FLMSG/FLAMP/VarAC plus VarAC BBS workflows (view/archive/delete, aging visibility, auto-archive support)
 - Operator History with CSV import/export, group/role standardization, trust tools, sorting/filtering, and SitRep chip updates
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
-## What's New in v1.1.7
+## What's New in v1.1.8
 
-- Major responsiveness improvements across Messages, Map, Operators, and ControlFreq
-- Staged/deferred refresh pipeline updates to keep tab switching and first-paint paths snappy
-- Map rendering optimizations and improved payload handling during layer/theme reloads
-- Operators and ControlFreq workflow fixes and reliability updates
-- JS8 log ingest/read-path stability fixes for production-sized logs
-- Expanded benchmark instrumentation for controlfreq, digi_ncs, and js8_ncs activation paths
+- Added `Local Operators` and `NCS-Local` tabs for local net workflows
+- Added Net Resources catalog actions and JSON import flow for schedule resource management
+- Expanded contextual action-highlighting consistency across tabs and themes
+- Improved map first-open stability and reduced first-use window flash behavior
+- Added local-net and local-operator data model updates including SitRep and notes workflows
+- Continued performance and reliability hardening across tab activation and render paths
 
 ## Quick Start
 

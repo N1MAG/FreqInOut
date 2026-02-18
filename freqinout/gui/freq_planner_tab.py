@@ -861,6 +861,7 @@ class FreqPlannerTab(QWidget):
             now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {abbr}")
         )
         self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
+        self._update_toggle_button_styles()
 
     def _setup_clock_timer(self):
         self._clock_timer = QTimer(self)
@@ -888,12 +889,16 @@ class FreqPlannerTab(QWidget):
 
     def _toggle_time_view(self):
         self._show_local = not self._show_local
+        self._update_toggle_button_styles()
         self.rebuild_table()
+        self._update_toggle_button_styles()
 
     def _toggle_band_view(self):
         self._show_band = not self._show_band
         self.band_toggle_btn.setText("Showing Band" if self._show_band else "Showing Frequency")
+        self._update_toggle_button_styles()
         self.rebuild_table()
+        self._update_toggle_button_styles()
 
     def _load_band_colors(self) -> None:
         raw = self.settings.get("band_colors", {}) or {}
@@ -934,7 +939,7 @@ class FreqPlannerTab(QWidget):
         if not hasattr(self, "band_toggle_btn") or self.band_toggle_btn is None:
             self.band_toggle_btn = QPushButton("Showing Band")
             self.band_toggle_btn.clicked.connect(self._toggle_band_view)
-        self.band_toggle_btn.setStyleSheet(button_style("info", theme))
+        self._update_toggle_button_styles(theme=theme)
         self.band_toggle_btn.setText("Showing Band" if self._show_band else "Showing Frequency")
         self.band_legend_layout.addWidget(self.band_toggle_btn)
 
@@ -1047,9 +1052,18 @@ class FreqPlannerTab(QWidget):
 
     def _apply_theme(self):
         theme = resolve_theme(self.settings)
-        self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
-        self.band_toggle_btn.setStyleSheet(button_style("info", theme))
+        self._update_toggle_button_styles(theme=theme)
         self._render_band_legend()
+
+    def _update_toggle_button_styles(self, theme: Dict[str, str] | None = None) -> None:
+        if theme is None:
+            theme = resolve_theme(self.settings)
+        # Local + Band are defaults; highlight when user selects an alternate view.
+        # Use explicit info styling so the active alternate state is clearly visible.
+        time_role = "info" if not self._show_local else "muted"
+        band_role = "info" if not self._show_band else "muted"
+        self.time_toggle_btn.setStyleSheet(button_style(time_role, theme))
+        self.band_toggle_btn.setStyleSheet(button_style(band_role, theme))
 
     def on_settings_saved(self):
         try:

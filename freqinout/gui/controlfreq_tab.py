@@ -3,13 +3,14 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import re
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFontMetrics, QShortcut, QKeySequence, QColor
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QFont, QFontMetrics, QShortcut, QKeySequence, QColor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QAbstractItemView,
     QMenu,
+    QCompleter,
 )
 
 from freqinout.core.config_paths import get_config_dir
@@ -75,13 +77,34 @@ class ControlFreqTab(QWidget):
         self._intersection_cache_rows: List[List[str]] = []
         self._prop_target_syncing = False
         self._prop_operator_geo: Dict[str, Dict[str, str]] = {}
-        self._focus_mode = True
+        self._focus_mode = False
         self._freq_ctrl_fixed_height = 0
         self._pending_group_filter = ""
         self._saved_top_sizes: List[int] = []
         self._saved_left_sizes: List[int] = []
         self._saved_right_sizes: List[int] = []
         self._schedule_entries_by_row: Dict[int, Dict[str, Any]] = {}
+        self._force_hero_resync = False
+        self._message_summary_target_height = 0
+        self._freq_combo_cache_key: Tuple[Tuple[str, str, float, str, str, bool], ...] = ()
+        self._operator_groups_cache: Dict[str, Set[str]] = {}
+        self._operator_groups_cache_ts = 0.0
+        self._operator_groups_cache_mtime = 0.0
+        self._operator_groups_cache_ttl_sec = 20.0
+        self._my_schedule_entries_cache: List[Dict[str, object]] = []
+        self._my_schedule_entries_cache_ts = 0.0
+        self._my_schedule_entries_cache_key: Tuple[float, float] = (0.0, 0.0)
+        self._my_schedule_entries_cache_ttl_sec = 20.0
+        self._view_cards: Dict[str, bool] = {
+            "activity": True,
+            "intersections": True,
+            "schedule": True,
+            "propagation": True,
+        }
+        self._view_preset = "All"
+        self._view_syncing = False
+        self._card_expanded_heights: Dict[str, int] = {}
+        self._card_animations: Dict[str, QPropertyAnimation] = {}
         self.status_labels: Dict[str, QLabel] = {}
         self._status_checked_at: Dict[str, str] = {}
         self._status_service = SoftwareStatusService(self.settings)
@@ -95,6 +118,9 @@ class ControlFreqTab(QWidget):
         self._prefs_timer = QTimer(self)
         self._prefs_timer.setSingleShot(True)
         self._prefs_timer.timeout.connect(self._persist_ui_state)
+        self._filter_refresh_timer = QTimer(self)
+        self._filter_refresh_timer.setSingleShot(True)
+        self._filter_refresh_timer.timeout.connect(self._run_filter_refresh)
         self._activation_refresh_pending = False
         self._activation_refresh_interval_sec = 60.0
         self._secondary_refresh_pending = False
@@ -121,16 +147,14 @@ class ControlFreqTab(QWidget):
 
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Filter by keyword...")
-        self.search_edit.textChanged.connect(self._refresh_all)
-        self.search_edit.textChanged.connect(self._schedule_persist_ui_state)
+        self.search_edit.textChanged.connect(self._on_filters_changed)
         self.search_edit.setMinimumWidth(340)
         self.search_edit.setMaximumWidth(420)
         header.addWidget(self.search_edit)
 
         self.group_combo = QComboBox()
         self.group_combo.setMinimumWidth(180)
-        self.group_combo.currentIndexChanged.connect(self._refresh_all)
-        self.group_combo.currentIndexChanged.connect(self._schedule_persist_ui_state)
+        self.group_combo.currentIndexChanged.connect(self._on_filters_changed)
         header.addWidget(self.group_combo)
 
         self.refresh_btn = QPushButton("Refresh")
@@ -147,7 +171,7 @@ class ControlFreqTab(QWidget):
 
         self.focus_mode_btn = QPushButton("Focus Mode: Off")
         self.focus_mode_btn.clicked.connect(self._toggle_focus_mode)
-        header.addWidget(self.focus_mode_btn)
+        self.focus_mode_btn.setVisible(False)
 
         root.addLayout(header)
 
@@ -248,15 +272,18 @@ class ControlFreqTab(QWidget):
         self.inbox_table = QTableWidget(0, 3)
         self.inbox_table.setHorizontalHeaderLabels(["Type", "Count", "Details / BBS Aging Out"])
         self._setup_table_defaults(self.inbox_table)
+        self.inbox_table.verticalHeader().setDefaultSectionSize(20)
         inbox_header = self.inbox_table.horizontalHeader()
         inbox_header.setStretchLastSection(True)
         inbox_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         inbox_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         inbox_header.setSectionResizeMode(2, QHeaderView.Stretch)
         inbox_layout.addWidget(self.inbox_table)
+        self._set_message_summary_visible_rows(7)
 
         self.left_splitter = QSplitter(Qt.Vertical)
         self.left_splitter.setChildrenCollapsible(False)
+        self.left_splitter.addWidget(self.activity_box)
         self.left_splitter.addWidget(self.intersection_box)
         left_layout.addWidget(self.left_splitter)
         self.top_splitter.addWidget(self.left_col)
@@ -268,35 +295,36 @@ class ControlFreqTab(QWidget):
 
         self.freq_ctrl_box = QGroupBox("Frequency Control")
         freq_layout = QVBoxLayout(self.freq_ctrl_box)
-        self.freq_ctrl_label = QLabel("Scheduled: --")
-        self.freq_ctrl_label.setWordWrap(True)
-        self.freq_ctrl_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.freq_ctrl_label.setStyleSheet("font-size: 14px; font-weight: bold;")
-        freq_layout.addWidget(self.freq_ctrl_label)
-        self.freq_active_label = QLabel("Active: --")
-        self.freq_active_label.setWordWrap(True)
-        self.freq_active_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.freq_active_label.setStyleSheet("font-size: 14px; font-weight: bold;")
-        freq_layout.addWidget(self.freq_active_label)
-        status_row = QHBoxLayout()
-        self.now_status_label = QLabel("Status: --")
-        self.now_status_label.setStyleSheet("font-weight: 500;")
-        status_row.addWidget(self.now_status_label)
-        self.next_change_label = QLabel("Next: --")
-        self.next_change_label.setStyleSheet("color: #888;")
-        status_row.addWidget(self.next_change_label)
-        self.suspend_label = QLabel("Suspend: --")
-        self.suspend_label.setStyleSheet("color: #888;")
-        status_row.addWidget(self.suspend_label)
-        status_row.addStretch(1)
-        freq_layout.addLayout(status_row)
+        hero_row = QHBoxLayout()
+        self.freq_now_label = QLabel("Now")
+        self.freq_now_label.setStyleSheet("font-weight: 600;")
+        hero_row.addWidget(self.freq_now_label)
+        hero_row.addStretch(1)
+        self.freq_state_badge = QLabel("Unknown")
+        self.freq_state_badge.setAlignment(Qt.AlignCenter)
+        self.freq_state_badge.setMinimumWidth(108)
+        self.freq_state_badge.setStyleSheet("font-weight: 600; border-radius: 10px; padding: 2px 8px;")
+        hero_row.addWidget(self.freq_state_badge)
+        freq_layout.addLayout(hero_row)
         self.freq_combo = QComboBox()
-        self.freq_combo.setMinimumWidth(180)
-        self.freq_combo.setMaximumWidth(260)
+        self.freq_combo.setMinimumHeight(42)
+        self.freq_combo.setMinimumWidth(220)
+        self.freq_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.freq_combo.currentIndexChanged.connect(self._on_freq_selection_changed)
         freq_layout.addWidget(self.freq_combo)
+        self.freq_meta_label = QLabel("Scheduled: -- | Active: --")
+        self.freq_meta_label.setWordWrap(True)
+        self.freq_meta_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.freq_meta_label.setStyleSheet("font-size: 12px;")
+        freq_layout.addWidget(self.freq_meta_label)
+        status_row = QHBoxLayout()
+        self.next_change_label = QLabel("Next Change: --")
+        self.next_change_label.setStyleSheet("color: #888;")
+        status_row.addWidget(self.next_change_label)
+        status_row.addStretch(1)
+        freq_layout.addLayout(status_row)
         btn_row = QHBoxLayout()
-        self.freq_set_btn = QPushButton("Set Frequency")
+        self.freq_set_btn = QPushButton("QSY Now")
         self.freq_set_btn.clicked.connect(self._on_freq_set_clicked)
         self.freq_set_btn.setMinimumHeight(26)
         self.freq_set_btn.setMaximumWidth(140)
@@ -310,11 +338,41 @@ class ControlFreqTab(QWidget):
         freq_layout.addLayout(btn_row)
 
         top_overview_row = QHBoxLayout()
-        top_overview_row.addWidget(self.freq_ctrl_box, 2)
-        top_overview_row.addWidget(self.activity_box, 3)
-        top_overview_row.addWidget(self.inbox_box, 3)
+        self.freq_ctrl_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self.freq_ctrl_box.setMinimumWidth(380)
+        self.freq_ctrl_box.setMaximumWidth(540)
+        self.inbox_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top_overview_row.addWidget(self.freq_ctrl_box, 0)
+        top_overview_row.addWidget(self.inbox_box, 1)
         root.addLayout(top_overview_row)
         self._lock_frequency_control_height()
+
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("View"))
+        self.view_preset_combo = QComboBox()
+        self.view_preset_combo.addItem("Operations", "Operations")
+        self.view_preset_combo.addItem("All", "All")
+        self.view_preset_combo.addItem("Traffic", "Traffic")
+        self.view_preset_combo.addItem("Schedule", "Schedule")
+        self.view_preset_combo.addItem("Propagation", "Propagation")
+        self.view_preset_combo.addItem("Custom", "Custom")
+        self.view_preset_combo.setMinimumWidth(150)
+        self.view_preset_combo.currentIndexChanged.connect(self._on_view_preset_changed)
+        view_row.addWidget(self.view_preset_combo)
+        self.view_chip_buttons: Dict[str, QPushButton] = {}
+        for key, label in (
+            ("activity", "Activity"),
+            ("intersections", "Intersections"),
+            ("schedule", "Schedule"),
+            ("propagation", "Propagation"),
+        ):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.toggled.connect(lambda checked, k=key: self._on_view_chip_toggled(k, checked))
+            self.view_chip_buttons[key] = btn
+            view_row.addWidget(btn)
+        view_row.addStretch(1)
+        root.addLayout(view_row)
 
         self.schedule_box = QGroupBox("Schedule Outlook")
         schedule_layout = QVBoxLayout(self.schedule_box)
@@ -341,13 +399,16 @@ class ControlFreqTab(QWidget):
         self.top_splitter.addWidget(self.right_col)
         self.top_splitter.setStretchFactor(0, 1)
         self.top_splitter.setStretchFactor(1, 1)
-        self.left_splitter.setSizes([1])
+        self.left_splitter.setSizes([1, 1])
         self.right_splitter.setSizes([1])
         self.top_splitter.setSizes([480, 560])
         root.addWidget(self.top_splitter, 5)
 
         # Bottom region: full-width propagation forecast
-        row2 = QHBoxLayout()
+        self.bottom_row = QWidget()
+        row2 = QHBoxLayout(self.bottom_row)
+        row2.setContentsMargins(0, 0, 0, 0)
+        row2.setSpacing(0)
 
         self.prop_box = QGroupBox("Propagation Forecast")
         prop_layout = QVBoxLayout(self.prop_box)
@@ -363,8 +424,19 @@ class ControlFreqTab(QWidget):
         self.prop_target_value_combo.setEditable(True)
         self.prop_target_value_combo.setInsertPolicy(QComboBox.NoInsert)
         self.prop_target_value_combo.setDuplicatesEnabled(False)
+        self._prop_target_completer = QCompleter(self.prop_target_value_combo.model(), self)
+        self._prop_target_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._prop_target_completer.setFilterMode(Qt.MatchContains)
+        self.prop_target_value_combo.setCompleter(self._prop_target_completer)
+        if self.prop_target_value_combo.lineEdit():
+            self.prop_target_value_combo.lineEdit().setPlaceholderText("Type to search...")
+            self.prop_target_value_combo.lineEdit().setClearButtonEnabled(True)
         self.prop_target_value_combo.currentTextChanged.connect(self._on_prop_target_value_changed)
         target_row.addWidget(self.prop_target_value_combo, 1)
+        self.prop_hint = QLabel("Model uses today's schedule bands.")
+        self.prop_hint.setStyleSheet("color: #666;")
+        self.prop_hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        target_row.addWidget(self.prop_hint, 1)
         prop_layout.addLayout(target_row)
         self.prop_table = QTableWidget(0, 4)
         self.prop_table.setHorizontalHeaderLabels(
@@ -374,15 +446,8 @@ class ControlFreqTab(QWidget):
         self.prop_table.horizontalHeader().setStretchLastSection(True)
         self.prop_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         prop_layout.addWidget(self.prop_table)
-        self.prop_hint = QLabel(
-            "Modeled snapshot based on today's schedule bands. "
-            "Morning = dawn-10:00, Day = 10:00-sunset, Night = sunset-dawn (local)."
-        )
-        self.prop_hint.setWordWrap(True)
-        self.prop_hint.setStyleSheet("color: #666;")
-        prop_layout.addWidget(self.prop_hint)
         row2.addWidget(self.prop_box, 1)
-        root.addLayout(row2, 2)
+        root.addWidget(self.bottom_row, 2)
 
         # Save user-resized layout proportions.
         self.top_splitter.splitterMoved.connect(self._schedule_persist_ui_state)
@@ -397,7 +462,7 @@ class ControlFreqTab(QWidget):
         self.shortcut_resume_schedule = QShortcut(QKeySequence("Ctrl+Shift+R"), self)
         self.shortcut_resume_schedule.activated.connect(self._on_resume_schedule_clicked)
         self.refresh_btn.setToolTip("Refresh (Ctrl+R)")
-        self.freq_set_btn.setToolTip("Set Frequency (Ctrl+Enter)")
+        self.freq_set_btn.setToolTip("QSY Now (Ctrl+Enter)")
         self.freq_resume_btn.setToolTip("Resume Schedule (Ctrl+Shift+R)")
 
     @staticmethod
@@ -432,17 +497,41 @@ class ControlFreqTab(QWidget):
 
     def _sync_top_panel_heights(self) -> None:
         try:
-            h = int(self._freq_ctrl_fixed_height or 0)
-            if h <= 0:
-                h = max(140, int(self.freq_ctrl_box.sizeHint().height()))
-            if self._focus_mode:
-                self.inbox_box.setMinimumHeight(h)
-                self.inbox_box.setMaximumHeight(h)
-            else:
-                self.activity_box.setMinimumHeight(h)
-                self.activity_box.setMaximumHeight(h)
-                self.inbox_box.setMinimumHeight(h)
-                self.inbox_box.setMaximumHeight(h)
+            self.activity_box.setMinimumHeight(0)
+            self.activity_box.setMaximumHeight(16777215)
+            h_freq = max(140, int(self.freq_ctrl_box.sizeHint().height()))
+            h_inbox = max(
+                140,
+                int(self._message_summary_target_height or 0),
+                int(self.inbox_box.sizeHint().height()),
+            )
+            top_h = max(h_freq, h_inbox)
+            self._freq_ctrl_fixed_height = top_h
+            self.freq_ctrl_box.setMinimumHeight(top_h)
+            self.freq_ctrl_box.setMaximumHeight(top_h)
+            self.inbox_box.setMinimumHeight(top_h)
+            self.inbox_box.setMaximumHeight(top_h)
+        except Exception:
+            pass
+
+    def _set_message_summary_visible_rows(self, rows: int = 7) -> None:
+        try:
+            rows = max(1, int(rows))
+            header_h = max(
+                int(self.inbox_table.horizontalHeader().height()),
+                int(self.inbox_table.horizontalHeader().sizeHint().height()),
+                22,
+            )
+            row_h = max(int(self.inbox_table.verticalHeader().defaultSectionSize()), 18)
+            frame_h = int(self.inbox_table.frameWidth()) * 2
+            target_h = header_h + (row_h * rows) + frame_h + 4
+            self._message_summary_target_height = max(
+                target_h,
+                int(self.inbox_box.sizeHint().height()),
+            )
+            self.inbox_table.setMinimumHeight(target_h)
+            self.inbox_table.setMaximumHeight(target_h)
+            self._sync_top_panel_heights()
         except Exception:
             pass
 
@@ -452,19 +541,20 @@ class ControlFreqTab(QWidget):
 
     def _persist_ui_state(self) -> None:
         try:
+            self._saved_top_sizes = list(self.top_splitter.sizes())
+            self._saved_left_sizes = list(self.left_splitter.sizes())
+            self._saved_right_sizes = list(self.right_splitter.sizes())
             values = {
                 "controlfreq_show_local": bool(self._show_local),
                 "controlfreq_focus_mode": bool(self._focus_mode),
                 "controlfreq_search": (self.search_edit.text() or "").strip(),
                 "controlfreq_group_filter": (self.group_combo.currentData() or "").strip().upper(),
                 "controlfreq_activity_window_min": int(self.activity_window_combo.currentData() or 120),
-                "controlfreq_top_splitter_sizes": (
-                    list(self._saved_top_sizes)
-                    if self._focus_mode and self._saved_top_sizes
-                    else list(self.top_splitter.sizes())
-                ),
-                "controlfreq_left_splitter_sizes": list(self.left_splitter.sizes()),
-                "controlfreq_right_splitter_sizes": list(self.right_splitter.sizes()),
+                "controlfreq_view_preset": str(self._view_preset or "All"),
+                "controlfreq_view_cards": dict(self._view_cards or {}),
+                "controlfreq_top_splitter_sizes": list(self._saved_top_sizes),
+                "controlfreq_left_splitter_sizes": list(self._saved_left_sizes),
+                "controlfreq_right_splitter_sizes": list(self._saved_right_sizes),
             }
             self.settings.set_many(values)
         except Exception as e:
@@ -473,11 +563,16 @@ class ControlFreqTab(QWidget):
     def _restore_ui_state(self) -> None:
         try:
             self._show_local = bool(self.settings.get("controlfreq_show_local", self._show_local))
-            # Default Focus Mode to on when opening ControlFreq.
-            self._focus_mode = True
+            self._focus_mode = False
             self._pending_group_filter = (
                 str(self.settings.get("controlfreq_group_filter", "") or "").strip().upper()
             )
+            saved_view_cards = self.settings.get("controlfreq_view_cards", {}) or {}
+            self._view_cards = self._normalized_view_cards(saved_view_cards)
+            saved_preset = str(self.settings.get("controlfreq_view_preset", "All") or "All").strip()
+            self._view_preset = self._preset_for_view_cards(self._view_cards)
+            if saved_preset == "Custom":
+                self._view_preset = "Custom"
             saved_search = str(self.settings.get("controlfreq_search", "") or "").strip()
             if saved_search:
                 self.search_edit.blockSignals(True)
@@ -493,9 +588,14 @@ class ControlFreqTab(QWidget):
             self._saved_left_sizes = list(self.settings.get("controlfreq_left_splitter_sizes", []) or [])
             self._saved_right_sizes = list(self.settings.get("controlfreq_right_splitter_sizes", []) or [])
             self._apply_focus_mode()
-            QTimer.singleShot(0, self._apply_saved_splitter_sizes)
+            QTimer.singleShot(0, self._finalize_restored_ui_state)
         except Exception as e:
             log.debug("ControlFreq: failed to restore UI state: %s", e)
+
+    def _finalize_restored_ui_state(self) -> None:
+        self._apply_saved_splitter_sizes()
+        self._sync_view_controls_from_state()
+        self._apply_view_state(animated=False)
 
     def _apply_saved_splitter_sizes(self) -> None:
         try:
@@ -509,36 +609,291 @@ class ControlFreqTab(QWidget):
             log.debug("ControlFreq: failed to apply saved splitter sizes: %s", e)
 
     def _toggle_focus_mode(self) -> None:
-        self._focus_mode = not self._focus_mode
+        self._focus_mode = False
         self._apply_focus_mode()
-        self._schedule_persist_ui_state()
 
     def _apply_focus_mode(self) -> None:
-        active = bool(self._focus_mode)
-        self.focus_mode_btn.setText("Focus Mode: On" if active else "Focus Mode: Off")
+        self._focus_mode = False
+        self.focus_mode_btn.setText("Focus Mode: Off")
         try:
             theme = resolve_theme(self.settings)
-            self.focus_mode_btn.setStyleSheet(
-                button_style("info" if active else "secondary", theme)
-            )
+            self.focus_mode_btn.setStyleSheet(button_style("secondary", theme))
         except Exception:
             pass
-        # Keep operating-status LEDs visible in both focus states.
+        # Legacy compatibility only; visibility is controlled by the View bar.
         self.status_group.setVisible(True)
-        self.activity_box.setVisible(not active)
         self.inbox_box.setVisible(True)
-        self.left_col.setVisible(not active)
-        if active:
-            current_sizes = list(self.top_splitter.sizes())
-            if len(current_sizes) == self.top_splitter.count() and current_sizes[0] > 0:
-                self._saved_top_sizes = current_sizes
-            self.top_splitter.setSizes([0, 1])
-        else:
-            if self._saved_top_sizes and len(self._saved_top_sizes) == self.top_splitter.count():
-                self.top_splitter.setSizes([max(1, int(v)) for v in self._saved_top_sizes])
-            else:
-                self.top_splitter.setSizes([1, 1])
+        self._sync_view_controls_from_state()
+        self._apply_view_state(animated=False)
         self._sync_top_panel_heights()
+
+    @staticmethod
+    def _view_presets() -> Dict[str, Dict[str, bool]]:
+        return {
+            "Operations": {
+                "activity": True,
+                "intersections": True,
+                "schedule": True,
+                "propagation": False,
+            },
+            "All": {
+                "activity": True,
+                "intersections": True,
+                "schedule": True,
+                "propagation": True,
+            },
+            "Traffic": {
+                "activity": True,
+                "intersections": True,
+                "schedule": False,
+                "propagation": False,
+            },
+            "Schedule": {
+                "activity": False,
+                "intersections": True,
+                "schedule": True,
+                "propagation": False,
+            },
+            "Propagation": {
+                "activity": False,
+                "intersections": False,
+                "schedule": False,
+                "propagation": True,
+            },
+        }
+
+    def _normalized_view_cards(self, raw: object) -> Dict[str, bool]:
+        defaults = dict(self._view_presets().get("All", {}))
+        if isinstance(raw, dict):
+            for key in defaults:
+                if key in raw:
+                    defaults[key] = bool(raw.get(key))
+        if not any(defaults.values()):
+            defaults["activity"] = True
+        return defaults
+
+    def _preset_for_view_cards(self, cards: Dict[str, bool]) -> str:
+        norm = self._normalized_view_cards(cards)
+        for preset, preset_cards in self._view_presets().items():
+            if all(bool(norm.get(k)) == bool(preset_cards.get(k)) for k in preset_cards):
+                return preset
+        return "Custom"
+
+    def _card_widget_map(self) -> Dict[str, QWidget]:
+        return {
+            "activity": self.activity_box,
+            "intersections": self.intersection_box,
+            "schedule": self.schedule_box,
+            "propagation": self.bottom_row,
+        }
+
+    def _card_target_height(self, key: str, widget: QWidget) -> int:
+        min_heights = {
+            "activity": 180,
+            "intersections": 170,
+            "schedule": 220,
+            "propagation": 220,
+        }
+        return max(
+            int(min_heights.get(key, 160)),
+            int(self._card_expanded_heights.get(key, 0) or 0),
+            int(widget.sizeHint().height()),
+            int(widget.height()),
+        )
+
+    def _stop_card_animation(self, key: str) -> None:
+        anim = self._card_animations.pop(key, None)
+        if anim:
+            try:
+                anim.stop()
+            except Exception:
+                pass
+
+    def _set_card_visibility_now(self, key: str, visible: bool) -> None:
+        widget = self._card_widget_map().get(key)
+        if widget is None:
+            return
+        self._stop_card_animation(key)
+        if visible:
+            widget.setVisible(True)
+            widget.setMinimumHeight(0)
+            widget.setMaximumHeight(16777215)
+            self._card_expanded_heights[key] = self._card_target_height(key, widget)
+        else:
+            self._card_expanded_heights[key] = self._card_target_height(key, widget)
+            widget.setVisible(False)
+            widget.setMinimumHeight(0)
+            widget.setMaximumHeight(16777215)
+
+    def _on_card_animation_finished(
+        self, key: str, widget: QWidget, visible: bool, target_height: int
+    ) -> None:
+        try:
+            if visible:
+                widget.setVisible(True)
+                widget.setMinimumHeight(0)
+                widget.setMaximumHeight(16777215)
+                self._card_expanded_heights[key] = max(
+                    int(self._card_expanded_heights.get(key, 0) or 0),
+                    int(target_height),
+                )
+            else:
+                widget.setVisible(False)
+                widget.setMinimumHeight(0)
+                widget.setMaximumHeight(16777215)
+        finally:
+            self._card_animations.pop(key, None)
+            self._rebalance_main_card_layout()
+            self._sync_top_panel_heights()
+
+    def _animate_card_visibility(self, key: str, visible: bool) -> None:
+        widget = self._card_widget_map().get(key)
+        if widget is None:
+            return
+        if visible and widget.isVisible():
+            return
+        if (not visible) and (not widget.isVisible()):
+            return
+        self._stop_card_animation(key)
+        target_height = self._card_target_height(key, widget)
+        if visible:
+            widget.setVisible(True)
+            widget.setMinimumHeight(0)
+            widget.setMaximumHeight(0)
+            anim = QPropertyAnimation(widget, b"maximumHeight", self)
+            anim.setDuration(170)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.setStartValue(0)
+            anim.setEndValue(target_height)
+        else:
+            start_h = max(1, int(widget.height()))
+            self._card_expanded_heights[key] = max(
+                int(self._card_expanded_heights.get(key, 0) or 0),
+                int(start_h),
+            )
+            widget.setMaximumHeight(start_h)
+            anim = QPropertyAnimation(widget, b"maximumHeight", self)
+            anim.setDuration(140)
+            anim.setEasingCurve(QEasingCurve.InCubic)
+            anim.setStartValue(start_h)
+            anim.setEndValue(0)
+        self._card_animations[key] = anim
+        anim.finished.connect(
+            lambda k=key, w=widget, show=visible, h=target_height: self._on_card_animation_finished(k, w, show, h)
+        )
+        anim.start()
+
+    def _rebalance_main_card_layout(self) -> None:
+        left_activity = bool(self._view_cards.get("activity"))
+        left_intersections = bool(self._view_cards.get("intersections"))
+        right_schedule = bool(self._view_cards.get("schedule"))
+        left_visible = left_activity or left_intersections
+        right_visible = right_schedule
+        self.left_col.setVisible(left_visible)
+        self.right_col.setVisible(right_visible)
+        self.top_splitter.setVisible(left_visible or right_visible)
+        if left_visible:
+            if left_activity and left_intersections:
+                self.left_splitter.setSizes([1, 1])
+            elif left_activity:
+                self.left_splitter.setSizes([1, 0])
+            else:
+                self.left_splitter.setSizes([0, 1])
+        if left_visible or right_visible:
+            if left_visible and right_visible:
+                self.top_splitter.setSizes([1, 1])
+            elif left_visible:
+                self.top_splitter.setSizes([1, 0])
+            else:
+                self.top_splitter.setSizes([0, 1])
+
+    def _apply_view_state(self, *, animated: bool) -> None:
+        self._view_cards = self._normalized_view_cards(self._view_cards)
+        if animated:
+            left_target = bool(self._view_cards.get("activity")) or bool(self._view_cards.get("intersections"))
+            right_target = bool(self._view_cards.get("schedule"))
+            if left_target:
+                self.left_col.setVisible(True)
+            if right_target:
+                self.right_col.setVisible(True)
+            if left_target or right_target:
+                self.top_splitter.setVisible(True)
+        for key, visible in self._view_cards.items():
+            if animated:
+                self._animate_card_visibility(key, bool(visible))
+            else:
+                self._set_card_visibility_now(key, bool(visible))
+        if not animated:
+            self._rebalance_main_card_layout()
+            self._sync_top_panel_heights()
+
+    def _sync_view_controls_from_state(self) -> None:
+        if not hasattr(self, "view_preset_combo") or not hasattr(self, "view_chip_buttons"):
+            return
+        self._view_syncing = True
+        try:
+            preset = self._preset_for_view_cards(self._view_cards)
+            if self._view_preset != "Custom":
+                self._view_preset = preset
+            combo_preset = self._view_preset if self._view_preset in {"Operations", "All", "Traffic", "Schedule", "Propagation", "Custom"} else "Custom"
+            idx = self.view_preset_combo.findData(combo_preset)
+            if idx >= 0 and self.view_preset_combo.currentIndex() != idx:
+                self.view_preset_combo.setCurrentIndex(idx)
+            for key, btn in self.view_chip_buttons.items():
+                btn.setChecked(bool(self._view_cards.get(key, False)))
+        finally:
+            self._view_syncing = False
+        self._update_view_chip_styles()
+
+    def _on_view_preset_changed(self, _idx: int) -> None:
+        if self._view_syncing:
+            return
+        preset = str(self.view_preset_combo.currentData() or "").strip()
+        if not preset or preset == "Custom":
+            return
+        preset_cards = self._view_presets().get(preset)
+        if not isinstance(preset_cards, dict):
+            return
+        self._view_cards = self._normalized_view_cards(preset_cards)
+        self._view_preset = preset
+        self._sync_view_controls_from_state()
+        self._apply_view_state(animated=True)
+        self._schedule_persist_ui_state()
+
+    def _on_view_chip_toggled(self, key: str, checked: bool) -> None:
+        if self._view_syncing:
+            return
+        next_cards = dict(self._view_cards)
+        next_cards[key] = bool(checked)
+        if not any(next_cards.values()):
+            self._view_syncing = True
+            try:
+                btn = self.view_chip_buttons.get(key)
+                if btn is not None:
+                    btn.setChecked(True)
+            finally:
+                self._view_syncing = False
+            return
+        self._view_cards = self._normalized_view_cards(next_cards)
+        self._view_preset = self._preset_for_view_cards(self._view_cards)
+        self._sync_view_controls_from_state()
+        self._apply_view_state(animated=True)
+        self._schedule_persist_ui_state()
+
+    def _update_view_chip_styles(self, theme: Optional[Dict[str, str]] = None) -> None:
+        if not hasattr(self, "view_chip_buttons"):
+            return
+        if theme is None:
+            try:
+                theme = resolve_theme(self.settings)
+            except Exception:
+                theme = {}
+        for key, btn in self.view_chip_buttons.items():
+            role = "info" if bool(self._view_cards.get(key)) else "muted"
+            try:
+                btn.setStyleSheet(button_style(role, theme))
+            except Exception:
+                pass
 
     @staticmethod
     def _hex_to_rgb(value: str) -> Tuple[int, int, int]:
@@ -584,22 +939,78 @@ class ControlFreqTab(QWidget):
         try:
             theme = resolve_theme(self.settings)
             self.refresh_btn.setStyleSheet(button_style("primary", theme))
-            self.clear_filters_btn.setStyleSheet(button_style("secondary", theme))
-            self.freq_set_btn.setStyleSheet(button_style("secondary", theme))
-            self.freq_resume_btn.setStyleSheet(button_style("secondary", theme))
+            self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
+            self.freq_set_btn.setStyleSheet(button_style("muted", theme))
+            self.freq_resume_btn.setStyleSheet(button_style("muted", theme))
             self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
-            self.focus_mode_btn.setStyleSheet(
-                button_style("info" if self._focus_mode else "secondary", theme)
-            )
+            self.focus_mode_btn.setStyleSheet(button_style("secondary", theme))
+            self._update_view_chip_styles(theme)
+            self._update_clear_filters_style()
             if hasattr(self, "schedule_action_hint"):
                 self.schedule_action_hint.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
         except Exception:
             pass
+        self._apply_frequency_display_style()
+        self._set_message_summary_visible_rows(7)
         self._lock_frequency_control_height()
         self._update_time_toggle_text()
         self._apply_focus_mode()
         self._on_freq_selection_changed()
         self._refresh_running_status()
+
+    def _apply_frequency_display_style(self) -> None:
+        try:
+            theme = resolve_theme(self.settings)
+        except Exception:
+            theme = {}
+        text_color = str(theme.get("text", "#F2F2F2" if self._is_dark_theme() else "#111111"))
+        muted_color = str(theme.get("text_muted", "#888"))
+        digital_font = QFont("Consolas")
+        if not digital_font.exactMatch():
+            digital_font = QFont("Courier New")
+        if not digital_font.exactMatch():
+            digital_font = QFont("Monospace")
+        digital_font.setStyleHint(QFont.Monospace)
+        digital_font.setPointSize(20)
+        digital_font.setBold(True)
+        self.freq_combo.setFont(digital_font)
+        self.freq_combo.setStyleSheet(
+            f"QComboBox {{ color: {text_color}; padding: 4px 24px 4px 8px; }}"
+            f"QComboBox QAbstractItemView {{ color: {text_color}; }}"
+        )
+        popup_font = QFont(digital_font)
+        popup_font.setPointSize(10)
+        popup_font.setBold(False)
+        self._freq_popup_font = popup_font
+        try:
+            self.freq_combo.view().setFont(popup_font)
+        except Exception:
+            pass
+        self.freq_meta_label.setStyleSheet(f"font-size: 12px; color: {muted_color};")
+        self._set_frequency_state_badge("unknown")
+
+    def _set_frequency_state_badge(self, state: str) -> None:
+        key = (state or "").strip().lower()
+        if key not in {"on", "off", "blocked", "unknown"}:
+            key = "unknown"
+        labels = {
+            "on": "On Schedule",
+            "off": "Off Schedule",
+            "blocked": "Blocked",
+            "unknown": "Unknown",
+        }
+        dark = self._is_dark_theme()
+        colors = {
+            "on": ("#1B5E20", "#D7FFD9") if dark else ("#DFF6E4", "#1B5E20"),
+            "off": ("#8A5A00", "#FFF1CC") if dark else ("#FFF3D6", "#8A5A00"),
+            "blocked": ("#8B1E1E", "#FFD6D6") if dark else ("#FFE2E2", "#8B1E1E"),
+            "unknown": ("#455A64", "#E6EEF2") if dark else ("#EAF2FF", "#1E3A5F"),
+        }
+        bg, fg = colors.get(key, colors["unknown"])
+        self.freq_state_badge.setText(labels.get(key, "Unknown"))
+        self.freq_state_badge.setStyleSheet(
+            f"font-weight: 600; border-radius: 10px; padding: 2px 8px; background: {bg}; color: {fg};"
+        )
 
     def apply_theme(self) -> None:
         self._apply_theme()
@@ -618,7 +1029,7 @@ class ControlFreqTab(QWidget):
             if self._status_timer is None:
                 self._status_timer = QTimer(self)
                 self._status_timer.timeout.connect(self._refresh_status_widgets)
-            self._status_timer.start(2000)
+            self._status_timer.start(5000)
             # Keep tab switch snappy: defer initial refresh work until after
             # the screen change event has returned to the UI loop.
             QTimer.singleShot(0, self._refresh_frequency_control_tick)
@@ -672,10 +1083,14 @@ class ControlFreqTab(QWidget):
         try:
             with perf_span("controlfreq.secondary_refresh", settings=self.settings, min_ms=10.0):
                 self._load_group_combo()
-                self._refresh_activity()
-                self._refresh_intersections()
-                self._refresh_schedule_outlook()
-                self._refresh_prop_target_controls()
+                if bool(self._view_cards.get("activity", True)):
+                    self._refresh_activity()
+                if bool(self._view_cards.get("intersections", True)):
+                    self._refresh_intersections()
+                if bool(self._view_cards.get("schedule", True)):
+                    self._refresh_schedule_outlook()
+                if bool(self._view_cards.get("propagation", True)):
+                    self._refresh_prop_target_controls()
                 self._last_secondary_refresh_ts = time.time()
                 self._schedule_deferred_heavy_refresh(force=True)
         finally:
@@ -694,7 +1109,8 @@ class ControlFreqTab(QWidget):
         try:
             with perf_span("controlfreq.heavy_refresh", settings=self.settings, min_ms=10.0):
                 self._refresh_message_summary()
-                self._refresh_propagation_snapshot()
+                if bool(self._view_cards.get("propagation", True)):
+                    self._refresh_propagation_snapshot()
                 self._last_heavy_refresh_ts = time.time()
         finally:
             self._heavy_refresh_pending = False
@@ -712,6 +1128,33 @@ class ControlFreqTab(QWidget):
         self._schedule_persist_ui_state()
         self._refresh_schedule_outlook()
 
+    def _on_filters_changed(self, *_args) -> None:
+        self._update_clear_filters_style()
+        self._schedule_persist_ui_state()
+        try:
+            self._filter_refresh_timer.start(220)
+        except Exception:
+            self._run_filter_refresh()
+
+    def _run_filter_refresh(self) -> None:
+        try:
+            if bool(self._view_cards.get("activity", True)):
+                self._refresh_activity()
+            if bool(self._view_cards.get("intersections", True)):
+                self._refresh_intersections()
+            if bool(self._view_cards.get("schedule", True)):
+                self._refresh_schedule_outlook()
+            # Message summary is always visible in top row.
+            self._refresh_message_summary()
+            self._last_secondary_refresh_ts = time.time()
+            self._last_heavy_refresh_ts = self._last_secondary_refresh_ts
+            self.updated_label.setText(
+                f"Last updated: {dt.datetime.fromtimestamp(self._last_secondary_refresh_ts):%Y-%m-%d %H:%M:%S}"
+            )
+            self._update_clear_filters_style()
+        except Exception as e:
+            log.debug("ControlFreq: filter refresh failed: %s", e)
+
     def _clear_filters(self) -> None:
         self.search_edit.clear()
         if self.group_combo.count() > 0:
@@ -719,8 +1162,22 @@ class ControlFreqTab(QWidget):
         if self.activity_window_combo.count() > 0:
             idx = self.activity_window_combo.findData(120)
             self.activity_window_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self._schedule_persist_ui_state()
-        self._refresh_all()
+        self._update_clear_filters_style()
+        self._on_filters_changed()
+
+    def _filters_active(self) -> bool:
+        search_active = bool((self.search_edit.text() or "").strip())
+        group_active = bool((self.group_combo.currentData() or "").strip())
+        window_active = int(self.activity_window_combo.currentData() or 120) != 120
+        return search_active or group_active or window_active
+
+    def _update_clear_filters_style(self) -> None:
+        try:
+            theme = resolve_theme(self.settings)
+            role = "eligible_warning" if self._filters_active() else "muted"
+            self.clear_filters_btn.setStyleSheet(button_style(role, theme))
+        except Exception:
+            pass
 
     def _refresh_all(
         self,
@@ -729,27 +1186,34 @@ class ControlFreqTab(QWidget):
         include_status: bool = True,
     ) -> None:
         with perf_span("controlfreq.refresh_all", settings=self.settings, min_ms=10.0):
-            try:
-                self.settings.reload()
-            except Exception:
-                pass
+            if include_secondary or include_heavy:
+                try:
+                    self.settings.reload()
+                except Exception:
+                    pass
             self._refresh_frequency_control(include_intersections=False)
             if include_status:
                 self._refresh_status_widgets()
             if include_secondary:
                 self._load_group_combo()
-                self._refresh_activity()
-                self._refresh_intersections()
-                self._refresh_schedule_outlook()
-                self._refresh_prop_target_controls()
+                if bool(self._view_cards.get("activity", True)):
+                    self._refresh_activity()
+                if bool(self._view_cards.get("intersections", True)):
+                    self._refresh_intersections()
+                if bool(self._view_cards.get("schedule", True)):
+                    self._refresh_schedule_outlook()
+                if bool(self._view_cards.get("propagation", True)):
+                    self._refresh_prop_target_controls()
                 self._last_secondary_refresh_ts = time.time()
             if include_heavy:
                 self._refresh_message_summary()
-                self._refresh_propagation_snapshot()
+                if bool(self._view_cards.get("propagation", True)):
+                    self._refresh_propagation_snapshot()
                 self._last_heavy_refresh_ts = time.time()
             self._last_refresh_ts = time.time()
             ts = dt.datetime.fromtimestamp(self._last_refresh_ts).strftime("%Y-%m-%d %H:%M:%S")
             self.updated_label.setText(f"Last updated: {ts}")
+            self._update_clear_filters_style()
 
     def _refresh_status_widgets(self) -> None:
         self._refresh_running_status()
@@ -778,21 +1242,28 @@ class ControlFreqTab(QWidget):
         try:
             sched = getattr(self.window(), "scheduler", None)
             if not sched or not hasattr(sched, "get_status_summary"):
-                self.now_status_label.setText("Status: --")
-                self.next_change_label.setText("Next: --")
-                self.suspend_label.setText("Suspend: --")
+                self._set_frequency_state_badge("unknown")
+                self.next_change_label.setText("Next Change: --")
                 return
             status = sched.get_status_summary()
             off_schedule = bool(status.get("off_schedule"))
-            now_state = "Off Schedule" if off_schedule else "On Schedule"
-            self.now_status_label.setText(f"Status: {now_state}")
-            if off_schedule:
-                self.now_status_label.setStyleSheet("font-weight: 600; color: #B71C1C;")
+            blocked = bool(
+                status.get("varac_waiting")
+                or status.get("js8_busy")
+                or status.get("fldigi_busy")
+                or status.get("varac_busy")
+                or status.get("ptt_active")
+            )
+            if blocked:
+                badge_state = "blocked"
+            elif off_schedule:
+                badge_state = "off"
             else:
-                self.now_status_label.setStyleSheet("font-weight: 500;")
+                badge_state = "on"
+            self._set_frequency_state_badge(badge_state)
 
             next_change = getattr(sched, "next_change_utc", None)
-            next_text = "Next: --"
+            next_text = "Next Change: --"
             if isinstance(next_change, dt.datetime):
                 if next_change.tzinfo is None:
                     next_change = next_change.replace(tzinfo=dt.timezone.utc)
@@ -801,7 +1272,9 @@ class ControlFreqTab(QWidget):
                 now_utc = dt.datetime.now(dt.timezone.utc)
                 mins = int(max(0.0, (next_change - now_utc).total_seconds()) // 60)
                 display_dt = next_change.astimezone(self._get_display_tz()) if self._show_local else next_change
-                next_text = f"Next: {display_dt:%H:%M} ({mins}m)"
+                sched_freq = current_scheduler_freq(self.window())
+                freq_txt = f"{sched_freq:.3f}" if isinstance(sched_freq, (int, float)) else "--"
+                next_text = f"Next Change: {freq_txt} {display_dt:%H:%M}"
                 if mins <= 15:
                     self.next_change_label.setStyleSheet("font-weight: 600; color: #B71C1C;")
                 elif mins <= 60:
@@ -811,16 +1284,6 @@ class ControlFreqTab(QWidget):
             else:
                 self.next_change_label.setStyleSheet("color: #888;")
             self.next_change_label.setText(next_text)
-
-            suspended_until = status.get("suspended_until")
-            suspend_text = "Suspend: Active" if suspended_until else "Suspend: Off"
-            if isinstance(suspended_until, dt.datetime):
-                local_dt = suspended_until.astimezone(self._get_display_tz())
-                suspend_text = f"Suspend: until {local_dt:%H:%M}"
-                self.suspend_label.setStyleSheet("font-weight: 500; color: #8A5A00;")
-            else:
-                self.suspend_label.setStyleSheet("color: #888;")
-            self.suspend_label.setText(suspend_text)
         except Exception as e:
             log.debug("ControlFreq: failed scheduler strip refresh: %s", e)
 
@@ -888,7 +1351,9 @@ class ControlFreqTab(QWidget):
             self.prop_target_value_combo.setCurrentIndex(0)
         else:
             self.prop_target_value_combo.setEditText("")
-        self.prop_target_value_combo.setEditable(target_type == "OPERATOR")
+        self.prop_target_value_combo.setEditable(True)
+        if self.prop_target_value_combo.lineEdit():
+            self.prop_target_value_combo.lineEdit().setPlaceholderText("Type to search...")
         self.prop_target_value_combo.blockSignals(False)
 
     def _refresh_prop_target_controls(self) -> None:
@@ -950,6 +1415,10 @@ class ControlFreqTab(QWidget):
             value = "ALL"
         if target_type == "STATE":
             value = self._normalize_state_abbr(value)
+        if target_type in {"REGION", "STATE"} and value:
+            idx = self.prop_target_value_combo.findText(value, Qt.MatchFixedString)
+            if idx < 0:
+                return
         try:
             self.settings.set_many(
                 {
@@ -1020,6 +1489,17 @@ class ControlFreqTab(QWidget):
 
     def _load_operator_group_map(self) -> Dict[str, Set[str]]:
         db_path = self._db_path()
+        now_ts = time.time()
+        try:
+            db_mtime = float(db_path.stat().st_mtime) if db_path.exists() else 0.0
+        except Exception:
+            db_mtime = 0.0
+        if (
+            self._operator_groups_cache
+            and (now_ts - float(self._operator_groups_cache_ts) < self._operator_groups_cache_ttl_sec)
+            and abs(float(self._operator_groups_cache_mtime) - db_mtime) < 0.0001
+        ):
+            return self._operator_groups_cache
         mapping: Dict[str, Set[str]] = {}
         if not db_path.exists():
             return mapping
@@ -1055,9 +1535,14 @@ class ControlFreqTab(QWidget):
                 pass
             if groups:
                 mapping[cs] = groups
+        self._operator_groups_cache = mapping
+        self._operator_groups_cache_ts = now_ts
+        self._operator_groups_cache_mtime = db_mtime
         return mapping
 
     def _refresh_activity(self) -> None:
+        if not bool(self._view_cards.get("activity", True)):
+            return
         window_minutes = int(self.activity_window_combo.currentData() or 120)
         search = (self.search_edit.text() or "").strip().upper()
         group_filter = self.group_combo.currentData() or ""
@@ -1209,10 +1694,8 @@ class ControlFreqTab(QWidget):
                 current_freq = float(current.get("freq"))
         except Exception:
             current_freq = None
-        self.freq_combo.blockSignals(True)
-        self.freq_combo.clear()
-        self.freq_combo.addItem("Select frequency", None)
-        restore_idx = -1
+        combo_items: List[Tuple[str, Dict[str, Any], float]] = []
+        combo_cache_rows: List[Tuple[str, str, float, str, str, bool]] = []
         for g in sorted(
             og_list,
             key=lambda x: (
@@ -1225,7 +1708,14 @@ class ControlFreqTab(QWidget):
                 freq_val = float(g.get("frequency", 0))
             except Exception:
                 continue
-            label = f"{g.get('group','').strip()} - {g.get('band','').strip()} - {freq_val:.3f} MHz"
+            group_txt = str(g.get("group", "")).strip().upper()
+            band_txt = str(g.get("band", "")).strip().upper()
+            compact_parts = [f"{freq_val:.3f}"]
+            if group_txt:
+                compact_parts.append(group_txt)
+            if band_txt:
+                compact_parts.append(band_txt)
+            label = "  ".join(compact_parts)
             meta = {
                 "freq": freq_val,
                 "mode": g.get("mode", ""),
@@ -1233,32 +1723,87 @@ class ControlFreqTab(QWidget):
                 "auto_tune": bool(g.get("auto_tune", False)),
                 "vfo": (g.get("vfo") or "").strip().upper(),
             }
-            self.freq_combo.addItem(label.strip(" -"), meta)
-            if current_freq is not None and abs(freq_val - current_freq) < 0.0005:
-                restore_idx = self.freq_combo.count() - 1
-        if restore_idx >= 0:
+            combo_items.append((label.strip(), meta, freq_val))
+            combo_cache_rows.append(
+                (
+                    group_txt,
+                    band_txt,
+                    round(float(freq_val), 6),
+                    str(meta.get("mode") or "").strip().upper(),
+                    str(meta.get("vfo") or "").strip().upper(),
+                    bool(meta.get("auto_tune")),
+                )
+            )
+        combo_key: Tuple[Tuple[str, str, float, str, str, bool], ...] = tuple(combo_cache_rows)
+        combo_rebuilt = combo_key != self._freq_combo_cache_key
+        if combo_rebuilt:
+            self.freq_combo.blockSignals(True)
+            self.freq_combo.clear()
+            self.freq_combo.addItem("Select frequency", None)
+            try:
+                popup_font = getattr(self, "_freq_popup_font", None)
+                if popup_font is not None:
+                    self.freq_combo.setItemData(0, popup_font, Qt.FontRole)
+            except Exception:
+                pass
+            for label, meta, _freq_val in combo_items:
+                self.freq_combo.addItem(label, meta)
+                try:
+                    popup_font = getattr(self, "_freq_popup_font", None)
+                    if popup_font is not None:
+                        self.freq_combo.setItemData(self.freq_combo.count() - 1, popup_font, Qt.FontRole)
+                except Exception:
+                    pass
+            self.freq_combo.blockSignals(False)
+            self._freq_combo_cache_key = combo_key
+
+        restore_idx = -1
+        if current_freq is not None:
+            for idx in range(1, self.freq_combo.count()):
+                meta = self.freq_combo.itemData(idx)
+                try:
+                    freq_val = float((meta or {}).get("freq"))
+                except Exception:
+                    continue
+                if abs(freq_val - current_freq) < 0.0005:
+                    restore_idx = idx
+                    break
+        force_resync = bool(self._force_hero_resync)
+        if restore_idx >= 0 and not force_resync:
+            self.freq_combo.blockSignals(True)
             self.freq_combo.setCurrentIndex(restore_idx)
-        self.freq_combo.blockSignals(False)
+            self.freq_combo.blockSignals(False)
         sched_freq = current_scheduler_freq(self.window())
         sched_group = self._get_scheduled_group_name()
-        if sched_freq is not None:
-            grp = sched_group or "--"
-            self.freq_ctrl_label.setText(f"Scheduled: {grp} {sched_freq:.3f} MHz")
-        else:
-            self.freq_ctrl_label.setText("Scheduled: --")
         active_freq = self._get_active_frequency_mhz()
-        if active_freq is not None:
-            grp = sched_group or "--"
-            self.freq_active_label.setText(f"Active: {grp} {active_freq:.3f} MHz")
-        else:
-            self.freq_active_label.setText("Active: --")
-        self._update_resume_button_style(sched_freq, active_freq)
+        display_freq = active_freq if active_freq is not None else sched_freq
+        if (force_resync or restore_idx < 0) and display_freq is not None:
+            for idx in range(1, self.freq_combo.count()):
+                meta = self.freq_combo.itemData(idx)
+                try:
+                    freq_val = float((meta or {}).get("freq"))
+                except Exception:
+                    continue
+                if abs(freq_val - float(display_freq)) < 0.0005:
+                    self.freq_combo.blockSignals(True)
+                    self.freq_combo.setCurrentIndex(idx)
+                    self.freq_combo.blockSignals(False)
+                    break
+        self._force_hero_resync = False
+        sched_txt = f"{sched_freq:.3f}" if sched_freq is not None else "--"
+        band_txt = self._band_for_group_freq(sched_group, sched_freq) if sched_freq is not None else "--"
+        group_txt = sched_group or "--"
+        line1 = f"Scheduled: {group_txt} | {band_txt} - {sched_txt}"
+        self.freq_meta_label.setText(line1)
+        self._update_frequency_action_styles(sched_freq, active_freq)
         self._update_active_label_style(sched_freq, active_freq)
         self._refresh_scheduler_strip()
         if include_intersections:
             self._refresh_intersections()
 
     def _refresh_intersections(self) -> None:
+        if not bool(self._view_cards.get("intersections", True)):
+            return
         now_ts = time.time()
         group_filter = (self.group_combo.currentData() or "").strip().upper()
         search = (self.search_edit.text() or "").strip().upper()
@@ -1286,11 +1831,11 @@ class ControlFreqTab(QWidget):
         rows: List[List[str]] = []
         now_utc = dt.datetime.now(dt.timezone.utc)
         now_min = now_utc.hour * 60 + now_utc.minute
-        horizon_min = min(now_min + 120, 1440)
-        today_name = now_utc.strftime("%A")
-        tz = self._get_display_tz()
+        now_day_idx = (now_utc.weekday() + 1) % 7  # Sunday=0
+        now_week_min = now_day_idx * 1440 + now_min
+        horizon_minutes = 120
 
-        my_entries = self._load_my_schedule_entries(today_name)
+        my_entries = self._load_my_schedule_entries()
         if not my_entries:
             return rows
         operator_groups = self._load_operator_group_map()
@@ -1302,12 +1847,23 @@ class ControlFreqTab(QWidget):
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT owner_callsign, day_utc, start_utc, end_utc, band, frequency
-                FROM peer_hf_schedule
-                """
-            )
+            has_effective_view = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view' AND name='peer_hf_schedule_effective'"
+            ).fetchone()
+            if has_effective_view:
+                cur.execute(
+                    """
+                    SELECT owner_callsign, day_utc, start_utc, end_utc, band, frequency
+                    FROM peer_hf_schedule_effective
+                    """
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT owner_callsign, day_utc, start_utc, end_utc, band, frequency
+                    FROM peer_hf_schedule
+                    """
+                )
             peer_rows = cur.fetchall()
             conn.close()
         except Exception as e:
@@ -1319,9 +1875,6 @@ class ControlFreqTab(QWidget):
         now_labels: Set[str] = set()
         next_labels: Set[str] = set()
         for r in peer_rows:
-            day = (r["day_utc"] or "ALL").strip()
-            if not self._day_matches_today(day, today_name):
-                continue
             cs = (r["owner_callsign"] or "").strip().upper()
             if not cs:
                 continue
@@ -1333,27 +1886,33 @@ class ControlFreqTab(QWidget):
                 continue
             peer_start = self._parse_time_minutes(r["start_utc"])
             peer_end = self._parse_time_minutes(r["end_utc"])
-            if peer_start is None or peer_end is None or peer_end <= peer_start:
+            if peer_start is None or peer_end is None:
                 continue
-            if peer_end <= now_min or peer_start >= horizon_min:
+            peer_segments = self._expand_week_segments((r["day_utc"] or "ALL"), peer_start, peer_end)
+            if not peer_segments:
                 continue
-            try:
-                peer_freq = float(str(r["frequency"]).strip())
-            except Exception:
+            peer_freq = self._parse_frequency_mhz(r["frequency"])
+            if peer_freq is None:
                 continue
 
             for entry in my_entries:
-                if abs(entry["freq"] - peer_freq) > 0.0001:
+                if abs(entry["freq"] - peer_freq) > 0.001:
                     continue
-                start = max(peer_start, entry["start_min"], now_min)
-                end = min(peer_end, entry["end_min"], horizon_min)
-                if end > start:
-                    if start <= now_min < end:
-                        now_calls.add(cs)
-                        now_labels.add(self._format_group_band_freq_label(entry))
-                    else:
-                        next_calls.add(cs)
-                        next_labels.add(self._format_group_band_freq_label(entry))
+                overlaps = self._next_horizon_overlaps(
+                    entry.get("segments", []),
+                    peer_segments,
+                    now_week_min=now_week_min,
+                    horizon_minutes=horizon_minutes,
+                )
+                if not overlaps:
+                    continue
+                has_now = any(start <= now_week_min < end for start, end in overlaps)
+                if has_now:
+                    now_calls.add(cs)
+                    now_labels.add(self._format_group_band_freq_label(entry))
+                else:
+                    next_calls.add(cs)
+                    next_labels.add(self._format_group_band_freq_label(entry))
 
         rows.append(["Now", str(len(now_calls)), self._summarize_labels(now_labels)])
         rows.append(["Next 2 hours", str(len(next_calls)), self._summarize_labels(next_labels)])
@@ -1433,76 +1992,236 @@ class ControlFreqTab(QWidget):
                 return (row.get("band") or "").strip().upper()
         return ""
 
-    def _load_my_schedule_entries(self, today_name: str) -> List[Dict[str, object]]:
+    def _load_my_schedule_entries(self) -> List[Dict[str, object]]:
+        try:
+            settings_mtime = (
+                float(self._settings_db_path().stat().st_mtime)
+                if self._settings_db_path().exists()
+                else 0.0
+            )
+        except Exception:
+            settings_mtime = 0.0
+        try:
+            nets_mtime = float(self._db_path().stat().st_mtime) if self._db_path().exists() else 0.0
+        except Exception:
+            nets_mtime = 0.0
+        cache_key = (settings_mtime, nets_mtime)
+        now_ts = time.time()
+        if (
+            self._my_schedule_entries_cache
+            and (now_ts - float(self._my_schedule_entries_cache_ts) < self._my_schedule_entries_cache_ttl_sec)
+            and cache_key == self._my_schedule_entries_cache_key
+        ):
+            return self._my_schedule_entries_cache
+
         entries: List[Dict[str, object]] = []
+        seen: Set[Tuple[str, float, str, str]] = set()
 
         def add_entry(day: str, start: str, end: str, band: str, freq_val, group: str) -> None:
-            if not self._day_matches_today(day, today_name):
-                return
             start_min = self._parse_time_minutes(start)
             end_min = self._parse_time_minutes(end)
-            if start_min is None or end_min is None or end_min <= start_min:
+            if start_min is None or end_min is None:
                 return
-            try:
-                freq_num = float(str(freq_val).strip())
-            except Exception:
+            freq_num = self._parse_frequency_mhz(freq_val)
+            if freq_num is None:
                 return
+            segments = self._expand_week_segments(day, start_min, end_min)
+            if not segments:
+                return
+            group_val = (group or "").strip().upper()
+            band_val = (band or "").strip().upper()
+            key = (
+                f"{day}|{start_min}|{end_min}",
+                round(float(freq_num), 3),
+                band_val,
+                group_val,
+            )
+            if key in seen:
+                return
+            seen.add(key)
             entries.append(
                 {
                     "start_min": start_min,
                     "end_min": end_min,
                     "freq": freq_num,
-                    "band": (band or "").strip().upper(),
-                    "group": (group or "").strip().upper(),
+                    "band": band_val,
+                    "group": group_val,
+                    "segments": segments,
                 }
             )
 
-        db_path = self._settings_db_path()
-        if db_path.exists():
+        def _read_rows(db_path: Path, table_name: str, cols: str) -> None:
+            if not db_path.exists():
+                return
             try:
                 conn = sqlite3.connect(db_path)
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
-                cur.execute("SELECT day_utc, start_utc, end_utc, band, frequency, group_name FROM daily_schedule_tab")
+                has_table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,),
+                ).fetchone()
+                if not has_table:
+                    conn.close()
+                    return
+                cur.execute(f"SELECT {cols} FROM {table_name}")
                 rows = cur.fetchall()
                 conn.close()
                 for r in rows:
+                    group_val = ""
+                    try:
+                        group_val = r["group_name"] or ""
+                    except Exception:
+                        group_val = ""
+                    if not group_val:
+                        try:
+                            group_val = r["net_name"] or ""
+                        except Exception:
+                            group_val = ""
                     add_entry(
                         r["day_utc"],
                         r["start_utc"],
                         r["end_utc"],
                         r["band"],
                         r["frequency"],
-                        r["group_name"],
+                        group_val,
                     )
             except Exception as e:
-                log.debug("ControlFreq: failed to load daily schedule for overlaps: %s", e)
+                log.debug("ControlFreq: failed to load %s for overlaps: %s", table_name, e)
 
-        db_path = self._db_path()
-        if db_path.exists():
-            try:
-                conn = sqlite3.connect(db_path)
-                conn.row_factory = sqlite3.Row
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT day_utc, start_utc, end_utc, band, frequency, group_name, net_name FROM net_schedule_tab"
-                )
-                rows = cur.fetchall()
-                conn.close()
-                for r in rows:
-                    group = r["group_name"] or r["net_name"]
-                    add_entry(
-                        r["day_utc"],
-                        r["start_utc"],
-                        r["end_utc"],
-                        r["band"],
-                        r["frequency"],
-                        group,
-                    )
-            except Exception as e:
-                log.debug("ControlFreq: failed to load net schedule for overlaps: %s", e)
-
+        _read_rows(
+            self._settings_db_path(),
+            "daily_schedule_tab",
+            "day_utc, start_utc, end_utc, band, frequency, group_name",
+        )
+        _read_rows(
+            self._db_path(),
+            "daily_schedule_tab",
+            "day_utc, start_utc, end_utc, band, frequency, group_name",
+        )
+        _read_rows(
+            self._db_path(),
+            "net_schedule_tab",
+            "day_utc, start_utc, end_utc, band, frequency, group_name, net_name",
+        )
+        _read_rows(
+            self._settings_db_path(),
+            "net_schedule_tab",
+            "day_utc, start_utc, end_utc, band, frequency, group_name, net_name",
+        )
+        self._my_schedule_entries_cache = entries
+        self._my_schedule_entries_cache_ts = now_ts
+        self._my_schedule_entries_cache_key = cache_key
         return entries
+
+    @staticmethod
+    def _day_to_index(day: str) -> Optional[int]:
+        txt = (day or "").strip().lower()
+        if not txt:
+            return None
+        names = [
+            "sunday",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+        ]
+        for idx, name in enumerate(names):
+            if txt.startswith(name[:3]) or name.startswith(txt[:3]):
+                return idx
+        return None
+
+    def _schedule_day_indices(self, day: str) -> List[int]:
+        txt = (day or "ALL").strip().upper()
+        if txt in {"", "ALL", "DAILY"}:
+            return list(range(7))
+        for delim in ("/", ";", "|"):
+            txt = txt.replace(delim, ",")
+        out: List[int] = []
+        for part in txt.split(","):
+            idx = self._day_to_index(part)
+            if idx is not None and idx not in out:
+                out.append(idx)
+        return out
+
+    def _expand_week_segments(self, day: str, start_min: int, end_min: int) -> List[Tuple[int, int, int]]:
+        if start_min < 0 or start_min > 1439 or end_min < 0 or end_min > 1439:
+            return []
+        if start_min == end_min:
+            return []
+        day_indices = self._schedule_day_indices(day)
+        if not day_indices:
+            return []
+        segments: List[Tuple[int, int, int]] = []
+        for day_idx in day_indices:
+            if start_min < end_min:
+                segments.append((day_idx, start_min, end_min))
+                continue
+            segments.append((day_idx, start_min, 24 * 60))
+            segments.append(((day_idx + 1) % 7, 0, end_min))
+        return segments
+
+    @staticmethod
+    def _next_horizon_overlaps(
+        seg_a: List[Tuple[int, int, int]],
+        seg_b: List[Tuple[int, int, int]],
+        *,
+        now_week_min: int,
+        horizon_minutes: int,
+    ) -> List[Tuple[int, int]]:
+        if not seg_a or not seg_b:
+            return []
+        week = 7 * 24 * 60
+        window_start = int(now_week_min)
+        window_end = int(now_week_min + max(1, int(horizon_minutes)))
+
+        def _absolute_segments(segments: List[Tuple[int, int, int]]) -> List[Tuple[int, int]]:
+            out: List[Tuple[int, int]] = []
+            for day_idx, start_min, end_min in segments:
+                base_start = int(day_idx) * 1440 + int(start_min)
+                base_end = int(day_idx) * 1440 + int(end_min)
+                out.append((base_start, base_end))
+                out.append((base_start + week, base_end + week))
+            return out
+
+        abs_a = _absolute_segments(seg_a)
+        abs_b = _absolute_segments(seg_b)
+        overlaps: List[Tuple[int, int]] = []
+        for a_start, a_end in abs_a:
+            if a_end <= window_start or a_start >= window_end:
+                continue
+            for b_start, b_end in abs_b:
+                if b_end <= window_start or b_start >= window_end:
+                    continue
+                start = max(a_start, b_start, window_start)
+                end = min(a_end, b_end, window_end)
+                if end > start:
+                    overlaps.append((start, end))
+        if not overlaps:
+            return overlaps
+        overlaps.sort(key=lambda it: (it[0], it[1]))
+        merged: List[Tuple[int, int]] = []
+        for start, end in overlaps:
+            if not merged or start > merged[-1][1]:
+                merged.append((start, end))
+            else:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        return merged
+
+    @staticmethod
+    def _parse_frequency_mhz(value) -> Optional[float]:
+        try:
+            txt = str(value).strip()
+            if not txt:
+                return None
+            match = re.search(r"[-+]?\d+(?:[.,]\d+)?", txt)
+            if not match:
+                return None
+            return float(match.group(0).replace(",", "."))
+        except Exception:
+            return None
 
     @staticmethod
     def _day_matches_today(day: str, today_name: str) -> bool:
@@ -1590,19 +2309,38 @@ class ControlFreqTab(QWidget):
             return None
         return None
 
-    def _update_resume_button_style(
-        self, scheduled: Optional[float], active: Optional[float]
+    def _update_frequency_action_styles(
+        self,
+        scheduled: Optional[float] = None,
+        active: Optional[float] = None,
     ) -> None:
         try:
             theme = resolve_theme(self.settings)
         except Exception:
             theme = None
-        mismatch = False
-        if scheduled is not None and active is not None:
-            mismatch = abs(scheduled - active) > 0.0005
-        if theme:
-            style = "warning" if mismatch else "secondary"
-            self.freq_resume_btn.setStyleSheet(button_style(style, theme))
+        if not theme:
+            return
+        if scheduled is None:
+            scheduled = current_scheduler_freq(self.window())
+        if active is None:
+            active = self._get_active_frequency_mhz()
+        mismatch = (
+            scheduled is not None
+            and active is not None
+            and abs(scheduled - active) > 0.0005
+        )
+        qsy_pending = False
+        meta = selected_qsy_meta(self.freq_combo)
+        if meta:
+            try:
+                selected = float(meta.get("freq", 0.0))
+                qsy_pending = active is None or abs(selected - float(active)) > 0.0005
+            except Exception:
+                qsy_pending = True
+        qsy_role = "warning" if qsy_pending else "muted"
+        resume_role = "info" if mismatch and not qsy_pending else "muted"
+        self.freq_set_btn.setStyleSheet(button_style(qsy_role, theme))
+        self.freq_resume_btn.setStyleSheet(button_style(resume_role, theme))
 
     def _update_active_label_style(
         self, scheduled: Optional[float], active: Optional[float]
@@ -1615,10 +2353,8 @@ class ControlFreqTab(QWidget):
         if scheduled is not None and active is not None:
             mismatch = abs(scheduled - active) > 0.0005
         if theme:
-            color = theme["info"] if mismatch else theme["text"]
-            self.freq_active_label.setStyleSheet(
-                f"font-size: 14px; font-weight: bold; color: {color};"
-            )
+            color = theme["warning"] if mismatch else theme.get("text_muted", theme["text"])
+            self.freq_meta_label.setStyleSheet(f"font-size: 12px; color: {color};")
 
     def _on_freq_set_clicked(self) -> None:
         control_via = (self.settings.get("control_via", "") or "").strip()
@@ -1646,30 +2382,46 @@ class ControlFreqTab(QWidget):
         if ok:
             QTimer.singleShot(800, self._refresh_frequency_control)
 
-    def _on_freq_selection_changed(self) -> None:
-        meta = selected_qsy_meta(self.freq_combo)
-        try:
-            theme = resolve_theme(self.settings)
-        except Exception:
-            theme = None
-        if theme:
-            if meta:
-                self.freq_set_btn.setStyleSheet(button_style("info", theme))
-            else:
-                self.freq_set_btn.setStyleSheet(button_style("secondary", theme))
+    def _on_freq_selection_changed(self, *_args) -> None:
+        self._update_frequency_action_styles()
 
     def _on_resume_schedule_clicked(self) -> None:
+        resumed = False
         try:
             sched = getattr(self.window(), "scheduler", None)
             if sched and hasattr(sched, "resume_schedule"):
                 sched.resume_schedule()
-                return
-            if sched:
+                resumed = True
+            elif sched:
                 sched.apply_current_entry(force=True, ignore_wait_prompt=True, ignore_suspend=True)
+                resumed = True
         except Exception:
             pass
+        if resumed:
+            self.on_schedule_resumed()
+
+    def on_schedule_resumed(self) -> None:
+        """
+        Keep hero/status readouts responsive after resume regardless of trigger origin.
+        """
+        self._force_hero_resync = True
+        if not self._active:
+            return
+        self._refresh_frequency_control(include_intersections=False)
+        self._refresh_scheduler_strip()
+
+        def _pulse_refresh() -> None:
+            self._force_hero_resync = True
+            self._refresh_frequency_control(include_intersections=False)
+            self._refresh_scheduler_strip()
+
+        # Short pulses absorb asynchronous scheduler/radio apply completion.
+        for delay_ms in (120, 350, 700, 1200, 2000):
+            QTimer.singleShot(delay_ms, _pulse_refresh)
 
     def _refresh_schedule_outlook(self) -> None:
+        if not bool(self._view_cards.get("schedule", True)):
+            return
         now = dt.datetime.now(dt.timezone.utc)
         today_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
         week_end = now + dt.timedelta(days=7)
@@ -2267,6 +3019,8 @@ class ControlFreqTab(QWidget):
         rows_out: List[List[str]] = []
         rows_out.extend(message_rows)
         rows_out.extend(bbs_rows)
+        if rows_out and rows_out[0][0] not in {"No matches", "No data"}:
+            rows_out.sort(key=lambda row: str(row[0]).strip().upper())
         self._set_table_rows(self.inbox_table, rows_out)
         self._style_message_summary_rows()
         self._apply_elide_tooltips(self.inbox_table, 2)
@@ -2538,6 +3292,8 @@ class ControlFreqTab(QWidget):
         )
 
     def _refresh_propagation_snapshot(self) -> None:
+        if not bool(self._view_cards.get("propagation", True)):
+            return
         try:
             tz_name = self.settings.get("timezone", "UTC") or "UTC"
             tz = get_timezone(tz_name)
@@ -2556,7 +3312,7 @@ class ControlFreqTab(QWidget):
             self._set_prop_window_headers()
             self._set_table_rows(self.prop_table, [])
             self.prop_hint.setText(
-                "Set your Grid 6 in Settings to enable propagation snapshots."
+                "Tip: Set Grid 6 in Settings to enable forecast."
             )
             return
 
@@ -2681,14 +3437,8 @@ class ControlFreqTab(QWidget):
             ]
         )
         self._set_sectioned_prop_rows("Schedule-based Forecast", schedule_rows, "Modeled Forecast", modeled_rows)
-        schedule_note = ""
-        if not all_bands:
-            schedule_note = " No scheduled bands for today."
-        self.prop_hint.setText(
-            f"Modeled snapshot for {now_local.strftime('%Y-%m-%d')} "
-            f"({tz.tzname(now_local)}). Origin Grid: {user_grid}. "
-            f"Regional target: {target_label}.{schedule_note}"
-        )
+        schedule_note = " | no scheduled bands" if not all_bands else ""
+        self.prop_hint.setText(f"Tip: {target_label} | origin {user_grid}{schedule_note}")
 
     def _points_for_region(self, region_id: str) -> List[Tuple[float, float]]:
         region_id = (region_id or "").strip().upper()

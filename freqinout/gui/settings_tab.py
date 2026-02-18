@@ -6,6 +6,7 @@ import subprocess
 import sqlite3
 import os
 import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import Dict, Optional, List
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.logger import log, set_log_level, get_log_level, _get_log_file
+from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.config_paths import get_fldigi_checkin_dir, get_config_dir
 from freqinout.core.launch_orchestrator import LaunchOrchestrator, LAUNCH_APP_ORDER
@@ -220,6 +222,19 @@ FLDIGI_MODE_OPTIONS = [
     "IFKP",
 ]
 
+LOCAL_NET_SERVICE_OPTIONS = [
+    "VHF Simplex",
+    "VHF Repeater",
+    "UHF Simplex",
+    "UHF Repeater",
+    "GMRS Simplex",
+    "GMRS Repeater",
+    "FRS",
+    "MURS",
+    "Meshtastic",
+    "Other",
+]
+
 
 class SettingsTab(QWidget):
     """
@@ -271,12 +286,16 @@ class SettingsTab(QWidget):
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
         self.operating_groups: List[Dict[str, str]] = []
+        self.local_net_profiles: List[Dict[str, str]] = []
         self._accordion_groups: List[QGroupBox] = []
         self._section_meta: Dict[QGroupBox, Dict[str, object]] = {}
         self._section_nav_items: Dict[QGroupBox, QListWidgetItem] = {}
         self._launch_items_cache: List[Dict[str, object]] = []
         self._launch_visible_names: List[str] = []
         self._launch_table_loading = False
+        self._active = False
+        self._last_activation_refresh_ts = 0.0
+        self._activation_refresh_interval_sec = 30.0
 
         self._build_ui()
         self._load_settings()
@@ -294,13 +313,31 @@ class SettingsTab(QWidget):
 
         # process status timer
         self.status_timer = QTimer(self)
-        self.status_timer.setInterval(2000)
+        self.status_timer.setInterval(5000)
         self.status_timer.timeout.connect(self._refresh_running_status)
-        self.status_timer.start()
 
         self._update_clock_labels()
-        self._refresh_running_status()
         QTimer.singleShot(0, self._maybe_backfill_js8_geo)
+
+    def set_tab_active(self, active: bool) -> None:
+        self._active = bool(active)
+        if self._active:
+            if not self.status_timer.isActive():
+                self.status_timer.start()
+            QTimer.singleShot(0, self.on_tab_activated)
+            return
+        if self.status_timer.isActive():
+            self.status_timer.stop()
+
+    def on_tab_activated(self) -> None:
+        with perf_span("settings.on_tab_activated", settings=self.settings, min_ms=10.0):
+            now_ts = time.time()
+            if (now_ts - float(self._last_activation_refresh_ts or 0.0)) < float(
+                self._activation_refresh_interval_sec
+            ):
+                return
+            self._last_activation_refresh_ts = now_ts
+            self._refresh_running_status()
 
     # ---------- UI ---------- #
 
@@ -610,8 +647,8 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(logging_section, self._summary_logging_settings)
         logging_section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        # Operating Groups panel
-        ops_group = QGroupBox("Operating Groups")
+        # HF Operating Groups panel
+        ops_group = QGroupBox("HF Operating Groups")
         ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         ops_layout = QVBoxLayout()
         ops_layout.setSpacing(6)
@@ -657,10 +694,62 @@ class SettingsTab(QWidget):
         ops_layout.addWidget(self.op_groups_table)
         ops_container = QWidget()
         ops_container.setLayout(ops_layout)
-        ops_group = self._make_collapsible_group("Operating Groups", ops_container, checked=True, fit_content=False)
+        ops_group = self._make_collapsible_group("HF Operating Groups", ops_container, checked=True, fit_content=False)
         self._register_collapsible_group(ops_group, self._summary_operating_groups)
         ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(ops_group)
+
+        # Local Net Profiles panel (non-scheduler local net metadata for SOP workflows)
+        local_group = QGroupBox("Local Net Profiles")
+        local_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        local_layout = QVBoxLayout()
+        local_layout.setSpacing(6)
+        local_group.setLayout(local_layout)
+        local_hint = QLabel("Used by SOP local-net reminders only. Not used by scheduler automation.")
+        local_hint.setWordWrap(True)
+        local_layout.addWidget(local_hint)
+        local_row = QHBoxLayout()
+        self.add_local_net_btn = QPushButton("Add Profile")
+        self.add_local_net_btn.clicked.connect(self._add_local_net_profile)
+        self.edit_local_net_btn = QPushButton("Edit Selected")
+        self.edit_local_net_btn.clicked.connect(self._edit_local_net_profile)
+        self.delete_local_net_btn = QPushButton("Delete Selected")
+        self.delete_local_net_btn.clicked.connect(self._delete_local_net_profiles)
+        local_row.addStretch()
+        local_row.addWidget(self.add_local_net_btn)
+        local_row.addWidget(self.edit_local_net_btn)
+        local_row.addWidget(self.delete_local_net_btn)
+        local_layout.addLayout(local_row)
+        self.local_net_table = QTableWidget(0, 6)
+        self.local_net_table.setHorizontalHeaderLabels(
+            [
+                "Selected",
+                "Name",
+                "Service",
+                "Mode",
+                "Target",
+                "Notes",
+            ]
+        )
+        local_header = self.local_net_table.horizontalHeader()
+        local_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        local_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        local_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        local_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        local_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        local_header.setSectionResizeMode(5, QHeaderView.Stretch)
+        self.local_net_table.verticalHeader().setVisible(False)
+        self.local_net_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.local_net_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        self.local_net_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.local_net_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        local_layout.addWidget(self.local_net_table)
+        local_container = QWidget()
+        local_container.setLayout(local_layout)
+        local_group = self._make_collapsible_group("Local Net Profiles", local_container, checked=True, fit_content=False)
+        self._register_collapsible_group(local_group, self._summary_local_net_profiles)
+        local_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(local_group)
 
         # JS8Call status/settings
         js8_group = QGroupBox("JS8Call Settings")
@@ -1305,6 +1394,10 @@ class SettingsTab(QWidget):
         count = len(self.operating_groups)
         return f"{count} group{'s' if count != 1 else ''}"
 
+    def _summary_local_net_profiles(self) -> str:
+        count = len(self.local_net_profiles)
+        return f"{count} profile{'s' if count != 1 else ''}"
+
     def _summary_js8_settings(self) -> str:
         directed = "set" if self.js8_directed_edit.text().strip() else "missing"
         forms = "set" if self.js8_forms_edit.text().strip() else "missing"
@@ -1380,6 +1473,7 @@ class SettingsTab(QWidget):
     # ---------- LOAD/SAVE ---------- #
 
     def _load_settings(self):
+        _perf_t0 = time.perf_counter()
         self._loading_settings = True
         data = self.settings.all()
 
@@ -1554,6 +1648,23 @@ class SettingsTab(QWidget):
             self.operating_groups = []
         self._refresh_operating_groups_table()
 
+        # Load local net profiles (SOP local-net reminder metadata only).
+        try:
+            lnp = data.get("local_net_profiles", [])
+            if isinstance(lnp, list):
+                self.local_net_profiles = []
+                for row in lnp:
+                    if not isinstance(row, dict):
+                        continue
+                    normalized = self._normalize_local_net_profile(row)
+                    if normalized.get("name"):
+                        self.local_net_profiles.append(normalized)
+            else:
+                self.local_net_profiles = []
+        except Exception:
+            self.local_net_profiles = []
+        self._refresh_local_net_profiles_table()
+
         self.js8_directed_edit.setText(data.get("js8_directed_path", "") or "")
 
         for prog_name, meta in self.PROGRAMS.items():
@@ -1570,38 +1681,58 @@ class SettingsTab(QWidget):
         log.info("SettingsTab: settings loaded.")
         self._update_launch_control_buttons()
         self._update_op_group_action_buttons()
+        self._update_local_net_action_buttons()
         self._loading_settings = False
         self._settings_dirty = False
         self._set_save_button_state("success")
         self._refresh_section_titles()
+        emit_span(
+            "settings.load_settings",
+            (time.perf_counter() - _perf_t0) * 1000.0,
+            settings=self.settings,
+            min_ms=10.0,
+        )
 
     def _save_settings_button(self):
         """Explicit save via the button (shows confirmation)."""
         self._save_settings(show_message=True)
-        try:
-            self.settings_saved.emit()
-        except Exception:
-            pass
-        try:
-            self.settings_saved.emit()
-        except Exception:
-            pass
+        # Defer settings fanout one tick to keep Save interaction responsive.
+        QTimer.singleShot(0, self._emit_settings_saved)
         QTimer.singleShot(0, self._maybe_backfill_js8_geo)
         self._settings_dirty = False
         self._set_save_button_state("success")
+
+    def _emit_settings_saved(self) -> None:
+        try:
+            self.settings_saved.emit()
+        except Exception:
+            pass
 
     def _save_settings_quiet(self):
         """Auto-save on application exit (no dialog)."""
         self._save_settings(show_message=False)
 
     def _save_settings(self, show_message: bool = True):
+        _perf_t0 = time.perf_counter()
         data = self.settings.all()
+        prev_operator = {
+            "callsign": str(data.get("operator_callsign", "") or "").strip().upper(),
+            "name": str(data.get("operator_name", "") or "").strip(),
+            "state": str(data.get("operator_state", "") or "").strip().upper(),
+            "grid6": str(data.get("operator_grid6", "") or "").strip().upper(),
+        }
 
         data["operator_callsign"] = self.callsign_edit.text().strip()
         data["operator_name"] = self.name_edit.text().strip()
         data["operator_state"] = self.state_edit.text().strip()
         data["operator_grid6"] = self.grid6_edit.text().strip().upper()
         data["operator_grid6"] = self.grid6_edit.text().strip().upper()
+        operator_changed = (
+            prev_operator["callsign"] != str(data["operator_callsign"]).strip().upper()
+            or prev_operator["name"] != str(data["operator_name"]).strip()
+            or prev_operator["state"] != str(data["operator_state"]).strip().upper()
+            or prev_operator["grid6"] != str(data["operator_grid6"]).strip().upper()
+        )
 
         # Timezone is not user-editable; keep existing value (or detect if missing)
         tz = data.get("timezone")
@@ -1750,6 +1881,7 @@ class SettingsTab(QWidget):
         data["autostart_js8call"] = bool(startup_by_name.get("JS8Call", False))
 
         data["operating_groups"] = self._table_to_operating_groups()
+        data["local_net_profiles"] = self._table_to_local_net_profiles()
         try:
             set_log_level(str(data.get("log_level", "INFO") or "INFO"))
         except Exception:
@@ -1796,6 +1928,7 @@ class SettingsTab(QWidget):
                 "launch_control_migrated_v1": data.get("launch_control_migrated_v1", True),
                 "launch_readiness_timeout_sec": data.get("launch_readiness_timeout_sec", 30),
                 "operating_groups": data.get("operating_groups", []),
+                "local_net_profiles": data.get("local_net_profiles", []),
             }
             for prog_name, meta in self.PROGRAMS.items():
                 path_key = meta["setting_key"]
@@ -1855,6 +1988,7 @@ class SettingsTab(QWidget):
                     self.settings.set(auto_key, data.get(auto_key, False))
             self.settings.set("autostart_js8call", data.get("autostart_js8call", False))
             self.settings.set("operating_groups", data.get("operating_groups", []))
+            self.settings.set("local_net_profiles", data.get("local_net_profiles", []))
         elif hasattr(self.settings, "_data"):
             # Fallback: update the internal dict only
             self.settings._data = data  # type: ignore[attr-defined]
@@ -1871,9 +2005,17 @@ class SettingsTab(QWidget):
             data.get("operator_name", ""),
             data.get("operator_state", ""),
         )
-        self._refresh_operator_history_views()
+        if operator_changed:
+            QTimer.singleShot(0, self._refresh_operator_history_views)
         self._settings_dirty = False
         self._set_save_button_state("success")
+        emit_span(
+            "settings.save_settings",
+            (time.perf_counter() - _perf_t0) * 1000.0,
+            settings=self.settings,
+            meta={"operator_changed": operator_changed},
+            min_ms=0.0,
+        )
 
     def _on_theme_changed(self):
         theme = self.theme_combo.currentText().strip().lower() or "light"
@@ -2208,7 +2350,14 @@ class SettingsTab(QWidget):
                     break
 
     def _refresh_launch_control_table(self) -> None:
+        _perf_t0 = time.perf_counter()
         if not hasattr(self, "launch_control_table"):
+            emit_span(
+                "settings.refresh_launch_control_table",
+                (time.perf_counter() - _perf_t0) * 1000.0,
+                settings=self.settings,
+                min_ms=5.0,
+            )
             return
         self._sync_launch_cache_from_table()
         existing_map: Dict[str, Dict[str, object]] = {}
@@ -2277,6 +2426,12 @@ class SettingsTab(QWidget):
             self.launch_control_table.selectRow(0)
         self._update_launch_control_buttons()
         self._refresh_section_titles()
+        emit_span(
+            "settings.refresh_launch_control_table",
+            (time.perf_counter() - _perf_t0) * 1000.0,
+            settings=self.settings,
+            min_ms=5.0,
+        )
 
     def _update_launch_control_buttons(self) -> None:
         row = self.launch_control_table.currentRow() if hasattr(self, "launch_control_table") else -1
@@ -2650,6 +2805,7 @@ class SettingsTab(QWidget):
             return None
 
     def _refresh_running_status(self):
+        _perf_t0 = time.perf_counter()
         theme = resolve_theme(self.settings)
         port_override: Optional[int] = None
         try:
@@ -2669,6 +2825,12 @@ class SettingsTab(QWidget):
         if hasattr(self, "varac_path_edit"):
             varac_info = snapshot.get("VarAC", {})
             self.varac_path_edit.setToolTip(str(varac_info.get("tooltip", "Not running")))
+        emit_span(
+            "settings.refresh_running_status",
+            (time.perf_counter() - _perf_t0) * 1000.0,
+            settings=self.settings,
+            min_ms=5.0,
+        )
 
     def apply_theme(self):
         try:
@@ -2684,6 +2846,7 @@ class SettingsTab(QWidget):
             self._refresh_running_status()
             self._update_launch_selected_state()
             self._update_op_group_action_buttons()
+            self._update_local_net_action_buttons()
             self._set_save_button_state("info" if self._settings_dirty else "success")
             if hasattr(self, "open_logs_btn"):
                 self.open_logs_btn.setStyleSheet(button_style("primary", theme))
@@ -2960,6 +3123,7 @@ class SettingsTab(QWidget):
             log.exception("Failed to persist Operating Group; will remain in-memory only.")
 
     def _refresh_operating_groups_table(self):
+        _perf_t0 = time.perf_counter()
         # Sort display by Group asc, then Band asc
         self.operating_groups = sorted(
             [
@@ -3015,6 +3179,12 @@ class SettingsTab(QWidget):
         header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
         self._update_op_group_action_buttons()
         self._refresh_section_titles()
+        emit_span(
+            "settings.refresh_operating_groups_table",
+            (time.perf_counter() - _perf_t0) * 1000.0,
+            settings=self.settings,
+            min_ms=5.0,
+        )
 
     def _update_op_group_action_buttons(self):
         theme = resolve_theme(self.settings)
@@ -3238,7 +3408,7 @@ class SettingsTab(QWidget):
     def _delete_operating_groups(self):
         rows = self._selected_op_rows()
         if not rows:
-            QMessageBox.information(self, "Delete Groups", "Select one or more Operating Groups to delete.")
+            QMessageBox.information(self, "Delete Groups", "Select one or more HF Operating Groups to delete.")
             return
         to_remove = set()
         for r in rows:
@@ -3265,7 +3435,228 @@ class SettingsTab(QWidget):
                 pass
         except Exception:
             log.exception("Failed to persist Operating Group deletions; will remain in-memory only.")
-        QMessageBox.information(self, "Delete Groups", f"Deleted {len(to_remove)} Operating Group(s).")
+        QMessageBox.information(self, "Delete Groups", f"Deleted {len(to_remove)} HF Operating Group(s).")
+
+    # ---------- Local Net Profiles ---------- #
+
+    def _normalize_local_net_profile(self, row: Dict) -> Dict[str, str]:
+        name = str(row.get("name", "") or "").strip()
+        service = str(row.get("service", "") or "").strip()
+        mode = str(row.get("mode", "") or "").strip()
+        target = str(row.get("target", "") or "").strip()
+        notes = str(row.get("notes", "") or "").strip()
+        if service not in LOCAL_NET_SERVICE_OPTIONS:
+            service = "Other" if service else LOCAL_NET_SERVICE_OPTIONS[0]
+        return {
+            "name": name,
+            "service": service,
+            "mode": mode,
+            "target": target,
+            "notes": notes,
+        }
+
+    def _table_to_local_net_profiles(self) -> List[Dict[str, str]]:
+        cleaned: List[Dict[str, str]] = []
+        seen: set[str] = set()
+        for raw in self.local_net_profiles:
+            if not isinstance(raw, dict):
+                continue
+            row = self._normalize_local_net_profile(raw)
+            name = row.get("name", "")
+            key = name.strip().upper()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(row)
+        cleaned.sort(key=lambda r: (r.get("name", "").lower(), r.get("service", "").lower()))
+        self.local_net_profiles = cleaned
+        return [dict(r) for r in cleaned]
+
+    def _selected_local_net_rows(self) -> List[int]:
+        rows: List[int] = []
+        for r in range(self.local_net_table.rowCount()):
+            w = self.local_net_table.cellWidget(r, 0)
+            if isinstance(w, QCheckBox) and w.isChecked():
+                rows.append(r)
+            elif isinstance(w, QWidget):
+                chk = w.findChild(QCheckBox)
+                if chk is not None and chk.isChecked():
+                    rows.append(r)
+        return rows
+
+    def _update_local_net_action_buttons(self) -> None:
+        theme = resolve_theme(self.settings)
+        has_selection = bool(self._selected_local_net_rows()) if hasattr(self, "local_net_table") else False
+        role = "info" if has_selection else "muted"
+        self.add_local_net_btn.setStyleSheet(button_style("primary", theme))
+        self.edit_local_net_btn.setEnabled(True)
+        self.delete_local_net_btn.setEnabled(True)
+        self.edit_local_net_btn.setStyleSheet(button_style(role, theme))
+        self.delete_local_net_btn.setStyleSheet(button_style(role, theme))
+
+    def _refresh_local_net_profiles_table(self) -> None:
+        rows = self._table_to_local_net_profiles()
+        table = self.local_net_table
+        table.setRowCount(0)
+        for prof in rows:
+            row = table.rowCount()
+            table.insertRow(row)
+            sel_chk = QCheckBox()
+            sel_chk.setFixedWidth(22)
+            sel_chk.stateChanged.connect(self._update_local_net_action_buttons)
+            sel_wrap = QWidget()
+            sel_layout = QHBoxLayout(sel_wrap)
+            sel_layout.setContentsMargins(0, 0, 0, 0)
+            sel_layout.setAlignment(Qt.AlignCenter)
+            sel_layout.addWidget(sel_chk)
+            table.setCellWidget(row, 0, sel_wrap)
+            table.setItem(row, 1, QTableWidgetItem(prof.get("name", "")))
+            table.setItem(row, 2, QTableWidgetItem(prof.get("service", "")))
+            table.setItem(row, 3, QTableWidgetItem(prof.get("mode", "")))
+            table.setItem(row, 4, QTableWidgetItem(prof.get("target", "")))
+            table.setItem(row, 5, QTableWidgetItem(prof.get("notes", "")))
+        self._update_local_net_action_buttons()
+        self._refresh_section_titles()
+
+    def _local_profile_from_row(self, row: int) -> Dict[str, str]:
+        return {
+            "name": self.local_net_table.item(row, 1).text().strip() if self.local_net_table.item(row, 1) else "",
+            "service": self.local_net_table.item(row, 2).text().strip() if self.local_net_table.item(row, 2) else "",
+            "mode": self.local_net_table.item(row, 3).text().strip() if self.local_net_table.item(row, 3) else "",
+            "target": self.local_net_table.item(row, 4).text().strip() if self.local_net_table.item(row, 4) else "",
+            "notes": self.local_net_table.item(row, 5).text().strip() if self.local_net_table.item(row, 5) else "",
+        }
+
+    def _open_local_net_profile_dialog(self, existing: Optional[Dict[str, str]] = None) -> Optional[Dict[str, str]]:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit Local Net Profile" if existing else "Add Local Net Profile")
+        form = QFormLayout(dlg)
+
+        name_edit = QLineEdit((existing or {}).get("name", ""))
+        service_combo = QComboBox()
+        service_combo.addItems(LOCAL_NET_SERVICE_OPTIONS)
+        if existing and service_combo.findText((existing or {}).get("service", "")) >= 0:
+            service_combo.setCurrentText((existing or {}).get("service", ""))
+        mode_combo = QComboBox()
+        mode_combo.setEditable(True)
+        mode_combo.addItems(["Voice", "Data", "Mixed"])
+        if existing and (existing or {}).get("mode"):
+            mode_combo.setCurrentText((existing or {}).get("mode", ""))
+        target_edit = QLineEdit((existing or {}).get("target", ""))
+        target_edit.setPlaceholderText("e.g., 146.520, Ch 16, or repeater pair/tone")
+        notes_edit = QLineEdit((existing or {}).get("notes", ""))
+        notes_edit.setPlaceholderText("Optional notes for SOP reminder context")
+
+        form.addRow("Profile Name:", name_edit)
+        form.addRow("Service:", service_combo)
+        form.addRow("Mode:", mode_combo)
+        form.addRow("Target:", target_edit)
+        form.addRow("Notes:", notes_edit)
+
+        btn_row = QHBoxLayout()
+        ok_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addStretch()
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        form.addRow(btn_row)
+
+        out: Dict[str, str] = {}
+
+        def _accept() -> None:
+            candidate = self._normalize_local_net_profile(
+                {
+                    "name": name_edit.text(),
+                    "service": service_combo.currentText(),
+                    "mode": mode_combo.currentText(),
+                    "target": target_edit.text(),
+                    "notes": notes_edit.text(),
+                }
+            )
+            if not candidate.get("name"):
+                QMessageBox.warning(self, "Validation", "Profile Name is required.")
+                return
+            out.update(candidate)
+            dlg.accept()
+
+        ok_btn.clicked.connect(_accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _upsert_local_net_profile(self, profile: Dict[str, str], old_name: str = "") -> None:
+        normalized = self._normalize_local_net_profile(profile)
+        new_key = normalized.get("name", "").strip().upper()
+        old_key = (old_name or "").strip().upper()
+        if not new_key:
+            return
+        self.local_net_profiles = [
+            r
+            for r in self.local_net_profiles
+            if str(r.get("name", "")).strip().upper() not in {new_key, old_key}
+        ]
+        self.local_net_profiles.append(normalized)
+        self._refresh_local_net_profiles_table()
+        try:
+            self._save_settings_quiet()
+            self._settings_dirty = False
+            self._set_save_button_state("success")
+            try:
+                self.settings_saved.emit()
+            except Exception:
+                pass
+        except Exception:
+            log.exception("Failed to persist Local Net Profile; will remain in-memory only.")
+
+    def _add_local_net_profile(self) -> None:
+        created = self._open_local_net_profile_dialog(existing=None)
+        if not created:
+            return
+        self._upsert_local_net_profile(created)
+
+    def _edit_local_net_profile(self) -> None:
+        rows = self._selected_local_net_rows()
+        if not rows:
+            QMessageBox.information(self, "Edit Profile", "Select one Local Net Profile to edit.")
+            return
+        if len(rows) > 1:
+            QMessageBox.warning(self, "Edit Profile", "Please select only one Local Net Profile to edit.")
+            return
+        row = rows[0]
+        existing = self._local_profile_from_row(row)
+        updated = self._open_local_net_profile_dialog(existing=existing)
+        if not updated:
+            return
+        self._upsert_local_net_profile(updated, old_name=existing.get("name", ""))
+
+    def _delete_local_net_profiles(self) -> None:
+        rows = self._selected_local_net_rows()
+        if not rows:
+            QMessageBox.information(self, "Delete Profiles", "Select one or more Local Net Profiles to delete.")
+            return
+        to_remove: set[str] = set()
+        for r in rows:
+            name = self.local_net_table.item(r, 1).text().strip() if self.local_net_table.item(r, 1) else ""
+            if name:
+                to_remove.add(name.upper())
+        if not to_remove:
+            return
+        self.local_net_profiles = [
+            row for row in self.local_net_profiles if str(row.get("name", "")).strip().upper() not in to_remove
+        ]
+        self._refresh_local_net_profiles_table()
+        try:
+            self._save_settings_quiet()
+            self._settings_dirty = False
+            self._set_save_button_state("success")
+            try:
+                self.settings_saved.emit()
+            except Exception:
+                pass
+        except Exception:
+            log.exception("Failed to persist Local Net Profile deletions; will remain in-memory only.")
+        QMessageBox.information(self, "Delete Profiles", f"Deleted {len(to_remove)} Local Net Profile(s).")
 
     # ---------- JS8 DIRECTED PATH ---------- #
 

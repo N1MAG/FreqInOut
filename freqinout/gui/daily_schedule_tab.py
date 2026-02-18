@@ -145,6 +145,9 @@ class DailyScheduleTab(QWidget):
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
         self._show_local: bool = default_mode != "UTC"
         self._raw_schedule: List[Dict] = []
+        self._dirty: bool = False
+        self._suspend_dirty_tracking: bool = False
+        self._saved_rows_signature: str = ""
 
         self._clock_timer: Optional[QTimer] = None
         self._suppress_autostart: bool = True  # avoid auto-start during initial load
@@ -235,6 +238,7 @@ class DailyScheduleTab(QWidget):
         self.save_btn.clicked.connect(self._save_schedule)
         self.export_btn.clicked.connect(self._export_schedule)
         self.table.itemSelectionChanged.connect(self._update_delete_button_state)
+        self.table.itemChanged.connect(self._on_table_item_changed)
 
         # Initialize clock labels once
         self._update_clock_labels()
@@ -592,20 +596,26 @@ class DailyScheduleTab(QWidget):
             if not isinstance(hf_sched, list):
                 hf_sched = []
 
-        self.table.setRowCount(0)
-        self._raw_schedule = hf_sched
+        self._suspend_dirty_tracking = True
+        try:
+            self.table.setRowCount(0)
+            self._raw_schedule = hf_sched
 
-        for entry in hf_sched:
-            self._append_entry_row(self._entry_for_display(entry))
+            for entry in hf_sched:
+                self._append_entry_row(self._entry_for_display(entry))
 
-        if self.table.rowCount() == 0:
-            # Add a single empty row to start with
-            self._add_row()
+            if self.table.rowCount() == 0:
+                # Add a single empty row to start with
+                self._add_row()
+        finally:
+            self._suspend_dirty_tracking = False
 
         src = "DB" if loaded_from_db else "settings"
         log.info("HF Frequency Schedule loaded from %s: %d rows", src, self.table.rowCount())
         self._set_headers()
         self._update_clock_labels()
+        self._saved_rows_signature = self._rows_signature(self._raw_schedule)
+        self._set_dirty(False)
 
     def _save_schedule(self):
         # Ensure in-progress cell edits are committed
@@ -715,6 +725,8 @@ class DailyScheduleTab(QWidget):
         QMessageBox.information(self, "Saved", "HF Frequency Schedule saved.")
         log.info("HF Frequency Schedule saved: %d rows", len(rows))
         self._raw_schedule = rows
+        self._saved_rows_signature = self._rows_signature(rows)
+        self._set_dirty(False)
         self._refresh_freq_planner()
 
     def _export_schedule(self):
@@ -772,13 +784,18 @@ class DailyScheduleTab(QWidget):
         return d
 
     def _rebuild_from_raw(self):
-        self.table.setRowCount(0)
-        for entry in self._raw_schedule:
-            self._append_entry_row(self._entry_for_display(entry))
-        if self.table.rowCount() == 0:
-            self._add_row()
+        self._suspend_dirty_tracking = True
+        try:
+            self.table.setRowCount(0)
+            for entry in self._raw_schedule:
+                self._append_entry_row(self._entry_for_display(entry))
+            if self.table.rowCount() == 0:
+                self._add_row()
+        finally:
+            self._suspend_dirty_tracking = False
         self._set_headers()
         self._update_clock_labels()
+        self._mark_dirty()
 
     def _toggle_time_view(self):
         self._show_local = not self._show_local
@@ -891,10 +908,13 @@ class DailyScheduleTab(QWidget):
         self._operating_groups_sig = self._snapshot_operating_groups(latest)
         prev_suppress = self._suppress_autostart
         self._suppress_autostart = True
+        prev_dirty = self._suspend_dirty_tracking
+        self._suspend_dirty_tracking = True
         try:
             self._refresh_group_band_cells()
         finally:
             self._suppress_autostart = prev_suppress
+            self._suspend_dirty_tracking = prev_dirty
         self._refresh_qsy_options()
         self._apply_theme()
 
@@ -920,13 +940,87 @@ class DailyScheduleTab(QWidget):
         theme = resolve_theme(self.settings)
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.add_row_btn.setStyleSheet(button_style("primary", theme))
-        self.save_btn.setStyleSheet(button_style("success", theme))
+        self._refresh_save_button_state(theme)
         self.export_btn.setStyleSheet(button_style("info", theme))
         self._update_suspend_state()
         self._update_delete_button_state()
 
     def apply_theme(self) -> None:
         self._apply_theme()
+
+    def _rows_signature(self, rows: List[Dict]) -> str:
+        normalized: List[Dict[str, object]] = []
+        for row in rows:
+            normalized.append(
+                {
+                    "day_utc": str(row.get("day_utc", "")),
+                    "group_name": str(row.get("group_name", "")),
+                    "mode": str(row.get("mode", "")),
+                    "band": str(row.get("band", "")),
+                    "frequency": str(row.get("frequency", "")),
+                    "start_utc": str(row.get("start_utc", "")),
+                    "end_utc": str(row.get("end_utc", "")),
+                    "auto_tune": bool(row.get("auto_tune", False)),
+                }
+            )
+        return json.dumps(normalized, sort_keys=True)
+
+    def _collect_rows_for_signature(self) -> List[Dict[str, object]]:
+        rows: List[Dict[str, object]] = []
+        for r in range(self.table.rowCount()):
+            day = self._get_combo_value(r, self.COL_DAY, default="ALL")
+            group_name = self._get_combo_value(r, self.COL_GROUP, default="")
+            mode = self._get_combo_value(r, self.COL_MODE, default="Digi")
+            band = self._get_combo_value(r, self.COL_BAND, default="")
+            freq_text = self._get_text_value(r, self.COL_FREQ)
+            start_val = self._get_text_value(r, self.COL_START)
+            end_val = self._get_text_value(r, self.COL_END)
+            auto_tune = self._get_checkbox_value(r, self.COL_AUTOTUNE)
+            # Ignore untouched placeholder rows.
+            if not (group_name or band or freq_text or start_val or end_val):
+                continue
+            day_out = day
+            start_out = start_val
+            end_out = end_val
+            if self._show_local and day and self._validate_time(start_val):
+                day_out, start_out = self._convert_day_time(day, start_val, to_local=False)
+            if self._show_local and day and self._validate_time(end_val):
+                _, end_out = self._convert_day_time(day, end_val, to_local=False)
+            rows.append(
+                {
+                    "day_utc": day_out,
+                    "group_name": group_name,
+                    "mode": mode,
+                    "band": band,
+                    "frequency": freq_text,
+                    "start_utc": start_out,
+                    "end_utc": end_out,
+                    "auto_tune": bool(auto_tune),
+                }
+            )
+        return rows
+
+    def _refresh_save_button_state(self, theme: Optional[Dict[str, str]] = None) -> None:
+        if theme is None:
+            theme = resolve_theme(self.settings)
+        role = "eligible_success" if self._dirty else "muted"
+        self.save_btn.setStyleSheet(button_style(role, theme))
+
+    def _set_dirty(self, dirty: bool) -> None:
+        self._dirty = bool(dirty)
+        self._refresh_save_button_state()
+
+    def _mark_dirty(self, *_args) -> None:
+        if self._suspend_dirty_tracking:
+            return
+        try:
+            current_sig = self._rows_signature(self._collect_rows_for_signature())
+            self._set_dirty(current_sig != self._saved_rows_signature)
+        except Exception:
+            self._set_dirty(True)
+
+    def _on_table_item_changed(self, _item: QTableWidgetItem) -> None:
+        self._mark_dirty()
 
     def _has_delete_selection(self) -> bool:
         for r in range(self.table.rowCount()):
@@ -943,7 +1037,7 @@ class DailyScheduleTab(QWidget):
         theme = resolve_theme(self.settings)
         has_selection = self._has_delete_selection()
         self.del_row_btn.setEnabled(has_selection)
-        role = "danger" if has_selection else "muted"
+        role = "eligible_danger" if has_selection else "muted"
         self.del_row_btn.setStyleSheet(button_style(role, theme))
 
     def _append_entry_row(self, entry: Dict):
@@ -967,6 +1061,7 @@ class DailyScheduleTab(QWidget):
         if day_val not in DAY_OPTIONS:
             day_val = "ALL"
         day_combo.setCurrentText(day_val)
+        day_combo.currentTextChanged.connect(self._mark_dirty)
         self.table.setCellWidget(row, self.COL_DAY, day_combo)
 
         # Group (from operating groups)
@@ -976,6 +1071,7 @@ class DailyScheduleTab(QWidget):
         group_val = (entry.get("group_name") or "").strip()
         if group_val and group_val in group_names:
             group_combo.setCurrentText(group_val)
+        group_combo.currentTextChanged.connect(self._mark_dirty)
         self.table.setCellWidget(row, self.COL_GROUP, group_combo)
 
         # Band
@@ -984,6 +1080,7 @@ class DailyScheduleTab(QWidget):
         band_val = (entry.get("band") or "").strip()
         if band_val and band_combo.findText(band_val) >= 0:
             band_combo.setCurrentText(band_val)
+        band_combo.currentTextChanged.connect(self._mark_dirty)
         self.table.setCellWidget(row, self.COL_BAND, band_combo)
 
         # Mode + Frequency (mode becomes selectable if multiple entries exist for the same group/band)
@@ -1004,6 +1101,7 @@ class DailyScheduleTab(QWidget):
         chk = QCheckBox()
         chk.setChecked(bool(entry.get("auto_tune", False)))
         chk.setTristate(False)
+        chk.stateChanged.connect(self._mark_dirty)
         auto_wrap = QWidget()
         auto_layout = QHBoxLayout(auto_wrap)
         auto_layout.setContentsMargins(0, 0, 0, 0)
@@ -1031,6 +1129,7 @@ class DailyScheduleTab(QWidget):
     def _add_row(self):
         self._append_entry_row({})
         self.table.scrollToBottom()
+        self._mark_dirty()
 
     def _delete_selected_rows(self):
         selected = set()
@@ -1050,6 +1149,8 @@ class DailyScheduleTab(QWidget):
         for r in sorted(selected, reverse=True):
             self.table.removeRow(r)
         self._update_delete_button_state()
+        if selected:
+            self._mark_dirty()
 
     # ---------------- Cell access helpers ---------------- #
 
@@ -1118,6 +1219,7 @@ class DailyScheduleTab(QWidget):
             combo.setCurrentIndex(0)
         combo.setEnabled(len(modes) > 1)
         combo.currentTextChanged.connect(lambda _m, r=row: self._update_mode_freq(r))
+        combo.currentTextChanged.connect(self._mark_dirty)
         self.table.setCellWidget(row, self.COL_MODE, combo)
         return combo
 

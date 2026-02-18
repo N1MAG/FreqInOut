@@ -371,17 +371,19 @@ class FldigiNetControlTab(QWidget):
         theme = resolve_theme(self.settings)
         if active:
             self.start_btn.setStyleSheet(button_style("muted", theme))
-            self.save_btn.setStyleSheet(button_style("success", theme))
-            self.merge_btn.setStyleSheet(button_style("info", theme))
-            self.end_btn.setStyleSheet(button_style("danger", theme))
-            self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
+            self.save_btn.setStyleSheet(button_style("eligible_success", theme))
+            self.merge_btn.setStyleSheet(button_style("eligible_info", theme))
+            self.end_btn.setStyleSheet(button_style("eligible_danger", theme))
+            self.ad_hoc_btn.setStyleSheet(button_style("muted", theme))
+            self.start_btn.setEnabled(False)
             self.ad_hoc_btn.setEnabled(False)
         else:
-            self.start_btn.setStyleSheet(self._start_btn_default_style)
+            self.start_btn.setStyleSheet(button_style("eligible_success", theme))
             self.save_btn.setStyleSheet(button_style("muted", theme))
             self.merge_btn.setStyleSheet(button_style("muted", theme))
             self.end_btn.setStyleSheet(button_style("muted", theme))
-            self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
+            self.ad_hoc_btn.setStyleSheet(button_style("eligible_info", theme))
+            self.start_btn.setEnabled(True)
             self.ad_hoc_btn.setEnabled(True)
 
     def _refresh_operator_history_views(self) -> None:
@@ -663,7 +665,6 @@ class FldigiNetControlTab(QWidget):
         self._save_btn_default_style = button_style("success", theme)
         self.save_btn.setStyleSheet(self._save_btn_default_style)
         self.suspend_btn.setStyleSheet(button_style("warning", theme))
-        self.ad_hoc_btn.setStyleSheet(button_style("info", theme))
         self._set_net_button_styles(self._net_in_progress)
         self._update_copy_buttons_state()
         self._apply_known_op_styles(theme)
@@ -1230,10 +1231,10 @@ class FldigiNetControlTab(QWidget):
         main_has = bool(self.main_text.toPlainText().strip())
         late_has = bool(self.late_text.toPlainText().strip())
         self.copy_main_btn.setStyleSheet(
-            button_style("success", theme) if main_has else button_style("muted", theme)
+            button_style("eligible_success", theme) if main_has else button_style("muted", theme)
         )
         self.copy_late_btn.setStyleSheet(
-            button_style("info", theme) if late_has else button_style("muted", theme)
+            button_style("eligible_info", theme) if late_has else button_style("muted", theme)
         )
 
     def _update_add_buttons_state(self) -> None:
@@ -1266,7 +1267,7 @@ class FldigiNetControlTab(QWidget):
     def _known_action_button_style(self, role: str, theme: Dict[str, str], ready: bool) -> str:
         focus = theme.get("focus", "#7FB5FF")
         role_color = theme.get(role, theme.get("accent", "#2E6F9E"))
-        style = button_style("muted", theme)
+        style = button_style(f"eligible_{role}" if ready else "muted", theme)
         if ready:
             style += (
                 " QPushButton:focus {"
@@ -1440,6 +1441,9 @@ class FldigiNetControlTab(QWidget):
         return True
 
     def _start_net(self):
+        if self._net_in_progress:
+            QMessageBox.information(self, "Net In Progress", "A net is already active. End it before starting a new one.")
+            return
         if not self._validate_before_start():
             return
         main_path, late_path = self._ensure_checkin_files()
