@@ -1,6 +1,8 @@
 # Changelog
 
 ## [1.1.8]
+- Changed: ControlFreq now uses bounded SOP window caches (`Today`/`Tomorrow`) with TTL and explicit cache-bust on SOP/settings changes for long-run responsiveness without restart.
+- Changed: ControlFreq settings-save handling is now lightweight when tab is inactive (deferred heavy refresh until activation).
 - Changed: SOP tab action-source labels now use `Resource` (replacing `Software`) in Action Rows and Upcoming Actions tables.
 - Changed: SOP PDF export now renders a blended single-day action checklist (Time, Resource, Action, Band/Freq, Contact, Description) without Status, and includes complete same-day action occurrences.
 - Added: SOP PDF export now includes a separate `Periodic Actions` section (Week(s) of Month, Day of Week, Resource, Action, Band/Freq, Contact, Description) when periodic schedule-layer rows exist.

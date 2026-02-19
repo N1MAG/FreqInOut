@@ -7,7 +7,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QFontMetrics, QShortcut, QKeySequence, QColor
@@ -118,6 +118,10 @@ class ControlFreqTab(QWidget):
         self.status_labels: Dict[str, QLabel] = {}
         self._status_checked_at: Dict[str, str] = {}
         self._status_service = SoftwareStatusService(self.settings)
+        self._sop_window_cache: Dict[Tuple[Any, ...], Tuple[float, List[Dict[str, Any]]]] = {}
+        self._sop_today_cache_ttl_sec = 30.0
+        self._sop_tomorrow_cache_ttl_sec = 180.0
+        self._sop_cache_epoch = 0
         self._prop_service = PropagationService(
             default_profiles=PROP_DEFAULT_PROFILES,
             profiles_path=None,
@@ -1148,18 +1152,53 @@ class ControlFreqTab(QWidget):
             self._heavy_refresh_pending = False
 
     def on_settings_saved(self) -> None:
+        self._invalidate_sop_window_cache()
         self._apply_theme()
-        self._refresh_all()
+        if self._active:
+            self._refresh_all()
+            return
+        # Keep inactive-path cheap; refresh on next activation.
+        self._last_refresh_ts = 0.0
+        self._last_secondary_refresh_ts = 0.0
+        self._last_heavy_refresh_ts = 0.0
 
     def on_sop_data_changed(self) -> None:
         # SOP edits can happen while ControlFreq is inactive; invalidate refresh gates
         # so the next activation redraws immediately.
+        self._invalidate_sop_window_cache()
         self._last_refresh_ts = 0.0
         self._last_secondary_refresh_ts = 0.0
         self._last_heavy_refresh_ts = 0.0
         if self._active:
             QTimer.singleShot(0, self._refresh_schedule_outlook)
             QTimer.singleShot(0, self._refresh_scheduler_strip)
+
+    def _invalidate_sop_window_cache(self) -> None:
+        self._sop_cache_epoch += 1
+        self._sop_window_cache.clear()
+
+    def _get_cached_sop_actions(
+        self,
+        *,
+        key: Tuple[Any, ...],
+        ttl_sec: float,
+        builder: Callable[[], List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        now_ts = time.time()
+        cached = self._sop_window_cache.get(key)
+        if cached and (now_ts - float(cached[0])) <= max(0.0, float(ttl_sec)):
+            return list(cached[1])
+        try:
+            rows = list(builder() or [])
+        except Exception as e:
+            log.debug("ControlFreq: SOP cache build failed for %s: %s", key, e)
+            rows = []
+        self._sop_window_cache[key] = (now_ts, rows)
+        if len(self._sop_window_cache) > 16:
+            oldest = sorted(self._sop_window_cache.items(), key=lambda kv: kv[1][0])[:4]
+            for old_key, _ in oldest:
+                self._sop_window_cache.pop(old_key, None)
+        return list(rows)
 
     def _update_time_toggle_text(self) -> None:
         self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
@@ -2642,25 +2681,40 @@ class ControlFreqTab(QWidget):
             today_end = now_utc.replace(hour=23, minute=59, second=59, microsecond=0)
             tomorrow_start = today_end + dt.timedelta(seconds=1)
             tomorrow_end = tomorrow_start.replace(hour=23, minute=59, second=59, microsecond=0)
-        sop_actions_today: Optional[List[Dict[str, Any]]] = None
-        try:
-            today_horizon_hours = max(1, int(math.ceil(max(0.0, (today_end - now_utc).total_seconds()) / 3600.0)))
-            sop_actions_today = self._sop_manager.build_upcoming_actions(
+        day_mode = 1 if self._show_local else 0
+        today_horizon_hours = max(1, int(math.ceil(max(0.0, (today_end - now_utc).total_seconds()) / 3600.0)))
+        today_key = (
+            "today",
+            int(now_utc.timestamp() // 60),
+            int(today_end.timestamp()),
+            day_mode,
+            int(self._sop_cache_epoch),
+        )
+        sop_actions_today = self._get_cached_sop_actions(
+            key=today_key,
+            ttl_sec=self._sop_today_cache_ttl_sec,
+            builder=lambda: self._sop_manager.build_upcoming_actions(
                 horizon_hours=today_horizon_hours,
                 only_active=True,
                 now_utc=now_utc,
-            )
-        except Exception as e:
-            log.debug("ControlFreq: SOP today prefetch failed: %s", e)
-        sop_actions_tomorrow: Optional[List[Dict[str, Any]]] = None
-        try:
-            sop_actions_tomorrow = self._build_sop_actions_in_window(
+            ),
+        )
+        tomorrow_key = (
+            "tomorrow",
+            int(tomorrow_start.timestamp()),
+            int(tomorrow_end.timestamp()),
+            day_mode,
+            int(self._sop_cache_epoch),
+        )
+        sop_actions_tomorrow = self._get_cached_sop_actions(
+            key=tomorrow_key,
+            ttl_sec=self._sop_tomorrow_cache_ttl_sec,
+            builder=lambda: self._build_sop_actions_in_window(
                 tomorrow_start,
                 tomorrow_end,
                 only_active=True,
-            )
-        except Exception as e:
-            log.debug("ControlFreq: SOP tomorrow prefetch failed: %s", e)
+            ),
+        )
         today_rows = self._collect_schedule_rows(
             now_utc,
             today_end,
@@ -2941,30 +2995,29 @@ class ControlFreqTab(QWidget):
                         due += interval_td
                     max_per_action = min(240, int(math.ceil((end - start).total_seconds() / max(60, interval_m * 60))) + 2)
                     emitted = 0
+                    rule = str(action.get("contact_rule") or "none").strip()
+                    selected_target = (action.get("contact_target") or "").strip().upper()
+                    targets: List[str] = []
+                    if rule in {"hub_or_hub_alt", "ncs_or_ancs"}:
+                        if selected_target and selected_target != "__ANY_ROLE__":
+                            targets = [selected_target]
+                        else:
+                            targets = ["Any (Role Match)"]
+                    elif rule in {"callsign", "peer", "local_profile"}:
+                        targets = [selected_target] if selected_target else []
+                    action_band = (action.get("band") or "").strip().upper()
+                    action_freq = (action.get("frequency") or "").strip() or str(full.get("frequency") or "")
+                    action_id = int(action.get("id") or 0)
+                    software = str(action.get("software") or "")
+                    action_key = str(action.get("action_key") or "")
+                    action_label = str(action.get("action_label") or "")
+                    description = str(action.get("description") or "")
                     while due <= end and emitted < max_per_action:
                         if len(out) >= max_total_rows:
                             break
-                        rule = str(action.get("contact_rule") or "none").strip()
-                        selected_target = (action.get("contact_target") or "").strip().upper()
-                        targets: List[str] = []
-                        if rule in {"hub_or_hub_alt", "ncs_or_ancs"}:
-                            if selected_target and selected_target != "__ANY_ROLE__":
-                                targets = [selected_target]
-                            else:
-                                targets = ["Any (Role Match)"]
-                        elif rule in {"callsign", "peer", "local_profile"}:
-                            targets = [selected_target] if selected_target else []
-                        action_band = (action.get("band") or "").strip().upper()
-                        action_freq = (action.get("frequency") or "").strip() or str(full.get("frequency") or "")
+                        # ControlFreq outlook does not render alignment warnings for SOP rows;
+                        # keep this lightweight to avoid per-occurrence DB schedule scans.
                         aligned = True
-                        if rule != "local_profile":
-                            aligned = self._sop_manager.is_due_aligned_with_schedule(
-                                operating_group,
-                                action_band,
-                                action_freq,
-                                due,
-                                profile_id=profile_id,
-                            )
                         out.append(
                             {
                                 "profile_id": profile_id,
@@ -2972,11 +3025,11 @@ class ControlFreqTab(QWidget):
                                 "operating_group": operating_group,
                                 "band": action_band,
                                 "frequency": action_freq,
-                                "action_id": int(action.get("id") or 0),
-                                "software": str(action.get("software") or ""),
-                                "action_key": str(action.get("action_key") or ""),
-                                "action_label": str(action.get("action_label") or ""),
-                                "description": str(action.get("description") or ""),
+                                "action_id": action_id,
+                                "software": software,
+                                "action_key": action_key,
+                                "action_label": action_label,
+                                "description": description,
                                 "contact_rule": rule,
                                 "contact_target": selected_target,
                                 "contact_targets": targets,
