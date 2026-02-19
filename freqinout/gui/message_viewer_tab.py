@@ -1777,6 +1777,7 @@ class MessageViewerTab(QWidget):
         self._messages_model = MessageTableModel([])
         self._actions_delegate = None
         self._header_cells: List[QWidget] = []
+        self._messages_header_sync_connected: bool = False
         self._is_shutting_down = False
         self._refresh_files_inflight = False
         self.loading_label: QLabel | None = None
@@ -4052,6 +4053,7 @@ class MessageViewerTab(QWidget):
                 accent=accent,
                 mark=mark,
             )
+        self._update_time_toggle_style(theme)
         self._update_clear_filters_style()
         self._update_mark_all_read_style()
         self._update_pending_table()
@@ -4459,6 +4461,13 @@ class MessageViewerTab(QWidget):
             self.pending_table.setHorizontalHeaderLabels(
                 ["Callsign", "Msg ID", f"Last Seen ({tz_abbr})", "Status", "Actions"]
             )
+        self._update_time_toggle_style()
+
+    def _update_time_toggle_style(self, theme: Optional[Dict[str, str]] = None) -> None:
+        if theme is None:
+            theme = resolve_theme(self.settings)
+        role = "info" if self._current_time_mode() == "UTC" else "muted"
+        self.time_toggle_btn.setStyleSheet(button_style(role, theme))
 
     def _toggle_time_view(self) -> None:
         mode = self._current_time_mode()
@@ -5358,9 +5367,17 @@ class MessageViewerTab(QWidget):
         self._update_clear_filters_style()
         self._update_mark_all_read_style()
         self._sync_header_widths()
-        self.messages_table.horizontalHeader().sectionResized.connect(self._sync_header_widths)
+        header = self.messages_table.horizontalHeader()
+        if not self._messages_header_sync_connected:
+            header.sectionResized.connect(self._sync_header_widths)
+            # Catch first-show geometry recalcs that do not emit sectionResized.
+            header.geometriesChanged.connect(self._sync_header_widths)
+            self._messages_header_sync_connected = True
         self.messages_header.setMinimumHeight(self.messages_header.sizeHint().height())
+        # Perform a few deferred sync passes so first open matches post-resize alignment.
         QTimer.singleShot(0, self._sync_header_widths)
+        QTimer.singleShot(25, self._sync_header_widths)
+        QTimer.singleShot(100, self._sync_header_widths)
         QTimer.singleShot(0, self._sync_select_all_checkbox)
 
     def _set_initial_splitter_sizes(self) -> None:
@@ -5424,11 +5441,32 @@ class MessageViewerTab(QWidget):
         return spacer
 
     def _sync_header_widths(self) -> None:
+        if not hasattr(self, "messages_table"):
+            return
+        if not self._header_cells:
+            return
         header = self.messages_table.horizontalHeader()
+        fallback_widths = {
+            0: 32,
+            1: 100,
+            2: 96,
+            3: 106,
+            4: 106,
+            5: 162,
+            6: 120,
+            7: 210,
+        }
         for idx, widget in enumerate(self._header_cells):
             if widget is None:
                 continue
             width = header.sectionSize(idx)
+            if int(width) <= 1:
+                try:
+                    width = int(self.messages_table.columnWidth(idx))
+                except Exception:
+                    width = 0
+            if int(width) <= 1:
+                width = fallback_widths.get(idx, 60)
             if idx == 0:
                 min_width = 30
             elif idx == 7:

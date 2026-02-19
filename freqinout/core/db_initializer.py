@@ -1142,6 +1142,7 @@ def _ensure_nets_db() -> None:
                 secondary_group TEXT,
                 frequency TEXT NOT NULL,
                 sop_start_utc TEXT NOT NULL,
+                priority INTEGER DEFAULT 100,
                 active INTEGER DEFAULT 0,
                 window_hours INTEGER DEFAULT 12,
                 created_utc TEXT,
@@ -1158,6 +1159,7 @@ def _ensure_nets_db() -> None:
                 "secondary_group": "TEXT",
                 "frequency": "TEXT",
                 "sop_start_utc": "TEXT",
+                "priority": "INTEGER DEFAULT 100",
                 "active": "INTEGER DEFAULT 0",
                 "window_hours": "INTEGER DEFAULT 12",
                 "created_utc": "TEXT",
@@ -1231,6 +1233,52 @@ def _ensure_nets_db() -> None:
         )
         cur.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_sop_state_action ON sop_action_state(profile_id, action_id)"
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sop_schedule_layer (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id INTEGER NOT NULL,
+                day_utc TEXT NOT NULL,
+                recurrence TEXT DEFAULT 'Weekly',
+                biweekly_offset_weeks INTEGER DEFAULT 0,
+                month_weeks TEXT,
+                band TEXT,
+                mode TEXT,
+                vfo TEXT,
+                frequency TEXT NOT NULL,
+                start_utc TEXT NOT NULL,
+                end_utc TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                sort_order INTEGER DEFAULT 0,
+                updated_utc TEXT
+            )
+            """
+        )
+        _ensure_columns(
+            conn,
+            "sop_schedule_layer",
+            {
+                "profile_id": "INTEGER",
+                "day_utc": "TEXT",
+                "recurrence": "TEXT DEFAULT 'Weekly'",
+                "biweekly_offset_weeks": "INTEGER DEFAULT 0",
+                "month_weeks": "TEXT",
+                "band": "TEXT",
+                "mode": "TEXT",
+                "vfo": "TEXT",
+                "frequency": "TEXT",
+                "start_utc": "TEXT",
+                "end_utc": "TEXT",
+                "enabled": "INTEGER DEFAULT 1",
+                "sort_order": "INTEGER DEFAULT 0",
+                "updated_utc": "TEXT",
+            },
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sop_layer_profile ON sop_schedule_layer(profile_id)")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sop_layer_profile_day ON sop_schedule_layer(profile_id, day_utc, start_utc)"
         )
 
         _ensure_operator_checkins(conn)

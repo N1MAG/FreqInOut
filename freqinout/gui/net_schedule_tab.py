@@ -448,7 +448,7 @@ class NetScheduleTab(QWidget):
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
-        self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
+        self._update_time_toggle_style(theme)
         self.add_btn.setStyleSheet(button_style("primary", theme))
         self.del_btn.setStyleSheet(button_style("muted", theme))
         self.move_to_resources_btn.setStyleSheet(button_style("muted", theme))
@@ -570,6 +570,12 @@ class NetScheduleTab(QWidget):
             now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {abbr}")
         )
 
+    def _update_time_toggle_style(self, theme: Optional[Dict[str, str]] = None) -> None:
+        if theme is None:
+            theme = resolve_theme(self.settings)
+        role = "info" if not self._show_local else "muted"
+        self.time_toggle_btn.setStyleSheet(button_style(role, theme))
+
     def _setup_clock_timer(self):
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._update_clock_labels)
@@ -598,6 +604,7 @@ class NetScheduleTab(QWidget):
             ]
         )
         self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
+        self._update_time_toggle_style()
 
     # --------- time conversion helpers --------- #
     def _day_offset(self, day_name: str) -> int:

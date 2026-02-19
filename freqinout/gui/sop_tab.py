@@ -5,9 +5,9 @@ import datetime
 import html
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPageLayout, QPageSize, QTextDocument
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QCompleter,
     QSpinBox,
     QTableWidget,
@@ -73,9 +74,19 @@ class SOPTab(QWidget):
     INTERVAL_PRESETS = ["00:30", "01:00", "03:00", "06:00", "12:00"]
     SOFTWARES = ["JS8Call", "VarAC", "FLDigi"]
     LOCAL_NET_SOFTWARE = "Local Net"
+    LOCAL_NET_ACTION_NCS_KEY = "local_ncs"
+    LOCAL_NET_ACTION_CHECKIN_KEY = "local_checkin"
+    LOCAL_NET_ACTION_MESSAGE_KEY = "local_message"
+    # Legacy key retained for backward compatibility with existing profiles.
     LOCAL_NET_ACTION_KEY = "local_open_net"
-    LOCAL_NET_ACTION_LABEL = "Open Local Net"
+    LOCAL_NET_ACTION_KEYS = (
+        LOCAL_NET_ACTION_NCS_KEY,
+        LOCAL_NET_ACTION_CHECKIN_KEY,
+        LOCAL_NET_ACTION_MESSAGE_KEY,
+        LOCAL_NET_ACTION_KEY,
+    )
     BAND_CHOICES = ["160M", "80M", "60M", "40M", "30M", "20M", "17M", "15M", "12M", "10M", "6M"]
+    sop_data_changed = Signal()
 
     COL_BAND = 0
     COL_FREQ = 1
@@ -86,6 +97,16 @@ class SOPTab(QWidget):
     COL_CONTACT_TARGET = 6
     COL_DESC = 7
     COL_REMOVE = 8
+
+    LAYER_COL_DAY = 0
+    LAYER_COL_RECURRENCE = 1
+    LAYER_COL_MONTH_WEEKS = 2
+    LAYER_COL_START = 3
+    LAYER_COL_END = 4
+    LAYER_COL_BAND = 5
+    LAYER_COL_FREQ = 6
+    LAYER_COL_MODE = 7
+    LAYER_COL_REMOVE = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -101,6 +122,11 @@ class SOPTab(QWidget):
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
         self._show_local = default_mode != "UTC"
         self._dirty = False
+        self._layer_time_header_tag = ""
+        self._layer_sync_out_of_sync = False
+        self._layer_sync_has_basis = False
+        self._layer_sync_cache_key: Tuple[Any, ...] | None = None
+        self._layer_sync_cache_value: Tuple[List[Dict[str, Any]], List[str], int] | None = None
 
         self._build_ui()
         self._set_save_dirty(False)
@@ -118,6 +144,12 @@ class SOPTab(QWidget):
         self._clock_timer.timeout.connect(self._update_clock_labels)
         self._clock_timer.start()
         self._update_clock_labels()
+
+        self._layer_sync_timer = QTimer(self)
+        self._layer_sync_timer.setSingleShot(True)
+        self._layer_sync_timer.setInterval(220)
+        self._layer_sync_timer.timeout.connect(self._refresh_layer_sync_hint)
+        self._schedule_layer_sync_refresh()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -185,6 +217,12 @@ class SOPTab(QWidget):
         row2.addWidget(self.start_label)
         self.start_edit.setFixedWidth(100)
         row2.addWidget(self.start_edit)
+        row2.addWidget(QLabel("Priority:"))
+        self.priority_spin = QSpinBox()
+        self.priority_spin.setRange(1, 999)
+        self.priority_spin.setValue(100)
+        self.priority_spin.setToolTip("Lower number wins when multiple active SOP profiles overlap.")
+        row2.addWidget(self.priority_spin)
         row2.addWidget(self.active_cb)
         row2.addStretch()
         cfg_layout.addLayout(row2)
@@ -208,7 +246,7 @@ class SOPTab(QWidget):
             [
                 "Band",
                 "Frequency",
-                "Software",
+                "Resource",
                 "Action",
                 "Interval (HH:MM)",
                 "Contact Rule",
@@ -230,6 +268,59 @@ class SOPTab(QWidget):
         self.actions_table.setColumnWidth(self.COL_CONTACT_TARGET, 170)
         cfg_layout.addWidget(self.actions_table)
         root.addWidget(cfg_box)
+
+        layer_box = QGroupBox("SOP Schedule Layer (Overrides HF While Active)")
+        layer_layout = QVBoxLayout(layer_box)
+        layer_hint = QLabel(
+            "Optional schedule profile for this SOP. While SOP is Active, these rows supersede HF schedule. "
+            "Net schedule remains highest priority."
+        )
+        layer_hint.setWordWrap(True)
+        layer_layout.addWidget(layer_hint)
+
+        layer_head = QHBoxLayout()
+        layer_head.addWidget(QLabel("Layer Rows"))
+        layer_head.addStretch()
+        self.populate_layer_btn = QPushButton("Populate Layer from Actions")
+        self.populate_layer_btn.clicked.connect(self._on_populate_layer_from_actions)
+        layer_head.addWidget(self.populate_layer_btn)
+        self.rebuild_layer_btn = QPushButton("Rebuild Layer Preview")
+        self.rebuild_layer_btn.clicked.connect(self._on_rebuild_layer_preview)
+        layer_head.addWidget(self.rebuild_layer_btn)
+        self.add_layer_row_btn = QPushButton("Add Layer Row")
+        self.add_layer_row_btn.clicked.connect(lambda: self._add_layer_row(existing=None))
+        layer_head.addWidget(self.add_layer_row_btn)
+        layer_layout.addLayout(layer_head)
+        self.layer_sync_label = QLabel("")
+        self.layer_sync_label.setWordWrap(True)
+        self.layer_sync_label.setVisible(False)
+        layer_layout.addWidget(self.layer_sync_label)
+
+        self.layer_table = QTableWidget(0, 9)
+        self.layer_table.setHorizontalHeaderLabels(
+            ["Day", "Recurrence", "Weeks", "Start (UTC)", "End (UTC)", "Band", "Frequency", "Mode", "Remove"]
+        )
+        self.layer_table.verticalHeader().setVisible(False)
+        self.layer_table.horizontalHeader().setSectionResizeMode(self.LAYER_COL_DAY, QHeaderView.ResizeToContents)
+        self.layer_table.horizontalHeader().setSectionResizeMode(self.LAYER_COL_RECURRENCE, QHeaderView.ResizeToContents)
+        self.layer_table.horizontalHeader().setSectionResizeMode(self.LAYER_COL_MONTH_WEEKS, QHeaderView.ResizeToContents)
+        self.layer_table.horizontalHeader().setSectionResizeMode(self.LAYER_COL_START, QHeaderView.Stretch)
+        self.layer_table.horizontalHeader().setSectionResizeMode(self.LAYER_COL_END, QHeaderView.Stretch)
+        self.layer_table.horizontalHeader().setSectionResizeMode(self.LAYER_COL_BAND, QHeaderView.Stretch)
+        self.layer_table.horizontalHeader().setSectionResizeMode(self.LAYER_COL_FREQ, QHeaderView.Stretch)
+        self.layer_table.horizontalHeader().setSectionResizeMode(self.LAYER_COL_MODE, QHeaderView.Stretch)
+        self.layer_table.horizontalHeader().setSectionResizeMode(self.LAYER_COL_REMOVE, QHeaderView.ResizeToContents)
+        self.layer_table.horizontalHeader().setStretchLastSection(False)
+        layer_layout.addWidget(self.layer_table)
+        self.layer_validation_label = QLabel("")
+        self.layer_validation_label.setWordWrap(True)
+        self.layer_validation_label.setVisible(False)
+        layer_layout.addWidget(self.layer_validation_label)
+        self.layer_runtime_label = QLabel("")
+        self.layer_runtime_label.setWordWrap(True)
+        self.layer_runtime_label.setVisible(False)
+        layer_layout.addWidget(self.layer_runtime_label)
+        root.addWidget(layer_box)
 
         upcoming_box = QGroupBox("Upcoming SOP Actions")
         upcoming_layout = QVBoxLayout(upcoming_box)
@@ -253,7 +344,7 @@ class SOPTab(QWidget):
 
         self.upcoming_table = QTableWidget(0, 8)
         self.upcoming_table.setHorizontalHeaderLabels(
-            ["Profile", "Band/Freq", "Software", "Action", "Description", "Next", "Contact", "Status"]
+            ["Profile", "Band/Freq", "Resource", "Action", "Description", "Next", "Contact", "Status"]
         )
         self.upcoming_table.verticalHeader().setVisible(False)
         self.upcoming_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -275,6 +366,22 @@ class SOPTab(QWidget):
         data = self.settings.all()
         og = data.get("operating_groups", [])
         self._operating_groups = [g for g in og if isinstance(g, dict)]
+        self._load_local_net_profiles_from_data(data)
+
+        self.group_combo.blockSignals(True)
+        self.group_combo.clear()
+        group_names = sorted({(g.get("group") or "").strip().upper() for g in self._operating_groups if g.get("group")})
+        self.group_combo.addItem("")
+        for name in group_names:
+            self.group_combo.addItem(name)
+        self.group_combo.blockSignals(False)
+
+        self.secondary_combo.clear()
+        self.secondary_combo.addItem("")
+        for g in self.manager.load_secondary_groups():
+            self.secondary_combo.addItem(g)
+
+    def _load_local_net_profiles_from_data(self, data: Dict[str, Any]) -> None:
         local_profiles = data.get("local_net_profiles", [])
         self._local_net_profiles = []
         if isinstance(local_profiles, list):
@@ -298,19 +405,6 @@ class SOPTab(QWidget):
             key=lambda x: str(x.get("name", "")).upper(),
         )
 
-        self.group_combo.blockSignals(True)
-        self.group_combo.clear()
-        group_names = sorted({(g.get("group") or "").strip().upper() for g in self._operating_groups if g.get("group")})
-        self.group_combo.addItem("")
-        for name in group_names:
-            self.group_combo.addItem(name)
-        self.group_combo.blockSignals(False)
-
-        self.secondary_combo.clear()
-        self.secondary_combo.addItem("")
-        for g in self.manager.load_secondary_groups():
-            self.secondary_combo.addItem(g)
-
     def _local_profile_names(self) -> List[str]:
         return [str(p.get("name", "")).strip() for p in self._local_net_profiles if str(p.get("name", "")).strip()]
 
@@ -328,6 +422,7 @@ class SOPTab(QWidget):
         self.group_combo.currentIndexChanged.connect(self._mark_dirty)
         self.secondary_combo.currentIndexChanged.connect(self._mark_dirty)
         self.start_edit.textChanged.connect(self._mark_dirty)
+        self.priority_spin.valueChanged.connect(self._mark_dirty)
         self.active_cb.toggled.connect(self._mark_dirty)
 
     def _set_save_dirty(self, dirty: bool) -> None:
@@ -338,6 +433,15 @@ class SOPTab(QWidget):
         if self._loading_ui:
             return
         self._set_save_dirty(True)
+        self._schedule_layer_sync_refresh()
+
+    def _schedule_layer_sync_refresh(self) -> None:
+        if getattr(self, "_loading_ui", False):
+            return
+        timer = getattr(self, "_layer_sync_timer", None)
+        if timer is None:
+            return
+        timer.start()
 
     def _update_profile_action_styles(self, theme: Dict[str, str] | None = None) -> None:
         try:
@@ -358,6 +462,26 @@ class SOPTab(QWidget):
             add_row_eligible = has_profile and self.add_row_btn.isEnabled()
             self.add_row_btn.setStyleSheet(
                 button_style("eligible_primary" if add_row_eligible else "muted", theme)
+            )
+            add_layer_eligible = has_profile and self.add_layer_row_btn.isEnabled()
+            self.add_layer_row_btn.setStyleSheet(
+                button_style("eligible_primary" if add_layer_eligible else "muted", theme)
+            )
+            has_non_local = len(self._collect_action_rows_for_layer_seed()) > 0
+            populate_eligible = bool(self.group_combo.currentText().strip().upper()) and has_non_local
+            rebuild_role = "muted"
+            if populate_eligible:
+                if self._layer_sync_has_basis and self._layer_sync_out_of_sync:
+                    rebuild_role = "eligible_warning"
+                else:
+                    rebuild_role = "eligible_info"
+            self.populate_layer_btn.setEnabled(populate_eligible)
+            self.rebuild_layer_btn.setEnabled(populate_eligible)
+            self.populate_layer_btn.setStyleSheet(
+                button_style("eligible_info" if populate_eligible else "muted", theme)
+            )
+            self.rebuild_layer_btn.setStyleSheet(
+                button_style(rebuild_role, theme)
             )
         except Exception:
             pass
@@ -452,7 +576,9 @@ class SOPTab(QWidget):
                 ("fldigi_send_report", "General"),
             ],
             self.LOCAL_NET_SOFTWARE: [
-                (self.LOCAL_NET_ACTION_KEY, self.LOCAL_NET_ACTION_LABEL),
+                (self.LOCAL_NET_ACTION_NCS_KEY, "NCS"),
+                (self.LOCAL_NET_ACTION_CHECKIN_KEY, "Check-in"),
+                (self.LOCAL_NET_ACTION_MESSAGE_KEY, "Message"),
             ],
         }
         for key, label in self._load_spotter_forms():
@@ -497,13 +623,17 @@ class SOPTab(QWidget):
             self.group_combo.setCurrentText(profile.get("operating_group", ""))
             self.secondary_combo.setCurrentText(profile.get("secondary_group", ""))
             self.start_edit.setText(self._display_start_hhmm_from_utc(profile.get("sop_start_utc", "00:00")))
+            self.priority_spin.setValue(int(profile.get("priority") or 100))
             self.active_cb.setChecked(bool(profile.get("active")))
             self._populate_actions(profile.get("actions", []))
+            self._populate_schedule_layer(profile.get("schedule_layer", []))
             self._refresh_contact_label()
         finally:
             self._loading_ui = False
+        self._invalidate_layer_sync_cache()
         self._set_save_dirty(False)
         self._update_profile_action_styles()
+        self._schedule_layer_sync_refresh()
         self.refresh_upcoming()
 
     def _new_profile(self) -> None:
@@ -516,20 +646,26 @@ class SOPTab(QWidget):
             if self.secondary_combo.count() > 0:
                 self.secondary_combo.setCurrentIndex(0)
             self.start_edit.setText(self._display_start_hhmm_from_utc("00:00"))
+            self.priority_spin.setValue(100)
             self.active_cb.setChecked(False)
             self._populate_actions([])
+            self._populate_schedule_layer([])
             self._refresh_contact_label()
         finally:
             self._loading_ui = False
+        self._invalidate_layer_sync_cache()
         self._set_save_dirty(False)
         self._update_profile_action_styles()
+        self._schedule_layer_sync_refresh()
         self.refresh_upcoming()
 
     def _on_group_changed(self) -> None:
         if self._loading_ui:
             return
+        self._invalidate_layer_sync_cache()
         self._refresh_all_row_group_options()
         self._refresh_contact_label()
+        self._schedule_layer_sync_refresh()
 
     def _on_secondary_group_changed(self) -> None:
         if self._loading_ui:
@@ -565,6 +701,7 @@ class SOPTab(QWidget):
                     freq_combo.addItem(v)
                 freq_combo.setCurrentText(current)
                 freq_combo.blockSignals(False)
+        self._refresh_all_layer_group_options()
         self._refresh_all_contact_target_options()
 
     def _available_callsign_targets(self) -> List[str]:
@@ -595,7 +732,7 @@ class SOPTab(QWidget):
             return False
         software = sw_combo.currentText().strip()
         action_key = str(action_combo.currentData() or "").strip()
-        return software == self.LOCAL_NET_SOFTWARE and action_key == self.LOCAL_NET_ACTION_KEY
+        return software == self.LOCAL_NET_SOFTWARE and action_key in self.LOCAL_NET_ACTION_KEYS
 
     def _contact_rule_options_for_row(self, row: int) -> List[Tuple[str, str]]:
         if self._is_local_net_action_row(row):
@@ -680,6 +817,740 @@ class SOPTab(QWidget):
                 self.actions_table.setColumnWidth(self.COL_DESC, 260)
         except Exception:
             pass
+
+    def _mode_options_for_group_band(self, group: str, band: str) -> List[str]:
+        grp = (group or "").strip().upper()
+        band_uc = (band or "").strip().upper()
+        values: set[str] = set()
+        for row in self._operating_groups:
+            if (row.get("group") or "").strip().upper() != grp:
+                continue
+            row_band = (row.get("band") or "").strip().upper()
+            if band_uc and row_band and row_band != band_uc:
+                continue
+            mode = (row.get("mode") or "").strip().upper()
+            if mode:
+                values.add(mode)
+        return sorted(values)
+
+    def _refresh_all_layer_group_options(self) -> None:
+        for r in range(self.layer_table.rowCount()):
+            self._refresh_layer_freq_for_row(r)
+            self._refresh_layer_mode_for_row(r)
+        self._refresh_layer_validation_hints()
+
+    def _refresh_layer_freq_for_row(self, row: int) -> None:
+        if row < 0 or row >= self.layer_table.rowCount():
+            return
+        group = self.group_combo.currentText().strip().upper()
+        band_combo = self.layer_table.cellWidget(row, self.LAYER_COL_BAND)
+        freq_combo = self.layer_table.cellWidget(row, self.LAYER_COL_FREQ)
+        if not isinstance(band_combo, QComboBox) or not isinstance(freq_combo, QComboBox):
+            return
+        band = band_combo.currentText().strip().upper()
+        values = self._frequency_options_for_group_band(group, band)
+        current = freq_combo.currentText().strip()
+        freq_combo.blockSignals(True)
+        freq_combo.clear()
+        freq_combo.addItem("")
+        for val in values:
+            freq_combo.addItem(val)
+        if not current and len(values) == 1:
+            freq_combo.setCurrentText(values[0])
+        else:
+            freq_combo.setCurrentText(current)
+        self._fit_combo_popup(freq_combo)
+        freq_combo.blockSignals(False)
+        self._refresh_layer_validation_hints()
+
+    def _refresh_layer_mode_for_row(self, row: int) -> None:
+        if row < 0 or row >= self.layer_table.rowCount():
+            return
+        group = self.group_combo.currentText().strip().upper()
+        band_combo = self.layer_table.cellWidget(row, self.LAYER_COL_BAND)
+        mode_combo = self.layer_table.cellWidget(row, self.LAYER_COL_MODE)
+        if not isinstance(band_combo, QComboBox) or not isinstance(mode_combo, QComboBox):
+            return
+        band = band_combo.currentText().strip().upper()
+        options = self._mode_options_for_group_band(group, band)
+        current = mode_combo.currentText().strip().upper()
+        mode_combo.blockSignals(True)
+        mode_combo.clear()
+        mode_combo.addItem("")
+        for val in options:
+            mode_combo.addItem(val)
+        if current and mode_combo.findText(current) < 0:
+            mode_combo.addItem(current)
+        mode_combo.setCurrentText(current)
+        self._fit_combo_popup(mode_combo)
+        mode_combo.blockSignals(False)
+        self._refresh_layer_validation_hints()
+
+    def _autosize_layer_table(self) -> None:
+        try:
+            for col in (
+                self.LAYER_COL_DAY,
+                self.LAYER_COL_RECURRENCE,
+                self.LAYER_COL_MONTH_WEEKS,
+                self.LAYER_COL_REMOVE,
+            ):
+                self.layer_table.resizeColumnToContents(col)
+            if self.layer_table.columnWidth(self.LAYER_COL_MONTH_WEEKS) < 88:
+                self.layer_table.setColumnWidth(self.LAYER_COL_MONTH_WEEKS, 88)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _normalize_weeks_text(value: str) -> str:
+        weeks: List[int] = []
+        for token in str(value or "").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                week = int(token)
+            except Exception:
+                continue
+            if 1 <= week <= 5:
+                weeks.append(week)
+        return ",".join(str(w) for w in sorted(set(weeks)))
+
+    @staticmethod
+    def _is_valid_hhmm(value: str) -> bool:
+        txt = (value or "").strip()
+        if len(txt) != 5 or ":" not in txt:
+            return False
+        try:
+            h, m = txt.split(":", 1)
+            hh = int(h)
+            mm = int(m)
+            return 0 <= hh <= 23 and 0 <= mm <= 59
+        except Exception:
+            return False
+
+    def _populate_schedule_layer(self, existing: List[Dict[str, Any]]) -> None:
+        self.layer_table.setRowCount(0)
+        ordered = sorted((existing or []), key=lambda x: int(x.get("sort_order") or 0))
+        for row in ordered:
+            if not isinstance(row, dict):
+                continue
+            self._add_layer_row(existing=row)
+        self._autosize_layer_table()
+        self._refresh_layer_validation_hints()
+
+    def _add_layer_row(self, existing: Dict[str, Any] | None) -> None:
+        row_data = existing or {}
+        row = self.layer_table.rowCount()
+        self.layer_table.insertRow(row)
+
+        day_combo = QComboBox()
+        for day in ("ALL", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"):
+            day_combo.addItem(day, day)
+        day_val = (row_data.get("day_utc") or "ALL").strip()
+        day_combo.setCurrentText(day_val if day_val else "ALL")
+        day_combo.setProperty("layer_id", int(row_data.get("id") or 0))
+        day_combo.setProperty("sort_order", int(row_data.get("sort_order") or row))
+        self.layer_table.setCellWidget(row, self.LAYER_COL_DAY, day_combo)
+
+        rec_combo = QComboBox()
+        for rec in ("Weekly", "Daily", "Periodic", "Bi-Weekly"):
+            rec_combo.addItem(rec, rec)
+        rec_val = (row_data.get("recurrence") or "Daily").strip()
+        rec_combo.setCurrentText(rec_val if rec_val else "Daily")
+        self.layer_table.setCellWidget(row, self.LAYER_COL_RECURRENCE, rec_combo)
+
+        weeks_edit = QLineEdit(self._normalize_weeks_text(str(row_data.get("month_weeks") or "")))
+        weeks_edit.setPlaceholderText("1,3,5")
+        weeks_edit.setMaximumWidth(120)
+        self.layer_table.setCellWidget(row, self.LAYER_COL_MONTH_WEEKS, weeks_edit)
+
+        start_edit = QLineEdit(self._display_layer_hhmm_from_utc((row_data.get("start_utc") or "").strip()))
+        start_edit.setPlaceholderText("HH:MM")
+        start_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.layer_table.setCellWidget(row, self.LAYER_COL_START, start_edit)
+
+        end_edit = QLineEdit(self._display_layer_hhmm_from_utc((row_data.get("end_utc") or "").strip()))
+        end_edit.setPlaceholderText("HH:MM")
+        end_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.layer_table.setCellWidget(row, self.LAYER_COL_END, end_edit)
+
+        band_combo = self._make_band_widget((row_data.get("band") or "").strip().upper())
+        self.layer_table.setCellWidget(row, self.LAYER_COL_BAND, band_combo)
+
+        freq_combo = self._make_freq_widget((row_data.get("frequency") or "").strip())
+        self.layer_table.setCellWidget(row, self.LAYER_COL_FREQ, freq_combo)
+
+        mode_combo = QComboBox()
+        mode_combo.setEditable(True)
+        self.layer_table.setCellWidget(row, self.LAYER_COL_MODE, mode_combo)
+
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(lambda _=False, b=remove_btn: self._remove_layer_row_for_button(b))
+        self.layer_table.setCellWidget(row, self.LAYER_COL_REMOVE, remove_btn)
+
+        band_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_layer_freq_for_row(r))
+        band_combo.currentTextChanged.connect(lambda _=None, r=row: self._refresh_layer_freq_for_row(r))
+        band_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_layer_mode_for_row(r))
+        band_combo.currentTextChanged.connect(lambda _=None, r=row: self._refresh_layer_mode_for_row(r))
+        rec_combo.currentIndexChanged.connect(lambda _=0, r=row: self._on_layer_recurrence_changed(r))
+
+        self._refresh_layer_freq_for_row(row)
+        self._refresh_layer_mode_for_row(row)
+        if (row_data.get("mode") or "").strip():
+            mode_combo.setCurrentText((row_data.get("mode") or "").strip().upper())
+        self._on_layer_recurrence_changed(row)
+
+        day_combo.currentIndexChanged.connect(self._mark_dirty)
+        day_combo.currentIndexChanged.connect(self._refresh_layer_validation_hints)
+        rec_combo.currentIndexChanged.connect(self._mark_dirty)
+        rec_combo.currentIndexChanged.connect(self._refresh_layer_validation_hints)
+        weeks_edit.textChanged.connect(self._mark_dirty)
+        weeks_edit.textChanged.connect(self._refresh_layer_validation_hints)
+        start_edit.textChanged.connect(self._mark_dirty)
+        start_edit.textChanged.connect(self._refresh_layer_validation_hints)
+        end_edit.textChanged.connect(self._mark_dirty)
+        end_edit.textChanged.connect(self._refresh_layer_validation_hints)
+        band_combo.currentIndexChanged.connect(self._mark_dirty)
+        band_combo.currentIndexChanged.connect(self._refresh_layer_validation_hints)
+        band_combo.currentTextChanged.connect(self._mark_dirty)
+        band_combo.currentTextChanged.connect(self._refresh_layer_validation_hints)
+        freq_combo.currentIndexChanged.connect(self._mark_dirty)
+        freq_combo.currentIndexChanged.connect(self._refresh_layer_validation_hints)
+        freq_combo.currentTextChanged.connect(self._mark_dirty)
+        freq_combo.currentTextChanged.connect(self._refresh_layer_validation_hints)
+        mode_combo.currentIndexChanged.connect(self._mark_dirty)
+        mode_combo.currentIndexChanged.connect(self._refresh_layer_validation_hints)
+        mode_combo.currentTextChanged.connect(self._mark_dirty)
+        mode_combo.currentTextChanged.connect(self._refresh_layer_validation_hints)
+        self._mark_dirty()
+        self._autosize_layer_table()
+        self._refresh_layer_validation_hints()
+
+    def _on_layer_recurrence_changed(self, row: int) -> None:
+        if row < 0 or row >= self.layer_table.rowCount():
+            return
+        rec_combo = self.layer_table.cellWidget(row, self.LAYER_COL_RECURRENCE)
+        weeks_edit = self.layer_table.cellWidget(row, self.LAYER_COL_MONTH_WEEKS)
+        if not isinstance(rec_combo, QComboBox) or not isinstance(weeks_edit, QLineEdit):
+            return
+        recurrence = (rec_combo.currentText() or "Weekly").strip().title()
+        periodic = recurrence == "Periodic"
+        weeks_edit.setEnabled(periodic)
+        if not periodic:
+            weeks_edit.setText("")
+        self._refresh_layer_validation_hints()
+
+    def _remove_layer_row_for_button(self, btn: QPushButton) -> None:
+        for r in range(self.layer_table.rowCount()):
+            if self.layer_table.cellWidget(r, self.LAYER_COL_REMOVE) is btn:
+                self.layer_table.removeRow(r)
+                self._mark_dirty()
+                self._autosize_layer_table()
+                self._refresh_layer_validation_hints()
+                break
+
+    @staticmethod
+    def _hhmm_to_minutes(value: str) -> int | None:
+        txt = (value or "").strip()
+        if len(txt) != 5 or ":" not in txt:
+            return None
+        try:
+            hh, mm = txt.split(":", 1)
+            h = int(hh)
+            m = int(mm)
+            if h < 0 or h > 23 or m < 0 or m > 59:
+                return None
+            return (h * 60) + m
+        except Exception:
+            return None
+
+    @staticmethod
+    def _normalize_freq_text(value: str) -> str:
+        txt = (value or "").strip()
+        if not txt:
+            return ""
+        try:
+            return f"{float(txt):.3f}"
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _interval_segments(start_min: int, end_min: int) -> List[Tuple[int, int]]:
+        if start_min == end_min:
+            return [(0, 1440)]
+        if end_min > start_min:
+            return [(start_min, end_min)]
+        return [(start_min, 1440), (0, end_min)]
+
+    def _layer_time_windows_overlap(self, start_a: str, end_a: str, start_b: str, end_b: str) -> bool:
+        a0 = self._hhmm_to_minutes(start_a)
+        a1 = self._hhmm_to_minutes(end_a)
+        b0 = self._hhmm_to_minutes(start_b)
+        b1 = self._hhmm_to_minutes(end_b)
+        if a0 is None or a1 is None or b0 is None or b1 is None:
+            return False
+        for sa, ea in self._interval_segments(a0, a1):
+            for sb, eb in self._interval_segments(b0, b1):
+                if sa < eb and sb < ea:
+                    return True
+        return False
+
+    @staticmethod
+    def _row_may_share_day_context(row_a: Dict[str, Any], row_b: Dict[str, Any]) -> bool:
+        rec_a = str(row_a.get("recurrence") or "Weekly").strip().title()
+        rec_b = str(row_b.get("recurrence") or "Weekly").strip().title()
+        day_a = str(row_a.get("day") or "ALL").strip() or "ALL"
+        day_b = str(row_b.get("day") or "ALL").strip() or "ALL"
+        if rec_a == "Daily" or rec_b == "Daily":
+            return True
+        if day_a != "ALL" and day_b != "ALL" and day_a != day_b:
+            return False
+        if rec_a == "Periodic" and rec_b == "Periodic":
+            weeks_a = {int(x) for x in str(row_a.get("weeks") or "").split(",") if str(x).strip().isdigit()}
+            weeks_b = {int(x) for x in str(row_b.get("weeks") or "").split(",") if str(x).strip().isdigit()}
+            if weeks_a and weeks_b and not (weeks_a & weeks_b):
+                return False
+        return True
+
+    @staticmethod
+    def _set_layer_widget_warning(widget: QWidget | None, issues: List[str]) -> None:
+        if not isinstance(widget, QWidget):
+            return
+        if issues:
+            widget.setStyleSheet("border: 1px solid #C99700; border-radius: 3px;")
+            widget.setToolTip("\n".join(issues))
+        else:
+            widget.setStyleSheet("")
+            widget.setToolTip("")
+
+    def _refresh_layer_validation_hints(self, *_args) -> None:
+        row_meta: List[Dict[str, Any]] = []
+        for r in range(self.layer_table.rowCount()):
+            day_combo = self.layer_table.cellWidget(r, self.LAYER_COL_DAY)
+            rec_combo = self.layer_table.cellWidget(r, self.LAYER_COL_RECURRENCE)
+            weeks_edit = self.layer_table.cellWidget(r, self.LAYER_COL_MONTH_WEEKS)
+            start_edit = self.layer_table.cellWidget(r, self.LAYER_COL_START)
+            end_edit = self.layer_table.cellWidget(r, self.LAYER_COL_END)
+            band_combo = self.layer_table.cellWidget(r, self.LAYER_COL_BAND)
+            freq_combo = self.layer_table.cellWidget(r, self.LAYER_COL_FREQ)
+            mode_combo = self.layer_table.cellWidget(r, self.LAYER_COL_MODE)
+            if not isinstance(day_combo, QComboBox) or not isinstance(rec_combo, QComboBox):
+                continue
+            if not isinstance(weeks_edit, QLineEdit) or not isinstance(start_edit, QLineEdit):
+                continue
+            if not isinstance(end_edit, QLineEdit):
+                continue
+            if not isinstance(freq_combo, QComboBox):
+                continue
+            day_val = str(day_combo.currentData() or day_combo.currentText() or "ALL").strip() or "ALL"
+            rec_val = (rec_combo.currentText() or "Daily").strip().title()
+            weeks_val = self._normalize_weeks_text(weeks_edit.text())
+            start_val = start_edit.text().strip()
+            end_val = end_edit.text().strip()
+            band_val = band_combo.currentText().strip().upper() if isinstance(band_combo, QComboBox) else ""
+            freq_val = freq_combo.currentText().strip()
+            mode_val = mode_combo.currentText().strip().upper() if isinstance(mode_combo, QComboBox) else ""
+            row_blank = not any([weeks_val, start_val, end_val, band_val, freq_val, mode_val])
+            issues: Set[str] = set()
+            if not row_blank:
+                if not self._is_valid_hhmm(start_val):
+                    issues.add("Start time must be HH:MM.")
+                if not self._is_valid_hhmm(end_val):
+                    issues.add("End time must be HH:MM.")
+                if not freq_val:
+                    issues.add("Frequency is required.")
+                elif self._normalize_freq_text(freq_val) == "":
+                    issues.add("Frequency is invalid.")
+                if rec_val == "Periodic" and not weeks_val:
+                    issues.add("Weeks are required for Periodic recurrence.")
+            row_meta.append(
+                {
+                    "row": r,
+                    "day": "ALL" if rec_val == "Daily" else day_val,
+                    "recurrence": rec_val,
+                    "weeks": weeks_val,
+                    "start": start_val,
+                    "end": end_val,
+                    "band": band_val,
+                    "freq": self._normalize_freq_text(freq_val),
+                    "blank": row_blank,
+                    "issues": issues,
+                    "widgets": {
+                        "day": day_combo,
+                        "recurrence": rec_combo,
+                        "weeks": weeks_edit,
+                        "start": start_edit,
+                        "end": end_edit,
+                        "band": band_combo,
+                        "freq": freq_combo,
+                        "mode": mode_combo,
+                    },
+                }
+            )
+
+        overlap_pairs: Set[Tuple[int, int]] = set()
+        for i in range(len(row_meta)):
+            a = row_meta[i]
+            if a["blank"] or a["issues"] or not a["freq"]:
+                continue
+            for j in range(i + 1, len(row_meta)):
+                b = row_meta[j]
+                if b["blank"] or b["issues"] or not b["freq"]:
+                    continue
+                if a["band"] != b["band"] or a["freq"] != b["freq"]:
+                    continue
+                if not self._row_may_share_day_context(a, b):
+                    continue
+                if self._layer_time_windows_overlap(a["start"], a["end"], b["start"], b["end"]):
+                    overlap_pairs.add((int(a["row"]), int(b["row"])))
+
+        for ra, rb in overlap_pairs:
+            for meta in row_meta:
+                if int(meta["row"]) == ra:
+                    meta["issues"].add(f"Potential overlap with row {rb + 1}.")
+                if int(meta["row"]) == rb:
+                    meta["issues"].add(f"Potential overlap with row {ra + 1}.")
+
+        warnings: List[str] = []
+        for meta in row_meta:
+            row_issues = sorted(list(meta["issues"]))
+            row_widgets = meta["widgets"]
+            self._set_layer_widget_warning(row_widgets.get("start"), row_issues)
+            self._set_layer_widget_warning(row_widgets.get("end"), row_issues)
+            self._set_layer_widget_warning(row_widgets.get("freq"), row_issues)
+            self._set_layer_widget_warning(row_widgets.get("weeks"), row_issues)
+            if row_issues:
+                warnings.append(f"Row {int(meta['row']) + 1}: {'; '.join(row_issues)}")
+
+        if warnings:
+            preview = warnings[:5]
+            if len(warnings) > 5:
+                preview.append(f"...and {len(warnings) - 5} more row warning(s).")
+            self.layer_validation_label.setText("Layer warnings:\n" + "\n".join(preview))
+            self.layer_validation_label.setVisible(True)
+        else:
+            self.layer_validation_label.setText("")
+            self.layer_validation_label.setVisible(False)
+
+    def _layer_row_key(self, row: Dict[str, Any]) -> Tuple[str, str, int, str, str, str, str, str, str]:
+        return (
+            str(row.get("day_utc") or "ALL"),
+            str(row.get("recurrence") or "Weekly"),
+            int(row.get("biweekly_offset_weeks") or 0),
+            self._normalize_weeks_text(str(row.get("month_weeks") or "")),
+            str(row.get("band") or "").strip().upper(),
+            str(row.get("mode") or "").strip().upper(),
+            str(row.get("frequency") or "").strip(),
+            str(row.get("start_utc") or "").strip(),
+            str(row.get("end_utc") or "").strip(),
+        )
+
+    def _collect_action_rows_for_layer_seed(self) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for r in range(self.actions_table.rowCount()):
+            sw_combo = self.actions_table.cellWidget(r, self.COL_SOFTWARE)
+            action_combo = self.actions_table.cellWidget(r, self.COL_ACTION)
+            band_combo = self.actions_table.cellWidget(r, self.COL_BAND)
+            freq_combo = self.actions_table.cellWidget(r, self.COL_FREQ)
+            if not isinstance(sw_combo, QComboBox):
+                continue
+            software = sw_combo.currentText().strip()
+            if software == self.LOCAL_NET_SOFTWARE:
+                continue
+            action_label = action_combo.currentText().strip() if isinstance(action_combo, QComboBox) else ""
+            band = band_combo.currentText().strip().upper() if isinstance(band_combo, QComboBox) else ""
+            frequency = freq_combo.currentText().strip() if isinstance(freq_combo, QComboBox) else ""
+            rows.append(
+                {
+                    "software": software,
+                    "action_label": action_label,
+                    "band": band,
+                    "frequency": frequency,
+                }
+            )
+        return rows
+
+    def _count_local_net_actions(self) -> int:
+        count = 0
+        for r in range(self.actions_table.rowCount()):
+            if self._is_local_net_action_row(r):
+                count += 1
+        return count
+
+    def _current_layer_rows(self) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for r in range(self.layer_table.rowCount()):
+            day_combo = self.layer_table.cellWidget(r, self.LAYER_COL_DAY)
+            rec_combo = self.layer_table.cellWidget(r, self.LAYER_COL_RECURRENCE)
+            weeks_edit = self.layer_table.cellWidget(r, self.LAYER_COL_MONTH_WEEKS)
+            start_edit = self.layer_table.cellWidget(r, self.LAYER_COL_START)
+            end_edit = self.layer_table.cellWidget(r, self.LAYER_COL_END)
+            band_combo = self.layer_table.cellWidget(r, self.LAYER_COL_BAND)
+            freq_combo = self.layer_table.cellWidget(r, self.LAYER_COL_FREQ)
+            mode_combo = self.layer_table.cellWidget(r, self.LAYER_COL_MODE)
+            if not isinstance(day_combo, QComboBox) or not isinstance(rec_combo, QComboBox):
+                continue
+            if not isinstance(weeks_edit, QLineEdit) or not isinstance(start_edit, QLineEdit):
+                continue
+            if not isinstance(end_edit, QLineEdit) or not isinstance(freq_combo, QComboBox):
+                continue
+            out.append(
+                {
+                    "id": int(day_combo.property("layer_id") or 0),
+                    "day_utc": str(day_combo.currentData() or day_combo.currentText() or "ALL").strip(),
+                    "recurrence": (rec_combo.currentText() or "Daily").strip().title(),
+                    "biweekly_offset_weeks": 0,
+                    "month_weeks": self._normalize_weeks_text(weeks_edit.text()),
+                    "band": band_combo.currentText().strip().upper() if isinstance(band_combo, QComboBox) else "",
+                    "mode": mode_combo.currentText().strip().upper() if isinstance(mode_combo, QComboBox) else "",
+                    "frequency": freq_combo.currentText().strip(),
+                    "start_utc": self._utc_layer_hhmm_from_display(start_edit.text().strip(), show_local=self._show_local),
+                    "end_utc": self._utc_layer_hhmm_from_display(end_edit.text().strip(), show_local=self._show_local),
+                    "enabled": True,
+                    "sort_order": int(day_combo.property("sort_order") if day_combo.property("sort_order") is not None else r),
+                }
+            )
+        return out
+
+    def _apply_layer_rows(self, rows: List[Dict[str, Any]], *, replace_existing: bool) -> int:
+        if replace_existing:
+            self.layer_table.setRowCount(0)
+            for row in rows:
+                self._add_layer_row(existing=row)
+            self._mark_dirty()
+            self._autosize_layer_table()
+            self._refresh_layer_validation_hints()
+            return len(rows)
+
+        existing_rows = self._current_layer_rows()
+        existing_keys = {self._layer_row_key(row) for row in existing_rows}
+        added = 0
+        for row in rows:
+            key = self._layer_row_key(row)
+            if key in existing_keys:
+                continue
+            self._add_layer_row(existing=row)
+            existing_keys.add(key)
+            added += 1
+        if added > 0:
+            self._mark_dirty()
+            self._autosize_layer_table()
+            self._refresh_layer_validation_hints()
+        return added
+
+    def _invalidate_layer_sync_cache(self) -> None:
+        self._layer_sync_cache_key = None
+        self._layer_sync_cache_value = None
+
+    def _build_layer_candidates_from_actions(
+        self,
+        *,
+        use_cache: bool = False,
+    ) -> Tuple[List[Dict[str, Any]], List[str], int]:
+        group = self.group_combo.currentText().strip().upper()
+        if not group:
+            raise ValueError("Select an Operating Group before populating layer rows.")
+        action_rows = self._collect_action_rows_for_layer_seed()
+        if not action_rows:
+            raise ValueError(
+                "No eligible non-local action rows found. "
+                "Local Net SOP actions are supported, but Layer Sync applies to HF/Net schedule actions."
+            )
+        action_sig: List[Tuple[str, str, str, str]] = []
+        for row in action_rows:
+            band = str(row.get("band") or "").strip().upper()
+            freq = self._normalize_freq_text(str(row.get("frequency") or "").strip())
+            software = str(row.get("software") or "").strip().upper()
+            action_label = str(row.get("action_label") or "").strip().upper()
+            action_sig.append((software, action_label, band, freq))
+        cache_key: Tuple[Any, ...] = ("layer_candidates", group, tuple(sorted(action_sig)))
+        if use_cache and self._layer_sync_cache_key == cache_key and self._layer_sync_cache_value is not None:
+            c_rows, c_unmatched, c_matched = self._layer_sync_cache_value
+            return [dict(x) for x in c_rows], list(c_unmatched), int(c_matched)
+        result = self.manager.build_schedule_layer_candidates(
+            operating_group=group,
+            action_rows=action_rows,
+        )
+        candidates = result.get("rows", []) or []
+        unmatched = result.get("unmatched", []) or []
+        matched_actions = int(result.get("matched_actions") or 0)
+        self._layer_sync_cache_key = cache_key
+        self._layer_sync_cache_value = ([dict(x) for x in candidates], list(unmatched), matched_actions)
+        return candidates, unmatched, matched_actions
+
+    def _refresh_layer_sync_hint(self) -> None:
+        theme = resolve_theme(self.settings)
+        default_style = f"color: {theme.get('text_muted', '#888')};"
+        text = ""
+        style = default_style
+        show = False
+        out_of_sync = False
+        has_basis = False
+        try:
+            candidates, unmatched, matched_actions = self._build_layer_candidates_from_actions(use_cache=True)
+            existing_rows = self._current_layer_rows()
+            existing_keys = {self._layer_row_key(r) for r in existing_rows}
+            candidate_keys = {self._layer_row_key(r) for r in candidates}
+            add_count = len([key for key in candidate_keys if key not in existing_keys])
+            remove_count = len([key for key in existing_keys if key not in candidate_keys])
+            has_basis = True
+            show = True
+            if not candidates:
+                text = "Layer Sync: No matching HF/Net schedule windows for current action targets."
+                style = f"color: {theme.get('warning', '#C99700')};"
+            elif add_count == 0 and remove_count == 0:
+                text = "Layer Sync: In Sync"
+                style = f"color: {theme.get('success', '#2E7D32')}; font-weight: 600;"
+            else:
+                out_of_sync = True
+                unmatched_count = len(unmatched)
+                text = f"Layer Sync: Out of Sync (+{add_count} / -{remove_count})"
+                if unmatched_count > 0:
+                    text += f" | {unmatched_count} unmatched action target(s)"
+                if matched_actions >= 0:
+                    text += f" | matched targets: {matched_actions}"
+                style = f"color: {theme.get('warning', '#C99700')}; font-weight: 600;"
+        except ValueError:
+            group = self.group_combo.currentText().strip().upper()
+            actions = self._collect_action_rows_for_layer_seed()
+            local_count = self._count_local_net_actions()
+            if not group and actions:
+                show = True
+                text = "Layer Sync: Select an Operating Group to evaluate layer alignment."
+            elif group and not actions:
+                show = True
+                if local_count > 0:
+                    text = (
+                        "Layer Sync: Local Net actions are active reminders. "
+                        "Layer Sync is only used for HF/Net schedule actions."
+                    )
+                else:
+                    text = "Layer Sync: Add non-local action rows to evaluate layer alignment."
+            else:
+                show = False
+                text = ""
+            style = default_style
+            has_basis = False
+            out_of_sync = False
+        except Exception as e:
+            log.debug("SOP: layer sync hint refresh failed: %s", e)
+            show = False
+            text = ""
+            has_basis = False
+            out_of_sync = False
+
+        self._layer_sync_has_basis = has_basis
+        self._layer_sync_out_of_sync = out_of_sync
+        self.layer_sync_label.setVisible(show)
+        self.layer_sync_label.setText(text)
+        self.layer_sync_label.setStyleSheet(style)
+        self._update_profile_action_styles(theme)
+
+    def _layer_row_summary(self, row: Dict[str, Any]) -> str:
+        day = str(row.get("day_utc") or "ALL").strip() or "ALL"
+        rec = str(row.get("recurrence") or "Daily").strip().title()
+        weeks = self._normalize_weeks_text(str(row.get("month_weeks") or ""))
+        start = str(row.get("start_utc") or "").strip()
+        end = str(row.get("end_utc") or "").strip()
+        band = str(row.get("band") or "").strip().upper()
+        freq = str(row.get("frequency") or "").strip()
+        mode = str(row.get("mode") or "").strip().upper()
+        rec_txt = rec if rec != "Periodic" else f"{rec}({weeks or '-'})"
+        return f"{day} {rec_txt} {start}-{end} {band} {freq} {mode}".strip()
+
+    def _preview_layer_candidates(
+        self,
+        *,
+        candidates: List[Dict[str, Any]],
+        unmatched: List[str],
+        matched_actions: int,
+        title: str,
+    ) -> None:
+        if not candidates:
+            detail = "\n".join(unmatched[:8]) if unmatched else "No matching schedule windows were found."
+            QMessageBox.information(self, "SOP Layer", f"No layer candidates found.\n\n{detail}")
+            return
+        existing_rows = self._current_layer_rows()
+        existing_keys = {self._layer_row_key(r) for r in existing_rows}
+        candidate_keys = {self._layer_row_key(r) for r in candidates}
+        add_rows = [r for r in candidates if self._layer_row_key(r) not in existing_keys]
+        remove_rows = [r for r in existing_rows if self._layer_row_key(r) not in candidate_keys]
+        unchanged = len(existing_keys & candidate_keys)
+        summary_lines = [
+            f"Generated {len(candidates)} candidate row(s) from {matched_actions} matched action target(s).",
+            "",
+            "Diff vs current layer:",
+            f"+ Add: {len(add_rows)}",
+            f"- Remove (rebuild): {len(remove_rows)}",
+            f"= Unchanged: {unchanged}",
+        ]
+        if add_rows:
+            summary_lines.append("")
+            summary_lines.append("Adds:")
+            summary_lines.extend(self._layer_row_summary(row) for row in add_rows[:4])
+            if len(add_rows) > 4:
+                summary_lines.append(f"...and {len(add_rows) - 4} more add row(s).")
+        if remove_rows:
+            summary_lines.append("")
+            summary_lines.append("Removals on rebuild:")
+            summary_lines.extend(self._layer_row_summary(row) for row in remove_rows[:4])
+            if len(remove_rows) > 4:
+                summary_lines.append(f"...and {len(remove_rows) - 4} more remove row(s).")
+        if unmatched:
+            summary_lines.append("")
+            summary_lines.append("Unmatched actions:")
+            summary_lines.extend(unmatched[:4])
+            if len(unmatched) > 4:
+                summary_lines.append(f"...and {len(unmatched) - 4} more unmatched action(s).")
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle(title)
+        msg.setText("\n".join(summary_lines))
+        append_btn = msg.addButton("Append Missing", QMessageBox.AcceptRole)
+        rebuild_btn = msg.addButton("Apply Rebuild", QMessageBox.DestructiveRole)
+        msg.addButton(QMessageBox.Cancel)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == append_btn:
+            added = self._apply_layer_rows(candidates, replace_existing=False)
+            QMessageBox.information(
+                self,
+                "SOP Layer",
+                f"Appended {added} new row(s). {len(candidates) - added} duplicate row(s) were skipped.",
+            )
+        elif clicked == rebuild_btn:
+            replaced = self._apply_layer_rows(candidates, replace_existing=True)
+            QMessageBox.information(
+                self,
+                "SOP Layer",
+                f"Rebuilt layer with {replaced} row(s). Removed {len(remove_rows)} row(s).",
+            )
+
+    def _on_populate_layer_from_actions(self) -> None:
+        try:
+            candidates, unmatched, matched_actions = self._build_layer_candidates_from_actions()
+        except ValueError as e:
+            QMessageBox.information(self, "SOP Layer", str(e))
+            return
+        self._preview_layer_candidates(
+            candidates=candidates,
+            unmatched=unmatched,
+            matched_actions=matched_actions,
+            title="Populate SOP Layer",
+        )
+
+    def _on_rebuild_layer_preview(self) -> None:
+        try:
+            candidates, unmatched, matched_actions = self._build_layer_candidates_from_actions()
+        except ValueError as e:
+            QMessageBox.information(self, "SOP Layer", str(e))
+            return
+        self._preview_layer_candidates(
+            candidates=candidates,
+            unmatched=unmatched,
+            matched_actions=matched_actions,
+            title="Rebuild SOP Layer Preview",
+        )
 
     def _populate_actions(self, existing: List[Dict[str, Any]]) -> None:
         self.actions_table.setRowCount(0)
@@ -768,7 +1639,19 @@ class SOPTab(QWidget):
         m = max(1, int(minutes))
         return f"{m // 60:02d}:{m % 60:02d}"
 
+    @staticmethod
+    def _format_interval_spec(interval_minutes: int, phase_minutes: int = 0) -> str:
+        base = SOPTab._format_interval_hhmm(interval_minutes)
+        phase = max(0, int(phase_minutes or 0))
+        if phase <= 0:
+            return base
+        return f"{base}@{phase}m"
+
     def _parse_interval_minutes(self, text: str) -> int:
+        minutes, _phase = self._parse_interval_spec(text)
+        return minutes
+
+    def _parse_simple_minutes(self, text: str) -> int:
         raw = (text or "").strip().lower()
         if not raw:
             raise ValueError("Interval is required.")
@@ -792,6 +1675,38 @@ class SOPTab(QWidget):
         if "." in raw:
             return max(1, int(round(float(raw) * 60)))
         raise ValueError(f"Invalid interval: {text}")
+
+    def _parse_phase_minutes(self, text: str) -> int:
+        raw = (text or "").strip().lower()
+        if not raw:
+            return 0
+        if raw.endswith("m"):
+            raw = raw[:-1].strip()
+        if ":" in raw:
+            hh, mm = raw.split(":", 1)
+            total = (int(hh.strip() or "0") * 60) + int(mm.strip() or "0")
+            if total < 0:
+                raise ValueError(f"Invalid interval phase: {text}")
+            return total
+        total = int(raw)
+        if total < 0:
+            raise ValueError(f"Invalid interval phase: {text}")
+        return total
+
+    def _parse_interval_spec(self, text: str) -> Tuple[int, int]:
+        raw = (text or "").strip()
+        if not raw:
+            raise ValueError("Interval is required.")
+        base = raw
+        phase = 0
+        if "@" in raw:
+            base_part, phase_part = raw.split("@", 1)
+            base = base_part.strip()
+            phase = self._parse_phase_minutes(phase_part)
+        interval_minutes = self._parse_simple_minutes(base)
+        if phase:
+            phase = phase % max(1, interval_minutes)
+        return interval_minutes, phase
 
     def _refresh_action_combo_for_row(
         self,
@@ -866,11 +1781,12 @@ class SOPTab(QWidget):
         interval_minutes = int((existing or {}).get("interval_minutes") or 0)
         if interval_minutes <= 0:
             interval_minutes = int((existing or {}).get("interval_hours") or 3) * 60
-        interval_txt = self._format_interval_hhmm(interval_minutes)
+        interval_phase = int((existing or {}).get("interval_phase_minutes") or 0)
+        interval_txt = self._format_interval_spec(interval_minutes, interval_phase)
         if interval_combo.findText(interval_txt) < 0:
             interval_combo.addItem(interval_txt, interval_txt)
         interval_combo.setCurrentText(interval_txt)
-        interval_combo.setToolTip("Examples: 00:45, 90m, 1.5h, 0130")
+        interval_combo.setToolTip("Examples: 00:45, 90m, 1.5h, 0130, 03:00@30m")
         if interval_combo.lineEdit() is not None:
             interval_combo.lineEdit().setPlaceholderText("type or select...")
         self._fit_combo_popup(interval_combo)
@@ -1105,7 +2021,7 @@ class SOPTab(QWidget):
         except Exception:
             pass
 
-    def _collect_profile_payload(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    def _collect_profile_payload(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
         name = self.name_edit.text().strip()
         if not name:
             raise ValueError("SOP name is required.")
@@ -1122,11 +2038,13 @@ class SOPTab(QWidget):
             "secondary_group": self.secondary_combo.currentText().strip().upper(),
             "frequency": "",
             "sop_start_utc": start_utc,
+            "priority": int(self.priority_spin.value()),
             "active": self.active_cb.isChecked(),
             "window_hours": int(self.horizon_spin.value()),
         }
 
         actions: List[Dict[str, Any]] = []
+        schedule_layer: List[Dict[str, Any]] = []
         requires_operating_group = False
         for r in range(self.actions_table.rowCount()):
             band_combo = self.actions_table.cellWidget(r, self.COL_BAND)
@@ -1146,7 +2064,7 @@ class SOPTab(QWidget):
             action_label = action_combo.currentText().strip()
             if not software or not action_key or action_key == "__spotter_header__":
                 continue
-            is_local_action = software == self.LOCAL_NET_SOFTWARE and action_key == self.LOCAL_NET_ACTION_KEY
+            is_local_action = software == self.LOCAL_NET_SOFTWARE and action_key in self.LOCAL_NET_ACTION_KEYS
             if not is_local_action:
                 requires_operating_group = True
             contact_rule = rule_combo.currentData() if isinstance(rule_combo, QComboBox) else "none"
@@ -1160,10 +2078,10 @@ class SOPTab(QWidget):
                     contact_target = str(target_combo.currentData() or target_combo.currentText() or "").strip().upper()
             if str(contact_rule) != "none" and not contact_target:
                 raise ValueError(f"Contact Target is required on row {r + 1}.")
-            interval_minutes = (
-                self._parse_interval_minutes(interval_combo.currentText())
+            interval_minutes, interval_phase_minutes = (
+                self._parse_interval_spec(interval_combo.currentText())
                 if isinstance(interval_combo, QComboBox)
-                else 180
+                else (180, 0)
             )
             description = desc_edit.text().strip() if isinstance(desc_edit, QLineEdit) else ""
             if is_local_action and not description and contact_target:
@@ -1187,6 +2105,7 @@ class SOPTab(QWidget):
                     "action_label": action_label,
                     "enabled": True,
                     "interval_minutes": interval_minutes,
+                    "interval_phase_minutes": interval_phase_minutes,
                     "interval_hours": max(1, int((interval_minutes + 59) // 60)),
                     "description": description,
                     "contact_rule": contact_rule,
@@ -1202,20 +2121,89 @@ class SOPTab(QWidget):
             )
             actions.append(preserved)
 
+        for r in range(self.layer_table.rowCount()):
+            day_combo = self.layer_table.cellWidget(r, self.LAYER_COL_DAY)
+            rec_combo = self.layer_table.cellWidget(r, self.LAYER_COL_RECURRENCE)
+            weeks_edit = self.layer_table.cellWidget(r, self.LAYER_COL_MONTH_WEEKS)
+            start_edit = self.layer_table.cellWidget(r, self.LAYER_COL_START)
+            end_edit = self.layer_table.cellWidget(r, self.LAYER_COL_END)
+            band_combo = self.layer_table.cellWidget(r, self.LAYER_COL_BAND)
+            freq_combo = self.layer_table.cellWidget(r, self.LAYER_COL_FREQ)
+            mode_combo = self.layer_table.cellWidget(r, self.LAYER_COL_MODE)
+            if not isinstance(day_combo, QComboBox) or not isinstance(rec_combo, QComboBox):
+                continue
+            if not isinstance(weeks_edit, QLineEdit) or not isinstance(start_edit, QLineEdit):
+                continue
+            if not isinstance(end_edit, QLineEdit):
+                continue
+            if not isinstance(freq_combo, QComboBox):
+                continue
+            day = str(day_combo.currentData() or day_combo.currentText() or "ALL").strip()
+            recurrence = (rec_combo.currentText() or "Daily").strip().title()
+            weeks = self._normalize_weeks_text(weeks_edit.text())
+            start_display = start_edit.text().strip()
+            end_display = end_edit.text().strip()
+            band_val = band_combo.currentText().strip().upper() if isinstance(band_combo, QComboBox) else ""
+            mode_val = mode_combo.currentText().strip().upper() if isinstance(mode_combo, QComboBox) else ""
+            freq_txt = freq_combo.currentText().strip()
+            row_blank = not any([weeks, start_display, end_display, band_val, mode_val, freq_txt])
+            if row_blank:
+                continue
+            if not self._is_valid_hhmm(start_display):
+                raise ValueError(f"Layer row {r + 1}: Start time must be HH:MM.")
+            if not self._is_valid_hhmm(end_display):
+                raise ValueError(f"Layer row {r + 1}: End time must be HH:MM.")
+            start_utc = self._utc_layer_hhmm_from_display(start_display, show_local=self._show_local)
+            end_utc = self._utc_layer_hhmm_from_display(end_display, show_local=self._show_local)
+            if not freq_txt:
+                raise ValueError(f"Layer row {r + 1}: Frequency is required.")
+            try:
+                freq_norm = f"{float(freq_txt):.3f}"
+            except Exception:
+                raise ValueError(f"Layer row {r + 1}: Frequency is invalid.")
+            if recurrence not in {"Weekly", "Daily", "Periodic", "Bi-Weekly"}:
+                recurrence = "Daily"
+            if recurrence == "Periodic" and not weeks:
+                raise ValueError(f"Layer row {r + 1}: Weeks are required for Periodic recurrence.")
+            if recurrence != "Periodic":
+                weeks = ""
+            if recurrence == "Daily":
+                day = "ALL"
+            schedule_layer.append(
+                {
+                    "id": int(day_combo.property("layer_id") or 0),
+                    "day_utc": day or "ALL",
+                    "recurrence": recurrence,
+                    "biweekly_offset_weeks": 0,
+                    "month_weeks": weeks,
+                    "band": band_val,
+                    "mode": mode_val,
+                    "vfo": "",
+                    "frequency": freq_norm,
+                    "start_utc": start_utc,
+                    "end_utc": end_utc,
+                    "enabled": True,
+                    "sort_order": int(day_combo.property("sort_order") if day_combo.property("sort_order") is not None else r),
+                }
+            )
+
         if not actions:
             raise ValueError("Add at least one action row.")
+        if schedule_layer:
+            requires_operating_group = True
         if requires_operating_group and not group:
             raise ValueError("Operating group is required for non-local SOP actions.")
 
-        return payload, actions
+        return payload, actions, schedule_layer
 
     def _save_profile(self) -> None:
         try:
-            payload, actions = self._collect_profile_payload()
-            profile_id = self.manager.save_profile(payload, actions)
+            payload, actions, schedule_layer = self._collect_profile_payload()
+            profile_id = self.manager.save_profile(payload, actions, schedule_layer)
             self._reload_profiles(select_id=profile_id)
             self._set_save_dirty(False)
             self.refresh_upcoming()
+            self._emit_sop_data_changed()
             QMessageBox.information(self, "SOP", "SOP saved.")
         except Exception as e:
             QMessageBox.warning(self, "SOP", str(e))
@@ -1229,6 +2217,7 @@ class SOPTab(QWidget):
         self.manager.delete_profile(int(self._selected_profile_id))
         self._reload_profiles(select_id=None)
         self.refresh_upcoming()
+        self._emit_sop_data_changed()
 
     def _operator_callsign(self) -> str:
         return str(self.settings.get("operator_callsign", "") or "").strip().upper()
@@ -1471,12 +2460,7 @@ class SOPTab(QWidget):
             profile = self.manager.get_profile(profile_id)
             if not profile:
                 return rows
-            rows.append(
-                {
-                    "profile": profile,
-                    "actions": self.manager.build_profile_export_rows(profile_id, now_utc=now_utc),
-                }
-            )
+            rows.append({"profile": profile})
             return rows
         for p in self._profiles:
             if not bool(p.get("active")):
@@ -1487,14 +2471,36 @@ class SOPTab(QWidget):
             profile = self.manager.get_profile(profile_id)
             if not profile:
                 continue
-            rows.append(
-                {
-                    "profile": profile,
-                    "actions": self.manager.build_profile_export_rows(profile_id, now_utc=now_utc),
-                }
-            )
+            rows.append({"profile": profile})
         rows.sort(key=lambda x: str((x.get("profile") or {}).get("name") or "").upper())
         return rows
+
+    def _daily_export_window_utc(
+        self,
+        *,
+        time_mode: str,
+        now_utc: datetime.datetime,
+    ) -> Tuple[datetime.datetime, datetime.datetime, str]:
+        mode = str(time_mode or "Local").strip().upper()
+        now_norm = now_utc if isinstance(now_utc, datetime.datetime) else datetime.datetime.now(datetime.timezone.utc)
+        if now_norm.tzinfo is None:
+            now_norm = now_norm.replace(tzinfo=datetime.timezone.utc)
+        else:
+            now_norm = now_norm.astimezone(datetime.timezone.utc)
+        if mode == "UTC":
+            day_start = now_norm.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=0)
+            return day_start, day_end, f"{day_start.strftime('%Y-%m-%d')} UTC"
+        tz_name = self.settings.get("timezone", "UTC") or "UTC"
+        tz = get_timezone(tz_name)
+        local_now = now_norm.astimezone(tz)
+        local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        local_end = local_start.replace(hour=23, minute=59, second=59, microsecond=0)
+        return (
+            local_start.astimezone(datetime.timezone.utc),
+            local_end.astimezone(datetime.timezone.utc),
+            f"{local_start.strftime('%Y-%m-%d')} Local ({tz_name})",
+        )
 
     def _format_due_for_pdf(self, due_utc: datetime.datetime, *, time_mode: str) -> str:
         if not isinstance(due_utc, datetime.datetime):
@@ -1505,32 +2511,66 @@ class SOPTab(QWidget):
         tz = get_timezone(tz_name)
         return due_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M")
 
-    def _build_sop_actions_html(self, actions: List[Dict[str, Any]], *, time_mode: str) -> str:
-        if not actions:
-            return "<p class='empty'>No enabled actions in this SOP profile.</p>"
+    def _format_due_clock_for_pdf(self, due_utc: datetime.datetime, *, time_mode: str) -> str:
+        if not isinstance(due_utc, datetime.datetime):
+            return ""
+        if str(time_mode).strip().upper() == "UTC":
+            return due_utc.astimezone(datetime.timezone.utc).strftime("%H:%M")
+        tz_name = self.settings.get("timezone", "UTC") or "UTC"
+        tz = get_timezone(tz_name)
+        return due_utc.astimezone(tz).strftime("%H:%M")
+
+    def _build_daily_action_plan_html(self, rows: List[Dict[str, Any]], *, time_mode: str) -> str:
+        if not rows:
+            return "<p class='empty'>No actions found for the selected day.</p>"
         out = [
             "<table>",
             "<thead><tr>"
-            "<th style='width: 14%;'>Next Due</th>"
-            "<th style='width: 10%;'>Status</th>"
-            "<th style='width: 12%;'>Software</th>"
+            "<th style='width: 10%;'>Time</th>"
+            "<th style='width: 14%;'>Resource</th>"
             "<th style='width: 12%;'>Action</th>"
-            "<th style='width: 10%;'>Band/Freq</th>"
-            "<th style='width: 12%;'>Contact</th>"
-            "<th style='width: 30%;'>Description</th>"
+            "<th style='width: 12%;'>Band/Freq</th>"
+            "<th style='width: 18%;'>Contact</th>"
+            "<th style='width: 34%;'>Description</th>"
             "</tr></thead><tbody>",
         ]
-        for row in actions:
-            band = str(row.get("band") or "").strip()
-            freq = str(row.get("frequency") or "").strip()
-            band_freq = f"{band} {freq}".strip() if (band or freq) else "--"
+        for row in rows:
             out.append(
                 "<tr>"
-                f"<td>{html.escape(self._format_due_for_pdf(row.get('next_due_utc'), time_mode=time_mode))}</td>"
-                f"<td>{html.escape(str(row.get('status') or ''))}</td>"
-                f"<td>{html.escape(str(row.get('software') or ''))}</td>"
+                f"<td>{html.escape(self._format_due_clock_for_pdf(row.get('due_utc'), time_mode=time_mode))}</td>"
+                f"<td>{html.escape(str(row.get('resource') or ''))}</td>"
                 f"<td>{html.escape(str(row.get('action_label') or ''))}</td>"
-                f"<td>{html.escape(band_freq)}</td>"
+                f"<td>{html.escape(str(row.get('band_freq') or '--'))}</td>"
+                f"<td>{html.escape(str(row.get('contact_display') or '--'))}</td>"
+                f"<td>{html.escape(str(row.get('description') or ''))}</td>"
+                "</tr>"
+            )
+        out.append("</tbody></table>")
+        return "".join(out)
+
+    def _build_periodic_action_plan_html(self, rows: List[Dict[str, Any]]) -> str:
+        if not rows:
+            return "<p class='empty'>No periodic action rows found.</p>"
+        out = [
+            "<table>",
+            "<thead><tr>"
+            "<th style='width: 12%;'>Week(s) of Month</th>"
+            "<th style='width: 11%;'>Day of Week</th>"
+            "<th style='width: 12%;'>Resource</th>"
+            "<th style='width: 12%;'>Action</th>"
+            "<th style='width: 12%;'>Band/Freq</th>"
+            "<th style='width: 17%;'>Contact</th>"
+            "<th style='width: 24%;'>Description</th>"
+            "</tr></thead><tbody>",
+        ]
+        for row in rows:
+            out.append(
+                "<tr>"
+                f"<td>{html.escape(str(row.get('weeks_of_month') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('day_of_week') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('resource') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('action_label') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('band_freq') or '--'))}</td>"
                 f"<td>{html.escape(str(row.get('contact_display') or '--'))}</td>"
                 f"<td>{html.escape(str(row.get('description') or ''))}</td>"
                 "</tr>"
@@ -1632,19 +2672,94 @@ class SOPTab(QWidget):
         if callsign:
             parts.append(f"<div class='meta'><b>Operator:</b> {html.escape(callsign)}</div>")
 
-        for idx, section in enumerate(profiles):
+        time_mode = str(options.get("time_mode") or "Local")
+        day_start_utc, day_end_utc, day_label = self._daily_export_window_utc(time_mode=time_mode, now_utc=now_utc)
+        blended_daily_rows: List[Dict[str, Any]] = []
+        periodic_rows: List[Dict[str, Any]] = []
+        for section in profiles:
             profile = section.get("profile") or {}
-            actions = section.get("actions") or []
-            page_cls = " class='page-break'" if idx > 0 else ""
-            parts.append(f"<div{page_cls}>")
-            parts.append(f"<h2>{html.escape(str(profile.get('name') or 'SOP'))}</h2>")
-            parts.append(
-                f"<div class='meta'><b>Operating Group:</b> {html.escape(str(profile.get('operating_group') or ''))}"
-                f" &nbsp; | &nbsp; <b>Secondary Group:</b> {html.escape(str(profile.get('secondary_group') or ''))}"
-                f" &nbsp; | &nbsp; <b>Daily Start (UTC):</b> {html.escape(str(profile.get('sop_start_utc') or '00:00'))}"
-                f" &nbsp; | &nbsp; <b>Active:</b> {'Yes' if bool(profile.get('active')) else 'No'}</div>"
+            profile_id = int(profile.get("id") or 0)
+            if profile_id <= 0:
+                continue
+            blended_daily_rows.extend(
+                self.manager.build_profile_daily_plan_rows(
+                    profile_id,
+                    day_start_utc=day_start_utc,
+                    day_end_utc=day_end_utc,
+                )
             )
-            parts.append(self._build_sop_actions_html(actions, time_mode=str(options.get("time_mode") or "Local")))
+            periodic_rows.extend(self.manager.build_profile_periodic_action_rows(profile_id))
+
+        daily_seen: Set[Tuple[str, str, str, str, str, str]] = set()
+        daily_unique: List[Dict[str, Any]] = []
+        for row in blended_daily_rows:
+            due = row.get("due_utc")
+            due_key = (
+                due.astimezone(datetime.timezone.utc).replace(second=0, microsecond=0).isoformat()
+                if isinstance(due, datetime.datetime)
+                else ""
+            )
+            key = (
+                due_key,
+                str(row.get("resource") or ""),
+                str(row.get("action_label") or ""),
+                str(row.get("band_freq") or ""),
+                str(row.get("contact_display") or ""),
+                str(row.get("description") or ""),
+            )
+            if key in daily_seen:
+                continue
+            daily_seen.add(key)
+            daily_unique.append(row)
+        daily_unique.sort(
+            key=lambda x: (
+                x.get("due_utc")
+                if isinstance(x.get("due_utc"), datetime.datetime)
+                else datetime.datetime.max.replace(tzinfo=datetime.timezone.utc),
+                str(x.get("resource") or ""),
+                str(x.get("action_label") or ""),
+            )
+        )
+
+        periodic_seen: Set[Tuple[str, str, str, str, str, str, str]] = set()
+        periodic_unique: List[Dict[str, Any]] = []
+        for row in periodic_rows:
+            key = (
+                str(row.get("weeks_of_month") or ""),
+                str(row.get("day_of_week") or ""),
+                str(row.get("resource") or ""),
+                str(row.get("action_label") or ""),
+                str(row.get("band_freq") or ""),
+                str(row.get("contact_display") or ""),
+                str(row.get("description") or ""),
+            )
+            if key in periodic_seen:
+                continue
+            periodic_seen.add(key)
+            periodic_unique.append(row)
+        periodic_unique.sort(
+            key=lambda x: (
+                str(x.get("weeks_of_month") or ""),
+                str(x.get("day_of_week") or ""),
+                str(x.get("resource") or ""),
+                str(x.get("action_label") or ""),
+            )
+        )
+
+        parts.append("<div class='section'>")
+        parts.append("<h2>Daily Action Plan</h2>")
+        parts.append(f"<div class='meta'><b>Day:</b> {html.escape(day_label)}</div>")
+        parts.append(
+            "<div class='meta'><b>Columns:</b> Time, Resource, Action, Band/Freq, Contact, Description</div>"
+        )
+        parts.append(self._build_daily_action_plan_html(daily_unique, time_mode=time_mode))
+        parts.append("</div>")
+
+        if periodic_unique:
+            parts.append("<div class='page-break'>")
+            parts.append("<h2>Periodic Actions</h2>")
+            parts.append("<div class='meta'><b>Columns:</b> Week(s) of Month, Day of Week, Resource, Action, Band/Freq, Contact, Description</div>")
+            parts.append(self._build_periodic_action_plan_html(periodic_unique))
             parts.append("</div>")
 
         if options.get("include_roster"):
@@ -1759,6 +2874,7 @@ class SOPTab(QWidget):
             profile_id = self.manager.import_profile_json(payload)
             self._reload_profiles(select_id=profile_id)
             self.refresh_upcoming()
+            self._emit_sop_data_changed()
             QMessageBox.information(self, "Import SOP", "SOP imported.")
         except Exception as e:
             QMessageBox.warning(self, "Import SOP", str(e))
@@ -1801,21 +2917,52 @@ class SOPTab(QWidget):
         self._update_time_toggle_style()
         tz_short = self._tz_short_name() if self._show_local else "UTC"
         self.start_label.setText(f"SOP Daily Start ({tz_short}):")
+        self._update_layer_time_headers(tz_short)
+        self._refresh_runtime_layer_hint()
+
+    def _update_layer_time_headers(self, tz_short: str) -> None:
+        if not hasattr(self, "layer_table"):
+            return
+        key = str(tz_short or "UTC").strip().upper()
+        if key == self._layer_time_header_tag:
+            return
+        self._layer_time_header_tag = key
+        self.layer_table.setHorizontalHeaderItem(self.LAYER_COL_START, QTableWidgetItem(f"Start ({tz_short})"))
+        self.layer_table.setHorizontalHeaderItem(self.LAYER_COL_END, QTableWidgetItem(f"End ({tz_short})"))
 
     def _toggle_time_view(self) -> None:
         prev_show_local = self._show_local
         prior_text = self.start_edit.text().strip()
         prior_utc = self._utc_start_hhmm_from_display(prior_text, show_local=prev_show_local)
+        layer_prior: List[Tuple[QLineEdit, QLineEdit, str, str]] = []
+        for r in range(self.layer_table.rowCount()):
+            start_edit = self.layer_table.cellWidget(r, self.LAYER_COL_START)
+            end_edit = self.layer_table.cellWidget(r, self.LAYER_COL_END)
+            if not isinstance(start_edit, QLineEdit) or not isinstance(end_edit, QLineEdit):
+                continue
+            layer_prior.append(
+                (
+                    start_edit,
+                    end_edit,
+                    self._utc_layer_hhmm_from_display(start_edit.text().strip(), show_local=prev_show_local),
+                    self._utc_layer_hhmm_from_display(end_edit.text().strip(), show_local=prev_show_local),
+                )
+            )
         self._show_local = not self._show_local
         self.start_edit.setText(self._display_start_hhmm_from_utc(prior_utc))
+        for start_edit, end_edit, start_utc, end_utc in layer_prior:
+            start_edit.setText(self._display_layer_hhmm_from_utc(start_utc))
+            end_edit.setText(self._display_layer_hhmm_from_utc(end_utc))
         self._update_clock_labels()
+        self._refresh_layer_validation_hints()
         self.refresh_upcoming()
 
-    def _display_start_hhmm_from_utc(self, utc_hhmm: str) -> str:
+    def _display_start_hhmm_from_utc(self, utc_hhmm: str, show_local: bool | None = None) -> str:
         text = (utc_hhmm or "00:00").strip()
         if len(text) != 5 or ":" not in text:
             return "00:00"
-        if not self._show_local:
+        use_local = self._show_local if show_local is None else bool(show_local)
+        if not use_local:
             return text
         try:
             tz_name = self.settings.get("timezone", "UTC") or "UTC"
@@ -1826,6 +2973,9 @@ class SOPTab(QWidget):
             return dt_utc.astimezone(tz).strftime("%H:%M")
         except Exception:
             return text
+
+    def _display_layer_hhmm_from_utc(self, utc_hhmm: str, show_local: bool | None = None) -> str:
+        return self._display_start_hhmm_from_utc(utc_hhmm, show_local=show_local)
 
     def _utc_start_hhmm_from_display(self, display_hhmm: str, show_local: bool | None = None) -> str:
         text = (display_hhmm or "00:00").strip()
@@ -1845,6 +2995,9 @@ class SOPTab(QWidget):
         except Exception:
             return text
 
+    def _utc_layer_hhmm_from_display(self, display_hhmm: str, show_local: bool | None = None) -> str:
+        return self._utc_start_hhmm_from_display(display_hhmm, show_local=show_local)
+
     def refresh_upcoming(self) -> None:
         try:
             horizon = int(self.horizon_spin.value())
@@ -1858,6 +3011,55 @@ class SOPTab(QWidget):
             self._populate_upcoming_table()
         except Exception as e:
             log.debug("SOP: refresh_upcoming failed: %s", e)
+        self._refresh_runtime_layer_hint()
+
+    def _refresh_runtime_layer_hint(self) -> None:
+        theme = resolve_theme(self.settings)
+        text = ""
+        style = f"color: {theme.get('text_muted', '#888')};"
+        visible = False
+        try:
+            sched = getattr(self.window(), "scheduler", None)
+            if sched and hasattr(sched, "get_status_summary"):
+                status = sched.get_status_summary()
+                source = str(status.get("source") or "").strip().upper()
+                net_kind = str(status.get("net_kind") or "").strip()
+                source_reason_detail = str(status.get("source_reason_detail") or "").strip()
+                sop_contention = bool(status.get("sop_contention"))
+                sop_profiles = [str(x).strip() for x in (status.get("sop_contention_profiles") or []) if str(x).strip()]
+                sop_selected = str(status.get("sop_selected_profile") or "").strip()
+                next_source = str(status.get("next_source") or "").strip().upper()
+                next_net_kind = str(status.get("next_net_kind") or "").strip()
+                next_source_change = bool(status.get("next_source_change"))
+
+                if source in {"SOP", "NET", "HF"}:
+                    visible = True
+                    text = f"Runtime Source: {net_kind or source.title()}"
+                    if source == "SOP":
+                        style = f"color: {theme.get('warning', '#C99700')}; font-weight: 600;"
+                    elif source == "NET":
+                        style = f"color: {theme.get('info', '#1E88E5')}; font-weight: 600;"
+                    else:
+                        style = f"color: {theme.get('text', '#111')};"
+                    extras: List[str] = []
+                    if source_reason_detail:
+                        extras.append(source_reason_detail)
+                    if source == "SOP" and sop_contention:
+                        contenders = [p for p in sop_profiles if p and p != sop_selected]
+                        if contenders:
+                            extras.append(f"Contention: {sop_selected or 'Winner'} over {', '.join(contenders[:3])}")
+                        else:
+                            extras.append("Contention detected")
+                    if next_source_change and next_source and next_source != source:
+                        next_label = next_net_kind or next_source
+                        extras.append(f"Next Source: {next_label}")
+                    if extras:
+                        text = f"{text} | {' | '.join(extras)}"
+        except Exception:
+            visible = False
+        self.layer_runtime_label.setVisible(visible)
+        self.layer_runtime_label.setText(text)
+        self.layer_runtime_label.setStyleSheet(style)
 
     def _populate_upcoming_table(self) -> None:
         tz_mode = "Local" if self._show_local else "UTC"
@@ -1916,7 +3118,7 @@ class SOPTab(QWidget):
 
         if misaligned > 0:
             self.alignment_label.setText(
-                f"Warning: {misaligned} upcoming SOP check-in reminder(s) do not align with Daily/Net schedule windows."
+                f"Warning: {misaligned} upcoming SOP check-in reminder(s) do not align with Daily/Net/SOP Layer schedule windows."
             )
             self.alignment_label.setVisible(True)
         else:
@@ -1926,14 +3128,22 @@ class SOPTab(QWidget):
         try:
             self.manager.mark_action_complete(profile_id, action_id)
             self.refresh_upcoming()
+            self._emit_sop_data_changed()
         except Exception as e:
             QMessageBox.warning(self, "SOP", f"Could not complete action: {e}")
+
+    def _emit_sop_data_changed(self) -> None:
+        try:
+            self.sop_data_changed.emit()
+        except Exception:
+            pass
 
     def on_settings_saved(self) -> None:
         try:
             self.settings.reload()
         except Exception:
             pass
+        self._invalidate_layer_sync_cache()
         current_group = self.group_combo.currentText()
         current_start_utc = self._utc_start_hhmm_from_display(self.start_edit.text().strip())
         self._refresh_reference_data()
@@ -1943,15 +3153,32 @@ class SOPTab(QWidget):
         self._refresh_contact_label()
         self._on_profile_selected(self.profile_combo.currentIndex())
         self.refresh_upcoming()
+        self._schedule_layer_sync_refresh()
+
+    def on_local_net_profiles_updated(self) -> None:
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        try:
+            self._load_local_net_profiles_from_data(self.settings.all())
+            self._refresh_all_contact_target_options()
+            self._schedule_layer_sync_refresh()
+        except Exception as e:
+            log.debug("SOP: local net profiles refresh failed: %s", e)
 
     def on_tab_activated(self) -> None:
+        self._invalidate_layer_sync_cache()
+        self._schedule_layer_sync_refresh()
         self.refresh_upcoming()
 
     def apply_theme(self) -> None:
         try:
             theme = resolve_theme(self.settings)
             self.alignment_label.setStyleSheet(f"color: {theme.get('warning', '#B71C1C')}; font-weight: 600;")
+            self.layer_validation_label.setStyleSheet(f"color: {theme.get('warning', '#B71C1C')}; font-weight: 600;")
             self._update_time_toggle_style(theme)
             self._update_profile_action_styles(theme)
+            self._refresh_layer_sync_hint()
         except Exception:
             pass

@@ -1,6 +1,47 @@
 # Changelog
 
 ## [1.1.8]
+- Changed: SOP tab action-source labels now use `Resource` (replacing `Software`) in Action Rows and Upcoming Actions tables.
+- Changed: SOP PDF export now renders a blended single-day action checklist (Time, Resource, Action, Band/Freq, Contact, Description) without Status, and includes complete same-day action occurrences.
+- Added: SOP PDF export now includes a separate `Periodic Actions` section (Week(s) of Month, Day of Week, Resource, Action, Band/Freq, Contact, Description) when periodic schedule-layer rows exist.
+- Fixed: ControlFreq `Tomorrow` outlook now expands SOP reminder occurrences across the full tomorrow window (not only each action's immediate next due), restoring complete SOP visibility alongside net rows.
+- Changed: ControlFreq `Schedule Outlook` second section now shows `Tomorrow` only (not a rolling 7-day window) and uses strict mutually-exclusive day boundaries with `Today`.
+- Added: SOP legacy Local Net interval migration now auto-converts common fractional-hour cadence rows (`:15/:30/:45`) into interval + phase (`interval_phase_minutes`) so existing stagger intent is preserved.
+- Fixed: SOP save/delete/import/complete now emits a data-change signal that invalidates SOP status caches, forces scheduler refresh, and prompts immediate ControlFreq SOP outlook update.
+- Changed: ControlFreq SOP outlook performance improved by reusing a tab-scoped `SOPManager` and using window-aligned SOP prefetches (`Today` from now, `Tomorrow` from tomorrow-start) instead of rebuilding manager/query path per section.
+- Added: SOP Interval now supports optional phase offset syntax (`HH:MM@MMm`, for example `03:00@30m`) for staggered reminders; due-time evaluation, JSON import/export, and DB persistence now carry per-action `interval_phase_minutes`.
+- Fixed: ControlFreq SOP `Schedule Outlook` now excludes disabled SOP action rows; only active-profile + enabled-action reminders are shown.
+- Fixed: ControlFreq `Schedule Outlook` now buckets “Today” using local-day boundaries when `Showing: Local`, preventing tonight-local items from being pushed only into `7 Days`.
+- Added: SOP `Local Net` action catalog now includes `NCS`, `Check-in`, and `Message` options (with legacy local action-key compatibility for existing SOP rows).
+- Changed: Settings `Local Net Profiles` add/edit/delete now emits a lightweight `local_net_profiles_changed` path to refresh SOP targets without full app-wide settings refresh fanout.
+- Fixed: Local Net Profile add/edit/delete now persists `local_net_profiles` directly, so SOP Local Net action targets are available even when unrelated Settings validation would block a full save.
+- Fixed: SOP `Local Net` actions remain fully supported for reminders; Layer Sync messaging now explicitly states it applies only to HF/Net schedule actions.
+- Changed: SOP `Populate/Rebuild Layer` controls are now disabled when no eligible non-local action rows exist, preventing false impression that local reminders were removed.
+- Added: SOP Builder now shows a `Layer Sync` hint (In Sync / Out of Sync / No matching windows) comparing current SOP Layer rows to action-derived candidates.
+- Changed: `Rebuild Layer Preview` now gets contextual warning emphasis when SOP Layer drift is detected.
+- Changed: SOP layer-sync checks are now debounced and candidate-cached in UI paths to keep editing responsive while still updating guidance quickly.
+- Added: Scheduler status now includes source-resolution rationale (`source_reason*`, `sop_selected_reason*`) and next-source transition preview metadata (`next_source*`) for UI transparency.
+- Changed: ControlFreq and HF Schedule `Effective Source` / `Next Change` hints now include low-noise rationale and upcoming source-transition guidance when applicable.
+- Added: SOP Builder now shows a runtime source hint line with contention context and next-source transition guidance.
+- Added: SOP profiles now include a persisted `Priority` value (lower wins) used for runtime SOP-layer conflict arbitration.
+- Changed: Scheduler SOP-layer overlap arbitration is now deterministic: `priority` -> profile `updated_utc` recency -> stable row tie-breakers.
+- Added: Scheduler status now reports SOP contention metadata (selected profile and contenders) for UI warning surfaces.
+- Changed: ControlFreq, HF Schedule, and sidebar Schedule Status now surface explicit SOP contention warnings when multiple active SOP profiles overlap.
+- Changed: ControlFreq `Message Summary` row height now uses the shared default table row height for visual consistency with `Schedule Outlook`.
+- Added: SOP Schedule Layer row-level pre-save warnings for invalid/missing time or frequency, missing `Periodic` weeks, and potential row overlaps.
+- Added: SOP Builder `Rebuild Layer Preview` action with add/remove/unchanged diff summary before applying action-derived layer updates.
+- Changed: `Populate Layer from Actions` now uses the same diff-style preview flow so users can safely append missing rows or rebuild with clear impact.
+- Added: ControlFreq Frequency Control now shows `Effective Source` so operators can see when `SOP Layer` is overriding baseline HF schedule.
+- Added: HF Schedule header now shows `Effective Source` with the same SOP/Net/HF precedence visibility.
+- Changed: SOP Schedule Layer defaults new/bootstrap rows to `Daily` recurrence for action-driven workflows.
+- Changed: SOP Schedule Layer time columns now follow `Showing: Local/UTC` and convert display/edit values while preserving UTC storage.
+- Changed: Removed `VFO` from SOP Schedule Layer UI (VFO resolution now follows Operating Group data/scheduler behavior).
+- Changed: SOP Schedule Layer table now uses stretch sizing to better fill available width for easier review.
+- Added: SOP Builder now includes `Populate Layer from Actions` for assisted schedule-layer bootstrap from existing SOP action rows.
+- Added: Guided SOP layer bootstrap review flow with `Append`, `Replace Existing Layer`, and `Cancel`, including unmatched-action reporting.
+- Added: SOP Builder now supports an optional per-profile `SOP Schedule Layer` table (day/recurrence/time/band/frequency/mode) to define schedule windows that override HF schedule when that SOP profile is active.
+- Changed: Scheduler source precedence is now `NET > SOP Layer > HF`, with SOP layer rows evaluated only for active SOP profiles and enabled layer rows.
+- Changed: SOP alignment checks now evaluate against Daily/Net/SOP Layer windows so reminder mismatch warnings reflect effective schedule behavior.
 - Added: New `Local Operators` tab with roster CRUD/search and CSV import/export for local VHF/UHF/GMRS/MURS/FRS operator tracking, now using `first_name` and `last_name` fields in UI and DB.
 - Changed: Local Operators table now includes visible `SitRep` status column and supports sortable column headers.
 - Added: New `Local NCS` tab with `Start Net`/`Join Net`/`End Net` session controls, local-operator lookup, single check-in log table, SitRep status (`Green/Yellow/Red`), persistent notes, and periodic autosave.

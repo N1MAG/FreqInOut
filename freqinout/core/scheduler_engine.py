@@ -70,6 +70,21 @@ def _prev_day_name(day_name: str) -> str:
     return order[(idx - 1) % 7]
 
 
+def _parse_iso_utc_to_epoch(value: object) -> float:
+    txt = str(value or "").strip()
+    if not txt:
+        return 0.0
+    try:
+        dt_obj = datetime.datetime.fromisoformat(txt.replace("Z", "+00:00"))
+        if dt_obj.tzinfo is None:
+            dt_obj = dt_obj.replace(tzinfo=datetime.timezone.utc)
+        else:
+            dt_obj = dt_obj.astimezone(datetime.timezone.utc)
+        return float(dt_obj.timestamp())
+    except Exception:
+        return 0.0
+
+
 # ---------------------------------------------------------------------------
 # Public helper (used by planner tabs etc.)
 # ---------------------------------------------------------------------------
@@ -79,6 +94,7 @@ def compute_next_change_time(
     now_utc: datetime.datetime,
     hf_entry: Optional[Dict],
     net_entry: Optional[Dict],
+    sop_entry: Optional[Dict] = None,
 ) -> Optional[datetime.datetime]:
     """
     Compute the *next* UTC datetime at which the active schedule should
@@ -142,12 +158,11 @@ def compute_next_change_time(
             microsecond=0,
         ) + datetime.timedelta(days=day_offset)
 
-    hf_next = next_for_entry(hf_entry)
-    net_next = next_for_entry(net_entry)
-
-    if hf_next and net_next:
-        return hf_next if hf_next <= net_next else net_next
-    return hf_next or net_next
+    candidates = [next_for_entry(hf_entry), next_for_entry(net_entry), next_for_entry(sop_entry)]
+    candidates = [c for c in candidates if isinstance(c, datetime.datetime)]
+    if not candidates:
+        return None
+    return min(candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +195,7 @@ class SchedulerEngine(QObject):
     """
 
     # Emitted whenever active entry or next change time updates
-    active_entry_changed = Signal(dict, str)  # (entry, source: "HF" / "NET" / "NONE")
+    active_entry_changed = Signal(dict, str)  # (entry, source: "HF" / "NET" / "SOP" / "NONE")
     next_change_updated = Signal(object)      # datetime or None
     off_schedule_detected = Signal(dict)
     off_schedule_cleared = Signal()
@@ -266,6 +281,19 @@ class SchedulerEngine(QObject):
         self.current_source: str = "NONE"
         self.current_schedule_entry: Dict = {}
         self.next_change_utc: Optional[datetime.datetime] = None
+        self._sop_contention: bool = False
+        self._sop_contention_profiles: List[str] = []
+        self._sop_winner_profile: str = ""
+        self._sop_winner_priority: int = 100
+        self._sop_winner_reason_code: str = ""
+        self._sop_winner_reason_detail: str = ""
+        self._source_reason_code: str = ""
+        self._source_reason_detail: str = ""
+        self._next_source: str = "NONE"
+        self._next_net_kind: str = ""
+        self._next_transition_utc: Optional[datetime.datetime] = None
+        self._next_transition_note: str = ""
+        self._next_source_change: bool = False
 
         self.timer = QTimer(self)
         self.timer.setInterval(poll_interval_ms)
@@ -1094,6 +1122,55 @@ class SchedulerEngine(QObject):
 
         QTimer.singleShot(1000, _try)
 
+    @staticmethod
+    def _source_net_kind(source: str, entry: Optional[Dict]) -> str:
+        src = (source or "").strip().upper()
+        row = entry or {}
+        if src == "NET":
+            if row.get("primary_js8call_group"):
+                return "JS8 Net"
+            return "FLDigi Net"
+        if src == "SOP":
+            sop_name = str(row.get("sop_profile_name") or "").strip()
+            return f"SOP Layer ({sop_name})" if sop_name else "SOP Layer"
+        if src == "HF":
+            return "HF Schedule"
+        return ""
+
+    @staticmethod
+    def _entry_transition_signature(entry: Optional[Dict]) -> Tuple[object, ...]:
+        row = entry or {}
+        return (
+            (row.get("source_type") or "").strip(),
+            int(row.get("id") or 0),
+            int(row.get("sop_profile_id") or 0),
+            (row.get("band") or "").strip().upper(),
+            (row.get("mode") or "").strip().upper(),
+            (row.get("frequency") or "").strip(),
+            (row.get("start_utc") or "").strip(),
+            (row.get("end_utc") or "").strip(),
+        )
+
+    def _derive_source_reason(
+        self,
+        source: str,
+        entry: Optional[Dict],
+        sop_meta: Optional[Dict[str, object]] = None,
+    ) -> Tuple[str, str]:
+        src = (source or "").strip().upper()
+        if src == "NET":
+            return "net_precedence", "Net schedule is active and overrides SOP/HF."
+        if src == "SOP":
+            meta = sop_meta or {}
+            reason_code = str(meta.get("winner_reason_code") or "single_active_profile").strip()
+            detail = str(meta.get("winner_reason_detail") or "").strip()
+            if not detail:
+                detail = "SOP layer is active and overrides HF schedule."
+            return reason_code, detail
+        if src == "HF":
+            return "hf_fallback", "No active Net/SOP layer row; baseline HF schedule is active."
+        return "none", "No active schedule row."
+
     def get_status_summary(self) -> Dict[str, object]:
         try:
             use_scheduler = bool(self.settings.get("use_scheduler", True))
@@ -1137,14 +1214,7 @@ class SchedulerEngine(QObject):
         if isinstance(freq_hz, (int, float)) and freq_hz > 0:
             freq_label = f"{freq_hz / 1_000_000:.3f}"
         source = self.current_source or "NONE"
-        net_kind = None
-        if source == "NET":
-            if entry.get("primary_js8call_group"):
-                net_kind = "JS8 Net"
-            else:
-                net_kind = "FLDigi Net"
-        elif source == "HF":
-            net_kind = "HF Schedule"
+        net_kind = self._source_net_kind(source, entry)
         fldigi_mode_off = False
         fldigi_offset_off = False
         if entry and self._fldigi_available():
@@ -1177,7 +1247,21 @@ class SchedulerEngine(QObject):
             "auto_resume_utc": auto_resume_utc,
             "auto_resume_source": auto_resume_source,
             "freq_label": freq_label,
+            "source": source,
             "net_kind": net_kind,
+            "sop_contention": bool(self._sop_contention),
+            "sop_contention_profiles": list(self._sop_contention_profiles),
+            "sop_selected_profile": str(self._sop_winner_profile or ""),
+            "sop_selected_priority": int(self._sop_winner_priority or 100),
+            "sop_selected_reason": str(self._sop_winner_reason_code or ""),
+            "sop_selected_reason_detail": str(self._sop_winner_reason_detail or ""),
+            "source_reason": str(self._source_reason_code or ""),
+            "source_reason_detail": str(self._source_reason_detail or ""),
+            "next_source": str(self._next_source or "NONE"),
+            "next_net_kind": str(self._next_net_kind or ""),
+            "next_transition_utc": self._next_transition_utc,
+            "next_transition_note": str(self._next_transition_note or ""),
+            "next_source_change": bool(self._next_source_change),
             "fldigi_mode_off": fldigi_mode_off,
             "fldigi_offset_off": fldigi_offset_off,
         }
@@ -1782,7 +1866,136 @@ class SchedulerEngine(QObject):
         finally:
             conn.close()
 
-    def _load_schedules(self, *, force: bool = False) -> Tuple[List[Dict], List[Dict]]:
+    def _sop_layer_enabled(self) -> bool:
+        try:
+            return bool(self.settings.get("sop_schedule_layer_enabled", True))
+        except Exception:
+            return True
+
+    def _load_sop_schedule_layer_from_db(self) -> Optional[List[Dict]]:
+        """
+        Read active SOP schedule-layer entries from freqinout_nets.db.
+        Rows are joined with sop_profiles so only active profiles are considered.
+        """
+        if not self._sop_layer_enabled():
+            return []
+        db_path = self._config_dir() / "freqinout_nets.db"
+        if not db_path.exists():
+            return None
+        conn = sqlite3.connect(db_path)
+        try:
+            if not self._table_exists(conn, "sop_schedule_layer") or not self._table_exists(conn, "sop_profiles"):
+                return []
+            profile_cols = set()
+            try:
+                cur_cols = conn.execute("PRAGMA table_info(sop_profiles)")
+                profile_cols = {str(r[1] or "").strip().lower() for r in cur_cols.fetchall() if len(r) > 1}
+            except Exception:
+                profile_cols = set()
+            priority_expr = "COALESCE(p.priority, 100)" if "priority" in profile_cols else "100"
+            if "updated_utc" in profile_cols and "created_utc" in profile_cols:
+                updated_expr = "COALESCE(p.updated_utc, p.created_utc, '')"
+            elif "updated_utc" in profile_cols:
+                updated_expr = "COALESCE(p.updated_utc, '')"
+            elif "created_utc" in profile_cols:
+                updated_expr = "COALESCE(p.created_utc, '')"
+            else:
+                updated_expr = "''"
+            cur = conn.execute(
+                f"""
+                SELECT
+                    l.id,
+                    l.day_utc,
+                    l.recurrence,
+                    l.biweekly_offset_weeks,
+                    l.month_weeks,
+                    l.band,
+                    l.mode,
+                    l.vfo,
+                    l.frequency,
+                    l.start_utc,
+                    l.end_utc,
+                    l.enabled,
+                    l.sort_order,
+                    l.profile_id,
+                    p.name,
+                    p.operating_group,
+                    {priority_expr} AS sop_priority,
+                    {updated_expr} AS sop_profile_updated_utc
+                FROM sop_schedule_layer l
+                JOIN sop_profiles p ON p.id = l.profile_id
+                WHERE p.active = 1
+                  AND COALESCE(l.enabled, 1) = 1
+                ORDER BY p.id, COALESCE(l.sort_order, 0), l.id
+                """
+            )
+            rows: List[Dict] = []
+            for (
+                layer_id,
+                day_utc,
+                recurrence,
+                biweekly_offset_weeks,
+                month_weeks,
+                band,
+                mode,
+                vfo,
+                frequency,
+                start_utc,
+                end_utc,
+                _enabled,
+                _sort_order,
+                profile_id,
+                profile_name,
+                operating_group,
+                sop_priority,
+                sop_profile_updated_utc,
+            ) in cur.fetchall():
+                freq_txt = str(frequency or "").strip()
+                if not freq_txt:
+                    continue
+                try:
+                    biweekly = int(biweekly_offset_weeks or 0)
+                except Exception:
+                    biweekly = 0
+                try:
+                    priority_num = int(sop_priority or 100)
+                except Exception:
+                    priority_num = 100
+                sort_order = int(_sort_order or 0)
+                rows.append(
+                    {
+                        "id": int(layer_id or 0),
+                        "day_utc": day_utc or "ALL",
+                        "recurrence": recurrence or "Weekly",
+                        "biweekly_offset_weeks": biweekly,
+                        "month_weeks": month_weeks or "",
+                        "band": (band or "").strip().upper(),
+                        "mode": (mode or "").strip().upper(),
+                        "vfo": (vfo or "A").strip().upper() or "A",
+                        "frequency": freq_txt,
+                        "start_utc": start_utc or "",
+                        "end_utc": end_utc or "",
+                        "early_checkin": 0,
+                        "auto_tune": False,
+                        "primary_js8call_group": "",
+                        "comment": f"SOP Layer: {profile_name or ''}".strip(),
+                        "group_name": (operating_group or "").strip().upper(),
+                        "sop_profile_id": int(profile_id or 0),
+                        "sop_profile_name": profile_name or "",
+                        "sop_priority": priority_num,
+                        "sop_profile_updated_utc": str(sop_profile_updated_utc or ""),
+                        "sort_order": sort_order,
+                        "source_type": "SOP_LAYER",
+                    }
+                )
+            return rows
+        except Exception as e:
+            log.error("SchedulerEngine: failed to load sop schedule layer from DB %s: %s", db_path, e)
+            return None
+        finally:
+            conn.close()
+
+    def _load_schedules(self, *, force: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         """
         Load schedules, preferring the database tables and falling back to the
         SettingsManager key/value store for backwards compatibility.
@@ -1790,31 +2003,35 @@ class SchedulerEngine(QObject):
         cache = getattr(self, "_schedule_cache", None)
         config_db = self._config_dir() / "freqinout.db"
         nets_db = self._config_dir() / "freqinout_nets.db"
-        mtimes = (self._db_mtime(config_db), self._db_mtime(nets_db))
+        mtimes = (self._db_mtime(config_db), self._db_mtime(nets_db), 1 if self._sop_layer_enabled() else 0)
 
         if cache and not force and cache.get("mtimes") == mtimes and cache.get("data"):
             return cache["data"]  # type: ignore[return-value]
 
         hf_db = self._load_daily_schedule_from_db()
         net_db = self._load_net_schedule_from_db()
+        sop_layer_db = self._load_sop_schedule_layer_from_db()
 
         data = self.settings.all()
         hf = hf_db if hf_db is not None else data.get("hf_schedule") or data.get("daily_schedule") or []
         net = net_db if net_db is not None else data.get("net_schedule") or []
+        sop_layer = sop_layer_db if sop_layer_db is not None else []
 
         if not isinstance(hf, list):
             hf = []
         if not isinstance(net, list):
             net = []
+        if not isinstance(sop_layer, list):
+            sop_layer = []
 
-        self._schedule_cache = {"mtimes": mtimes, "data": (hf, net)}
-        return hf, net
+        self._schedule_cache = {"mtimes": mtimes, "data": (hf, net, sop_layer)}
+        return hf, net, sop_layer
 
     def _evaluate(self, now_utc: datetime.datetime, force: bool = False) -> None:
         """
-        Core evaluation step: decides which entry should be active (HF
-        or Net), computes the next change time, and optionally drives
-        the rig.
+        Core evaluation step: decides which entry should be active
+        (NET, SOP layer, or HF), computes the next change time, and
+        optionally drives the rig.
         """
         # Pick up any setting changes (control_via, use_scheduler, offsets, etc.)
         try:
@@ -1822,7 +2039,7 @@ class SchedulerEngine(QObject):
         except Exception as e:
             log.debug("SchedulerEngine: settings reload failed (continuing with cached data): %s", e)
 
-        hf_sched, net_sched = self._load_schedules(force=force)
+        hf_sched, net_sched, sop_sched = self._load_schedules(force=force)
 
         try:
             hf_active = self._find_active_hf_entry(now_utc, hf_sched)
@@ -1834,25 +2051,86 @@ class SchedulerEngine(QObject):
         except Exception as e:
             log.error("SchedulerEngine: failed to evaluate Net schedule: %s", e)
             net_active = None
+        sop_meta: Dict[str, object] = {}
+        try:
+            sop_active, sop_meta = self._find_active_sop_entry(now_utc, sop_sched)
+            self._sop_contention = bool(sop_meta.get("contention"))
+            self._sop_contention_profiles = list(sop_meta.get("profiles") or [])
+            self._sop_winner_profile = str(sop_meta.get("winner_profile") or "")
+            try:
+                self._sop_winner_priority = int(sop_meta.get("winner_priority") or 100)
+            except Exception:
+                self._sop_winner_priority = 100
+            self._sop_winner_reason_code = str(sop_meta.get("winner_reason_code") or "")
+            self._sop_winner_reason_detail = str(sop_meta.get("winner_reason_detail") or "")
+        except Exception as e:
+            log.error("SchedulerEngine: failed to evaluate SOP layer schedule: %s", e)
+            sop_active = None
+            self._sop_contention = False
+            self._sop_contention_profiles = []
+            self._sop_winner_profile = ""
+            self._sop_winner_priority = 100
+            self._sop_winner_reason_code = ""
+            self._sop_winner_reason_detail = ""
 
-        # Decide which source "wins" if both HF and Net have entries.
+        # Decide which source "wins":
+        # NET > SOP Layer > HF
         source = "NONE"
         active_entry: Optional[Dict] = None
-        if net_active and hf_active:
-            # If both schedules have something active, we prefer Net
-            # schedule (operator-level nets tend to be higher priority).
+        if net_active:
             source = "NET"
             active_entry = net_active
-        elif net_active:
-            source = "NET"
-            active_entry = net_active
+        elif sop_active:
+            source = "SOP"
+            active_entry = sop_active
         elif hf_active:
             source = "HF"
             active_entry = hf_active
 
+        source_reason_code, source_reason_detail = self._derive_source_reason(
+            source,
+            active_entry,
+            sop_meta if source == "SOP" else None,
+        )
+        self._source_reason_code = source_reason_code
+        self._source_reason_detail = source_reason_detail
+
         # Compute next change moment.
-        self.next_change_utc = compute_next_change_time(now_utc, hf_active, net_active)
+        self.next_change_utc = compute_next_change_time(now_utc, hf_active, net_active, sop_active)
         self.next_change_updated.emit(self.next_change_utc)
+        self._next_transition_utc = self.next_change_utc
+        self._next_source = source
+        self._next_net_kind = self._source_net_kind(source, active_entry)
+        self._next_transition_note = ""
+        self._next_source_change = False
+        if isinstance(self.next_change_utc, datetime.datetime):
+            probe_utc = self.next_change_utc + datetime.timedelta(seconds=1)
+            try:
+                hf_next = self._find_active_hf_entry(probe_utc, hf_sched)
+                net_next = self._find_active_net_entry(probe_utc, net_sched)
+                sop_next, _sop_next_meta = self._find_active_sop_entry(probe_utc, sop_sched)
+                next_source = "NONE"
+                next_entry: Optional[Dict] = None
+                if net_next:
+                    next_source = "NET"
+                    next_entry = net_next
+                elif sop_next:
+                    next_source = "SOP"
+                    next_entry = sop_next
+                elif hf_next:
+                    next_source = "HF"
+                    next_entry = hf_next
+                self._next_source = next_source
+                self._next_net_kind = self._source_net_kind(next_source, next_entry)
+                self._next_source_change = next_source != source
+                cur_sig = self._entry_transition_signature(active_entry)
+                next_sig = self._entry_transition_signature(next_entry)
+                if self._next_source_change:
+                    self._next_transition_note = f"{source} -> {next_source}"
+                elif next_sig != cur_sig and next_source in {"HF", "NET", "SOP"}:
+                    self._next_transition_note = f"{next_source} entry update"
+            except Exception as e:
+                log.debug("SchedulerEngine: next-source preview failed: %s", e)
 
         prev_source = self.current_source
         net_ended = prev_source == "NET" and source != "NET"
@@ -2043,6 +2321,141 @@ class SchedulerEngine(QObject):
                 continue
 
         return best
+
+    def _find_active_sop_entry(
+        self,
+        now_utc: datetime.datetime,
+        sop_sched: List[Dict],
+    ) -> Tuple[Optional[Dict], Dict[str, object]]:
+        """
+        Evaluate active SOP layer rows and resolve overlaps deterministically.
+
+        Arbitration order:
+          1) Lower `sop_priority` wins.
+          2) Newer profile update timestamp wins.
+          3) Later start time wins.
+          4) Stable profile/sort/id tie-breakers.
+        """
+        empty_meta = {
+            "contention": False,
+            "profiles": [],
+            "winner_profile": "",
+            "winner_priority": 100,
+            "winner_reason_code": "",
+            "winner_reason_detail": "",
+        }
+        if not sop_sched:
+            return None, dict(empty_meta)
+
+        weekday_name = _python_weekday_to_day_name(now_utc.weekday())
+        weekday_upper = weekday_name.upper()
+        prev_day_name = _prev_day_name(weekday_name).upper()
+        now_min = now_utc.hour * 60 + now_utc.minute
+        candidates: List[Tuple[Tuple[object, ...], Dict]] = []
+
+        for idx, row in enumerate(sop_sched):
+            try:
+                day = (row.get("day_utc") or "ALL").strip().upper()
+                recurrence = (row.get("recurrence") or "Weekly").strip()
+                if recurrence == "Monthly":
+                    recurrence = "Periodic"
+                month_weeks = self._parse_month_weeks(row.get("month_weeks", ""))
+
+                smin = _parse_hhmm_to_minutes(row.get("start_utc", ""))
+                emin = _parse_hhmm_to_minutes(row.get("end_utc", ""))
+                if smin is None or emin is None:
+                    continue
+
+                early = int(row.get("early_checkin", 0) or 0)
+                window_start = max(0, smin - early)
+                overnight = smin > emin
+                prev_day = prev_day_name
+
+                active = False
+                if recurrence == "Daily":
+                    day = "ALL"
+                if day == "ALL":
+                    day = weekday_upper
+                if not self._monthly_match(now_utc, day, prev_day, recurrence, month_weeks, overnight):
+                    continue
+                if day == weekday_upper:
+                    if not overnight:
+                        active = window_start <= now_min < emin
+                    else:
+                        active = now_min >= window_start or now_min < emin
+                elif day == prev_day and overnight:
+                    active = now_min < emin
+
+                if not active:
+                    continue
+
+                priority = int(row.get("sop_priority") or 100)
+                updated_epoch = _parse_iso_utc_to_epoch(row.get("sop_profile_updated_utc"))
+                profile_id = int(row.get("sop_profile_id") or 0)
+                sort_order = int(row.get("sort_order") or 0)
+                layer_id = int(row.get("id") or 0)
+                rank = (
+                    priority,
+                    -updated_epoch,
+                    -int(smin),
+                    profile_id,
+                    sort_order,
+                    layer_id,
+                    idx,
+                )
+                candidates.append((rank, row))
+            except Exception:
+                continue
+
+        if not candidates:
+            return None, dict(empty_meta)
+
+        candidates.sort(key=lambda item: item[0])
+        winner_rank = candidates[0][0]
+        winner = candidates[0][1]
+        profile_name_map: Dict[int, str] = {}
+        for _rank, row in candidates:
+            pid = int(row.get("sop_profile_id") or 0)
+            if pid <= 0:
+                continue
+            name = str(row.get("sop_profile_name") or f"SOP-{pid}").strip() or f"SOP-{pid}"
+            profile_name_map[pid] = name
+        contender_profiles = [profile_name_map[k] for k in sorted(profile_name_map.keys())]
+        contention = len(contender_profiles) > 1
+        winner_name = str(winner.get("sop_profile_name") or "").strip()
+        try:
+            winner_priority = int(winner.get("sop_priority") or 100)
+        except Exception:
+            winner_priority = 100
+        winner_reason_code = "single_active_profile"
+        winner_reason_detail = "Only one active SOP profile row matched this window."
+        if len(candidates) > 1:
+            runner_rank = candidates[1][0]
+            runner = candidates[1][1]
+            if winner_rank[0] != runner_rank[0]:
+                winner_reason_code = "priority"
+                try:
+                    runner_priority = int(runner.get("sop_priority") or 100)
+                except Exception:
+                    runner_priority = 100
+                winner_reason_detail = f"Priority {winner_priority} wins over {runner_priority}."
+            elif winner_rank[1] != runner_rank[1]:
+                winner_reason_code = "updated_utc"
+                winner_reason_detail = "Winner profile is the most recently updated among equal priority rows."
+            elif winner_rank[2] != runner_rank[2]:
+                winner_reason_code = "start_time"
+                winner_reason_detail = "Later start time wins among equal priority/update rows."
+            else:
+                winner_reason_code = "stable_tiebreak"
+                winner_reason_detail = "Stable tie-break (profile/sort/id) selected the winner."
+        return winner, {
+            "contention": contention,
+            "profiles": contender_profiles,
+            "winner_profile": winner_name,
+            "winner_priority": winner_priority,
+            "winner_reason_code": winner_reason_code,
+            "winner_reason_detail": winner_reason_detail,
+        }
 
     def _parse_month_weeks(self, txt: str) -> List[int]:
         weeks: List[int] = []
@@ -2288,7 +2701,7 @@ class SchedulerEngine(QObject):
                 log.debug("SchedulerEngine: net schedule active; skipping corrections for current entry.")
                 self.active_entry_changed.emit(entry, source)
                 return
-        if source in ("HF", "NET") and entry_key != self._last_entry_key:
+        if source in ("HF", "NET", "SOP") and entry_key != self._last_entry_key:
             # Ensure schedule transitions always enforce FLDigi mode/offset,
             # even if the user previously skipped a prompt.
             self._fldigi_force_apply_once = True

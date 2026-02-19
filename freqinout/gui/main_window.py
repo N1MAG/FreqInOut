@@ -369,6 +369,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            if hasattr(self.settings_tab, "local_net_profiles_changed"):
+                self.settings_tab.local_net_profiles_changed.connect(self.sop_tab.on_local_net_profiles_updated)
+        except Exception:
+            pass
+        try:
+            if hasattr(self.sop_tab, "sop_data_changed"):
+                self.sop_tab.sop_data_changed.connect(self._on_sop_data_changed)
+        except Exception:
+            pass
+        try:
             self.settings_tab.settings_saved.connect(self.local_operator_tab.on_settings_saved)
         except Exception:
             pass
@@ -1086,6 +1096,10 @@ class MainWindow(QMainWindow):
         flags = status.get("off_schedule_flags") or {}
         fldigi_mode_off = bool(status.get("fldigi_mode_off"))
         fldigi_offset_off = bool(status.get("fldigi_offset_off"))
+        sop_contention = bool(status.get("sop_contention"))
+        sop_profiles = [str(x).strip() for x in (status.get("sop_contention_profiles") or []) if str(x).strip()]
+        sop_selected_profile = str(status.get("sop_selected_profile") or "").strip()
+        active_source = str(status.get("source") or "").strip().upper()
         next_change_minutes = None
         sop_next_minutes = self._get_next_sop_action_minutes()
         next_change = getattr(self.scheduler, "next_change_utc", None)
@@ -1164,6 +1178,12 @@ class MainWindow(QMainWindow):
                 reasons.append("QSO")
             if busy_line and not net_kind:
                 reasons.append(busy_line)
+            if sop_contention and active_source == "SOP":
+                contenders = [p for p in sop_profiles if p and p != sop_selected_profile]
+                if contenders:
+                    reasons.append(f"SOP Contention: {sop_selected_profile or 'Winner'} over {', '.join(contenders[:3])}")
+                else:
+                    reasons.append("SOP Contention")
             if next_change_minutes is not None and next_change_minutes <= 15:
                 reasons.append(f"Freq Change: {next_change_minutes} min")
         else:
@@ -1177,6 +1197,12 @@ class MainWindow(QMainWindow):
                 reasons.append(net_kind)
             if busy_line and not net_kind:
                 reasons.append(busy_line)
+            if sop_contention and active_source == "SOP":
+                contenders = [p for p in sop_profiles if p and p != sop_selected_profile]
+                if contenders:
+                    reasons.append(f"SOP Contention: {sop_selected_profile or 'Winner'} over {', '.join(contenders[:3])}")
+                else:
+                    reasons.append("SOP Contention")
             if next_change_minutes is not None and next_change_minutes <= 15:
                 reasons.append(f"Freq Change: {next_change_minutes} min")
 
@@ -1216,7 +1242,18 @@ class MainWindow(QMainWindow):
             else:
                 self.scheduler_status_header.setText("On Schedule")
             self.scheduler_status_header.setStyleSheet("")
-            self._set_scheduler_reasons([])
+            reason_lines: list[str] = []
+            if active_source == "SOP" and net_kind:
+                reason_lines.append(str(net_kind))
+            if sop_contention and active_source == "SOP":
+                contenders = [p for p in sop_profiles if p and p != sop_selected_profile]
+                if contenders:
+                    reason_lines.append(
+                        f"SOP Contention: {sop_selected_profile or 'Winner'} over {', '.join(contenders[:3])}"
+                    )
+                else:
+                    reason_lines.append("SOP Contention")
+            self._set_scheduler_reasons(reason_lines)
             self.resume_schedule_btn.setVisible(False)
             self.suspend_schedule_btn.setVisible(True)
             self.suspend_schedule_btn.setText("Suspend Schedule")
@@ -1259,6 +1296,27 @@ class MainWindow(QMainWindow):
             return mins
         except Exception:
             return None
+
+    def _invalidate_sop_status_cache(self) -> None:
+        self._sop_next_due_cache_ts = 0.0
+        self._sop_next_due_minutes = None
+
+    def _on_sop_data_changed(self) -> None:
+        self._invalidate_sop_status_cache()
+        try:
+            if hasattr(self, "scheduler"):
+                self.scheduler.force_refresh()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "controlfreq_tab") and hasattr(self.controlfreq_tab, "on_sop_data_changed"):
+                self.controlfreq_tab.on_sop_data_changed()
+        except Exception:
+            pass
+        try:
+            self._refresh_scheduler_status_panel()
+        except Exception:
+            pass
 
     def _on_app_about_to_quit(self):
         if self._shutting_down:

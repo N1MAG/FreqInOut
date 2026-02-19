@@ -277,6 +277,7 @@ class SettingsTab(QWidget):
     """
 
     settings_saved = Signal()
+    local_net_profiles_changed = Signal()
     open_logs_requested = Signal()
     log_level_changed = Signal(str)
 
@@ -3809,11 +3810,16 @@ class SettingsTab(QWidget):
         self.local_net_profiles.append(normalized)
         self._refresh_local_net_profiles_table()
         try:
-            self._save_settings_quiet()
+            # Persist Local Net Profiles directly so this workflow is not blocked
+            # by unrelated full-settings validation requirements.
+            if hasattr(self.settings, "set"):
+                self.settings.set("local_net_profiles", self._table_to_local_net_profiles())
+            elif hasattr(self.settings, "_data"):
+                self.settings._data["local_net_profiles"] = self._table_to_local_net_profiles()  # type: ignore[attr-defined]
             self._settings_dirty = False
             self._set_save_button_state("success")
             try:
-                self.settings_saved.emit()
+                self.local_net_profiles_changed.emit()
             except Exception:
                 pass
         except Exception:
@@ -3857,11 +3863,16 @@ class SettingsTab(QWidget):
         ]
         self._refresh_local_net_profiles_table()
         try:
-            self._save_settings_quiet()
+            # Persist Local Net Profiles directly so this workflow is not blocked
+            # by unrelated full-settings validation requirements.
+            if hasattr(self.settings, "set"):
+                self.settings.set("local_net_profiles", self._table_to_local_net_profiles())
+            elif hasattr(self.settings, "_data"):
+                self.settings._data["local_net_profiles"] = self._table_to_local_net_profiles()  # type: ignore[attr-defined]
             self._settings_dirty = False
             self._set_save_button_state("success")
             try:
-                self.settings_saved.emit()
+                self.local_net_profiles_changed.emit()
             except Exception:
                 pass
         except Exception:

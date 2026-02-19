@@ -852,7 +852,8 @@ class PeerSchedTab(QWidget):
 
     def _update_timezone_button_style(self) -> None:
         theme = resolve_theme(self.settings)
-        self.tz_toggle_btn.setStyleSheet(button_style("primary", theme))
+        role = "info" if not self._show_local_times else "muted"
+        self.tz_toggle_btn.setStyleSheet(button_style(role, theme))
 
     def _on_table_cell_clicked(self, row: int, col: int) -> None:
         if col != self._overlap_col:

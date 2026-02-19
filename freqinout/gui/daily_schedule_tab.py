@@ -184,6 +184,9 @@ class DailyScheduleTab(QWidget):
         self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
         self.time_toggle_btn.clicked.connect(self._toggle_time_view)
         header.addWidget(self.time_toggle_btn)
+        self.effective_source_label = QLabel("Effective Source: --")
+        self.effective_source_label.setToolTip("Shows which schedule source is currently driving scheduling decisions.")
+        header.addWidget(self.effective_source_label)
         layout.addLayout(header)
 
         # QSY controls row (right aligned under time bar)
@@ -242,6 +245,7 @@ class DailyScheduleTab(QWidget):
 
         # Initialize clock labels once
         self._update_clock_labels()
+        self._update_effective_source_label()
         self._update_suspend_state()
         self._apply_theme()
         self._update_delete_button_state()
@@ -318,6 +322,69 @@ class DailyScheduleTab(QWidget):
             now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {ui_abbr}")
         )
         self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
+        self._update_time_toggle_style()
+        self._update_effective_source_label()
+
+    def _update_time_toggle_style(self, theme: Optional[Dict[str, str]] = None) -> None:
+        if theme is None:
+            theme = resolve_theme(self.settings)
+        role = "info" if not self._show_local else "muted"
+        self.time_toggle_btn.setStyleSheet(button_style(role, theme))
+
+    def _update_effective_source_label(self, theme: Optional[Dict[str, str]] = None) -> None:
+        if theme is None:
+            theme = resolve_theme(self.settings)
+        muted = str(theme.get("text_muted", "#888"))
+        source_text = "Effective Source: --"
+        style = f"color: {muted};"
+        tip = ""
+        try:
+            sched = getattr(self.window(), "scheduler", None)
+            if sched and hasattr(sched, "get_status_summary"):
+                status = sched.get_status_summary()
+                source = str(status.get("source") or "").strip().upper()
+                net_kind = str(status.get("net_kind") or "").strip()
+                source_reason_detail = str(status.get("source_reason_detail") or "").strip()
+                sop_contention = bool(status.get("sop_contention"))
+                sop_profiles = [str(x).strip() for x in (status.get("sop_contention_profiles") or []) if str(x).strip()]
+                sop_selected = str(status.get("sop_selected_profile") or "").strip()
+                next_source = str(status.get("next_source") or "").strip().upper()
+                next_net_kind = str(status.get("next_net_kind") or "").strip()
+                next_source_change = bool(status.get("next_source_change"))
+                if source == "SOP":
+                    source_text = f"Effective Source: {net_kind or 'SOP Layer'}"
+                    style = f"font-weight: 600; color: {theme.get('warning', '#C99700')};"
+                    tip = "SOP Layer currently overrides the baseline HF schedule."
+                    if sop_contention:
+                        others = [p for p in sop_profiles if p and p != sop_selected]
+                        if others:
+                            source_text += " (Contention)"
+                            tip = f"SOP contention: selected {sop_selected or 'winner'} over {', '.join(others[:4])}."
+                        else:
+                            source_text += " (Contention)"
+                            tip = "SOP contention detected across active profiles."
+                    if source_reason_detail:
+                        tip = f"{tip}\nSelection: {source_reason_detail}"
+                elif source == "NET":
+                    source_text = f"Effective Source: {net_kind or 'Net Schedule'}"
+                    style = f"font-weight: 600; color: {theme.get('info', '#1E88E5')};"
+                    tip = "Active net schedule has highest precedence."
+                    if source_reason_detail:
+                        tip = f"{tip}\nSelection: {source_reason_detail}"
+                elif source == "HF":
+                    source_text = f"Effective Source: {net_kind or 'HF Schedule'}"
+                    style = f"color: {theme.get('text', '#111')};"
+                    tip = "Baseline HF schedule is active."
+                    if source_reason_detail:
+                        tip = f"{tip}\nSelection: {source_reason_detail}"
+                if next_source_change and next_source and next_source != source:
+                    next_label = next_net_kind or next_source
+                    tip = (f"{tip}\n" if tip else "") + f"Next source transition: {next_label}."
+        except Exception:
+            pass
+        self.effective_source_label.setText(source_text)
+        self.effective_source_label.setStyleSheet(style)
+        self.effective_source_label.setToolTip(tip)
 
     def _set_headers(self):
         mode_label = "Local" if self._show_local else "UTC"
@@ -938,7 +1005,8 @@ class DailyScheduleTab(QWidget):
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
-        self.time_toggle_btn.setStyleSheet(button_style("primary", theme))
+        self._update_time_toggle_style(theme)
+        self._update_effective_source_label(theme)
         self.add_row_btn.setStyleSheet(button_style("primary", theme))
         self._refresh_save_button_state(theme)
         self.export_btn.setStyleSheet(button_style("info", theme))
