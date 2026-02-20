@@ -88,6 +88,8 @@ class ControlFreqTab(QWidget):
         self._schedule_entries_by_row: Dict[int, Dict[str, Any]] = {}
         self._force_hero_resync = False
         self._message_summary_target_height = 0
+        self._freq_meta_full_text = "Scheduled: -- | Active: --"
+        self._hero_combo_font_px = 18
         self._freq_combo_cache_key: Tuple[Tuple[str, str, float, str, str, bool], ...] = ()
         self._operator_groups_cache: Dict[str, Set[str]] = {}
         self._operator_groups_cache_ts = 0.0
@@ -316,7 +318,11 @@ class ControlFreqTab(QWidget):
 
         self.freq_ctrl_box = QGroupBox("Frequency Control")
         freq_layout = QVBoxLayout(self.freq_ctrl_box)
+        freq_layout.setContentsMargins(8, 8, 8, 8)
+        freq_layout.setSpacing(4)
         hero_row = QHBoxLayout()
+        hero_row.setContentsMargins(0, 0, 0, 0)
+        hero_row.setSpacing(6)
         self.freq_now_label = QLabel("Now")
         self.freq_now_label.setStyleSheet("font-weight: 600;")
         hero_row.addWidget(self.freq_now_label)
@@ -328,17 +334,22 @@ class ControlFreqTab(QWidget):
         hero_row.addWidget(self.freq_state_badge)
         freq_layout.addLayout(hero_row)
         self.freq_combo = QComboBox()
-        self.freq_combo.setMinimumHeight(42)
+        self.freq_combo.setMinimumHeight(40)
+        self.freq_combo.setMaximumHeight(40)
         self.freq_combo.setMinimumWidth(220)
         self.freq_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.freq_combo.currentIndexChanged.connect(self._on_freq_selection_changed)
         freq_layout.addWidget(self.freq_combo)
-        self.freq_meta_label = QLabel("Scheduled: -- | Active: --")
-        self.freq_meta_label.setWordWrap(True)
+        self.freq_meta_label = QLabel(self._freq_meta_full_text)
+        self.freq_meta_label.setWordWrap(False)
         self.freq_meta_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.freq_meta_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.freq_meta_label.setStyleSheet("font-size: 12px;")
+        self.freq_meta_label.setToolTip(self._freq_meta_full_text)
         freq_layout.addWidget(self.freq_meta_label)
         status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(8)
         self.next_change_label = QLabel("Next Change: --")
         self.next_change_label.setStyleSheet("color: #888;")
         status_row.addWidget(self.next_change_label)
@@ -348,6 +359,8 @@ class ControlFreqTab(QWidget):
         status_row.addStretch(1)
         freq_layout.addLayout(status_row)
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(8)
         self.freq_set_btn = QPushButton("QSY Now")
         self.freq_set_btn.clicked.connect(self._on_freq_set_clicked)
         self.freq_set_btn.setMinimumHeight(26)
@@ -505,6 +518,10 @@ class ControlFreqTab(QWidget):
         hh = table.horizontalHeader()
         hh.setSectionsMovable(False)
         hh.setHighlightSections(False)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_freq_meta_text()
 
     def _lock_frequency_control_height(self) -> None:
         try:
@@ -1000,15 +1017,18 @@ class ControlFreqTab(QWidget):
         if not digital_font.exactMatch():
             digital_font = QFont("Monospace")
         digital_font.setStyleHint(QFont.Monospace)
-        digital_font.setPointSize(20)
+        digital_font.setPixelSize(max(14, int(self._hero_combo_font_px)))
         digital_font.setBold(True)
         self.freq_combo.setFont(digital_font)
         self.freq_combo.setStyleSheet(
             f"QComboBox {{ color: {text_color}; padding: 4px 24px 4px 8px; }}"
             f"QComboBox QAbstractItemView {{ color: {text_color}; }}"
         )
+        combo_h = max(36, int(QFontMetrics(digital_font).height()) + 14)
+        self.freq_combo.setMinimumHeight(combo_h)
+        self.freq_combo.setMaximumHeight(combo_h)
         popup_font = QFont(digital_font)
-        popup_font.setPointSize(10)
+        popup_font.setPixelSize(10)
         popup_font.setBold(False)
         self._freq_popup_font = popup_font
         try:
@@ -1016,7 +1036,24 @@ class ControlFreqTab(QWidget):
         except Exception:
             pass
         self.freq_meta_label.setStyleSheet(f"font-size: 12px; color: {muted_color};")
+        self._apply_freq_meta_text()
         self._set_frequency_state_badge("unknown")
+
+    def _apply_freq_meta_text(self) -> None:
+        full = str(self._freq_meta_full_text or "").strip()
+        if not full:
+            full = "Scheduled: -- | Active: --"
+        try:
+            fm = QFontMetrics(self.freq_meta_label.font())
+            avail = max(80, int(self.freq_meta_label.width()) - 6)
+            display = fm.elidedText(full, Qt.ElideRight, avail)
+            line_h = max(18, int(fm.height()) + 4)
+            self.freq_meta_label.setMinimumHeight(line_h)
+            self.freq_meta_label.setMaximumHeight(line_h)
+        except Exception:
+            display = full
+        self.freq_meta_label.setText(display)
+        self.freq_meta_label.setToolTip(full)
 
     def _set_frequency_state_badge(self, state: str) -> None:
         key = (state or "").strip().lower()
@@ -2038,7 +2075,8 @@ class ControlFreqTab(QWidget):
         band_txt = self._band_for_group_freq(sched_group, sched_freq) if sched_freq is not None else "--"
         group_txt = sched_group or "--"
         line1 = f"Scheduled: {group_txt} | {band_txt} - {sched_txt}"
-        self.freq_meta_label.setText(line1)
+        self._freq_meta_full_text = line1
+        self._apply_freq_meta_text()
         self._update_frequency_action_styles(sched_freq, active_freq)
         self._update_active_label_style(sched_freq, active_freq)
         self._refresh_scheduler_strip()
