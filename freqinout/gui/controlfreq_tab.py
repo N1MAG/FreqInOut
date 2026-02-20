@@ -90,6 +90,7 @@ class ControlFreqTab(QWidget):
         self._message_summary_target_height = 0
         self._freq_meta_full_text = "Scheduled: -- | Active: --"
         self._hero_combo_font_px = 18
+        self._primary_freq_action_mode = "none"
         self._freq_combo_cache_key: Tuple[Tuple[str, str, float, str, str, bool], ...] = ()
         self._operator_groups_cache: Dict[str, Set[str]] = {}
         self._operator_groups_cache_ts = 0.0
@@ -323,9 +324,6 @@ class ControlFreqTab(QWidget):
         hero_row = QHBoxLayout()
         hero_row.setContentsMargins(0, 0, 0, 0)
         hero_row.setSpacing(6)
-        self.freq_now_label = QLabel("Now")
-        self.freq_now_label.setStyleSheet("font-weight: 600;")
-        hero_row.addWidget(self.freq_now_label)
         hero_row.addStretch(1)
         self.freq_state_badge = QLabel("Unknown")
         self.freq_state_badge.setAlignment(Qt.AlignCenter)
@@ -351,30 +349,32 @@ class ControlFreqTab(QWidget):
         self.freq_meta_label.setStyleSheet("font-size: 12px;")
         self.freq_meta_label.setToolTip(self._freq_meta_full_text)
         freq_layout.addWidget(self.freq_meta_label)
-        status_row = QHBoxLayout()
-        status_row.setContentsMargins(0, 0, 0, 0)
-        status_row.setSpacing(8)
-        self.next_change_label = QLabel("Next Change: --")
-        self.next_change_label.setStyleSheet("color: #888;")
-        status_row.addWidget(self.next_change_label)
-        self.effective_source_label = QLabel("Effective Source: --")
+        self.effective_source_label = QLabel("Active Source: --")
+        self.effective_source_label.setWordWrap(False)
+        self.effective_source_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.effective_source_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.effective_source_label.setStyleSheet("color: #888;")
-        status_row.addWidget(self.effective_source_label)
-        status_row.addStretch(1)
-        freq_layout.addLayout(status_row)
+        freq_layout.addWidget(self.effective_source_label)
+        self.next_change_label = QLabel("Next Change: --")
+        self.next_change_label.setWordWrap(False)
+        self.next_change_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.next_change_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.next_change_label.setStyleSheet("color: #888;")
+        freq_layout.addWidget(self.next_change_label)
+        try:
+            freq_layout.addSpacing(max(6, int(self.fontMetrics().height() * 0.50)))
+        except Exception:
+            freq_layout.addSpacing(8)
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(8)
-        self.freq_set_btn = QPushButton("QSY Now")
-        self.freq_set_btn.clicked.connect(self._on_freq_set_clicked)
-        self.freq_set_btn.setMinimumHeight(26)
-        self.freq_set_btn.setMaximumWidth(140)
-        btn_row.addWidget(self.freq_set_btn)
-        self.freq_resume_btn = QPushButton("Resume Schedule")
-        self.freq_resume_btn.clicked.connect(self._on_resume_schedule_clicked)
-        self.freq_resume_btn.setMinimumHeight(26)
-        self.freq_resume_btn.setMaximumWidth(160)
-        btn_row.addWidget(self.freq_resume_btn)
+        btn_row.addWidget(self.freq_state_badge)
+        self.freq_action_btn = QPushButton("QSY Now")
+        self.freq_action_btn.clicked.connect(self._on_primary_freq_action_clicked)
+        self.freq_action_btn.setMinimumHeight(26)
+        self.freq_action_btn.setMinimumWidth(132)
+        self.freq_action_btn.setMaximumWidth(170)
+        btn_row.addWidget(self.freq_action_btn)
         btn_row.addStretch(1)
         freq_layout.addLayout(btn_row)
 
@@ -503,8 +503,7 @@ class ControlFreqTab(QWidget):
         self.shortcut_resume_schedule = QShortcut(QKeySequence("Ctrl+Shift+R"), self)
         self.shortcut_resume_schedule.activated.connect(self._on_resume_schedule_clicked)
         self.refresh_btn.setToolTip("Refresh (Ctrl+R)")
-        self.freq_set_btn.setToolTip("QSY Now (Ctrl+Enter)")
-        self.freq_resume_btn.setToolTip("Resume Schedule (Ctrl+Shift+R)")
+        self.freq_action_btn.setToolTip("QSY Now (Ctrl+Enter) or Resume Schedule (Ctrl+Shift+R)")
 
     @staticmethod
     def _setup_table_defaults(table: QTableWidget) -> None:
@@ -985,8 +984,7 @@ class ControlFreqTab(QWidget):
             theme = resolve_theme(self.settings)
             self.refresh_btn.setStyleSheet(button_style("muted", theme))
             self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
-            self.freq_set_btn.setStyleSheet(button_style("muted", theme))
-            self.freq_resume_btn.setStyleSheet(button_style("muted", theme))
+            self.freq_action_btn.setStyleSheet(button_style("muted", theme))
             self._update_time_toggle_style(theme)
             self.focus_mode_btn.setStyleSheet(button_style("secondary", theme))
             self._update_view_chip_styles(theme)
@@ -1041,6 +1039,7 @@ class ControlFreqTab(QWidget):
             pass
         self.freq_meta_label.setStyleSheet(f"font-size: 12px; color: {muted_color};")
         self._apply_freq_meta_text()
+        self._sync_frequency_info_row_heights()
         self._set_frequency_state_badge("unknown")
 
     def _apply_freq_meta_text(self) -> None:
@@ -1058,6 +1057,23 @@ class ControlFreqTab(QWidget):
             display = full
         self.freq_meta_label.setText(display)
         self.freq_meta_label.setToolTip(full)
+
+    def _sync_frequency_info_row_heights(self) -> None:
+        labels = [
+            getattr(self, "freq_meta_label", None),
+            getattr(self, "effective_source_label", None),
+            getattr(self, "next_change_label", None),
+        ]
+        for label in labels:
+            if not isinstance(label, QLabel):
+                continue
+            try:
+                fm = QFontMetrics(label.font())
+                row_h = max(18, int(fm.height()) + 4)
+                label.setMinimumHeight(row_h)
+                label.setMaximumHeight(row_h)
+            except Exception:
+                continue
 
     def _set_frequency_state_badge(self, state: str) -> None:
         key = (state or "").strip().lower()
@@ -1401,7 +1417,7 @@ class ControlFreqTab(QWidget):
             if not sched or not hasattr(sched, "get_status_summary"):
                 self._set_frequency_state_badge("unknown")
                 self.next_change_label.setText("Next Change: --")
-                self.effective_source_label.setText("Effective Source: --")
+                self.effective_source_label.setText("Active Source: --")
                 self.effective_source_label.setStyleSheet(f"color: {muted};")
                 return
             status = sched.get_status_summary()
@@ -1415,9 +1431,9 @@ class ControlFreqTab(QWidget):
             next_net_kind = str(status.get("next_net_kind") or "").strip()
             next_source_change = bool(status.get("next_source_change"))
             next_transition_note = str(status.get("next_transition_note") or "").strip()
-            source_text = "Effective Source: --"
+            source_text = "Active Source: --"
             if source == "SOP":
-                source_text = f"Effective Source: {net_kind or 'SOP Layer'}"
+                source_text = f"Active Source: {net_kind or 'SOP Layer'}"
                 tip = "SOP Layer currently overrides the baseline HF schedule."
                 if sop_contention:
                     others = [p for p in sop_profiles if p and p != sop_selected]
@@ -1434,7 +1450,7 @@ class ControlFreqTab(QWidget):
                 )
                 self.effective_source_label.setToolTip(tip)
             elif source == "NET":
-                source_text = f"Effective Source: {net_kind or 'Net Schedule'}"
+                source_text = f"Active Source: {net_kind or 'Net Schedule'}"
                 self.effective_source_label.setStyleSheet(
                     f"font-weight: 600; color: {theme.get('info', '#1E88E5')};"
                 )
@@ -1443,7 +1459,7 @@ class ControlFreqTab(QWidget):
                     tip = f"{tip}\nSelection: {source_reason_detail}"
                 self.effective_source_label.setToolTip(tip)
             elif source == "HF":
-                source_text = f"Effective Source: {net_kind or 'HF Schedule'}"
+                source_text = f"Active Source: {net_kind or 'HF Schedule'}"
                 self.effective_source_label.setStyleSheet(f"color: {theme.get('text', '#111')};")
                 tip = "Baseline HF schedule is active."
                 if source_reason_detail:
@@ -1502,6 +1518,7 @@ class ControlFreqTab(QWidget):
                 self.next_change_label.setStyleSheet(f"color: {muted};")
                 self.next_change_label.setToolTip("")
             self.next_change_label.setText(next_text)
+            self._sync_frequency_info_row_heights()
         except Exception as e:
             log.debug("ControlFreq: failed scheduler strip refresh: %s", e)
 
@@ -2624,10 +2641,32 @@ class ControlFreqTab(QWidget):
                 qsy_pending = active is None or abs(selected - float(active)) > 0.0005
             except Exception:
                 qsy_pending = True
-        qsy_role = "warning" if qsy_pending else "muted"
-        resume_role = "info" if mismatch and not qsy_pending else "muted"
-        self.freq_set_btn.setStyleSheet(button_style(qsy_role, theme))
-        self.freq_resume_btn.setStyleSheet(button_style(resume_role, theme))
+        if qsy_pending:
+            self._primary_freq_action_mode = "qsy"
+            self.freq_action_btn.setText("QSY Now")
+            self.freq_action_btn.setToolTip("QSY Now (Ctrl+Enter)")
+            self.freq_action_btn.setEnabled(True)
+            self.freq_action_btn.setStyleSheet(button_style("warning", theme))
+            return
+        if mismatch:
+            self._primary_freq_action_mode = "resume"
+            self.freq_action_btn.setText("Resume Schedule")
+            self.freq_action_btn.setToolTip("Resume Schedule (Ctrl+Shift+R)")
+            self.freq_action_btn.setEnabled(True)
+            self.freq_action_btn.setStyleSheet(button_style("info", theme))
+            return
+        self._primary_freq_action_mode = "none"
+        self.freq_action_btn.setText("QSY Now")
+        self.freq_action_btn.setToolTip("QSY Now (Ctrl+Enter)")
+        self.freq_action_btn.setEnabled(False)
+        self.freq_action_btn.setStyleSheet(button_style("muted", theme))
+
+    def _on_primary_freq_action_clicked(self) -> None:
+        mode = str(self._primary_freq_action_mode or "none").strip().lower()
+        if mode == "resume":
+            self._on_resume_schedule_clicked()
+            return
+        self._on_freq_set_clicked()
 
     def _update_active_label_style(
         self, scheduled: Optional[float], active: Optional[float]
@@ -2662,7 +2701,7 @@ class ControlFreqTab(QWidget):
         except Exception:
             theme = None
         if theme:
-            self.freq_set_btn.setStyleSheet(
+            self.freq_action_btn.setStyleSheet(
                 button_style("success" if ok else "warning", theme)
             )
         self._refresh_frequency_control()
