@@ -67,7 +67,7 @@
   <ol class="section-list">
     <li><strong>Pre-op check (2-3 min)</strong>: Verify Schedule Status is on-plan, validate rig/software status LEDs in Settings, and confirm current band/frequency alignment.</li>
     <li><strong>Sync schedule intent</strong>: Review <a href="#freqplanner">FreqPlanner</a> for today’s windows; ensure Net Schedule rows include proper recurrence + early-check-in values.</li>
-    <li><strong>Run SOP alongside schedule</strong>: In <a href="#sop">SOP</a>, keep active SOPs scoped by operating group/sub-group and monitor only actionable rows (<em>Due Now</em>/<em>Overdue</em>).</li>
+    <li><strong>Run SOP alongside schedule</strong>: In <a href="#sop">SOP</a>, keep active SOPs scoped by Group Name (HF Operating Group) and optional SOP Group, then monitor only actionable rows (<em>Due Now</em>/<em>Overdue</em>).</li>
     <li><strong>Manage net execution</strong>: Use NCS tabs for net lifecycle (start, acknowledge/query, save, end). Use QSY intentionally and resume scheduler when appropriate.</li>
     <li><strong>Use filters aggressively</strong>: In Messages/HF Operators/Local Operators/Map/Peer Schedules, filter by time/group/region/status before making decisions to reduce cognitive load.</li>
     <li><strong>Post-op hygiene</strong>: Clear stale prompts, reconcile operator roles/trust flags, export needed data, and return logging level to normal.</li>
@@ -139,8 +139,8 @@
   </ol>
 
 <h2 id="sop">SOP Tab</h2>
-  <p><strong>Purpose</strong>: Build reminder-only SOP action plans per operating group.</p>
-  <p><strong>Typical workflow</strong>: Select Operating Group and optional Secondary Group, set SOP Daily Start, add action rows, save, then monitor the Status column during operations to complete actions on time.</p>
+  <p><strong>Purpose</strong>: Build reminder-only SOP action plans per Group Name (HF Operating Group).</p>
+  <p><strong>Typical workflow</strong>: Select Group Name (HF Operating Group) and optional SOP Group, set SOP Daily Start, add action rows, save, then monitor the Status column during operations to complete actions on time.</p>
   <p><strong>Expected UI behavior</strong>:</p>
   <ul class="section-list">
     <li><strong>Manual completion model</strong>: Actions never auto-complete; operator action marks completion.</li>
@@ -149,11 +149,12 @@
     <li><strong>Mismatch signaling</strong>: Band/Frequency mismatch against schedule appears as warning-highlighted cell with tooltip.</li>
   </ul>
   <ol class="section-list">
+    <li><strong>Terminology</strong>: <em>SOP Category</em> identifies HF vs Local Net action context, <em>SOP Group</em> is optional profile grouping, and <em>Group Name</em> maps to HF Operating Groups.</li>
     <li><strong>Builder model</strong>: Build each SOP one row at a time with Band, Frequency, Software, Action, Interval, Contact Rule, Contact Target, and Description.</li>
     <li><strong>SOP Daily Start (TZ)</strong>: A master start time anchors all action cadence. The label and displayed value follow the current UTC/Local toggle.</li>
     <li><strong>Interval (HH:MM)</strong>: Enter intervals as HH:MM (for example, 00:30, 01:00, 06:00). The field supports typed values for granular recurrence.</li>
     <li><strong>Timezone display</strong>: SOP uses header clocks and the <em>Showing UTC/Showing Local</em> toggle. Data is stored in UTC.</li>
-    <li><strong>Contact rules</strong>: Rule options are filtered by roles available for the selected Operating Group (+ Secondary Group when used). Role options include HUB/HUB-ALT, NCS/ANCS, PEER, and CallSign targeting.</li>
+    <li><strong>Contact rules</strong>: Rule options are filtered by roles available for the selected Group Name (+ SOP Group when used). Role options include HUB/HUB-ALT, NCS/ANCS, PEER, and CallSign targeting.</li>
     <li><strong>Contact target</strong>: Target is type-ahead searchable. Use <em>Any (Role Match)</em> or select a specific callsign based on the selected contact rule.</li>
     <li><strong>Status button behavior</strong>: The Status button text reflects reminder state. <em>Due Now</em> (0-20 min, info), <em>Overdue</em> (20-30 min, warning), <em>Completed</em> (success).</li>
     <li><strong>Action visibility</strong>: Actions older than 30 minutes past due are hidden to keep the reminder list focused.</li>
@@ -554,6 +555,11 @@
     <li><strong>Header clocks</strong>: UTC and Local update live.</li>
     <li><strong>Showing: UTC/Local</strong>: Toggle the time display only. When in Local view, times are converted to UTC on save.</li>
     <li><strong>QSY controls</strong>: QSY dropdown (HF Operating Groups) and QSY button. QSY applies frequency immediately and pauses the scheduler until resumed.</li>
+    <li><strong>SOP Runtime panel</strong>: Shows <em>Now</em>/<em>Next</em> effective source context and active SOP counts in the HF tab.</li>
+    <li><strong>Active SOP controls</strong>: Only SOP sets are listed for one-click <em>Activate</em>/<em>Deactivate</em>; baseline HF schedule is not an activatable/deactivatable set.</li>
+    <li><strong>SOP naming clarity</strong>: Tooltips distinguish <em>Group Name (HF)</em> vs <em>SOP Group</em> to reduce interpretation errors during live operations.</li>
+    <li><strong>Schedule Issues</strong>: Shows <em>Conflict</em>, <em>Needs Review</em>, and <em>Info</em> issues with direct actions (<em>Open SOP</em>, <em>Deactivate SOP</em>, <em>Adjust Daily Row</em>) and <em>Dismiss Until Change</em>.</li>
+    <li><strong>Schedule Resources</strong>: Consolidated read-only workspace for NET, SOP, and HF rows with source/category/text filters and explicit priority context.</li>
     <li><strong>Schedule table</strong>: Columns are Select, Day, Group Name, Mode, Band, Freq (MHz), Start, End, Auto-Tune. The table is not sortable.</li>
     <li><strong>Add Row</strong>: Inserts a new schedule row.</li>
     <li><strong>Delete Selected</strong>: Removes checked rows. The button highlights only when at least one row is checked.</li>

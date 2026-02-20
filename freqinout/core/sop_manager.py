@@ -365,7 +365,7 @@ class SOPManager:
                             END
                         WHERE lower(trim(COALESCE(software, ''))) = 'local net'
                           AND (
-                                lower(trim(COALESCE(contact_rule, ''))) = 'local_profile'
+                                lower(trim(COALESCE(contact_rule, ''))) IN ('local_profile', 'local_group')
                                 OR lower(trim(COALESCE(action_key, ''))) LIKE 'local_%'
                               )
                           AND COALESCE(interval_phase_minutes, 0) = 0
@@ -472,6 +472,111 @@ class SOPManager:
                 }
                 for r in rows
             ]
+        finally:
+            conn.close()
+
+    def list_profiles_with_category(self) -> List[Dict[str, Any]]:
+        """
+        Return SOP profiles with an inferred SOP category summary:
+          - HF
+          - Local Net
+          - HF + Local Net
+        """
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                """
+                SELECT
+                    p.id,
+                    p.name,
+                    p.operating_group,
+                    p.secondary_group,
+                    p.priority,
+                    p.active,
+                    p.window_hours,
+                    p.created_utc,
+                    p.updated_utc,
+                    SUM(
+                        CASE
+                            WHEN UPPER(TRIM(COALESCE(a.software, ''))) = 'LOCAL NET' THEN 1
+                            ELSE 0
+                        END
+                    ) AS local_count,
+                    SUM(
+                        CASE
+                            WHEN TRIM(COALESCE(a.software, '')) <> ''
+                                 AND UPPER(TRIM(COALESCE(a.software, ''))) <> 'LOCAL NET' THEN 1
+                            ELSE 0
+                        END
+                    ) AS hf_count
+                FROM sop_profiles p
+                LEFT JOIN sop_actions a
+                  ON a.profile_id = p.id
+                GROUP BY
+                    p.id,
+                    p.name,
+                    p.operating_group,
+                    p.secondary_group,
+                    p.priority,
+                    p.active,
+                    p.window_hours,
+                    p.created_utc,
+                    p.updated_utc
+                ORDER BY p.name COLLATE NOCASE
+                """
+            )
+            out: List[Dict[str, Any]] = []
+            for row in cur.fetchall():
+                local_count = int(row[9] or 0)
+                hf_count = int(row[10] or 0)
+                if local_count > 0 and hf_count > 0:
+                    category = "HF + Local Net"
+                elif local_count > 0:
+                    category = "Local Net"
+                else:
+                    category = "HF"
+                out.append(
+                    {
+                        "id": int(row[0] or 0),
+                        "name": row[1] or "",
+                        "operating_group": row[2] or "",
+                        "secondary_group": row[3] or "",
+                        "priority": int(row[4] or 100),
+                        "active": bool(row[5]),
+                        "window_hours": int(row[6] or 12),
+                        "created_utc": row[7] or "",
+                        "updated_utc": row[8] or "",
+                        "sop_category": category,
+                    }
+                )
+            return out
+        finally:
+            conn.close()
+
+    def set_profile_active(self, profile_id: int, active: bool) -> bool:
+        """
+        Toggle SOP profile active state without mutating action/layer rows.
+        Returns True when a profile row was updated.
+        """
+        pid = int(profile_id or 0)
+        if pid <= 0:
+            return False
+        now_iso = _utc_now_iso()
+        conn = self._connect()
+        try:
+            with conn:
+                cur = conn.execute(
+                    """
+                    UPDATE sop_profiles
+                    SET active = ?, updated_utc = ?
+                    WHERE id = ?
+                    """,
+                    (1 if active else 0, now_iso, pid),
+                )
+            try:
+                return int(cur.rowcount or 0) > 0
+            except Exception:
+                return True
         finally:
             conn.close()
 
@@ -789,6 +894,148 @@ class SOPManager:
                         conn.execute("DELETE FROM sop_schedule_layer WHERE id=? AND profile_id=?", (lid, profile_id))
 
             return profile_id
+        finally:
+            conn.close()
+
+    def upsert_schedule_layer_rows(self, profile_id: int, layer_rows: List[Dict[str, Any]]) -> int:
+        """
+        Upsert schedule-layer rows for one profile.
+        Returns number of rows inserted or updated.
+        """
+        pid = int(profile_id or 0)
+        rows = [r for r in (layer_rows or []) if isinstance(r, dict)]
+        if pid <= 0 or not rows:
+            return 0
+
+        conn = self._connect()
+        changed = 0
+        try:
+            now_iso = _utc_now_iso()
+            with conn:
+                cur = conn.execute(
+                    "SELECT COALESCE(MAX(sort_order), -1) FROM sop_schedule_layer WHERE profile_id = ?",
+                    (pid,),
+                )
+                fetched = cur.fetchone()
+                next_sort = int((fetched[0] if fetched else -1) or -1) + 1
+
+                for idx, layer in enumerate(rows):
+                    layer_id = int(layer.get("id") or 0)
+                    recurrence = self._normalize_recurrence(layer.get("recurrence"))
+                    day_utc = self._normalize_day_utc(layer.get("day_utc"))
+                    if recurrence == "Daily":
+                        day_utc = "ALL"
+                    biweekly = int(layer.get("biweekly_offset_weeks") or 0)
+                    month_weeks = self._normalize_month_weeks(layer.get("month_weeks"))
+                    band = str(layer.get("band") or "").strip().upper()
+                    mode = str(layer.get("mode") or "").strip().upper()
+                    vfo = str(layer.get("vfo") or "A").strip().upper() or "A"
+                    freq = self._normalize_frequency(layer.get("frequency"))
+                    start_utc = self._normalize_hhmm(layer.get("start_utc"))
+                    end_utc = self._normalize_hhmm(layer.get("end_utc"))
+                    enabled = 1 if layer.get("enabled", True) else 0
+                    sort_order = layer.get("sort_order")
+                    if sort_order is None:
+                        sort_order = next_sort + idx
+                    try:
+                        sort_val = int(sort_order)
+                    except Exception:
+                        sort_val = next_sort + idx
+
+                    if not (band and mode and freq and start_utc and end_utc):
+                        continue
+
+                    if layer_id > 0:
+                        updated = conn.execute(
+                            """
+                            UPDATE sop_schedule_layer
+                            SET day_utc=?, recurrence=?, biweekly_offset_weeks=?, month_weeks=?,
+                                band=?, mode=?, vfo=?, frequency=?, start_utc=?, end_utc=?,
+                                enabled=?, sort_order=?, updated_utc=?
+                            WHERE id=? AND profile_id=?
+                            """,
+                            (
+                                day_utc,
+                                recurrence,
+                                biweekly,
+                                month_weeks,
+                                band,
+                                mode,
+                                vfo,
+                                freq,
+                                start_utc,
+                                end_utc,
+                                enabled,
+                                sort_val,
+                                now_iso,
+                                layer_id,
+                                pid,
+                            ),
+                        )
+                        if int(updated.rowcount or 0) > 0:
+                            changed += 1
+                            continue
+
+                    existing = conn.execute(
+                        """
+                        SELECT id
+                        FROM sop_schedule_layer
+                        WHERE profile_id=? AND day_utc=? AND recurrence=? AND biweekly_offset_weeks=? AND month_weeks=?
+                          AND band=? AND mode=? AND vfo=? AND frequency=? AND start_utc=? AND end_utc=?
+                        LIMIT 1
+                        """,
+                        (
+                            pid,
+                            day_utc,
+                            recurrence,
+                            biweekly,
+                            month_weeks,
+                            band,
+                            mode,
+                            vfo,
+                            freq,
+                            start_utc,
+                            end_utc,
+                        ),
+                    ).fetchone()
+                    if existing:
+                        conn.execute(
+                            """
+                            UPDATE sop_schedule_layer
+                            SET enabled=?, updated_utc=?
+                            WHERE id=? AND profile_id=?
+                            """,
+                            (enabled, now_iso, int(existing[0] or 0), pid),
+                        )
+                        changed += 1
+                        continue
+
+                    conn.execute(
+                        """
+                        INSERT INTO sop_schedule_layer
+                            (profile_id, day_utc, recurrence, biweekly_offset_weeks, month_weeks,
+                             band, mode, vfo, frequency, start_utc, end_utc, enabled, sort_order, updated_utc)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            pid,
+                            day_utc,
+                            recurrence,
+                            biweekly,
+                            month_weeks,
+                            band,
+                            mode,
+                            vfo,
+                            freq,
+                            start_utc,
+                            end_utc,
+                            enabled,
+                            sort_val,
+                            now_iso,
+                        ),
+                    )
+                    changed += 1
+            return changed
         finally:
             conn.close()
 
@@ -1153,6 +1400,53 @@ class SOPManager:
                 return True
         return False
 
+    def diagnose_due_alignment(
+        self,
+        operating_group: str,
+        band: str,
+        frequency: str,
+        due_utc: dt.datetime,
+        *,
+        profile_id: Optional[int] = None,
+        treat_no_windows_as_aligned: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Return alignment diagnostics for a due time against Daily/Net/SOP windows.
+
+        reason:
+          - in_window
+          - outside_window
+          - no_windows
+        """
+        windows = self._load_schedule_windows(operating_group, band, frequency)
+        windows.extend(
+            self._load_sop_layer_windows(
+                profile_id=profile_id,
+                band=band,
+                frequency=frequency,
+            )
+        )
+        total_windows = len(windows)
+        if total_windows <= 0:
+            return {
+                "aligned": bool(treat_no_windows_as_aligned),
+                "reason": "no_windows",
+                "has_windows": False,
+                "matching_windows": 0,
+                "total_windows": 0,
+            }
+        matches = 0
+        for window in windows:
+            if self._window_matches_due(window, due_utc):
+                matches += 1
+        return {
+            "aligned": matches > 0,
+            "reason": "in_window" if matches > 0 else "outside_window",
+            "has_windows": True,
+            "matching_windows": matches,
+            "total_windows": total_windows,
+        }
+
     def build_schedule_layer_candidates(
         self,
         *,
@@ -1405,14 +1699,20 @@ class SOPManager:
                 action_freq = (action.get("frequency") or "").strip() or full.get("frequency", "")
                 rule = (action.get("contact_rule") or "none").strip()
                 aligned = True
-                if rule != "local_profile":
-                    aligned = self.is_due_aligned_with_schedule(
+                alignment_reason = "not_evaluated"
+                has_schedule_windows = False
+                if rule not in {"local_profile", "local_group"}:
+                    diag = self.diagnose_due_alignment(
                         full.get("operating_group", ""),
                         action_band,
                         action_freq,
                         due,
                         profile_id=int(full.get("id") or 0),
+                        treat_no_windows_as_aligned=True,
                     )
+                    aligned = bool(diag.get("aligned", True))
+                    alignment_reason = str(diag.get("reason") or "not_evaluated").strip()
+                    has_schedule_windows = bool(diag.get("has_windows"))
                 selected_target = (action.get("contact_target") or "").strip().upper()
                 targets: List[str] = []
                 if rule == "hub_or_hub_alt":
@@ -1431,7 +1731,7 @@ class SOPManager:
                 elif rule == "peer":
                     target = (action.get("contact_target") or "").strip().upper()
                     targets = [target] if target else []
-                elif rule == "local_profile":
+                elif rule in {"local_profile", "local_group"}:
                     target = (action.get("contact_target") or "").strip().upper()
                     targets = [target] if target else []
                 rows.append(
@@ -1453,6 +1753,8 @@ class SOPManager:
                         "interval_phase_minutes": interval_phase_m,
                         "next_due_utc": due,
                         "aligned": aligned,
+                        "alignment_reason": alignment_reason,
+                        "has_schedule_windows": has_schedule_windows,
                         "status": status,
                         "is_completed": completed_current and status == "Completed",
                     }
@@ -1521,7 +1823,7 @@ class SOPManager:
                 return tgt
             vals = contacts.get("ncs", []) or []
             return " OR ".join(vals[:4]) if vals else "Any (Role Match)"
-        if rule_val in {"callsign", "peer", "local_profile"}:
+        if rule_val in {"callsign", "peer", "local_profile", "local_group"}:
             return tgt or "--"
         return "--"
 

@@ -30,14 +30,10 @@ def main():
     lock_path = get_config_dir() / "freqinout.lock"
     lockfile = QLockFile(str(lock_path))
     lockfile.setStaleLockTime(60_000)
-    if not lockfile.tryLock(0):
-        stale_removed = False
-        if hasattr(lockfile, "removeStaleLock"):
-            stale_removed = lockfile.removeStaleLock()
-        elif hasattr(lockfile, "removeStaleLockFile"):
-            stale_removed = lockfile.removeStaleLockFile()
-        if stale_removed:
-            lockfile.tryLock(0)
+    if not lockfile.isLocked():
+        if not lockfile.tryLock(0):
+            QMessageBox.information(None, "FreqInOut", "FreqInOut is already running.")
+            return
     if not lockfile.isLocked():
         QMessageBox.information(None, "FreqInOut", "FreqInOut is already running.")
         return

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QFont, QPalette
 
 
 THEMES: Dict[str, Dict[str, str]] = {
@@ -39,6 +39,14 @@ THEMES: Dict[str, Dict[str, str]] = {
         "focus": "#9AC7FF",
     },
 }
+
+UI_TEXT_SIZE_SCALES: Dict[str, float] = {
+    "normal": 1.00,
+    "medium": 1.10,
+    "large": 1.25,
+}
+
+_APP_BASE_FONT: QFont | None = None
 
 BAND_COLORS_LIGHT: Dict[str, str] = {
     "160m": "#7F7F7F",
@@ -77,6 +85,35 @@ def resolve_theme(settings) -> Dict[str, str]:
     if key not in THEMES:
         key = "light"
     return get_theme(key)
+
+
+def normalize_ui_text_size(value: object) -> str:
+    txt = str(value or "normal").strip().lower()
+    aliases = {
+        "100": "normal",
+        "100%": "normal",
+        "1.0": "normal",
+        "normal": "normal",
+        "110": "medium",
+        "110%": "medium",
+        "1.1": "medium",
+        "medium": "medium",
+        "125": "large",
+        "125%": "large",
+        "1.25": "large",
+        "large": "large",
+    }
+    normalized = aliases.get(txt, txt)
+    return normalized if normalized in UI_TEXT_SIZE_SCALES else "normal"
+
+
+def ui_text_scale_for_size(size_key: object) -> float:
+    key = normalize_ui_text_size(size_key)
+    return float(UI_TEXT_SIZE_SCALES.get(key, 1.00))
+
+
+def resolve_ui_text_scale(settings) -> float:
+    return ui_text_scale_for_size(settings.get("ui_text_size", "normal"))
 
 
 def _hex_to_rgb(value: str) -> Tuple[int, int, int]:
@@ -393,9 +430,23 @@ def app_stylesheet(theme: Dict[str, str]) -> str:
     )
 
 
-def apply_app_theme(app, theme: Dict[str, str]) -> None:
+def apply_app_theme(app, theme: Dict[str, str], *, ui_text_scale: float = 1.00) -> None:
+    global _APP_BASE_FONT
     if app is None:
         return
+    if _APP_BASE_FONT is None:
+        _APP_BASE_FONT = QFont(app.font())
+    scaled_font = QFont(_APP_BASE_FONT)
+    try:
+        scale = float(ui_text_scale)
+    except Exception:
+        scale = 1.00
+    scale = min(1.25, max(1.00, scale))
+    if scaled_font.pointSizeF() > 0:
+        scaled_font.setPointSizeF(max(6.0, scaled_font.pointSizeF() * scale))
+    elif scaled_font.pixelSize() > 0:
+        scaled_font.setPixelSize(max(8, int(round(scaled_font.pixelSize() * scale))))
+    app.setFont(scaled_font)
     pal = QPalette()
     pal.setColor(QPalette.Window, qcolor(theme["bg"]))
     pal.setColor(QPalette.WindowText, qcolor(theme["text"]))

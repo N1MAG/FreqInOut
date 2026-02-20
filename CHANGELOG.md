@@ -1,6 +1,25 @@
 # Changelog
 
 ## [1.1.8]
+- Added: Accessibility `Text Size` setting in `Settings` with bounded presets (`Normal` 100%, `Medium` 110%, `Large` 125%) applied app-wide without restart.
+- Changed: UI text-size presets now persist across restarts via `ui_text_size` and are applied centrally through app-theme refresh.
+- Changed: ControlFreq frequency hero display remains fixed-size across text-size presets so dashboard frequency readability stays stable.
+- Changed: Sidebar navigation and Schedule Status action controls now auto-size from text metrics to reduce clipping risk at larger UI text sizes.
+- Changed: Settings section navigator width now auto-sizes to section labels, improving readability at larger UI text sizes.
+- Changed: Settings forms now apply width guards for fixed-width labels/buttons/combos so `Large` text size avoids clipped control text.
+- Changed: Messages tab header/filter controls now auto-fit minimum widths from font metrics to improve `Large` readability.
+- Fixed: Messages filter combo popups (`MSG Type`, `Status`, `From`, `To`) now expand to fit filter values, and `From/To` dropdown arrow affordance is fully visible.
+- Changed: SOP header/action controls now auto-fit minimum widths, and SOP PDF export filter controls now use expandable minimum widths for `Large` text size.
+- Changed: SOP Action Rows `Resource` popup width is now capped for a more comfortable dropdown reading width.
+- Added: HF Schedule now includes an `SOP Runtime` panel with `Now/Next` source summary, active SOP count, SOP category visibility, and one-click `Activate`/`Deactivate` controls.
+- Added: SOP manager now supports lightweight profile summaries with inferred SOP category (`HF`, `Local Net`, `HF + Local Net`) and direct active-state toggles for low-latency UI controls.
+- Changed: SOP terminology is now clearer in UI/docs (`Group Name (HF)`, `SOP Group`, `SOP Category`) to reduce user interpretation friction.
+- Changed: HF Schedule SOP category labels now render as `SOP-HF`, `SOP-Local Net`, or `SOP-Mixed` to make clear that toggle actions apply to SOP sets only (not the baseline HF schedule).
+- Added: HF Schedule now includes a `Schedule Issues` panel with severity tiers (`Conflict`, `Needs Review`, `Info`), guided action buttons, and `Dismiss Until Change` behavior.
+- Added: HF Schedule now includes a consolidated `Schedule Resources` workspace showing NET/SOP/HF rows with source/category/text filters and explicit priority ordering context.
+- Changed: HF Schedule `Schedule Resources` now excludes NET source rows and supports Active-Schedule parity workflows (`Move Selected to Resources`, `Add Selected/Filtered to Active Schedule`) backed by persisted `hf_schedule_resources`.
+- Changed: HF Schedule now uses explicit section labels (`Active Schedule`, `Schedule Resources`) in the same visual style as Net Schedule section headers.
+- Fixed: Settings section navigator now shows a vertical scrollbar as needed so lower sections, including `Launch Control`, remain reachable without window resize workarounds.
 - Changed: ControlFreq now uses bounded SOP window caches (`Today`/`Tomorrow`) with TTL and explicit cache-bust on SOP/settings changes for long-run responsiveness without restart.
 - Changed: ControlFreq settings-save handling is now lightweight when tab is inactive (deferred heavy refresh until activation).
 - Changed: SOP tab action-source labels now use `Resource` (replacing `Software`) in Action Rows and Upcoming Actions tables.

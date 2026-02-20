@@ -3003,7 +3003,7 @@ class ControlFreqTab(QWidget):
                             targets = [selected_target]
                         else:
                             targets = ["Any (Role Match)"]
-                    elif rule in {"callsign", "peer", "local_profile"}:
+                    elif rule in {"callsign", "peer", "local_profile", "local_group"}:
                         targets = [selected_target] if selected_target else []
                     action_band = (action.get("band") or "").strip().upper()
                     action_freq = (action.get("frequency") or "").strip() or str(full.get("frequency") or "")
@@ -3117,7 +3117,7 @@ class ControlFreqTab(QWidget):
                     contact_target = targets[0]
                 is_local_net_action = (
                     software_norm in {"local net", "local"}
-                    or contact_rule == "local_profile"
+                    or contact_rule in {"local_profile", "local_group"}
                     or action_key_norm.startswith("local_")
                 )
                 if is_local_net_action:

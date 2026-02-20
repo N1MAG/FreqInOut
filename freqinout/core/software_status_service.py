@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import socket
 import time
 from pathlib import Path
@@ -50,15 +51,27 @@ class SoftwareStatusService:
     inspection so tabs can refresh status consistently.
     """
 
+    # Shared caches across all service instances to avoid duplicated polling work.
+    _shared_proc_snapshot: List[str] = []
+    _shared_proc_snapshot_ts: float = 0.0
+    _shared_js8_api_cache: Dict[tuple[str, int, bool], tuple[float, bool]] = {}
+
     def __init__(self, settings: Any) -> None:
         self.settings = settings
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
         self._snapshot_ttl_sec: float = 2.0
+        self._js8_api_cache_key: tuple[str, int, bool] | None = None
+        self._js8_api_cache_ok: bool = False
+        self._js8_api_cache_ts: float = 0.0
+        self._js8_api_cache_ttl_sec: float = 4.0
 
     def _refresh_process_snapshot(self, *, force: bool = False) -> None:
+        cls = type(self)
         now = time.monotonic()
-        if not force and (now - self._proc_snapshot_ts) < self._snapshot_ttl_sec:
+        if not force and (now - float(cls._shared_proc_snapshot_ts or 0.0)) < self._snapshot_ttl_sec:
+            self._proc_snapshot = list(cls._shared_proc_snapshot)
+            self._proc_snapshot_ts = float(cls._shared_proc_snapshot_ts or now)
             return
         snap: List[str] = []
         for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
@@ -66,13 +79,21 @@ class SoftwareStatusService:
                 name = (proc.info.get("name") or "").strip().lower()
                 exe = os.path.basename(proc.info.get("exe") or "").strip().lower()
                 cmdline = proc.info.get("cmdline") or []
-                first_arg = os.path.basename(cmdline[0]).strip().lower() if cmdline else ""
-                second_arg = os.path.basename(cmdline[1]).strip().lower() if len(cmdline) > 1 else ""
-                for token in (name, exe, first_arg, second_arg):
+                cmd_tokens: List[str] = []
+                for arg in cmdline[:6]:
+                    try:
+                        token = os.path.basename(str(arg or "")).strip().lower()
+                    except Exception:
+                        token = ""
+                    if token:
+                        cmd_tokens.append(token)
+                for token in (name, exe, *cmd_tokens):
                     if token:
                         snap.append(token)
             except Exception:
                 continue
+        cls._shared_proc_snapshot = list(snap)
+        cls._shared_proc_snapshot_ts = now
         self._proc_snapshot = snap
         self._proc_snapshot_ts = now
 
@@ -86,12 +107,26 @@ class SoftwareStatusService:
             path_txt = ""
         if not path_txt:
             return []
+        out: List[str] = []
         try:
             p = Path(path_txt)
             name = p.name.strip().lower()
-            return [name] if name else []
+            if name:
+                out.append(name)
         except Exception:
-            return []
+            pass
+        try:
+            parts = shlex.split(path_txt, posix=os.name != "nt")
+        except Exception:
+            parts = []
+        for part in parts[:6]:
+            try:
+                token = os.path.basename(str(part or "")).strip().lower()
+            except Exception:
+                token = ""
+            if token:
+                out.append(token)
+        return list(dict.fromkeys(out))
 
     def _target_tokens(self, program_name: str) -> List[str]:
         defaults = [t.lower() for t in PROGRAM_TOKENS.get(program_name, ())]
@@ -126,7 +161,13 @@ class SoftwareStatusService:
                 continue
         return None
 
-    def js8_api_reachable(self, *, port_override: Optional[int] = None) -> bool:
+    def js8_api_reachable(
+        self,
+        *,
+        port_override: Optional[int] = None,
+        allow_fallback: bool = True,
+        force: bool = False,
+    ) -> bool:
         if port_override is not None:
             port = int(port_override)
         else:
@@ -142,27 +183,51 @@ class SoftwareStatusService:
                 hosts.append(host_cfg)
         except Exception:
             pass
-        hosts.extend(["127.0.0.1", "localhost", "::1"])
+        cache_host = hosts[0].strip().lower() if hosts else ""
+        cache_key = (cache_host, int(port), bool(allow_fallback))
+        now = time.monotonic()
+        cls = type(self)
+        cache_entry = cls._shared_js8_api_cache.get(cache_key)
+        if not force and cache_entry:
+            cached_ts, cached_ok = cache_entry
+            if (now - float(cached_ts or 0.0)) < float(self._js8_api_cache_ttl_sec):
+                self._js8_api_cache_key = cache_key
+                self._js8_api_cache_ok = bool(cached_ok)
+                self._js8_api_cache_ts = float(cached_ts or now)
+                return bool(cached_ok)
 
+        hosts.extend(["127.0.0.1", "localhost", "::1"])
+        reachable = False
         for host in hosts:
             try:
-                with socket.create_connection((host, port), timeout=1.5):
-                    return True
+                with socket.create_connection((host, port), timeout=0.35):
+                    reachable = True
+                    break
             except Exception:
                 continue
 
-        # Fallback probe through existing control client.
-        try:
-            from freqinout.radio_interface.js8_status import JS8ControlClient
+        if not reachable and allow_fallback:
+            # Optional fallback probe through existing control client.
+            try:
+                from freqinout.radio_interface.js8_status import JS8ControlClient
 
-            client = JS8ControlClient()
-            return client.get_frequency() is not None
-        except Exception:
-            return False
+                client = JS8ControlClient()
+                reachable = client.get_frequency() is not None
+            except Exception:
+                reachable = False
+
+        self._js8_api_cache_key = cache_key
+        self._js8_api_cache_ok = bool(reachable)
+        self._js8_api_cache_ts = time.monotonic()
+        cls._shared_js8_api_cache[cache_key] = (self._js8_api_cache_ts, self._js8_api_cache_ok)
+        return bool(reachable)
 
     def status_snapshot(self, *, port_override: Optional[int] = None) -> Dict[str, Dict[str, object]]:
         running_js8 = self.program_is_running("JS8Call")
-        api_ok = self.js8_api_reachable(port_override=port_override)
+        api_ok = self.js8_api_reachable(
+            port_override=port_override,
+            allow_fallback=False,
+        ) if running_js8 else False
 
         out: Dict[str, Dict[str, object]] = {}
         out["JS8Call_API"] = {
@@ -193,4 +258,3 @@ class SoftwareStatusService:
                 "running": bool(running),
             }
         return out
-

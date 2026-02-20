@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 import time
 import sqlite3
-from typing import List, Dict, Tuple, Optional
+from typing import Any, List, Dict, Tuple, Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -166,20 +166,24 @@ class FreqPlannerTab(QWidget):
             abbr = self._ui_tz_abbr(tz_name, abbr)
         return tz_name, abbr
 
-    def _load_schedules(self) -> Tuple[List[Dict], List[Dict]]:
+    def _load_schedules(self) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         data = self.settings.all()
 
         # Try DB-backed schedules first
         hf_db = self._load_hf_from_db()
         net_db = self._load_net_from_db()
+        sop_db = self._load_sop_layer_from_db()
 
         hf = hf_db if hf_db is not None else data.get("hf_schedule") or data.get("daily_schedule") or []
         net = net_db if net_db is not None else data.get("net_schedule") or []
+        sop = sop_db if sop_db is not None else []
         if not isinstance(hf, list):
             hf = []
         if not isinstance(net, list):
             net = []
-        return hf, net
+        if not isinstance(sop, list):
+            sop = []
+        return hf, net, sop
 
     def _load_hf_from_db(self) -> Optional[List[Dict]]:
         """
@@ -325,6 +329,109 @@ class FreqPlannerTab(QWidget):
             return out
         except Exception:
             return None
+
+    def _load_sop_layer_from_db(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Load HF SOP schedule-layer rows from config/freqinout_nets.db.
+        Prefer active profiles; if none are active for HF entries, fall back to
+        enabled layer rows so planner labeling still reflects configured SOP sets.
+        """
+        conn: sqlite3.Connection | None = None
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+            if not db_path.exists():
+                return None
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            profile_cols: set[str] = set()
+            try:
+                cur.execute("PRAGMA table_info(sop_profiles)")
+                profile_cols = {str(r[1] or "").strip().lower() for r in cur.fetchall() if len(r) > 1}
+            except Exception:
+                profile_cols = set()
+            has_secondary_group = "secondary_group" in profile_cols
+            resolved_group_expr = (
+                "COALESCE(NULLIF(TRIM(p.operating_group), ''), NULLIF(TRIM(p.secondary_group), ''),"
+                " NULLIF(TRIM(p.name), ''), '')"
+                if has_secondary_group
+                else "COALESCE(NULLIF(TRIM(p.operating_group), ''), NULLIF(TRIM(p.name), ''), '')"
+            )
+            base_sql = """
+                SELECT
+                    COALESCE(l.day_utc, 'ALL'),
+                    COALESCE(l.recurrence, 'Weekly'),
+                    COALESCE(l.biweekly_offset_weeks, 0),
+                    COALESCE(l.month_weeks, ''),
+                    COALESCE(l.band, ''),
+                    COALESCE(l.mode, ''),
+                    COALESCE(l.vfo, 'A'),
+                    COALESCE(l.frequency, ''),
+                    COALESCE(l.start_utc, ''),
+                    COALESCE(l.end_utc, ''),
+                    {resolved_group_expr},
+                    COALESCE(p.name, '')
+                FROM sop_schedule_layer l
+                JOIN sop_profiles p ON p.id = l.profile_id
+                WHERE COALESCE(l.enabled, 1) = 1
+                  AND (
+                        TRIM(COALESCE(l.band, '')) <> ''
+                        OR TRIM(COALESCE(l.frequency, '')) <> ''
+                  )
+                  {active_clause}
+                ORDER BY p.operating_group COLLATE NOCASE, l.day_utc, l.start_utc
+            """
+            # Primary path: active HF SOPs only.
+            cur.execute(
+                base_sql.format(
+                    resolved_group_expr=resolved_group_expr,
+                    active_clause="AND COALESCE(p.active, 0) = 1",
+                )
+            )
+            rows = cur.fetchall()
+            # Fallback path: no active HF SOP profile rows; show configured HF SOP layers.
+            if not rows:
+                cur.execute(base_sql.format(resolved_group_expr=resolved_group_expr, active_clause=""))
+                rows = cur.fetchall()
+            out: List[Dict[str, Any]] = []
+            for (
+                day_utc,
+                recurrence,
+                biweekly_offset_weeks,
+                month_weeks,
+                band,
+                mode,
+                vfo,
+                freq,
+                start_utc,
+                end_utc,
+                operating_group,
+                profile_name,
+            ) in rows:
+                out.append(
+                    {
+                        "day_utc": day_utc or "ALL",
+                        "recurrence": recurrence or "Weekly",
+                        "biweekly_offset_weeks": biweekly_offset_weeks or 0,
+                        "month_weeks": month_weeks or "",
+                        "band": band or "",
+                        "mode": mode or "",
+                        "vfo": (vfo or "A").strip().upper() or "A",
+                        "frequency": str(freq or ""),
+                        "start_utc": start_utc or "",
+                        "end_utc": end_utc or "",
+                        "group_name": str(operating_group or "").strip(),
+                        "profile_name": str(profile_name or "").strip(),
+                    }
+                )
+            return out
+        except Exception:
+            return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def _parse_hhmm(self, s: str) -> int | None:
         s = (s or "").strip()
@@ -510,9 +617,9 @@ class FreqPlannerTab(QWidget):
             ]
         self.table.setHorizontalHeaderLabels(headers)
 
-        hf_sched, net_sched = self._load_schedules()
+        hf_sched, net_sched, sop_sched = self._load_schedules()
         theme = resolve_theme(self.settings)
-        self._last_snapshot = self._snapshot(hf_sched, net_sched)
+        self._last_snapshot = self._snapshot(hf_sched, net_sched, sop_sched)
         now_utc = datetime.datetime.utcnow()
         week_sunday = self._week_start_sunday_utc(now_utc)
 
@@ -561,6 +668,61 @@ class FreqPlannerTab(QWidget):
                         overlap_start = max(seg_start, hour_start_min)
                         overlap_end = min(seg_end, hour_end_min)
                         add_net_slice(dname, hour % 24, overlap_start - hour_start_min, overlap_end - hour_start_min, name)
+            except Exception:
+                continue
+
+        # Precompute active SOP layer coverage by (day, hour)
+        sop_cover: Dict[tuple, List[Tuple[int, int, str]]] = {}
+
+        def add_sop_slice(day_name: str, hour: int, start_minute: int, end_minute: int, label: str) -> None:
+            if start_minute >= end_minute:
+                return
+            sop_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, label))
+
+        for row in sop_sched:
+            try:
+                day = row.get("day_utc", "")
+                smin = self._parse_hhmm(row.get("start_utc", ""))
+                emin = self._parse_hhmm(row.get("end_utc", ""))
+                if smin is None or emin is None:
+                    continue
+                recurrence = (row.get("recurrence") or "Weekly").strip()
+                day_txt = (day or "ALL").strip().upper()
+                if recurrence.upper() == "DAILY":
+                    day_txt = "ALL"
+                targets = DAY_NAMES if day_txt == "ALL" or day_txt not in DAY_NAMES_UPPER else [
+                    DAY_NAMES[DAY_NAMES_UPPER.index(day_txt)]
+                ]
+                if not self._net_row_applies_this_week(row, targets, week_sunday):
+                    continue
+                group_name = str(row.get("group_name") or row.get("profile_name") or "").strip()
+                label = f"SOP:{group_name}" if group_name else "SOP"
+                overnight = smin > emin
+                intervals: List[Tuple[str, int, int]] = []
+                if not overnight:
+                    for dname in targets:
+                        intervals.append((dname, smin, emin))
+                else:
+                    for dname in targets:
+                        intervals.append((dname, smin, 24 * 60))
+                        next_idx = (DAY_NAMES.index(dname) + 1) % 7
+                        next_day = DAY_NAMES[next_idx]
+                        intervals.append((next_day, 0, emin))
+                for dname, seg_start, seg_end in intervals:
+                    start_hour = seg_start // 60
+                    end_hour = (seg_end - 1) // 60
+                    for hour in range(start_hour, end_hour + 1):
+                        hour_start_min = hour * 60
+                        hour_end_min = hour * 60 + 60
+                        overlap_start = max(seg_start, hour_start_min)
+                        overlap_end = min(seg_end, hour_end_min)
+                        add_sop_slice(
+                            dname,
+                            hour % 24,
+                            overlap_start - hour_start_min,
+                            overlap_end - hour_start_min,
+                            label,
+                        )
             except Exception:
                 continue
 
@@ -645,7 +807,6 @@ class FreqPlannerTab(QWidget):
 
         # Current UTC day for highlighting
         now_local = datetime.datetime.now(tz)
-        current_day_name = now_utc.strftime("%A")  # "Sunday" etc.
         now_plus_24 = now_utc + datetime.timedelta(hours=24)
 
         # Fill rows
@@ -712,6 +873,7 @@ class FreqPlannerTab(QWidget):
                     lookup_hour = cell_dt_utc.hour
 
                 net_slices = net_cover.get((lookup_day, lookup_hour), [])
+                sop_slices = sop_cover.get((lookup_day, lookup_hour), [])
                 hf_slices = hf_cover.get((lookup_day, lookup_hour), [])
                 band_label = ""
                 freq_label = ""
@@ -756,10 +918,32 @@ class FreqPlannerTab(QWidget):
                     if net_names:
                         net_label = " / ".join(net_names)
 
+                sop_label = ""
+                if sop_slices:
+                    sop_slices = sorted(sop_slices, key=lambda x: x[0])
+                    sop_names: List[str] = []
+                    seen_sop_names: set[str] = set()
+                    for start_m, end_m, label in sop_slices:
+                        if end_m <= start_m:
+                            continue
+                        raw = str(label or "").strip()
+                        if raw.upper().startswith("SOP:"):
+                            raw = raw[4:].strip()
+                        name = raw or "SOP"
+                        key = name.upper()
+                        if key in seen_sop_names:
+                            continue
+                        seen_sop_names.add(key)
+                        sop_names.append(name)
+                    if sop_names:
+                        sop_label = f"SOP:{'/'.join(sop_names)}"
+
                 cell_text = ""
-                # If any net exists, show only the net name (no band)
+                # Display precedence: Net > SOP > HF.
                 if net_label:
                     cell_text = net_label
+                elif sop_label:
+                    cell_text = sop_label
                 else:
                     cell_text = band_label if self._show_band else (freq_label or band_label)
 
@@ -768,7 +952,7 @@ class FreqPlannerTab(QWidget):
                 if cell_text:
                     item.setToolTip(cell_text)
 
-                if band_label and not net_label:
+                if band_label and not net_label and not sop_label:
                     primary_band = band_label.split("/")[0].strip()
                     colors = self._band_cell_colors(primary_band, theme)
                     if colors:
@@ -806,7 +990,7 @@ class FreqPlannerTab(QWidget):
         self._render_band_legend()
         log.info("FreqPlanner table rebuilt.")
 
-    def _snapshot(self, hf_sched: List[Dict], net_sched: List[Dict]) -> str:
+    def _snapshot(self, hf_sched: List[Dict], net_sched: List[Dict], sop_sched: List[Dict]) -> str:
         """
         Deterministic snapshot of schedules and time view to avoid unnecessary rebuilds.
         """
@@ -819,11 +1003,15 @@ class FreqPlannerTab(QWidget):
             parts.append(
                 f"N|{n.get('day_utc','')}|{n.get('net_name','')}|{n.get('start_utc','')}|{n.get('end_utc','')}|{n.get('recurrence','')}|{n.get('month_weeks','')}"
             )
+        for s in sorted(sop_sched, key=lambda x: (x.get("group_name", ""), x.get("day_utc", ""), x.get("start_utc", ""))):
+            parts.append(
+                f"S|{s.get('group_name','')}|{s.get('day_utc','')}|{s.get('start_utc','')}|{s.get('end_utc','')}|{s.get('recurrence','')}|{s.get('month_weeks','')}"
+            )
         return ";".join(parts)
 
     def _maybe_rebuild_if_changed(self):
-        hf_sched, net_sched = self._load_schedules()
-        snap = self._snapshot(hf_sched, net_sched)
+        hf_sched, net_sched, sop_sched = self._load_schedules()
+        snap = self._snapshot(hf_sched, net_sched, sop_sched)
         if snap != self._last_snapshot:
             self.rebuild_table()
 

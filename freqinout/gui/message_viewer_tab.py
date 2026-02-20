@@ -3175,8 +3175,8 @@ class MessageViewerTab(QWidget):
         self.messages_table.setColumnWidth(0, 32)
         self.messages_table.setColumnWidth(1, 100)
         self.messages_table.setColumnWidth(2, 96)
-        self.messages_table.setColumnWidth(3, 106)
-        self.messages_table.setColumnWidth(4, 106)
+        self.messages_table.setColumnWidth(3, 122)
+        self.messages_table.setColumnWidth(4, 122)
         self.messages_table.setColumnWidth(5, 162)
         self.messages_table.setColumnWidth(7, 210)
         msg_header.setVisible(True)
@@ -3237,6 +3237,7 @@ class MessageViewerTab(QWidget):
         self.rcv_search.setPlaceholderText("Search...")
         self.rcv_search.textChanged.connect(lambda _: self._filter_timer.start(200))
         self._build_messages_header()
+        self._apply_accessibility_width_guards()
         QTimer.singleShot(0, self._set_initial_splitter_sizes)
         self._messages_model.dataChanged.connect(self._update_bulk_delete_buttons)
 
@@ -4056,6 +4057,7 @@ class MessageViewerTab(QWidget):
         self._update_time_toggle_style(theme)
         self._update_clear_filters_style()
         self._update_mark_all_read_style()
+        self._apply_accessibility_width_guards()
         self._update_pending_table()
 
     def shutdown(self) -> None:
@@ -4719,6 +4721,10 @@ class MessageViewerTab(QWidget):
             self.to_filter.setCurrentText("")
         self.to_filter.blockSignals(False)
         self._filters_initialized = True
+        self._fit_filter_combo_popup(self.type_filter)
+        self._fit_filter_combo_popup(self.status_filter)
+        self._fit_filter_combo_popup(self.from_filter)
+        self._fit_filter_combo_popup(self.to_filter)
 
     def _apply_message_filters(self) -> None:
         rows = self._message_rows
@@ -5403,16 +5409,22 @@ class MessageViewerTab(QWidget):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(2)
-        combo.setMinimumWidth(110)
+        try:
+            min_w = int(combo.fontMetrics().horizontalAdvance("MSG Type...") + 44)
+        except Exception:
+            min_w = 110
+        combo.setMinimumWidth(max(110, min_w))
         combo.setMinimumContentsLength(6)
         combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._fit_filter_combo_popup(combo)
         layout.addWidget(combo)
         return container
 
     def _make_combo_searchable(self, combo: QComboBox, placeholder: str) -> None:
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.NoInsert)
+        combo.setStyleSheet("QComboBox { padding-right: 20px; } QComboBox::drop-down { width: 18px; }")
         completer = QCompleter(combo.model(), combo)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
@@ -5424,16 +5436,125 @@ class MessageViewerTab(QWidget):
             edit.setPlaceholderText(placeholder)
             edit.editingFinished.connect(self._on_filter_changed)
             edit.textEdited.connect(lambda _: combo.completer().complete())
+        self._fit_filter_combo_popup(combo)
 
     def _make_search_filter_cell(self, edit: QLineEdit) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(2)
-        edit.setMinimumWidth(200)
+        try:
+            min_w = int(edit.fontMetrics().horizontalAdvance("Search...") + 136)
+        except Exception:
+            min_w = 200
+        edit.setMinimumWidth(max(200, min_w))
         edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout.addWidget(edit)
         return container
+
+    def _fit_filter_combo_popup(self, combo: QComboBox) -> None:
+        try:
+            fm = combo.fontMetrics()
+            text_w = 0
+            for i in range(combo.count()):
+                text_w = max(text_w, int(fm.horizontalAdvance(combo.itemText(i))))
+            if combo.isEditable() and combo.lineEdit() is not None:
+                ph = combo.lineEdit().placeholderText() or ""
+                if ph:
+                    text_w = max(text_w, int(fm.horizontalAdvance(ph)))
+            popup_w = max(int(combo.width()), text_w + 52)
+            popup_w = min(520, popup_w)
+            view = combo.view()
+            if view is not None:
+                view.setMinimumWidth(popup_w)
+        except Exception:
+            pass
+
+    def _apply_accessibility_width_guards(self) -> None:
+        # Prevent control label clipping at larger text sizes.
+        max_w = 360
+        buttons = [
+            getattr(self, "refresh_btn", None),
+            getattr(self, "export_btn", None),
+            getattr(self, "delete_selected_btn", None),
+            getattr(self, "mark_all_read_btn", None),
+            getattr(self, "time_toggle_btn", None),
+            getattr(self, "clear_filters_btn", None),
+            getattr(self, "open_external_btn", None),
+        ]
+        for btn in buttons:
+            if btn is None:
+                continue
+            try:
+                txt = str(btn.text() or "").strip()
+            except Exception:
+                txt = ""
+            if not txt:
+                continue
+            try:
+                needed = int(btn.fontMetrics().horizontalAdvance(txt.replace("&", "")) + 30)
+            except Exception:
+                continue
+            try:
+                current_min = int(btn.minimumWidth() or 0)
+            except Exception:
+                current_min = 0
+            base = btn.property("_fio_base_min_width")
+            try:
+                base_w = int(base)
+            except Exception:
+                base_w = current_min
+                try:
+                    btn.setProperty("_fio_base_min_width", base_w)
+                except Exception:
+                    pass
+            target = max(base_w, min(max_w, needed))
+            try:
+                btn.setMinimumWidth(target)
+            except Exception:
+                pass
+
+        try:
+            progress_w = int(self.loading_label.fontMetrics().horizontalAdvance("Getting messages...") + 64)
+            self._loading_progress.setFixedWidth(max(140, min(260, progress_w)))
+        except Exception:
+            pass
+
+        for combo in (self.type_filter, self.status_filter, self.from_filter, self.to_filter):
+            if combo is None:
+                continue
+            try:
+                needed = int(combo.fontMetrics().horizontalAdvance("Status...") + 52)
+            except Exception:
+                continue
+            try:
+                current_min = int(combo.minimumWidth() or 0)
+                base = combo.property("_fio_base_min_width")
+                try:
+                    base_w = int(base)
+                except Exception:
+                    base_w = current_min
+                    combo.setProperty("_fio_base_min_width", base_w)
+                combo.setMinimumWidth(max(base_w, min(220, needed)))
+            except Exception:
+                pass
+            self._fit_filter_combo_popup(combo)
+        try:
+            search_needed = int(self.rcv_search.fontMetrics().horizontalAdvance("Search...") + 136)
+            current_min = int(self.rcv_search.minimumWidth() or 0)
+            base = self.rcv_search.property("_fio_base_min_width")
+            try:
+                base_w = int(base)
+            except Exception:
+                base_w = current_min
+                self.rcv_search.setProperty("_fio_base_min_width", base_w)
+            self.rcv_search.setMinimumWidth(max(base_w, min(320, search_needed)))
+        except Exception:
+            pass
+        try:
+            self._sync_header_widths()
+        except Exception:
+            pass
 
     @staticmethod
     def _make_header_spacer() -> QWidget:
@@ -5450,8 +5571,8 @@ class MessageViewerTab(QWidget):
             0: 32,
             1: 100,
             2: 96,
-            3: 106,
-            4: 106,
+            3: 122,
+            4: 122,
             5: 162,
             6: 120,
             7: 210,
@@ -5471,6 +5592,8 @@ class MessageViewerTab(QWidget):
                 min_width = 30
             elif idx == 7:
                 min_width = 210
+            elif idx in (3, 4):
+                min_width = 96
             else:
                 min_width = 60
             widget.setFixedWidth(max(min_width, width))

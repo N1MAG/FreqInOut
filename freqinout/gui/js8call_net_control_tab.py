@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
@@ -49,7 +50,6 @@ from freqinout.gui.qsy_helper import (
 )
 from freqinout.core.config_paths import get_config_dir
 from freqinout.gui.theme import resolve_theme, button_style
-import psutil
 
 
 def _nets_db_path() -> Path:
@@ -104,6 +104,7 @@ class JS8CallNetControlTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self._status_service = SoftwareStatusService(self.settings)
 
         self._net_in_progress = False
         self._net_start_utc: str | None = None
@@ -1846,16 +1847,7 @@ class JS8CallNetControlTab(QWidget):
             return None
         # Do not spawn JS8Call; only attach if it is already running
         try:
-            running = False
-            for proc in psutil.process_iter(attrs=["name", "exe"]):
-                try:
-                    name = (proc.info.get("name") or "").lower()
-                    exe = (proc.info.get("exe") or "").lower()
-                    if "js8call" in name or "js8call" in exe:
-                        running = True
-                        break
-                except Exception:
-                    continue
+            running = bool(self._status_service.program_is_running("JS8Call"))
             if not running:
                 log.info("JS8CallNetControl: JS8Call not running; skipping js8net attach.")
                 return None

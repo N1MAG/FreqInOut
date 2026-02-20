@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import List, Dict, Optional, Any, Tuple
 
-import os
 import platform
 import sqlite3
 import subprocess
@@ -11,7 +10,6 @@ import json
 import re
 from pathlib import Path
 
-import psutil
 from PySide6.QtCore import Qt, QTimer, Signal, QRegularExpression, QItemSelectionModel
 from PySide6.QtWidgets import (
     QWidget,
@@ -38,7 +36,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QRegularExpressionValidator, QAction
 
 from freqinout.core.settings_manager import SettingsManager
-    # must already exist in your project
+from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.theme import resolve_theme, button_style
@@ -214,10 +212,9 @@ class NetScheduleTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self._status_service = SoftwareStatusService(self.settings)
         self._net_name_history: List[str] = []
         self.operating_groups: List[Dict[str, str]] = []
-        self._proc_snapshot: List[str] = []
-        self._proc_snapshot_ts: float = 0.0
         self._clock_timer: QTimer | None = None
         self._suppress_autostart: bool = True  # avoid auto-start during initial load
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
@@ -1224,28 +1221,10 @@ class NetScheduleTab(QWidget):
         return p if p.exists() else None
 
     def _program_is_running(self, program_name: str) -> bool:
-        now_ts = datetime.datetime.now().timestamp()
-        if now_ts - self._proc_snapshot_ts > 2.0:
-            snap = []
-            for proc in psutil.process_iter(attrs=["name", "exe"]):
-                try:
-                    name = (proc.info.get("name") or "").lower()
-                    exe = os.path.basename(proc.info.get("exe") or "").lower()
-                    if name:
-                        snap.append(name)
-                    if exe and exe != name:
-                        snap.append(exe)
-                except Exception:
-                    continue
-            self._proc_snapshot = snap
-            self._proc_snapshot_ts = now_ts
-
-        exe_path = self._get_saved_program_path(program_name)
-        targets = [program_name.lower()]
-        if exe_path:
-            targets.append(exe_path.name.lower())
-
-        return any(any(t in entry for t in targets) for entry in self._proc_snapshot)
+        try:
+            return bool(self._status_service.program_is_running(program_name))
+        except Exception:
+            return False
 
     @staticmethod
     def _is_truthy(val) -> bool:

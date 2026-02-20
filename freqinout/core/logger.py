@@ -4,6 +4,7 @@ import logging.handlers
 import os
 import sys
 import platform
+import time
 from pathlib import Path
 
 APP_NAME = "FreqInOut"
@@ -74,6 +75,51 @@ class ColorFormatter(logging.Formatter):
                 return f"{color}{msg}{self.RESET}"
         return msg
 
+
+class ResilientRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """
+    RotatingFileHandler variant that tolerates transient file locks on rollover.
+
+    On Windows, antivirus/indexers or external viewers can briefly lock the log
+    file, causing rename during doRollover() to raise PermissionError/WinError 32.
+    This handler suppresses rollover attempts for a short cooldown and keeps
+    app logging flowing to the active file.
+    """
+
+    def __init__(self, *args, rollover_retry_seconds: float = 30.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._rollover_retry_seconds = max(1.0, float(rollover_retry_seconds))
+        self._rollover_suppressed_until = 0.0
+
+    @staticmethod
+    def _is_lock_error(exc: Exception) -> bool:
+        if isinstance(exc, PermissionError):
+            return True
+        if isinstance(exc, OSError):
+            if getattr(exc, "winerror", None) == 32:
+                return True
+            # 13: permission denied, 16: device/resource busy
+            if getattr(exc, "errno", None) in {13, 16}:
+                return True
+        return False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if self.maxBytes > 0 and self.shouldRollover(record):
+                now = time.monotonic()
+                if now >= self._rollover_suppressed_until:
+                    try:
+                        self.doRollover()
+                        self._rollover_suppressed_until = 0.0
+                    except Exception as exc:
+                        if self._is_lock_error(exc):
+                            self._rollover_suppressed_until = now + self._rollover_retry_seconds
+                        else:
+                            raise
+            logging.FileHandler.emit(self, record)
+        except Exception:
+            self.handleError(record)
+
 def setup_logger(name: str = "freqinout", log_to_console=True, log_level=logging.INFO):
     # Allow env var override
     if _ENV_LOG_LEVEL in _LEVEL_MAP:
@@ -104,8 +150,12 @@ def setup_logger(name: str = "freqinout", log_to_console=True, log_level=logging
 
     log_file = _get_log_file()
     try:
-        fh = logging.handlers.RotatingFileHandler(
-            log_file, maxBytes=2 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        fh = ResilientRotatingFileHandler(
+            log_file,
+            maxBytes=2 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+            rollover_retry_seconds=30.0,
         )
         fh.setLevel(log_level)
         fh.setFormatter(logging.Formatter(

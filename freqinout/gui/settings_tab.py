@@ -10,7 +10,7 @@ import time
 import zipfile
 import re
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QIntValidator
@@ -68,7 +68,12 @@ from freqinout.core.hash_tools import (
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
-from freqinout.gui.theme import resolve_theme, led_style, button_style
+from freqinout.gui.theme import (
+    resolve_theme,
+    normalize_ui_text_size,
+    led_style,
+    button_style,
+)
 from freqinout.version import __version__
 
 
@@ -240,7 +245,7 @@ FLDIGI_MODE_OPTIONS = [
     "IFKP",
 ]
 
-LOCAL_NET_SERVICE_OPTIONS = [
+LOCAL_NET_RESOURCE_OPTIONS = [
     "VHF Simplex",
     "VHF Repeater",
     "UHF Simplex",
@@ -252,6 +257,8 @@ LOCAL_NET_SERVICE_OPTIONS = [
     "Meshtastic",
     "Other",
 ]
+# Backward-compat alias for legacy references.
+LOCAL_NET_SERVICE_OPTIONS = LOCAL_NET_RESOURCE_OPTIONS
 
 
 class SettingsTab(QWidget):
@@ -313,6 +320,8 @@ class SettingsTab(QWidget):
         self._launch_visible_names: List[str] = []
         self._launch_table_loading = False
         self._gpg_keys_table_loading = False
+        self._gpg_keys_loaded = False
+        self._gpg_keys_auto_probe_attempted = False
         self._gpg_trusted_fingerprints: set[str] = set()
         self._trusted_hashes_table_loading = False
         self._trusted_hash_entries: List[Dict[str, object]] = []
@@ -430,6 +439,12 @@ class SettingsTab(QWidget):
         self.theme_combo.addItems(["Light", "Dark"])
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         ctrl_row.addWidget(self.theme_combo)
+        ctrl_row.addSpacing(12)
+        ctrl_row.addWidget(QLabel("Text Size:"))
+        self.text_size_combo = QComboBox()
+        self.text_size_combo.addItems(["Normal", "Medium", "Large"])
+        self.text_size_combo.currentIndexChanged.connect(self._on_text_size_changed)
+        ctrl_row.addWidget(self.text_size_combo)
         ctrl_row.addSpacing(12)
         ctrl_row.addWidget(QLabel("Frequency Control:"))
         self.control_combo = QComboBox()
@@ -728,7 +743,10 @@ class SettingsTab(QWidget):
         local_layout = QVBoxLayout()
         local_layout.setSpacing(6)
         local_group.setLayout(local_layout)
-        local_hint = QLabel("Used by SOP local-net reminders only. Not used by scheduler automation.")
+        local_hint = QLabel(
+            "Used by SOP local-net reminders only. A Group can contain multiple Resources and Modes. "
+            "Not used by scheduler automation."
+        )
         local_hint.setWordWrap(True)
         local_layout.addWidget(local_hint)
         local_row = QHBoxLayout()
@@ -747,8 +765,8 @@ class SettingsTab(QWidget):
         self.local_net_table.setHorizontalHeaderLabels(
             [
                 "Selected",
-                "Name",
-                "Service",
+                "Group",
+                "Resource",
                 "Mode",
                 "Target",
                 "Notes",
@@ -1379,6 +1397,7 @@ class SettingsTab(QWidget):
         if self.sections_nav_list.count() > 0:
             self.sections_nav_list.setCurrentRow(0)
         self._update_sections_nav_size()
+        self._apply_accessibility_width_guards()
 
     def _make_collapsible_group(
         self,
@@ -1457,29 +1476,63 @@ class SettingsTab(QWidget):
             row_h = 28
         frame = self.sections_nav_list.frameWidth()
         target = (row_h * count) + (frame * 2) + 6
-        self.sections_nav_list.setFixedHeight(max(120, min(target, 320)))
+        self.sections_nav_list.setFixedHeight(max(120, target))
+        try:
+            col_hint = int(self.sections_nav_list.sizeHintForColumn(0))
+        except Exception:
+            col_hint = 0
+        if col_hint <= 0:
+            try:
+                fm = self.sections_nav_list.fontMetrics()
+                col_hint = max(
+                    (int(fm.horizontalAdvance(self.sections_nav_list.item(i).text())) for i in range(count)),
+                    default=140,
+                )
+            except Exception:
+                col_hint = 140
+        width = max(170, min(col_hint + (frame * 2) + 26, 300))
+        self.sections_nav_list.setMinimumWidth(width)
+        self.sections_nav_list.setMaximumWidth(width)
 
     def _on_section_nav_changed(self, row: int) -> None:
         if row < 0:
             return
         if row >= self.sections_stack.count():
             return
-        self.sections_stack.setCurrentIndex(row)
-        try:
-            page = self.sections_stack.currentWidget()
-            if isinstance(page, QGroupBox):
-                header_btn = self._section_meta.get(page, {}).get("header_btn")
-                if header_btn and not header_btn.isChecked():
-                    header_btn.setChecked(True)
-        except Exception:
-            pass
+        with perf_span("settings.section_switch", settings=self.settings, min_ms=10.0):
+            self.sections_stack.setCurrentIndex(row)
+            try:
+                page = self.sections_stack.currentWidget()
+                if isinstance(page, QGroupBox):
+                    header_btn = self._section_meta.get(page, {}).get("header_btn")
+                    # In stacked mode, keep headers expanded without firing toggle handlers.
+                    if header_btn and not header_btn.isChecked():
+                        header_btn.blockSignals(True)
+                        try:
+                            header_btn.setChecked(True)
+                        finally:
+                            header_btn.blockSignals(False)
+                    title = str(self._section_meta.get(page, {}).get("title", "")).strip().lower()
+                    if (
+                        title == "message auth (key/hash)"
+                        and not bool(self._gpg_keys_loaded)
+                        and not bool(self._gpg_keys_auto_probe_attempted)
+                        and not bool(self._gpg_keys_table_loading)
+                        and hasattr(self, "gpg_keys_table")
+                    ):
+                        self._gpg_keys_auto_probe_attempted = True
+                        QTimer.singleShot(0, lambda: self._refresh_gpg_keys_table(show_dialog_on_error=False))
+            except Exception:
+                pass
 
     def _on_section_toggled(self, group: QGroupBox, content: QWidget, checked: bool) -> None:
         stacked_mode = hasattr(self, "sections_stack") and self.sections_stack.count() > 0
-        if stacked_mode and not checked:
+        if stacked_mode:
             header_btn = self._section_meta.get(group, {}).get("header_btn")
-            if header_btn:
+            if not checked and header_btn:
                 QTimer.singleShot(0, lambda btn=header_btn: btn.setChecked(True))
+            # Collapsible behavior is disabled while using stacked section navigation.
+            self._apply_collapsed_state(group, content, True)
             return
         self._apply_collapsed_state(group, content, checked)
         if checked and not stacked_mode:
@@ -1491,6 +1544,20 @@ class SettingsTab(QWidget):
         self._refresh_section_titles()
 
     def _refresh_section_titles(self) -> None:
+        stacked_mode = hasattr(self, "sections_stack") and self.sections_stack.count() > 0
+        if stacked_mode:
+            for group, meta in self._section_meta.items():
+                base = str(meta.get("title", ""))
+                header_btn = meta.get("header_btn")
+                if header_btn and header_btn.text() != base:
+                    header_btn.setText(base)
+                nav_item = self._section_nav_items.get(group)
+                if nav_item:
+                    if nav_item.text() != base:
+                        nav_item.setText(base)
+                    nav_item.setToolTip(base)
+            self._update_sections_nav_size()
+            return
         for group, meta in self._section_meta.items():
             base = str(meta.get("title", ""))
             summary_fn = meta.get("summary_fn")
@@ -1582,8 +1649,10 @@ class SettingsTab(QWidget):
         return f"{count} group{'s' if count != 1 else ''}"
 
     def _summary_local_net_profiles(self) -> str:
-        count = len(self.local_net_profiles)
-        return f"{count} profile{'s' if count != 1 else ''}"
+        rows = [r for r in self.local_net_profiles if isinstance(r, dict)]
+        count = len(rows)
+        groups = len({str(r.get("group") or r.get("name") or "").strip().upper() for r in rows if str(r.get("group") or r.get("name") or "").strip()})
+        return f"{count} entr{'y' if count == 1 else 'ies'} in {groups} group{'s' if groups != 1 else ''}"
 
     def _summary_js8_settings(self) -> str:
         directed = "set" if self.js8_directed_edit.text().strip() else "missing"
@@ -1742,6 +1811,10 @@ class SettingsTab(QWidget):
         self._update_enforcement_visibility()
         theme = (data.get("ui_theme", "light") or "light").strip().lower()
         self.theme_combo.setCurrentText("Dark" if theme == "dark" else "Light")
+        ui_text_size = normalize_ui_text_size(data.get("ui_text_size", "normal"))
+        self.text_size_combo.setCurrentText(
+            "Normal" if ui_text_size == "normal" else ("Medium" if ui_text_size == "medium" else "Large")
+        )
 
         port_txt = str(data.get("js8_port", "2442") or "2442")
         self.js8_port_edit.setText(port_txt)
@@ -1788,7 +1861,15 @@ class SettingsTab(QWidget):
         if hasattr(self, "gpg_path_edit"):
             self.gpg_path_edit.setText(gpg_path)
         self._refresh_trusted_hash_table()
-        self._refresh_gpg_keys_table(show_dialog_on_error=False)
+        self._gpg_keys_loaded = False
+        self._gpg_keys_auto_probe_attempted = False
+        if hasattr(self, "gpg_keys_table"):
+            self._gpg_keys_table_loading = True
+            try:
+                self.gpg_keys_table.setRowCount(0)
+            finally:
+                self._gpg_keys_table_loading = False
+        self._set_gpg_status("GPG status: keys not loaded. Open this section or click Refresh Keys.")
         varac_path = (data.get("varac_path", "") or "").strip()
         if not varac_path:
             legacy_db = (data.get("varac_db_path", "") or "").strip()
@@ -1874,7 +1955,7 @@ class SettingsTab(QWidget):
                     if not isinstance(row, dict):
                         continue
                     normalized = self._normalize_local_net_profile(row)
-                    if normalized.get("name"):
+                    if normalized.get("group"):
                         self.local_net_profiles.append(normalized)
             else:
                 self.local_net_profiles = []
@@ -1985,6 +2066,7 @@ class SettingsTab(QWidget):
         data["js8_enforcement_mode"] = js8_mode
         data["js8_prompt_interval"] = js8_prompt
         data["ui_theme"] = self.theme_combo.currentText().strip().lower()
+        data["ui_text_size"] = normalize_ui_text_size(self.text_size_combo.currentText())
 
         try:
             port_val = int(self.js8_port_edit.text().strip() or "2442")
@@ -2110,11 +2192,42 @@ class SettingsTab(QWidget):
             for item in data["launch_control_items"]
             if isinstance(item, dict)
         }
+        enabled_by_name = {
+            str(item.get("name", "")).strip(): bool(item.get("enabled", False))
+            for item in data["launch_control_items"]
+            if isinstance(item, dict)
+        }
         data["autostart_flrig"] = bool(startup_by_name.get("FLRig", False))
         data["autostart_fldigi"] = bool(startup_by_name.get("FLDigi", False))
         data["autostart_flmsg"] = bool(startup_by_name.get("FLMsg", False))
         data["autostart_flamp"] = bool(startup_by_name.get("FLAmp", False))
         data["autostart_js8call"] = bool(startup_by_name.get("JS8Call", False))
+
+        launch_target_by_name: Dict[str, str] = {
+            "FLRig": str(data.get("path_flrig", "") or "").strip(),
+            "FLDigi": str(data.get("path_fldigi", "") or "").strip(),
+            "FLMsg": str(data.get("path_flmsg", "") or "").strip(),
+            "FLAmp": str(data.get("path_flamp", "") or "").strip(),
+            "VarAC": str(data.get("varac_path", "") or "").strip(),
+            "JS8Call": str(data.get("path_js8call", "") or "").strip(),
+            "JS8Spotter": str(data.get("path_js8spotter", "") or "").strip(),
+            "CommStat": str(data.get("path_commstat", "") or "").strip(),
+        }
+        self_target_apps = [
+            name
+            for name, target in launch_target_by_name.items()
+            if enabled_by_name.get(name, False) and self._looks_like_self_launch_target(target)
+        ]
+        if self_target_apps:
+            QMessageBox.warning(
+                self,
+                "Launch Control",
+                "Launch path appears to point back to FreqInOut for:\n"
+                f"{', '.join(self_target_apps)}\n\n"
+                "This can cause repeated already-running windows and extra Python processes. "
+                "Choose the correct app executable/script path.",
+            )
+            return
 
         data["operating_groups"] = self._table_to_operating_groups()
         data["local_net_profiles"] = self._table_to_local_net_profiles()
@@ -2270,6 +2383,26 @@ class SettingsTab(QWidget):
         try:
             if hasattr(self.settings, "set"):
                 self.settings.set("ui_theme", theme)
+                if hasattr(self.settings, "save"):
+                    self.settings.save()
+        except Exception:
+            pass
+        try:
+            self.settings_saved.emit()
+        except Exception:
+            pass
+        self._mark_settings_dirty()
+        # apply_theme will clear the toast once the app theme is applied
+
+    def _on_text_size_changed(self):
+        if self._loading_settings:
+            return
+        ui_text_size = normalize_ui_text_size(self.text_size_combo.currentText())
+        self._set_loading(True, "Applying text size...")
+        QApplication.processEvents()
+        try:
+            if hasattr(self.settings, "set"):
+                self.settings.set("ui_text_size", ui_text_size)
                 if hasattr(self.settings, "save"):
                     self.settings.save()
         except Exception:
@@ -2492,6 +2625,126 @@ class SettingsTab(QWidget):
         except Exception:
             self.logging_actions_grid.addWidget(self.export_diag_btn, 1, 0, 1, 2)
 
+    def _apply_accessibility_width_guards(self) -> None:
+        # Prevent clipped labels/buttons when UI text size increases (for example 125%).
+        max_w = 420
+        try:
+            labels = self.findChildren(QLabel)
+        except Exception:
+            labels = []
+        for lbl in labels:
+            try:
+                txt = str(lbl.text() or "").strip()
+            except Exception:
+                txt = ""
+            if not txt:
+                continue
+            if lbl.wordWrap():
+                continue
+            try:
+                min_w = int(lbl.minimumWidth())
+                max_curr = int(lbl.maximumWidth())
+            except Exception:
+                continue
+            if min_w <= 0 or min_w != max_curr:
+                continue
+            plain = re.sub(r"<[^>]+>", "", txt).strip() or txt
+            try:
+                needed = int(lbl.fontMetrics().horizontalAdvance(plain) + 14)
+            except Exception:
+                needed = min_w
+            base = lbl.property("_fio_base_min_width")
+            try:
+                base_w = int(base)
+            except Exception:
+                base_w = min_w
+                try:
+                    lbl.setProperty("_fio_base_min_width", base_w)
+                except Exception:
+                    pass
+            target = max(base_w, min(max_w, needed))
+            if target > min_w:
+                try:
+                    lbl.setFixedWidth(target)
+                except Exception:
+                    pass
+            elif target < min_w:
+                try:
+                    lbl.setFixedWidth(target)
+                except Exception:
+                    pass
+
+        try:
+            buttons = list(self.findChildren(QPushButton)) + list(self.findChildren(QToolButton))
+        except Exception:
+            buttons = []
+        for btn in buttons:
+            try:
+                txt = str(btn.text() or "").strip()
+            except Exception:
+                txt = ""
+            if not txt:
+                continue
+            try:
+                min_w = int(btn.minimumWidth())
+                max_curr = int(btn.maximumWidth())
+            except Exception:
+                min_w = 0
+                max_curr = 0
+            try:
+                needed = int(btn.fontMetrics().horizontalAdvance(txt.replace("&", "")) + 30)
+            except Exception:
+                needed = min_w
+            base = btn.property("_fio_base_min_width")
+            try:
+                base_w = int(base)
+            except Exception:
+                base_w = min_w
+                try:
+                    btn.setProperty("_fio_base_min_width", base_w)
+                except Exception:
+                    pass
+            target = max(base_w, min(max_w, needed))
+            try:
+                if min_w > 0 and min_w == max_curr and max_curr < 16777215:
+                    btn.setMaximumWidth(16777215)
+                if target > 0:
+                    btn.setMinimumWidth(target)
+            except Exception:
+                pass
+
+        try:
+            combos = self.findChildren(QComboBox)
+        except Exception:
+            combos = []
+        for combo in combos:
+            try:
+                min_w = int(combo.minimumWidth())
+                max_curr = int(combo.maximumWidth())
+            except Exception:
+                continue
+            if min_w <= 0 or min_w != max_curr:
+                continue
+            try:
+                item_w = max((int(combo.fontMetrics().horizontalAdvance(combo.itemText(i))) for i in range(combo.count())), default=0)
+            except Exception:
+                item_w = 0
+            base = combo.property("_fio_base_min_width")
+            try:
+                base_w = int(base)
+            except Exception:
+                base_w = min_w
+                try:
+                    combo.setProperty("_fio_base_min_width", base_w)
+                except Exception:
+                    pass
+            target = max(base_w, min(max_w, item_w + 44))
+            try:
+                combo.setMaximumWidth(16777215)
+                combo.setMinimumWidth(target)
+            except Exception:
+                pass
+
     def _on_enforcement_changed(self):
         self._update_enforcement_visibility()
         self._mark_settings_dirty()
@@ -2529,6 +2782,7 @@ class SettingsTab(QWidget):
         combos = [
             self.control_combo,
             self.theme_combo,
+            self.text_size_combo,
             self.freq_enforce_combo,
             self.freq_prompt_combo,
             self.fldigi_enforce_combo,
@@ -2567,6 +2821,19 @@ class SettingsTab(QWidget):
         if self._loading_settings:
             return
         self._refresh_launch_control_table()
+
+    @staticmethod
+    def _looks_like_self_launch_target(raw: str) -> bool:
+        txt = str(raw or "").strip().lower()
+        if not txt:
+            return False
+        if "freqinout.main" in txt:
+            return True
+        if "freqinout.exe" in txt:
+            return True
+        if txt.endswith("freqinout/main.py") or txt.endswith("freqinout\\main.py"):
+            return True
+        return False
 
     def _is_launch_item_configured(self, name: str) -> bool:
         if name == "VarAC":
@@ -2780,14 +3047,17 @@ class SettingsTab(QWidget):
         already_running = int(data.get("already_running", 0) or 0)
         failed = int(data.get("failed", 0) or 0)
         timeout = int(data.get("timeout", 0) or 0)
+        blocked_self = int(data.get("blocked_self", 0) or 0)
         cancelled = bool(data.get("cancelled", False))
         trigger = str(data.get("trigger", "")).strip().lower()
         status_txt = (
-            f"Launch status: done (launched={launched}, running={already_running}, failed={failed}, timeout={timeout})"
+            "Launch status: done "
+            f"(launched={launched}, running={already_running}, failed={failed}, timeout={timeout}, blocked={blocked_self})"
         )
         if cancelled:
             status_txt = (
-                f"Launch status: cancelled (launched={launched}, running={already_running}, failed={failed}, timeout={timeout})"
+                "Launch status: cancelled "
+                f"(launched={launched}, running={already_running}, failed={failed}, timeout={timeout}, blocked={blocked_self})"
             )
         self.launch_summary_label.setText(status_txt)
         if trigger == "manual":
@@ -2799,6 +3069,7 @@ class SettingsTab(QWidget):
                     f"Already running: {already_running}\n"
                     f"Failed: {failed}\n"
                     f"Timeout: {timeout}\n"
+                    f"Blocked (self-target): {blocked_self}\n"
                     f"Cancelled: {'Yes' if cancelled else 'No'}"
                 ),
             )
@@ -3094,6 +3365,7 @@ class SettingsTab(QWidget):
                 self._update_sections_nav_size()
             self._update_enforcement_visibility()
             self._update_logging_actions_layout()
+            self._apply_accessibility_width_guards()
         except Exception:
             pass
 
@@ -3651,35 +3923,52 @@ class SettingsTab(QWidget):
     # ---------- Local Net Profiles ---------- #
 
     def _normalize_local_net_profile(self, row: Dict) -> Dict[str, str]:
-        name = str(row.get("name", "") or "").strip()
-        service = str(row.get("service", "") or "").strip()
+        # Legacy map: name->group, service->resource.
+        group = str(row.get("group", row.get("name", "")) or "").strip()
+        resource = str(row.get("resource", row.get("service", "")) or "").strip()
         mode = str(row.get("mode", "") or "").strip()
         target = str(row.get("target", "") or "").strip()
         notes = str(row.get("notes", "") or "").strip()
-        if service not in LOCAL_NET_SERVICE_OPTIONS:
-            service = "Other" if service else LOCAL_NET_SERVICE_OPTIONS[0]
+        if not resource:
+            resource = LOCAL_NET_RESOURCE_OPTIONS[0]
         return {
-            "name": name,
-            "service": service,
+            "group": group,
+            "resource": resource,
             "mode": mode,
             "target": target,
             "notes": notes,
         }
 
+    @staticmethod
+    def _local_net_profile_row_key(row: Dict[str, str]) -> Tuple[str, str, str, str]:
+        return (
+            str(row.get("group", "")).strip().upper(),
+            str(row.get("resource", "")).strip().upper(),
+            str(row.get("mode", "")).strip().upper(),
+            str(row.get("target", "")).strip().upper(),
+        )
+
     def _table_to_local_net_profiles(self) -> List[Dict[str, str]]:
         cleaned: List[Dict[str, str]] = []
-        seen: set[str] = set()
+        seen: set[Tuple[str, str, str, str]] = set()
         for raw in self.local_net_profiles:
             if not isinstance(raw, dict):
                 continue
             row = self._normalize_local_net_profile(raw)
-            name = row.get("name", "")
-            key = name.strip().upper()
-            if not key or key in seen:
+            group = row.get("group", "")
+            key = self._local_net_profile_row_key(row)
+            if not group.strip() or key in seen:
                 continue
             seen.add(key)
             cleaned.append(row)
-        cleaned.sort(key=lambda r: (r.get("name", "").lower(), r.get("service", "").lower()))
+        cleaned.sort(
+            key=lambda r: (
+                r.get("group", "").lower(),
+                r.get("resource", "").lower(),
+                r.get("mode", "").lower(),
+                r.get("target", "").lower(),
+            )
+        )
         self.local_net_profiles = cleaned
         return [dict(r) for r in cleaned]
 
@@ -3721,8 +4010,8 @@ class SettingsTab(QWidget):
             sel_layout.setAlignment(Qt.AlignCenter)
             sel_layout.addWidget(sel_chk)
             table.setCellWidget(row, 0, sel_wrap)
-            table.setItem(row, 1, QTableWidgetItem(prof.get("name", "")))
-            table.setItem(row, 2, QTableWidgetItem(prof.get("service", "")))
+            table.setItem(row, 1, QTableWidgetItem(prof.get("group", "")))
+            table.setItem(row, 2, QTableWidgetItem(prof.get("resource", "")))
             table.setItem(row, 3, QTableWidgetItem(prof.get("mode", "")))
             table.setItem(row, 4, QTableWidgetItem(prof.get("target", "")))
             table.setItem(row, 5, QTableWidgetItem(prof.get("notes", "")))
@@ -3731,8 +4020,8 @@ class SettingsTab(QWidget):
 
     def _local_profile_from_row(self, row: int) -> Dict[str, str]:
         return {
-            "name": self.local_net_table.item(row, 1).text().strip() if self.local_net_table.item(row, 1) else "",
-            "service": self.local_net_table.item(row, 2).text().strip() if self.local_net_table.item(row, 2) else "",
+            "group": self.local_net_table.item(row, 1).text().strip() if self.local_net_table.item(row, 1) else "",
+            "resource": self.local_net_table.item(row, 2).text().strip() if self.local_net_table.item(row, 2) else "",
             "mode": self.local_net_table.item(row, 3).text().strip() if self.local_net_table.item(row, 3) else "",
             "target": self.local_net_table.item(row, 4).text().strip() if self.local_net_table.item(row, 4) else "",
             "notes": self.local_net_table.item(row, 5).text().strip() if self.local_net_table.item(row, 5) else "",
@@ -3740,17 +4029,18 @@ class SettingsTab(QWidget):
 
     def _open_local_net_profile_dialog(self, existing: Optional[Dict[str, str]] = None) -> Optional[Dict[str, str]]:
         dlg = QDialog(self)
-        dlg.setWindowTitle("Edit Local Net Profile" if existing else "Add Local Net Profile")
+        dlg.setWindowTitle("Edit Local Net Entry" if existing else "Add Local Net Entry")
         form = QFormLayout(dlg)
 
-        name_edit = QLineEdit((existing or {}).get("name", ""))
-        service_combo = QComboBox()
-        service_combo.addItems(LOCAL_NET_SERVICE_OPTIONS)
-        if existing and service_combo.findText((existing or {}).get("service", "")) >= 0:
-            service_combo.setCurrentText((existing or {}).get("service", ""))
+        group_edit = QLineEdit((existing or {}).get("group", ""))
+        resource_combo = QComboBox()
+        resource_combo.setEditable(True)
+        resource_combo.addItems(LOCAL_NET_RESOURCE_OPTIONS)
+        if existing and (existing or {}).get("resource"):
+            resource_combo.setCurrentText((existing or {}).get("resource", ""))
         mode_combo = QComboBox()
         mode_combo.setEditable(True)
-        mode_combo.addItems(["Voice", "Data", "Mixed"])
+        mode_combo.addItems(["Voice", "Data", "Mixed", "FM", "Digital"])
         if existing and (existing or {}).get("mode"):
             mode_combo.setCurrentText((existing or {}).get("mode", ""))
         target_edit = QLineEdit((existing or {}).get("target", ""))
@@ -3758,8 +4048,8 @@ class SettingsTab(QWidget):
         notes_edit = QLineEdit((existing or {}).get("notes", ""))
         notes_edit.setPlaceholderText("Optional notes for SOP reminder context")
 
-        form.addRow("Profile Name:", name_edit)
-        form.addRow("Service:", service_combo)
+        form.addRow("Group:", group_edit)
+        form.addRow("Resource:", resource_combo)
         form.addRow("Mode:", mode_combo)
         form.addRow("Target:", target_edit)
         form.addRow("Notes:", notes_edit)
@@ -3777,15 +4067,15 @@ class SettingsTab(QWidget):
         def _accept() -> None:
             candidate = self._normalize_local_net_profile(
                 {
-                    "name": name_edit.text(),
-                    "service": service_combo.currentText(),
+                    "group": group_edit.text(),
+                    "resource": resource_combo.currentText(),
                     "mode": mode_combo.currentText(),
                     "target": target_edit.text(),
                     "notes": notes_edit.text(),
                 }
             )
-            if not candidate.get("name"):
-                QMessageBox.warning(self, "Validation", "Profile Name is required.")
+            if not candidate.get("group"):
+                QMessageBox.warning(self, "Validation", "Group is required.")
                 return
             out.update(candidate)
             dlg.accept()
@@ -3796,16 +4086,19 @@ class SettingsTab(QWidget):
             return None
         return out if out else None
 
-    def _upsert_local_net_profile(self, profile: Dict[str, str], old_name: str = "") -> None:
+    def _upsert_local_net_profile(self, profile: Dict[str, str], old_row: Optional[Dict[str, str]] = None) -> None:
         normalized = self._normalize_local_net_profile(profile)
-        new_key = normalized.get("name", "").strip().upper()
-        old_key = (old_name or "").strip().upper()
-        if not new_key:
+        new_group = normalized.get("group", "").strip().upper()
+        if not new_group:
             return
+        new_key = self._local_net_profile_row_key(normalized)
+        old_key: Optional[Tuple[str, str, str, str]] = None
+        if isinstance(old_row, dict):
+            old_key = self._local_net_profile_row_key(self._normalize_local_net_profile(old_row))
         self.local_net_profiles = [
             r
             for r in self.local_net_profiles
-            if str(r.get("name", "")).strip().upper() not in {new_key, old_key}
+            if self._local_net_profile_row_key(self._normalize_local_net_profile(r)) not in {new_key, old_key}
         ]
         self.local_net_profiles.append(normalized)
         self._refresh_local_net_profiles_table()
@@ -3834,32 +4127,35 @@ class SettingsTab(QWidget):
     def _edit_local_net_profile(self) -> None:
         rows = self._selected_local_net_rows()
         if not rows:
-            QMessageBox.information(self, "Edit Profile", "Select one Local Net Profile to edit.")
+            QMessageBox.information(self, "Edit Entry", "Select one Local Net entry to edit.")
             return
         if len(rows) > 1:
-            QMessageBox.warning(self, "Edit Profile", "Please select only one Local Net Profile to edit.")
+            QMessageBox.warning(self, "Edit Entry", "Please select only one Local Net entry to edit.")
             return
         row = rows[0]
         existing = self._local_profile_from_row(row)
         updated = self._open_local_net_profile_dialog(existing=existing)
         if not updated:
             return
-        self._upsert_local_net_profile(updated, old_name=existing.get("name", ""))
+        self._upsert_local_net_profile(updated, old_row=existing)
 
     def _delete_local_net_profiles(self) -> None:
         rows = self._selected_local_net_rows()
         if not rows:
-            QMessageBox.information(self, "Delete Profiles", "Select one or more Local Net Profiles to delete.")
+            QMessageBox.information(self, "Delete Entries", "Select one or more Local Net entries to delete.")
             return
-        to_remove: set[str] = set()
+        to_remove: set[Tuple[str, str, str, str]] = set()
         for r in rows:
-            name = self.local_net_table.item(r, 1).text().strip() if self.local_net_table.item(r, 1) else ""
-            if name:
-                to_remove.add(name.upper())
+            row_obj = self._local_profile_from_row(r)
+            key = self._local_net_profile_row_key(self._normalize_local_net_profile(row_obj))
+            if key[0]:
+                to_remove.add(key)
         if not to_remove:
             return
         self.local_net_profiles = [
-            row for row in self.local_net_profiles if str(row.get("name", "")).strip().upper() not in to_remove
+            row
+            for row in self.local_net_profiles
+            if self._local_net_profile_row_key(self._normalize_local_net_profile(row)) not in to_remove
         ]
         self._refresh_local_net_profiles_table()
         try:
@@ -3877,7 +4173,7 @@ class SettingsTab(QWidget):
                 pass
         except Exception:
             log.exception("Failed to persist Local Net Profile deletions; will remain in-memory only.")
-        QMessageBox.information(self, "Delete Profiles", f"Deleted {len(to_remove)} Local Net Profile(s).")
+        QMessageBox.information(self, "Delete Entries", f"Deleted {len(to_remove)} Local Net entr{'y' if len(to_remove) == 1 else 'ies'}.")
 
     # ---------- GPG authenticity ---------- #
 
@@ -3892,58 +4188,63 @@ class SettingsTab(QWidget):
     def _refresh_gpg_keys_table(self, *, show_dialog_on_error: bool = True) -> None:
         if not hasattr(self, "gpg_keys_table"):
             return
-        configured = self._current_gpg_path()
-        ok, msg, resolved = gpg_available(configured)
-        if not ok:
-            self._set_gpg_status(f"GPG unavailable: {msg}", error=True)
+        self._gpg_keys_auto_probe_attempted = True
+        with perf_span("settings.refresh_gpg_keys_table", settings=self.settings, min_ms=10.0):
+            configured = self._current_gpg_path()
+            ok, msg, resolved = gpg_available(configured)
+            if not ok:
+                self._gpg_keys_loaded = False
+                self._set_gpg_status(f"GPG unavailable: {msg}", error=True)
+                self._gpg_keys_table_loading = True
+                try:
+                    self.gpg_keys_table.setRowCount(0)
+                finally:
+                    self._gpg_keys_table_loading = False
+                self._update_gpg_sign_button_state()
+                if show_dialog_on_error:
+                    QMessageBox.warning(
+                        self,
+                        "GPG",
+                        f"{msg}\n\nInstall GPG or set the executable path in Settings.",
+                    )
+                return
+
+            if resolved:
+                self._set_gpg_status(f"GPG ready: {resolved}")
+            else:
+                self._set_gpg_status("GPG ready.")
+            keys, err = list_public_keys(configured_path=configured)
+            if err:
+                self._gpg_keys_loaded = False
+                self._set_gpg_status(f"GPG key list failed: {err}", error=True)
+                if show_dialog_on_error:
+                    QMessageBox.warning(self, "GPG", err)
+                return
+            self._gpg_keys_loaded = True
             self._gpg_keys_table_loading = True
             try:
                 self.gpg_keys_table.setRowCount(0)
+                for row_idx, key in enumerate(keys):
+                    self.gpg_keys_table.insertRow(row_idx)
+                    fpr = normalize_fingerprint(key.fingerprint)
+                    trusted = fpr in self._gpg_trusted_fingerprints
+                    trusted_item = QTableWidgetItem("")
+                    trusted_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                    trusted_item.setCheckState(Qt.Checked if trusted else Qt.Unchecked)
+                    trusted_item.setData(Qt.UserRole, fpr)
+                    self.gpg_keys_table.setItem(row_idx, 0, trusted_item)
+
+                    fpr_item = QTableWidgetItem(fpr)
+                    fpr_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    self.gpg_keys_table.setItem(row_idx, 1, fpr_item)
+
+                    uid_text = "; ".join([u for u in key.user_ids if str(u).strip()]) or "(no user id)"
+                    uid_item = QTableWidgetItem(uid_text)
+                    uid_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    self.gpg_keys_table.setItem(row_idx, 2, uid_item)
             finally:
                 self._gpg_keys_table_loading = False
             self._update_gpg_sign_button_state()
-            if show_dialog_on_error:
-                QMessageBox.warning(
-                    self,
-                    "GPG",
-                    f"{msg}\n\nInstall GPG or set the executable path in Settings.",
-                )
-            return
-
-        if resolved:
-            self._set_gpg_status(f"GPG ready: {resolved}")
-        else:
-            self._set_gpg_status("GPG ready.")
-        keys, err = list_public_keys(configured_path=configured)
-        if err:
-            self._set_gpg_status(f"GPG key list failed: {err}", error=True)
-            if show_dialog_on_error:
-                QMessageBox.warning(self, "GPG", err)
-            return
-        self._gpg_keys_table_loading = True
-        try:
-            self.gpg_keys_table.setRowCount(0)
-            for row_idx, key in enumerate(keys):
-                self.gpg_keys_table.insertRow(row_idx)
-                fpr = normalize_fingerprint(key.fingerprint)
-                trusted = fpr in self._gpg_trusted_fingerprints
-                trusted_item = QTableWidgetItem("")
-                trusted_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-                trusted_item.setCheckState(Qt.Checked if trusted else Qt.Unchecked)
-                trusted_item.setData(Qt.UserRole, fpr)
-                self.gpg_keys_table.setItem(row_idx, 0, trusted_item)
-
-                fpr_item = QTableWidgetItem(fpr)
-                fpr_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                self.gpg_keys_table.setItem(row_idx, 1, fpr_item)
-
-                uid_text = "; ".join([u for u in key.user_ids if str(u).strip()]) or "(no user id)"
-                uid_item = QTableWidgetItem(uid_text)
-                uid_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                self.gpg_keys_table.setItem(row_idx, 2, uid_item)
-        finally:
-            self._gpg_keys_table_loading = False
-        self._update_gpg_sign_button_state()
 
     def _on_gpg_keys_table_item_changed(self, item: QTableWidgetItem) -> None:
         if self._gpg_keys_table_loading:
@@ -3983,6 +4284,8 @@ class SettingsTab(QWidget):
         if not fn:
             return
         self.gpg_path_edit.setText(fn)
+        self._gpg_keys_loaded = False
+        self._gpg_keys_auto_probe_attempted = False
         self._mark_settings_dirty()
 
     def _test_gpg_executable(self) -> None:

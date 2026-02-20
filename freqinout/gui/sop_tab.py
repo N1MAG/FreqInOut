@@ -61,6 +61,10 @@ class SOPTab(QWidget):
     """
     SOP reminders tab.
     Reminder-only workflow with manual completion and UTC-driven cadence.
+    Terminology:
+      - Group Name = HF Operating Group mapping
+      - SOP Group = optional SOP profile grouping label
+      - SOP Category = HF or Local Net action context
     """
 
     CONTACT_RULE_OPTIONS = [
@@ -201,21 +205,30 @@ class SOPTab(QWidget):
         self.name_edit = QLineEdit()
         self.group_combo = QComboBox()
         self.secondary_combo = QComboBox()
+        self.group_combo.setToolTip("Group Name (HF Operating Group) drives HF band/frequency mapping.")
+        self.secondary_combo.setToolTip("SOP Group is optional and can be used for SOP profile organization.")
         self.start_edit = QLineEdit()
         self.start_edit.setPlaceholderText("HH:MM")
         self.active_cb = QCheckBox("Active")
         row1.addWidget(QLabel("Name:"))
         row1.addWidget(self.name_edit, stretch=2)
-        row1.addWidget(QLabel("Operating Group:"))
+        row1.addWidget(QLabel("Group Name (HF):"))
         row1.addWidget(self.group_combo, stretch=1)
-        row1.addWidget(QLabel("Secondary Group:"))
+        row1.addWidget(QLabel("SOP Group:"))
         row1.addWidget(self.secondary_combo, stretch=1)
         cfg_layout.addLayout(row1)
+        self.terms_hint_label = QLabel(
+            "SOP Category = HF or Local Net | SOP Group = optional profile grouping | "
+            "Group Name = HF Operating Group frequency mapping"
+        )
+        self.terms_hint_label.setWordWrap(True)
+        cfg_layout.addWidget(self.terms_hint_label)
 
         row2 = QHBoxLayout()
         self.start_label = QLabel("SOP Daily Start (UTC):")
         row2.addWidget(self.start_label)
-        self.start_edit.setFixedWidth(100)
+        self.start_edit.setMinimumWidth(100)
+        self.start_edit.setMaximumWidth(150)
         row2.addWidget(self.start_edit)
         row2.addWidget(QLabel("Priority:"))
         self.priority_spin = QSpinBox()
@@ -361,6 +374,60 @@ class SOPTab(QWidget):
         self.group_combo.currentIndexChanged.connect(self._on_group_changed)
         self.secondary_combo.currentIndexChanged.connect(self._on_secondary_group_changed)
         self._wire_dirty_tracking()
+        self._apply_accessibility_width_guards()
+
+    def _apply_accessibility_width_guards(self) -> None:
+        # Keep action labels readable when UI text size is increased.
+        try:
+            time_w = int(self.start_edit.fontMetrics().horizontalAdvance("23:59") + 26)
+            base = self.start_edit.property("_fio_base_min_width")
+            try:
+                base_w = int(base)
+            except Exception:
+                base_w = 100
+                self.start_edit.setProperty("_fio_base_min_width", base_w)
+            self.start_edit.setFixedWidth(max(base_w, min(150, time_w)))
+        except Exception:
+            pass
+        buttons = [
+            self.time_toggle_btn,
+            self.new_btn,
+            self.save_btn,
+            self.delete_btn,
+            self.export_pdf_btn,
+            self.export_import_btn,
+            self.add_row_btn,
+            self.populate_layer_btn,
+            self.rebuild_layer_btn,
+            self.add_layer_row_btn,
+            self.refresh_btn,
+        ]
+        for btn in buttons:
+            try:
+                txt = str(btn.text() or "").strip()
+            except Exception:
+                txt = ""
+            if not txt:
+                continue
+            try:
+                needed = int(btn.fontMetrics().horizontalAdvance(txt.replace("&", "")) + 30)
+            except Exception:
+                continue
+            try:
+                current_min = int(btn.minimumWidth() or 0)
+            except Exception:
+                current_min = 0
+            base = btn.property("_fio_base_min_width")
+            try:
+                base_w = int(base)
+            except Exception:
+                base_w = current_min
+                btn.setProperty("_fio_base_min_width", base_w)
+            target = max(base_w, min(360, needed))
+            try:
+                btn.setMinimumWidth(target)
+            except Exception:
+                pass
 
     def _refresh_reference_data(self) -> None:
         data = self.settings.all()
@@ -388,13 +455,13 @@ class SOPTab(QWidget):
             for raw in local_profiles:
                 if not isinstance(raw, dict):
                     continue
-                name = str(raw.get("name", "") or "").strip()
-                if not name:
+                group = str(raw.get("group", raw.get("name", "")) or "").strip()
+                if not group:
                     continue
                 self._local_net_profiles.append(
                     {
-                        "name": name,
-                        "service": str(raw.get("service", "") or "").strip(),
+                        "group": group,
+                        "resource": str(raw.get("resource", raw.get("service", "")) or "").strip(),
                         "mode": str(raw.get("mode", "") or "").strip(),
                         "target": str(raw.get("target", "") or "").strip(),
                         "notes": str(raw.get("notes", "") or "").strip(),
@@ -402,19 +469,37 @@ class SOPTab(QWidget):
                 )
         self._local_net_profiles = sorted(
             self._local_net_profiles,
-            key=lambda x: str(x.get("name", "")).upper(),
+            key=lambda x: (
+                str(x.get("group", "")).upper(),
+                str(x.get("resource", "")).upper(),
+                str(x.get("mode", "")).upper(),
+                str(x.get("target", "")).upper(),
+            ),
         )
 
     def _local_profile_names(self) -> List[str]:
-        return [str(p.get("name", "")).strip() for p in self._local_net_profiles if str(p.get("name", "")).strip()]
+        names = {
+            str(p.get("group", "")).strip()
+            for p in self._local_net_profiles
+            if str(p.get("group", "")).strip()
+        }
+        return sorted(names, key=lambda x: x.upper())
 
-    def _local_profile_lookup(self) -> Dict[str, Dict[str, str]]:
-        out: Dict[str, Dict[str, str]] = {}
+    def _local_profile_lookup(self) -> Dict[str, List[Dict[str, str]]]:
+        out: Dict[str, List[Dict[str, str]]] = {}
         for row in self._local_net_profiles:
-            name = str(row.get("name", "")).strip()
+            name = str(row.get("group", "")).strip()
             if not name:
                 continue
-            out[name.upper()] = row
+            out.setdefault(name.upper(), []).append(dict(row))
+        for rows in out.values():
+            rows.sort(
+                key=lambda r: (
+                    str(r.get("resource", "")).upper(),
+                    str(r.get("mode", "")).upper(),
+                    str(r.get("target", "")).upper(),
+                )
+            )
         return out
 
     def _wire_dirty_tracking(self) -> None:
@@ -736,26 +821,34 @@ class SOPTab(QWidget):
 
     def _contact_rule_options_for_row(self, row: int) -> List[Tuple[str, str]]:
         if self._is_local_net_action_row(row):
-            return [("local_profile", "Local Profile")]
+            return [("local_group", "Local Group")]
         return self._contact_rule_options_for_current_filter()
 
     def _local_profile_display(self, profile_name: str) -> str:
         key = (profile_name or "").strip().upper()
         if not key:
             return "--"
-        prof = self._local_profile_lookup().get(key)
-        if not prof:
+        group_rows = self._local_profile_lookup().get(key) or []
+        if not group_rows:
             return profile_name
-        service = str(prof.get("service", "")).strip()
-        target = str(prof.get("target", "")).strip()
-        mode = str(prof.get("mode", "")).strip()
-        bits = [str(prof.get("name", "")).strip()]
-        detail = " ".join([x for x in [service, mode] if x]).strip()
-        if detail:
-            bits.append(detail)
-        if target:
-            bits.append(target)
-        return " | ".join([b for b in bits if b])
+        group_name = str(group_rows[0].get("group", "")).strip() or profile_name
+        details: List[str] = []
+        for row in group_rows[:3]:
+            resource = str(row.get("resource", "")).strip()
+            mode = str(row.get("mode", "")).strip()
+            target = str(row.get("target", "")).strip()
+            chunk = " ".join([p for p in [resource, mode] if p]).strip()
+            if target:
+                chunk = f"{chunk} {target}".strip() if chunk else target
+            if chunk:
+                details.append(chunk)
+        suffix = ""
+        extra = max(0, len(group_rows) - len(details))
+        if extra:
+            suffix = f" (+{extra} more)"
+        if details:
+            return f"{group_name} | {'; '.join(details)}{suffix}"
+        return group_name
 
     def _refresh_all_contact_target_options(self) -> None:
         for r in range(self.actions_table.rowCount()):
@@ -769,6 +862,8 @@ class SOPTab(QWidget):
         if not isinstance(rule_combo, QComboBox):
             return
         current = str(rule_combo.currentData() or "none").strip()
+        if self._is_local_net_action_row(row) and current == "local_profile":
+            current = "local_group"
         opts = self._contact_rule_options_for_row(row)
         rule_combo.blockSignals(True)
         rule_combo.clear()
@@ -1349,7 +1444,7 @@ class SOPTab(QWidget):
     ) -> Tuple[List[Dict[str, Any]], List[str], int]:
         group = self.group_combo.currentText().strip().upper()
         if not group:
-            raise ValueError("Select an Operating Group before populating layer rows.")
+            raise ValueError("Select a Group Name (HF Operating Group) before populating layer rows.")
         action_rows = self._collect_action_rows_for_layer_seed()
         if not action_rows:
             raise ValueError(
@@ -1416,7 +1511,7 @@ class SOPTab(QWidget):
             local_count = self._count_local_net_actions()
             if not group and actions:
                 show = True
-                text = "Layer Sync: Select an Operating Group to evaluate layer alignment."
+                text = "Layer Sync: Select a Group Name (HF Operating Group) to evaluate layer alignment."
             elif group and not actions:
                 show = True
                 if local_count > 0:
@@ -1595,6 +1690,7 @@ class SOPTab(QWidget):
 
     def _make_software_widget(self, value: str) -> QComboBox:
         combo = QComboBox()
+        combo.setProperty("_fio_popup_max_width", 360)
         for sw in self._configured_softwares():
             combo.addItem(sw)
         if value and combo.findText(value) < 0:
@@ -1926,7 +2022,7 @@ class SOPTab(QWidget):
         target_combo.blockSignals(True)
         target_combo.clear()
         target_combo.addItem("")
-        if rule == "local_profile":
+        if rule in {"local_group", "local_profile"}:
             for name in self._local_profile_names():
                 target_combo.addItem(name, name.upper())
             if current and target_combo.findData(current) < 0:
@@ -1991,7 +2087,7 @@ class SOPTab(QWidget):
                 target_combo.setCurrentIndex(0)
             target_combo.setEnabled(True)
             target_combo.setEditable(True)
-        elif rule == "local_profile":
+        elif rule in {"local_group", "local_profile"}:
             target_combo.addItem("", "")
             for name in self._local_profile_names():
                 target_combo.addItem(name, name.upper())
@@ -2015,6 +2111,13 @@ class SOPTab(QWidget):
             for i in range(combo.count()):
                 text_w = max(text_w, fm.horizontalAdvance(combo.itemText(i)))
             popup_w = max(combo.width(), text_w + 44)
+            max_w_raw = combo.property("_fio_popup_max_width")
+            try:
+                max_w = int(max_w_raw)
+            except Exception:
+                max_w = 0
+            if max_w > 0:
+                popup_w = min(popup_w, max_w)
             view = combo.view()
             if view is not None:
                 view.setMinimumWidth(popup_w)
@@ -2069,12 +2172,12 @@ class SOPTab(QWidget):
                 requires_operating_group = True
             contact_rule = rule_combo.currentData() if isinstance(rule_combo, QComboBox) else "none"
             if is_local_action:
-                contact_rule = "local_profile"
+                contact_rule = "local_group"
             contact_target = ""
             if isinstance(target_combo, QComboBox):
                 if str(contact_rule) in {"hub_or_hub_alt", "ncs_or_ancs"}:
                     contact_target = str(target_combo.currentData() or "").strip().upper()
-                elif str(contact_rule) in {"callsign", "peer", "local_profile"}:
+                elif str(contact_rule) in {"callsign", "peer", "local_group", "local_profile"}:
                     contact_target = str(target_combo.currentData() or target_combo.currentText() or "").strip().upper()
             if str(contact_rule) != "none" and not contact_target:
                 raise ValueError(f"Contact Target is required on row {r + 1}.")
@@ -2085,7 +2188,7 @@ class SOPTab(QWidget):
             )
             description = desc_edit.text().strip() if isinstance(desc_edit, QLineEdit) else ""
             if is_local_action and not description and contact_target:
-                description = f"Open local net profile {contact_target}"
+                description = f"Open local net group {contact_target}"
 
             actions.append(
                 {
@@ -2192,7 +2295,7 @@ class SOPTab(QWidget):
         if schedule_layer:
             requires_operating_group = True
         if requires_operating_group and not group:
-            raise ValueError("Operating group is required for non-local SOP actions.")
+            raise ValueError("Group Name (HF Operating Group) is required for non-local SOP actions.")
 
         return payload, actions, schedule_layer
 
@@ -2294,13 +2397,13 @@ class SOPTab(QWidget):
         state_edit = QLineEdit()
         state_edit.setPlaceholderText("State (e.g., TX)")
         state_edit.setMaxLength(2)
-        state_edit.setFixedWidth(130)
+        state_edit.setMinimumWidth(130)
         filter_row.addWidget(state_edit)
 
         region_combo = QComboBox()
         for region in self.manager.list_export_regions():
             region_combo.addItem(region, region)
-        region_combo.setFixedWidth(130)
+        region_combo.setMinimumWidth(130)
         filter_row.addWidget(region_combo)
         filter_row.addStretch()
         roster_options_layout.addLayout(filter_row)
@@ -3090,7 +3193,7 @@ class SOPTab(QWidget):
             self.upcoming_table.setItem(r, 5, QTableWidgetItem(self._format_due(row.get("next_due_utc"), tz_mode)))
             targets = row.get("contact_targets", []) or []
             contact_rule = str(row.get("contact_rule") or "").strip()
-            if contact_rule == "local_profile" and targets:
+            if contact_rule in {"local_group", "local_profile"} and targets:
                 contact_txt = self._local_profile_display(str(targets[0] or "").strip().upper())
             elif targets:
                 contact_txt = " OR ".join(targets[:4])
@@ -3172,13 +3275,46 @@ class SOPTab(QWidget):
         self._schedule_layer_sync_refresh()
         self.refresh_upcoming()
 
+    def on_sop_profiles_updated(self) -> None:
+        current_id = self._selected_profile_id
+        self._reload_profiles(select_id=current_id)
+        self.refresh_upcoming()
+        self._schedule_layer_sync_refresh()
+
+    def select_profile(self, profile_id: int) -> bool:
+        """
+        Programmatically select a profile in the SOP tab.
+        Returns True when selection succeeds.
+        """
+        try:
+            target_id = int(profile_id or 0)
+        except Exception:
+            return False
+        if target_id <= 0:
+            return False
+        try:
+            self._reload_profiles(select_id=target_id)
+            for idx in range(self.profile_combo.count()):
+                if int(self.profile_combo.itemData(idx) or 0) != target_id:
+                    continue
+                if self.profile_combo.currentIndex() != idx:
+                    self.profile_combo.setCurrentIndex(idx)
+                else:
+                    self._on_profile_selected(idx)
+                return True
+        except Exception:
+            return False
+        return False
+
     def apply_theme(self) -> None:
         try:
             theme = resolve_theme(self.settings)
             self.alignment_label.setStyleSheet(f"color: {theme.get('warning', '#B71C1C')}; font-weight: 600;")
             self.layer_validation_label.setStyleSheet(f"color: {theme.get('warning', '#B71C1C')}; font-weight: 600;")
+            self.terms_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
             self._update_time_toggle_style(theme)
             self._update_profile_action_styles(theme)
+            self._apply_accessibility_width_guards()
             self._refresh_layer_sync_hint()
         except Exception:
             pass

@@ -5,6 +5,7 @@ import platform
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -301,6 +302,13 @@ class LaunchOrchestrator(QObject):
             self.sequence_progress.emit(result)
             QTimer.singleShot(0, self._advance_queue)
             return
+        if self._is_self_launch_command(cmd):
+            result = {"name": name, "status": "blocked_self", "detail": "blocked self-launch target"}
+            self._results.append(result)
+            self.sequence_progress.emit(result)
+            log.warning("LaunchOrchestrator: blocked self-launch target for %s via %r", name, cmd)
+            QTimer.singleShot(0, self._advance_queue)
+            return
         try:
             creationflags = 0
             if platform.system() == "Windows":
@@ -410,6 +418,48 @@ class LaunchOrchestrator(QObject):
             return [py_cmd, str(path)]
         return [str(path)]
 
+    def _is_self_launch_command(self, cmd: List[str]) -> bool:
+        """
+        Prevent recursive launch-control self-launch loops.
+        """
+        parts = [str(p or "").strip() for p in cmd if str(p or "").strip()]
+        if not parts:
+            return False
+        parts_lower = [p.lower() for p in parts]
+        joined = " ".join(parts_lower)
+        if "freqinout.main" in joined:
+            return True
+        if any("freqinout.exe" in p for p in parts_lower):
+            return True
+        if any(p.endswith("freqinout/main.py") or p.endswith("freqinout\\main.py") for p in parts_lower):
+            return True
+
+        # Python module/script invocation patterns.
+        if len(parts_lower) >= 3 and parts_lower[1] == "-m" and parts_lower[2] == "freqinout.main":
+            return True
+        if len(parts_lower) >= 2 and (
+            parts_lower[1].endswith("freqinout/main.py") or parts_lower[1].endswith("freqinout\\main.py")
+        ):
+            return True
+
+        # Direct executable equivalence with current process executable/script.
+        try:
+            current_exec = os.path.basename(sys.executable).strip().lower()
+        except Exception:
+            current_exec = ""
+        try:
+            current_argv0 = os.path.basename(sys.argv[0]).strip().lower()
+        except Exception:
+            current_argv0 = ""
+        first_base = os.path.basename(parts_lower[0]).strip().lower()
+        if first_base and first_base in {current_exec, current_argv0}:
+            for token in parts_lower[1:4]:
+                if "freqinout.main" in token:
+                    return True
+                if token.endswith("freqinout/main.py") or token.endswith("freqinout\\main.py"):
+                    return True
+        return False
+
     def _fallback_cmd(self, name: str) -> Optional[List[str]]:
         for cand in LAUNCH_APP_META.get(name, {}).get("fallback_cmds", []):
             cand_s = str(cand).strip()
@@ -466,6 +516,7 @@ class LaunchOrchestrator(QObject):
         already_running = sum(1 for r in self._results if r.get("status") == "already_running")
         failed = sum(1 for r in self._results if r.get("status") == "failed")
         timeout = sum(1 for r in self._results if r.get("status") == "timeout")
+        blocked_self = sum(1 for r in self._results if r.get("status") == "blocked_self")
         cancelled_count = sum(1 for r in self._results if r.get("status") == "cancelled")
         return {
             "trigger": self._trigger,
@@ -474,6 +525,7 @@ class LaunchOrchestrator(QObject):
             "already_running": already_running,
             "failed": failed,
             "timeout": timeout,
+            "blocked_self": blocked_self,
             "cancelled_count": cancelled_count,
             "results": list(self._results),
         }

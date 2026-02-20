@@ -62,7 +62,7 @@ from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.peer_sched_tab import PeerSchedTab
 from freqinout.gui.help_tab import HelpTab
 from freqinout.gui.controlfreq_tab import ControlFreqTab
-from freqinout.gui.theme import resolve_theme, apply_app_theme, button_style
+from freqinout.gui.theme import resolve_theme, resolve_ui_text_scale, apply_app_theme, button_style
 
 
 class MainWindow(QMainWindow):
@@ -125,7 +125,7 @@ class MainWindow(QMainWindow):
             "Messages": self._create_message_viewer_tab,
         }
 
-        # Sidebar navigation order (as requested)
+        # Internal screen registry (stable keys used by cross-tab navigation/lazy loading)
         self._screens = [
             ("ControlFreq", self.controlfreq_tab),
             ("FreqPlanner", self._placeholder_widget("FreqPlanner")),
@@ -143,6 +143,28 @@ class MainWindow(QMainWindow):
             ("Settings", self.settings_tab),
             ("Help", self.help_tab),
         ]
+        self._screen_index_by_label = {label: idx for idx, (label, _w) in enumerate(self._screens)}
+        # Sidebar button order/text requested by user. Keep SOP accessible via in-app links,
+        # but do not show it as a primary sidebar button.
+        self._nav_specs = [
+            ("ControlFreq", "ControlFreq"),
+            ("FreqPlanner", "FreqPlanner"),
+            ("Messages", "Messages"),
+            ("Map", "Map"),
+            ("NCS - FLDigi/SSB", "NCS-FLDigi/SSB"),
+            ("NCS - JS8", "NCS-JS8"),
+            ("NCS - Local", "NCS-Local"),
+            ("Schedule - HF", "HF Schedule"),
+            ("Schedule - Nets", "Net Schedule"),
+            ("Schedule - Peers", "Peer Schedules"),
+            ("Operators - HF", "HF Operators"),
+            ("Operators - Local", "Local Operators"),
+            ("SOP Builder", "SOP"),
+            ("Settings", "Settings"),
+            ("Help", "Help"),
+        ]
+        self._nav_screen_index_map: dict[int, int] = {}
+        self._nav_base_labels: list[str] = []
 
         # Build sidebar
         self.nav_widget = QWidget()
@@ -164,24 +186,29 @@ class MainWindow(QMainWindow):
         self._map_nav_index = None
         self._ncs_nav_indices: dict[str, int] = {}
         self._ncs_net_active: dict[str, bool] = {"FLDIGI": False, "JS8": False, "LOCAL": False}
-        for idx, (label, _w) in enumerate(self._screens):
-            btn = QPushButton(label)
+        for nav_idx, (button_label, screen_label) in enumerate(self._nav_specs):
+            screen_idx = self._screen_index_by_label.get(screen_label)
+            if screen_idx is None:
+                continue
+            btn = QPushButton(button_label)
             btn.setCheckable(True)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             btn.setMinimumWidth(120)
             btn.setStyleSheet(self._nav_button_alignment_style())
-            btn.clicked.connect(lambda _=False, i=idx: self._set_screen(i))
-            self.button_group.addButton(btn, idx)
+            btn.clicked.connect(lambda _=False, i=screen_idx: self._set_screen(i))
+            self.button_group.addButton(btn, screen_idx)
             self.nav_buttons.append(btn)
+            self._nav_screen_index_map[screen_idx] = len(self.nav_buttons) - 1
+            self._nav_base_labels.append(button_label)
             nav_layout.addWidget(btn)
-            if label == "Map":
-                self._map_nav_index = idx
-            elif label == "NCS-FLDigi/SSB":
-                self._ncs_nav_indices["FLDIGI"] = idx
-            elif label == "NCS-JS8":
-                self._ncs_nav_indices["JS8"] = idx
-            elif label == "NCS-Local":
-                self._ncs_nav_indices["LOCAL"] = idx
+            if screen_label == "Map":
+                self._map_nav_index = nav_idx
+            elif screen_label == "NCS-FLDigi/SSB":
+                self._ncs_nav_indices["FLDIGI"] = nav_idx
+            elif screen_label == "NCS-JS8":
+                self._ncs_nav_indices["JS8"] = nav_idx
+            elif screen_label == "NCS-Local":
+                self._ncs_nav_indices["LOCAL"] = nav_idx
         # Placeholder for map filters (shown only on Map view)
         self.map_filters_container = QWidget()
         self.map_filters_container.setMinimumWidth(120)
@@ -245,6 +272,8 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(self.scheduler_status_container)
         self.resume_schedule_btn.setVisible(False)
         nav_layout.addStretch()
+        self._update_scheduler_action_button_widths()
+        self._update_nav_layout_metrics()
         QTimer.singleShot(0, self._sync_status_box_width)
 
         # Stacked content
@@ -284,7 +313,8 @@ class MainWindow(QMainWindow):
         # Default selection
         if self.nav_buttons:
             self.nav_buttons[0].setChecked(True)
-            self._set_screen(0)
+            first_screen_index = self.button_group.id(self.nav_buttons[0])
+            self._set_screen(first_screen_index if first_screen_index >= 0 else 0)
         QTimer.singleShot(150, self._prewarm_webengine)
         QTimer.singleShot(600, self._start_lazy_prewarm)
 
@@ -1309,6 +1339,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            if hasattr(self, "hf_schedule_tab") and hasattr(self.hf_schedule_tab, "on_sop_data_changed"):
+                self.hf_schedule_tab.on_sop_data_changed()
+        except Exception:
+            pass
+        try:
             if hasattr(self, "controlfreq_tab") and hasattr(self.controlfreq_tab, "on_sop_data_changed"):
                 self.controlfreq_tab.on_sop_data_changed()
         except Exception:
@@ -1411,6 +1446,68 @@ class MainWindow(QMainWindow):
                 width = int(self.nav_widget.width())
         if width > 0:
             self.scheduler_status_container.setFixedWidth(width)
+
+    def _update_scheduler_action_button_widths(self) -> None:
+        buttons = [
+            getattr(self, "resume_schedule_btn", None),
+            getattr(self, "suspend_schedule_btn", None),
+            getattr(self, "logs_active_btn", None),
+        ]
+        valid_buttons = [btn for btn in buttons if btn is not None]
+        if not valid_buttons:
+            return
+        width = 0
+        for btn in valid_buttons:
+            try:
+                hint_w = int(btn.sizeHint().width())
+            except Exception:
+                hint_w = 0
+            try:
+                text_w = int(btn.fontMetrics().horizontalAdvance(btn.text()) + 28)
+            except Exception:
+                text_w = 0
+            width = max(width, hint_w, text_w)
+        width = max(140, min(width, 220))
+        for btn in valid_buttons:
+            try:
+                btn.setFixedWidth(width)
+            except Exception:
+                pass
+
+    def _update_nav_layout_metrics(self) -> None:
+        if not hasattr(self, "nav_widget") or not getattr(self, "nav_buttons", None):
+            return
+        content_width = 0
+        for btn in self.nav_buttons:
+            try:
+                hint_w = int(btn.sizeHint().width())
+            except Exception:
+                hint_w = 0
+            try:
+                text_w = int(btn.fontMetrics().horizontalAdvance(btn.text()) + 40)
+            except Exception:
+                text_w = 0
+            content_width = max(content_width, hint_w, text_w)
+        content_width = max(132, min(content_width, 240))
+        for btn in self.nav_buttons:
+            try:
+                btn.setMinimumWidth(content_width)
+            except Exception:
+                pass
+        try:
+            layout = self.nav_widget.layout()
+            margins = layout.contentsMargins() if layout is not None else None
+            margin_w = int((margins.left() + margins.right()) if margins is not None else 8)
+        except Exception:
+            margin_w = 8
+        panel_w = max(140, min(content_width + margin_w, 260))
+        try:
+            self.nav_widget.setMinimumWidth(panel_w)
+            self.nav_widget.setMaximumWidth(panel_w)
+        except Exception:
+            pass
+        self._update_scheduler_action_button_widths()
+        self._sync_status_box_width()
 
     def _dismiss_off_schedule_prompt(self) -> None:
         if hasattr(self, "_off_schedule_prompt") and self._off_schedule_prompt is not None:
@@ -1538,20 +1635,20 @@ class MainWindow(QMainWindow):
         """
         data = self.settings.all()
         callsign = (data.get("callsign") or "").strip().upper()
+        base_labels = getattr(self, "_nav_base_labels", [])
         if not callsign:
             # Reset to base titles if no callsign is set
-            for idx, (base, _w) in enumerate(self._screens):
+            for idx, base in enumerate(base_labels):
                 if idx < len(self.nav_buttons):
                     self.nav_buttons[idx].setText(base)
+            self._update_nav_layout_metrics()
             return
 
-        def label(base: str) -> str:
-            return f"{base} [{callsign}]"
-
-        for idx, (base, _w) in enumerate(self._screens):
-            lbl = label(base)
+        for idx, base in enumerate(base_labels):
+            lbl = f"{base} [{callsign}]"
             if idx < len(self.nav_buttons):
                 self.nav_buttons[idx].setText(lbl)
+        self._update_nav_layout_metrics()
 
     def _apply_app_theme(self):
         app = QApplication.instance()
@@ -1560,7 +1657,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         theme = resolve_theme(self.settings)
-        apply_app_theme(app, theme)
+        ui_text_scale = resolve_ui_text_scale(self.settings)
+        apply_app_theme(app, theme, ui_text_scale=ui_text_scale)
         self._set_logo_pixmap()
         self._update_log_indicator()
         if hasattr(self, "map_prop_badge"):
@@ -1596,6 +1694,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
         self._update_ncs_nav_button_styles()
+        self._update_nav_layout_metrics()
 
     def _placeholder_widget(self, label: str) -> QWidget:
         w = QWidget()
@@ -1839,10 +1938,11 @@ class MainWindow(QMainWindow):
             running = int(data.get("already_running", 0) or 0)
             failed = int(data.get("failed", 0) or 0)
             timeout = int(data.get("timeout", 0) or 0)
+            blocked_self = int(data.get("blocked_self", 0) or 0)
             cancelled = bool(data.get("cancelled", False))
             summary = (
                 f"Launch {trigger or 'sequence'} complete: "
-                f"launched={launched}, running={running}, failed={failed}, timeout={timeout}"
+                f"launched={launched}, running={running}, failed={failed}, timeout={timeout}, blocked={blocked_self}"
             )
             if cancelled:
                 summary = f"{summary}, cancelled=true"
@@ -1907,6 +2007,14 @@ class MainWindow(QMainWindow):
             min_ms=5.0,
         ):
             if 0 <= index < self.stack.count():
+                try:
+                    nav_idx = self._nav_screen_index_map.get(index)
+                    if nav_idx is not None and 0 <= nav_idx < len(self.nav_buttons):
+                        btn = self.nav_buttons[nav_idx]
+                        if not btn.isChecked():
+                            btn.setChecked(True)
+                except Exception:
+                    pass
                 prev_index = self._active_tab_index
                 if prev_index is not None and 0 <= prev_index < self.stack.count():
                     try:
