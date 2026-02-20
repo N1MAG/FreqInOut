@@ -330,7 +330,11 @@ class ControlFreqTab(QWidget):
         self.freq_state_badge = QLabel("Unknown")
         self.freq_state_badge.setAlignment(Qt.AlignCenter)
         self.freq_state_badge.setMinimumWidth(108)
-        self.freq_state_badge.setStyleSheet("font-weight: 600; border-radius: 10px; padding: 2px 8px;")
+        self.freq_state_badge.setMinimumHeight(26)
+        self.freq_state_badge.setMaximumHeight(26)
+        self.freq_state_badge.setStyleSheet(
+            "font-size: 12px; font-weight: 600; border-radius: 6px; padding: 0 8px;"
+        )
         hero_row.addWidget(self.freq_state_badge)
         freq_layout.addLayout(hero_row)
         self.freq_combo = QComboBox()
@@ -1075,7 +1079,8 @@ class ControlFreqTab(QWidget):
         bg, fg = colors.get(key, colors["unknown"])
         self.freq_state_badge.setText(labels.get(key, "Unknown"))
         self.freq_state_badge.setStyleSheet(
-            f"font-weight: 600; border-radius: 10px; padding: 2px 8px; background: {bg}; color: {fg};"
+            f"font-size: 12px; font-weight: 600; border-radius: 6px; "
+            f"padding: 0 8px; background: {bg}; color: {fg};"
         )
 
     def apply_theme(self) -> None:
