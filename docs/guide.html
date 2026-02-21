@@ -11,16 +11,14 @@
     h2 { border-bottom: 1px solid #eee; padding-bottom: 0.15em; }
     code { background: #f2f2f2; padding: 2px 4px; border-radius: 3px; }
     pre { background: #f2f2f2; padding: 10px; border-radius: 4px; overflow-x: auto; }
-    pre.cmd { background: #f0f4f8; border-left: 4px solid #5b8def; }
-    pre.cmd code { color: #111; }
-    ul { margin-top: 0.3em; }
+    ul, ol { margin-top: 0.3em; }
     .section-list { padding-left: 18px; }
     .logo-wrap { text-align: center; padding-top: 18px; }
     .logo-wrap img { max-width: 180px; height: auto; }
     .callout { background: #eef5ff; border-left: 4px solid #5b8def; padding: 10px 12px; margin: 12px 0; }
     .warn { background: #fff7e6; border-left: 4px solid #e0a106; }
     table { border-collapse: collapse; width: 100%; margin: 10px 0; }
-    th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
   </style>
 </head>
 <body>
@@ -30,897 +28,524 @@
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
   <p><strong>Current version</strong>: 1.1.8</p>
-  <p>This guide documents all tabs and primary controls in FreqInOut, including operating workflows for both new and advanced users. Times are stored in UTC; the "Showing: Local/UTC" toggle only changes what you see.</p>
-  <p><strong>Responsibility notice</strong>: FreqInOut assists licensed amateur operators by coordinating complex radio software and schedules. It assumes you follow applicable band plans and regulations. Disabling safeguards (for example, scheduling) can let you tune outside legal allocations. You are solely responsible for compliant operation; the authors and contributors are not liable for misuse.</p>
+  <p>This guide is a complete reference for the current FreqInOut interface. It documents each main-menu area, tab, button, table, and nested action so both new and advanced operators can move quickly and confidently.</p>
+  <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
 
-  <h2 id="quick-start">Quick Start</h2>
-  <p><strong>Purpose</strong>: Get a first successful setup and first on-air workflow quickly.</p>
-  <ol class="section-list">
-    <li><strong>Start in Settings</strong>: Open <a href="#settings">Settings</a> and enter your callsign/name/state/grid, choose Frequency Control mode, set JS8Call DIRECTED.TXT (if using JS8 features), and set message folders. Click <em>Save Settings</em> so all tabs refresh with your configuration.</li>
-    <li><strong>Choose your operating mode</strong>: FreqInOut supports (a) JS8Call-only operation, or (b) FLRig/FLDigi operation (with optional JS8Call/VarAC). VarAC is supported as an integration, but <strong>VarAC-only is not a supported standalone control mode</strong>.</li>
-    <li><strong>If using FLRig as rig control</strong>: In JS8Call set <em>Rig</em> to <strong>FLRig</strong>. In VarAC, open <em>Rig Settings</em>, set <em>CAT control</em> and <em>Frequency Control</em> to <strong>FLRig</strong>, and keep periodic frequency reads enabled.</li>
-    <li><strong>FLDigi monitoring</strong>: To monitor if FLDigi is receiving traffic, you must enable logging in FLDigi under <em>File &gt; Text Capture &gt; Log all RX/TX text</em>.</li>
-    <li><strong>Create HF Operating Groups</strong>: Add your go-to frequencies in <a href="#settings-op-groups">HF Operating Groups</a>. These drive HF Schedule, Net Schedule, QSY controls, SOP filters, and scheduler enforcement targets.</li>
-    <li><strong>Build schedules</strong>: Use <a href="#hf-schedule">HF Schedule</a> for routine blocks and <a href="#net-schedule">Net Schedule</a> for net windows (including early check-in). Confirm layout in <a href="#freqplanner">FreqPlanner</a>.</li>
-    <li><strong>Load operators and traffic context</strong>: Import your HF list in <a href="#operators">HF Operators</a> and your local roster in <a href="#local-operators">Local Operators</a>. For JS8 workflows, go to <a href="#settings-js8call">Settings &gt; JS8Call Settings</a> and run <em>Load JS8 Traffic</em> to seed map/link history.</li>
-    <li><strong>Run your first cycle</strong>: QSY to an HF Operating Group, verify Schedule Status, start/monitor a net from <a href="#digi-ssb-ncs">NCS-FLDigi/SSB</a> or <a href="#js8-ncs">NCS-JS8</a>, then review outcomes in Messages, <a href="#operators">HF Operators</a>, and Map.</li>
-  </ol>
-
-  <h2 id="onboarding-new-operator">New Operator Onboarding (First Session)</h2>
-  <p><strong>Purpose</strong>: Give new HF users a safe, practical path from install to first successful operating cycle.</p>
-  <ol class="section-list">
-    <li><strong>Set identity and save</strong>: In <a href="#settings-operator">Settings &gt; Operator Information</a>, enter Callsign/Name/State/Grid and click <em>Save Settings</em>.</li>
-    <li><strong>Choose simple control mode</strong>: In <a href="#settings-operation">Settings &gt; FreqInOut Settings</a>, start with <strong>Manual</strong> if you are unsure, then move to FLRig or JS8Call control after validation.</li>
-    <li><strong>Add one HF Operating Group</strong>: In <a href="#settings-op-groups">Settings &gt; HF Operating Groups</a>, add one known-good frequency/mode row you can monitor on-air safely.</li>
-    <li><strong>Build one HF schedule row</strong>: In <a href="#hf-schedule">HF Schedule</a>, add one row for current day/time and save. Verify it appears in <a href="#freqplanner">FreqPlanner</a>.</li>
-    <li><strong>Test QSY behavior</strong>: From HF Schedule or NCS tab, use QSY once and confirm Schedule Status reflects pause/resume behavior.</li>
-    <li><strong>Load operator context</strong>: In <a href="#operators">HF Operators</a> and <a href="#local-operators">Local Operators</a>, import CSV data if available; otherwise continue with manual additions as contacts are observed.</li>
-    <li><strong>Run one controlled net session</strong>: Use <a href="#digi-ssb-ncs">NCS-FLDigi/SSB</a>, <a href="#js8-ncs">NCS-JS8</a>, or <a href="#local-ncs">NCS-Local</a>, start a test net, record at least one check-in, save, and end cleanly.</li>
-    <li><strong>Review outputs</strong>: Confirm results in HF Operators/Local Operators, Messages, Map, and Logs. Keep logs at INFO or DISABLED for routine use.</li>
-  </ol>
   <div class="callout">
-    Tip for first day: keep schedules simple (one or two rows), avoid aggressive automation, and confirm each integration path one at a time.
+    Tip: if a button appears muted, it usually means no eligible action is available yet. Select a row, start a net, or complete required fields to enable the next step.
   </div>
 
-  <h2 id="advanced-workflow">Advanced Operator Workflow (Daily Ops)</h2>
-  <p><strong>Purpose</strong>: Fast reference for experienced operators running recurring schedules, nets, and SOP reminders.</p>
+  <h2 id="quick-start">Quick Start</h2>
   <ol class="section-list">
-    <li><strong>Pre-op check (2-3 min)</strong>: Verify Schedule Status is on-plan, validate rig/software status LEDs in Settings, and confirm current band/frequency alignment.</li>
-    <li><strong>Sync schedule intent</strong>: Review <a href="#freqplanner">FreqPlanner</a> for today’s windows; ensure Net Schedule rows include proper recurrence + early-check-in values.</li>
-    <li><strong>Run SOP alongside schedule</strong>: In <a href="#sop">SOP</a>, keep active SOPs scoped by Group Name (HF Operating Group) and optional SOP Group, then monitor only actionable rows (<em>Due Now</em>/<em>Overdue</em>).</li>
-    <li><strong>Manage net execution</strong>: Use NCS tabs for net lifecycle (start, acknowledge/query, save, end). Use QSY intentionally and resume scheduler when appropriate.</li>
-    <li><strong>Use filters aggressively</strong>: In Messages/HF Operators/Local Operators/Map/Peer Schedules, filter by time/group/region/status before making decisions to reduce cognitive load.</li>
-    <li><strong>Post-op hygiene</strong>: Clear stale prompts, reconcile operator roles/trust flags, export needed data, and return logging level to normal.</li>
+    <li>Open <a href="#settings">Settings</a>, enter your operator identity, set required software/file paths, and click <em>Save Settings</em>.</li>
+    <li>Build your baseline station plan in <a href="#settings-hf-groups">HF Operating Groups</a>, <a href="#hf-daily">HF Daily</a>, and <a href="#hf-nets">HF Nets</a>.</li>
+    <li>Validate the plan in <a href="#freqplanner">FreqPlanner</a> and <a href="#controlfreq">ControlFreq</a>.</li>
+    <li>If running net operations, use <a href="#ncs-fldigi-ssb">FLDigi / SSB</a>, <a href="#ncs-js8call">JS8Call</a>, or <a href="#ncs-vhf-uhf">VHF/UHF</a>.</li>
+    <li>Use <a href="#sop-builder">SOP Builder</a> for condition-driven action plans and <a href="#messages">Messages</a> for traffic review and message actions.</li>
   </ol>
+
+  <h2 id="main-menu">Main Menu and Left Rail</h2>
+  <p>The left rail is grouped and collapsible. You can keep multiple groups open or collapse groups to save space.</p>
+
+  <h3 id="main-menu-order">Main Menu Order</h3>
   <table>
     <thead>
-      <tr><th>Task</th><th>Primary Tab</th><th>Secondary Check</th></tr>
+      <tr><th>Group</th><th>Buttons</th></tr>
     </thead>
     <tbody>
-      <tr><td>Confirm current operating plan</td><td>FreqPlanner</td><td>Schedule Status panel</td></tr>
-      <tr><td>Execute net operations</td><td>NCS-FLDigi/SSB / NCS-JS8 / NCS-Local</td><td>Messages + HF/Local Operators</td></tr>
-      <tr><td>Run reminder actions</td><td>SOP</td><td>Schedule mismatch highlighting</td></tr>
-      <tr><td>Validate contact/link context</td><td>Map</td><td>HF/Local Operators + Peer Schedules</td></tr>
-      <tr><td>Troubleshoot anomalies</td><td>Logs</td><td>Settings integration paths</td></tr>
+      <tr><td>Core</td><td><code>ControlFreq</code>, <code>FreqPlanner</code>, <code>Messages</code>, <code>Map</code></td></tr>
+      <tr><td>NCS</td><td><code>FLDigi / SSB</code>, <code>JS8Call</code>, <code>VHF/UHF</code></td></tr>
+      <tr><td>Schedules</td><td><code>HF Daily</code>, <code>HF Nets</code>, <code>HF Peers</code></td></tr>
+      <tr><td>Operators</td><td><code>HF Callsigns</code>, <code>Local Callsigns</code></td></tr>
+      <tr><td>Other</td><td><code>SOP Builder</code>, <code>Settings</code>, <code>Help</code></td></tr>
     </tbody>
   </table>
 
-  <h2 id="prerequisites">First-Run Readiness</h2>
-  <p><strong>Purpose</strong>: Confirm in-app configuration is complete before operating.</p>
+  <h3 id="left-rail-status">Status Cards</h3>
+  <p>Below the menu, two persistent cards provide global status and quick actions.</p>
+  <table>
+    <thead>
+      <tr><th>Card</th><th>What It Shows</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Schedule Status</strong></td>
+        <td>Current schedule state and reason details (on schedule, off schedule, paused, etc.).</td>
+        <td><code>Suspend Schedule</code>, <code>Resume Schedule</code>, and <code>Logs Active</code> (shown when logging is enabled).</td>
+      </tr>
+      <tr>
+        <td><strong>Condition Level</strong></td>
+        <td>One row per HF group using condition levels, with color-coded level chips.</td>
+        <td><code>Edit Levels</code> (text action) opens the condition level editor.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="controlfreq">ControlFreq</h2>
+  <p><strong>Purpose</strong>: primary operating dashboard for station state, schedule actions, and near-term decision support.</p>
+
+  <h3 id="controlfreq-actions">Actions</h3>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Filter by keyword...</code></td><td>Filters dashboard content by text.</td></tr>
+      <tr><td>Group dropdown</td><td>Filters dashboard content by group.</td></tr>
+      <tr><td><code>Refresh</code></td><td>Rebuilds ControlFreq data immediately.</td></tr>
+      <tr><td><code>Clear Filters</code></td><td>Resets keyword and group filters.</td></tr>
+      <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed time labels.</td></tr>
+      <tr><td><code>Focus Mode: Off/On</code></td><td>Toggles focus display behavior for tighter operating context.</td></tr>
+      <tr><td>Frequency dropdown</td><td>Selects a target operating frequency profile.</td></tr>
+      <tr><td>Primary frequency action button</td><td>Contextual action: <code>QSY Now</code> or <code>Resume Schedule</code>.</td></tr>
+      <tr><td>Schedule state badge</td><td>Shows current state such as <code>On Schedule</code>, <code>Off Schedule</code>, or suspended/manual state.</td></tr>
+      <tr><td>View chips</td><td>Toggle visibility of <code>Activity</code>, <code>Intersections</code>, <code>Schedule</code>, and <code>Propagation</code> sections.</td></tr>
+      <tr><td>Schedule Outlook row action</td><td>Per row button in <em>Actions</em> column (for example QSY, open Net Schedule, open SOP Builder).</td></tr>
+      <tr><td>Schedule Outlook right-click</td><td>Context menu repeats the same row action from the Actions column.</td></tr>
+      <tr><td>Propagation Target controls</td><td>Choose <code>Region</code>, <code>State</code>, or <code>Operator</code> and value, then review forecast zones.</td></tr>
+    </tbody>
+  </table>
+  <p>The right side of Frequency Control includes a live time/date readout aligned with the selected <code>Showing</code> mode (Local or UTC).</p>
+
+  <h3 id="controlfreq-tables">Tables</h3>
+  <table>
+    <thead>
+      <tr><th>Table</th><th>Columns</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Activity</td><td><code>Group</code>, <code>Band/Freq</code>, <code>Callsigns Seen</code>, <code>Traffic</code></td></tr>
+      <tr><td>Schedule Intersections</td><td><code>When</code>, <code>Overlaps</code>, <code>Group/Band/Freq</code></td></tr>
+      <tr><td>Message Summary</td><td><code>Type</code>, <code>Count</code>, <code>Details / BBS Aging Out</code></td></tr>
+      <tr><td>Schedule Outlook</td><td><code>When/Day</code>, <code>Type</code>, <code>Group/Net</code>, <code>Band/Freq</code>, <code>Actions</code></td></tr>
+      <tr><td>Propagation Forecast</td><td><code>Zone</code>, <code>Morning</code>, <code>Day</code>, <code>Night</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="freqplanner">FreqPlanner</h2>
+  <p><strong>Purpose</strong>: read-only visual planner for HF, Net, and SOP-effective schedule coverage.</p>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed time axis labels.</td></tr>
+      <tr><td><code>Showing Band/Showing Frequency</code></td><td>Toggles day-cell display between band names and frequency values.</td></tr>
+      <tr><td>Band color chips</td><td>Click a chip to choose color; dialog includes <code>Reset Default</code>.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Planner columns</strong>: <code>UTC Hour</code>, <code>Local Time (TZ)</code>, <code>Sunday</code> ... <code>Saturday</code>.</p>
+
+  <h2 id="messages">Messages</h2>
+  <p><strong>Purpose</strong>: unified traffic review, filtering, read state, and file-level actions.</p>
+
+  <h3 id="messages-header-actions">Header Actions</h3>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Scan every</code></td><td>Sets folder scan cadence for file-backed message ingestion.</td></tr>
+      <tr><td><code>Refresh Now</code></td><td>Forces full refresh of file, JS8, and VarAC message sources.</td></tr>
+      <tr><td><code>Export to PDF</code></td><td>Exports current message view/report.</td></tr>
+      <tr><td><code>Delete Selected</code></td><td>Deletes checked rows from supported sources.</td></tr>
+      <tr><td><code>Mark All as Read</code></td><td>Marks currently filtered messages as read.</td></tr>
+      <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed receive-time labels.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="messages-pending">Pending JS8 MSGs</h3>
+  <p><strong>Columns</strong>: <code>Callsign</code>, <code>Msg ID</code>, <code>Last Seen</code>, <code>Status</code>, <code>Actions</code>.</p>
+  <p><strong>Nested row actions</strong> in Actions column:</p>
   <ul class="section-list">
-    <li><strong>Callsign identity</strong>: Set Callsign/Name/State/Grid in Settings. This affects NCS actions, exports, map placement, and operator matching.</li>
-    <li><strong>Frequency control selection</strong>: Choose FLRig, JS8Call, or Manual in Settings based on your station topology.</li>
-    <li><strong>Core paths</strong>: Set JS8Call DIRECTED.TXT (if using JS8), message paths (FLMSG/FLAMP/VarAC), and FLDigi log folder (if using scheduler busy detection with FLDigi).</li>
-    <li><strong>HF Operating Groups baseline</strong>: Add at least one valid group row (mode, band, frequency, VFO/offset as applicable).</li>
-    <li><strong>Scheduler intent</strong>: Decide whether to run with scheduler enabled or manual control before going on-air.</li>
+    <li><code>Get</code>: retrieve/request message workflow.</li>
+    <li><code>Mark Retrieved</code>: mark pending row as retrieved.</li>
   </ul>
 
-  <h2 id="main-window">Main Window and Navigation</h2>
-  <p><strong>Purpose</strong>: Understand the sidebar, global UI behavior, and system prompts.</p>
-  <p><strong>Typical workflow</strong>: Watch this panel first. It is your real-time "am I on plan?" indicator, your nearest remediation path (<em>Resume Schedule</em>), and your earliest warning when operator action is required.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
+  <h3 id="messages-main-table">Messages Table</h3>
+  <p><strong>Columns</strong>: select checkbox, <code>MSG Type</code>, <code>Status</code>, <code>From</code>, <code>To</code>, <code>RCV_DT</code>, <code>Message Title</code>, actions.</p>
+  <p><strong>Filter row controls</strong>: <code>MSG Type...</code>, <code>Status...</code>, searchable <code>From</code>, searchable <code>To</code>, <code>Search...</code>, <code>Clear Filters</code>.</p>
+  <p><strong>Nested row actions</strong> in Actions column:</p>
   <ul class="section-list">
-    <li><strong>Sidebar labels</strong>: Main menu labels use current names including <em>NCS-FLDigi/SSB</em>, <em>NCS-JS8</em>, <em>NCS-Local</em>, <em>HF Operators</em>, and <em>Local Operators</em>. Tab labels append your callsign after saving valid operator identity settings.</li>
-    <li><strong>Map filters visibility</strong>: Map Layers controls appear only while Map tab is active.</li>
-    <li><strong>Status panel updates</strong>: Schedule Status updates continuously and reflects suspend/off-schedule/net/busy conditions in near real time.</li>
-    <li><strong>Resume control authority</strong>: Clicking <em>Resume Schedule</em> clears pause/skip state and reapplies schedule targets immediately when allowed.</li>
+    <li><code>View</code>: opens selected message in viewer pane.</li>
+    <li>Flag icon: cycles action-needed flag state.</li>
+    <li><code>Delete</code>: deletes selected message/file record.</li>
+    <li><code>Archive</code>: shown for BBS file rows, archives file to configured BBS archive path.</li>
+    <li><code>+BBS</code>: shown for FLMsg/FLAmp/VarAC file rows when VarAC BBS path is configured; copies file to VarAC BBS folder with overwrite prompt if needed.</li>
   </ul>
+  <p><code>Open Image</code> appears when selected content is an image-capable file and opens it externally.</p>
+
+  <h2 id="map">Map</h2>
+  <p><strong>Purpose</strong>: map-based station, path, and propagation context.</p>
+
+  <h3 id="map-top-controls">Top Map Controls</h3>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Paths</code></td><td><code>Off</code>, <code>My Station</code>, or <code>All</code> path display mode.</td></tr>
+      <tr><td><code>Group</code></td><td>Filters paths/points by operator group.</td></tr>
+      <tr><td><code>Region</code></td><td>Filters by FEMA region.</td></tr>
+      <tr><td><code>Band</code></td><td>Filters by HF band or specific daily schedule frequency.</td></tr>
+      <tr><td><code>Recency</code></td><td>Filters link data by time window.</td></tr>
+      <tr><td><code>Paths to</code></td><td>Searchable relay/operator target field.</td></tr>
+      <tr><td><code>Refresh Links</code></td><td>Refreshes links and map overlays.</td></tr>
+      <tr><td><code>Peer Sched Now</code></td><td>Toggle now-reachable overlay from peer schedules.</td></tr>
+      <tr><td><code>SitRep Status</code></td><td>Toggle sitrep-status emphasis on map context.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="map-drawer">Map Control Drawer</h3>
+  <p>Use <code>Show Map Controls</code>/<code>Hide Map Controls</code> or the splitter handle toggle.</p>
+  <p><strong>Collapsible sections</strong>:</p>
   <ul class="section-list">
-    <li><strong>Sidebar navigation</strong>: Click a left-side button to switch tabs. After saving a callsign in Settings, each tab label becomes <em>Tab [CALLSIGN]</em>.</li>
-    <li><strong>Logs indicator</strong>: If logging is active (level is not DISABLED), the Schedule Status panel shows a warning-highlighted <em>Logs: LEVEL</em> button for quick access.</li>
-    <li><strong>Map Layers sidebar</strong>: Only visible while the Map tab is active. Controls Callsigns, States, Cities, Grids, Regions, City Pop. filtering, and propagation controls (Overlay, Mode, Window, Target Type/Value).</li>
-    <li><strong>Schedule Status panel</strong>: Below the tab buttons (hidden on Map), shows On Schedule / Off Schedule with specific reasons (e.g., Frequency, FLDigi Mode, JS8 Offset, QSO traffic, or Sending Traffic when PTT is active). When scheduling is disabled or Frequency Control is Manual, it shows the current frequency only. Includes <em>Resume Schedule</em> and <em>Suspend Schedule</em> controls for immediate operator override. Suspend toggles to Resume while active. When an SOP reminder is coming within 3 hours, the header shows <em>SOP Action in: H:MM</em>. When JS8/VarAC/FLDigi have recent RX activity, an informational <em>BUSY RX: ...</em> line appears; it is hidden during nets. FLDigi may display as <em>FLDigi (gibberish)</em> when noisy RX is detected. Active NCS sessions also highlight the corresponding sidebar NCS entry as a reminder to end the net.</li>
-    <li><strong>Off-schedule prompt</strong>: When a configured enforcement item first goes off schedule, a dialog appears listing only those items (e.g., <em>Frequency and Offset are Off Schedule</em>) with buttons <em>Resume Sched.</em>, <em>Skip Once</em>, and <em>Pause Sched. 30 Min</em>. <em>Resume Sched.</em> enforces only the listed items; <em>Pause Sched. 30 Min</em> pauses enforcement for 30 minutes; <em>Skip Once</em> resets the prompt timer. If you do not respond within 2 minutes, the listed items are applied automatically. Repeat prompts follow the selected prompt interval.</li>
-  </ul>
-  <p><strong>Important background timers</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Scheduler evaluation loop</strong>: Runs continuously and updates active entry / next-change state.</li>
-    <li><strong>Prompt auto-apply</strong>: Off-schedule prompts auto-apply listed corrections after 2 minutes if ignored.</li>
-    <li><strong>SOP status horizon</strong>: Status panel shows SOP countdown only when an SOP action is within 3 hours.</li>
-    <li><strong>BUSY RX windows</strong>: Recent RX/PTT windows can temporarily defer schedule corrections to avoid disrupting traffic.</li>
+    <li><strong>Layers Display</strong>: <code>Callsigns</code>, <code>Regions</code>, <code>States</code>, <code>Cities</code>, <code>Grids</code>, plus city population filter.</li>
+    <li><strong>Propagation</strong>: <code>Enable Propagation Overlay</code>, <code>Mode</code> (Actual/Blended/Modeled), <code>Window</code>, <code>Target</code>, <code>Value</code>, and best-band badge.</li>
   </ul>
 
-  <h2 id="freqplanner">FreqPlanner Tab</h2>
-  <p><strong>Purpose</strong>: A read-only 24-hour view of HF and Net schedules.</p>
-  <p><strong>Typical workflow</strong>: Use this as the "source-of-truth view" after each schedule edit. If something looks wrong here, fix HF/Net schedule entries before operating.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
+  <h2 id="ncs-fldigi-ssb">NCS: FLDigi / SSB</h2>
+  <p><strong>Purpose</strong>: FLDigi/SSB net control workflow and check-in log operations.</p>
+  <table>
+    <thead>
+      <tr><th>Area</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Session setup</td><td><code>Role</code> (NCS/ANCS/JOINER), Net Name selector, QSY dropdown, <code>QSY</code>, <code>Ad Hoc Net</code>.</td></tr>
+      <tr><td>Operator lookup</td><td><code>Add to Main</code>, <code>Add to New/Late</code>, <code>Compare NCS Lists</code>.</td></tr>
+      <tr><td>Check-in logs</td><td>Main and New/Late text panels, each with <code>Copy</code>.</td></tr>
+      <tr><td>Net lifecycle</td><td><code>Start Net</code>, <code>Save Check-ins</code>, <code>Merge Check-ins</code>, <code>End Net</code>.</td></tr>
+      <tr><td>Compare dialog (nested)</td><td><code>Compare</code>, <code>Copy Missing</code>, <code>Close</code>.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Lookup table columns</strong>: <code>Select</code>, <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Grid</code>, <code>Group</code>, <code>Trusted</code>, <code>Last Seen</code>.</p>
+
+  <h2 id="ncs-js8call">NCS: JS8Call</h2>
+  <p><strong>Purpose</strong>: JS8Call-directed net control, check-in handling, and query/ack workflows.</p>
+  <table>
+    <thead>
+      <tr><th>Area</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Session setup</td><td><code>Role</code> (NCS/ANCS), Net Name, refresh interval, Group target, expected query form, QSY dropdown, <code>QSY</code>, <code>Ad Hoc Net</code>.</td></tr>
+      <tr><td>Check-ins</td><td>Filter selector (<code>F!103 / F!104</code>, <code>Any Spotter</code>, <code>All Callsigns</code>), table actions by row selection.</td></tr>
+      <tr><td>Net lifecycle/actions</td><td><code>Start Net</code>, <code>ACK GROUP</code>, <code>ACK CALLSIGN</code>, <code>E? GROUP</code>, <code>E? Callsign</code>, <code>Save Checkins</code>, <code>End Net</code>.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Check-in table columns</strong>: <code>CALLSIGN</code>, <code>NAME</code>, <code>ST</code>, <code>GRID</code>, <code>REGION</code>, <code>MODE</code>, <code>SNR</code>, <code>OFFSET</code>, <code>STATUS</code>, action column.</p>
+
+  <h2 id="ncs-vhf-uhf">NCS: VHF/UHF (Local NCS)</h2>
+  <p><strong>Purpose</strong>: local net session control, check-in logging, and persistent local situational notes.</p>
+  <table>
+    <thead>
+      <tr><th>Area</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Session controls</td><td><code>Start Net</code>, <code>Join Net</code>, <code>End Net</code>, plus status label.</td></tr>
+      <tr><td>Net metadata</td><td>Net Name and Channels fields (saved context).</td></tr>
+      <tr><td>Lookup/Add</td><td>Operator lookup field, <code>Add Check-in</code>, <code>Refresh</code>, <code>Export CSV</code>.</td></tr>
+      <tr><td>Filters</td><td>Search field + SitRep filter (<code>All/GREEN/YELLOW/RED</code>).</td></tr>
+      <tr><td>Entry editor</td><td>SitRep dropdown, <code>Save Entry</code>, persistent notes box, autosave status.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Check-in table columns</strong>: <code>Check-in UTC</code>, <code>Callsign</code>, <code>Name</code>, <code>City</code>, <code>State</code>, <code>Category</code>, <code>SitRep</code>, <code>Notes</code>.</p>
+  <p><strong>Session behavior</strong>: each net is a unique session. <code>End Net</code> clears session check-in rows while keeping roster/operator data.</p>
+
+  <h2 id="hf-daily">Schedules: HF Daily</h2>
+  <p><strong>Purpose</strong>: manage active HF daily schedule rows and resource-backed schedule candidates.</p>
+
+  <h3 id="hf-daily-active">Active Schedule Section</h3>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Showing: Local/UTC</code></td><td>Toggles display timezone for Day/Start/End columns.</td></tr>
+      <tr><td>QSY dropdown + <code>QSY</code></td><td>Manual tune helper from schedule context.</td></tr>
+      <tr><td><code>Add Row</code></td><td>Adds a new editable active schedule row.</td></tr>
+      <tr><td><code>Delete Selected</code></td><td>Removes selected active rows.</td></tr>
+      <tr><td><code>Move Selected to Resources</code></td><td>Moves selected active rows into Schedule Resources.</td></tr>
+      <tr><td><code>Resolve Conflicts</code></td><td>Shows conflict summary/actions when overlaps are detected (button appears only when conflicts exist).</td></tr>
+      <tr><td><code>Import/Export</code> (nested)</td><td><code>Import HF Schedule</code> and <code>Export HF Schedule</code>.</td></tr>
+      <tr><td><code>Save HF Schedule</code></td><td>Persists active HF rows.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Active Schedule columns</strong>: <code>Selected</code>, <code>Day</code>, <code>Source</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Auto-Tune</code>.</p>
+  <p>Rows are shown in time sequence by default to simplify conflict review.</p>
+
+  <h3 id="hf-daily-resources">Schedule Resources Section</h3>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Set filter + text filter</td><td>Filters resource rows by set and text query.</td></tr>
+      <tr><td><code>Add to Active Schedule</code> (nested)</td><td><code>Add Selected to Active Schedule</code> or <code>Add Filtered to Active Schedule</code>.</td></tr>
+      <tr><td><code>Delete Selected</code></td><td>Deletes selected resource rows from Schedule Resources.</td></tr>
+      <tr><td><code>Refresh</code></td><td>Reloads resource table.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Schedule Resources columns</strong>: <code>Select</code>, <code>Set</code>, <code>Day</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Source</code>, <code>Updated (UTC)</code>, <code>Conflict</code>.</p>
+
+  <h3 id="hf-daily-sop-status">SOP Schedule Status (HF)</h3>
+  <p>This section summarizes active/inactive HF SOP status and conflict indicators, including quick SOP activation/deactivation buttons by group.</p>
+
+  <h2 id="hf-nets">Schedules: HF Nets</h2>
+  <p><strong>Purpose</strong>: manage net schedule rows and the net resource catalog.</p>
+
+  <h3 id="hf-nets-schedule">Net Schedule Section</h3>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Showing: Local/UTC</code></td><td>Toggles display timezone for day/time columns.</td></tr>
+      <tr><td><code>Add Row</code></td><td>Adds a net schedule row.</td></tr>
+      <tr><td><code>Delete Selected</code></td><td>Removes selected schedule rows.</td></tr>
+      <tr><td><code>Move Selected to Resources</code></td><td>Moves selected rows back to resource catalog.</td></tr>
+      <tr><td><code>Export Net Schedule</code></td><td>Exports net schedule data.</td></tr>
+      <tr><td><code>Manage Net/SOP Policies</code></td><td>Opens policy manager dialog for saved Net/SOP conflict policies.</td></tr>
+      <tr><td><code>Save Net Schedule</code></td><td>Persists net schedule rows.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Net Schedule columns</strong>: <code>Select</code>, <code>Day</code>, <code>Recurrence</code>, <code>Weeks of Month</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Early (min)</code>, <code>FLDigi Mode</code>, <code>FLDigi Offset</code>, <code>Net Name</code>, <code>Auto-Tune</code>.</p>
+  <p><strong>Recurrence values</strong>: <code>Weekly</code>, <code>Daily</code>, <code>Periodic</code>. Periodic rows use <code>Weeks of Month</code>.</p>
+
+  <h3 id="hf-nets-resources">Net Resources Section</h3>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Set + Search filters</td><td>Filters resource catalog rows.</td></tr>
+      <tr><td><code>Add to Net Schedule</code> (nested)</td><td><code>Add Selected to Net Schedule</code> or <code>Add Filtered to Net Schedule</code>.</td></tr>
+      <tr><td><code>Manage Net Resources</code> (nested)</td><td><code>Import JSON...</code> and <code>Export New Resource File</code>.</td></tr>
+      <tr><td><code>Edit Selected Resource</code></td><td>Edits selected resource entry.</td></tr>
+      <tr><td><code>Delete Selected Resources</code></td><td>Deletes selected resource entries.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Net Resources columns</strong>: <code>Source</code>, <code>Set</code>, <code>Day (UTC)</code>, <code>Recurrence</code>, <code>Weeks</code>, <code>Group</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start (UTC)</code>, <code>End (UTC)</code>, <code>Early (min)</code>, <code>FLDigi Mode</code>, <code>FLDigi Offset</code>, <code>Net Name</code>, <code>Coverage</code>, <code>Comment</code>, <code>Updated (UTC)</code>.</p>
+
+  <h3 id="hf-nets-policy-manager">Manage Net/SOP Policies Dialog</h3>
+  <p><strong>Columns</strong>: <code>Start (UTC)</code>, <code>End (UTC)</code>, <code>SOP</code>, <code>Net</code>, <code>Policy</code>, <code>State</code>, <code>Updated</code>.</p>
+  <p><strong>Actions</strong>: <code>Refresh</code>, <code>Set Selected: SOP Priority</code>, <code>Set Selected: Net Priority</code>, <code>Clear Selected</code>, <code>Clear All</code>, <code>Close</code>.</p>
+  <p><strong>When policy prompts appear</strong>: adding or saving a net that overlaps active SOP windows prompts priority selection. If you close/cancel without selecting required Net priority for that overlap, the conflicting add/save is blocked.</p>
+
+  <h2 id="hf-peers">Schedules: HF Peers</h2>
+  <p><strong>Purpose</strong>: import and review peer HF schedules with overlap visibility.</p>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Import Schedule</code></td><td>Imports peer schedule file(s).</td></tr>
+      <tr><td><code>Refresh</code></td><td>Reloads peer schedule data.</td></tr>
+      <tr><td>Delete selector + <code>Delete Schedule</code></td><td>Deletes one callsign schedule or clear-all (when selected).</td></tr>
+      <tr><td><code>Showing: Local/UTC</code></td><td>Toggles display time columns and overlap labels.</td></tr>
+      <tr><td>Filters</td><td>Callsign, Region, Group, Search, and <code>Clear Filters</code>.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Peer table columns</strong>: <code>CALLSIGN</code>, <code>NAME</code>, <code>STATE</code>, <code>GROUPS</code>, <code>DAY</code>, <code>START</code>, <code>END</code>, <code>BAND</code>, <code>MODE</code>, <code>FREQ</code>, <code>OVERLAP</code>.</p>
+
+  <h2 id="hf-callsigns">Operators: HF Callsigns</h2>
+  <p><strong>Purpose</strong>: maintain HF operator roster, trust state, group mapping, and check-in history.</p>
+
+  <h3 id="hf-callsigns-actions">Actions</h3>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Search + <code>Filter by</code></td><td>Text search and group/trust filtering.</td></tr>
+      <tr><td><code>Clear Filters</code></td><td>Resets all operator filters.</td></tr>
+      <tr><td><code>Manage Operators</code> (nested)</td><td><code>Add Operator...</code>, <code>Edit Selected...</code>, <code>Delete Selected...</code>.</td></tr>
+      <tr><td><code>Import/Export...</code> (nested)</td><td><code>Import CSV...</code> and <code>Export CSV...</code>.</td></tr>
+      <tr><td><code>Export by Group</code></td><td>Multi-select group export menu for filtered roster export.</td></tr>
+      <tr><td>SitRep menu (nested)</td><td>Per operator: <code>Green</code>, <code>Yellow</code>, <code>Red</code>, <code>Unknown</code>.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>HF Callsigns table columns</strong>: select checkbox, <code>Callsign</code>, <code>SitRep</code>, <code>Name</code>, <code>State</code>, <code>Grid</code>, <code>Groups</code>, hidden group slots (<code>Group 1</code>, <code>Group 2</code>, <code>Group 3</code>), <code>Group Role</code>, <code>First Seen</code>, <code>Last Seen</code>, <code>Trusted</code>, <code>Check-ins</code>.</p>
+
+  <h2 id="local-callsigns">Operators: Local Callsigns</h2>
+  <p><strong>Purpose</strong>: maintain local VHF/UHF/GMRS/MURS/FRS operator roster and local context.</p>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Search + Category</td><td>Filters local operator roster.</td></tr>
+      <tr><td><code>Refresh</code></td><td>Reloads local operator table.</td></tr>
+      <tr><td><code>Add</code>, <code>Edit Selected</code>, <code>Delete Selected</code></td><td>Roster management actions.</td></tr>
+      <tr><td><code>Import CSV</code>, <code>Export CSV</code></td><td>Bulk local operator import/export.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Local Callsigns table columns</strong>: <code>Selected</code>, <code>Callsign</code>, <code>First Name</code>, <code>Last Name</code>, <code>City</code>, <code>State</code>, <code>Category</code>, <code>First Seen</code>, <code>Last Seen</code>, <code>Check-ins</code>, <code>SitRep</code>, <code>Notes</code>.</p>
+
+  <h2 id="sop-builder">SOP Builder</h2>
+  <p><strong>Purpose</strong>: build and activate one HF SOP and one Local Comms SOP with conflict-aware HF activation.</p>
+  <p><strong>Model</strong>: SOP action rows are daily by design (no periodic row mode in SOP Builder).</p>
+
+  <h3 id="sop-builder-actions">Top-Level Actions</h3>
+  <table>
+    <thead>
+      <tr><th>Control</th><th>What It Does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>SOP selector</td><td>Switches between the two managed profiles (<code>HF SOP</code>, <code>Local Comms SOP</code>).</td></tr>
+      <tr><td><code>New SOP</code></td><td>Resets selected category profile for rebuilding.</td></tr>
+      <tr><td><code>Save</code></td><td>Saves current SOP configuration and actions.</td></tr>
+      <tr><td><code>Delete</code></td><td>Deletes current SOP actions/profile configuration.</td></tr>
+      <tr><td><code>Export PDF</code></td><td>Opens SOP export modal for single-file PDF output.</td></tr>
+      <tr><td><code>Export/Import</code> (nested)</td><td><code>Export JSON</code> and <code>Import JSON</code>.</td></tr>
+      <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed action times.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="sop-builder-fields">SOP Profile Fields</h3>
   <ul class="section-list">
-    <li><strong>Read-only planner</strong>: Cells cannot be edited directly and are not sortable.</li>
-    <li><strong>Display toggles only</strong>: UTC/Local and Band/Frequency toggles change display text only, not stored schedule data.</li>
-    <li><strong>Band color persistence</strong>: Band chip color changes persist across sessions.</li>
+    <li><strong>Name</strong>: SOP profile name.</li>
+    <li><strong>Category</strong>: <code>HF SOP</code> or <code>Local Comms SOP</code>.</li>
+    <li><strong>Active</strong>: enables the profile after validations pass.</li>
+    <li><strong>Add Action Row</strong>: appends a new action row.</li>
   </ul>
+
+  <h3 id="sop-builder-table">Action Rows Table</h3>
+  <p><strong>Columns</strong>: <code>Group</code>, <code>Condition Levels</code>, <code>Resource</code>, <code>Mode</code>, <code>Action</code>, <code>Band - Freq</code>, <code>Start (UTC)</code>, <code>End (UTC)</code>, <code>Duration</code>, <code>Interval</code>, <code>Contact Type</code>, <code>Contact Target</code>, <code>Description</code>, <code>Conflict</code>, <code>Remove</code>.</p>
+  <ul class="section-list">
+    <li><strong>Conflict badge</strong>: updates in-line (<code>Pending</code>, <code>OK</code>, <code>Conflict</code>, <code>Local</code>).</li>
+    <li><strong>Contact Target</strong>: typeahead lookup when rule supports callsigns; also supports typed values.</li>
+    <li><strong>Interval format</strong>: supports presets and explicit HH:MM; phase patterns such as <code>03:00@30m</code> are supported where applicable.</li>
+    <li><strong>Local Comms actions</strong>: local action set includes <code>NCS</code>, <code>Check-in</code>, <code>Message</code>, <code>Monitor</code>.</li>
+    <li><strong>Conflict status</strong>: updates in real time while editing; Save re-validates before applying active state changes.</li>
+  </ul>
+
+  <h3 id="sop-builder-conflicts">Conflict Resolution Prompts</h3>
+  <p>When HF actions conflict, SOP Builder prompts for a policy:</p>
   <ol class="section-list">
-    <li><strong>Header clocks</strong>: UTC and Local times update live.</li>
-    <li><strong>Showing: UTC/Local</strong>: Toggle how the time columns are labeled; schedule data is still stored in UTC.</li>
-    <li><strong>Showing Band / Showing Frequency</strong>: Toggles the cell text between band labels and frequency values (3-decimal MHz). Net entries still show the net name alongside their band.</li>
-    <li><strong>Band colors chips</strong>: The legend row shows chips only for bands present in the current table. Clicking a chip opens a color picker; the dialog includes a <em>Reset Default</em> button for that band. Colors persist and apply to band labels in the grid.</li>
-    <li><strong>Planner table</strong>: Columns are <em>UTC Hour</em>, <em>Local Time (TZ)</em>, and <em>Sunday</em> through <em>Saturday</em>. The table is read-only and not sortable.</li>
-    <li><strong>Highlighting</strong>: The current UTC day column is highlighted for hours that include net entries.</li>
+    <li><code>SOP Priority For ALL</code></li>
+    <li><code>Net Priority on Conflicts</code></li>
+    <li><code>Daily Schedule Priority on Conflicts</code></li>
   </ol>
+  <p>If required, a start-time adjustment prompt appears with suggested non-conflicting time.</p>
 
-<h2 id="sop">SOP Tab</h2>
-  <p><strong>Purpose</strong>: Build reminder-only SOP action plans per Group Name (HF Operating Group).</p>
-  <p><strong>Typical workflow</strong>: Select Group Name (HF Operating Group) and optional SOP Group, set SOP Daily Start, add action rows, save, then monitor the Status column during operations to complete actions on time.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Manual completion model</strong>: Actions never auto-complete; operator action marks completion.</li>
-    <li><strong>Status windows</strong>: Due timing transitions should display <em>Due Now</em>, then <em>Overdue</em>, then hide stale actions based on configured aging rules.</li>
-    <li><strong>Save-state cue</strong>: Save button highlights only when SOP configuration changes exist.</li>
-    <li><strong>Mismatch signaling</strong>: Band/Frequency mismatch against schedule appears as warning-highlighted cell with tooltip.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Terminology</strong>: <em>SOP Category</em> identifies HF vs Local Net action context, <em>SOP Group</em> is optional profile grouping, and <em>Group Name</em> maps to HF Operating Groups.</li>
-    <li><strong>Builder model</strong>: Build each SOP one row at a time with Band, Frequency, Software, Action, Interval, Contact Rule, Contact Target, and Description.</li>
-    <li><strong>SOP Daily Start (TZ)</strong>: A master start time anchors all action cadence. The label and displayed value follow the current UTC/Local toggle.</li>
-    <li><strong>Interval (HH:MM)</strong>: Enter intervals as HH:MM (for example, 00:30, 01:00, 06:00). The field supports typed values for granular recurrence.</li>
-    <li><strong>Timezone display</strong>: SOP uses header clocks and the <em>Showing UTC/Showing Local</em> toggle. Data is stored in UTC.</li>
-    <li><strong>Contact rules</strong>: Rule options are filtered by roles available for the selected Group Name (+ SOP Group when used). Role options include HUB/HUB-ALT, NCS/ANCS, PEER, and CallSign targeting.</li>
-    <li><strong>Contact target</strong>: Target is type-ahead searchable. Use <em>Any (Role Match)</em> or select a specific callsign based on the selected contact rule.</li>
-    <li><strong>Status button behavior</strong>: The Status button text reflects reminder state. <em>Due Now</em> (0-20 min, info), <em>Overdue</em> (20-30 min, warning), <em>Completed</em> (success).</li>
-    <li><strong>Action visibility</strong>: Actions older than 30 minutes past due are hidden to keep the reminder list focused.</li>
-    <li><strong>Scheduling mismatch</strong>: If SOP and schedule alignment differ, the Band/Freq cell is highlighted with a warning and tooltip <em>Scheduling Mismatch</em>.</li>
-    <li><strong>Save highlighting</strong>: <em>Save</em> highlights only when SOP configuration changes are made.</li>
-    <li><strong>Import/export</strong>: SOP profiles export/import as JSON; actions for unconfigured software are preserved for later use.</li>
-  </ol>
+  <h3 id="sop-builder-export-pdf">Export PDF Modal (Nested Workflow)</h3>
+  <table>
+    <thead>
+      <tr><th>Option Group</th><th>Available Options</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Scope</td><td><code>Selected SOP</code> or <code>All Active SOPs (Unified)</code></td></tr>
+      <tr><td>SOP Time Display</td><td><code>Local</code> or <code>UTC</code></td></tr>
+      <tr><td>Include Operator Rosters</td><td>Master toggle to include roster appendix sections</td></tr>
+      <tr><td>Roster sources</td><td><code>HF Operators</code>, <code>Local Operators</code> (enabled only when Include is checked)</td></tr>
+      <tr><td>Roster filter type</td><td><code>All</code>, <code>State</code>, <code>FEMA Region</code></td></tr>
+      <tr><td>HF filters</td><td>Groups multi-select, Trusted/Untrusted multi-select</td></tr>
+      <tr><td>Local filters</td><td>Category multi-select</td></tr>
+    </tbody>
+  </table>
 
-<h2 id="controlfreq">ControlFreq Tab</h2>
-  <p><strong>Purpose</strong>: Primary operating dashboard for near-real-time schedule control, activity awareness, message triage, and offline propagation guidance.</p>
-  <p><strong>Typical workflow</strong>: Confirm station/software status, validate Scheduled vs Active frequency, scan Activity and Message Summary, review upcoming intersections and outlook rows, then QSY/resume as needed.</p>
-  <p><strong>Header controls</strong>:</p>
+  <h2 id="settings">Settings</h2>
+  <p><strong>Purpose</strong>: configure station identity, scheduler behavior, integration paths, data trust, and launch behavior.</p>
+  <p>The Settings tab uses a left section list and collapsible section cards. Select a section in the list to jump directly.</p>
+
+  <h3 id="settings-sections">Settings Sections</h3>
+  <table>
+    <thead>
+      <tr><th>Section</th><th>Key Controls</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Operator Information</td>
+        <td>Callsign, Name, State, Grid 6</td>
+      </tr>
+      <tr>
+        <td>FreqInOut Settings</td>
+        <td>Theme, Text Size (Normal/Medium/Large), Frequency Control mode, scheduler enable, enforcement and prompt intervals, logging level and diagnostics controls</td>
+      </tr>
+      <tr id="settings-hf-groups">
+        <td>HF Operating Groups</td>
+        <td><code>Add Group</code>, <code>Edit Selected</code>, <code>Delete Selected</code>; table includes <code>Use Condition Levels</code> per row (group-scoped behavior)</td>
+      </tr>
+      <tr>
+        <td>Local Comms Groups</td>
+        <td><code>Add Profile</code>, <code>Edit Selected</code>, <code>Delete Selected</code>; table columns: <code>Selected</code>, <code>Group</code>, <code>Resource</code>, <code>Mode</code>, <code>Target</code>, <code>Notes</code></td>
+      </tr>
+      <tr>
+        <td>JS8Call Settings</td>
+        <td>TCP port, offset, mark-read option, path fields, and <code>Load JS8 Traffic</code></td>
+      </tr>
+      <tr>
+        <td>Fast Light Settings</td>
+        <td>FLRig/FLDigi/FLMsg/FLAmp paths, FLRig XMLRPC port, check-in/log paths, copy path helpers</td>
+      </tr>
+      <tr>
+        <td>Message Auth (Key/Hash)</td>
+        <td>Enable signature/hash verification, trusted hash registry, GPG executable controls, key import/signing, trusted key table</td>
+      </tr>
+      <tr>
+        <td>VarAC Settings</td>
+        <td>Install path, incoming files path, BBS directory/archive, auto-archive policy</td>
+      </tr>
+      <tr>
+        <td>Launch Control</td>
+        <td>Per-app enable/startup toggles, order management (<code>Up</code>, <code>Down</code>, <code>Reset Default Order</code>), launch/stop controls</td>
+      </tr>
+      <tr>
+        <td>Logging &amp; Diagnostics</td>
+        <td><code>Enable DEBUG For</code>, <code>Open Logs</code>, <code>Open Log Folder</code>, <code>Export Diagnostics</code></td>
+      </tr>
+      <tr>
+        <td>Save</td>
+        <td><code>Save Settings</code> persists all sections and triggers cross-tab refresh.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 id="settings-message-auth">Message Auth (Key/Hash) Details</h3>
   <ul class="section-list">
-    <li><strong>Filter by keyword</strong>: Filters dashboard datasets by callsign/group/keywords (for example, <em>SOP</em>, <em>NET</em>, <em>JS8</em>).</li>
-    <li><strong>Group filter</strong>: Limits activity/schedule/intersection views to one operating group.</li>
-    <li><strong>Refresh</strong>: Immediate manual refresh of all ControlFreq widgets.</li>
-    <li><strong>Clear Filters</strong>: Resets keyword/group filters and activity window selection.</li>
-    <li><strong>Showing Local / Showing UTC</strong>: Changes displayed times for schedule-oriented views.</li>
-    <li><strong>Focus Mode</strong>: Defaults to <em>On</em>. Focus On keeps high-priority panels visible and reduces clutter.</li>
-    <li><strong>Keyboard shortcuts</strong>: <em>Ctrl+R</em> Refresh, <em>Ctrl+Enter</em> Set Frequency, <em>Ctrl+Shift+R</em> Resume Schedule.</li>
-  </ul>
-  <p><strong>Top status strip</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Operating Status LEDs</strong>: FLRig, FLDigi, FLMsg, FLAmp, JS8, VarAC, JS8Spotter, CommStat. LEDs remain visible in both focus states.</li>
-    <li><strong>Current date/time</strong>: Right-justified clock reflects the current display mode (<em>Local</em> or <em>UTC</em>).</li>
-  </ul>
-  <h3 id="controlfreq-layout">Layout and Focus Mode</h3>
-  <ul class="section-list">
-    <li><strong>Focus Mode Off</strong>: Top row = <em>Frequency Control</em> (left), <em>Activity</em> (middle), <em>Message Summary</em> (right). Lower row = <em>Schedule Intersections</em> (left) and <em>Schedule Outlook</em> (right). Bottom = full-width <em>Propagation Forecast</em>.</li>
-    <li><strong>Focus Mode On</strong>: Keeps <em>Frequency Control</em>, <em>Message Summary</em>, <em>Operating Status</em>, <em>Schedule Outlook</em>, and <em>Propagation Forecast</em>. Hides lower-priority <em>Activity</em> and <em>Schedule Intersections</em>.</li>
-    <li><strong>Panel sizing</strong>: Top-row panel heights are synchronized to Frequency Control height for consistent alignment.</li>
-  </ul>
-  <h3 id="controlfreq-frequency">Frequency Control</h3>
-  <ul class="section-list">
-    <li><strong>Scheduled / Active</strong>: Displays scheduler target frequency and currently active rig frequency.</li>
-    <li><strong>Status / Next / Suspend</strong>: Compact scheduler state summary (on/off schedule, next scheduled change, and suspend state).</li>
-    <li><strong>Select frequency</strong>: Operating-group frequency picker.</li>
-    <li><strong>Set Frequency</strong>: Applies selected frequency (manual QSY behavior).</li>
-    <li><strong>Resume Schedule</strong>: Reapplies scheduler targets immediately.</li>
-  </ul>
-  <h3 id="controlfreq-activity">Activity</h3>
-  <ul class="section-list">
-    <li><strong>Window</strong>: 30m / 1h / 2h / 6h / 12h / 24h.</li>
-    <li><strong>Rows</strong>: Group, Band/Freq, Callsigns Seen, Traffic.</li>
-    <li><strong>Traffic sources</strong>: JS8 links/messages, Spotter traffic, VarAC messages, FLDigi check-ins.</li>
-    <li><strong>No data state</strong>: Shows explicit empty-state rows when no activity is found.</li>
-  </ul>
-  <h3 id="controlfreq-messages">Message Summary</h3>
-  <ul class="section-list">
-    <li><strong>Rows</strong>: JS8, Spotter, VarAC unread counts + details; SitRep status summary row; VarAC BBS file row.</li>
-    <li><strong>SitRep row</strong>: Shows known-status callsign count and detail counts as <em>R:x  Y:y  G:z</em> (latest status per callsign).</li>
-    <li><strong>Details column</strong>: Header is <em>Details / BBS Aging Out</em>.</li>
-    <li><strong>BBS aging</strong>: Shows filenames nearing auto-archive threshold (next-day aging window).</li>
-  </ul>
-  <h3 id="controlfreq-intersections">Schedule Intersections</h3>
-  <ul class="section-list">
-    <li><strong>Scope</strong>: Exact-frequency overlaps between your schedule and peer schedules.</li>
-    <li><strong>Rows</strong>: <em>Now</em> and <em>Next 2 hours</em> summary.</li>
-    <li><strong>Display</strong>: Visible in Focus Off; hidden in Focus On.</li>
-  </ul>
-  <h3 id="controlfreq-outlook">Schedule Outlook</h3>
-  <ul class="section-list">
-    <li><strong>Sectioned table</strong>: <em>Today</em> and <em>7 Days</em> in one table.</li>
-    <li><strong>Columns</strong>: When/Day, Type, Group/Net, Band/Freq, Action.</li>
-    <li><strong>Types</strong>: HF schedule rows, NET rows, SOP reminder rows.</li>
-    <li><strong>Row actions</strong>: <em>QSY</em> (HF rows with valid frequency), <em>Open Net</em>, <em>Open SOP</em>.</li>
-    <li><strong>No data state</strong>: Explicit empty-state rows for each section when no items match.</li>
-  </ul>
-  <h3 id="controlfreq-highlighting">ControlFreq Highlighting Rules</h3>
-  <ul class="section-list">
-    <li><strong>Schedule Outlook urgency</strong>: Upcoming rows are highlighted by time-to-event: critical (<=15 min), soon (<=60 min), upcoming (<=180 min). Critical type cell is bold.</li>
-    <li><strong>Schedule Intersections emphasis</strong>: The <em>Now</em> row is emphasized; overlap-present rows receive warning highlight; secondary row text is muted.</li>
-    <li><strong>Message Summary emphasis</strong>: Non-zero message counts use positive highlight; SitRep row uses warning when red count is non-zero; VarAC BBS aging-out row uses warning highlight.</li>
-    <li><strong>Theme adaptation</strong>: Highlight palettes are theme-aware (dark/light adjusted for readability and contrast).</li>
-  </ul>
-  <h3 id="controlfreq-propagation">Propagation Forecast</h3>
-  <ul class="section-list">
-    <li><strong>Forecast layout</strong>: Two sections: <em>Schedule-based Forecast</em> and <em>Modeled Forecast</em>, each with <em>National</em> and <em>Regional</em> rows for Morning/Day/Night.</li>
-    <li><strong>Target controls</strong>: Target Type = Region/State/Operator. Region <em>ALL</em> means lower-48 national target.</li>
-    <li><strong>Schedule-based Forecast</strong>: Uses only bands present in today’s schedule/net windows.</li>
-    <li><strong>Modeled Forecast</strong>: Uses full supported HF band set (not schedule-limited).</li>
-    <li><strong>Empirical blend</strong>: Regional scoring can blend modeled output with local historical outcomes from offline DB when confidence gates are met.</li>
-    <li><strong>Origin requirement</strong>: Requires operator Grid 6 from Settings; without it, propagation rows are not produced.</li>
-  </ul>
-  <h3 id="controlfreq-persistence">Persistence and refresh behavior</h3>
-  <ul class="section-list">
-    <li><strong>Saved UI state</strong>: Local/UTC mode, search text, group filter, and activity window are persisted. Focus Mode defaults to <em>On</em> when the tab opens.</li>
-    <li><strong>Background updates</strong>: While active, ControlFreq refreshes status/frequency indicators continuously and full data snapshots on timer/manual refresh.</li>
-  </ul>
-  
-<h2 id="messages">Messages Tab</h2>
-  <p><strong>Purpose</strong>: View and manage FLDigi/FLMsg/FLAmp/VarAC files and JS8 inbox messages.</p>
-  <p><strong>Typical workflow</strong>: Filter first, open/read second, then flag or delete. Use Pending JS8 MSG tools to drive retrieval and keep queue hygiene high during net operations.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Timed refresh</strong>: File-source scans follow Scan Every interval; JS8 message refresh runs on its own shorter cadence.</li>
-    <li><strong>Selection controls</strong>: Header select-all checkbox is enabled only in filtered/search states.</li>
-    <li><strong>Delete safety</strong>: Bulk and per-row deletes always prompt with scope/result feedback.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Scan every</strong>: Dropdown for 1/15/30/60 minutes; controls file folder rescan intervals. JS8Call messages refresh automatically on a short interval.</li>
-    <li><strong>Refresh Now</strong>: Forces an immediate refresh of file-based messages and JS8 inbox data.</li>
-    <li><strong>Export to PDF</strong>: Exports the currently viewed message from the viewer pane.</li>
-    <li><strong>Pending JS8 MSGs</strong>: Shows pending message IDs and actions. <em>Get</em> sends a JS8 QUERY MSG to the callsign; <em>Mark Retrieved</em> clears the pending entry (and can mark JS8 inbox rows READ if enabled in Settings).</li>
-    <li><strong>Filters row</strong>: MSG Type, Status, From, To dropdowns plus free-text Search and <em>Clear Filters</em>. From/To fields are searchable; typing replaces the hint and narrows matches. Status includes <em>Action Needed</em> when red flags exist.</li>
-    <li><strong>Mark All as Read</strong>: Enabled only when a specific <em>MSG Type</em> filter is selected. Marks unread rows in the current filtered view (same message type scope) as READ in bulk.</li>
-    <li><strong>Messages table</strong>: Columns are MSG Type, Status, From, To, RCV_DT (UTC), Message Title, Actions. Actions show <em>View</em> for all rows; a flag icon (between View/Delete) for all rows; and <em>Delete</em> for JS8/VarAC/file-based entries and Spotter (F!###) messages.</li>
-    <li><strong>Flags</strong>: Click the flag icon to cycle None -> Red -> Green -> None. Red flags indicate follow-up needed and are included in the Status filter as <em>Action Needed</em>.</li>
-    <li><strong>Sorting</strong>: Click headers to sort by MSG Type, Status, From, To, RCV_DT, or Message Title (Actions is not sortable).</li>
-    <li><strong>Reader panel</strong>: The lower pane shows the selected message and remains open while you review entries.</li>
-    <li><strong>Loading indicator</strong>: A “Brewing it fresh...” message appears to the right of the Messages tab title while data refresh is running, and disappears when refresh completes.</li>
-    <li><strong>Time display</strong>: All message timestamps are displayed in UTC for consistency across message sources.</li>
-  </ol>
-  <p><strong>Notifications and prompts</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Send MSG</strong>: When clicking <em>Get</em> in Pending JS8 MSGs, a confirmation dialog shows the exact QUERY MSG string before sending.</li>
-    <li><strong>Missing Callsign</strong>: If your callsign is not configured, a warning appears when attempting to send a QUERY MSG.</li>
-    <li><strong>Delete Selected</strong>: Deletes only checked rows. The button highlights only when at least one row is checked. The confirmation includes counts by message type and the results report Deleted/Skipped/Failed.</li>
-    <li><strong>Row selection</strong>: Use the checkbox column to select rows. The header checkbox is a master select/deselect for the current filtered view and is enabled only when a filter or search term is active.</li>
-    <li><strong>Delete File</strong>: File-based messages prompt <em>Move this file to the Recycle Bin?</em> and show size/modified time. Failure shows <em>Failed to move file to the Recycle Bin.</em></li>
-    <li><strong>Delete Message</strong>: JS8 deletions show <em>Message {ID} Deleted</em> or <em>Failed to delete Message {ID}</em>. VarAC deletions confirm with <em>Delete VarAC message {ID}?</em> and then show the same success/failure toast.</li>
-    <li><strong>Delete Spotter</strong>: Spotter (F!###) messages are deleted from the local <code>spotter_traffic</code> table after confirmation.</li>
+    <li><strong>Signature verification</strong>: <code>Verify FLAMP .k2s/.b2s signatures</code>.</li>
+    <li><strong>Checksum verification</strong>: <code>Verify FLAMP .k2s/.b2s checksum sidecars</code>.</li>
+    <li><strong>Trusted hash actions</strong>: <code>Add</code>, <code>Import Hash File</code>, <code>Remove Selected</code>.</li>
+    <li><strong>GPG actions</strong>: <code>Browse</code>, <code>Test</code>, <code>Refresh Keys</code>, <code>Import Key File</code>, <code>Import Armored Key</code>, <code>Local-Sign Selected</code>.</li>
+    <li><strong>Key table columns</strong>: <code>Trusted</code>, <code>Fingerprint</code>, <code>User IDs</code>.</li>
+    <li><strong>Trusted hash table columns</strong>: <code>Use</code>, <code>Algorithm</code>, <code>Hash</code>, <code>Label</code>.</li>
   </ul>
 
-<h2 id="digi-ssb-ncs">NCS-FLDigi/SSB Tab</h2>
-  <p><strong>Purpose</strong>: Manage FLDigi-based digital nets and SSB voice nets using the same workflow.</p>
-  <p><strong>SSB note</strong>: For voice nets, you manually enter check-ins; activity is still captured via check-in files so ControlFreq and HF Operators reflect participation.</p>
-  <p><strong>Typical workflow</strong>: Pick role and net name, QSY if needed, start net, collect check-ins into Main/New-Late, save/merge as needed, then end net to persist and import results.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
+  <h2 id="help">Help</h2>
+  <p><strong>Purpose</strong>: in-app documentation viewer for this guide.</p>
   <ul class="section-list">
-    <li><strong>Net lifecycle gating</strong>: Start/End/Save workflows follow net-in-progress state and prompt when required fields are missing.</li>
-    <li><strong>Schedule interaction</strong>: QSY pauses scheduler enforcement until resumed; scheduled transitions can auto-end active net when applicable.</li>
-    <li><strong>Lookup ergonomics</strong>: Operator lookup and Add-to-panel controls support keyboard-centric net operations.</li>
-    <li><strong>Voice net capture</strong>: Manual check-in entries are saved to check-in files and counted as activity.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Header clocks</strong>: UTC and Local update live at the top.</li>
-    <li><strong>Next Scheduled Net</strong>: Banner shows the next scheduled net; also reflects scheduler pause state.</li>
-    <li><strong>Role</strong>: Dropdown with NCS/ANCS/JOINER; the role is appended to your own line when the net starts.</li>
-    <li><strong>Net Name</strong>: Editable dropdown with schedule-driven suggestions.</li>
-    <li><strong>QSY controls</strong>: QSY dropdown (HF Operating Groups) and QSY button. QSY changes frequency immediately and pauses schedule enforcement until you click <em>Resume Schedule</em>.</li>
-    <li><strong>Ad Hoc Net</strong>: Generates a UTC-stamped net name and starts the net.</li>
-    <li><strong>Operator Lookup/Add</strong>: Search field that auto-fills known operators. Tab/Enter cycles through Add buttons; active button highlights for keyboard flow.</li>
-    <li><strong>Add to Main / Add to New/Late</strong>: Inserts the lookup line into the corresponding panel.</li>
-    <li><strong>Compare NCS Lists</strong>: Opens a dialog with <em>Compare</em>, <em>Copy Missing</em>, and <em>Close</em> to reconcile your list against an NCS list.</li>
-    <li><strong>Copy</strong>: Copies the full Main or New/Late text to the clipboard.</li>
-    <li><strong>Main Check-in Log</strong>: Editable text area for primary check-ins.</li>
-    <li><strong>New/Late Check-ins</strong>: Editable text area for late or follow-up entries.</li>
-    <li><strong>Start Net</strong>: Clears files, writes your operator line, and begins the net session.</li>
-    <li><strong>Save Check-ins</strong>: Writes both panes to the configured check-in files.</li>
-    <li><strong>Merge Check-ins</strong>: Moves New/Late entries into Main and clears New/Late.</li>
-    <li><strong>End Net</strong>: Saves, imports check-ins into Operator History, and ends the net. Can auto-end if a scheduled frequency change occurs and the scheduler is not paused.</li>
-  </ol>
-  <p><strong>Notifications and prompts</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Missing Net Name</strong>: <em>Enter Net Name before starting the net.</em></li>
-    <li><strong>File Error</strong>: If check-in files cannot be created or accessed.</li>
-    <li><strong>Net In Progress</strong>: When starting an Ad Hoc net while another net is active.</li>
-    <li><strong>Replace Net Name</strong>: Confirmation before replacing a typed net name with an Ad Hoc name.</li>
-    <li><strong>Saved</strong>: <em>Check-in logs saved.</em></li>
-    <li><strong>End Net</strong>: Confirmation dialog; if the main file is empty, an additional prompt asks to end without importing check-ins.</li>
-    <li><strong>Net Ended</strong>: Either reports the number of imported check-ins or that no valid check-ins were found.</li>
-    <li><strong>Compare NCS Lists</strong>: <em>Full Match</em> or <em>No missing entries to copy.</em> when appropriate.</li>
-    <li><strong>QSY</strong>: Warnings for missing selection or scheduler unavailable; success message indicates the schedule is paused until resumed.</li>
-    <li><strong>Scheduling resumed</strong>: Informational message when a paused schedule resumes.</li>
+    <li><strong>Table of Contents</strong> (left): click headings to navigate.</li>
+    <li><strong>Guide viewer</strong> (right): renders <code>docs/guide.html</code>.</li>
+    <li><strong>Export to PDF</strong>: exports the displayed guide.</li>
   </ul>
 
-<h2 id="js8-ncs">NCS-JS8 Tab</h2>
-  <p><strong>Purpose</strong>: Manage JS8Call net check-ins, ACKs, and spotter forms.</p>
-  <p><strong>Typical workflow</strong>: Set group and optional expected form, start net, monitor check-ins by filter, ACK/query as needed, save check-ins, then end net and optionally transmit concluded message.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
+  <h2 id="logs-viewer">Logs Viewer (from Settings)</h2>
+  <p>Logs are opened from <code>Settings &gt; Logging &amp; Diagnostics &gt; Open Logs</code>.</p>
+  <p><strong>Toolbar actions</strong>: <code>Refresh</code>, <code>Clear</code>, <code>Search</code>, <code>Open Log</code>, font size control, and global log level selector.</p>
+
+  <h2 id="time-and-storage">Time and Storage Rules</h2>
   <ul class="section-list">
-    <li><strong>Pre-start requirements</strong>: Callsign, net name, and group prerequisites are enforced before start.</li>
-    <li><strong>Action scoping</strong>: ACK/query actions apply to group or selected callsign as labeled.</li>
-    <li><strong>Delete gating</strong>: Delete action appears only in allowed mode/filter states to prevent accidental check-in loss.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Header clocks</strong>: UTC and Local update live at the top.</li>
-    <li><strong>Role</strong>: Dropdown with NCS/ANCS.</li>
-    <li><strong>Net Name</strong>: Text field with schedule-based auto-complete. Auto-prefills when a scheduled net is within the next 20 minutes of its early-check-in time.</li>
-    <li><strong>Refresh (sec)</strong>: Polling interval for JS8 (5-300 seconds).</li>
-    <li><strong>Set Group</strong>: Button plus group field (use @GROUP format). Required to start a net.</li>
-    <li><strong>Set Expect Query</strong>: Button plus Spotter dropdown (F!###). The dropdown is disabled if no forms are found.</li>
-    <li><strong>QSY controls</strong>: QSY dropdown (HF Operating Groups) and QSY button. QSY pauses the scheduler until you click <em>Resume Schedule</em>.</li>
-    <li><strong>Ad Hoc Net</strong>: Starts a net with a timestamped name.</li>
-    <li><strong>Check-in Filter</strong>: Dropdown with F!103 / F!104, Any Spotter, and All Callsigns.</li>
-    <li><strong>Check-ins table</strong>: Columns are CALLSIGN, NAME, ST, GRID, REGION, MODE, SNR, OFFSET, STATUS, and Actions.</li>
-    <li><strong>Delete action</strong>: The Actions column shows <em>Delete</em> only when a net is in progress and the filter is <em>All Callsigns</em>.</li>
-    <li><strong>Start Net</strong>: Clears and begins monitoring.</li>
-    <li><strong>ACK GROUP / ACK CALLSIGN</strong>: Sends acknowledgments to all NEW check-ins or the selected callsign.</li>
-    <li><strong>E? GROUP / E? Callsign</strong>: Sends a spotter form query to the group or selected callsign.</li>
-    <li><strong>Save Checkins</strong>: Saves this net's check-ins to the DB and updates HF Operators.</li>
-    <li><strong>End Net</strong>: Ends the net and writes a net log file in a <code>net_logs</code> folder next to DIRECTED.TXT.</li>
-  </ol>
-  <p><strong>Notifications and prompts</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Missing Net Name</strong>: <em>Enter Net Name before starting the net.</em></li>
-    <li><strong>Missing Callsign</strong>: <em>Configure your callsign in the Settings tab.</em></li>
-    <li><strong>DIRECTED.TXT Not Configured</strong>: Prompts to set JS8Call DIRECTED.TXT in Settings.</li>
-    <li><strong>Group Required</strong>: <em>Set Call Group to Start Net.</em></li>
-    <li><strong>Net In Progress</strong>: When starting an Ad Hoc net while another net is active.</li>
-    <li><strong>Replace Net Name</strong>: Confirmation before replacing a typed net name with an Ad Hoc name.</li>
-    <li><strong>End Net</strong>: Dialog <em>TX NET CONCLUDED MSG?</em> with YES / NO / END w/o TX. YES transmits a NET CONCLUDED message to the group.</li>
-    <li><strong>Net Ended</strong>: <em>JS8Call net ended and log saved.</em></li>
-    <li><strong>Spotter</strong>: Warnings for missing forms, missing group, or missing callsign; confirmations for <em>Send this JS8Call message?</em></li>
-    <li><strong>ACK</strong>: Info messages for missing net, no NEW check-ins, or no callsigns; confirmation dialog <em>SEND ACK?</em></li>
-    <li><strong>Saved</strong>: <em>Check-ins recorded for this net.</em></li>
+    <li>UTC is the storage truth for schedules and SOP timing.</li>
+    <li>Display toggles do not rewrite stored schedule times.</li>
+    <li>CSV/JSON import tools validate required fields and may skip invalid rows with summary feedback.</li>
   </ul>
 
-<h2 id="local-ncs">NCS-Local Tab</h2>
-  <p><strong>Purpose</strong>: Run local community nets (VHF/UHF/GMRS/MURS/FRS workflows) using the Local Operators roster with one session-scoped check-in log.</p>
-  <p><strong>Typical workflow</strong>: Set/confirm Net Name and Channels, click <em>Start Net</em> (or <em>Join Net</em>), use Lookup + <em>Add Check-in</em>, update SitRep/notes as traffic arrives, then <em>End Net</em> to close the session.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
+  <h2 id="troubleshooting">Troubleshooting</h2>
   <ul class="section-list">
-    <li><strong>Session gating</strong>: Lookup add/write actions require an active local net session.</li>
-    <li><strong>Session isolation</strong>: Each local net run is treated as a unique session; ending net clears the visible check-in table for next run.</li>
-    <li><strong>Keyboard consistency</strong>: Enter in Lookup resolves/autofills selected operator; add/write occurs through <em>Add Check-in</em> action.</li>
-    <li><strong>Autosave safety</strong>: SitRep/notes edits autosave periodically (about every 30s) and on tab deactivation/exit.</li>
+    <li>If a button appears disabled, confirm required row selection or required fields.</li>
+    <li>If schedule behavior is unexpected, check <code>Schedule Status</code> first (paused/off-schedule/manual mode reasons).</li>
+    <li>If message actions are missing (for example <code>+BBS</code>), verify required Settings paths are configured.</li>
+    <li>If signature/hash states are neutral, verify Message Auth settings and trusted key/hash entries.</li>
   </ul>
-  <ol class="section-list">
-    <li><strong>Role</strong>: Fixed to NCS for local net workflow.</li>
-    <li><strong>Net Name / Channels</strong>: Persistent context fields saved in settings for quick restart continuity.</li>
-    <li><strong>Start Net</strong>: Begins a local net session. If Net Name is blank, an ad hoc UTC-stamped local net name is generated.</li>
-    <li><strong>Join Net</strong>: Joins an existing local net session model; requires Net Name.</li>
-    <li><strong>End Net</strong>: Ends active session after confirmation and clears current session table.</li>
-    <li><strong>Operator Lookup/Add</strong>: Type callsign/name/state, use autocomplete, press Enter to resolve one match, then click <em>Add Check-in</em> (or press Enter/Space on the button).</li>
-    <li><strong>Refresh / Export CSV</strong>: Reload session rows and export current local check-in rows.</li>
-    <li><strong>Check-in table columns</strong>: Check-in UTC, Callsign, Name, City, State, Category, SitRep, Notes.</li>
-    <li><strong>Filter controls</strong>: Search plus SitRep filter (All/GREEN/YELLOW/RED).</li>
-    <li><strong>Entry editor</strong>: Selected row exposes SitRep + Notes editor; use <em>Save Entry</em> for immediate write or rely on autosave.</li>
-  </ol>
-  <p><strong>SitRep semantics</strong>:</p>
-  <ul class="section-list">
-    <li><strong>GREEN</strong>: All ok.</li>
-    <li><strong>YELLOW</strong>: Situation has risks.</li>
-    <li><strong>RED</strong>: Priority issue.</li>
-  </ul>
-  <p><strong>Local NCS export CSV fields</strong>:</p>
-  <ul class="section-list">
-    <li><code>id, checkin_utc, net_name, channels, callsign, name, city, state, category, sitrep_status, notes</code></li>
-  </ul>
-
-<h2 id="operators">HF Operators Tab</h2>
-  <p><strong>Purpose</strong>: Maintain operator records used by maps and nets.</p>
-  <p><strong>Typical workflow</strong>: Import CSV, normalize roles, bulk-edit Trusted/Role where needed, then export by group for peer or field use.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Bulk select guardrail</strong>: Header checkbox enables only when filter/search is active.</li>
-    <li><strong>Role normalization</strong>: Group Role values are constrained to the standardized list (plus blank).</li>
-    <li><strong>Export-group multi-select</strong>: Group checkmarks persist while popup is open; header text updates to selected count.</li>
-    <li><strong>Theme readability</strong>: In dark theme, export-group check indicators use explicit contrast styling.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Search</strong>: Text box that filters by any column (case-insensitive).</li>
-    <li><strong>Filter by</strong>: Dropdown with All, Untrusted, Blank, and any discovered group names. Use it to scope the table and exports.</li>
-    <li><strong>Clear Filters</strong>: Resets Search and Filter by back to defaults.</li>
-    <li><strong>Manage Operators</strong>: Menu with <em>Add Operator...</em>, <em>Edit Selected...</em> (bulk trusted + bulk group role update), and <em>Delete Selected...</em>. Selection is via the checkbox column.</li>
-    <li><strong>Bulk select</strong>: The header checkbox selects/deselects all visible rows in the current filtered view. It is enabled only when a filter or search term is active.</li>
-    <li><strong>Export by Group</strong>: Checkbox dropdown. The header shows <em>Export by Group</em> or <em>N Selected</em>. The first row says <em>Select groups...</em> (not checkable). You can select any number of groups; selections are cleared after a successful export.</li>
-    <li><strong>Export by Group selection behavior</strong>: Click group rows to toggle checkmarks. On Linux and Windows, checked items should remain selected and the header should update to <em>N Selected</em>.</li>
-    <li><strong>Import/Export...</strong>: Menu with <em>Import CSV...</em> and <em>Export CSV...</em>.</li>
-    <li><strong>Operators table</strong>: Columns are Select (checkbox), Callsign, SitRep, Name, State, Grid, Groups (summary), Group Role, First Seen, Last Seen, Trusted, Check-ins. Group 1/2/3 are stored but hidden by default. Click a column header to sort.</li>
-    <li><strong>SitRep column behavior</strong>: Each row shows a clickable status chip (<em>R/Y/G/?</em>). Click the chip to set manual status (Green/Yellow/Red/Unknown). Newer incoming reports can replace manual status.</li>
-    <li><strong>Edit Groups</strong>: Double-click the Groups column to edit the full group list for that callsign (one group per line).</li>
-    <li><strong>Bulk edit/delete summaries</strong>: Bulk trust edits and deletes show summary counts (Updated/Deleted, Skipped, Failed).</li>
-    <li><strong>Loading indicator</strong>: A “Brewing it fresh...” message appears to the right of the Operators tab title while data refresh is running, and disappears when refresh completes.</li>
-    <li><strong>Add/Edit dialog fields</strong>: Callsign, Name, State, Grid, Group 1/2/3, Group Role, First Seen, Last Seen, Trusted ("do I trust their reports?"). Group Role is standardized to blank, HUB, HUB-ALT, NCS, ANCS, or PEER.</li>
-  </ol>
-  <p><strong>Export behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Required selection</strong>: Export requires selecting one or more groups in the Export by Group dropdown.</li>
-    <li><strong>Filtering</strong>: Export uses the current filter/search and/or selected rows; only trusted records with at least one group are exported.</li>
-    <li><strong>Groups column</strong>: The exported <code>groups</code> field contains only the selected groups that are actually associated with each callsign (row-specific intersection).</li>
-    <li><strong>Filename</strong>: Defaults to <code>CALLSIGN_group1_group2_group3_yyyymmdd.csv</code> using the selected groups.</li>
-  </ul>
-  <p><strong>Notifications and prompts</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Export CSV</strong>: Prompts to select one or more groups before exporting; shows <em>No rows to export</em> if nothing matches.</li>
-    <li><strong>Export by Group visual checkmarks</strong>: In dark theme, check indicators in the export-group popup are rendered with explicit contrast styling for readability.</li>
-    <li><strong>CSV Import</strong>: Success and error messages report imported/skipped counts or failures.</li>
-    <li><strong>Delete Selected</strong>: Confirmation required before deleting operator records.</li>
-  </ul>
-
-<h2 id="local-operators">Local Operators Tab</h2>
-  <p><strong>Purpose</strong>: Maintain a local roster for VHF/UHF/GMRS/MURS/FRS workflows and supply fast lookup data for <a href="#local-ncs">NCS-Local</a>.</p>
-  <p><strong>Typical workflow</strong>: Import or add local operators, filter by category/search, keep SitRep and notes current, then use the same records during Local NCS check-in operations.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Sortable table</strong>: Click any column header to sort.</li>
-    <li><strong>Selection-driven actions</strong>: <em>Edit Selected</em> and <em>Delete Selected</em> highlight only when one or more rows are selected.</li>
-    <li><strong>SitRep readability</strong>: SitRep cells are color-coded (Green/Yellow/Red) for quick scanning.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Search</strong>: Filters by callsign, first/last name, city, state, category, sitrep, or notes.</li>
-    <li><strong>Category filter</strong>: Limits rows to one service category (for example VHF, UHF, GMRS, MURS, FRS, Other).</li>
-    <li><strong>Actions row</strong>: <em>Refresh</em>, <em>Add</em>, <em>Edit Selected</em>, <em>Delete Selected</em>, <em>Import CSV</em>, <em>Export CSV</em>.</li>
-    <li><strong>Table columns</strong>: Selected, Callsign, First Name, Last Name, City, State, Category, First Seen, Last Seen, Check-ins, SitRep, Notes.</li>
-    <li><strong>Add/Edit dialog fields</strong>: Callsign (required), First Name, Last Name, City, State, Category, SitRep, Notes.</li>
-    <li><strong>Name handling</strong>: If only a full name exists in imported data, the app splits it into first/last where possible; display name is composed from first+last when needed.</li>
-    <li><strong>CSV import requirement</strong>: Callsign is required. Other fields are optional and are mapped from common aliases.</li>
-    <li><strong>CSV import accepted headers</strong>: <code>callsign</code> (or <code>call</code>), <code>first_name</code>/<code>last_name</code> (or <code>name</code>), <code>city</code>, <code>state</code>, <code>category</code>, <code>notes</code>, <code>first_seen_utc</code>, <code>last_seen_utc</code>, <code>checkin_count</code>, <code>sitrep_status</code>.</li>
-    <li><strong>CSV export fields</strong>: <code>callsign, first_name, last_name, name, city, state, category, first_seen_utc, last_seen_utc, checkin_count, notes, sitrep_status</code>.</li>
-  </ol>
-
-<h2 id="map">Map Tab</h2>
-  <p><strong>Purpose</strong>: Visualize operators, grids, JS8/VarAC link history, and live propagation guidance.</p>
-  <p><strong>Typical workflow</strong>: Start broad (All paths / Any recency), then narrow by group, region, band, and recency until only actionable paths remain. When you want propagation guidance, enable the propagation overlay and pick a mode.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>WebEngine dependency</strong>: If Qt WebEngine is unavailable, map panel shows a disabled/fallback state.</li>
-    <li><strong>Sidebar sync</strong>: Map Layers sidebar reflects and controls the active map rendering preferences.</li>
-    <li><strong>Refresh semantics</strong>: <em>Refresh Links</em> forces ingest/redraw cycle using current filters.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Map link controls row</strong>: Paths (Off/My Station/All), Group, Region, Band, Recency (Any, 15m, 30m, 1h, 3h, 6h, 12h, 24h, 7d), Paths to (editable/searchable callsign), <em>Peer Sched Now</em>, <em>SitRep Status</em>, and <em>Refresh Links</em>.</li>
-    <li><strong>Map controls panel</strong>: Use the splitter chevron between the controls pane and map to collapse/expand controls quickly.</li>
-    <li><strong>Map Layers (sidebar)</strong>: Only visible when Map is active. Checkboxes for Callsigns, States, Cities, Grids, Regions plus a City Pop. dropdown.</li>
-    <li><strong>Propagation controls</strong>: Propagation Overlay toggle, Mode selector (Actual / Blended / Modeled), Propagation Window, Target Type, and Target Value.</li>
-    <li><strong>Target vs Region filter</strong>: The map row <em>Region</em> dropdown filters displayed paths. Propagation Target controls the recommendation target used by the propagation badge and shared forecast target settings.</li>
-    <li><strong>Paths to</strong>: Filters link highlights to paths that reach a specific callsign.</li>
-    <li><strong>Refresh Links</strong>: Forces JS8 log ingest and redraw.</li>
-    <li><strong>Map view</strong>: Requires Qt WebEngine; if unavailable, a disabled message is shown instead of the map.</li>
-    <li><strong>Tooltips</strong>: Station tooltips include JS8 and VarAC fields when data exists: JS8 Last Seen, JS8 Spotter, JS8 Last Band, JS8 Direct SNR (and traffic count), JS8 Avg SNR (and traffic count), VarAC Last Seen, VarAC Last Band, VarAC SNR, and SitRep status/source/timestamp.</li>
-    <li><strong>Peer Sched Now</strong>: Filters to peers whose peer schedule is active now on your active schedule frequency. This is schedule alignment only, not a propagation or connection guarantee. Purple marker outline indicates QSY in less than 10 minutes; unknown timing appears as <em>QSY ?</em> in tooltips.</li>
-    <li><strong>Toggle state styling</strong>: <em>Peer Sched Now</em> and <em>SitRep Status</em> keep fixed labels; ON state is indicated by blue info styling.</li>
-    <li><strong>SitRep Status mode</strong>: When enabled, map shows only stations with known SitRep status (Red/Yellow/Green), hides links, and overrides normal path/link filters until toggled off.</li>
-  </ol>
-  <h3 id="map-propagation">Propagation Overlay (New)</h3>
-  <p><strong>Purpose</strong>: Show the best probable band from <em>your station</em> to each region/state based on the selected mode, time-of-day, and available observed data.</p>
-  <ul class="section-list">
-    <li><strong>Overlay activation</strong>: Turn on <em>Propagation Overlay</em> in the Map Layers box to color the map by recommended band and enable the propagation badge summary.</li>
-    <li><strong>Mode selection</strong>: Choose <em>Actual</em>, <em>Blended</em>, or <em>Modeled</em>. This changes both overlay scoring and badge recommendation behavior.</li>
-    <li><strong>Propagation Window</strong>: Controls how far back observed traffic is considered for Actual/Blended map scoring. Modeled ignores this window.</li>
-    <li><strong>Target Type/Value</strong>: Sets the target used by propagation recommendations. Region supports <em>ALL</em> (National lower-48), R01-R10, plus State or Operator targets.</li>
-    <li><strong>How target appears in UI</strong>: Badge first line shows <em>Target: ...</em>. Changing target immediately updates the badge recommendation. Overlay remains nationwide; target does not crop the map.</li>
-    <li><strong>Band colors</strong>: Band colors are pulled from your FreqPlanner band color palette.</li>
-  </ul>
-  <h3 id="map-propagation-modes">Mode meanings (Actual / Blended / Modeled)</h3>
-  <ul class="section-list">
-    <li><strong>Actual</strong>: Ignores modeled baseline and uses observed evidence only (JS8/VarAC link history + peer schedule presence within the selected window).</li>
-    <li><strong>Blended</strong>: Combines modeled baseline with observed evidence. Target recommendations can also apply offline historical outcome blending when enabled and sufficiently confident.</li>
-    <li><strong>Modeled</strong>: Uses the offline propagation model only. This is best when you have limited recent traffic or want a baseline prediction.</li>
-  </ul>
-  <h3 id="map-propagation-window">Propagation Window</h3>
-  <p><strong>Purpose</strong>: Define how much recent traffic informs the <em>Actual</em> and <em>Blended</em> modes.</p>
-  <ul class="section-list">
-    <li><strong>Options</strong>: 1h, 3h, 6h, 12h, 24h, or History (7d).</li>
-    <li><strong>Recency vs propagation</strong>: <em>Recency</em> filters the visible map links; <em>Propagation Window</em> controls the actual/observed weighting for the overlay. They are independent.</li>
-  </ul>
-  <h3 id="map-propagation-reading">How to read the overlay</h3>
-  <ul class="section-list">
-    <li><strong>State colors</strong>: When propagation is enabled and Regions are off, each state is colored by its best band for your station.</li>
-    <li><strong>Region colors</strong>: When Regions are on, regions keep their regional color. The recommended band for each region appears as a band label beneath the region label.</li>
-    <li><strong>Tooltips</strong>: Labels show <em>Band (LOW/MED/HIGH)</em> confidence. Lower confidence suggests marginal propagation or sparse observation.</li>
-    <li><strong>Best Now summary</strong>: The Propagation badge shows <em>Target</em>, <em>Best Now</em>, and (when different) <em>Schedule</em> band for quick validation/QSY decisions.</li>
-  </ul>
-  <h3 id="map-propagation-modeling">How Propagation Modeling Works (Offline)</h3>
-  <ul class="section-list">
-    <li><strong>Origin and targets</strong>: The model starts from your configured Grid 6 and evaluates lower-48 target points (National/Region/State/Operator-derived).</li>
-    <li><strong>Baseline modeled score</strong>: Uses local climatology/profile data, path distance, and local-day/night weighting to score each candidate band.</li>
-    <li><strong>Schedule-based vs Modeled</strong>: Schedule-based ranking is restricted to today’s scheduled bands; Modeled ranking evaluates all supported HF bands.</li>
-    <li><strong>Observed evidence input</strong>: Actual/Blended map modes incorporate local observed traffic and peer schedule presence over the selected propagation window.</li>
-    <li><strong>Historical outcomes input</strong>: Target-specific recommendations can blend in local historical contact outcomes using recency decay, confidence gates, and Bayesian smoothing.</li>
-    <li><strong>Fully offline execution</strong>: All scoring uses local app data; no internet connectivity is required for forecast generation.</li>
-  </ul>
-  <h3 id="map-propagation-novice">Novice workflow</h3>
-  <ol class="section-list">
-    <li>Enable <strong>Propagation Overlay</strong>.</li>
-    <li>Select <strong>Blended</strong> for balanced guidance.</li>
-    <li>Choose a <strong>Propagation Window</strong> of 6h or 12h.</li>
-    <li>Set <strong>Target Type/Value</strong> for your destination (for broad planning, use Region = <strong>ALL</strong>).</li>
-    <li>Use the colored state/region guidance to decide which band to check first.</li>
-  </ol>
-  <h3 id="map-propagation-expert">Expert notes</h3>
-  <ul class="section-list">
-    <li><strong>Distance + day/night behavior</strong>: Modeled uses distance class (NVIS / regional / long-path) and local day/night weighting based on midpoint time between you and the target.</li>
-    <li><strong>Grid accuracy matters</strong>: Operator Grid 6 fields directly influence distance and weighting. Missing/incorrect grids degrade predictions.</li>
-    <li><strong>Peer schedules vs traffic</strong>: Peer schedules are treated as observed intent. Actual/Blended mode will weight them within the Propagation Window.</li>
-    <li><strong>Use Modeled for planning</strong>: If you are planning for expected conditions rather than recent activity, Modeled gives you a clean baseline.</li>
-  </ul>
-  <p><strong>Troubleshooting tips</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Overlay looks empty</strong>: Ensure your own Grid 6 is set in Settings and the Propagation Overlay is enabled.</li>
-    <li><strong>Unexpected band choice</strong>: Try Modeled to compare, then Blended to see how recent activity changes the result.</li>
-    <li><strong>No observed impact</strong>: Confirm JS8 Traffic load has run and that peer schedules have been imported.</li>
-  </ul>
-
-<h2 id="hf-schedule">HF Schedule Tab</h2>
-  <p><strong>Purpose</strong>: Plan routine operating blocks.</p>
-  <p><strong>Typical workflow</strong>: Define recurring operating windows by group/frequency, save, confirm in FreqPlanner, and use QSY for ad hoc moves that intentionally pause enforcement.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Validation on save</strong>: Invalid time/frequency rows are skipped with explicit feedback.</li>
-    <li><strong>Display conversion</strong>: Local view converts to UTC on save; underlying storage remains UTC.</li>
-    <li><strong>Delete emphasis</strong>: Delete Selected highlights when row checkboxes are active.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Header clocks</strong>: UTC and Local update live.</li>
-    <li><strong>Showing: UTC/Local</strong>: Toggle the time display only. When in Local view, times are converted to UTC on save.</li>
-    <li><strong>QSY controls</strong>: QSY dropdown (HF Operating Groups) and QSY button. QSY applies frequency immediately and pauses the scheduler until resumed.</li>
-    <li><strong>SOP Runtime panel</strong>: Shows <em>Now</em>/<em>Next</em> effective source context and active SOP counts in the HF tab.</li>
-    <li><strong>Active SOP controls</strong>: Only SOP sets are listed for one-click <em>Activate</em>/<em>Deactivate</em>; baseline HF schedule is not an activatable/deactivatable set.</li>
-    <li><strong>SOP naming clarity</strong>: Tooltips distinguish <em>Group Name (HF)</em> vs <em>SOP Group</em> to reduce interpretation errors during live operations.</li>
-    <li><strong>Schedule Issues</strong>: Shows <em>Conflict</em>, <em>Needs Review</em>, and <em>Info</em> issues with direct actions (<em>Open SOP</em>, <em>Deactivate SOP</em>, <em>Adjust Daily Row</em>) and <em>Dismiss Until Change</em>.</li>
-    <li><strong>Schedule Resources</strong>: Consolidated read-only workspace for NET, SOP, and HF rows with source/category/text filters and explicit priority context.</li>
-    <li><strong>Schedule table</strong>: Columns are Select, Day, Group Name, Mode, Band, Freq (MHz), Start, End, Auto-Tune. The table is not sortable.</li>
-    <li><strong>Add Row</strong>: Inserts a new schedule row.</li>
-    <li><strong>Delete Selected</strong>: Removes checked rows. The button highlights only when at least one row is checked.</li>
-    <li><strong>Save HF Schedule</strong>: Saves to the database and refreshes FreqPlanner.</li>
-    <li><strong>Export HF Schedule</strong>: Exports JSON in UTC with your callsign and date in the filename.</li>
-  </ol>
-  <p><strong>Validation and formatting</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Time format</strong>: Start/End must be HH:MM (24-hour). Invalid rows are skipped and reported.</li>
-    <li><strong>Frequency required</strong>: Every row must have a frequency.</li>
-    <li><strong>Band limits</strong>: Frequencies are validated against band/mode ranges; 60M accepts only the standard channels.</li>
-  </ul>
-  <p><strong>Notifications and prompts</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Partial Save</strong>: Lists skipped rows (invalid times).</li>
-    <li><strong>Save Failed / DB Save Error</strong>: Shown if saving to settings or DB fails.</li>
-    <li><strong>Saved</strong>: <em>HF Frequency Schedule saved.</em></li>
-    <li><strong>Export</strong>: <em>No HF schedule rows to export.</em> or <em>HF schedule exported to: ...</em></li>
-    <li><strong>QSY</strong>: Warnings for missing selection or scheduler unavailable; success message indicates the schedule is paused until resumed.</li>
-    <li><strong>Scheduling resumed</strong>: Informational message when a paused schedule resumes.</li>
-  </ul>
-
-<h2 id="net-schedule">Net Schedule Tab</h2>
-  <p><strong>Purpose</strong>: Define active net windows and manage reusable Net Resources catalogs (including seasonal imported sets).</p>
-  <p><strong>Typical workflow</strong>: Build/maintain active net rows, pull reusable rows from Net Resources into the active schedule, save, then verify behavior in FreqPlanner and NCS tabs.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Recurrence coupling</strong>: Recurrence choice drives Day/Weeks field behavior (enable/disable/required).</li>
-    <li><strong>Early-check-in rules</strong>: Early minutes expand start window for net activation and NCS readiness.</li>
-    <li><strong>Dirty-state save cue</strong>: <em>Save Net Schedule</em> highlights only when unsaved row edits exist.</li>
-    <li><strong>Resource catalog model</strong>: JSON imports feed Net Resources first; operators promote selected resource rows into the active schedule.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Header clocks</strong>: UTC and Local update live.</li>
-    <li><strong>Showing: UTC/Local</strong>: Toggle the Day/Start/End display only. When in Local view, Day/Start/End are converted to UTC on save (including Daily/ALL rows).</li>
-    <li><strong>Schedule table</strong>: Columns are Select, Day (UTC/Local), Recurrence, Weeks of Month, Group Name, Mode, Band, Freq (MHz), Start, End, Early (min), FLDigi Mode, FLDigi Offset, Net Name, Auto-Tune. The table is not sortable.</li>
-    <li><strong>Recurrence</strong>: Weekly, Daily, or Periodic. Daily forces Day=ALL and disables the Day field. Periodic disables ALL and requires a specific day.</li>
-    <li><strong>Weeks of Month</strong>: Enabled only for Periodic. Accepts digits 1-5 and auto-formats to comma-delimited values (e.g., 135 -> 1,3,5).</li>
-    <li><strong>Add Row</strong>: Inserts a new schedule row.</li>
-    <li><strong>Delete Selected</strong>: Removes checked active-schedule rows.</li>
-    <li><strong>Move Selected to Resources</strong>: Moves checked active-schedule rows into the currently selected Net Resources set.</li>
-    <li><strong>Export Net Schedule</strong>: Exports JSON in UTC.</li>
-    <li><strong>Save Net Schedule</strong>: Saves to the database and refreshes FreqPlanner.</li>
-    <li><strong>Net Resources controls</strong>: Set selector + Search filter + <em>Add to Net Schedule</em> + <em>Manage Net Resources</em> + <em>Edit Selected Resource</em> + <em>Delete Selected Resources</em>.</li>
-    <li><strong>Add to Net Schedule</strong>: Default action adds selected resource rows (or filtered rows when no selection). Menu provides explicit <em>Add Selected to Net Schedule</em> and <em>Add Filtered to Net Schedule</em>.</li>
-    <li><strong>Manage Net Resources menu</strong>: Includes <em>Import JSON...</em> and <em>Export New Resource File</em>. The default click path opens JSON import.</li>
-    <li><strong>Resources table</strong>: Columns are Source, Set, Day (UTC), Recurrence, Weeks, Group, Mode, Band, Freq, Start, End, Early, FLDigi Mode, FLDigi Offset, Net Name, Coverage, Comment, Updated (UTC). Resource table headers are sortable.</li>
-    <li><strong>Built-in seasonal sets</strong>: App-distributed files in <code>config/net_resources</code> load as Winter and Summer sets at bootstrap.</li>
-  </ol>
-  <p><strong>Validation and formatting</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Day required</strong>: Every row must specify a day; Periodic cannot use ALL.</li>
-    <li><strong>Net Name required</strong>: Net Name must be filled before saving.</li>
-    <li><strong>Frequency required</strong>: Validated against band/mode ranges; 60M must use the standard channels.</li>
-    <li><strong>Time format</strong>: Start/End must be HH:MM (24-hour).</li>
-    <li><strong>Early check-in</strong>: Must be 0, 5, 10, or 15.</li>
-  </ul>
-  <p><strong>Notifications and prompts</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Invalid Net Schedule</strong>: Shows the exact row error when validation fails.</li>
-    <li><strong>Saved</strong>: <em>Net Schedule saved.</em></li>
-    <li><strong>Export</strong>: <em>No net schedule rows to export.</em> or <em>Net schedule exported to: ...</em></li>
-    <li><strong>Import mode prompt</strong>: <em>Merge/Update</em> upserts matching rows; <em>Replace Built-in Set</em> also removes missing built-in rows for that target set.</li>
-    <li><strong>Import Failed / Invalid File / No valid rows</strong>: Shown when imported JSON is missing required keys or has no usable rows.</li>
-    <li><strong>Imported</strong>: Import summary reports target set and counts (Inserted/Updated, plus Removed for replace mode).</li>
-  </ul>
-
-<h2 id="peer-schedules">Peer Schedules Tab</h2>
-  <p><strong>Purpose</strong>: Track schedules imported from other operators.</p>
-  <p><strong>Typical workflow</strong>: Import peer files, filter by callsign/region/group, review overlap summaries, and use overlap details to plan coordination windows.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Overlap interaction</strong>: Overlap cells with values are clickable to open detailed intervals.</li>
-    <li><strong>Local display toggle</strong>: Show Local affects rendered columns only; imported data remains UTC-native.</li>
-    <li><strong>Scoped deletion</strong>: Delete controls support single-peer or clear-all workflows with confirmation.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Import Schedule</strong>: Loads a peer HF schedule JSON (UTC).</li>
-    <li><strong>Refresh</strong>: Reloads the list from the database.</li>
-    <li><strong>Delete</strong>: Dropdown for callsigns plus <em>Delete Schedule</em> to remove a single peer schedule. The dropdown also includes <em>Clear All Schedules</em>.</li>
-    <li><strong>Showing: Local/UTC</strong>: Toggle to display DAY/START/END/OVERLAP in Local or UTC. Local headers are labeled <em>(Local)</em> for clarity.</li>
-    <li><strong>Filters</strong>: Callsign dropdown, Region dropdown (R01-R10), Group dropdown, Search field, and <em>Clear Filters</em>.</li>
-    <li><strong>Overlap</strong>: Shows upcoming overlaps for today only (UTC day) where your HF and Net schedules share the same frequency and mode with the peer schedule. Multiple overlaps show a count (e.g., <em>3 overlaps</em>); click the cell to view details.</li>
-    <li><strong>Peer schedule table</strong>: Columns are CALLSIGN, NAME, STATE, GROUPS, DAY, START, END, BAND, MODE, FREQ, OVERLAP. The table is sortable by column header click.</li>
-  </ol>
-  <p><strong>Notifications and prompts</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Overlap Details</strong>: Clicking the Overlap cell opens a details dialog with each HH:MM-HH:MM overlap.</li>
-    <li><strong>Import Failed / Invalid File / No valid rows</strong>: Shown when import JSON is missing keys or invalid.</li>
-    <li><strong>Import</strong>: <em>Imported N rows for CALLSIGN.</em></li>
-    <li><strong>Delete</strong>: Confirmation dialog for delete or clear-all; success or failure messages after DB writes.</li>
-  </ul>
-
-<h2 id="settings">Settings Tab</h2>
-  <p><strong>Purpose</strong>: Configure operator details, scheduler behavior, and integrations.</p>
-  <p><strong>Typical workflow</strong>: Configure identity and control mode first, then operating groups, then JS8/radio paths, then scheduler enforcement behavior, and finally save/test.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Section navigator</strong>: Left-side section list selects one active settings section at a time, giving the selected section maximum workspace.</li>
-    <li><strong>Fixed top sections</strong>: <em>Operator Information</em> and <em>Operating Status</em> remain visible and are not collapsible.</li>
-    <li><strong>Save propagation</strong>: Saving settings triggers downstream tab refreshes and status recalculation.</li>
-    <li><strong>Theme application</strong>: Theme changes apply globally after save/refresh cycle.</li>
-  </ul>
-  <p><strong>Quick links</strong>: <a href="#settings-operator">Operator Information</a> | <a href="#settings-operation">FreqInOut Settings</a> | <a href="#settings-status">Operating Status</a> | <a href="#settings-op-groups">HF Operating Groups</a> | <a href="#settings-js8call">JS8Call Settings</a> | <a href="#settings-fast-light">Fast Light Settings</a> | <a href="#settings-varac">VarAC Settings</a> | <a href="#settings-launch">Launch Control</a> | <a href="#settings-logging">Logging &amp; Diagnostics</a> | <a href="#settings-actions">Save Settings</a></p>
-
-  <h3 id="settings-operator">Operator Information</h3>
-  <ul class="section-list">
-    <li><strong>Header clocks</strong>: UTC and Local update live.</li>
-    <li><strong>Callsign / Name / State / Grid 6</strong>: Used in net control, operator history, and map placement.</li>
-  </ul>
-
-  <h3 id="settings-operation">FreqInOut Settings</h3>
-  <ul class="section-list">
-    <li><strong>Theme</strong>: Light or Dark.</li>
-    <li><strong>Frequency Control</strong>: FLRig, JS8Call, or Manual (no rig commands).</li>
-    <li><strong>Use FreqInOut Scheduler</strong>: Master enable for schedule-driven changes; QSY depends on this.</li>
-    <li><strong>Enforcement timers</strong>: Frequency, FLDigi Mode, and JS8 Offset each have their own enforcement dial. Default is <em>On Schedule Change</em>. Choosing <em>Prompt</em> enables a per-item interval (Hourly / 5 / 10 / 15 / 30 minutes).</li>
-    <li><strong>Off-schedule prompts</strong>: When one or more enabled items first go off schedule, a combined prompt appears listing only the items that are currently off (e.g., <em>Frequency and Offset are Off Schedule</em>). <em>Resume Sched.</em> immediately enforces only the listed items (frequency/mode/offset) and leaves others unchanged. <em>Skip Once</em> dismisses the prompt and resets the timer for those items without applying changes. <em>Pause Sched. 30 Min</em> pauses enforcement for 30 minutes. If unanswered for 2 minutes, the listed items are applied automatically. Repeat prompts follow the selected interval. Using <em>Resume Schedule</em> from the status panel overrides any prior Skip/Pause state.</li>
-    <li><strong>Net handling (scheduled + ad hoc)</strong>: While any net is active (scheduled or Ad Hoc), automatic corrections are suppressed so the operator stays in control. This includes frequency, FLDigi mode/offset, and JS8 offset. At net start, the scheduler may apply the net’s FLDigi mode/offset once (a short initial window) to land you on the net settings; after that, changes you make during the net are left alone. At net end, the scheduler clears any pending/backoff state and immediately resumes the active schedule (frequency + FLDigi mode/offset + JS8 offset) unless scheduling is paused or in Manual control.</li>
-    <li><strong>Activity check (non-NET schedules)</strong>: Before a non-NET scheduled frequency change, the scheduler defers changes when traffic is active: FLRig PTT active, JS8Call busy (TX/RX), VarAC busy/waiting, or FLDigi recent RX activity from the FLDigi log. For HF schedule rows, FLDigi RX deferral is capped at about 10 minutes; after that, the change proceeds. FLDigi gibberish handling includes grace/timeout logic so noise bursts do not hold the schedule indefinitely.</li>
-    <li><strong>NET override behavior (scheduled/ad hoc nets)</strong>: NET-sourced changes bypass JS8Call/VarAC/FLDigi busy deferrals so the scheduled net frequency can take priority. NET override does <em>not</em> bypass global control guards: Manual mode, scheduler disabled, scheduler suspend/pause, or FLRig PTT actively transmitting.</li>
-    <li><strong>VarAC busy detection</strong>: VarAC activity is read from <code>VarAC_traffic.log</code> (and supported VarAC main logs) in the VarAC install folder. Busy conditions include “WAITING FOR FREQUENCY TO CLEAR,” active connections, incoming connection requests, file transfers or “waiting for confirmation of receipt,” and incomplete broadcasts (a broadcast line without a trailing “-” within ~12 seconds). VMAIL relay notifications and your own beacon lines (ending with <code>DE YOURCALLSIGN</code>) are ignored.</li>
-    <li><strong>Wait behavior</strong>: There is no fixed delay timer. Evaluation runs continuously (about every 5 seconds). Non-NET changes apply when activity clears; NET override changes apply on the next evaluation cycle when global guards allow. Manual QSY pauses schedule enforcement until you click <em>Resume Schedule</em>.</li>
-  </ul>
-
-  <h3 id="settings-status">Operating Status</h3>
-  <ul class="section-list">
-    <li><strong>Status LEDs</strong>: JS8 (API reachability), FLRig, FLDigi, FLMsg, FLAmp, VarAC, JS8Spotter, CommStat.</li>
-    <li><strong>Color meaning</strong>: Green running, gray stopped, yellow running but unreachable.</li>
-  </ul>
-
-  <h3 id="settings-op-groups">HF Operating Groups</h3>
-  <ul class="section-list">
-    <li><strong>Add Group</strong>: Opens a dialog to define Group Name, Mode, Band, Frequency, VFO, FLDigi Starting Mode, FLDigi Starting Offset (Hz), and Auto-Tune.</li>
-    <li><strong>Edit Selected</strong>: Edits the checked row (one at a time).</li>
-    <li><strong>Delete Selected</strong>: Removes checked rows.</li>
-    <li><strong>HF Operating Groups table</strong>: Columns are Selected, Group, Mode, Band, Freq (MHz), VFO, FLDigi Starting Mode, FLDigi Starting Offset, Auto-Tune.</li>
-    <li><strong>Defaults</strong>: If Mode is set to SSB, FLDigi Starting Mode is automatically set to SSB.</li>
-  </ul>
-  <p><strong>HF Operating Groups validations</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Group Name required</strong>: Missing name shows a validation warning.</li>
-    <li><strong>Frequency validation</strong>: Invalid numbers or out-of-band values show warnings.</li>
-    <li><strong>FLDigi Starting Offset</strong>: Must be an integer.</li>
-  </ul>
-
-  <h3 id="settings-js8call">JS8Call Settings</h3>
-  <ul class="section-list">
-    <li><strong>TCP Port</strong>: Must match JS8Call configuration.</li>
-    <li><strong>Offset (Hz)</strong>: Applied on startup and on schedule changes.</li>
-    <li><strong>Mark JS8Call MSG Read?</strong>: Syncs Message Viewer <em>Mark Retrieved</em> to JS8Call inbox READ state.</li>
-    <li><strong>JS8Call DIRECTED.TXT</strong>: Path field plus Browse button.</li>
-    <li><strong>JS8Spotter forms</strong>: Path field plus Browse button (MCF###.txt files).</li>
-    <li><strong>JS8Call Install Folder</strong>: Install folder used by launcher/status integration.</li>
-    <li><strong>JS8Spotter Launch Path</strong>: Executable/script/desktop entry path used by Launch Control.</li>
-    <li><strong>CommStat Launch Path</strong>: Executable/script/desktop entry path used by Launch Control.</li>
-    <li><strong>Load JS8 Traffic</strong>: Ingests DIRECTED.TXT/ALL.TXT into Map and HF Operators.</li>
-  </ul>
-  <p><strong>JS8Call notifications</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Missing path</strong>: <em>Please set JS8Call DIRECTED.TXT path first.</em></li>
-    <li><strong>File not found</strong>: <em>DIRECTED.TXT not found at: ...</em></li>
-    <li><strong>JS8 Traffic Loaded</strong>: Success message after ingest.</li>
-    <li><strong>Error</strong>: Ingest failures show the underlying error.</li>
-  </ul>
-
-  <h3 id="settings-fast-light">Fast Light Settings</h3>
-  <ul class="section-list">
-    <li><strong>Program paths</strong>: FLRig, FLDigi, FLMsg, and FLAmp each have path fields with Browse actions.</li>
-    <li><strong>FLRig XMLRPC Port</strong>: Port used for FLRig API control.</li>
-    <li><strong>Check-in File Path</strong>: FLDigi check-in folder plus Browse.</li>
-    <li><strong>FLDigi Log Path</strong>: Select the folder that contains FLDigi log files (e.g., <code>fldigiYYYYMMDD.log</code>). The newest log in that folder is used to detect recent RX activity.</li>
-    <li><strong>ICS/Messages</strong>: FLMsg folder plus Browse.</li>
-    <li><strong>FLAMP/rx</strong>: FLAmp folder plus Browse.</li>
-    <li><strong>Enable FLDigi logging</strong>: FLDigi RX/TX monitoring depends on logging. In FLDigi, enable <em>File &gt; Text Capture &gt; Log all RX/TX text</em>.</li>
-    <li><strong>Check-in Log Paths</strong>: Copy Main and Copy New/Late buttons copy full file paths to the clipboard.</li>
-  </ul>
-
-  <h3 id="settings-varac">VarAC Settings</h3>
-  <ul class="section-list">
-    <li><strong>VarAC Install Folder</strong>: Folder containing VarAC runtime files (used for status and traffic integrations).</li>
-    <li><strong>VarAC Incoming Files</strong>: Folder scanned for inbound VarAC message files.</li>
-    <li><strong>BBS Directory</strong>: Top-level folder for current BBS files.</li>
-    <li><strong>BBS Archive</strong>: Destination folder for archived BBS files.</li>
-    <li><strong>Auto-Archive Policy</strong>: Enable auto-archive and choose age threshold (1/3/5/7/10/14/21/30 days).</li>
-    <li><strong>Archive behavior</strong>: Files older than selected days are moved from BBS Directory to BBS Archive during periodic processing.</li>
-  </ul>
-
-  <h3 id="settings-launch">Launch Control</h3>
-  <ul class="section-list">
-    <li><strong>Launch All with FreqInOut</strong>: Global startup toggle for configured apps.</li>
-    <li><strong>Per-app controls</strong>: Each app row has <em>Enabled</em> and <em>Startup</em> toggles.</li>
-    <li><strong>Order controls</strong>: Use <em>Up</em>, <em>Down</em>, and <em>Reset Default Order</em> to set launch sequence.</li>
-    <li><strong>Manual controls</strong>: <em>Launch Configured Now</em> starts enabled configured apps in order; <em>Stop Launch Sequence</em> cancels active launch workflow.</li>
-    <li><strong>Startup timing</strong>: Launch waits up to ~30s per app for running/ready check before moving to the next app.</li>
-    <li><strong>Failure handling</strong>: Failed apps are skipped and sequence continues; summary status is shown in Launch Control.</li>
-  </ul>
-
-  <h3 id="settings-logging">Logging &amp; Diagnostics</h3>
-  <ul class="section-list">
-    <li><strong>Logging Level</strong>: DISABLED, ERROR, WARNING, INFO, DEBUG.</li>
-    <li><strong>Enable DEBUG For</strong>: Timed debug for 15/30/60 minutes, then auto-revert.</li>
-    <li><strong>Open Logs</strong>: Opens Logs viewer window.</li>
-    <li><strong>Open Log Folder</strong>: Opens folder containing the active log file.</li>
-    <li><strong>Export Diagnostics</strong>: Exports support ZIP with logs, DB snapshots, and environment metadata.</li>
-    <li><strong>Caution</strong>: Verbose logging increases disk I/O and can reduce performance; use DEBUG/ALL only for troubleshooting.</li>
-  </ul>
-
-  <p><strong>Integration notifications</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Invalid Path</strong>: Warning when a selected file path does not exist.</li>
-    <li><strong>Copied</strong>: Copy buttons confirm the copied path.</li>
-    <li><strong>Launch Summary</strong>: Launch Control updates sequence state and per-app result details during launch operations.</li>
-  </ul>
-
-  <h3 id="settings-actions">Save Settings</h3>
-  <ul class="section-list">
-    <li><strong>Save Settings</strong>: Persists all settings and refreshes dependent tabs. A confirmation dialog appears: <em>Settings saved.</em></li>
-    <li><strong>Auto-save on exit</strong>: Settings are also saved when the app closes.</li>
-    <li><strong>Theme change</strong>: Switching Light/Dark shows <em>Wilco. Standby for Spectrum QSY...</em> until the new theme is applied.</li>
-  </ul>
-
-<h2 id="logs">Logs Viewer</h2>
-  <p><strong>Purpose</strong>: View and filter application logs from Settings, without occupying a main navigation tab.</p>
-  <p><strong>Typical workflow</strong>: In <em>Settings &gt; Logging &amp; Diagnostics</em>, keep logs at DISABLED/INFO for normal operation. Raise to DEBUG only during troubleshooting, optionally using timed DEBUG, then allow automatic reversion.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Auto-refresh cadence</strong>: Log view refreshes continuously while the Logs window is open.</li>
-    <li><strong>Clear scope</strong>: Clear removes visible text only; it does not truncate the log file on disk.</li>
-    <li><strong>Global level effect</strong>: Level selection affects application-wide logging behavior.</li>
-  </ul>
-  <ol class="section-list">
-    <li><strong>Open Logs</strong>: Opens the Logs viewer window from Settings.</li>
-    <li><strong>Open Log Folder</strong>: Opens the folder containing <code>freqinout.log</code>.</li>
-    <li><strong>Export Diagnostics</strong>: Exports a support ZIP containing logs/DB snapshots and environment metadata.</li>
-    <li><strong>Enable DEBUG For</strong>: Sets DEBUG logging for 15/30/60 minutes, then auto-reverts to the prior level.</li>
-    <li><strong>Refresh</strong>: Reloads the log view (auto-refresh runs every 1.5 seconds).</li>
-    <li><strong>Clear</strong>: Clears the on-screen view only.</li>
-    <li><strong>Search</strong>: Prompts for a keyword and filters matches.</li>
-    <li><strong>Open Log</strong>: Opens the current log file in your OS viewer.</li>
-    <li><strong>Font</strong>: Spinbox for log font size.</li>
-    <li><strong>Level</strong>: Dropdown with DISABLED, ERROR, WARNING, INFO, DEBUG, ALL. This sets the global log level.</li>
-    <li><strong>Log file label</strong>: Shows the active log file path.</li>
-    <li><strong>Status indicator</strong>: When log level is not DISABLED, Schedule Status shows <em>Logs: LEVEL</em> in warning color.</li>
-  </ol>
-  <p><strong>Notifications and prompts</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Search</strong>: If no matches, shows <em>No matches for 'term'.</em></li>
-    <li><strong>Open Log</strong>: Errors open a dialog: <em>Could not open log file: ...</em></li>
-  </ul>
-
-<h2 id="help">Help Tab</h2>
-  <p><strong>Purpose</strong>: Read this guide and export it.</p>
-  <p><strong>Typical workflow</strong>: Use the TOC to jump by task area (Settings, Schedules, NCS, SOP), then export PDF for offline/field reference.</p>
-  <p><strong>Expected UI behavior</strong>:</p>
-  <ul class="section-list">
-    <li><strong>TOC navigation</strong>: Selecting a heading jumps to the corresponding guide section.</li>
-    <li><strong>Source of truth</strong>: Help viewer renders the local `docs/guide.html` shipped with the app build.</li>
-    <li><strong>PDF export</strong>: Export prompts for destination and reports success/failure explicitly.</li>
-  </ul>
-  <ul class="section-list">
-    <li><strong>Table of Contents</strong>: Left-side list of H1-H3 headings for quick navigation.</li>
-    <li><strong>Guide viewer</strong>: Right-side browser that renders <code>docs/guide.html</code>.</li>
-    <li><strong>Export to PDF</strong>: Saves the guide as a PDF file.</li>
-  </ul>
-  <p><strong>Notifications and prompts</strong>:</p>
-  <ul class="section-list">
-    <li><strong>Missing guide</strong>: <em>guide.html was not found.</em></li>
-    <li><strong>Export complete</strong>: <em>Saved PDF to: ...</em></li>
-    <li><strong>Export failed</strong>: <em>PDF export failed: ...</em></li>
-  </ul>
-
-<h2 id="maintenance-tools">Maintenance Tools and Scripts</h2>
-  <p><strong>Purpose</strong>: Safely run bundled maintenance, DB, calibration, and release scripts from a terminal.</p>
-  <ul class="section-list">
-    <li><strong>Beginner start</strong>: Use wrapper commands first: <code>tools/freqinout-db.ps1</code> (Windows) or <code>tools/freqinout-db.sh</code> (Linux/macOS).</li>
-    <li><strong>Safety-first sequence</strong>: Run read-only/status commands before any truncate/update command.</li>
-    <li><strong>Script index</strong>: See <code>docs/tools-and-scripts.md</code> for every delivered script with plain-language examples.</li>
-    <li><strong>DB-specific tasks</strong>: See <code>docs/db-tools.md</code> for backup, table export, and DB maintenance workflows.</li>
-    <li><strong>Release checks</strong>: Use <code>python tools/release_preflight.py</code> before tagging/building releases.</li>
-  </ul>
-
-<h2 id="troubleshooting">Troubleshooting and Tips</h2>
-  <p><strong>Purpose</strong>: Common fixes and operational tips.</p>
-  <ul class="section-list">
-    <li><strong>Scheduler not changing frequency</strong>: Verify <em>Use FreqInOut Scheduler</em> is on, the pause timer has expired, and HF Operating Groups include valid band/mode/frequency.</li>
-    <li><strong>NCS-JS8 will not start</strong>: Check that callsign, Net Name, Group, and DIRECTED.TXT are set in Settings.</li>
-    <li><strong>Messages list is empty</strong>: Confirm Message Paths in Settings and click <em>Refresh Now</em>.</li>
-    <li><strong>Map shows no links</strong>: Use <em>Load JS8 Traffic</em> in Settings and confirm DIRECTED.TXT is valid.</li>
-    <li><strong>Logs too large</strong>: Keep level at DISABLED or INFO for daily use; raise to DEBUG or ALL only for troubleshooting.</li>
-  </ul>
-
-  <h3 id="timers-reference">Background Timers Reference</h3>
-  <p><strong>Purpose</strong>: Quick reference for the most important recurring timers and time windows in FreqInOut.</p>
-  <ul class="section-list">
-    <li><strong>Scheduler engine poll</strong>: Re-evaluates active schedule and enforcement decisions on a repeating interval.</li>
-    <li><strong>Off-schedule prompt timeout</strong>: Auto-applies listed corrections after 2 minutes if no response.</li>
-    <li><strong>Status panel refresh</strong>: Main-window status indicators refresh on a short recurring cycle.</li>
-    <li><strong>SOP due windows</strong>: Due/overdue visibility follows SOP state timing rules and active SOP filters.</li>
-    <li><strong>Messages scan timer</strong>: File-message refresh follows Scan Every interval; manual refresh is always available.</li>
-    <li><strong>NCS-JS8 refresh timer</strong>: NCS-JS8 tab uses configured polling interval (seconds) for ingest/update cadence.</li>
-    <li><strong>Prompt interval timers</strong>: Scheduler prompt cadence for frequency/mode/offset follows configured prompt interval policy.</li>
-  </ul>
-
-  <h3 id="platform-differences">Known Platform Differences (Windows vs Linux)</h3>
-  <p><strong>Purpose</strong>: Help operators distinguish expected platform behavior from actual defects.</p>
-  <ul class="section-list">
-    <li><strong>Desktop launcher trust (Linux)</strong>: Some desktop environments (notably Mint/Cinnamon) may require one-time launcher trust/allow-launching after icon creation.</li>
-    <li><strong>Desktop icon cache timing (Linux)</strong>: Icon/menu updates may appear after cache refresh, logout/login, or reboot depending on desktop environment.</li>
-    <li><strong>Combo/list checkbox rendering</strong>: Checkbox appearance and click behavior in popup lists can vary by Qt style/theme; FreqInOut applies explicit styling for critical controls in dark mode.</li>
-    <li><strong>Path conventions</strong>: Windows uses drive-letter paths; Linux uses POSIX paths. Misconfigured integration paths are a common root cause for missing data.</li>
-    <li><strong>Process detection semantics</strong>: Running-process checks and launcher behavior differ slightly by OS session model; always verify via the Logs viewer if behavior seems inconsistent.</li>
-    <li><strong>Packaged vs source environment</strong>: Startup/runtime behavior can differ when running packaged executables vs source/venv workflows; confirm your mode before troubleshooting.</li>
-  </ul>
-
-  <h3 id="db-tools">Database Tools</h3>
-  <p><strong>Purpose</strong>: Inspect or clean the SQLite databases used by FreqInOut.</p>
-  <ul class="section-list">
-    <li><strong>freqinout_db.py + wrappers</strong>: Cross-platform DB wrapper with shell launchers.</li>
-    <li><strong>db_tools.py</strong>: Simple CLI to list, show, export, and truncate tables.</li>
-    <li><strong>db_admin.py</strong>: Admin CLI to initialize or truncate full tables (settings + nets).</li>
-    <li><strong>js8_links_check.py</strong>: Quick inspection of JS8 link ingestion.</li>
-    <li><strong>dedupe_operator_groups.py</strong>: Cleanup tool for legacy duplicate group assignments in operator records.</li>
-    <li><strong>Database locations</strong>: Settings live in <code>config/freqinout.db</code>. Operator and net data live in <code>config/freqinout_nets.db</code>.</li>
-  </ul>
-  <p><strong>Command examples</strong> (copy/paste):</p>
-  <pre class="cmd"><code>python tools/freqinout_db.py status</code></pre>
-  <pre class="cmd"><code>bash tools/freqinout-db.sh status</code></pre>
-  <pre class="cmd"><code>powershell -ExecutionPolicy Bypass -File .\tools\freqinout-db.ps1 status</code></pre>
-  <pre class="cmd"><code>python tools/db_tools.py --list-dbs</code></pre>
-  <pre class="cmd"><code>python tools/db_tools.py --table operator_checkins --table-show</code></pre>
-  <pre class="cmd"><code>python tools/db_admin.py --init all</code></pre>
-  <pre class="cmd"><code>python tools/db_admin.py --truncate nets_all --yes</code></pre>
-  <pre class="cmd"><code>python tools/js8_links_check.py --limit 20</code></pre>
-  <pre class="cmd"><code>python -m unittest discover -s tests -p "test_propagation*.py" -v</code></pre>
-  <pre class="cmd"><code>python tools/propagation_calibrate.py --fast</code></pre>
-  <pre class="cmd"><code>python tools/propagation_calibrate.py --apply</code></pre>
-  <pre class="cmd"><code>python tools/dedupe_operator_groups.py</code></pre>
-  <pre class="cmd"><code>python tools/dedupe_operator_groups.py --apply</code></pre>
 
   <h2 id="licensing">Licensing</h2>
-  <p><strong>Purpose</strong>: Licensing and copyright.</p>
   <ul class="section-list">
-    <li><strong>FreqInOut</strong>: Distributed under the GNU General Public License v3 (see <code>LICENSE.md</code>).</li>
-    <li><strong>Copyright</strong>: Copyright (C) 2026 Bill Daniel (N1MAG).</li>
-    <li><strong>Third-party components</strong>: This project bundles JS8Net (MIT License). See <code>CREDITS.md</code>.</li>
-  </ul>
-
-  <h2 id="acknowledgments">Acknowledgments</h2>
-  <p><strong>Purpose</strong>: Credit contributors and inspirations.</p>
-  <ul class="section-list">
-    <li>KG5RKW inspired the Message Viewer tab.</li>
-    <li>KI6QDB inspired Python-based scheduling.</li>
-    <li>W8UFO contributed to Linux installation considerations.</li>
-    <li>These operators as well as N1ROG, K1RBS, N5DM, and W5TTA have all helped with user testing and feedback.</li>
-    <li>Thank you all for you valuable feedback!</li>
+    <li><strong>FreqInOut</strong>: GNU GPL v3 (<code>LICENSE.md</code>).</li>
+    <li><strong>Third-party components</strong>: see <code>CREDITS.md</code>.</li>
   </ul>
 
   <h2 id="support">Support</h2>
-  <p>This project is a labor of love. Love for both HF radio and the amazing people I communicate with over the air on a daily basis. I commit to using your feedback to improve and enrich this application in meaningful ways. Your feedback and encouragement are appreciated.</p>
-  <p>Let me know your ideas and suggestions. You can reach me at <a href="mailto:bill@n1mag.com">bill@n1mag.com</a>.</p>
+  <p>Questions, bug reports, and enhancement ideas are welcome.</p>
+  <p>Contact: <a href="mailto:bill@n1mag.com">bill@n1mag.com</a></p>
   <p>
     <a href="https://buymeacoffee.com/n1mag" target="_blank" rel="noopener">
       <img src="../assets/bmc-button.png" alt="Buy me a coffee" style="max-width: 180px; height: auto;">
