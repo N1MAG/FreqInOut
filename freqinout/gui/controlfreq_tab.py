@@ -3045,6 +3045,7 @@ class ControlFreqTab(QWidget):
             if end <= start:
                 return out
             max_total_rows = 400
+            condition_levels = self._sop_manager._condition_level_map()  # type: ignore[attr-defined]
             profiles = self._sop_manager.list_profiles()
             for profile in profiles:
                 if only_active and not bool(profile.get("active")):
@@ -3059,23 +3060,36 @@ class ControlFreqTab(QWidget):
                 for action in list(full.get("actions") or []):
                     if not self._action_enabled(action.get("enabled", True)):
                         continue
+                    action_group = str(action.get("group_name") or "").strip().upper() or str(operating_group).strip().upper()
+                    group_level = condition_levels.get(action_group)
+                    if not self._sop_manager._action_condition_match(  # type: ignore[attr-defined]
+                        str(action.get("condition_levels") or "ALL"),
+                        group_level,
+                    ):
+                        continue
                     interval_m = int(action.get("interval_minutes") or 0)
                     if interval_m <= 0:
                         interval_m = max(1, int(action.get("interval_hours") or 3)) * 60
                     interval_m = max(1, interval_m)
                     interval_phase_m = max(0, int(action.get("interval_phase_minutes") or 0)) % interval_m
-                    interval_td = dt.timedelta(minutes=interval_m)
-                    due = self._sop_manager.compute_next_due(
-                        str(full.get("sop_start_utc") or "00:00"),
-                        interval_m,
-                        now_utc=start,
-                        last_completed_utc=None,
-                        phase_minutes=interval_phase_m,
+                    action_for_occurrence = dict(action)
+                    if not str(action_for_occurrence.get("daily_start_utc") or "").strip():
+                        action_for_occurrence["daily_start_utc"] = str(full.get("sop_start_utc") or "00:00")
+                    if not str(action_for_occurrence.get("daily_end_utc") or "").strip():
+                        action_for_occurrence["daily_end_utc"] = "23:59"
+                    action_for_occurrence["interval_minutes"] = interval_m
+                    action_for_occurrence["interval_phase_minutes"] = interval_phase_m
+                    occurrences = self._sop_manager.build_action_occurrences_in_window(
+                        action_for_occurrence,
+                        window_start_utc=start,
+                        window_end_utc=end + dt.timedelta(seconds=1),
                     )
-                    # Ensure first due lies inside the target window.
-                    while due < start:
-                        due += interval_td
-                    max_per_action = min(240, int(math.ceil((end - start).total_seconds() / max(60, interval_m * 60))) + 2)
+                    if not occurrences:
+                        continue
+                    max_per_action = min(
+                        240,
+                        int(math.ceil((end - start).total_seconds() / max(60, interval_m * 60))) + 2,
+                    )
                     emitted = 0
                     rule = str(action.get("contact_rule") or "none").strip()
                     selected_target = (action.get("contact_target") or "").strip().upper()
@@ -3091,10 +3105,15 @@ class ControlFreqTab(QWidget):
                     action_freq = (action.get("frequency") or "").strip() or str(full.get("frequency") or "")
                     action_id = int(action.get("id") or 0)
                     software = str(action.get("software") or "")
+                    mode = str(action.get("mode") or "").strip().upper()
                     action_key = str(action.get("action_key") or "")
                     action_label = str(action.get("action_label") or "")
                     description = str(action.get("description") or "")
-                    while due <= end and emitted < max_per_action:
+                    for due, _due_end in occurrences:
+                        if due < start or due > end:
+                            continue
+                        if emitted >= max_per_action:
+                            break
                         if len(out) >= max_total_rows:
                             break
                         # ControlFreq outlook does not render alignment warnings for SOP rows;
@@ -3104,11 +3123,12 @@ class ControlFreqTab(QWidget):
                             {
                                 "profile_id": profile_id,
                                 "profile_name": str(full.get("name") or ""),
-                                "operating_group": operating_group,
+                                "operating_group": action_group or operating_group,
                                 "band": action_band,
                                 "frequency": action_freq,
                                 "action_id": action_id,
                                 "software": software,
+                                "mode": mode,
                                 "action_key": action_key,
                                 "action_label": action_label,
                                 "description": description,
@@ -3124,7 +3144,6 @@ class ControlFreqTab(QWidget):
                             }
                         )
                         emitted += 1
-                        due += interval_td
                     if len(out) >= max_total_rows:
                         break
                 if len(out) >= max_total_rows:

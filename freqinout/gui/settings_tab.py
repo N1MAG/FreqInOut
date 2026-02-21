@@ -293,6 +293,8 @@ class SettingsTab(QWidget):
         self.settings = SettingsManager()
         self._settings_dirty = False
         self._loading_settings = False
+        self._op_group_condition_sync = False
+        self._op_group_rows_by_group: Dict[str, List[int]] = {}
         self.loading_label: QLabel | None = None
         self._status_service = SoftwareStatusService(self.settings)
         self.launch_orchestrator = LaunchOrchestrator(self.settings, self)
@@ -703,7 +705,12 @@ class SettingsTab(QWidget):
         add_row.addWidget(self.edit_group_btn)
         add_row.addWidget(self.delete_group_btn)
         ops_layout.addLayout(add_row)
-        self.op_groups_table = QTableWidget(0, 9)
+        cond_scope_hint = QLabel(
+            "Condition Levels are group-scoped: changing one row applies to all rows for that Group."
+        )
+        cond_scope_hint.setWordWrap(True)
+        ops_layout.addWidget(cond_scope_hint)
+        self.op_groups_table = QTableWidget(0, 10)
         self.op_groups_table.setHorizontalHeaderLabels(
             [
                 "Selected",
@@ -715,16 +722,19 @@ class SettingsTab(QWidget):
                 "FLDigi Starting Mode",
                 "FLDigi Starting Offset",
                 "Auto-Tune",
+                "Use Condition Levels",
             ]
         )
         header = self.op_groups_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(8, QHeaderView.Fixed)
+        header.setSectionResizeMode(9, QHeaderView.Fixed)
         header.setSectionResizeMode(7, QHeaderView.Stretch)
         header.setStretchLastSection(True)
         header.setMinimumSectionSize(50)
         self.op_groups_table.setColumnWidth(8, 110)
+        self.op_groups_table.setColumnWidth(9, 180)
         self.op_groups_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
         self.op_groups_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.op_groups_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -737,8 +747,8 @@ class SettingsTab(QWidget):
         ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(ops_group)
 
-        # Local Net Profiles panel (non-scheduler local net metadata for SOP workflows)
-        local_group = QGroupBox("Local Net Profiles")
+        # Local Comms Groups panel (non-scheduler local net metadata for SOP workflows)
+        local_group = QGroupBox("Local Comms Groups")
         local_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         local_layout = QVBoxLayout()
         local_layout.setSpacing(6)
@@ -787,7 +797,7 @@ class SettingsTab(QWidget):
         local_layout.addWidget(self.local_net_table)
         local_container = QWidget()
         local_container.setLayout(local_layout)
-        local_group = self._make_collapsible_group("Local Net Profiles", local_container, checked=True, fit_content=False)
+        local_group = self._make_collapsible_group("Local Comms Groups", local_container, checked=True, fit_content=False)
         self._register_collapsible_group(local_group, self._summary_local_net_profiles)
         local_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(local_group)
@@ -1930,6 +1940,12 @@ class SettingsTab(QWidget):
                     vfo_val = (g.get("vfo") or "A").strip().upper()
                     if vfo_val not in ("A", "B"):
                         vfo_val = "A"
+                    try:
+                        cond_level = int(g.get("condition_level", 5) or 5)
+                    except Exception:
+                        cond_level = 5
+                    if cond_level < 1 or cond_level > 5:
+                        cond_level = 5
                     self.operating_groups.append(
                         {
                             "group": str(g.get("group", "")).upper(),
@@ -1940,6 +1956,8 @@ class SettingsTab(QWidget):
                             "fldigi_mode": (g.get("fldigi_mode") or "").strip(),
                             "fldigi_offset": (g.get("fldigi_offset") or "").strip(),
                             "auto_tune": bool(g.get("auto_tune", False)),
+                            "use_condition_levels": bool(g.get("use_condition_levels", False)),
+                            "condition_level": cond_level,
                         }
                     )
         except Exception:
@@ -3468,6 +3486,9 @@ class SettingsTab(QWidget):
         auto_tune_chk = QCheckBox("Enable Auto-Tune on QSY")
         form.addRow("", auto_tune_chk)
 
+        use_condition_levels_chk = QCheckBox("Use Condition Levels (Group)")
+        form.addRow("", use_condition_levels_chk)
+
         btn_row = QHBoxLayout()
         ok_btn = QPushButton("OK")
         cancel_btn = QPushButton("Cancel")
@@ -3506,6 +3527,7 @@ class SettingsTab(QWidget):
                 vfo=vfo,
                 fldigi_mode=fldigi_mode,
                 fldigi_offset=offset_txt,
+                use_condition_levels=use_condition_levels_chk.isChecked(),
             )
             dlg.accept()
 
@@ -3565,10 +3587,22 @@ class SettingsTab(QWidget):
         vfo: str = "A",
         fldigi_mode: str = "",
         fldigi_offset: str = "",
+        use_condition_levels: bool = False,
+        condition_level: int | None = None,
     ):
         # replace existing entry with same group+mode+band
         name = name.strip().upper()
         freq_display = self._format_freq(freq_mhz)
+        cond_level: int | None
+        if condition_level is None:
+            cond_level = None
+        else:
+            try:
+                cond_level = int(condition_level)
+            except Exception:
+                cond_level = 5
+            if cond_level < 1 or cond_level > 5:
+                cond_level = 5
         updated = False
         for g in self.operating_groups:
             if g.get("group") == name and g.get("mode") == mode and g.get("band") == band:
@@ -3577,6 +3611,11 @@ class SettingsTab(QWidget):
                 g["vfo"] = vfo
                 g["fldigi_mode"] = fldigi_mode
                 g["fldigi_offset"] = fldigi_offset
+                g["use_condition_levels"] = bool(use_condition_levels)
+                if cond_level is not None:
+                    g["condition_level"] = cond_level
+                elif "condition_level" not in g:
+                    g["condition_level"] = 5
                 updated = True
                 break
         if not updated:
@@ -3590,8 +3629,14 @@ class SettingsTab(QWidget):
                     "fldigi_mode": fldigi_mode,
                     "fldigi_offset": fldigi_offset,
                     "auto_tune": bool(auto_tune),
+                    "use_condition_levels": bool(use_condition_levels),
+                    "condition_level": 5 if cond_level is None else cond_level,
                 }
             )
+        # Condition-level participation is group-scoped (not per band/mode row).
+        for g in self.operating_groups:
+            if str(g.get("group", "")).strip().upper() == name:
+                g["use_condition_levels"] = bool(use_condition_levels)
         self._refresh_operating_groups_table()
         # Persist immediately so additions survive app restarts without requiring an explicit Save click.
         try:
@@ -3619,6 +3664,8 @@ class SettingsTab(QWidget):
                     "fldigi_mode": (g.get("fldigi_mode") or "").strip(),
                     "fldigi_offset": (g.get("fldigi_offset") or "").strip(),
                     "auto_tune": bool(g.get("auto_tune", False)),
+                    "use_condition_levels": bool(g.get("use_condition_levels", False)),
+                    "condition_level": g.get("condition_level", 5),
                 }
                 for g in self.operating_groups
             ],
@@ -3627,9 +3674,13 @@ class SettingsTab(QWidget):
 
         table = self.op_groups_table
         table.setRowCount(0)
+        self._op_group_rows_by_group = {}
         for g in self.operating_groups:
             row = table.rowCount()
             table.insertRow(row)
+            group_key = str(g.get("group", "")).strip().upper()
+            if group_key:
+                self._op_group_rows_by_group.setdefault(group_key, []).append(row)
             sel_chk = QCheckBox()
             sel_chk.setFixedWidth(22)
             sel_chk.stateChanged.connect(self._update_op_group_action_buttons)
@@ -3656,10 +3707,24 @@ class SettingsTab(QWidget):
             auto_layout.setAlignment(Qt.AlignCenter)
             auto_layout.addWidget(auto_chk)
             table.setCellWidget(row, 8, auto_wrap)
+            cond_chk = QCheckBox()
+            cond_chk.setChecked(bool(g.get("use_condition_levels", False)))
+            cond_chk.setFixedSize(20, 20)
+            cond_wrap = QWidget()
+            cond_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            cond_layout = QHBoxLayout(cond_wrap)
+            cond_layout.setContentsMargins(6, 0, 6, 0)
+            cond_layout.setAlignment(Qt.AlignCenter)
+            cond_layout.addWidget(cond_chk)
+            table.setCellWidget(row, 9, cond_wrap)
+            cond_chk.stateChanged.connect(
+                lambda state, r=row: self._on_operating_group_condition_toggled(r, state)
+            )
         header = table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
         self._update_op_group_action_buttons()
         self._refresh_section_titles()
         emit_span(
@@ -3678,8 +3743,90 @@ class SettingsTab(QWidget):
         self.edit_group_btn.setStyleSheet(button_style(role, theme))
         self.delete_group_btn.setStyleSheet(button_style(role, theme))
 
-    def _table_to_operating_groups(self) -> List[Dict[str, str]]:
-        result: List[Dict[str, str]] = []
+    def _on_operating_group_condition_toggled(self, row: int, state: int) -> None:
+        if self._loading_settings or self._op_group_condition_sync:
+            return
+        if row < 0 or row >= self.op_groups_table.rowCount():
+            return
+        group_item = self.op_groups_table.item(row, 1)
+        group = (group_item.text().strip().upper() if group_item else "")
+        if not group:
+            return
+        try:
+            enabled = int(state) == int(Qt.CheckState.Checked)
+        except Exception:
+            enabled = bool(state)
+        self._op_group_condition_sync = True
+        table = self.op_groups_table
+        table.setUpdatesEnabled(False)
+        try:
+            target_rows = self._op_group_rows_by_group.get(group)
+            if not target_rows:
+                target_rows = []
+                for r in range(self.op_groups_table.rowCount()):
+                    row_group_item = self.op_groups_table.item(r, 1)
+                    row_group = (row_group_item.text().strip().upper() if row_group_item else "")
+                    if row_group == group:
+                        target_rows.append(r)
+            for r in target_rows:
+                cond_widget = self.op_groups_table.cellWidget(r, 9)
+                if isinstance(cond_widget, QCheckBox):
+                    target_chk = cond_widget
+                elif isinstance(cond_widget, QWidget):
+                    target_chk = cond_widget.findChild(QCheckBox)
+                else:
+                    target_chk = None
+                if target_chk is None:
+                    continue
+                if target_chk.isChecked() != enabled:
+                    target_chk.blockSignals(True)
+                    try:
+                        target_chk.setChecked(enabled)
+                    finally:
+                        target_chk.blockSignals(False)
+            for g in self.operating_groups:
+                if str(g.get("group", "")).strip().upper() == group:
+                    g["use_condition_levels"] = bool(enabled)
+        finally:
+            table.setUpdatesEnabled(True)
+            self._op_group_condition_sync = False
+        self._mark_settings_dirty()
+
+    def _table_to_operating_groups(self) -> List[Dict[str, object]]:
+        result: List[Dict[str, object]] = []
+        existing_levels: Dict[Tuple[str, str, str], int] = {}
+        for g in self.operating_groups:
+            try:
+                key = (
+                    str(g.get("group", "")).strip().upper(),
+                    str(g.get("mode", "")).strip(),
+                    str(g.get("band", "")).strip(),
+                )
+                level = int(g.get("condition_level", 5) or 5)
+            except Exception:
+                continue
+            if level < 1 or level > 5:
+                level = 5
+            existing_levels[key] = level
+        group_condition_levels: Dict[str, bool] = {}
+        for r in range(self.op_groups_table.rowCount()):
+            group_item = self.op_groups_table.item(r, 1)
+            group = (group_item.text().strip().upper() if group_item else "")
+            if not group:
+                continue
+            cond_widget = self.op_groups_table.cellWidget(r, 9)
+            use_condition_levels = False
+            if isinstance(cond_widget, QCheckBox):
+                use_condition_levels = cond_widget.isChecked()
+            elif isinstance(cond_widget, QWidget):
+                chk = cond_widget.findChild(QCheckBox)
+                if chk is not None:
+                    use_condition_levels = chk.isChecked()
+            if group not in group_condition_levels:
+                group_condition_levels[group] = use_condition_levels
+            elif group_condition_levels[group] != use_condition_levels:
+                # Resolve inconsistencies defensively by preferring enabled if any row is enabled.
+                group_condition_levels[group] = group_condition_levels[group] or use_condition_levels
         for r in range(self.op_groups_table.rowCount()):
             group = (
                 self.op_groups_table.item(r, 1).text().strip().upper() if self.op_groups_table.item(r, 1) else ""
@@ -3702,11 +3849,21 @@ class SettingsTab(QWidget):
                 chk = auto_widget.findChild(QCheckBox)
                 if chk is not None:
                     auto_tune = chk.isChecked()
+            cond_widget = self.op_groups_table.cellWidget(r, 9)
+            use_condition_levels = False
+            if isinstance(cond_widget, QCheckBox):
+                use_condition_levels = cond_widget.isChecked()
+            elif isinstance(cond_widget, QWidget):
+                chk = cond_widget.findChild(QCheckBox)
+                if chk is not None:
+                    use_condition_levels = chk.isChecked()
+            use_condition_levels = bool(group_condition_levels.get(group, use_condition_levels))
             try:
                 freq_val = float(freq_txt)
             except Exception:
                 freq_val = None
             if group and mode and band and freq_val is not None:
+                cond_level = existing_levels.get((group, mode, band), 5)
                 vfo_val = (vfo_txt or "A").strip().upper()
                 if vfo_val not in ("A", "B"):
                     vfo_val = "A"
@@ -3720,6 +3877,8 @@ class SettingsTab(QWidget):
                         "fldigi_mode": fldigi_mode,
                         "fldigi_offset": fldigi_offset,
                         "auto_tune": auto_tune,
+                        "use_condition_levels": use_condition_levels,
+                        "condition_level": cond_level,
                     }
                 )
         return result
@@ -3764,6 +3923,28 @@ class SettingsTab(QWidget):
             chk = auto_widget.findChild(QCheckBox)
             if chk is not None:
                 auto_val = chk.isChecked()
+        cond_widget = self.op_groups_table.cellWidget(row, 9)
+        use_cond_val = False
+        if isinstance(cond_widget, QCheckBox):
+            use_cond_val = cond_widget.isChecked()
+        elif isinstance(cond_widget, QWidget):
+            chk = cond_widget.findChild(QCheckBox)
+            if chk is not None:
+                use_cond_val = chk.isChecked()
+        cond_level_val = 5
+        for g in self.operating_groups:
+            if (
+                str(g.get("group", "")).strip().upper() == group.strip().upper()
+                and str(g.get("mode", "")).strip() == mode
+                and str(g.get("band", "")).strip() == band
+            ):
+                try:
+                    cond_level_val = int(g.get("condition_level", 5) or 5)
+                except Exception:
+                    cond_level_val = 5
+                break
+        if cond_level_val < 1 or cond_level_val > 5:
+            cond_level_val = 5
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Edit Operating Group")
@@ -3836,6 +4017,10 @@ class SettingsTab(QWidget):
         auto_tune_chk.setChecked(auto_val)
         form.addRow("", auto_tune_chk)
 
+        use_condition_levels_chk = QCheckBox("Use Condition Levels (Group)")
+        use_condition_levels_chk.setChecked(use_cond_val)
+        form.addRow("", use_condition_levels_chk)
+
         btn_row = QHBoxLayout()
         ok_btn = QPushButton("Save")
         cancel_btn = QPushButton("Cancel")
@@ -3881,6 +4066,8 @@ class SettingsTab(QWidget):
                 vfo=vfo,
                 fldigi_mode=fldigi_mode,
                 fldigi_offset=offset_txt,
+                use_condition_levels=use_condition_levels_chk.isChecked(),
+                condition_level=cond_level_val,
             )
             dlg.accept()
 

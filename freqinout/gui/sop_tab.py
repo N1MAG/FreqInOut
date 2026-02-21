@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -57,7 +58,7 @@ def _contrast_text_hex(bg_hex: str) -> str:
     return "#111111" if yiq >= 140 else "#FFFFFF"
 
 
-class SOPTab(QWidget):
+class _LegacySOPTab(QWidget):
     """
     SOP reminders tab.
     Reminder-only workflow with manual completion and UTC-driven cadence.
@@ -3316,5 +3317,1644 @@ class SOPTab(QWidget):
             self._update_profile_action_styles(theme)
             self._apply_accessibility_width_guards()
             self._refresh_layer_sync_hint()
+        except Exception:
+            pass
+
+
+class SOPTab(_LegacySOPTab):
+    """
+    SOP Builder v2.
+    Category-first workflow with one HF SOP and one Local Comms SOP profile,
+    per-action UTC scheduling fields, and conflict-gated HF activation.
+    """
+
+    CAT_HF = SOPManager.CATEGORY_HF
+    CAT_LOCAL = SOPManager.CATEGORY_LOCAL
+
+    COL_GROUP = 0
+    COL_COND = 1
+    COL_RESOURCE = 2
+    COL_MODE = 3
+    COL_ACTION = 4
+    COL_BANDFREQ = 5
+    COL_START = 6
+    COL_END = 7
+    COL_DURATION = 8
+    COL_INTERVAL = 9
+    COL_CONTACT = 10
+    COL_CONTACT_TARGET = 11
+    COL_DESC = 12
+    COL_CONFLICT = 13
+    COL_REMOVE = 14
+
+    DURATION_OPTIONS: List[Tuple[str, int]] = [("00:30", 30), ("01:00", 60)]
+    HF_RESOURCE_OPTIONS = ["FLDigi", "JS8Call", "VarAC", "SSB"]
+    LOCAL_RESOURCE_FALLBACK = ["VHF", "UHF", "GMRS", "MURS", "FRS", "Meshtastic"]
+    LOCAL_MODE_FALLBACK = ["Voice", "FM", "Digital", "Data", "Mixed", "Simplex", "Repeater"]
+    LOCAL_CONTACT_OPTIONS: List[Tuple[str, str]] = [
+        ("ncs_or_ancs", "NCS"),
+        ("callsign", "Callsign"),
+    ]
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+
+        title_row = QHBoxLayout()
+        title_row.addWidget(QLabel("<h3>SOP Builder</h3>"))
+        title_row.addStretch()
+        self.utc_label = QLabel()
+        self.local_label = QLabel()
+        title_row.addWidget(self.utc_label)
+        title_row.addWidget(self.local_label)
+        self.time_toggle_btn = QPushButton("Showing: Local")
+        self.time_toggle_btn.clicked.connect(self._toggle_time_view)
+        title_row.addWidget(self.time_toggle_btn)
+        root.addLayout(title_row)
+
+        header = QHBoxLayout()
+        self.profile_combo = QComboBox()
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_selected)
+        header.addWidget(QLabel("Manage SOP:"))
+        header.addWidget(self.profile_combo, stretch=1)
+
+        self.new_btn = QPushButton("New SOP")
+        self.save_btn = QPushButton("Save")
+        self.delete_btn = QPushButton("Delete")
+        self.export_pdf_btn = QPushButton("Export PDF")
+        self.export_import_btn = QToolButton()
+        self.export_import_btn.setText("Export/Import")
+        self.export_import_btn.setPopupMode(QToolButton.InstantPopup)
+        self.export_import_menu = QMenu(self.export_import_btn)
+        self.export_json_action = self.export_import_menu.addAction("Export JSON")
+        self.import_json_action = self.export_import_menu.addAction("Import JSON")
+        self.export_import_btn.setMenu(self.export_import_menu)
+
+        self.new_btn.clicked.connect(self._new_profile)
+        self.save_btn.clicked.connect(self._save_profile)
+        self.delete_btn.clicked.connect(self._delete_profile)
+        self.export_pdf_btn.clicked.connect(self._export_pdf)
+        self.export_json_action.triggered.connect(self._export_profile)
+        self.import_json_action.triggered.connect(self._import_profile)
+        for btn in (self.new_btn, self.save_btn, self.delete_btn, self.export_pdf_btn, self.export_import_btn):
+            header.addWidget(btn)
+        root.addLayout(header)
+
+        cfg_box = QGroupBox("SOP")
+        cfg_layout = QVBoxLayout(cfg_box)
+
+        top_row = QHBoxLayout()
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("SOP name")
+        self.category_combo = QComboBox()
+        self.category_combo.addItem("HF SOP", self.CAT_HF)
+        self.category_combo.addItem("Local Comms SOP", self.CAT_LOCAL)
+        self.category_combo.currentIndexChanged.connect(self._on_category_changed)
+        self.active_cb = QCheckBox("Active")
+        self.active_cb.toggled.connect(self._mark_dirty)
+        top_row.addWidget(QLabel("Name:"))
+        top_row.addWidget(self.name_edit, stretch=2)
+        top_row.addWidget(QLabel("Category:"))
+        top_row.addWidget(self.category_combo, stretch=1)
+        top_row.addWidget(self.active_cb)
+        cfg_layout.addLayout(top_row)
+
+        self.terms_hint_label = QLabel(
+            "Action rows are stored in UTC and displayed in Local/UTC based on the Showing toggle."
+        )
+        self.terms_hint_label.setWordWrap(True)
+        cfg_layout.addWidget(self.terms_hint_label)
+
+        rows_head = QHBoxLayout()
+        rows_head.addWidget(QLabel("Action Rows"))
+        rows_head.addStretch()
+        self.hidden_rows_label = QLabel("")
+        rows_head.addWidget(self.hidden_rows_label)
+        self.add_row_btn = QPushButton("Add Action Row")
+        self.add_row_btn.clicked.connect(lambda: self._add_action_row(existing=None))
+        rows_head.addWidget(self.add_row_btn)
+        cfg_layout.addLayout(rows_head)
+
+        self.actions_table = QTableWidget(0, 15)
+        self.actions_table.setHorizontalHeaderLabels(
+            [
+                "Group",
+                "Condition Levels",
+                "Resource",
+                "Mode",
+                "Action",
+                "Band - Freq",
+                "Start (UTC)",
+                "End (UTC)",
+                "Duration",
+                "Interval",
+                "Contact Type",
+                "Contact Target",
+                "Description",
+                "Conflict",
+                "Remove",
+            ]
+        )
+        self.actions_table.verticalHeader().setVisible(False)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_GROUP, QHeaderView.Interactive)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_COND, QHeaderView.ResizeToContents)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_RESOURCE, QHeaderView.Interactive)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_MODE, QHeaderView.Interactive)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_ACTION, QHeaderView.Interactive)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_BANDFREQ, QHeaderView.Interactive)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_START, QHeaderView.ResizeToContents)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_END, QHeaderView.ResizeToContents)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_DURATION, QHeaderView.ResizeToContents)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_INTERVAL, QHeaderView.Interactive)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_CONTACT, QHeaderView.ResizeToContents)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_CONTACT_TARGET, QHeaderView.Interactive)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_DESC, QHeaderView.Stretch)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_CONFLICT, QHeaderView.ResizeToContents)
+        self.actions_table.horizontalHeader().setSectionResizeMode(self.COL_REMOVE, QHeaderView.ResizeToContents)
+        self.actions_table.setColumnWidth(self.COL_GROUP, 150)
+        self.actions_table.setColumnWidth(self.COL_RESOURCE, 130)
+        self.actions_table.setColumnWidth(self.COL_MODE, 120)
+        self.actions_table.setColumnWidth(self.COL_ACTION, 140)
+        self.actions_table.setColumnWidth(self.COL_BANDFREQ, 180)
+        self.actions_table.setColumnWidth(self.COL_INTERVAL, 110)
+        self.actions_table.setColumnWidth(self.COL_CONTACT_TARGET, 170)
+        cfg_layout.addWidget(self.actions_table)
+        root.addWidget(cfg_box, stretch=1)
+
+        # Compatibility placeholders for inherited methods not used in v2 UI.
+        self.group_combo = QComboBox()
+        self.secondary_combo = QComboBox()
+        self.start_edit = QLineEdit("00:00")
+        self.priority_spin = QSpinBox()
+        self.horizon_spin = QSpinBox()
+        self.contact_label = QLabel("")
+        self.start_label = QLabel("")
+        self.layer_sync_label = QLabel("")
+        self.layer_validation_label = QLabel("")
+        self.layer_runtime_label = QLabel("")
+        self.alignment_label = QLabel("")
+        self.populate_layer_btn = QPushButton()
+        self.rebuild_layer_btn = QPushButton()
+        self.add_layer_row_btn = QPushButton()
+        self.refresh_btn = QPushButton()
+        self.layer_table = QTableWidget(0, 0)
+        self.upcoming_table = QTableWidget(0, 0)
+
+        self._wire_dirty_tracking()
+        self._realtime_conflict_timer = QTimer(self)
+        self._realtime_conflict_timer.setSingleShot(True)
+        self._realtime_conflict_timer.setInterval(550)
+        self._realtime_conflict_timer.timeout.connect(self._run_realtime_hf_conflict_check)
+        self._last_realtime_conflict_signature: Tuple[Any, ...] | None = None
+        self._suppress_realtime_conflict_checks = False
+        self._apply_accessibility_width_guards()
+        self._update_clock_labels()
+        self._update_action_time_headers()
+        self._update_time_toggle_style()
+        self._apply_category_table_view()
+
+    def _wire_dirty_tracking(self) -> None:
+        self.name_edit.textChanged.connect(self._mark_dirty)
+        self.category_combo.currentIndexChanged.connect(self._mark_dirty)
+        self.active_cb.toggled.connect(self._mark_dirty)
+
+    def _schedule_realtime_hf_conflict_check(self, *_args) -> None:
+        if getattr(self, "_loading_ui", False):
+            return
+        if getattr(self, "_suppress_realtime_conflict_checks", False):
+            return
+        if self._current_category() != self.CAT_HF:
+            return
+        timer = getattr(self, "_realtime_conflict_timer", None)
+        if timer is None:
+            return
+        timer.start()
+
+    def _collect_hf_action_for_realtime(self, row_index: int) -> Dict[str, Any] | None:
+        if row_index < 0 or row_index >= self.actions_table.rowCount():
+            return None
+        if self._current_category() != self.CAT_HF:
+            return None
+        group_combo = self.actions_table.cellWidget(row_index, self.COL_GROUP)
+        cond_edit = self.actions_table.cellWidget(row_index, self.COL_COND)
+        resource_combo = self.actions_table.cellWidget(row_index, self.COL_RESOURCE)
+        action_combo = self.actions_table.cellWidget(row_index, self.COL_ACTION)
+        bandfreq_combo = self.actions_table.cellWidget(row_index, self.COL_BANDFREQ)
+        start_edit = self.actions_table.cellWidget(row_index, self.COL_START)
+        duration_combo = self.actions_table.cellWidget(row_index, self.COL_DURATION)
+        interval_combo = self.actions_table.cellWidget(row_index, self.COL_INTERVAL)
+        contact_combo = self.actions_table.cellWidget(row_index, self.COL_CONTACT)
+        target_combo = self.actions_table.cellWidget(row_index, self.COL_CONTACT_TARGET)
+        desc_edit = self.actions_table.cellWidget(row_index, self.COL_DESC)
+        if not isinstance(group_combo, QComboBox) or not isinstance(resource_combo, QComboBox):
+            return None
+        if not isinstance(action_combo, QComboBox) or not isinstance(bandfreq_combo, QComboBox):
+            return None
+        if not isinstance(start_edit, QLineEdit) or not isinstance(duration_combo, QComboBox):
+            return None
+        if not isinstance(interval_combo, QComboBox) or not isinstance(contact_combo, QComboBox):
+            return None
+        if not isinstance(target_combo, QComboBox) or not isinstance(desc_edit, QLineEdit):
+            return None
+
+        group_name = group_combo.currentText().strip().upper()
+        resource = resource_combo.currentText().strip()
+        action_key = str(action_combo.currentData() or "").strip()
+        action_label = action_combo.currentText().strip()
+        band, freq = self._split_band_freq(bandfreq_combo.currentText().strip())
+        start_display = start_edit.text().strip()
+        if not (group_name and resource and action_key and band and freq and self._is_valid_hhmm(start_display)):
+            return None
+        start_utc = self._utc_start_hhmm_from_display(start_display, show_local=self._show_local)
+        duration_minutes = int(duration_combo.currentData() or 60)
+        if duration_minutes not in {30, 60}:
+            duration_minutes = 60
+        end_utc = self._add_minutes_hhmm(start_utc, duration_minutes)
+        interval_minutes, phase_minutes = self._parse_interval_spec(interval_combo.currentText())
+        if interval_minutes <= 0:
+            return None
+        condition_levels = "ALL"
+        if isinstance(cond_edit, QLineEdit):
+            condition_levels = self.manager._normalize_condition_levels(cond_edit.text().strip())
+        contact_rule = str(contact_combo.currentData() or "none").strip()
+        contact_target = str(target_combo.currentText() or "").strip().upper()
+        if contact_target == "ANY (ROLE MATCH)":
+            contact_target = self.ANY_ROLE_TOKEN
+        return {
+            "id": int(group_combo.property("action_id") or 0),
+            "group_name": group_name,
+            "condition_levels": condition_levels,
+            "band": band,
+            "frequency": freq,
+            "software": resource,
+            "action_key": action_key,
+            "action_label": action_label or action_key,
+            "enabled": True,
+            "daily_start_utc": start_utc,
+            "daily_end_utc": end_utc,
+            "duration_minutes": duration_minutes,
+            "interval_minutes": interval_minutes,
+            "interval_phase_minutes": phase_minutes,
+            "interval_hours": max(1, int((interval_minutes + 59) // 60)),
+            "conflict_policy": self.manager._normalize_conflict_policy(group_combo.property("conflict_policy")),
+            "schedule_applied": bool(group_combo.property("schedule_applied")),
+            "description": desc_edit.text().strip(),
+            "contact_rule": contact_rule,
+            "contact_target": contact_target,
+            "sort_order": row_index,
+        }
+
+    def _collect_hf_actions_for_realtime(self) -> List[Tuple[int, Dict[str, Any]]]:
+        out: List[Tuple[int, Dict[str, Any]]] = []
+        for r in range(self.actions_table.rowCount()):
+            action = self._collect_hf_action_for_realtime(r)
+            if not action:
+                continue
+            out.append((r, action))
+        return out
+
+    def _set_inline_conflict_badge(self, row_index: int, status: str, tooltip: str = "") -> None:
+        badge = self.actions_table.cellWidget(row_index, self.COL_CONFLICT)
+        if not isinstance(badge, QLabel):
+            return
+        theme = resolve_theme(self.settings)
+        status_key = str(status or "").strip().lower()
+        if status_key == "conflict":
+            bg = theme.get("warning", "#c28c18")
+            fg = theme.get("button_text", "#ffffff")
+            label = "Conflict"
+        elif status_key == "ok":
+            bg = theme.get("success", "#17863a")
+            fg = theme.get("button_text", "#ffffff")
+            label = "OK"
+        elif status_key == "local":
+            bg = theme.get("panel_alt", "#334155")
+            fg = theme.get("text_muted", "#b9c4d2")
+            label = "Local"
+        else:
+            bg = theme.get("panel_alt", "#334155")
+            fg = theme.get("text_muted", "#b9c4d2")
+            label = "Pending"
+        badge.setText(label)
+        badge.setToolTip(str(tooltip or "").strip())
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setStyleSheet(
+            (
+                "QLabel {"
+                f"background: {bg};"
+                f"color: {fg};"
+                "padding: 2px 8px;"
+                "border-radius: 10px;"
+                "font-weight: 600;"
+                "}"
+            )
+        )
+
+    def _refresh_inline_conflict_badges(
+        self,
+    ) -> List[Tuple[int, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]]:
+        if self._current_category() != self.CAT_HF:
+            for r in range(self.actions_table.rowCount()):
+                self._set_inline_conflict_badge(r, "local", "Local Comms actions do not use HF conflict checks.")
+            return []
+
+        action_rows = self._collect_hf_actions_for_realtime()
+        action_map = {r: a for r, a in action_rows}
+        out: List[Tuple[int, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]] = []
+
+        for row_index in range(self.actions_table.rowCount()):
+            action = action_map.get(row_index)
+            if not action:
+                self._set_inline_conflict_badge(
+                    row_index,
+                    "pending",
+                    "Complete Group, Resource, Action, Band-Freq, Start, Duration, and Interval to validate conflicts.",
+                )
+                continue
+            peers = [dict(other_action) for other_row, other_action in action_rows if other_row != row_index]
+            diag = self.manager.detect_action_conflicts(
+                action=action,
+                operating_group=str(action.get("group_name") or "").strip().upper(),
+                horizon_days=7,
+                check_all_groups=True,
+                peer_actions=peers,
+            )
+            if bool(diag.get("has_conflict")):
+                tooltip_lines = [
+                    f"Daily: {diag.get('daily_summary') or 'None'}",
+                    f"Nets: {diag.get('net_summary') or 'None'}",
+                    f"SOP: {diag.get('sop_summary') or 'None'}",
+                ]
+                self._set_inline_conflict_badge(row_index, "conflict", "\n".join(tooltip_lines))
+            else:
+                self._set_inline_conflict_badge(row_index, "ok", "No Daily/Net/SOP conflicts detected.")
+            out.append((row_index, action, diag, peers))
+        return out
+
+    def _run_realtime_hf_conflict_check(self) -> None:
+        if getattr(self, "_loading_ui", False):
+            return
+        if getattr(self, "_suppress_realtime_conflict_checks", False):
+            return
+        analyses = self._refresh_inline_conflict_badges()
+        if not analyses:
+            self._last_realtime_conflict_signature = None
+            return
+        for row_index, action, diag, peers in analyses:
+            if not bool(diag.get("has_conflict")):
+                continue
+            signature = (
+                int(row_index),
+                str(action.get("action_key") or ""),
+                str(action.get("group_name") or ""),
+                str(action.get("daily_start_utc") or ""),
+                str(action.get("daily_end_utc") or ""),
+                str(diag.get("daily_summary") or ""),
+                str(diag.get("net_summary") or ""),
+                str(diag.get("sop_summary") or ""),
+            )
+            if signature == self._last_realtime_conflict_signature:
+                return
+            # Mark this signature as handled before prompting so one decision
+            # does not immediately retrigger the same dialog on unchanged data.
+            self._last_realtime_conflict_signature = signature
+            self._prompt_realtime_hf_conflict_resolution(row_index, action, diag, peers)
+            return
+        self._last_realtime_conflict_signature = None
+
+    def _prompt_realtime_hf_conflict_resolution(
+        self,
+        row_index: int,
+        action: Dict[str, Any],
+        diag: Dict[str, Any],
+        peer_actions: List[Dict[str, Any]],
+    ) -> None:
+        details = [
+            f"Action Row {row_index + 1}: {action.get('action_label', 'Action')}",
+            f"Group: {str(action.get('group_name') or '').strip().upper()}",
+            "",
+            f"Daily Schedule Conflicts: {diag.get('daily_summary') or 'None'}",
+            f"Net Schedule Conflicts: {diag.get('net_summary') or 'None'}",
+            f"SOP Action Conflicts: {diag.get('sop_summary') or 'None'}",
+            "",
+            "Choose conflict handling policy:",
+        ]
+        msg = QMessageBox(self)
+        msg.setWindowTitle("SOP Conflict Resolution")
+        msg.setText("\n".join(details))
+        sop_btn = msg.addButton("1) SOP Priority For ALL", QMessageBox.AcceptRole)
+        net_btn = msg.addButton("2) Net Priority on Conflicts", QMessageBox.ActionRole)
+        daily_btn = msg.addButton("3) Daily Schedule Priority on Conflicts", QMessageBox.ActionRole)
+        cancel_btn = msg.addButton(QMessageBox.Cancel)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == cancel_btn:
+            return
+        if clicked == net_btn:
+            policy = self.manager.CONFLICT_POLICY_NET
+        elif clicked == daily_btn:
+            policy = self.manager.CONFLICT_POLICY_DAILY
+        else:
+            policy = self.manager.CONFLICT_POLICY_SOP
+        action["conflict_policy"] = policy
+
+        must_adjust_start = bool(diag.get("first_occurrence_conflict")) and (
+            policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY}
+            or bool(diag.get("sop_conflicts"))
+        )
+        if must_adjust_start:
+            suggested_utc = self.manager.suggest_non_conflicting_start(
+                action=action,
+                operating_group=str(action.get("group_name") or "").strip().upper(),
+                check_all_groups=True,
+                peer_actions=peer_actions,
+            )
+            suggested_display = self._display_start_hhmm_from_utc(suggested_utc, show_local=self._show_local)
+            reason_txt = (
+                "First occurrence overlaps another SOP action."
+                if bool(diag.get("sop_conflicts"))
+                else "First occurrence conflicts with selected priority policy."
+            )
+            prompt = (
+                f"{reason_txt}\n"
+                f"Suggested start: {suggested_display}\n\n"
+                "Enter a new Daily Start time (HH:MM):"
+            )
+            while True:
+                text, ok = QInputDialog.getText(
+                    self,
+                    "Adjust Daily Start",
+                    prompt,
+                    text=suggested_display,
+                )
+                if not ok:
+                    return
+                candidate = str(text or "").strip()
+                if not self._is_valid_hhmm(candidate):
+                    QMessageBox.warning(self, "SOP Conflict Resolution", "Start time must be HH:MM.")
+                    continue
+                new_start_utc = self._utc_start_hhmm_from_display(candidate, show_local=self._show_local)
+                action["daily_start_utc"] = new_start_utc
+                action["daily_end_utc"] = self._add_minutes_hhmm(new_start_utc, int(action.get("duration_minutes") or 60))
+                validate = self.manager.detect_action_conflicts(
+                    action=action,
+                    operating_group=str(action.get("group_name") or "").strip().upper(),
+                    horizon_days=7,
+                    check_all_groups=True,
+                    peer_actions=peer_actions,
+                )
+                if bool(validate.get("sop_conflicts")):
+                    QMessageBox.warning(
+                        self,
+                        "SOP Conflict Resolution",
+                        "This start time still overlaps another SOP action on a different frequency. Choose another time.",
+                    )
+                    continue
+                if policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY} and bool(
+                    validate.get("first_occurrence_conflict")
+                ):
+                    QMessageBox.warning(
+                        self,
+                        "SOP Conflict Resolution",
+                        "This start time still conflicts for the first occurrence. Choose another time.",
+                    )
+                    continue
+                break
+
+        self._apply_realtime_action_resolution_to_row(row_index, action)
+
+    def _apply_realtime_action_resolution_to_row(self, row_index: int, action: Dict[str, Any]) -> None:
+        if row_index < 0 or row_index >= self.actions_table.rowCount():
+            return
+        group_combo = self.actions_table.cellWidget(row_index, self.COL_GROUP)
+        start_edit = self.actions_table.cellWidget(row_index, self.COL_START)
+        end_edit = self.actions_table.cellWidget(row_index, self.COL_END)
+        if isinstance(group_combo, QComboBox):
+            group_combo.setProperty(
+                "conflict_policy",
+                self.manager._normalize_conflict_policy(action.get("conflict_policy")),
+            )
+        display_start = self._display_start_hhmm_from_utc(str(action.get("daily_start_utc") or "00:00"), show_local=self._show_local)
+        display_end = self._display_start_hhmm_from_utc(str(action.get("daily_end_utc") or "23:59"), show_local=self._show_local)
+        self._suppress_realtime_conflict_checks = True
+        try:
+            if isinstance(start_edit, QLineEdit):
+                start_edit.setText(display_start)
+            if isinstance(end_edit, QLineEdit):
+                end_edit.setText(display_end)
+        finally:
+            self._suppress_realtime_conflict_checks = False
+        self._mark_dirty()
+        self._schedule_realtime_hf_conflict_check()
+
+    def _apply_accessibility_width_guards(self) -> None:
+        buttons = [
+            self.time_toggle_btn,
+            self.new_btn,
+            self.save_btn,
+            self.delete_btn,
+            self.export_pdf_btn,
+            self.export_import_btn,
+            self.add_row_btn,
+        ]
+        for btn in buttons:
+            txt = str(btn.text() or "").replace("&", "").strip()
+            if not txt:
+                continue
+            try:
+                needed = int(btn.fontMetrics().horizontalAdvance(txt) + 30)
+            except Exception:
+                continue
+            try:
+                btn.setMinimumWidth(max(100, min(360, needed)))
+            except Exception:
+                pass
+
+    def _schedule_layer_sync_refresh(self) -> None:
+        return
+
+    def _refresh_layer_sync_hint(self) -> None:
+        return
+
+    def _update_clock_labels(self) -> None:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        tz_name = self.settings.get("timezone", "UTC") or "UTC"
+        tz = get_timezone(tz_name)
+        now_local = now_utc.astimezone(tz)
+        self.utc_label.setText(f"UTC: {now_utc.strftime('%Y-%m-%d %H:%M')}")
+        self.local_label.setText(f"Local: {now_local.strftime('%Y-%m-%d %H:%M')}")
+        self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
+        self._update_action_time_headers()
+        self._update_time_toggle_style()
+
+    def _update_action_time_headers(self) -> None:
+        tz_short = "UTC" if not self._show_local else self._tz_short_name()
+        start_item = self.actions_table.horizontalHeaderItem(self.COL_START)
+        if start_item is None:
+            start_item = QTableWidgetItem()
+            self.actions_table.setHorizontalHeaderItem(self.COL_START, start_item)
+        start_item.setText(f"Start ({tz_short})")
+        end_item = self.actions_table.horizontalHeaderItem(self.COL_END)
+        if end_item is None:
+            end_item = QTableWidgetItem()
+            self.actions_table.setHorizontalHeaderItem(self.COL_END, end_item)
+        end_item.setText(f"End ({tz_short})")
+
+    def _toggle_time_view(self) -> None:
+        old_show_local = bool(self._show_local)
+        self._show_local = not self._show_local
+        self._update_clock_labels()
+        for r in range(self.actions_table.rowCount()):
+            start_edit = self.actions_table.cellWidget(r, self.COL_START)
+            end_edit = self.actions_table.cellWidget(r, self.COL_END)
+            if isinstance(start_edit, QLineEdit):
+                current = start_edit.text().strip()
+                if self._is_valid_hhmm(current):
+                    utc_hhmm = self._utc_start_hhmm_from_display(current, show_local=old_show_local)
+                    start_edit.setText(self._display_start_hhmm_from_utc(utc_hhmm, show_local=self._show_local))
+            if isinstance(end_edit, QLineEdit):
+                current = end_edit.text().strip()
+                if self._is_valid_hhmm(current):
+                    utc_hhmm = self._utc_start_hhmm_from_display(current, show_local=old_show_local)
+                    end_edit.setText(self._display_start_hhmm_from_utc(utc_hhmm, show_local=self._show_local))
+        self._mark_dirty()
+
+    def _refresh_reference_data(self) -> None:
+        data = self.settings.all()
+        og = data.get("operating_groups", [])
+        self._operating_groups = [g for g in og if isinstance(g, dict)]
+        self._load_local_net_profiles_from_data(data)
+        self._refresh_all_rows_dynamic_options()
+
+    def _hf_group_names(self) -> List[str]:
+        return sorted(
+            {
+                str(row.get("group", "")).strip().upper()
+                for row in (self._operating_groups or [])
+                if str(row.get("group", "")).strip()
+            }
+        )
+
+    def _local_group_names(self) -> List[str]:
+        return sorted(
+            {
+                str(row.get("group", "")).strip().upper()
+                for row in (self._local_net_profiles or [])
+                if str(row.get("group", "")).strip()
+            }
+        )
+
+    def _local_resources_for_group(self, group: str) -> List[str]:
+        grp = str(group or "").strip().upper()
+        out: Set[str] = set()
+        for row in self._local_net_profiles or []:
+            if str(row.get("group", "")).strip().upper() != grp:
+                continue
+            resource = str(row.get("resource", "")).strip()
+            if resource:
+                out.add(resource)
+        if not out:
+            out.update(self.LOCAL_RESOURCE_FALLBACK)
+        return sorted(out, key=lambda x: x.upper())
+
+    def _local_modes_for_group_resource(self, group: str, resource: str) -> List[str]:
+        grp = str(group or "").strip().upper()
+        res = str(resource or "").strip().upper()
+        out: Set[str] = set()
+        for row in self._local_net_profiles or []:
+            if str(row.get("group", "")).strip().upper() != grp:
+                continue
+            if res and str(row.get("resource", "")).strip().upper() != res:
+                continue
+            mode = str(row.get("mode", "")).strip()
+            if mode:
+                out.add(mode)
+        if not out:
+            out.update(self.LOCAL_MODE_FALLBACK)
+        return sorted(out, key=lambda x: x.upper())
+
+    def _hf_band_freq_options_for_group(self, group: str) -> List[str]:
+        grp = str(group or "").strip().upper()
+        out: List[Tuple[str, str]] = []
+        for row in self._operating_groups or []:
+            if str(row.get("group", "")).strip().upper() != grp:
+                continue
+            band = str(row.get("band", "")).strip().upper()
+            freq = str(row.get("frequency", "")).strip()
+            if not band or not freq:
+                continue
+            try:
+                freq_fmt = f"{float(freq):.3f}"
+            except Exception:
+                freq_fmt = freq
+            out.append((band, freq_fmt))
+        out = sorted(set(out), key=lambda x: (x[0], float(x[1]) if x[1].replace(".", "", 1).isdigit() else 0.0))
+        return [f"{band} - {freq}" for band, freq in out]
+
+    def _resource_options_for_category(self, category: str, group: str) -> List[str]:
+        if category == self.CAT_LOCAL:
+            return self._local_resources_for_group(group)
+        return list(self.HF_RESOURCE_OPTIONS)
+
+    def _action_catalog(self) -> Dict[str, List[Tuple[str, str]]]:
+        catalog: Dict[str, List[Tuple[str, str]]] = {
+            "JS8Call": [("js8_send_status", "Status"), ("js8_commstat", "CommStat")],
+            "VarAC": [
+                ("varac_send_broadcast", "Broadcast"),
+                ("varac_direct_contact", "Direct Contact"),
+                ("varac_send_sitrep", "SitRep"),
+                ("varac_send_statrep", "StatRep"),
+                ("varac_send_report", "General"),
+            ],
+            "FLDigi": [
+                ("fldigi_send_sitrep", "SitRep"),
+                ("fldigi_send_statrep", "StatRep"),
+                ("fldigi_send_report", "General"),
+            ],
+            "SSB": [
+                ("ssb_monitor", "Monitor"),
+                ("ssb_checkin", "Check-in"),
+                ("ssb_message", "Message"),
+            ],
+            "Local Net": [
+                ("local_ncs", "NCS"),
+                ("local_checkin", "Check-in"),
+                ("local_message", "Message"),
+                ("local_monitor", "Monitor"),
+            ],
+        }
+        for key, label in self._load_spotter_forms():
+            catalog.setdefault("JS8Call", []).append((key, label))
+        return catalog
+
+    def _current_category(self) -> str:
+        return str(self.category_combo.currentData() or self.CAT_HF)
+
+    def _apply_category_table_view(self) -> None:
+        cat = self._current_category()
+        is_hf = cat == self.CAT_HF
+        self.actions_table.setColumnHidden(self.COL_COND, not is_hf)
+        self.actions_table.setColumnHidden(self.COL_BANDFREQ, not is_hf)
+        self.actions_table.setColumnHidden(self.COL_MODE, is_hf)
+        self.actions_table.setColumnHidden(self.COL_END, True)
+        self.actions_table.setColumnHidden(self.COL_CONFLICT, not is_hf)
+        self._autosize_actions_table()
+        self._refresh_inline_conflict_badges()
+
+    def _profile_id_for_category(self, category: str) -> int:
+        cat = self.manager._normalize_category(category)
+        for p in self._profiles:
+            if self.manager._normalize_category(p.get("category")) == cat:
+                return int(p.get("id") or 0)
+        return 0
+
+    def _reload_profiles(self, select_id: int | None) -> None:
+        try:
+            self.manager.enforce_single_profile_per_category()
+        except Exception:
+            pass
+        hf = self.manager.ensure_category_profile(self.CAT_HF)
+        local = self.manager.ensure_category_profile(self.CAT_LOCAL)
+        profiles = {int(p.get("id") or 0): p for p in self.manager.list_profiles()}
+        self._profiles = [
+            profiles.get(int(hf.get("id") or 0), hf),
+            profiles.get(int(local.get("id") or 0), local),
+        ]
+
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        self.profile_combo.addItem("HF SOP", int(hf.get("id") or 0))
+        self.profile_combo.addItem("Local Comms SOP", int(local.get("id") or 0))
+        self.profile_combo.blockSignals(False)
+
+        target_id = int(select_id or 0)
+        if target_id <= 0:
+            target_id = int(self._selected_profile_id or 0)
+        if target_id <= 0:
+            target_id = int(hf.get("id") or 0)
+        for idx in range(self.profile_combo.count()):
+            if int(self.profile_combo.itemData(idx) or 0) != target_id:
+                continue
+            self.profile_combo.setCurrentIndex(idx)
+            self._on_profile_selected(idx)
+            return
+        if self.profile_combo.count() > 0:
+            self.profile_combo.setCurrentIndex(0)
+            self._on_profile_selected(0)
+
+    def _on_category_changed(self) -> None:
+        if getattr(self, "_loading_ui", False):
+            return
+        self._last_realtime_conflict_signature = None
+        cat = self._current_category()
+        pid = self._profile_id_for_category(cat)
+        if pid > 0:
+            for idx in range(self.profile_combo.count()):
+                if int(self.profile_combo.itemData(idx) or 0) != pid:
+                    continue
+                if self.profile_combo.currentIndex() != idx:
+                    self.profile_combo.setCurrentIndex(idx)
+                break
+        self._apply_category_table_view()
+        self._refresh_all_rows_dynamic_options()
+        self._schedule_realtime_hf_conflict_check()
+
+    @staticmethod
+    def _is_local_action_dict(action: Dict[str, Any]) -> bool:
+        software = str(action.get("software", "")).strip().upper()
+        action_key = str(action.get("action_key", "")).strip().lower()
+        contact_rule = str(action.get("contact_rule", "")).strip().lower()
+        return software == "LOCAL NET" or action_key.startswith("local_") or contact_rule in {"local_group", "local_profile"}
+
+    def _on_profile_selected(self, idx: int) -> None:
+        if idx < 0:
+            return
+        profile_id = int(self.profile_combo.itemData(idx) or 0)
+        if profile_id <= 0:
+            return
+        profile = self.manager.get_profile(profile_id)
+        if not profile:
+            return
+        self._selected_profile_id = profile_id
+        category = self.manager._normalize_category(profile.get("category"))
+        actions = list(profile.get("actions") or [])
+        if category == self.CAT_HF:
+            actions = [a for a in actions if not self._is_local_action_dict(a)]
+        else:
+            actions = [a for a in actions if self._is_local_action_dict(a)]
+        self._loading_ui = True
+        try:
+            self.name_edit.setText(str(profile.get("name") or ("HF SOP" if category == self.CAT_HF else "Local Comms SOP")))
+            self.active_cb.setChecked(bool(profile.get("active")))
+            self.category_combo.setCurrentIndex(0 if category == self.CAT_HF else 1)
+            self._populate_actions(actions)
+        finally:
+            self._loading_ui = False
+        self._apply_category_table_view()
+        self._set_save_dirty(False)
+        self._update_profile_action_styles()
+
+    def _new_profile(self) -> None:
+        choices = ["HF SOP", "Local Comms SOP"]
+        choice, ok = QInputDialog.getItem(self, "New SOP", "Select SOP category:", choices, 0, False)
+        if not ok:
+            return
+        category = self.CAT_HF if choice == "HF SOP" else self.CAT_LOCAL
+        profile = self.manager.ensure_category_profile(category)
+        pid = int(profile.get("id") or 0)
+        if pid <= 0:
+            return
+        for idx in range(self.profile_combo.count()):
+            if int(self.profile_combo.itemData(idx) or 0) != pid:
+                continue
+            self.profile_combo.setCurrentIndex(idx)
+            break
+        if self.actions_table.rowCount() > 0:
+            resp = QMessageBox.question(
+                self,
+                "New SOP Draft",
+                "Clear current action rows and start a new draft for this category?",
+            )
+            if resp == QMessageBox.Yes:
+                self._populate_actions([])
+                self.name_edit.setText("HF SOP" if category == self.CAT_HF else "Local Comms SOP")
+                self.active_cb.setChecked(False)
+                self._set_save_dirty(True)
+
+    def _update_profile_action_styles(self, theme: Dict[str, str] | None = None) -> None:
+        try:
+            if theme is None:
+                theme = resolve_theme(self.settings)
+            has_profile = int(self._selected_profile_id or 0) > 0
+            self.new_btn.setStyleSheet(button_style("muted", theme))
+            self.save_btn.setStyleSheet(button_style("eligible_success" if self._dirty else "muted", theme))
+            self.save_btn.setEnabled(True)
+            self.delete_btn.setEnabled(has_profile)
+            self.delete_btn.setStyleSheet(button_style("eligible_danger" if has_profile else "muted", theme))
+            self.export_pdf_btn.setEnabled(True)
+            self.export_pdf_btn.setStyleSheet(button_style("muted", theme))
+            self.export_import_btn.setEnabled(True)
+            self.export_import_btn.setStyleSheet(button_style("muted", theme))
+            self.add_row_btn.setEnabled(has_profile)
+            self.add_row_btn.setStyleSheet(button_style("eligible_primary" if has_profile else "muted", theme))
+        except Exception:
+            pass
+
+    def _refresh_all_rows_dynamic_options(self) -> None:
+        for r in range(self.actions_table.rowCount()):
+            self._refresh_row_dynamic_options(r, preserve_current=True)
+
+    def _combo_set_items(self, combo: QComboBox, values: List[str], current_text: str = "") -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("")
+        for val in values:
+            if val:
+                combo.addItem(val)
+        if current_text and combo.findText(current_text) < 0:
+            combo.addItem(current_text)
+        combo.setCurrentText(current_text)
+        self._fit_combo_popup(combo)
+        combo.blockSignals(False)
+
+    def _lookup_callsigns_for_contact_rule(self, group: str, rule: str) -> List[str]:
+        grp = str(group or "").strip().upper()
+        if not grp:
+            return []
+        normalized_rule = str(rule or "none").strip().lower()
+        contacts = self.manager.resolve_primary_contacts(grp, "")
+        if normalized_rule == "hub_or_hub_alt":
+            return list(contacts.get("hub", []) or [])
+        if normalized_rule == "ncs_or_ancs":
+            return list(contacts.get("ncs", []) or [])
+        if normalized_rule == "peer":
+            return list(contacts.get("peer", []) or [])
+        return self.manager.resolve_group_callsigns(grp, "")
+
+    def _refresh_row_dynamic_options(self, row: int, *, preserve_current: bool) -> None:
+        cat = self._current_category()
+        group_combo = self.actions_table.cellWidget(row, self.COL_GROUP)
+        cond_edit = self.actions_table.cellWidget(row, self.COL_COND)
+        resource_combo = self.actions_table.cellWidget(row, self.COL_RESOURCE)
+        mode_combo = self.actions_table.cellWidget(row, self.COL_MODE)
+        action_combo = self.actions_table.cellWidget(row, self.COL_ACTION)
+        bandfreq_combo = self.actions_table.cellWidget(row, self.COL_BANDFREQ)
+        contact_combo = self.actions_table.cellWidget(row, self.COL_CONTACT)
+        target_combo = self.actions_table.cellWidget(row, self.COL_CONTACT_TARGET)
+        if not isinstance(group_combo, QComboBox) or not isinstance(resource_combo, QComboBox):
+            return
+        if not isinstance(mode_combo, QComboBox) or not isinstance(action_combo, QComboBox):
+            return
+        if not isinstance(bandfreq_combo, QComboBox) or not isinstance(contact_combo, QComboBox):
+            return
+        if not isinstance(target_combo, QComboBox):
+            return
+
+        group_current = group_combo.currentText().strip().upper()
+        resource_current = resource_combo.currentText().strip()
+        mode_current = mode_combo.currentText().strip()
+        action_key_current = str(action_combo.currentData() or "").strip()
+        bandfreq_current = bandfreq_combo.currentText().strip()
+        contact_current = str(contact_combo.currentData() or "none").strip()
+
+        group_values = self._hf_group_names() if cat == self.CAT_HF else self._local_group_names()
+        self._combo_set_items(group_combo, group_values, group_current if preserve_current else "")
+        group_current = group_combo.currentText().strip().upper()
+
+        resource_values = self._resource_options_for_category(cat, group_current)
+        if cat == self.CAT_LOCAL and resource_current and resource_current not in resource_values:
+            resource_values = resource_values + [resource_current]
+        self._combo_set_items(resource_combo, resource_values, resource_current if preserve_current else "")
+        resource_current = resource_combo.currentText().strip()
+
+        mode_values: List[str] = []
+        if cat == self.CAT_LOCAL:
+            mode_values = self._local_modes_for_group_resource(group_current, resource_current)
+        else:
+            mode_values = self._mode_options_for_group_band(group_current, "")
+            if not mode_values:
+                mode_values = ["DIGI", "USB", "LSB"]
+        self._combo_set_items(mode_combo, mode_values, mode_current if preserve_current else "")
+
+        action_pairs = []
+        if cat == self.CAT_LOCAL:
+            action_pairs = self._action_catalog().get("Local Net", [])
+        else:
+            action_pairs = self._action_catalog().get(resource_current, [])
+        action_combo.blockSignals(True)
+        action_combo.clear()
+        for key, label in action_pairs:
+            action_combo.addItem(label, key)
+        if action_key_current and action_combo.findData(action_key_current) < 0:
+            action_combo.addItem(action_key_current, action_key_current)
+        idx = action_combo.findData(action_key_current)
+        action_combo.setCurrentIndex(idx if idx >= 0 else (0 if action_combo.count() else -1))
+        self._fit_combo_popup(action_combo)
+        action_combo.blockSignals(False)
+        action_key_current = str(action_combo.currentData() or "").strip()
+
+        if cat == self.CAT_HF:
+            bandfreq_values = self._hf_band_freq_options_for_group(group_current)
+            self._combo_set_items(bandfreq_combo, bandfreq_values, bandfreq_current if preserve_current else "")
+            bandfreq_combo.setEnabled(True)
+        else:
+            self._combo_set_items(bandfreq_combo, [], "")
+            bandfreq_combo.setEnabled(False)
+
+        contact_opts = self.CONTACT_RULE_OPTIONS
+        if cat == self.CAT_LOCAL:
+            if action_key_current == "local_monitor":
+                contact_opts = [("none", "None")]
+            else:
+                contact_opts = list(self.LOCAL_CONTACT_OPTIONS)
+        contact_combo.blockSignals(True)
+        contact_combo.clear()
+        for code, label in contact_opts:
+            contact_combo.addItem(label, code)
+        idx_contact = contact_combo.findData(contact_current)
+        if idx_contact < 0:
+            idx_contact = 0
+        contact_combo.setCurrentIndex(idx_contact)
+        self._fit_combo_popup(contact_combo)
+        contact_combo.blockSignals(False)
+
+        if cat == self.CAT_HF and isinstance(cond_edit, QLineEdit):
+            if not cond_edit.text().strip():
+                cond_edit.setText("ALL")
+        if cat == self.CAT_LOCAL and isinstance(cond_edit, QLineEdit):
+            cond_edit.setText("ALL")
+            cond_edit.setEnabled(False)
+        elif isinstance(cond_edit, QLineEdit):
+            cond_edit.setEnabled(True)
+
+        selected_contact = str(contact_combo.currentData() or "none").strip()
+        target_enabled = selected_contact != "none"
+        if cat == self.CAT_LOCAL and action_key_current == "local_monitor":
+            target_enabled = False
+        existing_target = str(target_combo.currentText() or "").strip().upper()
+        option_values = self._lookup_callsigns_for_contact_rule(group_current, selected_contact) if target_enabled else []
+        if selected_contact in {"hub_or_hub_alt", "ncs_or_ancs"} and target_enabled:
+            option_values = ["Any (Role Match)"] + option_values
+        self._combo_set_items(target_combo, option_values, existing_target if preserve_current else "")
+        target_combo.setEditable(True)
+        target_combo.setEnabled(target_enabled)
+        self._apply_typeahead(target_combo)
+
+    def _populate_actions(self, existing: List[Dict[str, Any]]) -> None:
+        self.actions_table.setRowCount(0)
+        rows = [r for r in (existing or []) if isinstance(r, dict)]
+        rows.sort(key=lambda x: int(x.get("sort_order") or 0))
+        for row in rows:
+            self._add_action_row(existing=row, mark_dirty=False)
+        if self.actions_table.rowCount() == 0:
+            self._add_action_row(existing=None, mark_dirty=False)
+        self._apply_category_table_view()
+        self._autosize_actions_table()
+
+    def _add_action_row(self, existing: Dict[str, Any] | None, *, mark_dirty: bool = True) -> None:
+        row = self.actions_table.rowCount()
+        self.actions_table.insertRow(row)
+        cat = self._current_category()
+
+        group_combo = QComboBox()
+        group_combo.setEditable(True)
+        group_combo.setProperty("action_id", int((existing or {}).get("id") or 0))
+        group_combo.setProperty("sort_order", int((existing or {}).get("sort_order") or row))
+        group_combo.setProperty(
+            "conflict_policy",
+            self.manager._normalize_conflict_policy((existing or {}).get("conflict_policy")),
+        )
+        group_combo.setProperty(
+            "schedule_applied",
+            bool((existing or {}).get("schedule_applied", True)),
+        )
+        self.actions_table.setCellWidget(row, self.COL_GROUP, group_combo)
+
+        cond_edit = QLineEdit(self.manager._normalize_condition_levels((existing or {}).get("condition_levels") or "ALL"))
+        cond_edit.setPlaceholderText("ALL or 1,3,5")
+        self.actions_table.setCellWidget(row, self.COL_COND, cond_edit)
+
+        resource_combo = QComboBox()
+        resource_combo.setEditable(True)
+        self.actions_table.setCellWidget(row, self.COL_RESOURCE, resource_combo)
+
+        mode_combo = QComboBox()
+        mode_combo.setEditable(True)
+        self.actions_table.setCellWidget(row, self.COL_MODE, mode_combo)
+
+        action_combo = QComboBox()
+        self.actions_table.setCellWidget(row, self.COL_ACTION, action_combo)
+
+        bandfreq_combo = QComboBox()
+        bandfreq_combo.setEditable(True)
+        self.actions_table.setCellWidget(row, self.COL_BANDFREQ, bandfreq_combo)
+
+        start_utc = str((existing or {}).get("daily_start_utc") or "00:00")
+        end_utc = str((existing or {}).get("daily_end_utc") or "23:59")
+        start_edit = QLineEdit(self._display_start_hhmm_from_utc(start_utc, show_local=self._show_local))
+        end_edit = QLineEdit(self._display_start_hhmm_from_utc(end_utc, show_local=self._show_local))
+        start_edit.setPlaceholderText("HH:MM")
+        end_edit.setPlaceholderText("HH:MM")
+        self.actions_table.setCellWidget(row, self.COL_START, start_edit)
+        self.actions_table.setCellWidget(row, self.COL_END, end_edit)
+
+        duration_combo = QComboBox()
+        for label, minutes in self.DURATION_OPTIONS:
+            duration_combo.addItem(label, minutes)
+        duration_val = int((existing or {}).get("duration_minutes") or 60)
+        idx_dur = duration_combo.findData(duration_val)
+        duration_combo.setCurrentIndex(idx_dur if idx_dur >= 0 else 1)
+        self.actions_table.setCellWidget(row, self.COL_DURATION, duration_combo)
+
+        interval_combo = QComboBox()
+        interval_combo.setEditable(True)
+        for preset in self.INTERVAL_PRESETS:
+            interval_combo.addItem(preset, preset)
+        interval_minutes = int((existing or {}).get("interval_minutes") or 0)
+        if interval_minutes <= 0:
+            interval_minutes = int((existing or {}).get("interval_hours") or 3) * 60
+        interval_phase = int((existing or {}).get("interval_phase_minutes") or 0)
+        interval_text = self._format_interval_spec(interval_minutes, interval_phase)
+        if interval_combo.findText(interval_text) < 0:
+            interval_combo.addItem(interval_text, interval_text)
+        interval_combo.setCurrentText(interval_text)
+        interval_combo.setToolTip("Examples: 00:30, 01:00, 03:00@30m")
+        self.actions_table.setCellWidget(row, self.COL_INTERVAL, interval_combo)
+
+        contact_combo = QComboBox()
+        self.actions_table.setCellWidget(row, self.COL_CONTACT, contact_combo)
+
+        target_combo = QComboBox()
+        target_combo.setEditable(True)
+        target_combo.setInsertPolicy(QComboBox.NoInsert)
+        target_combo.setCurrentText(str((existing or {}).get("contact_target") or "").strip().upper())
+        target_combo.setProperty("saved_target", str((existing or {}).get("contact_target") or "").strip().upper())
+        if target_combo.lineEdit() is not None:
+            target_combo.lineEdit().setPlaceholderText("Optional (type or select)")
+        self.actions_table.setCellWidget(row, self.COL_CONTACT_TARGET, target_combo)
+
+        desc_edit = QLineEdit(str((existing or {}).get("description") or "").strip())
+        desc_edit.setPlaceholderText("Optional description")
+        self.actions_table.setCellWidget(row, self.COL_DESC, desc_edit)
+
+        conflict_badge = QLabel("Pending")
+        conflict_badge.setAlignment(Qt.AlignCenter)
+        self.actions_table.setCellWidget(row, self.COL_CONFLICT, conflict_badge)
+
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(lambda _=False, b=remove_btn: self._remove_row_for_button(b))
+        self.actions_table.setCellWidget(row, self.COL_REMOVE, remove_btn)
+
+        existing_group = str((existing or {}).get("group_name") or "").strip().upper()
+        if not existing_group:
+            existing_group = str((existing or {}).get("operating_group") or "").strip().upper()
+        existing_resource = str((existing or {}).get("software") or "").strip()
+        existing_mode = str((existing or {}).get("mode") or "").strip()
+        existing_action_key = str((existing or {}).get("action_key") or "").strip()
+        existing_contact = str((existing or {}).get("contact_rule") or "none").strip()
+
+        self._refresh_row_dynamic_options(row, preserve_current=False)
+        group_combo.setCurrentText(existing_group)
+        self._refresh_row_dynamic_options(row, preserve_current=True)
+        if existing_resource:
+            resource_combo.setCurrentText(existing_resource)
+            self._refresh_row_dynamic_options(row, preserve_current=True)
+        if existing_mode:
+            mode_combo.setCurrentText(existing_mode)
+        if cat == self.CAT_HF:
+            band = str((existing or {}).get("band") or "").strip().upper()
+            freq = str((existing or {}).get("frequency") or "").strip()
+            if band and freq:
+                bandfreq_combo.setCurrentText(f"{band} - {freq}")
+        if existing_action_key:
+            idx_action = action_combo.findData(existing_action_key)
+            if idx_action >= 0:
+                action_combo.setCurrentIndex(idx_action)
+        idx_contact = contact_combo.findData(existing_contact)
+        if idx_contact >= 0:
+            contact_combo.setCurrentIndex(idx_contact)
+
+        group_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
+        group_combo.currentTextChanged.connect(lambda _=None, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
+        resource_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
+        resource_combo.currentTextChanged.connect(lambda _=None, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
+        action_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
+        contact_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
+
+        for widget in (
+            group_combo,
+            cond_edit,
+            resource_combo,
+            mode_combo,
+            action_combo,
+            bandfreq_combo,
+            start_edit,
+            end_edit,
+            duration_combo,
+            interval_combo,
+            contact_combo,
+            target_combo,
+            desc_edit,
+        ):
+            if isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(self._mark_dirty)
+                widget.currentTextChanged.connect(self._mark_dirty)
+                widget.currentIndexChanged.connect(self._schedule_realtime_hf_conflict_check)
+                widget.currentTextChanged.connect(self._schedule_realtime_hf_conflict_check)
+            elif isinstance(widget, QLineEdit):
+                widget.textChanged.connect(self._mark_dirty)
+                widget.textChanged.connect(self._schedule_realtime_hf_conflict_check)
+        self._autosize_actions_table()
+        self._set_inline_conflict_badge(row, "pending")
+        if mark_dirty:
+            self._mark_dirty()
+
+    def _remove_row_for_button(self, btn: QPushButton) -> None:
+        for r in range(self.actions_table.rowCount()):
+            if self.actions_table.cellWidget(r, self.COL_REMOVE) is btn:
+                self.actions_table.removeRow(r)
+                if self.actions_table.rowCount() == 0:
+                    self._add_action_row(existing=None, mark_dirty=False)
+                self._autosize_actions_table()
+                self._mark_dirty()
+                self._last_realtime_conflict_signature = None
+                self._schedule_realtime_hf_conflict_check()
+                return
+
+    def _autosize_actions_table(self) -> None:
+        try:
+            for col in (
+                self.COL_GROUP,
+                self.COL_COND,
+                self.COL_RESOURCE,
+                self.COL_MODE,
+                self.COL_ACTION,
+                self.COL_BANDFREQ,
+                self.COL_START,
+                self.COL_END,
+                self.COL_DURATION,
+                self.COL_INTERVAL,
+                self.COL_CONTACT,
+                self.COL_CONTACT_TARGET,
+                self.COL_CONFLICT,
+                self.COL_REMOVE,
+            ):
+                self.actions_table.resizeColumnToContents(col)
+            min_widths = {
+                self.COL_GROUP: 150,
+                self.COL_RESOURCE: 130,
+                self.COL_ACTION: 140,
+                self.COL_BANDFREQ: 180,
+                self.COL_INTERVAL: 110,
+                self.COL_CONTACT_TARGET: 170,
+                self.COL_CONFLICT: 96,
+            }
+            for col, min_w in min_widths.items():
+                if self.actions_table.columnWidth(col) < min_w:
+                    self.actions_table.setColumnWidth(col, min_w)
+            if self.actions_table.columnWidth(self.COL_DESC) < 240:
+                self.actions_table.setColumnWidth(self.COL_DESC, 240)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _split_band_freq(value: str) -> Tuple[str, str]:
+        text = str(value or "").strip()
+        if not text:
+            return "", ""
+        if "-" in text:
+            band, freq = text.split("-", 1)
+            return band.strip().upper(), freq.strip()
+        parts = text.split()
+        if len(parts) >= 2:
+            return parts[0].strip().upper(), parts[-1].strip()
+        return "", text
+
+    @staticmethod
+    def _add_minutes_hhmm(hhmm: str, minutes: int) -> str:
+        try:
+            parts = str(hhmm or "00:00").strip().split(":")
+            h = max(0, min(23, int(parts[0])))
+            m = max(0, min(59, int(parts[1])))
+        except Exception:
+            h, m = 0, 0
+        base = (h * 60) + m
+        total = max(0, min((24 * 60) - 1, base + int(minutes)))
+        return f"{total // 60:02d}:{total % 60:02d}"
+
+    def _collect_profile_payload(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]], None]:
+        name = self.name_edit.text().strip()
+        if not name:
+            raise ValueError("SOP name is required.")
+        category = self._current_category()
+        active = bool(self.active_cb.isChecked())
+        profile_id = int(self._selected_profile_id or 0)
+
+        actions: List[Dict[str, Any]] = []
+        for r in range(self.actions_table.rowCount()):
+            group_combo = self.actions_table.cellWidget(r, self.COL_GROUP)
+            cond_edit = self.actions_table.cellWidget(r, self.COL_COND)
+            resource_combo = self.actions_table.cellWidget(r, self.COL_RESOURCE)
+            mode_combo = self.actions_table.cellWidget(r, self.COL_MODE)
+            action_combo = self.actions_table.cellWidget(r, self.COL_ACTION)
+            bandfreq_combo = self.actions_table.cellWidget(r, self.COL_BANDFREQ)
+            start_edit = self.actions_table.cellWidget(r, self.COL_START)
+            end_edit = self.actions_table.cellWidget(r, self.COL_END)
+            duration_combo = self.actions_table.cellWidget(r, self.COL_DURATION)
+            interval_combo = self.actions_table.cellWidget(r, self.COL_INTERVAL)
+            contact_combo = self.actions_table.cellWidget(r, self.COL_CONTACT)
+            target_combo = self.actions_table.cellWidget(r, self.COL_CONTACT_TARGET)
+            desc_edit = self.actions_table.cellWidget(r, self.COL_DESC)
+            if not isinstance(group_combo, QComboBox) or not isinstance(resource_combo, QComboBox):
+                continue
+            if not isinstance(mode_combo, QComboBox) or not isinstance(action_combo, QComboBox):
+                continue
+            if not isinstance(bandfreq_combo, QComboBox) or not isinstance(start_edit, QLineEdit):
+                continue
+            if not isinstance(end_edit, QLineEdit) or not isinstance(duration_combo, QComboBox):
+                continue
+            if not isinstance(interval_combo, QComboBox) or not isinstance(contact_combo, QComboBox):
+                continue
+            if not isinstance(target_combo, QComboBox) or not isinstance(desc_edit, QLineEdit):
+                continue
+
+            group_name = group_combo.currentText().strip().upper()
+            condition_levels = self.manager._normalize_condition_levels(cond_edit.text().strip()) if isinstance(cond_edit, QLineEdit) else "ALL"
+            resource = resource_combo.currentText().strip()
+            mode = mode_combo.currentText().strip().upper()
+            action_key = str(action_combo.currentData() or "").strip()
+            action_label = action_combo.currentText().strip()
+            band = ""
+            freq = ""
+            if category == self.CAT_HF:
+                band, freq = self._split_band_freq(bandfreq_combo.currentText().strip())
+            start_display = start_edit.text().strip()
+            end_display = end_edit.text().strip() if isinstance(end_edit, QLineEdit) else ""
+            description = desc_edit.text().strip()
+            contact_rule = str(contact_combo.currentData() or "none").strip()
+            contact_target = str(target_combo.currentText() or "").strip().upper()
+            if contact_target == "ANY (ROLE MATCH)":
+                contact_target = self.ANY_ROLE_TOKEN
+
+            row_blank = not any([group_name, resource, action_key, action_label, description, contact_target, band, freq])
+            if row_blank:
+                continue
+
+            if category == self.CAT_HF and not group_name:
+                raise ValueError(f"Row {r + 1}: Group is required for HF SOP.")
+            if category == self.CAT_LOCAL and not group_name:
+                raise ValueError(f"Row {r + 1}: Group is required for Local Comms SOP.")
+            if not resource:
+                raise ValueError(f"Row {r + 1}: Resource is required.")
+            if not action_key:
+                raise ValueError(f"Row {r + 1}: Action is required.")
+            if category == self.CAT_HF and (not band or not freq):
+                raise ValueError(f"Row {r + 1}: Band - Freq is required for HF SOP.")
+            if not self._is_valid_hhmm(start_display):
+                raise ValueError(f"Row {r + 1}: Daily Start must be HH:MM.")
+            start_utc = self._utc_start_hhmm_from_display(start_display, show_local=self._show_local)
+            duration_minutes = int(duration_combo.currentData() or 60)
+            if duration_minutes not in {30, 60}:
+                duration_minutes = 60
+            end_utc = self._add_minutes_hhmm(start_utc, duration_minutes)
+            if isinstance(end_edit, QLineEdit):
+                end_edit.setText(self._display_start_hhmm_from_utc(end_utc, show_local=self._show_local))
+            interval_minutes, phase_minutes = self._parse_interval_spec(interval_combo.currentText())
+            if category == self.CAT_LOCAL and action_key == "local_monitor":
+                contact_rule = "none"
+                contact_target = ""
+
+            action_id = int(group_combo.property("action_id") or 0)
+            conflict_policy = self.manager._normalize_conflict_policy(group_combo.property("conflict_policy"))
+            schedule_applied = bool(group_combo.property("schedule_applied"))
+            actions.append(
+                {
+                    "id": action_id,
+                    "group_name": group_name,
+                    "condition_levels": condition_levels if category == self.CAT_HF else "ALL",
+                    "band": band if category == self.CAT_HF else "",
+                    "frequency": freq if category == self.CAT_HF else "",
+                    "software": "Local Net" if category == self.CAT_LOCAL else resource,
+                    "mode": mode if category == self.CAT_LOCAL else "",
+                    "action_key": action_key,
+                    "action_label": action_label or action_key,
+                    "enabled": True,
+                    "daily_start_utc": start_utc,
+                    "daily_end_utc": end_utc,
+                    "duration_minutes": duration_minutes,
+                    "interval_minutes": interval_minutes,
+                    "interval_phase_minutes": phase_minutes,
+                    "interval_hours": max(1, int((interval_minutes + 59) // 60)),
+                    "conflict_policy": conflict_policy,
+                    "daily_conflict_summary": "",
+                    "net_conflict_summary": "",
+                    "schedule_applied": schedule_applied,
+                    "description": description,
+                    "contact_rule": contact_rule,
+                    "contact_target": contact_target,
+                    "sort_order": r,
+                }
+            )
+
+        if not actions:
+            raise ValueError("Add at least one action row.")
+
+        profile_group = ""
+        if category == self.CAT_HF:
+            for action in actions:
+                grp = str(action.get("group_name") or "").strip().upper()
+                if grp:
+                    profile_group = grp
+                    break
+            if not profile_group:
+                raise ValueError("At least one HF action row must include a Group.")
+
+        payload = {
+            "id": profile_id,
+            "name": name,
+            "category": category,
+            "operating_group": profile_group,
+            "secondary_group": "",
+            "frequency": "",
+            "sop_start_utc": "00:00",
+            "priority": 100,
+            "active": active,
+            "window_hours": 24,
+        }
+        return payload, actions, None
+
+    def _resolve_hf_activation_conflicts(self, actions: List[Dict[str, Any]]) -> bool:
+        hf_peer_actions = [
+            a
+            for a in actions
+            if isinstance(a, dict) and not self.manager._is_local_action(a) and bool(a.get("enabled", True))
+        ]
+        for idx, action in enumerate(actions):
+            group = str(action.get("group_name") or "").strip().upper()
+            if not group:
+                continue
+            diag = self.manager.detect_action_conflicts(
+                action=action,
+                operating_group=group,
+                horizon_days=7,
+                check_all_groups=True,
+                peer_actions=hf_peer_actions,
+            )
+            action["daily_conflict_summary"] = str(diag.get("daily_summary") or "")
+            action["net_conflict_summary"] = str(diag.get("net_summary") or "")
+            if not bool(diag.get("has_conflict")):
+                action["conflict_policy"] = self.manager.CONFLICT_POLICY_SOP
+                continue
+
+            details = [
+                f"Action Row {idx + 1}: {action.get('action_label', 'Action')}",
+                f"Group: {group}",
+                "",
+                f"Daily Schedule Conflicts: {diag.get('daily_summary') or 'None'}",
+                f"Net Schedule Conflicts: {diag.get('net_summary') or 'None'}",
+                f"SOP Action Conflicts: {diag.get('sop_summary') or 'None'}",
+                "",
+                "Choose conflict handling policy:",
+            ]
+            msg = QMessageBox(self)
+            msg.setWindowTitle("SOP Conflict Resolution")
+            msg.setText("\n".join(details))
+            sop_btn = msg.addButton("1) SOP Priority For ALL", QMessageBox.AcceptRole)
+            net_btn = msg.addButton("2) Net Priority on Conflicts", QMessageBox.ActionRole)
+            daily_btn = msg.addButton("3) Daily Schedule Priority on Conflicts", QMessageBox.ActionRole)
+            cancel_btn = msg.addButton(QMessageBox.Cancel)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked == cancel_btn:
+                return False
+            if clicked == net_btn:
+                policy = self.manager.CONFLICT_POLICY_NET
+            elif clicked == daily_btn:
+                policy = self.manager.CONFLICT_POLICY_DAILY
+            else:
+                policy = self.manager.CONFLICT_POLICY_SOP
+            action["conflict_policy"] = policy
+
+            # Net/Daily policy must avoid first-occurrence conflicts; SOP-vs-SOP overlap must always be resolved.
+            must_adjust_start = bool(diag.get("first_occurrence_conflict")) and (
+                policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY}
+                or bool(diag.get("sop_conflicts"))
+            )
+            if must_adjust_start:
+                suggested_utc = self.manager.suggest_non_conflicting_start(
+                    action=action,
+                    operating_group=group,
+                    check_all_groups=True,
+                    peer_actions=hf_peer_actions,
+                )
+                suggested_display = self._display_start_hhmm_from_utc(suggested_utc, show_local=self._show_local)
+                reason_txt = (
+                    "First occurrence overlaps another SOP action."
+                    if bool(diag.get("sop_conflicts"))
+                    else "First occurrence conflicts with selected priority policy."
+                )
+                prompt = (
+                    f"{reason_txt}\n"
+                    f"Suggested start: {suggested_display}\n\n"
+                    "Enter a new Daily Start time (HH:MM):"
+                )
+                while True:
+                    text, ok = QInputDialog.getText(
+                        self,
+                        "Adjust Daily Start",
+                        prompt,
+                        text=suggested_display,
+                    )
+                    if not ok:
+                        return False
+                    candidate = str(text or "").strip()
+                    if not self._is_valid_hhmm(candidate):
+                        QMessageBox.warning(self, "SOP Conflict Resolution", "Start time must be HH:MM.")
+                        continue
+                    new_start_utc = self._utc_start_hhmm_from_display(candidate, show_local=self._show_local)
+                    action["daily_start_utc"] = new_start_utc
+                    action["daily_end_utc"] = self._add_minutes_hhmm(new_start_utc, int(action.get("duration_minutes") or 60))
+                    validate = self.manager.detect_action_conflicts(
+                        action=action,
+                        operating_group=group,
+                        horizon_days=7,
+                        check_all_groups=True,
+                        peer_actions=hf_peer_actions,
+                    )
+                    action["daily_conflict_summary"] = str(validate.get("daily_summary") or "")
+                    action["net_conflict_summary"] = str(validate.get("net_summary") or "")
+                    if bool(validate.get("sop_conflicts")):
+                        QMessageBox.warning(
+                            self,
+                            "SOP Conflict Resolution",
+                            "This start time still overlaps another SOP action on a different frequency. Choose another time.",
+                        )
+                        continue
+                    if policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY} and bool(
+                        validate.get("first_occurrence_conflict")
+                    ):
+                        QMessageBox.warning(
+                            self,
+                            "SOP Conflict Resolution",
+                            "This start time still conflicts for the first occurrence. Choose another time.",
+                        )
+                        continue
+                    break
+        return True
+
+    def _save_profile(self) -> None:
+        timer = getattr(self, "_realtime_conflict_timer", None)
+        if timer is not None:
+            timer.stop()
+        prev_suppress = getattr(self, "_suppress_realtime_conflict_checks", False)
+        self._suppress_realtime_conflict_checks = True
+        try:
+            payload, actions, _schedule_layer = self._collect_profile_payload()
+            if payload.get("category") == self.CAT_HF:
+                if not self._resolve_hf_activation_conflicts(actions):
+                    return
+            profile_id = self.manager.save_profile(payload, actions, schedule_layer=None)
+            self._reload_profiles(select_id=profile_id)
+            self._set_save_dirty(False)
+            self._emit_sop_data_changed()
+            QMessageBox.information(self, "SOP", "SOP saved.")
+        except Exception as e:
+            QMessageBox.warning(self, "SOP", str(e))
+        finally:
+            self._suppress_realtime_conflict_checks = prev_suppress
+
+    def _delete_profile(self) -> None:
+        if int(self._selected_profile_id or 0) <= 0:
+            return
+        resp = QMessageBox.question(
+            self,
+            "Clear SOP",
+            "Clear all action rows for this SOP category?",
+        )
+        if resp != QMessageBox.Yes:
+            return
+        profile = self.manager.get_profile(int(self._selected_profile_id or 0))
+        if not profile:
+            return
+        payload = dict(profile)
+        payload["active"] = False
+        payload["id"] = int(profile.get("id") or 0)
+        actions: List[Dict[str, Any]] = []
+        self.manager.save_profile(payload, actions, schedule_layer=None)
+        self._reload_profiles(select_id=int(profile.get("id") or 0))
+        self._set_save_dirty(False)
+        self._emit_sop_data_changed()
+
+    def refresh_upcoming(self) -> None:
+        self._upcoming_rows = []
+
+    def on_settings_saved(self) -> None:
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        selected_id = int(self._selected_profile_id or 0)
+        self._refresh_reference_data()
+        self._reload_profiles(select_id=selected_id)
+        self._update_clock_labels()
+
+    def on_local_net_profiles_updated(self) -> None:
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        self._refresh_reference_data()
+        self._refresh_all_rows_dynamic_options()
+
+    def on_tab_activated(self) -> None:
+        self._update_clock_labels()
+
+    def on_sop_profiles_updated(self) -> None:
+        self._reload_profiles(select_id=int(self._selected_profile_id or 0))
+
+    def select_profile(self, profile_id: int) -> bool:
+        try:
+            target = int(profile_id or 0)
+        except Exception:
+            return False
+        if target <= 0:
+            return False
+        self._reload_profiles(select_id=target)
+        return int(self._selected_profile_id or 0) == target
+
+    def _import_profile(self) -> None:
+        timer = getattr(self, "_realtime_conflict_timer", None)
+        if timer is not None:
+            timer.stop()
+        prev_suppress = getattr(self, "_suppress_realtime_conflict_checks", False)
+        self._suppress_realtime_conflict_checks = True
+        try:
+            src, _ = QFileDialog.getOpenFileName(self, "Import SOP", "", "JSON Files (*.json)")
+            if not src:
+                return
+            payload = json.loads(Path(src).read_text(encoding="utf-8"))
+            profile = payload.get("profile")
+            if not isinstance(profile, dict):
+                raise ValueError("Invalid SOP import payload.")
+            category = self.manager._normalize_category(profile.get("category"))
+            target_profile = self.manager.ensure_category_profile(category)
+            target_id = int(target_profile.get("id") or 0)
+            if target_id <= 0:
+                raise ValueError("Could not resolve target SOP category profile.")
+
+            imported = dict(profile)
+            imported["id"] = target_id
+            imported["category"] = category
+            raw_actions = imported.pop("actions", [])
+            if not isinstance(raw_actions, list):
+                raw_actions = []
+            imported_actions: List[Dict[str, Any]] = []
+            for row in raw_actions:
+                if not isinstance(row, dict):
+                    continue
+                clean = dict(row)
+                clean.pop("id", None)
+                imported_actions.append(clean)
+
+            if category == self.CAT_HF:
+                if not self._resolve_hf_activation_conflicts(imported_actions):
+                    return
+            self.manager.save_profile(imported, imported_actions, schedule_layer=None)
+            self._reload_profiles(select_id=target_id)
+            self._set_save_dirty(False)
+            self._emit_sop_data_changed()
+            QMessageBox.information(self, "Import SOP", "SOP imported.")
+        except Exception as e:
+            QMessageBox.warning(self, "Import SOP", str(e))
+        finally:
+            self._suppress_realtime_conflict_checks = prev_suppress
+
+    def apply_theme(self) -> None:
+        try:
+            theme = resolve_theme(self.settings)
+            self.terms_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            self._update_time_toggle_style(theme)
+            self._update_profile_action_styles(theme)
+            self._apply_accessibility_width_guards()
+            self._refresh_inline_conflict_badges()
         except Exception:
             pass

@@ -22,6 +22,9 @@ from PySide6.QtWidgets import (
     QDialog,
     QLayout,
     QSpacerItem,
+    QScrollArea,
+    QFrame,
+    QToolButton,
 )
 from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import QApplication
@@ -144,6 +147,7 @@ class MainWindow(QMainWindow):
             ("Help", self.help_tab),
         ]
         self._screen_index_by_label = {label: idx for idx, (label, _w) in enumerate(self._screens)}
+        self._condition_levels_signature: tuple[tuple[str, int], ...] = tuple()
         # Sidebar button order/text requested by user. Keep SOP accessible via in-app links,
         # but do not show it as a primary sidebar button.
         self._nav_specs = [
@@ -151,14 +155,14 @@ class MainWindow(QMainWindow):
             ("FreqPlanner", "FreqPlanner"),
             ("Messages", "Messages"),
             ("Map", "Map"),
-            ("NCS - FLDigi/SSB", "NCS-FLDigi/SSB"),
-            ("NCS - JS8", "NCS-JS8"),
-            ("NCS - Local", "NCS-Local"),
-            ("Schedule - HF", "HF Schedule"),
-            ("Schedule - Nets", "Net Schedule"),
-            ("Schedule - Peers", "Peer Schedules"),
-            ("Operators - HF", "HF Operators"),
-            ("Operators - Local", "Local Operators"),
+            ("FLDigi / SSB", "NCS-FLDigi/SSB"),
+            ("JS8Call", "NCS-JS8"),
+            ("VHF/UHF", "NCS-Local"),
+            ("HF Daily", "HF Schedule"),
+            ("HF Nets", "Net Schedule"),
+            ("HF Peers", "Peer Schedules"),
+            ("HF Callsigns", "HF Operators"),
+            ("Local Callsigns", "Local Operators"),
             ("SOP Builder", "SOP"),
             ("Settings", "Settings"),
             ("Help", "Help"),
@@ -166,19 +170,33 @@ class MainWindow(QMainWindow):
         self._nav_screen_index_map: dict[int, int] = {}
         self._nav_base_labels: list[str] = []
 
-        # Build sidebar
+        # Build sidebar with scrollable nav zone + persistent status dock.
         self.nav_widget = QWidget()
-        self.nav_widget.setMinimumWidth(140)
-        self.nav_widget.setMaximumWidth(200)
-        nav_layout = QVBoxLayout(self.nav_widget)
-        nav_layout.setContentsMargins(4, 4, 4, 4)
-        nav_layout.setSpacing(4)
+        self.nav_widget.setMinimumWidth(150)
+        self.nav_widget.setMaximumWidth(280)
+        nav_main_layout = QVBoxLayout(self.nav_widget)
+        nav_main_layout.setContentsMargins(4, 4, 4, 4)
+        nav_main_layout.setSpacing(6)
 
-        # Logo above nav buttons (optional if file exists)
+        # Logo above nav area (optional if file exists)
         self.logo_label = QLabel()
         self.logo_label.setAlignment(Qt.AlignCenter)
-        nav_layout.addWidget(self.logo_label)
+        nav_main_layout.addWidget(self.logo_label)
         self._set_logo_pixmap()
+
+        # Scrollable navigation zone (buttons + map filters + group toggles).
+        self.nav_scroll = QScrollArea(self.nav_widget)
+        self.nav_scroll.setWidgetResizable(True)
+        self.nav_scroll.setFrameShape(QFrame.NoFrame)
+        self.nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.nav_scroll.setMinimumHeight(0)
+        self.nav_content = QWidget()
+        nav_layout = QVBoxLayout(self.nav_content)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
+        self.nav_scroll.setWidget(self.nav_content)
+        nav_main_layout.addWidget(self.nav_scroll, 1)
 
         self.nav_buttons = []
         self.button_group = QButtonGroup(self)
@@ -186,10 +204,21 @@ class MainWindow(QMainWindow):
         self._map_nav_index = None
         self._ncs_nav_indices: dict[str, int] = {}
         self._ncs_net_active: dict[str, bool] = {"FLDIGI": False, "JS8": False, "LOCAL": False}
+        self._nav_group_headers: dict[str, QToolButton] = {}
+        self._nav_group_bodies: dict[str, QWidget] = {}
+        self._nav_group_layouts: dict[str, QVBoxLayout] = {}
+        self._nav_group_sections: dict[str, QWidget] = {}
+        self._nav_group_order: list[str] = ["NCS", "Schedules", "Operators"]
+        self._nav_group_states: dict[str, bool] = self._load_nav_group_states()
+
         for nav_idx, (button_label, screen_label) in enumerate(self._nav_specs):
             screen_idx = self._screen_index_by_label.get(screen_label)
             if screen_idx is None:
                 continue
+            group_key = self._nav_group_for_label(button_label, screen_label)
+            target_layout = nav_layout
+            if group_key:
+                target_layout = self._ensure_nav_group_layout(group_key, nav_layout)
             btn = QPushButton(button_label)
             btn.setCheckable(True)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -198,42 +227,46 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _=False, i=screen_idx: self._set_screen(i))
             self.button_group.addButton(btn, screen_idx)
             self.nav_buttons.append(btn)
-            self._nav_screen_index_map[screen_idx] = len(self.nav_buttons) - 1
+            btn_idx = len(self.nav_buttons) - 1
+            self._nav_screen_index_map[screen_idx] = btn_idx
             self._nav_base_labels.append(button_label)
-            nav_layout.addWidget(btn)
+            target_layout.addWidget(btn)
             if screen_label == "Map":
                 self._map_nav_index = nav_idx
             elif screen_label == "NCS-FLDigi/SSB":
-                self._ncs_nav_indices["FLDIGI"] = nav_idx
+                self._ncs_nav_indices["FLDIGI"] = btn_idx
             elif screen_label == "NCS-JS8":
-                self._ncs_nav_indices["JS8"] = nav_idx
+                self._ncs_nav_indices["JS8"] = btn_idx
             elif screen_label == "NCS-Local":
-                self._ncs_nav_indices["LOCAL"] = nav_idx
+                self._ncs_nav_indices["LOCAL"] = btn_idx
+
         # Placeholder for map filters (shown only on Map view)
         self.map_filters_container = QWidget()
         self.map_filters_container.setMinimumWidth(120)
-        self.map_filters_container.setMaximumWidth(200)
+        self.map_filters_container.setMaximumWidth(240)
         self.map_filters_layout = QVBoxLayout(self.map_filters_container)
         self.map_filters_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.addWidget(self.map_filters_container)
         self._init_map_filters()
-        spacer_height = 0
-        if self.nav_buttons:
-            try:
-                spacer_height = max(btn.sizeHint().height() for btn in self.nav_buttons)
-            except Exception:
-                spacer_height = 0
-        if spacer_height > 0:
-            nav_layout.addItem(QSpacerItem(0, spacer_height, QSizePolicy.Minimum, QSizePolicy.Fixed))
+        nav_layout.addStretch(1)
+
+        # Persistent status dock (outside nav scroll area; always visible).
+        self.status_dock_widget = QWidget()
+        self.status_dock_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.status_dock_widget.setMinimumHeight(0)
+        status_dock_layout = QVBoxLayout(self.status_dock_widget)
+        status_dock_layout.setContentsMargins(0, 0, 0, 0)
+        status_dock_layout.setSpacing(6)
 
         # Scheduler status panel (hidden on Map view)
         self.scheduler_status_container = QGroupBox("Schedule Status")
         self.scheduler_status_container.setCheckable(False)
-        self.scheduler_status_container.setMinimumWidth(140)
-        self.scheduler_status_container.setMaximumWidth(200)
-        self.scheduler_status_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.scheduler_status_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        status_title_style = (
+            "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 4px; }"
+        )
         self.scheduler_status_container.setStyleSheet(
-            "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 4px; }"
+            status_title_style
         )
         status_layout = QVBoxLayout(self.scheduler_status_container)
         status_layout.setContentsMargins(4, 4, 4, 4)
@@ -269,9 +302,34 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.suspend_schedule_btn, alignment=Qt.AlignCenter)
         status_layout.addWidget(self.resume_schedule_btn, alignment=Qt.AlignCenter)
         status_layout.addWidget(self.logs_active_btn, alignment=Qt.AlignCenter)
-        nav_layout.addWidget(self.scheduler_status_container)
         self.resume_schedule_btn.setVisible(False)
-        nav_layout.addStretch()
+        status_dock_layout.addWidget(self.scheduler_status_container)
+
+        # Condition levels panel (global; per-HF operating group status card).
+        self.condition_level_container = QGroupBox("Condition Level")
+        self.condition_level_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        condition_layout = QVBoxLayout(self.condition_level_container)
+        condition_layout.setContentsMargins(4, 4, 4, 4)
+        condition_layout.setSpacing(4)
+        self.condition_levels_rows = QWidget()
+        self.condition_levels_rows_layout = QVBoxLayout(self.condition_levels_rows)
+        self.condition_levels_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.condition_levels_rows_layout.setSpacing(2)
+        self.condition_levels_summary = QLabel("No condition levels configured.")
+        self.condition_levels_summary.setWordWrap(True)
+        self.condition_levels_summary.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        self.condition_levels_summary.setVisible(False)
+        self.condition_levels_edit_btn = QToolButton(self.condition_level_container)
+        self.condition_levels_edit_btn.setText("Edit Levels")
+        self.condition_levels_edit_btn.setAutoRaise(True)
+        self.condition_levels_edit_btn.clicked.connect(self._open_condition_levels_editor)
+        condition_layout.addWidget(self.condition_levels_rows)
+        condition_layout.addWidget(self.condition_levels_edit_btn, alignment=Qt.AlignLeft)
+        self.condition_level_container.setStyleSheet(status_title_style)
+        status_dock_layout.addWidget(self.condition_level_container)
+
+        nav_main_layout.addWidget(self.status_dock_widget, 0)
+
         self._update_scheduler_action_button_widths()
         self._update_nav_layout_metrics()
         QTimer.singleShot(0, self._sync_status_box_width)
@@ -369,6 +427,7 @@ class MainWindow(QMainWindow):
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(2000)
         self._status_timer.timeout.connect(self._refresh_scheduler_status_panel)
+        self._status_timer.timeout.connect(self._refresh_condition_level_panel)
         self._status_timer.timeout.connect(self._check_timed_debug_expiry)
         self._status_timer.start()
 
@@ -461,6 +520,7 @@ class MainWindow(QMainWindow):
         self._sync_map_filters_from_tab()
         self._update_log_indicator()
         self._refresh_scheduler_status_panel()
+        self._refresh_condition_level_panel()
 
         try:
             self.launch_orchestrator.sequence_started.connect(self._on_launch_sequence_started)
@@ -1155,6 +1215,7 @@ class MainWindow(QMainWindow):
                 self.scheduler_status_container.adjustSize()
             except Exception:
                 pass
+            self._auto_collapse_inactive_nav_groups()
             return
 
         if suspended_until:
@@ -1173,6 +1234,7 @@ class MainWindow(QMainWindow):
                 self.scheduler_status_container.adjustSize()
             except Exception:
                 pass
+            self._auto_collapse_inactive_nav_groups()
             return
 
         reasons = []
@@ -1259,7 +1321,7 @@ class MainWindow(QMainWindow):
                 border = theme.get("warning", theme.get("border", "#CCCCCC"))
                 self.scheduler_status_container.setStyleSheet(
                     "QGroupBox { background-color: %s; border: 1px solid %s; border-radius: 6px; }"
-                    "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 4px; }"
+                    "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 4px; }"
                     % (highlight, border)
                 )
             except Exception:
@@ -1294,7 +1356,7 @@ class MainWindow(QMainWindow):
                 pass
             try:
                 self.scheduler_status_container.setStyleSheet(
-                    "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 4px; }"
+                    "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 4px; }"
                 )
             except Exception:
                 pass
@@ -1302,6 +1364,7 @@ class MainWindow(QMainWindow):
             self.scheduler_status_container.adjustSize()
         except Exception:
             pass
+        self._auto_collapse_inactive_nav_groups()
 
     def _get_next_sop_action_minutes(self):
         try:
@@ -1346,6 +1409,11 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "controlfreq_tab") and hasattr(self.controlfreq_tab, "on_sop_data_changed"):
                 self.controlfreq_tab.on_sop_data_changed()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "net_tab") and hasattr(self.net_tab, "on_sop_data_changed"):
+                self.net_tab.on_sop_data_changed()
         except Exception:
             pass
         try:
@@ -1426,26 +1494,52 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         super().resizeEvent(event)
+        try:
+            self._auto_collapse_inactive_nav_groups()
+        except Exception:
+            pass
 
     def _sync_status_box_width(self) -> None:
         if not hasattr(self, "scheduler_status_container"):
             return
         width = 0
+        if hasattr(self, "status_dock_widget"):
+            try:
+                width = int(self.status_dock_widget.width())
+            except Exception:
+                width = 0
         if hasattr(self, "nav_buttons") and self.nav_buttons:
             try:
-                width = max(btn.width() for btn in self.nav_buttons)
+                nav_width = max(btn.width() for btn in self.nav_buttons)
+                if width <= 10:
+                    width = nav_width
                 if width <= 10:
                     width = max(btn.sizeHint().width() for btn in self.nav_buttons)
             except Exception:
-                width = 0
+                if width <= 10:
+                    width = 0
         if width <= 10 and hasattr(self, "nav_widget"):
             try:
                 margins = self.nav_widget.layout().contentsMargins()
                 width = int(self.nav_widget.width() - margins.left() - margins.right())
             except Exception:
                 width = int(self.nav_widget.width())
+        if width <= 10 and hasattr(self, "nav_scroll"):
+            try:
+                width = int(self.nav_scroll.viewport().width())
+            except Exception:
+                pass
         if width > 0:
-            self.scheduler_status_container.setFixedWidth(width)
+            for container in (
+                getattr(self, "scheduler_status_container", None),
+                getattr(self, "condition_level_container", None),
+            ):
+                if container is None:
+                    continue
+                try:
+                    container.setFixedWidth(width)
+                except Exception:
+                    pass
 
     def _update_scheduler_action_button_widths(self) -> None:
         buttons = [
@@ -1488,10 +1582,52 @@ class MainWindow(QMainWindow):
             except Exception:
                 text_w = 0
             content_width = max(content_width, hint_w, text_w)
-        content_width = max(132, min(content_width, 240))
+        for header in getattr(self, "_nav_group_headers", {}).values():
+            try:
+                hint_w = int(header.sizeHint().width())
+            except Exception:
+                hint_w = 0
+            try:
+                text_w = int(header.fontMetrics().horizontalAdvance(header.text()) + 48)
+            except Exception:
+                text_w = 0
+            content_width = max(content_width, hint_w, text_w)
+
+        # Accordion child rows are indented; reserve that offset so expanded
+        # child buttons do not lose right-edge pixels.
+        child_indent_w = 0
+        for body_layout in getattr(self, "_nav_group_layouts", {}).values():
+            if body_layout is None:
+                continue
+            try:
+                margins = body_layout.contentsMargins()
+                child_indent_w = max(child_indent_w, int(margins.left() + margins.right()))
+            except Exception:
+                continue
+
+        # Status cards should fully fit in the rail without horizontal clipping.
+        status_hint_w = 0
+        for container in (
+            getattr(self, "scheduler_status_container", None),
+            getattr(self, "condition_level_container", None),
+        ):
+            if container is None:
+                continue
+            try:
+                status_hint_w = max(status_hint_w, int(container.sizeHint().width()))
+            except Exception:
+                continue
+
+        content_width = max(content_width + child_indent_w, status_hint_w)
+        content_width = max(150, min(content_width, 300))
         for btn in self.nav_buttons:
             try:
                 btn.setMinimumWidth(content_width)
+            except Exception:
+                pass
+        for header in getattr(self, "_nav_group_headers", {}).values():
+            try:
+                header.setMinimumWidth(content_width)
             except Exception:
                 pass
         try:
@@ -1500,7 +1636,10 @@ class MainWindow(QMainWindow):
             margin_w = int((margins.left() + margins.right()) if margins is not None else 8)
         except Exception:
             margin_w = 8
-        panel_w = max(140, min(content_width + margin_w, 260))
+
+        # Additional reserve avoids clipping from scroll-area internals and borders.
+        rail_padding_w = 20
+        panel_w = max(180, min(content_width + margin_w + rail_padding_w, 340))
         try:
             self.nav_widget.setMinimumWidth(panel_w)
             self.nav_widget.setMaximumWidth(panel_w)
@@ -1508,6 +1647,7 @@ class MainWindow(QMainWindow):
             pass
         self._update_scheduler_action_button_widths()
         self._sync_status_box_width()
+        self._auto_collapse_inactive_nav_groups()
 
     def _dismiss_off_schedule_prompt(self) -> None:
         if hasattr(self, "_off_schedule_prompt") and self._off_schedule_prompt is not None:
@@ -1661,6 +1801,11 @@ class MainWindow(QMainWindow):
         apply_app_theme(app, theme, ui_text_scale=ui_text_scale)
         self._set_logo_pixmap()
         self._update_log_indicator()
+        try:
+            if hasattr(self, "condition_levels_edit_btn"):
+                self._style_condition_levels_edit_action(theme)
+        except Exception:
+            pass
         if hasattr(self, "map_prop_badge"):
             try:
                 self.map_prop_badge.setStyleSheet(
@@ -1695,6 +1840,7 @@ class MainWindow(QMainWindow):
                     pass
         self._update_ncs_nav_button_styles()
         self._update_nav_layout_metrics()
+        self._refresh_condition_level_panel()
 
     def _placeholder_widget(self, label: str) -> QWidget:
         w = QWidget()
@@ -1856,6 +2002,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self._refresh_condition_level_panel()
+        except Exception:
+            pass
+        try:
             self._refresh_map_prop_target_controls()
         except Exception:
             pass
@@ -1999,6 +2149,427 @@ class MainWindow(QMainWindow):
         pix = pix.scaledToWidth(160, Qt.SmoothTransformation)
         self.logo_label.setPixmap(pix)
 
+    def _load_nav_group_states(self) -> dict[str, bool]:
+        # Default to collapsed sections for first-run clarity on smaller windows.
+        defaults = {"NCS": False, "Schedules": False, "Operators": False}
+        try:
+            raw = self.settings.get("main_nav_group_states", {}) or {}
+        except Exception:
+            raw = {}
+        if isinstance(raw, dict):
+            # Backward compatibility for prior key name.
+            if "Schedules" not in raw and "Schedule" in raw:
+                raw["Schedules"] = raw.get("Schedule")
+            for key in defaults:
+                if key in raw:
+                    defaults[key] = bool(raw.get(key))
+        return defaults
+
+    def _persist_nav_group_states(self) -> None:
+        try:
+            self.settings.set("main_nav_group_states", dict(self._nav_group_states))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _nav_group_for_label(button_label: str, screen_label: str = "") -> str:
+        screen = str(screen_label or "").strip()
+        if screen in {"NCS-FLDigi/SSB", "NCS-JS8", "NCS-Local"}:
+            return "NCS"
+        if screen in {"HF Schedule", "Net Schedule", "Peer Schedules"}:
+            return "Schedules"
+        if screen in {"HF Operators", "Local Operators"}:
+            return "Operators"
+        txt = str(button_label or "").strip()
+        if txt.startswith("NCS -"):
+            return "NCS"
+        if txt.startswith("Schedule -"):
+            return "Schedules"
+        if txt.startswith("Operators -"):
+            return "Operators"
+        return ""
+
+    def _ensure_nav_group_layout(self, group_key: str, nav_layout: QVBoxLayout) -> QVBoxLayout:
+        key = str(group_key or "").strip()
+        existing = self._nav_group_layouts.get(key)
+        if existing is not None:
+            return existing
+
+        section = QWidget(self.nav_content)
+        section_layout = QVBoxLayout(section)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(2)
+
+        header = QToolButton(section)
+        header.setText(key)
+        header.setCheckable(True)
+        expanded = bool(self._nav_group_states.get(key, True))
+        header.setChecked(expanded)
+        header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        header.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        header.toggled.connect(lambda checked, g=key: self._on_nav_group_toggled(g, checked))
+        section_layout.addWidget(header)
+
+        body = QWidget(section)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(8, 0, 0, 0)
+        body_layout.setSpacing(3)
+        body.setVisible(expanded)
+        section_layout.addWidget(body)
+
+        self._nav_group_headers[key] = header
+        self._nav_group_bodies[key] = body
+        self._nav_group_layouts[key] = body_layout
+        self._nav_group_sections[key] = section
+        nav_layout.addWidget(section)
+        return body_layout
+
+    def _on_nav_group_toggled(self, group_key: str, expanded: bool) -> None:
+        key = str(group_key or "").strip()
+        body = self._nav_group_bodies.get(key)
+        header = self._nav_group_headers.get(key)
+        if body is not None:
+            body.setVisible(bool(expanded))
+        if header is not None:
+            header.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self._nav_group_states[key] = bool(expanded)
+        self._persist_nav_group_states()
+        try:
+            self._update_nav_group_header_styles(resolve_theme(self.settings))
+        except Exception:
+            pass
+        self._update_nav_layout_metrics()
+
+    def _update_nav_group_header_styles(self, theme: dict) -> None:
+        align_style = self._nav_button_alignment_style()
+        for key in self._nav_group_order:
+            header = self._nav_group_headers.get(key)
+            if header is None:
+                continue
+            expanded = bool(self._nav_group_states.get(key, True))
+            role = "secondary" if expanded else "muted"
+            # If NCS group is collapsed while any net is active, keep an explicit
+            # reminder on the accordion header.
+            if key == "NCS" and (not expanded) and any(bool(v) for v in self._ncs_net_active.values()):
+                role = "warning"
+            try:
+                header.setStyleSheet(button_style(role, theme) + align_style)
+            except Exception:
+                pass
+
+    def _group_has_active_nav_context(self, key: str) -> bool:
+        key_txt = str(key or "").strip()
+        if key_txt == "NCS":
+            return any(bool(v) for v in self._ncs_net_active.values())
+        return False
+
+    def _auto_collapse_inactive_nav_groups(self) -> None:
+        if not hasattr(self, "nav_widget"):
+            return
+        if not hasattr(self, "status_dock_widget"):
+            return
+        nav_layout = self.nav_widget.layout()
+        if nav_layout is None:
+            return
+        try:
+            margins = nav_layout.contentsMargins()
+            avail_h = int(self.nav_widget.height() - margins.top() - margins.bottom())
+        except Exception:
+            avail_h = int(self.nav_widget.height())
+        if avail_h <= 0:
+            return
+        try:
+            logo_h = int(self.logo_label.sizeHint().height()) if self.logo_label.isVisible() else 0
+        except Exception:
+            logo_h = 0
+        try:
+            status_h = int(self.status_dock_widget.sizeHint().height())
+        except Exception:
+            status_h = 0
+        spacing = int(nav_layout.spacing()) if nav_layout is not None else 0
+        # Keep a minimal nav-scroll footprint so status cards can remain visible.
+        min_nav_zone_h = 24
+        required_h = logo_h + status_h + min_nav_zone_h + (spacing * 2)
+        if avail_h >= required_h:
+            return
+
+        # Collapse expanded groups that are currently inactive until status
+        # sections can remain fully visible.
+        changed = False
+        collapse_order = [k for k in self._nav_group_order if k != "NCS"] + ["NCS"]
+        for key in collapse_order:
+            if avail_h >= required_h:
+                break
+            if not bool(self._nav_group_states.get(key, False)):
+                continue
+            if self._group_has_active_nav_context(key):
+                continue
+            header = self._nav_group_headers.get(key)
+            if header is None:
+                continue
+            header.blockSignals(True)
+            try:
+                header.setChecked(False)
+            finally:
+                header.blockSignals(False)
+            body = self._nav_group_bodies.get(key)
+            if body is not None:
+                body.setVisible(False)
+            header.setArrowType(Qt.RightArrow)
+            self._nav_group_states[key] = False
+            changed = True
+            try:
+                status_h = int(self.status_dock_widget.sizeHint().height())
+            except Exception:
+                pass
+            required_h = logo_h + status_h + min_nav_zone_h + (spacing * 2)
+        if changed:
+            self._persist_nav_group_states()
+            try:
+                self._update_nav_group_header_styles(resolve_theme(self.settings))
+            except Exception:
+                pass
+
+    def _style_condition_levels_edit_action(self, theme: dict) -> None:
+        if not hasattr(self, "condition_levels_edit_btn"):
+            return
+        normal = theme.get("accent", theme.get("info", "#1E88E5"))
+        hover = theme.get("info", normal)
+        self.condition_levels_edit_btn.setStyleSheet(
+            "QToolButton {"
+            f"color: {normal}; border: none; background: transparent; padding: 0px; text-align: left; "
+            "text-decoration: underline;"
+            "}"
+            "QToolButton:hover {"
+            f"color: {hover};"
+            "}"
+        )
+
+    @staticmethod
+    def _condition_level_palette(level: int) -> tuple[str, str]:
+        palette = {
+            1: ("#C62828", "#FFFFFF"),  # Red
+            2: ("#EF6C00", "#111111"),  # Orange
+            3: ("#F9A825", "#111111"),  # Yellow
+            4: ("#1565C0", "#FFFFFF"),  # Blue
+            5: ("#2E7D32", "#FFFFFF"),  # Green
+        }
+        return palette.get(int(level), ("#455A64", "#FFFFFF"))
+
+    def _collect_condition_levels(self) -> list[tuple[str, int]]:
+        try:
+            rows = self.settings.get("operating_groups", []) or []
+        except Exception:
+            rows = []
+        if not isinstance(rows, list):
+            return []
+        by_group: dict[str, int] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            group = str(row.get("group", "") or "").strip().upper()
+            if not group:
+                continue
+            if not bool(row.get("use_condition_levels", False)):
+                continue
+            try:
+                level = int(row.get("condition_level", 0) or 0)
+            except Exception:
+                level = 0
+            if level < 1 or level > 5:
+                continue
+            prev = by_group.get(group)
+            if prev is None or level < prev:
+                by_group[group] = level
+        out = sorted(by_group.items(), key=lambda x: x[0])
+        return [(g, lvl) for g, lvl in out]
+
+    def _clear_layout_widgets(self, layout: QVBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _refresh_condition_level_panel(self) -> None:
+        if not hasattr(self, "condition_levels_rows_layout"):
+            return
+        levels = self._collect_condition_levels()
+        if not levels:
+            self._condition_levels_signature = tuple()
+            self._clear_layout_widgets(self.condition_levels_rows_layout)
+            if hasattr(self, "condition_level_container"):
+                self.condition_level_container.setVisible(False)
+            self._auto_collapse_inactive_nav_groups()
+            return
+        if hasattr(self, "condition_level_container"):
+            self.condition_level_container.setVisible(True)
+        signature = tuple((g, int(level)) for g, level in levels)
+        if signature == getattr(self, "_condition_levels_signature", tuple()):
+            # If signature is unchanged, still verify rows are rendered as button widgets.
+            # This prevents stale row formats from persisting across iterative UI updates.
+            rows_current = True
+            try:
+                if self.condition_levels_rows_layout.count() != len(levels):
+                    rows_current = False
+                else:
+                    for i in range(self.condition_levels_rows_layout.count()):
+                        item = self.condition_levels_rows_layout.itemAt(i)
+                        row_widget = item.widget() if item is not None else None
+                        if row_widget is None:
+                            rows_current = False
+                            break
+                        chips = row_widget.findChildren(QPushButton)
+                        # Current format is exactly one button row and no standalone labels.
+                        labels = row_widget.findChildren(QLabel)
+                        if len(chips) != 1:
+                            rows_current = False
+                            break
+                        if labels:
+                            rows_current = False
+                            break
+            except Exception:
+                rows_current = False
+            if rows_current:
+                return
+        self._condition_levels_signature = signature
+        self._clear_layout_widgets(self.condition_levels_rows_layout)
+        for group, level in levels:
+            row = QWidget(self.condition_levels_rows)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            chip = QPushButton(f"{group}  Level {level}")
+            chip.setObjectName("conditionLevelChip")
+            bg, fg = self._condition_level_palette(level)
+            chip.setCheckable(False)
+            chip.setEnabled(True)
+            chip.setFocusPolicy(Qt.NoFocus)
+            chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            chip.setStyleSheet(
+                f"QPushButton#conditionLevelChip {{"
+                f" font-weight: 600; border-radius: 6px; padding: 2px 8px;"
+                f" text-align: left; background-color: {bg}; color: {fg}; border: 1px solid {bg};"
+                f"}}"
+                f"QPushButton#conditionLevelChip:hover {{ background-color: {bg}; color: {fg}; border: 1px solid {bg}; }}"
+                f"QPushButton#conditionLevelChip:pressed {{ background-color: {bg}; color: {fg}; border: 1px solid {bg}; }}"
+            )
+            row_layout.addWidget(chip, 1)
+            self.condition_levels_rows_layout.addWidget(row)
+        self._auto_collapse_inactive_nav_groups()
+
+    def _open_condition_levels_editor(self) -> None:
+        groups_data = self.settings.get("operating_groups", []) or []
+        if not isinstance(groups_data, list) or not groups_data:
+            QMessageBox.information(self, "Condition Levels", "No HF Operating Groups found.")
+            return
+        grouped: dict[str, dict[str, object]] = {}
+        for row in groups_data:
+            if not isinstance(row, dict):
+                continue
+            group = str(row.get("group", "") or "").strip().upper()
+            if not group:
+                continue
+            use_level = bool(row.get("use_condition_levels", False))
+            try:
+                level = int(row.get("condition_level", 5) or 5)
+            except Exception:
+                level = 5
+            if level < 1 or level > 5:
+                level = 5
+            if group not in grouped:
+                grouped[group] = {"use": use_level, "level": level}
+            else:
+                grouped[group]["use"] = bool(grouped[group].get("use")) or use_level
+                grouped[group]["level"] = min(int(grouped[group].get("level", level)), level)
+        if not grouped:
+            QMessageBox.information(self, "Condition Levels", "No HF Operating Groups found.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit Condition Levels")
+        dlg_layout = QVBoxLayout(dlg)
+        rows_holder = QWidget(dlg)
+        rows_layout = QVBoxLayout(rows_holder)
+        rows_layout.setContentsMargins(0, 0, 0, 0)
+        rows_layout.setSpacing(6)
+        editors: dict[str, tuple[QCheckBox, QComboBox]] = {}
+        for group in sorted(grouped.keys()):
+            row_meta = grouped[group]
+            row = QWidget(rows_holder)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            group_lbl = QLabel(group)
+            group_lbl.setMinimumWidth(120)
+            use_chk = QCheckBox("Use Condition Levels")
+            use_chk.setChecked(bool(row_meta.get("use", False)))
+            level_combo = QComboBox()
+            for n in range(1, 6):
+                level_combo.addItem(str(n), n)
+            level_combo.setCurrentText(str(int(row_meta.get("level", 5))))
+            level_combo.setEnabled(use_chk.isChecked())
+            use_chk.toggled.connect(level_combo.setEnabled)
+            row_layout.addWidget(group_lbl)
+            row_layout.addWidget(use_chk)
+            row_layout.addWidget(QLabel("Level:"))
+            row_layout.addWidget(level_combo)
+            row_layout.addStretch(1)
+            rows_layout.addWidget(row)
+            editors[group] = (use_chk, level_combo)
+        dlg_layout.addWidget(rows_holder)
+        buttons = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        buttons.addStretch(1)
+        buttons.addWidget(save_btn)
+        buttons.addWidget(cancel_btn)
+        dlg_layout.addLayout(buttons)
+
+        def _save() -> None:
+            updated: list[dict] = []
+            for raw in groups_data:
+                if not isinstance(raw, dict):
+                    continue
+                row = dict(raw)
+                group = str(row.get("group", "") or "").strip().upper()
+                editor = editors.get(group)
+                if editor is not None:
+                    use_chk, level_combo = editor
+                    row["use_condition_levels"] = bool(use_chk.isChecked())
+                    try:
+                        level = int(level_combo.currentData() or level_combo.currentText() or 5)
+                    except Exception:
+                        level = 5
+                    if level < 1 or level > 5:
+                        level = 5
+                    row["condition_level"] = level
+                updated.append(row)
+            try:
+                self.settings.set("operating_groups", updated)
+                self.settings.reload()
+            except Exception as e:
+                QMessageBox.warning(self, "Condition Levels", f"Failed to save condition levels:\n{e}")
+                return
+            try:
+                if hasattr(self, "settings_tab") and self.settings_tab is not None:
+                    self.settings_tab.operating_groups = [dict(r) for r in updated if isinstance(r, dict)]
+                    if hasattr(self.settings_tab, "_refresh_operating_groups_table"):
+                        self.settings_tab._refresh_operating_groups_table()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            try:
+                self.settings_tab.settings_saved.emit()
+            except Exception:
+                pass
+            self._refresh_condition_level_panel()
+            dlg.accept()
+
+        save_btn.clicked.connect(_save)
+        cancel_btn.clicked.connect(dlg.reject)
+        dlg.exec()
+
     def _set_screen(self, index: int) -> None:
         with perf_span(
             "main_window.set_screen",
@@ -2073,6 +2644,7 @@ class MainWindow(QMainWindow):
             theme = resolve_theme(self.settings)
         except Exception:
             theme = {}
+        self._update_nav_group_header_styles(theme)
         align_style = self._nav_button_alignment_style()
         # Base styling for all sidebar buttons so typography/contrast is consistent.
         for btn in self.nav_buttons:

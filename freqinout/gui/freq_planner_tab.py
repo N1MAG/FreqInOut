@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 import time
 import sqlite3
-from typing import Any, List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -166,24 +166,284 @@ class FreqPlannerTab(QWidget):
             abbr = self._ui_tz_abbr(tz_name, abbr)
         return tz_name, abbr
 
-    def _load_schedules(self) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    @staticmethod
+    def _normalize_condition_levels(value: Any) -> str:
+        raw = str(value or "").strip().upper()
+        if not raw or raw == "ALL":
+            return "ALL"
+        vals: List[int] = []
+        for token in raw.replace(";", ",").replace("|", ",").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if token == "ALL":
+                return "ALL"
+            try:
+                lvl = int(token)
+            except Exception:
+                continue
+            if 1 <= lvl <= 5:
+                vals.append(lvl)
+        if not vals:
+            return "ALL"
+        return ",".join(str(v) for v in sorted(set(vals)))
+
+    def _condition_level_map(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        rows = self.settings.get("operating_groups", []) or []
+        if not isinstance(rows, list):
+            return out
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            group = str(row.get("group", "") or "").strip().upper()
+            if not group:
+                continue
+            if not bool(row.get("use_condition_levels", False)):
+                continue
+            try:
+                level = int(row.get("condition_level", 0) or 0)
+            except Exception:
+                level = 0
+            if not (1 <= level <= 5):
+                continue
+            prev = out.get(group)
+            if prev is None or level < prev:
+                out[group] = level
+        return out
+
+    @classmethod
+    def _condition_level_match(cls, condition_levels: str, group_level: Optional[int]) -> bool:
+        normalized = cls._normalize_condition_levels(condition_levels)
+        if normalized == "ALL":
+            return True
+        if group_level is None:
+            return True
+        allowed: Set[int] = set()
+        for token in normalized.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                lvl = int(token)
+            except Exception:
+                continue
+            if 1 <= lvl <= 5:
+                allowed.add(lvl)
+        if not allowed:
+            return True
+        return int(group_level) in allowed
+
+    def _load_schedules(self) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict[str, Any]]]:
         data = self.settings.all()
 
         # Try DB-backed schedules first
         hf_db = self._load_hf_from_db()
         net_db = self._load_net_from_db()
         sop_db = self._load_sop_layer_from_db()
+        policy_db = self._load_net_sop_policies_from_db()
 
         hf = hf_db if hf_db is not None else data.get("hf_schedule") or data.get("daily_schedule") or []
         net = net_db if net_db is not None else data.get("net_schedule") or []
         sop = sop_db if sop_db is not None else []
+        policies = policy_db if policy_db is not None else []
         if not isinstance(hf, list):
             hf = []
         if not isinstance(net, list):
             net = []
         if not isinstance(sop, list):
             sop = []
-        return hf, net, sop
+        if not isinstance(policies, list):
+            policies = []
+        return hf, net, sop, policies
+
+    @staticmethod
+    def _policy_overlap(
+        a_start: datetime.datetime,
+        a_end: datetime.datetime,
+        b_start: datetime.datetime,
+        b_end: datetime.datetime,
+    ) -> bool:
+        return a_start < b_end and b_start < a_end
+
+    @staticmethod
+    def _parse_iso_utc(value: str) -> Optional[datetime.datetime]:
+        txt = str(value or "").strip()
+        if not txt:
+            return None
+        try:
+            parsed = datetime.datetime.fromisoformat(txt.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=datetime.timezone.utc)
+            return parsed.astimezone(datetime.timezone.utc)
+        except Exception:
+            return None
+
+    def _load_net_sop_policies_from_db(self) -> Optional[List[Dict[str, Any]]]:
+        conn: sqlite3.Connection | None = None
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+            if not db_path.exists():
+                return None
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            exists = cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sop_net_conflict_policy'"
+            ).fetchone()
+            if not exists:
+                return []
+            cur.execute(
+                """
+                SELECT
+                    policy,
+                    window_start_utc,
+                    window_end_utc,
+                    net_row_signature,
+                    sop_row_signature
+                FROM sop_net_conflict_policy
+                WHERE COALESCE(active, 1) = 1
+                ORDER BY COALESCE(updated_utc, '') DESC, id DESC
+                """
+            )
+            rows = cur.fetchall()
+            out: List[Dict[str, Any]] = []
+            for policy, start_utc, end_utc, net_sig, sop_sig in rows:
+                pol = str(policy or "").strip().upper()
+                if pol not in {"SOP_PRIORITY", "NET_PRIORITY"}:
+                    continue
+                start_dt = self._parse_iso_utc(str(start_utc or ""))
+                end_dt = self._parse_iso_utc(str(end_utc or ""))
+                if not isinstance(start_dt, datetime.datetime) or not isinstance(end_dt, datetime.datetime):
+                    continue
+                if end_dt <= start_dt:
+                    continue
+                out.append(
+                    {
+                        "policy": pol,
+                        "start_utc": start_dt,
+                        "end_utc": end_dt,
+                        "net_row_signature": str(net_sig or "").strip(),
+                        "sop_row_signature": str(sop_sig or "").strip(),
+                    }
+                )
+            return out
+        except Exception:
+            return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _effective_net_sop_policy_for_window(
+        self,
+        *,
+        cell_start_utc: datetime.datetime,
+        cell_end_utc: datetime.datetime,
+        net_slices: List[Tuple[int, int, str, str]],
+        sop_slices: List[Tuple[int, int, str, str]],
+        policy_rows: List[Dict[str, Any]],
+    ) -> str:
+        saw_sop = False
+        for n_start, n_end, _n_label, n_sig in net_slices:
+            if n_end <= n_start:
+                continue
+            for s_start, s_end, _s_label, s_sig in sop_slices:
+                if s_end <= s_start:
+                    continue
+                overlap_start_min = max(n_start, s_start)
+                overlap_end_min = min(n_end, s_end)
+                if overlap_end_min <= overlap_start_min:
+                    continue
+                overlap_start_utc = cell_start_utc + datetime.timedelta(minutes=overlap_start_min)
+                overlap_end_utc = cell_start_utc + datetime.timedelta(minutes=overlap_end_min)
+                for row in policy_rows:
+                    if str(row.get("net_row_signature") or "") != str(n_sig or ""):
+                        continue
+                    if str(row.get("sop_row_signature") or "") != str(s_sig or ""):
+                        continue
+                    policy = str(row.get("policy") or "").strip().upper()
+                    start_dt = row.get("start_utc")
+                    end_dt = row.get("end_utc")
+                    if not isinstance(start_dt, datetime.datetime) or not isinstance(end_dt, datetime.datetime):
+                        continue
+                    if not self._policy_overlap(overlap_start_utc, overlap_end_utc, start_dt, end_dt):
+                        continue
+                    if policy == "NET_PRIORITY":
+                        return "NET_PRIORITY"
+                    if policy == "SOP_PRIORITY":
+                        saw_sop = True
+        return "SOP_PRIORITY" if saw_sop else ""
+
+    @staticmethod
+    def _normalize_day_for_signature(day: str) -> str:
+        raw = str(day or "").strip()
+        if not raw:
+            return "ALL"
+        up = raw.upper()
+        if up in {"ALL", "DAILY"}:
+            return "ALL"
+        for opt in DAY_NAMES:
+            if up.startswith(opt[:3].upper()):
+                return opt
+        return raw
+
+    @staticmethod
+    def _normalize_recurrence_for_signature(recurrence: str) -> str:
+        raw = str(recurrence or "Weekly").strip().upper()
+        if raw == "MONTHLY":
+            raw = "PERIODIC"
+        if raw in {"DAILY", "PERIODIC", "BI-WEEKLY", "WEEKLY"}:
+            return "Bi-Weekly" if raw == "BI-WEEKLY" else raw.title()
+        return "Weekly"
+
+    @staticmethod
+    def _normalize_frequency_for_signature(value: Any) -> str:
+        txt = str(value or "").strip()
+        if not txt:
+            return ""
+        try:
+            return f"{float(txt):.3f}"
+        except Exception:
+            return txt
+
+    def _normalize_month_weeks_for_signature(self, value: Any) -> str:
+        weeks = self._parse_month_weeks(str(value or ""))
+        return ",".join(str(v) for v in weeks)
+
+    def _net_row_signature(self, row: Dict[str, Any]) -> str:
+        day = self._normalize_day_for_signature(str(row.get("day_utc") or "ALL"))
+        recurrence = self._normalize_recurrence_for_signature(str(row.get("recurrence") or "Weekly"))
+        biweekly = int(row.get("biweekly_offset_weeks") or 0)
+        weeks = self._normalize_month_weeks_for_signature(row.get("month_weeks"))
+        group = str(row.get("group_name") or "").strip().upper()
+        band = str(row.get("band") or "").strip().upper()
+        freq = self._normalize_frequency_for_signature(row.get("frequency"))
+        start = str(row.get("start_utc") or "").strip()
+        end = str(row.get("end_utc") or "").strip()
+        net_name = str(row.get("net_name") or row.get("name") or "").strip().upper()
+        return (
+            f"NET|{group}|{band}|{freq}|{day}|{recurrence}|{biweekly}|"
+            f"{weeks}|{start}|{end}|{net_name}"
+        )
+
+    def _sop_row_signature(self, row: Dict[str, Any]) -> str:
+        day = self._normalize_day_for_signature(str(row.get("day_utc") or "ALL"))
+        recurrence = self._normalize_recurrence_for_signature(str(row.get("recurrence") or "Weekly"))
+        biweekly = int(row.get("biweekly_offset_weeks") or 0)
+        weeks = self._normalize_month_weeks_for_signature(row.get("month_weeks"))
+        group = str(row.get("group_name") or "").strip().upper()
+        band = str(row.get("band") or "").strip().upper()
+        freq = self._normalize_frequency_for_signature(row.get("frequency"))
+        start = str(row.get("start_utc") or "").strip()
+        end = str(row.get("end_utc") or "").strip()
+        profile_id = int(row.get("sop_profile_id") or 0)
+        layer_id = int(row.get("sop_layer_id") or row.get("id") or 0)
+        return (
+            f"SOP|{profile_id}|{layer_id}|{group}|{band}|{freq}|{day}|"
+            f"{recurrence}|{biweekly}|{weeks}|{start}|{end}"
+        )
 
     def _load_hf_from_db(self) -> Optional[List[Dict]]:
         """
@@ -237,7 +497,7 @@ class FreqPlannerTab(QWidget):
                 cur.execute(
                     """
                     SELECT day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, vfo, frequency,
-                           start_utc, end_utc, early_checkin, primary_js8call_group, comment, net_name
+                           start_utc, end_utc, early_checkin, primary_js8call_group, comment, net_name, group_name
                     FROM net_schedule_tab
                     """
                 )
@@ -255,7 +515,7 @@ class FreqPlannerTab(QWidget):
                         """
                     )
                     legacy = cur.fetchall()
-                    # Pad legacy rows to align with expected tuple positions (insert vfo=None)
+                    # Pad legacy rows to align with expected tuple positions (insert vfo=None, group_name='')
                     rows = [
                         (
                             day_utc,
@@ -268,14 +528,15 @@ class FreqPlannerTab(QWidget):
                             freq,
                             start_utc,
                             end_utc,
-                            early_checkin,
-                            primary_js8call_group,
-                            comment,
-                            net_name,
-                        )
-                        for (
-                            day_utc,
-                            recurrence,
+                             early_checkin,
+                             primary_js8call_group,
+                             comment,
+                             net_name,
+                             "",
+                         )
+                         for (
+                             day_utc,
+                             recurrence,
                             biweekly_offset_weeks,
                             band,
                             mode,
@@ -307,6 +568,7 @@ class FreqPlannerTab(QWidget):
                 primary_js8call_group,
                 comment,
                 net_name,
+                group_name,
             ) in rows:
                 out.append(
                     {
@@ -324,6 +586,7 @@ class FreqPlannerTab(QWidget):
                         "primary_js8call_group": primary_js8call_group or "",
                         "comment": comment or "",
                         "net_name": net_name or "",
+                        "group_name": group_name or primary_js8call_group or "",
                     }
                 )
             return out
@@ -350,6 +613,13 @@ class FreqPlannerTab(QWidget):
             except Exception:
                 profile_cols = set()
             has_secondary_group = "secondary_group" in profile_cols
+            layer_cols: set[str] = set()
+            try:
+                cur.execute("PRAGMA table_info(sop_schedule_layer)")
+                layer_cols = {str(r[1] or "").strip().lower() for r in cur.fetchall() if len(r) > 1}
+            except Exception:
+                layer_cols = set()
+            condition_expr = "COALESCE(l.condition_levels, 'ALL')" if "condition_levels" in layer_cols else "'ALL'"
             resolved_group_expr = (
                 "COALESCE(NULLIF(TRIM(p.operating_group), ''), NULLIF(TRIM(p.secondary_group), ''),"
                 " NULLIF(TRIM(p.name), ''), '')"
@@ -362,6 +632,7 @@ class FreqPlannerTab(QWidget):
                     COALESCE(l.recurrence, 'Weekly'),
                     COALESCE(l.biweekly_offset_weeks, 0),
                     COALESCE(l.month_weeks, ''),
+                    {condition_expr},
                     COALESCE(l.band, ''),
                     COALESCE(l.mode, ''),
                     COALESCE(l.vfo, 'A'),
@@ -384,20 +655,29 @@ class FreqPlannerTab(QWidget):
             cur.execute(
                 base_sql.format(
                     resolved_group_expr=resolved_group_expr,
+                    condition_expr=condition_expr,
                     active_clause="AND COALESCE(p.active, 0) = 1",
                 )
             )
             rows = cur.fetchall()
             # Fallback path: no active HF SOP profile rows; show configured HF SOP layers.
             if not rows:
-                cur.execute(base_sql.format(resolved_group_expr=resolved_group_expr, active_clause=""))
+                cur.execute(
+                    base_sql.format(
+                        resolved_group_expr=resolved_group_expr,
+                        condition_expr=condition_expr,
+                        active_clause="",
+                    )
+                )
                 rows = cur.fetchall()
             out: List[Dict[str, Any]] = []
+            cond_map = self._condition_level_map()
             for (
                 day_utc,
                 recurrence,
                 biweekly_offset_weeks,
                 month_weeks,
+                condition_levels,
                 band,
                 mode,
                 vfo,
@@ -407,19 +687,24 @@ class FreqPlannerTab(QWidget):
                 operating_group,
                 profile_name,
             ) in rows:
+                group_name = str(operating_group or "").strip().upper()
+                group_level = cond_map.get(group_name)
+                if not self._condition_level_match(str(condition_levels or "ALL"), group_level):
+                    continue
                 out.append(
                     {
                         "day_utc": day_utc or "ALL",
                         "recurrence": recurrence or "Weekly",
                         "biweekly_offset_weeks": biweekly_offset_weeks or 0,
                         "month_weeks": month_weeks or "",
+                        "condition_levels": self._normalize_condition_levels(condition_levels),
                         "band": band or "",
                         "mode": mode or "",
                         "vfo": (vfo or "A").strip().upper() or "A",
                         "frequency": str(freq or ""),
                         "start_utc": start_utc or "",
                         "end_utc": end_utc or "",
-                        "group_name": str(operating_group or "").strip(),
+                        "group_name": group_name,
                         "profile_name": str(profile_name or "").strip(),
                     }
                 )
@@ -617,19 +902,27 @@ class FreqPlannerTab(QWidget):
             ]
         self.table.setHorizontalHeaderLabels(headers)
 
-        hf_sched, net_sched, sop_sched = self._load_schedules()
+        hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
         theme = resolve_theme(self.settings)
-        self._last_snapshot = self._snapshot(hf_sched, net_sched, sop_sched)
+        self._last_snapshot = self._snapshot(hf_sched, net_sched, sop_sched, policy_rows)
         now_utc = datetime.datetime.utcnow()
         week_sunday = self._week_start_sunday_utc(now_utc)
 
-        # Precompute net schedule coverage by (day, hour) with boundary-aware logic
-        net_cover: Dict[tuple, List[Tuple[int, int, str]]] = {}
+        # Precompute net schedule coverage by (day, hour) with boundary-aware logic.
+        # Slice tuple: (start_minute, end_minute, label, net_row_signature)
+        net_cover: Dict[tuple, List[Tuple[int, int, str, str]]] = {}
 
-        def add_net_slice(day_name: str, hour: int, start_minute: int, end_minute: int, name: str) -> None:
+        def add_net_slice(
+            day_name: str,
+            hour: int,
+            start_minute: int,
+            end_minute: int,
+            name: str,
+            row_sig: str,
+        ) -> None:
             if start_minute >= end_minute:
                 return
-            net_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, name))
+            net_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, name, row_sig))
 
         for row in net_sched:
             try:
@@ -639,6 +932,7 @@ class FreqPlannerTab(QWidget):
                 if smin is None or emin is None:
                     continue
                 name = (row.get("net_name") or "Net").strip()
+                row_sig = self._net_row_signature(row)
                 recurrence = (row.get("recurrence") or "Weekly").strip()
                 day_txt = (day or "ALL").strip().upper()
                 if recurrence == "Daily":
@@ -667,17 +961,32 @@ class FreqPlannerTab(QWidget):
                         hour_end_min = hour * 60 + 60
                         overlap_start = max(seg_start, hour_start_min)
                         overlap_end = min(seg_end, hour_end_min)
-                        add_net_slice(dname, hour % 24, overlap_start - hour_start_min, overlap_end - hour_start_min, name)
+                        add_net_slice(
+                            dname,
+                            hour % 24,
+                            overlap_start - hour_start_min,
+                            overlap_end - hour_start_min,
+                            name,
+                            row_sig,
+                        )
             except Exception:
                 continue
 
-        # Precompute active SOP layer coverage by (day, hour)
-        sop_cover: Dict[tuple, List[Tuple[int, int, str]]] = {}
+        # Precompute active SOP layer coverage by (day, hour).
+        # Slice tuple: (start_minute, end_minute, label, sop_row_signature)
+        sop_cover: Dict[tuple, List[Tuple[int, int, str, str]]] = {}
 
-        def add_sop_slice(day_name: str, hour: int, start_minute: int, end_minute: int, label: str) -> None:
+        def add_sop_slice(
+            day_name: str,
+            hour: int,
+            start_minute: int,
+            end_minute: int,
+            label: str,
+            row_sig: str,
+        ) -> None:
             if start_minute >= end_minute:
                 return
-            sop_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, label))
+            sop_cover.setdefault((day_name, hour), []).append((start_minute, end_minute, label, row_sig))
 
         for row in sop_sched:
             try:
@@ -686,6 +995,7 @@ class FreqPlannerTab(QWidget):
                 emin = self._parse_hhmm(row.get("end_utc", ""))
                 if smin is None or emin is None:
                     continue
+                row_sig = self._sop_row_signature(row)
                 recurrence = (row.get("recurrence") or "Weekly").strip()
                 day_txt = (day or "ALL").strip().upper()
                 if recurrence.upper() == "DAILY":
@@ -722,6 +1032,7 @@ class FreqPlannerTab(QWidget):
                             overlap_start - hour_start_min,
                             overlap_end - hour_start_min,
                             label,
+                            row_sig,
                         )
             except Exception:
                 continue
@@ -864,13 +1175,18 @@ class FreqPlannerTab(QWidget):
                 if not self._show_local:
                     lookup_day = day_name
                     lookup_hour = hour
-                    cell_dt_local = None
+                    cell_utc_start = datetime.datetime.combine(
+                        week_sunday + datetime.timedelta(days=(col - self.COL_DAY_OFFSET)),
+                        datetime.time(hour=hour, minute=0),
+                    ).replace(tzinfo=datetime.timezone.utc)
                 else:
                     # Local day/hour mapped to UTC day/hour for lookup
                     cell_local_dt = week_start_local + datetime.timedelta(days=(col - self.COL_DAY_OFFSET), hours=hour)
                     cell_dt_utc = cell_local_dt.astimezone(datetime.timezone.utc)
                     lookup_day = cell_dt_utc.strftime("%A")
                     lookup_hour = cell_dt_utc.hour
+                    cell_utc_start = cell_dt_utc.replace(minute=0, second=0, microsecond=0, tzinfo=datetime.timezone.utc)
+                cell_utc_end = cell_utc_start + datetime.timedelta(hours=1)
 
                 net_slices = net_cover.get((lookup_day, lookup_hour), [])
                 sop_slices = sop_cover.get((lookup_day, lookup_hour), [])
@@ -909,7 +1225,7 @@ class FreqPlannerTab(QWidget):
                     net_slices = sorted(net_slices, key=lambda x: x[0])
                     net_names = []
                     last_net = None
-                    for start_m, end_m, name in net_slices:
+                    for start_m, end_m, name, _sig in net_slices:
                         if end_m <= start_m:
                             continue
                         if name != last_net:
@@ -923,7 +1239,7 @@ class FreqPlannerTab(QWidget):
                     sop_slices = sorted(sop_slices, key=lambda x: x[0])
                     sop_names: List[str] = []
                     seen_sop_names: set[str] = set()
-                    for start_m, end_m, label in sop_slices:
+                    for start_m, end_m, label, _sig in sop_slices:
                         if end_m <= start_m:
                             continue
                         raw = str(label or "").strip()
@@ -938,9 +1254,21 @@ class FreqPlannerTab(QWidget):
                     if sop_names:
                         sop_label = f"SOP:{'/'.join(sop_names)}"
 
+                policy_pref = ""
+                if net_label and sop_label:
+                    policy_pref = self._effective_net_sop_policy_for_window(
+                        cell_start_utc=cell_utc_start,
+                        cell_end_utc=cell_utc_end,
+                        net_slices=net_slices,
+                        sop_slices=sop_slices,
+                        policy_rows=policy_rows,
+                    )
+
                 cell_text = ""
-                # Display precedence: Net > SOP > HF.
-                if net_label:
+                if net_label and sop_label:
+                    # Display precedence with policy-aware Net/SOP arbitration.
+                    cell_text = sop_label if policy_pref == "SOP_PRIORITY" else net_label
+                elif net_label:
                     cell_text = net_label
                 elif sop_label:
                     cell_text = sop_label
@@ -962,7 +1290,7 @@ class FreqPlannerTab(QWidget):
                 # Highlight: net window overlaps now or starts within next 24h
                 highlight = False
                 if net_slices:
-                    for start_m, end_m, name in net_slices:
+                    for start_m, end_m, _name, _sig in net_slices:
                         # Compute absolute times for this day/hour slice
                         try:
                             day_idx = DAY_NAMES.index(lookup_day)
@@ -990,7 +1318,13 @@ class FreqPlannerTab(QWidget):
         self._render_band_legend()
         log.info("FreqPlanner table rebuilt.")
 
-    def _snapshot(self, hf_sched: List[Dict], net_sched: List[Dict], sop_sched: List[Dict]) -> str:
+    def _snapshot(
+        self,
+        hf_sched: List[Dict],
+        net_sched: List[Dict],
+        sop_sched: List[Dict],
+        policy_rows: List[Dict[str, Any]],
+    ) -> str:
         """
         Deterministic snapshot of schedules and time view to avoid unnecessary rebuilds.
         """
@@ -1007,11 +1341,25 @@ class FreqPlannerTab(QWidget):
             parts.append(
                 f"S|{s.get('group_name','')}|{s.get('day_utc','')}|{s.get('start_utc','')}|{s.get('end_utc','')}|{s.get('recurrence','')}|{s.get('month_weeks','')}"
             )
+        for p in sorted(
+            policy_rows,
+            key=lambda x: (
+                str(x.get("policy") or ""),
+                str(x.get("start_utc") or ""),
+                str(x.get("end_utc") or ""),
+                str(x.get("net_row_signature") or ""),
+                str(x.get("sop_row_signature") or ""),
+            ),
+        ):
+            parts.append(
+                f"P|{p.get('policy','')}|{p.get('start_utc','')}|{p.get('end_utc','')}|"
+                f"{p.get('net_row_signature','')}|{p.get('sop_row_signature','')}"
+            )
         return ";".join(parts)
 
     def _maybe_rebuild_if_changed(self):
-        hf_sched, net_sched, sop_sched = self._load_schedules()
-        snap = self._snapshot(hf_sched, net_sched, sop_sched)
+        hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
+        snap = self._snapshot(hf_sched, net_sched, sop_sched, policy_rows)
         if snap != self._last_snapshot:
             self.rebuild_table()
 

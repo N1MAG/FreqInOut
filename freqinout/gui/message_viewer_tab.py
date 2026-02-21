@@ -1492,7 +1492,7 @@ class MessageActionDelegate(QStyledItemDelegate):
         )
 
     @staticmethod
-    def _action_rects(rect: QRect, fm, bbs_row: bool) -> tuple[QRect, QRect, QRect]:
+    def _action_rects(rect: QRect, fm, bbs_row: bool, bbs_copy_row: bool) -> tuple[QRect, QRect, QRect, QRect]:
         view_text = "View"
         view_width = fm.horizontalAdvance(view_text)
         view_left = rect.left() + 6
@@ -1510,16 +1510,25 @@ class MessageActionDelegate(QStyledItemDelegate):
             arch_right = del_left - 12
             arch_left = arch_right - arch_width + 1
             aux_rect = QRect(arch_left, rect.y(), arch_width, rect.height())
-            return view_rect, aux_rect, del_rect
+            return view_rect, aux_rect, QRect(), del_rect
+
+        bbs_rect = QRect()
+        gap_right = del_left - 10
+        if bbs_copy_row:
+            bbs_text = "+BBS"
+            bbs_width = fm.horizontalAdvance(bbs_text)
+            bbs_right = del_left - 10
+            bbs_left = bbs_right - bbs_width + 1
+            bbs_rect = QRect(bbs_left, rect.y(), bbs_width, rect.height())
+            gap_right = bbs_left - 10
 
         flag_text = "\u2691"
         flag_width = fm.horizontalAdvance(flag_text)
         gap_left = view_left + view_width + 10
-        gap_right = del_left - 10
         flag_center = (gap_left + gap_right) // 2
         flag_left = max(gap_left, flag_center - (flag_width // 2))
         aux_rect = QRect(flag_left, rect.y(), flag_width, rect.height())
-        return view_rect, aux_rect, del_rect
+        return view_rect, aux_rect, bbs_rect, del_rect
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         if index.column() != 7:
@@ -1535,7 +1544,11 @@ class MessageActionDelegate(QStyledItemDelegate):
         painter.setPen(link_color)
         fm = option.fontMetrics
         bbs_row = self._is_bbs_file_row(row)
-        view_rect, aux_rect, del_rect = self._action_rects(rect, fm, bbs_row)
+        bbs_copy_row = bool(
+            hasattr(self.parent(), "_can_copy_row_to_varac_bbs")
+            and self.parent()._can_copy_row_to_varac_bbs(row)
+        )
+        view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(rect, fm, bbs_row, bbs_copy_row)
         painter.drawText(view_rect, Qt.AlignVCenter | Qt.AlignLeft, "View")
         if bbs_row:
             painter.setPen(link_color)
@@ -1558,6 +1571,11 @@ class MessageActionDelegate(QStyledItemDelegate):
             painter.setFont(font)
             painter.drawText(aux_rect, Qt.AlignVCenter | Qt.AlignLeft, "\u2691")
 
+            if bbs_copy_row:
+                painter.setPen(link_color)
+                painter.setFont(option.font)
+                painter.drawText(bbs_rect, Qt.AlignVCenter | Qt.AlignLeft, "+BBS")
+
             painter.setPen(self._danger)
             painter.setFont(option.font)
             painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
@@ -1577,10 +1595,16 @@ class MessageActionDelegate(QStyledItemDelegate):
         pos = event.position().toPoint()
         fm = option.fontMetrics
         bbs_row = self._is_bbs_file_row(row)
-        _view_rect, aux_rect, del_rect = self._action_rects(rect, fm, bbs_row)
+        bbs_copy_row = bool(
+            hasattr(self.parent(), "_can_copy_row_to_varac_bbs")
+            and self.parent()._can_copy_row_to_varac_bbs(row)
+        )
+        _view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(rect, fm, bbs_row, bbs_copy_row)
         if isinstance(row.payload, FileRecord):
             if bbs_row and aux_rect.contains(pos):
                 self.parent()._archive_file_record(row.payload)
+            elif bbs_copy_row and bbs_rect.contains(pos):
+                self.parent()._copy_row_to_varac_bbs(row)
             elif not bbs_row and aux_rect.contains(pos):
                 self.parent()._cycle_flag_state(row.payload)
             elif del_rect.contains(pos):
@@ -3178,7 +3202,7 @@ class MessageViewerTab(QWidget):
         self.messages_table.setColumnWidth(3, 122)
         self.messages_table.setColumnWidth(4, 122)
         self.messages_table.setColumnWidth(5, 162)
-        self.messages_table.setColumnWidth(7, 210)
+        self.messages_table.setColumnWidth(7, 250)
         msg_header.setVisible(True)
         msg_header.sectionClicked.connect(self._on_sort_clicked)
         msg_header.checkboxToggled.connect(self._on_header_checkbox_toggled)
@@ -6509,6 +6533,66 @@ class MessageViewerTab(QWidget):
             return
         log.info("MessageViewer: archived BBS file %s -> %s", rec.path, dst)
         self._remove_file_record(rec)
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+
+    def _can_copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> bool:
+        if row is None:
+            return False
+        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
+        if not bbs_dir_txt:
+            return False
+        msg_type = str(getattr(row, "msg_type", "") or "").strip().upper()
+        if msg_type not in {"FLMSG", "FLAMP", "VARAC"}:
+            return False
+        payload = getattr(row, "payload", None)
+        return isinstance(payload, FileRecord)
+
+    def _copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> None:
+        if row is None or not self._can_copy_row_to_varac_bbs(row):
+            return
+        payload = getattr(row, "payload", None)
+        if not isinstance(payload, FileRecord):
+            return
+        src = payload.path
+        if not src.exists() or not src.is_file():
+            QMessageBox.warning(self, "Copy to VarAC BBS", "The selected source file no longer exists.")
+            return
+        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
+        if not bbs_dir_txt:
+            QMessageBox.warning(self, "Copy to VarAC BBS", "Configure VarAC BBS directory in Settings first.")
+            return
+        bbs_dir = Path(bbs_dir_txt)
+        if not bbs_dir.exists() or not bbs_dir.is_dir():
+            QMessageBox.warning(self, "Copy to VarAC BBS", "Configured VarAC BBS directory is not valid.")
+            return
+        dst = bbs_dir / src.name
+        try:
+            if src.resolve() == dst.resolve():
+                QMessageBox.information(self, "Copy to VarAC BBS", "File is already in the VarAC BBS folder.")
+                return
+        except Exception:
+            pass
+        if dst.exists():
+            resp = QMessageBox.question(
+                self,
+                "Copy to VarAC BBS",
+                f"File already exists in BBS folder:\n{dst}\n\nOverwrite existing file?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+        try:
+            shutil.copy2(str(src), str(dst))
+        except Exception as e:
+            QMessageBox.warning(self, "Copy to VarAC BBS", f"Copy failed:\n{e}")
+            return
+        QMessageBox.information(
+            self,
+            "Copy to VarAC BBS",
+            f"Copied file to VarAC BBS folder:\n{dst}",
+        )
         self._unfreeze_table()
         self._populate_messages_table(force=True)
 

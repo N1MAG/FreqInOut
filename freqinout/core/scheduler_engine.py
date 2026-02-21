@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import psutil
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -1872,6 +1872,77 @@ class SchedulerEngine(QObject):
         except Exception:
             return True
 
+    @staticmethod
+    def _normalize_condition_levels(value: object) -> str:
+        raw = str(value or "").strip().upper()
+        if not raw or raw == "ALL":
+            return "ALL"
+        vals: List[int] = []
+        for token in raw.replace(";", ",").replace("|", ",").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if token == "ALL":
+                return "ALL"
+            try:
+                lvl = int(token)
+            except Exception:
+                continue
+            if 1 <= lvl <= 5:
+                vals.append(lvl)
+        if not vals:
+            return "ALL"
+        return ",".join(str(v) for v in sorted(set(vals)))
+
+    def _condition_level_map(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        try:
+            rows = self.settings.get("operating_groups", []) or []
+        except Exception:
+            rows = []
+        if not isinstance(rows, list):
+            return out
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            group = str(row.get("group", "") or "").strip().upper()
+            if not group:
+                continue
+            if not bool(row.get("use_condition_levels", False)):
+                continue
+            try:
+                level = int(row.get("condition_level", 0) or 0)
+            except Exception:
+                level = 0
+            if not (1 <= level <= 5):
+                continue
+            prev = out.get(group)
+            if prev is None or level < prev:
+                out[group] = level
+        return out
+
+    @classmethod
+    def _condition_level_match(cls, condition_levels: str, group_level: Optional[int]) -> bool:
+        normalized = cls._normalize_condition_levels(condition_levels)
+        if normalized == "ALL":
+            return True
+        if group_level is None:
+            return True
+        allowed: Set[int] = set()
+        for token in normalized.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                lvl = int(token)
+            except Exception:
+                continue
+            if 1 <= lvl <= 5:
+                allowed.add(lvl)
+        if not allowed:
+            return True
+        return int(group_level) in allowed
+
     def _load_sop_schedule_layer_from_db(self) -> Optional[List[Dict]]:
         """
         Read active SOP schedule-layer entries from freqinout_nets.db.
@@ -1892,6 +1963,12 @@ class SchedulerEngine(QObject):
                 profile_cols = {str(r[1] or "").strip().lower() for r in cur_cols.fetchall() if len(r) > 1}
             except Exception:
                 profile_cols = set()
+            layer_cols = set()
+            try:
+                cur_cols = conn.execute("PRAGMA table_info(sop_schedule_layer)")
+                layer_cols = {str(r[1] or "").strip().lower() for r in cur_cols.fetchall() if len(r) > 1}
+            except Exception:
+                layer_cols = set()
             priority_expr = "COALESCE(p.priority, 100)" if "priority" in profile_cols else "100"
             if "updated_utc" in profile_cols and "created_utc" in profile_cols:
                 updated_expr = "COALESCE(p.updated_utc, p.created_utc, '')"
@@ -1901,6 +1978,7 @@ class SchedulerEngine(QObject):
                 updated_expr = "COALESCE(p.created_utc, '')"
             else:
                 updated_expr = "''"
+            condition_expr = "COALESCE(l.condition_levels, 'ALL')" if "condition_levels" in layer_cols else "'ALL'"
             cur = conn.execute(
                 f"""
                 SELECT
@@ -1909,6 +1987,7 @@ class SchedulerEngine(QObject):
                     l.recurrence,
                     l.biweekly_offset_weeks,
                     l.month_weeks,
+                    {condition_expr} AS condition_levels,
                     l.band,
                     l.mode,
                     l.vfo,
@@ -1930,12 +2009,14 @@ class SchedulerEngine(QObject):
                 """
             )
             rows: List[Dict] = []
+            cond_map = self._condition_level_map()
             for (
                 layer_id,
                 day_utc,
                 recurrence,
                 biweekly_offset_weeks,
                 month_weeks,
+                condition_levels,
                 band,
                 mode,
                 vfo,
@@ -1962,6 +2043,10 @@ class SchedulerEngine(QObject):
                 except Exception:
                     priority_num = 100
                 sort_order = int(_sort_order or 0)
+                group_name = (operating_group or "").strip().upper()
+                group_level = cond_map.get(group_name)
+                if not self._condition_level_match(str(condition_levels or "ALL"), group_level):
+                    continue
                 rows.append(
                     {
                         "id": int(layer_id or 0),
@@ -1979,7 +2064,8 @@ class SchedulerEngine(QObject):
                         "auto_tune": False,
                         "primary_js8call_group": "",
                         "comment": f"SOP Layer: {profile_name or ''}".strip(),
-                        "group_name": (operating_group or "").strip().upper(),
+                        "group_name": group_name,
+                        "condition_levels": self._normalize_condition_levels(condition_levels),
                         "sop_profile_id": int(profile_id or 0),
                         "sop_profile_name": profile_name or "",
                         "sop_priority": priority_num,
@@ -1995,7 +2081,189 @@ class SchedulerEngine(QObject):
         finally:
             conn.close()
 
-    def _load_schedules(self, *, force: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    @staticmethod
+    def _normalize_sched_frequency(value: object) -> str:
+        txt = str(value or "").strip()
+        if not txt:
+            return ""
+        try:
+            return f"{float(txt):.3f}"
+        except Exception:
+            return txt
+
+    @staticmethod
+    def _normalize_sched_recurrence(value: object) -> str:
+        raw = str(value or "Weekly").strip().upper()
+        if raw == "MONTHLY":
+            raw = "PERIODIC"
+        if raw in {"DAILY", "PERIODIC", "BI-WEEKLY", "WEEKLY"}:
+            return "Bi-Weekly" if raw == "BI-WEEKLY" else raw.title()
+        return "Weekly"
+
+    @staticmethod
+    def _normalize_sched_month_weeks(value: object) -> str:
+        weeks: List[int] = []
+        for token in str(value or "").split(","):
+            tok = token.strip()
+            if not tok:
+                continue
+            try:
+                val = int(tok)
+            except Exception:
+                continue
+            if 1 <= val <= 5:
+                weeks.append(val)
+        return ",".join(str(v) for v in sorted(set(weeks)))
+
+    def _net_row_signature(self, row: Optional[Dict]) -> str:
+        data = row or {}
+        group_name = str(data.get("group_name") or "").strip().upper()
+        band = str(data.get("band") or "").strip().upper()
+        freq = self._normalize_sched_frequency(data.get("frequency"))
+        day = str(data.get("day_utc") or "ALL").strip().upper() or "ALL"
+        recurrence = self._normalize_sched_recurrence(data.get("recurrence"))
+        biweekly = int(data.get("biweekly_offset_weeks") or 0)
+        month_weeks = self._normalize_sched_month_weeks(data.get("month_weeks"))
+        start_utc = str(data.get("start_utc") or "").strip()
+        end_utc = str(data.get("end_utc") or "").strip()
+        net_name = str(data.get("net_name") or data.get("name") or "").strip().upper()
+        return (
+            f"NET|{group_name}|{band}|{freq}|{day}|{recurrence}|{biweekly}|"
+            f"{month_weeks}|{start_utc}|{end_utc}|{net_name}"
+        )
+
+    def _sop_row_signature(self, row: Optional[Dict]) -> str:
+        data = row or {}
+        profile_id = int(data.get("sop_profile_id") or 0)
+        layer_id = int(data.get("id") or 0)
+        group_name = str(data.get("group_name") or "").strip().upper()
+        band = str(data.get("band") or "").strip().upper()
+        freq = self._normalize_sched_frequency(data.get("frequency"))
+        day = str(data.get("day_utc") or "ALL").strip().upper() or "ALL"
+        recurrence = self._normalize_sched_recurrence(data.get("recurrence"))
+        biweekly = int(data.get("biweekly_offset_weeks") or 0)
+        month_weeks = self._normalize_sched_month_weeks(data.get("month_weeks"))
+        start_utc = str(data.get("start_utc") or "").strip()
+        end_utc = str(data.get("end_utc") or "").strip()
+        return (
+            f"SOP|{profile_id}|{layer_id}|{group_name}|{band}|{freq}|{day}|"
+            f"{recurrence}|{biweekly}|{month_weeks}|{start_utc}|{end_utc}"
+        )
+
+    def _load_sop_net_conflict_policies_from_db(self) -> Optional[List[Dict]]:
+        db_path = self._config_dir() / "freqinout_nets.db"
+        if not db_path.exists():
+            return None
+        conn = sqlite3.connect(db_path)
+        try:
+            if not self._table_exists(conn, "sop_net_conflict_policy"):
+                return []
+            cur = conn.execute(
+                """
+                SELECT
+                    sop_profile_id,
+                    sop_layer_id,
+                    net_row_signature,
+                    sop_row_signature,
+                    policy,
+                    window_start_utc,
+                    window_end_utc,
+                    active,
+                    updated_utc
+                FROM sop_net_conflict_policy
+                WHERE COALESCE(active, 1) = 1
+                ORDER BY COALESCE(updated_utc, '') DESC, id DESC
+                """
+            )
+            out: List[Dict] = []
+            for (
+                sop_profile_id,
+                sop_layer_id,
+                net_row_signature,
+                sop_row_signature,
+                policy,
+                window_start_utc,
+                window_end_utc,
+                active,
+                updated_utc,
+            ) in cur.fetchall():
+                pol = str(policy or "").strip().upper()
+                if pol not in {"SOP_PRIORITY", "NET_PRIORITY"}:
+                    pol = "NET_PRIORITY"
+                out.append(
+                    {
+                        "sop_profile_id": int(sop_profile_id or 0),
+                        "sop_layer_id": int(sop_layer_id or 0),
+                        "net_row_signature": str(net_row_signature or "").strip(),
+                        "sop_row_signature": str(sop_row_signature or "").strip(),
+                        "policy": pol,
+                        "window_start_utc": str(window_start_utc or "").strip(),
+                        "window_end_utc": str(window_end_utc or "").strip(),
+                        "active": bool(active) if active is not None else True,
+                        "updated_utc": str(updated_utc or "").strip(),
+                    }
+                )
+            return out
+        except Exception as e:
+            log.error("SchedulerEngine: failed to load Net/SOP conflict policy rows: %s", e)
+            return None
+        finally:
+            conn.close()
+
+    def _find_net_sop_policy_override(
+        self,
+        now_utc: datetime.datetime,
+        net_entry: Optional[Dict],
+        sop_entry: Optional[Dict],
+        policy_rows: List[Dict],
+    ) -> Optional[Dict]:
+        if not net_entry or not sop_entry or not policy_rows:
+            return None
+        net_sig = self._net_row_signature(net_entry)
+        sop_sig = self._sop_row_signature(sop_entry)
+        if not net_sig or not sop_sig:
+            return None
+        now_ts = float(now_utc.timestamp())
+        best: Optional[Dict] = None
+        best_updated = 0.0
+        for row in policy_rows:
+            if str(row.get("net_row_signature") or "") != net_sig:
+                continue
+            if str(row.get("sop_row_signature") or "") != sop_sig:
+                continue
+            start_ts = _parse_iso_utc_to_epoch(row.get("window_start_utc"))
+            end_ts = _parse_iso_utc_to_epoch(row.get("window_end_utc"))
+            if end_ts <= start_ts:
+                continue
+            if not (start_ts <= now_ts < end_ts):
+                continue
+            updated_ts = _parse_iso_utc_to_epoch(row.get("updated_utc"))
+            if best is None or updated_ts >= best_updated:
+                best = row
+                best_updated = updated_ts
+        return best
+
+    def _select_runtime_source(
+        self,
+        *,
+        now_utc: datetime.datetime,
+        hf_entry: Optional[Dict],
+        net_entry: Optional[Dict],
+        sop_entry: Optional[Dict],
+        policy_rows: List[Dict],
+    ) -> Tuple[str, Optional[Dict], Optional[Dict]]:
+        policy_override = self._find_net_sop_policy_override(now_utc, net_entry, sop_entry, policy_rows)
+        if net_entry:
+            if sop_entry and policy_override and str(policy_override.get("policy") or "").upper() == "SOP_PRIORITY":
+                return "SOP", sop_entry, policy_override
+            return "NET", net_entry, policy_override
+        if sop_entry:
+            return "SOP", sop_entry, None
+        if hf_entry:
+            return "HF", hf_entry, None
+        return "NONE", None, None
+
+    def _load_schedules(self, *, force: bool = False) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
         """
         Load schedules, preferring the database tables and falling back to the
         SettingsManager key/value store for backwards compatibility.
@@ -2011,11 +2279,13 @@ class SchedulerEngine(QObject):
         hf_db = self._load_daily_schedule_from_db()
         net_db = self._load_net_schedule_from_db()
         sop_layer_db = self._load_sop_schedule_layer_from_db()
+        policy_db = self._load_sop_net_conflict_policies_from_db()
 
         data = self.settings.all()
         hf = hf_db if hf_db is not None else data.get("hf_schedule") or data.get("daily_schedule") or []
         net = net_db if net_db is not None else data.get("net_schedule") or []
         sop_layer = sop_layer_db if sop_layer_db is not None else []
+        policies = policy_db if policy_db is not None else []
 
         if not isinstance(hf, list):
             hf = []
@@ -2023,9 +2293,11 @@ class SchedulerEngine(QObject):
             net = []
         if not isinstance(sop_layer, list):
             sop_layer = []
+        if not isinstance(policies, list):
+            policies = []
 
-        self._schedule_cache = {"mtimes": mtimes, "data": (hf, net, sop_layer)}
-        return hf, net, sop_layer
+        self._schedule_cache = {"mtimes": mtimes, "data": (hf, net, sop_layer, policies)}
+        return hf, net, sop_layer, policies
 
     def _evaluate(self, now_utc: datetime.datetime, force: bool = False) -> None:
         """
@@ -2039,7 +2311,7 @@ class SchedulerEngine(QObject):
         except Exception as e:
             log.debug("SchedulerEngine: settings reload failed (continuing with cached data): %s", e)
 
-        hf_sched, net_sched, sop_sched = self._load_schedules(force=force)
+        hf_sched, net_sched, sop_sched, net_sop_policies = self._load_schedules(force=force)
 
         try:
             hf_active = self._find_active_hf_entry(now_utc, hf_sched)
@@ -2073,25 +2345,29 @@ class SchedulerEngine(QObject):
             self._sop_winner_reason_code = ""
             self._sop_winner_reason_detail = ""
 
-        # Decide which source "wins":
-        # NET > SOP Layer > HF
-        source = "NONE"
-        active_entry: Optional[Dict] = None
-        if net_active:
-            source = "NET"
-            active_entry = net_active
-        elif sop_active:
-            source = "SOP"
-            active_entry = sop_active
-        elif hf_active:
-            source = "HF"
-            active_entry = hf_active
-
-        source_reason_code, source_reason_detail = self._derive_source_reason(
-            source,
-            active_entry,
-            sop_meta if source == "SOP" else None,
+        source, active_entry, policy_override = self._select_runtime_source(
+            now_utc=now_utc,
+            hf_entry=hf_active,
+            net_entry=net_active,
+            sop_entry=sop_active,
+            policy_rows=net_sop_policies,
         )
+        source_reason_code = ""
+        source_reason_detail = ""
+        if policy_override and net_active and sop_active:
+            policy_name = str(policy_override.get("policy") or "").strip().upper()
+            if policy_name == "SOP_PRIORITY" and source == "SOP":
+                source_reason_code = "sop_policy_override"
+                source_reason_detail = "Saved conflict policy gives SOP priority over Net for this overlap window."
+            elif policy_name == "NET_PRIORITY" and source == "NET":
+                source_reason_code = "net_policy_override"
+                source_reason_detail = "Saved conflict policy keeps Net priority for this overlap window."
+        if not source_reason_code:
+            source_reason_code, source_reason_detail = self._derive_source_reason(
+                source,
+                active_entry,
+                sop_meta if source == "SOP" else None,
+            )
         self._source_reason_code = source_reason_code
         self._source_reason_detail = source_reason_detail
 
@@ -2109,17 +2385,13 @@ class SchedulerEngine(QObject):
                 hf_next = self._find_active_hf_entry(probe_utc, hf_sched)
                 net_next = self._find_active_net_entry(probe_utc, net_sched)
                 sop_next, _sop_next_meta = self._find_active_sop_entry(probe_utc, sop_sched)
-                next_source = "NONE"
-                next_entry: Optional[Dict] = None
-                if net_next:
-                    next_source = "NET"
-                    next_entry = net_next
-                elif sop_next:
-                    next_source = "SOP"
-                    next_entry = sop_next
-                elif hf_next:
-                    next_source = "HF"
-                    next_entry = hf_next
+                next_source, next_entry, _next_policy = self._select_runtime_source(
+                    now_utc=probe_utc,
+                    hf_entry=hf_next,
+                    net_entry=net_next,
+                    sop_entry=sop_next,
+                    policy_rows=net_sop_policies,
+                )
                 self._next_source = next_source
                 self._next_net_kind = self._source_net_kind(next_source, next_entry)
                 self._next_source_change = next_source != source

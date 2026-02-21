@@ -11,6 +11,7 @@ from freqinout.core.config_paths import get_config_dir
 from freqinout.core.local_ops_store import get_all_operators
 from freqinout.core.logger import log
 from freqinout.core.propagation_outcome_ingest import STATE_TO_FEMA_REGION
+from freqinout.core.settings_manager import SettingsManager
 
 
 CONFIG_DIR = get_config_dir() / "config"
@@ -219,10 +220,32 @@ class SOPManager:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or NETS_DB
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.settings = SettingsManager()
         self.ensure_tables()
+        try:
+            self.enforce_single_profile_per_category()
+        except Exception as e:
+            log.debug("SOP: enforce_single_profile_per_category skipped: %s", e)
+
+    CATEGORY_HF = "HF"
+    CATEGORY_LOCAL = "LOCAL"
+    CONFLICT_POLICY_SOP = "SOP_ALL"
+    CONFLICT_POLICY_NET = "NET_PRIORITY"
+    CONFLICT_POLICY_DAILY = "DAILY_PRIORITY"
+    NET_SOP_POLICY_SOP = "SOP_PRIORITY"
+    NET_SOP_POLICY_NET = "NET_PRIORITY"
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
+
+    def _settings_db_path(self) -> Path:
+        cfg_path = getattr(self.settings, "_config_path", None)
+        if cfg_path:
+            try:
+                return Path(cfg_path)
+            except Exception:
+                pass
+        return get_config_dir() / "config" / "freqinout.db"
 
     @staticmethod
     def _normalize_day_utc(value: Any) -> str:
@@ -277,6 +300,95 @@ class SOPManager:
         except Exception:
             return text
 
+    @classmethod
+    def _normalize_category(cls, value: Any) -> str:
+        raw = str(value or "").strip().upper()
+        if raw in {"LOCAL", "LOCAL NET", "LOCAL COMMS", "LOCAL_COMMS"}:
+            return cls.CATEGORY_LOCAL
+        return cls.CATEGORY_HF
+
+    @classmethod
+    def _normalize_conflict_policy(cls, value: Any) -> str:
+        raw = str(value or "").strip().upper()
+        if raw in {cls.CONFLICT_POLICY_NET, "NET", "NET_PRIORITY"}:
+            return cls.CONFLICT_POLICY_NET
+        if raw in {cls.CONFLICT_POLICY_DAILY, "DAILY", "DAILY_PRIORITY"}:
+            return cls.CONFLICT_POLICY_DAILY
+        return cls.CONFLICT_POLICY_SOP
+
+    @classmethod
+    def _normalize_net_sop_policy(cls, value: Any) -> str:
+        raw = str(value or "").strip().upper()
+        if raw in {"SOP", "SOP_PRIORITY"}:
+            return cls.NET_SOP_POLICY_SOP
+        return cls.NET_SOP_POLICY_NET
+
+    @classmethod
+    def _net_row_signature(cls, row: Dict[str, Any]) -> str:
+        day = cls._normalize_day_utc(row.get("day_utc"))
+        recurrence = cls._normalize_recurrence(row.get("recurrence"))
+        biweekly = int(row.get("biweekly_offset_weeks") or 0)
+        weeks = cls._normalize_month_weeks(row.get("month_weeks"))
+        band = str(row.get("band") or "").strip().upper()
+        freq = cls._normalize_frequency(row.get("frequency"))
+        start = cls._normalize_hhmm(row.get("start_utc") or "00:00")
+        end = cls._normalize_hhmm(row.get("end_utc") or "23:59")
+        group_name = str(row.get("group_name") or "").strip().upper()
+        net_name = str(row.get("name") or row.get("net_name") or "").strip().upper()
+        return (
+            f"NET|{group_name}|{band}|{freq}|{day}|{recurrence}|{biweekly}|"
+            f"{weeks}|{start}|{end}|{net_name}"
+        )
+
+    @classmethod
+    def _sop_row_signature(cls, row: Dict[str, Any]) -> str:
+        day = cls._normalize_day_utc(row.get("day_utc"))
+        recurrence = cls._normalize_recurrence(row.get("recurrence"))
+        biweekly = int(row.get("biweekly_offset_weeks") or 0)
+        weeks = cls._normalize_month_weeks(row.get("month_weeks"))
+        band = str(row.get("band") or "").strip().upper()
+        freq = cls._normalize_frequency(row.get("frequency"))
+        start = cls._normalize_hhmm(row.get("start_utc") or "00:00")
+        end = cls._normalize_hhmm(row.get("end_utc") or "23:59")
+        group_name = str(row.get("group_name") or "").strip().upper()
+        profile_id = int(row.get("sop_profile_id") or 0)
+        layer_id = int(row.get("sop_layer_id") or row.get("id") or 0)
+        return (
+            f"SOP|{profile_id}|{layer_id}|{group_name}|{band}|{freq}|{day}|"
+            f"{recurrence}|{biweekly}|{weeks}|{start}|{end}"
+        )
+
+    @staticmethod
+    def _policy_conflict_key(
+        net_row_signature: str,
+        sop_row_signature: str,
+        window_start_utc: str,
+        window_end_utc: str,
+    ) -> str:
+        return f"{net_row_signature}|{sop_row_signature}|{window_start_utc}|{window_end_utc}"
+
+    @staticmethod
+    def _normalize_condition_levels(value: Any) -> str:
+        raw = str(value or "").strip().upper()
+        if not raw or raw == "ALL":
+            return "ALL"
+        out: List[int] = []
+        for token in raw.replace(";", ",").replace("|", ",").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if token == "ALL":
+                return "ALL"
+            try:
+                lvl = int(token)
+            except Exception:
+                continue
+            if 1 <= lvl <= 5:
+                out.append(lvl)
+        if not out:
+            return "ALL"
+        return ",".join(str(v) for v in sorted(set(out)))
+
     def ensure_tables(self) -> None:
         conn = self._connect()
         try:
@@ -286,6 +398,7 @@ class SOPManager:
                 CREATE TABLE IF NOT EXISTS sop_profiles (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
+                    category TEXT DEFAULT 'HF',
                     operating_group TEXT NOT NULL,
                     secondary_group TEXT,
                     frequency TEXT NOT NULL,
@@ -300,25 +413,38 @@ class SOPManager:
             )
             cur.execute("PRAGMA table_info(sop_profiles)")
             profile_cols = {str(row[1] or "").strip().lower() for row in cur.fetchall()}
+            if "category" not in profile_cols:
+                cur.execute("ALTER TABLE sop_profiles ADD COLUMN category TEXT DEFAULT 'HF'")
             if "priority" not in profile_cols:
                 cur.execute("ALTER TABLE sop_profiles ADD COLUMN priority INTEGER DEFAULT 100")
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sop_profiles_name ON sop_profiles(name)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sop_profiles_active ON sop_profiles(active)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sop_profiles_category ON sop_profiles(category)")
 
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sop_actions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     profile_id INTEGER NOT NULL,
+                    group_name TEXT,
+                    condition_levels TEXT DEFAULT 'ALL',
                     band TEXT,
                     frequency TEXT,
                     software TEXT NOT NULL,
+                    mode TEXT,
                     action_key TEXT NOT NULL,
                     action_label TEXT NOT NULL,
                     enabled INTEGER DEFAULT 1,
+                    daily_start_utc TEXT,
+                    daily_end_utc TEXT,
+                    duration_minutes INTEGER DEFAULT 60,
                     interval_hours INTEGER DEFAULT 3,
                     interval_minutes INTEGER,
                     interval_phase_minutes INTEGER DEFAULT 0,
+                    conflict_policy TEXT DEFAULT 'SOP_ALL',
+                    daily_conflict_summary TEXT,
+                    net_conflict_summary TEXT,
+                    schedule_applied INTEGER DEFAULT 1,
                     description TEXT,
                     contact_rule TEXT DEFAULT 'none',
                     contact_target TEXT,
@@ -331,9 +457,27 @@ class SOPManager:
             if "band" not in action_cols:
                 cur.execute("ALTER TABLE sop_actions ADD COLUMN band TEXT")
                 action_cols.add("band")
+            if "group_name" not in action_cols:
+                cur.execute("ALTER TABLE sop_actions ADD COLUMN group_name TEXT")
+                action_cols.add("group_name")
+            if "condition_levels" not in action_cols:
+                cur.execute("ALTER TABLE sop_actions ADD COLUMN condition_levels TEXT DEFAULT 'ALL'")
+                action_cols.add("condition_levels")
             if "frequency" not in action_cols:
                 cur.execute("ALTER TABLE sop_actions ADD COLUMN frequency TEXT")
                 action_cols.add("frequency")
+            if "mode" not in action_cols:
+                cur.execute("ALTER TABLE sop_actions ADD COLUMN mode TEXT")
+                action_cols.add("mode")
+            if "daily_start_utc" not in action_cols:
+                cur.execute("ALTER TABLE sop_actions ADD COLUMN daily_start_utc TEXT")
+                action_cols.add("daily_start_utc")
+            if "daily_end_utc" not in action_cols:
+                cur.execute("ALTER TABLE sop_actions ADD COLUMN daily_end_utc TEXT")
+                action_cols.add("daily_end_utc")
+            if "duration_minutes" not in action_cols:
+                cur.execute("ALTER TABLE sop_actions ADD COLUMN duration_minutes INTEGER DEFAULT 60")
+                action_cols.add("duration_minutes")
             if "contact_rule" not in action_cols:
                 cur.execute("ALTER TABLE sop_actions ADD COLUMN contact_rule TEXT DEFAULT 'none'")
                 action_cols.add("contact_rule")
@@ -346,9 +490,48 @@ class SOPManager:
             if "interval_phase_minutes" not in action_cols:
                 cur.execute("ALTER TABLE sop_actions ADD COLUMN interval_phase_minutes INTEGER DEFAULT 0")
                 action_cols.add("interval_phase_minutes")
+            if "conflict_policy" not in action_cols:
+                cur.execute("ALTER TABLE sop_actions ADD COLUMN conflict_policy TEXT DEFAULT 'SOP_ALL'")
+                action_cols.add("conflict_policy")
+            if "daily_conflict_summary" not in action_cols:
+                cur.execute("ALTER TABLE sop_actions ADD COLUMN daily_conflict_summary TEXT")
+                action_cols.add("daily_conflict_summary")
+            if "net_conflict_summary" not in action_cols:
+                cur.execute("ALTER TABLE sop_actions ADD COLUMN net_conflict_summary TEXT")
+                action_cols.add("net_conflict_summary")
+            if "schedule_applied" not in action_cols:
+                cur.execute("ALTER TABLE sop_actions ADD COLUMN schedule_applied INTEGER DEFAULT 1")
+                action_cols.add("schedule_applied")
             if "sort_order" not in action_cols:
                 cur.execute("ALTER TABLE sop_actions ADD COLUMN sort_order INTEGER DEFAULT 0")
                 action_cols.add("sort_order")
+            try:
+                cur.execute(
+                    """
+                    UPDATE sop_actions
+                    SET
+                        group_name = COALESCE(NULLIF(TRIM(group_name), ''), ''),
+                        condition_levels = COALESCE(NULLIF(TRIM(condition_levels), ''), 'ALL'),
+                        mode = COALESCE(mode, ''),
+                        daily_start_utc = COALESCE(NULLIF(TRIM(daily_start_utc), ''), '00:00'),
+                        daily_end_utc = COALESCE(NULLIF(TRIM(daily_end_utc), ''), '23:59'),
+                        duration_minutes = CASE
+                            WHEN COALESCE(duration_minutes, 0) <= 0 THEN 60
+                            ELSE duration_minutes
+                        END,
+                        conflict_policy = CASE
+                            WHEN UPPER(COALESCE(TRIM(conflict_policy), '')) IN ('NET', 'NET_PRIORITY') THEN 'NET_PRIORITY'
+                            WHEN UPPER(COALESCE(TRIM(conflict_policy), '')) IN ('DAILY', 'DAILY_PRIORITY') THEN 'DAILY_PRIORITY'
+                            ELSE 'SOP_ALL'
+                        END,
+                        schedule_applied = CASE
+                            WHEN schedule_applied IS NULL THEN 1
+                            ELSE schedule_applied
+                        END
+                    """
+                )
+            except Exception as e:
+                log.debug("SOP: normalize action planning defaults skipped: %s", e)
             if "interval_hours" in action_cols and "interval_minutes" in action_cols and "interval_phase_minutes" in action_cols:
                 # Legacy Local Net rows used fractional-hour intervals (e.g., 3:30) to express
                 # stagger intent. Convert common quarter-hour offsets to interval+phase.
@@ -404,6 +587,7 @@ class SOPManager:
                     recurrence TEXT DEFAULT 'Weekly',
                     biweekly_offset_weeks INTEGER DEFAULT 0,
                     month_weeks TEXT,
+                    condition_levels TEXT DEFAULT 'ALL',
                     band TEXT,
                     mode TEXT,
                     vfo TEXT,
@@ -424,6 +608,8 @@ class SOPManager:
                 cur.execute("ALTER TABLE sop_schedule_layer ADD COLUMN biweekly_offset_weeks INTEGER DEFAULT 0")
             if "month_weeks" not in layer_cols:
                 cur.execute("ALTER TABLE sop_schedule_layer ADD COLUMN month_weeks TEXT")
+            if "condition_levels" not in layer_cols:
+                cur.execute("ALTER TABLE sop_schedule_layer ADD COLUMN condition_levels TEXT DEFAULT 'ALL'")
             if "band" not in layer_cols:
                 cur.execute("ALTER TABLE sop_schedule_layer ADD COLUMN band TEXT")
             if "mode" not in layer_cols:
@@ -440,6 +626,92 @@ class SOPManager:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sop_layer_profile_day ON sop_schedule_layer(profile_id, day_utc, start_utc)"
             )
+            try:
+                # SOP HF workflows are daily-only. Normalize any legacy HF layer rows
+                # so scheduler/UI consistently treat them as ALL-day recurring windows.
+                cur.execute(
+                    """
+                    UPDATE sop_schedule_layer
+                    SET
+                        day_utc = 'ALL',
+                        recurrence = 'Daily',
+                        biweekly_offset_weeks = 0,
+                        month_weeks = '',
+                        updated_utc = COALESCE(updated_utc, ?)
+                    WHERE profile_id IN (
+                        SELECT id
+                        FROM sop_profiles
+                        WHERE UPPER(COALESCE(category, 'HF')) = 'HF'
+                    )
+                    AND (
+                        UPPER(COALESCE(day_utc, '')) <> 'ALL'
+                        OR UPPER(COALESCE(recurrence, 'WEEKLY')) <> 'DAILY'
+                        OR COALESCE(biweekly_offset_weeks, 0) <> 0
+                        OR COALESCE(TRIM(month_weeks), '') <> ''
+                    )
+                    """,
+                    (_utc_now_iso(),),
+                )
+            except Exception as e:
+                log.debug("SOP: normalize legacy HF layer cadence skipped: %s", e)
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sop_net_conflict_policy (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sop_profile_id INTEGER NOT NULL,
+                    sop_layer_id INTEGER,
+                    net_row_signature TEXT NOT NULL,
+                    sop_row_signature TEXT NOT NULL,
+                    policy TEXT NOT NULL,
+                    window_start_utc TEXT NOT NULL,
+                    window_end_utc TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    resolution_note TEXT,
+                    updated_utc TEXT
+                )
+                """
+            )
+            cur.execute("PRAGMA table_info(sop_net_conflict_policy)")
+            policy_cols = {str(row[1] or "").strip().lower() for row in cur.fetchall()}
+            if "sop_profile_id" not in policy_cols:
+                cur.execute("ALTER TABLE sop_net_conflict_policy ADD COLUMN sop_profile_id INTEGER NOT NULL DEFAULT 0")
+            if "sop_layer_id" not in policy_cols:
+                cur.execute("ALTER TABLE sop_net_conflict_policy ADD COLUMN sop_layer_id INTEGER")
+            if "net_row_signature" not in policy_cols:
+                cur.execute("ALTER TABLE sop_net_conflict_policy ADD COLUMN net_row_signature TEXT NOT NULL DEFAULT ''")
+            if "sop_row_signature" not in policy_cols:
+                cur.execute("ALTER TABLE sop_net_conflict_policy ADD COLUMN sop_row_signature TEXT NOT NULL DEFAULT ''")
+            if "policy" not in policy_cols:
+                cur.execute("ALTER TABLE sop_net_conflict_policy ADD COLUMN policy TEXT NOT NULL DEFAULT 'NET_PRIORITY'")
+            if "window_start_utc" not in policy_cols:
+                cur.execute("ALTER TABLE sop_net_conflict_policy ADD COLUMN window_start_utc TEXT NOT NULL DEFAULT ''")
+            if "window_end_utc" not in policy_cols:
+                cur.execute("ALTER TABLE sop_net_conflict_policy ADD COLUMN window_end_utc TEXT NOT NULL DEFAULT ''")
+            if "active" not in policy_cols:
+                cur.execute("ALTER TABLE sop_net_conflict_policy ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+            if "resolution_note" not in policy_cols:
+                cur.execute("ALTER TABLE sop_net_conflict_policy ADD COLUMN resolution_note TEXT")
+            if "updated_utc" not in policy_cols:
+                cur.execute("ALTER TABLE sop_net_conflict_policy ADD COLUMN updated_utc TEXT")
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_sop_net_conflict_unique ON sop_net_conflict_policy(net_row_signature, sop_row_signature, window_start_utc, window_end_utc)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sop_net_conflict_profile_active ON sop_net_conflict_policy(sop_profile_id, active)"
+            )
+            try:
+                cur.execute(
+                    """
+                    UPDATE sop_net_conflict_policy
+                    SET policy = CASE
+                        WHEN UPPER(COALESCE(TRIM(policy), '')) IN ('SOP', 'SOP_PRIORITY') THEN 'SOP_PRIORITY'
+                        ELSE 'NET_PRIORITY'
+                    END
+                    """
+                )
+            except Exception as e:
+                log.debug("SOP: normalize net conflict policy skipped: %s", e)
             conn.commit()
         finally:
             conn.close()
@@ -449,7 +721,7 @@ class SOPManager:
         try:
             cur = conn.execute(
                 """
-                SELECT id, name, operating_group, secondary_group, frequency, sop_start_utc,
+                SELECT id, name, category, operating_group, secondary_group, frequency, sop_start_utc,
                        priority, active, window_hours, created_utc, updated_utc
                 FROM sop_profiles
                 ORDER BY name COLLATE NOCASE
@@ -460,15 +732,16 @@ class SOPManager:
                 {
                     "id": r[0],
                     "name": r[1],
-                    "operating_group": r[2] or "",
-                    "secondary_group": r[3] or "",
-                    "frequency": r[4] or "",
-                    "sop_start_utc": r[5] or "00:00",
-                    "priority": int(r[6] or 100),
-                    "active": bool(r[7]),
-                    "window_hours": int(r[8] or 12),
-                    "created_utc": r[9] or "",
-                    "updated_utc": r[10] or "",
+                    "category": self._normalize_category(r[2]),
+                    "operating_group": r[3] or "",
+                    "secondary_group": r[4] or "",
+                    "frequency": r[5] or "",
+                    "sop_start_utc": r[6] or "00:00",
+                    "priority": int(r[7] or 100),
+                    "active": bool(r[8]),
+                    "window_hours": int(r[9] or 12),
+                    "created_utc": r[10] or "",
+                    "updated_utc": r[11] or "",
                 }
                 for r in rows
             ]
@@ -489,6 +762,7 @@ class SOPManager:
                 SELECT
                     p.id,
                     p.name,
+                    p.category,
                     p.operating_group,
                     p.secondary_group,
                     p.priority,
@@ -515,6 +789,7 @@ class SOPManager:
                 GROUP BY
                     p.id,
                     p.name,
+                    p.category,
                     p.operating_group,
                     p.secondary_group,
                     p.priority,
@@ -527,11 +802,14 @@ class SOPManager:
             )
             out: List[Dict[str, Any]] = []
             for row in cur.fetchall():
-                local_count = int(row[9] or 0)
-                hf_count = int(row[10] or 0)
-                if local_count > 0 and hf_count > 0:
+                category_raw = self._normalize_category(row[2])
+                local_count = int(row[10] or 0)
+                hf_count = int(row[11] or 0)
+                if category_raw == self.CATEGORY_LOCAL:
+                    category = "Local Net"
+                elif local_count > 0 and hf_count > 0:
                     category = "HF + Local Net"
-                elif local_count > 0:
+                elif local_count > 0 and hf_count <= 0:
                     category = "Local Net"
                 else:
                     category = "HF"
@@ -539,13 +817,14 @@ class SOPManager:
                     {
                         "id": int(row[0] or 0),
                         "name": row[1] or "",
-                        "operating_group": row[2] or "",
-                        "secondary_group": row[3] or "",
-                        "priority": int(row[4] or 100),
-                        "active": bool(row[5]),
-                        "window_hours": int(row[6] or 12),
-                        "created_utc": row[7] or "",
-                        "updated_utc": row[8] or "",
+                        "category": category_raw,
+                        "operating_group": row[3] or "",
+                        "secondary_group": row[4] or "",
+                        "priority": int(row[5] or 100),
+                        "active": bool(row[6]),
+                        "window_hours": int(row[7] or 12),
+                        "created_utc": row[8] or "",
+                        "updated_utc": row[9] or "",
                         "sop_category": category,
                     }
                 )
@@ -580,12 +859,99 @@ class SOPManager:
         finally:
             conn.close()
 
+    def get_profile_by_category(self, category: str) -> Optional[Dict[str, Any]]:
+        cat = self._normalize_category(category)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT id
+                FROM sop_profiles
+                WHERE UPPER(COALESCE(category, 'HF')) = ?
+                ORDER BY COALESCE(updated_utc, created_utc, '') DESC, id ASC
+                LIMIT 1
+                """,
+                (cat,),
+            ).fetchone()
+            if not row:
+                return None
+            return self.get_profile(int(row[0] or 0))
+        finally:
+            conn.close()
+
+    def ensure_category_profile(self, category: str) -> Dict[str, Any]:
+        cat = self._normalize_category(category)
+        existing = self.get_profile_by_category(cat)
+        if existing:
+            return existing
+        default_name = "HF SOP" if cat == self.CATEGORY_HF else "Local Comms SOP"
+        payload = {
+            "name": default_name,
+            "category": cat,
+            "operating_group": "",
+            "secondary_group": "",
+            "frequency": "",
+            "sop_start_utc": "00:00",
+            "priority": 100,
+            "active": False,
+            "window_hours": 24,
+        }
+        profile_id = self.save_profile(payload, actions=[], schedule_layer=[])
+        created = self.get_profile(profile_id)
+        if not created:
+            raise RuntimeError(f"Failed to create SOP profile for category {cat}")
+        return created
+
+    def set_category_active(self, category: str, active: bool) -> bool:
+        profile = self.get_profile_by_category(category)
+        if not profile:
+            profile = self.ensure_category_profile(category)
+        return self.set_profile_active(int(profile.get("id") or 0), bool(active))
+
+    def enforce_single_profile_per_category(self) -> Dict[str, int]:
+        """
+        Keep at most one active profile per category for runtime safety.
+        Returns the canonical profile id per category (0 when missing).
+        """
+        out: Dict[str, int] = {self.CATEGORY_HF: 0, self.CATEGORY_LOCAL: 0}
+        conn = self._connect()
+        try:
+            now_iso = _utc_now_iso()
+            with conn:
+                for category in (self.CATEGORY_HF, self.CATEGORY_LOCAL):
+                    rows = conn.execute(
+                        """
+                        SELECT id
+                        FROM sop_profiles
+                        WHERE UPPER(COALESCE(category, 'HF')) = ?
+                        ORDER BY COALESCE(updated_utc, created_utc, '') DESC, id ASC
+                        """,
+                        (category,),
+                    ).fetchall()
+                    ids = [int(r[0] or 0) for r in rows if int(r[0] or 0) > 0]
+                    if not ids:
+                        continue
+                    keep_id = ids[0]
+                    out[category] = keep_id
+                    for stale_id in ids[1:]:
+                        conn.execute(
+                            """
+                            UPDATE sop_profiles
+                            SET active = 0, updated_utc = ?
+                            WHERE id = ?
+                            """,
+                            (now_iso, stale_id),
+                        )
+            return out
+        finally:
+            conn.close()
+
     def get_profile(self, profile_id: int) -> Optional[Dict[str, Any]]:
         conn = self._connect()
         try:
             cur = conn.execute(
                 """
-                SELECT id, name, operating_group, secondary_group, frequency, sop_start_utc,
+                SELECT id, name, category, operating_group, secondary_group, frequency, sop_start_utc,
                        priority, active, window_hours, created_utc, updated_utc
                 FROM sop_profiles WHERE id = ?
                 """,
@@ -597,8 +963,11 @@ class SOPManager:
 
             actions_cur = conn.execute(
                 """
-                SELECT a.id, a.band, a.frequency, a.software, a.action_key, a.action_label, a.enabled,
+                SELECT a.id, a.group_name, a.condition_levels, a.band, a.frequency, a.software, a.mode,
+                       a.action_key, a.action_label, a.enabled,
+                       a.daily_start_utc, a.daily_end_utc, a.duration_minutes,
                        a.interval_hours, a.interval_minutes, a.interval_phase_minutes,
+                       a.conflict_policy, a.daily_conflict_summary, a.net_conflict_summary, a.schedule_applied,
                        a.description, a.contact_rule, a.contact_target, a.sort_order,
                        s.last_completed_utc
                 FROM sop_actions a
@@ -611,23 +980,41 @@ class SOPManager:
             )
             actions = []
             for ar in actions_cur.fetchall():
+                daily_start_utc = self._normalize_hhmm(ar[10] or "00:00")
+                daily_end_utc = self._normalize_hhmm(ar[11] or "23:59")
+                try:
+                    duration_minutes = int(ar[12] or 60)
+                except Exception:
+                    duration_minutes = 60
+                if duration_minutes not in {30, 60}:
+                    duration_minutes = 30 if duration_minutes < 45 else 60
                 actions.append(
                     {
                         "id": ar[0],
-                        "band": ar[1] or "",
-                        "frequency": ar[2] or "",
-                        "software": ar[3],
-                        "action_key": ar[4],
-                        "action_label": ar[5],
-                        "enabled": bool(ar[6]),
-                        "interval_hours": int(ar[7] or 3),
-                        "interval_minutes": int(ar[8] or (int(ar[7] or 3) * 60)),
-                        "interval_phase_minutes": int(ar[9] or 0),
-                        "description": ar[10] or "",
-                        "contact_rule": ar[11] or "none",
-                        "contact_target": ar[12] or "",
-                        "sort_order": int(ar[13] or 0),
-                        "last_completed_utc": ar[14] or "",
+                        "group_name": str(ar[1] or "").strip().upper(),
+                        "condition_levels": self._normalize_condition_levels(ar[2]),
+                        "band": ar[3] or "",
+                        "frequency": ar[4] or "",
+                        "software": ar[5],
+                        "mode": str(ar[6] or "").strip().upper(),
+                        "action_key": ar[7],
+                        "action_label": ar[8],
+                        "enabled": bool(ar[9]),
+                        "daily_start_utc": daily_start_utc,
+                        "daily_end_utc": daily_end_utc,
+                        "duration_minutes": duration_minutes,
+                        "interval_hours": int(ar[13] or 3),
+                        "interval_minutes": int(ar[14] or (int(ar[13] or 3) * 60)),
+                        "interval_phase_minutes": int(ar[15] or 0),
+                        "conflict_policy": self._normalize_conflict_policy(ar[16]),
+                        "daily_conflict_summary": str(ar[17] or "").strip(),
+                        "net_conflict_summary": str(ar[18] or "").strip(),
+                        "schedule_applied": bool(ar[19]) if ar[19] is not None else True,
+                        "description": ar[20] or "",
+                        "contact_rule": ar[21] or "none",
+                        "contact_target": ar[22] or "",
+                        "sort_order": int(ar[23] or 0),
+                        "last_completed_utc": ar[24] or "",
                     }
                 )
 
@@ -639,6 +1026,7 @@ class SOPManager:
                     recurrence,
                     biweekly_offset_weeks,
                     month_weeks,
+                    condition_levels,
                     band,
                     mode,
                     vfo,
@@ -663,30 +1051,32 @@ class SOPManager:
                         "recurrence": self._normalize_recurrence(lr[2]),
                         "biweekly_offset_weeks": int(lr[3] or 0),
                         "month_weeks": self._normalize_month_weeks(lr[4]),
-                        "band": str(lr[5] or "").strip().upper(),
-                        "mode": str(lr[6] or "").strip().upper(),
-                        "vfo": str(lr[7] or "").strip().upper(),
-                        "frequency": str(lr[8] or "").strip(),
-                        "start_utc": str(lr[9] or ""),
-                        "end_utc": str(lr[10] or ""),
-                        "enabled": bool(lr[11]),
-                        "sort_order": int(lr[12] or 0),
-                        "updated_utc": str(lr[13] or ""),
+                        "condition_levels": self._normalize_condition_levels(lr[5]),
+                        "band": str(lr[6] or "").strip().upper(),
+                        "mode": str(lr[7] or "").strip().upper(),
+                        "vfo": str(lr[8] or "").strip().upper(),
+                        "frequency": str(lr[9] or "").strip(),
+                        "start_utc": str(lr[10] or ""),
+                        "end_utc": str(lr[11] or ""),
+                        "enabled": bool(lr[12]),
+                        "sort_order": int(lr[13] or 0),
+                        "updated_utc": str(lr[14] or ""),
                     }
                 )
 
             return {
                 "id": row[0],
                 "name": row[1],
-                "operating_group": row[2] or "",
-                "secondary_group": row[3] or "",
-                "frequency": row[4] or "",
-                "sop_start_utc": row[5] or "00:00",
-                "priority": int(row[6] or 100),
-                "active": bool(row[7]),
-                "window_hours": int(row[8] or 12),
-                "created_utc": row[9] or "",
-                "updated_utc": row[10] or "",
+                "category": self._normalize_category(row[2]),
+                "operating_group": row[3] or "",
+                "secondary_group": row[4] or "",
+                "frequency": row[5] or "",
+                "sop_start_utc": row[6] or "00:00",
+                "priority": int(row[7] or 100),
+                "active": bool(row[8]),
+                "window_hours": int(row[9] or 12),
+                "created_utc": row[10] or "",
+                "updated_utc": row[11] or "",
                 "actions": actions,
                 "schedule_layer": schedule_layer,
             }
@@ -701,11 +1091,14 @@ class SOPManager:
     ) -> int:
         now_iso = _utc_now_iso()
         conn = self._connect()
+        rebuild_from_actions = False
         try:
             with conn:
                 profile_id = int(payload.get("id") or 0)
+                profile_category = self._normalize_category(payload.get("category"))
                 row = (
                     (payload.get("name") or "").strip(),
+                    profile_category,
                     (payload.get("operating_group") or "").strip(),
                     (payload.get("secondary_group") or "").strip(),
                     (payload.get("frequency") or "").strip(),
@@ -718,7 +1111,7 @@ class SOPManager:
                     conn.execute(
                         """
                         UPDATE sop_profiles
-                        SET name=?, operating_group=?, secondary_group=?, frequency=?, sop_start_utc=?,
+                        SET name=?, category=?, operating_group=?, secondary_group=?, frequency=?, sop_start_utc=?,
                             priority=?, active=?, window_hours=?, updated_utc=?
                         WHERE id=?
                         """,
@@ -728,9 +1121,9 @@ class SOPManager:
                     conn.execute(
                         """
                         INSERT INTO sop_profiles
-                            (name, operating_group, secondary_group, frequency, sop_start_utc,
+                            (name, category, operating_group, secondary_group, frequency, sop_start_utc,
                              priority, active, window_hours, created_utc, updated_utc)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (*row, now_iso, now_iso),
                     )
@@ -750,17 +1143,30 @@ class SOPManager:
                     interval_phase_minutes = max(0, int(action.get("interval_phase_minutes") or 0))
                     interval_phase_minutes = interval_phase_minutes % max(1, interval_minutes)
                     interval_hours_legacy = max(1, int((interval_minutes + 59) // 60))
+                    duration_minutes = int(action.get("duration_minutes") or 60)
+                    if duration_minutes not in {30, 60}:
+                        duration_minutes = 30 if duration_minutes < 45 else 60
                     vals = (
                         profile_id,
+                        (action.get("group_name") or "").strip().upper(),
+                        self._normalize_condition_levels(action.get("condition_levels")),
                         (action.get("band") or "").strip().upper(),
                         (action.get("frequency") or "").strip(),
                         (action.get("software") or "").strip(),
+                        (action.get("mode") or "").strip().upper(),
                         (action.get("action_key") or "").strip(),
                         (action.get("action_label") or "").strip(),
                         1 if action.get("enabled", True) else 0,
+                        self._normalize_hhmm(action.get("daily_start_utc") or "00:00"),
+                        self._normalize_hhmm(action.get("daily_end_utc") or "23:59"),
+                        duration_minutes,
                         interval_hours_legacy,
                         interval_minutes,
                         interval_phase_minutes,
+                        self._normalize_conflict_policy(action.get("conflict_policy")),
+                        str(action.get("daily_conflict_summary") or "").strip(),
+                        str(action.get("net_conflict_summary") or "").strip(),
+                        1 if action.get("schedule_applied", True) else 0,
                         (action.get("description") or "").strip(),
                         (action.get("contact_rule") or "none").strip(),
                         (action.get("contact_target") or "").strip().upper(),
@@ -770,8 +1176,11 @@ class SOPManager:
                         conn.execute(
                             """
                             UPDATE sop_actions
-                            SET band=?, frequency=?, software=?, action_key=?, action_label=?, enabled=?,
+                            SET group_name=?, condition_levels=?, band=?, frequency=?, software=?, mode=?,
+                                action_key=?, action_label=?, enabled=?,
+                                daily_start_utc=?, daily_end_utc=?, duration_minutes=?,
                                 interval_hours=?, interval_minutes=?, interval_phase_minutes=?,
+                                conflict_policy=?, daily_conflict_summary=?, net_conflict_summary=?, schedule_applied=?,
                                 description=?, contact_rule=?, contact_target=?, sort_order=?
                             WHERE id=? AND profile_id=?
                             """,
@@ -789,6 +1198,16 @@ class SOPManager:
                                 vals[11],
                                 vals[12],
                                 vals[13],
+                                vals[14],
+                                vals[15],
+                                vals[16],
+                                vals[17],
+                                vals[18],
+                                vals[19],
+                                vals[20],
+                                vals[21],
+                                vals[22],
+                                vals[23],
                                 action_id,
                                 profile_id,
                             ),
@@ -798,10 +1217,13 @@ class SOPManager:
                         conn.execute(
                             """
                             INSERT INTO sop_actions
-                                (profile_id, band, frequency, software, action_key, action_label, enabled,
+                                (profile_id, group_name, condition_levels, band, frequency, software, mode,
+                                 action_key, action_label, enabled,
+                                 daily_start_utc, daily_end_utc, duration_minutes,
                                  interval_hours, interval_minutes, interval_phase_minutes,
+                                 conflict_policy, daily_conflict_summary, net_conflict_summary, schedule_applied,
                                  description, contact_rule, contact_target, sort_order)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             vals,
                         )
@@ -836,6 +1258,7 @@ class SOPManager:
                             recurrence,
                             int(layer.get("biweekly_offset_weeks") or 0),
                             self._normalize_month_weeks(layer.get("month_weeks")),
+                            self._normalize_condition_levels(layer.get("condition_levels")),
                             str(layer.get("band") or "").strip().upper(),
                             str(layer.get("mode") or "").strip().upper(),
                             str(layer.get("vfo") or "").strip().upper(),
@@ -846,14 +1269,14 @@ class SOPManager:
                             int(layer.get("sort_order") if layer.get("sort_order") is not None else idx),
                             now_iso,
                         )
-                        if not vals[8]:
+                        if not vals[9]:
                             continue
                         if layer_id > 0:
                             cur = conn.execute(
                                 """
                                 UPDATE sop_schedule_layer
                                 SET day_utc=?, recurrence=?, biweekly_offset_weeks=?, month_weeks=?,
-                                    band=?, mode=?, vfo=?, frequency=?, start_utc=?, end_utc=?,
+                                    condition_levels=?, band=?, mode=?, vfo=?, frequency=?, start_utc=?, end_utc=?,
                                     enabled=?, sort_order=?, updated_utc=?
                                 WHERE id=? AND profile_id=?
                                 """,
@@ -871,6 +1294,7 @@ class SOPManager:
                                     vals[11],
                                     vals[12],
                                     vals[13],
+                                    vals[14],
                                     layer_id,
                                     profile_id,
                                 ),
@@ -882,8 +1306,8 @@ class SOPManager:
                             """
                             INSERT INTO sop_schedule_layer
                                 (profile_id, day_utc, recurrence, biweekly_offset_weeks, month_weeks,
-                                 band, mode, vfo, frequency, start_utc, end_utc, enabled, sort_order, updated_utc)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 condition_levels, band, mode, vfo, frequency, start_utc, end_utc, enabled, sort_order, updated_utc)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             vals,
                         )
@@ -892,7 +1316,13 @@ class SOPManager:
                     to_delete_layer = existing_layer - kept_layer
                     for lid in to_delete_layer:
                         conn.execute("DELETE FROM sop_schedule_layer WHERE id=? AND profile_id=?", (lid, profile_id))
-
+                elif profile_category == self.CATEGORY_HF:
+                    rebuild_from_actions = True
+            if rebuild_from_actions:
+                try:
+                    self.rebuild_schedule_layer_from_actions(profile_id)
+                except Exception as e:
+                    log.debug("SOP: rebuild_schedule_layer_from_actions failed for profile %s: %s", profile_id, e)
             return profile_id
         finally:
             conn.close()
@@ -927,6 +1357,7 @@ class SOPManager:
                         day_utc = "ALL"
                     biweekly = int(layer.get("biweekly_offset_weeks") or 0)
                     month_weeks = self._normalize_month_weeks(layer.get("month_weeks"))
+                    condition_levels = self._normalize_condition_levels(layer.get("condition_levels"))
                     band = str(layer.get("band") or "").strip().upper()
                     mode = str(layer.get("mode") or "").strip().upper()
                     vfo = str(layer.get("vfo") or "A").strip().upper() or "A"
@@ -950,7 +1381,7 @@ class SOPManager:
                             """
                             UPDATE sop_schedule_layer
                             SET day_utc=?, recurrence=?, biweekly_offset_weeks=?, month_weeks=?,
-                                band=?, mode=?, vfo=?, frequency=?, start_utc=?, end_utc=?,
+                                condition_levels=?, band=?, mode=?, vfo=?, frequency=?, start_utc=?, end_utc=?,
                                 enabled=?, sort_order=?, updated_utc=?
                             WHERE id=? AND profile_id=?
                             """,
@@ -959,6 +1390,7 @@ class SOPManager:
                                 recurrence,
                                 biweekly,
                                 month_weeks,
+                                condition_levels,
                                 band,
                                 mode,
                                 vfo,
@@ -981,7 +1413,7 @@ class SOPManager:
                         SELECT id
                         FROM sop_schedule_layer
                         WHERE profile_id=? AND day_utc=? AND recurrence=? AND biweekly_offset_weeks=? AND month_weeks=?
-                          AND band=? AND mode=? AND vfo=? AND frequency=? AND start_utc=? AND end_utc=?
+                          AND condition_levels=? AND band=? AND mode=? AND vfo=? AND frequency=? AND start_utc=? AND end_utc=?
                         LIMIT 1
                         """,
                         (
@@ -990,6 +1422,7 @@ class SOPManager:
                             recurrence,
                             biweekly,
                             month_weeks,
+                            condition_levels,
                             band,
                             mode,
                             vfo,
@@ -1014,8 +1447,8 @@ class SOPManager:
                         """
                         INSERT INTO sop_schedule_layer
                             (profile_id, day_utc, recurrence, biweekly_offset_weeks, month_weeks,
-                             band, mode, vfo, frequency, start_utc, end_utc, enabled, sort_order, updated_utc)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             condition_levels, band, mode, vfo, frequency, start_utc, end_utc, enabled, sort_order, updated_utc)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             pid,
@@ -1023,6 +1456,7 @@ class SOPManager:
                             recurrence,
                             biweekly,
                             month_weeks,
+                            condition_levels,
                             band,
                             mode,
                             vfo,
@@ -1103,6 +1537,1166 @@ class SOPManager:
         if step_count * interval < delta:
             step_count += 1
         return anchor + dt.timedelta(seconds=step_count * interval)
+
+    @staticmethod
+    def _ensure_utc(value: dt.datetime) -> dt.datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=dt.timezone.utc)
+        return value.astimezone(dt.timezone.utc)
+
+    def _condition_level_map(self) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        try:
+            rows = self.settings.get("operating_groups", []) or []
+        except Exception:
+            rows = []
+        if not isinstance(rows, list):
+            return out
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            group = str(row.get("group", "") or "").strip().upper()
+            if not group:
+                continue
+            if not bool(row.get("use_condition_levels", False)):
+                continue
+            try:
+                lvl = int(row.get("condition_level", 0) or 0)
+            except Exception:
+                lvl = 0
+            if not (1 <= lvl <= 5):
+                continue
+            prev = out.get(group)
+            if prev is None or lvl < prev:
+                out[group] = lvl
+        return out
+
+    @staticmethod
+    def _action_condition_match(condition_levels: str, group_level: Optional[int]) -> bool:
+        normalized = SOPManager._normalize_condition_levels(condition_levels)
+        if normalized == "ALL":
+            return True
+        if group_level is None:
+            return True
+        levels: Set[int] = set()
+        for token in normalized.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                lvl = int(token)
+            except Exception:
+                continue
+            if 1 <= lvl <= 5:
+                levels.add(lvl)
+        if not levels:
+            return True
+        return int(group_level) in levels
+
+    @staticmethod
+    def _is_local_action(action: Dict[str, Any]) -> bool:
+        software = str(action.get("software") or "").strip().upper()
+        contact_rule = str(action.get("contact_rule") or "").strip().lower()
+        action_key = str(action.get("action_key") or "").strip().lower()
+        if software == "LOCAL NET":
+            return True
+        if contact_rule in {"local_group", "local_profile"}:
+            return True
+        return action_key.startswith("local_")
+
+    def build_action_occurrences_in_window(
+        self,
+        action: Dict[str, Any],
+        *,
+        window_start_utc: dt.datetime,
+        window_end_utc: dt.datetime,
+    ) -> List[Tuple[dt.datetime, dt.datetime]]:
+        start_utc = self._ensure_utc(window_start_utc)
+        end_utc = self._ensure_utc(window_end_utc)
+        if end_utc < start_utc:
+            return []
+        start_hhmm = self._normalize_hhmm(action.get("daily_start_utc") or "00:00")
+        end_hhmm = self._normalize_hhmm(action.get("daily_end_utc") or "23:59")
+        interval_minutes = max(1, int(action.get("interval_minutes") or 60))
+        phase_minutes = max(0, int(action.get("interval_phase_minutes") or 0)) % interval_minutes
+        duration_minutes = int(action.get("duration_minutes") or 60)
+        if duration_minutes not in {30, 60}:
+            duration_minutes = 30 if duration_minutes < 45 else 60
+        sh, sm = _parse_hhmm(start_hhmm, default_hhmm="00:00")
+        eh, em = _parse_hhmm(end_hhmm, default_hhmm="23:59")
+        day_start = start_utc.date() - dt.timedelta(days=1)
+        day_end = end_utc.date() + dt.timedelta(days=1)
+        out: List[Tuple[dt.datetime, dt.datetime]] = []
+        day = day_start
+        while day <= day_end:
+            anchor = dt.datetime(day.year, day.month, day.day, sh, sm, tzinfo=dt.timezone.utc)
+            window_end = dt.datetime(day.year, day.month, day.day, eh, em, tzinfo=dt.timezone.utc)
+            if window_end <= anchor:
+                window_end += dt.timedelta(days=1)
+            due = anchor + dt.timedelta(minutes=phase_minutes)
+            if due < anchor:
+                due = anchor
+            guard = 0
+            while due <= window_end and guard < 240:
+                due_end = due + dt.timedelta(minutes=duration_minutes)
+                if due_end > window_end:
+                    due_end = window_end
+                if due_end > start_utc and due < end_utc:
+                    out.append((due, due_end))
+                due += dt.timedelta(minutes=interval_minutes)
+                guard += 1
+            day += dt.timedelta(days=1)
+        out.sort(key=lambda p: p[0])
+        return out
+
+    @staticmethod
+    def _day_matches_name(day_value: str, weekday_name: str) -> bool:
+        day_norm = SOPManager._normalize_day_utc(day_value).upper()
+        if day_norm == "ALL":
+            return True
+        return weekday_name.upper().startswith(day_norm[:3].upper())
+
+    def _schedule_row_applies_on_date(self, row: Dict[str, Any], date_val: dt.date) -> bool:
+        recurrence = self._normalize_recurrence(row.get("recurrence"))
+        day_utc = self._normalize_day_utc(row.get("day_utc"))
+        weekday_name = _day_name_from_utc(
+            dt.datetime(date_val.year, date_val.month, date_val.day, 12, 0, tzinfo=dt.timezone.utc)
+        )
+        if recurrence == "Daily":
+            return True
+        if not self._day_matches_name(day_utc, weekday_name):
+            return False
+        if recurrence == "Periodic":
+            weeks_txt = self._normalize_month_weeks(row.get("month_weeks"))
+            weeks = [int(tok) for tok in weeks_txt.split(",") if tok.strip().isdigit()]
+            if not weeks:
+                weeks = [1]
+            return self._month_week_index(date_val) in weeks
+        if recurrence == "Bi-Weekly":
+            try:
+                offset = int(row.get("biweekly_offset_weeks") or 0)
+            except Exception:
+                offset = 0
+            week_idx = int(date_val.isocalendar()[1])
+            return ((week_idx - offset) % 2) == 0
+        return True
+
+    def _load_group_schedule_rows(
+        self,
+        *,
+        operating_group: str,
+        source: str,
+    ) -> List[Dict[str, Any]]:
+        group = (operating_group or "").strip().upper()
+        if not group:
+            return []
+        table_name = "daily_schedule_tab" if source == "daily" else "net_schedule_tab"
+        if source == "daily":
+            conn = sqlite3.connect(self._settings_db_path())
+        else:
+            conn = self._connect()
+        out: List[Dict[str, Any]] = []
+        try:
+            cols = _table_columns(conn, table_name)
+            if not cols:
+                return []
+            group_col = "group_name" if "group_name" in cols else ("group" if "group" in cols else "")
+            if not group_col:
+                return []
+            if not {"day_utc", "start_utc", "end_utc"}.issubset(cols):
+                return []
+            name_expr = (
+                "COALESCE(net_name, '')"
+                if source == "net" and "net_name" in cols
+                else "COALESCE(group_name, '')"
+                if "group_name" in cols
+                else "''"
+            )
+            recurrence_expr = "COALESCE(recurrence, 'Weekly')" if "recurrence" in cols else "'Weekly'"
+            weeks_expr = "COALESCE(month_weeks, '')" if "month_weeks" in cols else "''"
+            biweek_expr = "COALESCE(biweekly_offset_weeks, 0)" if "biweekly_offset_weeks" in cols else "0"
+            band_expr = "COALESCE(band, '')" if "band" in cols else "''"
+            freq_expr = "COALESCE(frequency, '')" if "frequency" in cols else "''"
+            sql = f"""
+                SELECT day_utc, start_utc, end_utc,
+                       {recurrence_expr},
+                       {weeks_expr},
+                       {biweek_expr},
+                       {band_expr},
+                       {freq_expr},
+                       {name_expr}
+                FROM {table_name}
+                WHERE UPPER(COALESCE({group_col}, '')) = ?
+            """
+            for row in conn.execute(sql, (group,)).fetchall():
+                out.append(
+                    {
+                        "day_utc": str(row[0] or "ALL"),
+                        "start_utc": self._normalize_hhmm(row[1] or "00:00"),
+                        "end_utc": self._normalize_hhmm(row[2] or "23:59"),
+                        "recurrence": self._normalize_recurrence(row[3]),
+                        "month_weeks": self._normalize_month_weeks(row[4]),
+                        "biweekly_offset_weeks": int(row[5] or 0),
+                        "band": str(row[6] or "").strip().upper(),
+                        "frequency": self._normalize_frequency(row[7]),
+                        "name": str(row[8] or "").strip(),
+                        "source": source,
+                    }
+                )
+            return out
+        except Exception as e:
+            log.debug("SOP: load_group_schedule_rows failed (%s): %s", source, e)
+            return []
+        finally:
+            conn.close()
+
+    def _load_all_schedule_rows(self, *, source: str) -> List[Dict[str, Any]]:
+        table_name = "daily_schedule_tab" if source == "daily" else "net_schedule_tab"
+        if source == "daily":
+            conn = sqlite3.connect(self._settings_db_path())
+        else:
+            conn = self._connect()
+        out: List[Dict[str, Any]] = []
+        try:
+            cols = _table_columns(conn, table_name)
+            if not cols:
+                return []
+            if not {"day_utc", "start_utc", "end_utc"}.issubset(cols):
+                return []
+            group_col = "group_name" if "group_name" in cols else ("group" if "group" in cols else "")
+            name_expr = (
+                "COALESCE(net_name, '')"
+                if source == "net" and "net_name" in cols
+                else "COALESCE(group_name, '')"
+                if "group_name" in cols
+                else "''"
+            )
+            recurrence_expr = "COALESCE(recurrence, 'Weekly')" if "recurrence" in cols else "'Weekly'"
+            weeks_expr = "COALESCE(month_weeks, '')" if "month_weeks" in cols else "''"
+            biweek_expr = "COALESCE(biweekly_offset_weeks, 0)" if "biweekly_offset_weeks" in cols else "0"
+            band_expr = "COALESCE(band, '')" if "band" in cols else "''"
+            freq_expr = "COALESCE(frequency, '')" if "frequency" in cols else "''"
+            group_expr = f"COALESCE({group_col}, '')" if group_col else "''"
+            sql = f"""
+                SELECT day_utc, start_utc, end_utc,
+                       {recurrence_expr},
+                       {weeks_expr},
+                       {biweek_expr},
+                       {band_expr},
+                       {freq_expr},
+                       {name_expr},
+                       {group_expr}
+                FROM {table_name}
+            """
+            for row in conn.execute(sql).fetchall():
+                out.append(
+                    {
+                        "day_utc": str(row[0] or "ALL"),
+                        "start_utc": self._normalize_hhmm(row[1] or "00:00"),
+                        "end_utc": self._normalize_hhmm(row[2] or "23:59"),
+                        "recurrence": self._normalize_recurrence(row[3]),
+                        "month_weeks": self._normalize_month_weeks(row[4]),
+                        "biweekly_offset_weeks": int(row[5] or 0),
+                        "band": str(row[6] or "").strip().upper(),
+                        "frequency": self._normalize_frequency(row[7]),
+                        "name": str(row[8] or "").strip(),
+                        "group_name": str(row[9] or "").strip().upper(),
+                        "source": source,
+                    }
+                )
+            return out
+        except Exception as e:
+            log.debug("SOP: load_all_schedule_rows failed (%s): %s", source, e)
+            return []
+        finally:
+            conn.close()
+
+    def _expand_schedule_rows_windows(
+        self,
+        rows: List[Dict[str, Any]],
+        *,
+        window_start_utc: dt.datetime,
+        window_end_utc: dt.datetime,
+    ) -> List[Dict[str, Any]]:
+        start_utc = self._ensure_utc(window_start_utc)
+        end_utc = self._ensure_utc(window_end_utc)
+        out: List[Dict[str, Any]] = []
+        day = start_utc.date() - dt.timedelta(days=1)
+        day_end = end_utc.date() + dt.timedelta(days=1)
+        while day <= day_end:
+            for row in rows:
+                if not self._schedule_row_applies_on_date(row, day):
+                    continue
+                sh, sm = _parse_hhmm(str(row.get("start_utc") or ""), default_hhmm="00:00")
+                eh, em = _parse_hhmm(str(row.get("end_utc") or ""), default_hhmm="23:59")
+                begin = dt.datetime(day.year, day.month, day.day, sh, sm, tzinfo=dt.timezone.utc)
+                finish = dt.datetime(day.year, day.month, day.day, eh, em, tzinfo=dt.timezone.utc)
+                if finish <= begin:
+                    finish += dt.timedelta(days=1)
+                if finish <= start_utc or begin >= end_utc:
+                    continue
+                copy_row = dict(row)
+                copy_row["start_dt_utc"] = begin
+                copy_row["end_dt_utc"] = finish
+                out.append(copy_row)
+            day += dt.timedelta(days=1)
+        return out
+
+    @staticmethod
+    def _ranges_overlap(a_start: dt.datetime, a_end: dt.datetime, b_start: dt.datetime, b_end: dt.datetime) -> bool:
+        return a_start < b_end and b_start < a_end
+
+    @staticmethod
+    def _day_abbrev_for_dt(value: dt.datetime) -> str:
+        try:
+            return value.astimezone(dt.timezone.utc).strftime("%a")
+        except Exception:
+            return ""
+
+    def detect_action_conflicts(
+        self,
+        *,
+        action: Dict[str, Any],
+        operating_group: str,
+        horizon_days: int = 7,
+        check_all_groups: bool = False,
+        peer_actions: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        window_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_end = window_start + dt.timedelta(days=max(1, int(horizon_days)))
+        occurrences = self.build_action_occurrences_in_window(
+            action,
+            window_start_utc=window_start,
+            window_end_utc=window_end,
+        )
+        if check_all_groups:
+            daily_rows = self._load_all_schedule_rows(source="daily")
+            net_rows = self._load_all_schedule_rows(source="net")
+        else:
+            daily_rows = self._load_group_schedule_rows(operating_group=operating_group, source="daily")
+            net_rows = self._load_group_schedule_rows(operating_group=operating_group, source="net")
+        daily_windows = self._expand_schedule_rows_windows(
+            daily_rows,
+            window_start_utc=window_start,
+            window_end_utc=window_end,
+        )
+        net_windows = self._expand_schedule_rows_windows(
+            net_rows,
+            window_start_utc=window_start,
+            window_end_utc=window_end,
+        )
+        action_freq = self._normalize_frequency(action.get("frequency"))
+        action_band = str(action.get("band") or "").strip().upper()
+        daily_conflicts: Set[str] = set()
+        net_conflicts: Set[str] = set()
+        sop_conflicts: Set[str] = set()
+        first_conflict = False
+        first_occurrence_checked = False
+
+        peer_windows: List[Tuple[dt.datetime, dt.datetime, str]] = []
+        for peer in peer_actions or []:
+            if not isinstance(peer, dict):
+                continue
+            if peer is action:
+                continue
+            if not _is_enabled(peer.get("enabled", True)):
+                continue
+            if self._is_local_action(peer):
+                continue
+            peer_band = str(peer.get("band") or "").strip().upper()
+            peer_freq = self._normalize_frequency(peer.get("frequency"))
+            # Same band/frequency is not a radio-frequency conflict.
+            if peer_band and action_band and peer_band == action_band and peer_freq and action_freq and peer_freq == action_freq:
+                continue
+            peer_label = str(peer.get("action_label") or peer.get("action_key") or "SOP Action").strip()
+            peer_group = str(peer.get("group_name") or "").strip().upper()
+            peer_desc = peer_label
+            if peer_group:
+                peer_desc = f"{peer_group}: {peer_desc}"
+            peer_occurrences = self.build_action_occurrences_in_window(
+                peer,
+                window_start_utc=window_start,
+                window_end_utc=window_end,
+            )
+            for p_start, p_end in peer_occurrences:
+                peer_windows.append((p_start, p_end, peer_desc))
+
+        for occ_start, occ_end in occurrences:
+            occ_daily = False
+            occ_net = False
+            occ_sop = False
+            for row in daily_windows:
+                if not self._ranges_overlap(
+                    occ_start,
+                    occ_end,
+                    self._ensure_utc(row["start_dt_utc"]),
+                    self._ensure_utc(row["end_dt_utc"]),
+                ):
+                    continue
+                row_freq = self._normalize_frequency(row.get("frequency"))
+                if row_freq and action_freq and row_freq == action_freq:
+                    continue
+                name = str(row.get("name") or operating_group).strip().upper() or operating_group
+                daily_conflicts.add(name)
+                occ_daily = True
+            for row in net_windows:
+                if not self._ranges_overlap(
+                    occ_start,
+                    occ_end,
+                    self._ensure_utc(row["start_dt_utc"]),
+                    self._ensure_utc(row["end_dt_utc"]),
+                ):
+                    continue
+                row_freq = self._normalize_frequency(row.get("frequency"))
+                if row_freq and action_freq and row_freq == action_freq:
+                    continue
+                name = str(row.get("name") or "Net").strip() or "Net"
+                day_txt = self._day_abbrev_for_dt(self._ensure_utc(row["start_dt_utc"]))
+                net_conflicts.add(f"{name} ({day_txt})" if day_txt else name)
+                occ_net = True
+            for p_start, p_end, p_desc in peer_windows:
+                if not self._ranges_overlap(occ_start, occ_end, self._ensure_utc(p_start), self._ensure_utc(p_end)):
+                    continue
+                sop_conflicts.add(p_desc)
+                occ_sop = True
+            if not first_occurrence_checked:
+                first_conflict = bool(occ_daily or occ_net or occ_sop)
+                first_occurrence_checked = True
+        daily_summary = ", ".join(sorted(daily_conflicts))
+        net_summary = ", ".join(sorted(net_conflicts))
+        sop_summary = ", ".join(sorted(sop_conflicts))
+        return {
+            "daily_conflicts": sorted(daily_conflicts),
+            "net_conflicts": sorted(net_conflicts),
+            "sop_conflicts": sorted(sop_conflicts),
+            "daily_summary": daily_summary,
+            "net_summary": net_summary,
+            "sop_summary": sop_summary,
+            "has_conflict": bool(daily_conflicts or net_conflicts or sop_conflicts),
+            "first_occurrence_conflict": bool(first_conflict),
+        }
+
+    def suggest_non_conflicting_start(
+        self,
+        *,
+        action: Dict[str, Any],
+        operating_group: str,
+        step_minutes: int = 15,
+        check_all_groups: bool = False,
+        peer_actions: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        base = dict(action or {})
+        end_hhmm = self._normalize_hhmm(base.get("daily_end_utc") or "23:59")
+        interval = max(1, int(base.get("interval_minutes") or 60))
+        step = max(5, int(step_minutes))
+        for minute in range(0, 24 * 60, step):
+            hh = minute // 60
+            mm = minute % 60
+            candidate = f"{hh:02d}:{mm:02d}"
+            base["daily_start_utc"] = candidate
+            # Keep end at least one duration after start when possible.
+            dur = int(base.get("duration_minutes") or 60)
+            end_minute = minute + max(30, min(60, dur))
+            if end_minute < 24 * 60:
+                base["daily_end_utc"] = f"{end_minute // 60:02d}:{end_minute % 60:02d}"
+            else:
+                base["daily_end_utc"] = end_hhmm
+            diag = self.detect_action_conflicts(
+                action=base,
+                operating_group=operating_group,
+                horizon_days=7,
+                check_all_groups=check_all_groups,
+                peer_actions=peer_actions,
+            )
+            if not bool(diag.get("first_occurrence_conflict")):
+                return candidate
+        return self._normalize_hhmm(action.get("daily_start_utc") or "00:00")
+
+    def rebuild_schedule_layer_from_actions(self, profile_id: int) -> Dict[str, Any]:
+        profile = self.get_profile(int(profile_id or 0))
+        if not profile:
+            return {"profile_id": int(profile_id or 0), "updated_rows": 0, "skipped_rows": 0}
+        if self._normalize_category(profile.get("category")) == self.CATEGORY_LOCAL:
+            return {"profile_id": int(profile.get("id") or 0), "updated_rows": 0, "skipped_rows": 0}
+        actions = [a for a in (profile.get("actions") or []) if isinstance(a, dict)]
+        if not actions:
+            self.upsert_schedule_layer_rows(int(profile.get("id") or 0), [])
+            return {"profile_id": int(profile.get("id") or 0), "updated_rows": 0, "skipped_rows": 0}
+
+        layer_rows: List[Dict[str, Any]] = []
+        skipped_rows = 0
+        action_updates: List[Tuple[str, str, int]] = []
+        for action in actions:
+            if not _is_enabled(action.get("enabled", True)):
+                continue
+            if self._is_local_action(action):
+                continue
+            if not bool(action.get("schedule_applied", True)):
+                continue
+            band = str(action.get("band") or "").strip().upper()
+            freq = self._normalize_frequency(action.get("frequency"))
+            if not band or not freq:
+                skipped_rows += 1
+                continue
+            mode = str(action.get("mode") or "").strip().upper() or "DIGI"
+            action_group = str(action.get("group_name") or profile.get("operating_group") or "").strip().upper()
+            diag = self.detect_action_conflicts(
+                action=action,
+                operating_group=action_group,
+                horizon_days=7,
+                check_all_groups=True,
+                peer_actions=actions,
+            )
+            start_utc = self._normalize_hhmm(action.get("daily_start_utc") or "00:00")
+            end_utc = self._normalize_hhmm(action.get("daily_end_utc") or "23:59")
+            layer_rows.append(
+                {
+                    "day_utc": "ALL",
+                    "recurrence": "Daily",
+                    "biweekly_offset_weeks": 0,
+                    "month_weeks": "",
+                    "condition_levels": self._normalize_condition_levels(action.get("condition_levels")),
+                    "band": band,
+                    "mode": mode,
+                    "vfo": "A",
+                    "frequency": freq,
+                    "start_utc": start_utc,
+                    "end_utc": end_utc,
+                    "enabled": True,
+                }
+            )
+            daily_summary = str(diag.get("daily_summary") or "").strip()
+            net_summary = str(diag.get("net_summary") or "").strip()
+            action_updates.append((daily_summary, net_summary, int(action.get("id") or 0)))
+
+        dedup: Dict[Tuple[str, str, str, str, str, str, str], Dict[str, Any]] = {}
+        for row in layer_rows:
+            key = (
+                str(row.get("day_utc") or "").upper(),
+                str(row.get("band") or "").upper(),
+                str(row.get("mode") or "").upper(),
+                str(row.get("frequency") or ""),
+                str(row.get("start_utc") or ""),
+                str(row.get("end_utc") or ""),
+                self._normalize_condition_levels(row.get("condition_levels")),
+            )
+            dedup[key] = row
+        final_rows = list(dedup.values())
+        final_rows.sort(
+            key=lambda r: (
+                str(r.get("day_utc") or ""),
+                str(r.get("start_utc") or ""),
+                str(r.get("band") or ""),
+                str(r.get("frequency") or ""),
+            )
+        )
+        for idx, row in enumerate(final_rows):
+            row["sort_order"] = idx
+
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM sop_schedule_layer WHERE profile_id = ?", (int(profile.get("id") or 0),))
+            self.upsert_schedule_layer_rows(int(profile.get("id") or 0), final_rows)
+            with conn:
+                for daily_summary, net_summary, action_id in action_updates:
+                    if action_id <= 0:
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE sop_actions
+                        SET daily_conflict_summary = ?, net_conflict_summary = ?
+                        WHERE id = ? AND profile_id = ?
+                        """,
+                        (daily_summary, net_summary, action_id, int(profile.get("id") or 0)),
+                    )
+        finally:
+            conn.close()
+
+        return {
+            "profile_id": int(profile.get("id") or 0),
+            "updated_rows": len(final_rows),
+            "skipped_rows": int(skipped_rows),
+        }
+
+    def collect_profile_conflicts(self, profile_id: int) -> List[Dict[str, Any]]:
+        profile = self.get_profile(int(profile_id or 0))
+        if not profile:
+            return []
+        operating_group = str(profile.get("operating_group") or "").strip().upper()
+        peer_actions: List[Dict[str, Any]] = [
+            dict(a)
+            for a in (profile.get("actions", []) or [])
+            if isinstance(a, dict) and _is_enabled(a.get("enabled", True)) and not self._is_local_action(a)
+        ]
+        out: List[Dict[str, Any]] = []
+        for action in peer_actions:
+            diag = self.detect_action_conflicts(
+                action=action,
+                operating_group=str(action.get("group_name") or operating_group).strip().upper(),
+                horizon_days=7,
+                check_all_groups=True,
+                peer_actions=peer_actions,
+            )
+            out.append(
+                {
+                    "action_id": int(action.get("id") or 0),
+                    "action_label": str(action.get("action_label") or ""),
+                    "resource": str(action.get("software") or ""),
+                    "band": str(action.get("band") or ""),
+                    "frequency": str(action.get("frequency") or ""),
+                    "daily_conflicts": list(diag.get("daily_conflicts") or []),
+                    "net_conflicts": list(diag.get("net_conflicts") or []),
+                    "sop_conflicts": list(diag.get("sop_conflicts") or []),
+                    "daily_summary": str(diag.get("daily_summary") or ""),
+                    "net_summary": str(diag.get("net_summary") or ""),
+                    "sop_summary": str(diag.get("sop_summary") or ""),
+                    "has_conflict": bool(diag.get("has_conflict")),
+                    "first_occurrence_conflict": bool(diag.get("first_occurrence_conflict")),
+                    "suggested_start_utc": self.suggest_non_conflicting_start(
+                        action=action,
+                        operating_group=str(action.get("group_name") or operating_group).strip().upper(),
+                        check_all_groups=True,
+                        peer_actions=peer_actions,
+                    ),
+                    "conflict_policy": self._normalize_conflict_policy(action.get("conflict_policy")),
+                }
+            )
+        return out
+
+    def collect_active_hf_conflicts(self) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for profile in self.list_profiles():
+            if not bool(profile.get("active")):
+                continue
+            if self._normalize_category(profile.get("category")) != self.CATEGORY_HF:
+                continue
+            profile_id = int(profile.get("id") or 0)
+            if profile_id <= 0:
+                continue
+            conflicts = self.collect_profile_conflicts(profile_id)
+            for item in conflicts:
+                if bool(item.get("has_conflict")):
+                    out.append(
+                        {
+                            "profile_id": profile_id,
+                            "profile_name": str(profile.get("name") or ""),
+                            **item,
+                        }
+                    )
+        return out
+
+    def list_net_sop_conflict_policies(self, *, active_only: bool = True) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        try:
+            if not _table_columns(conn, "sop_net_conflict_policy"):
+                return []
+            sql = """
+                SELECT
+                    id,
+                    sop_profile_id,
+                    sop_layer_id,
+                    net_row_signature,
+                    sop_row_signature,
+                    policy,
+                    window_start_utc,
+                    window_end_utc,
+                    active,
+                    resolution_note,
+                    updated_utc
+                FROM sop_net_conflict_policy
+            """
+            params: List[Any] = []
+            if active_only:
+                sql += " WHERE COALESCE(active, 1) = 1"
+            sql += " ORDER BY COALESCE(updated_utc, '') DESC, id DESC"
+            out: List[Dict[str, Any]] = []
+            for row in conn.execute(sql, tuple(params)).fetchall():
+                out.append(
+                    {
+                        "id": int(row[0] or 0),
+                        "sop_profile_id": int(row[1] or 0),
+                        "sop_layer_id": int(row[2] or 0),
+                        "net_row_signature": str(row[3] or "").strip(),
+                        "sop_row_signature": str(row[4] or "").strip(),
+                        "policy": self._normalize_net_sop_policy(row[5]),
+                        "window_start_utc": str(row[6] or "").strip(),
+                        "window_end_utc": str(row[7] or "").strip(),
+                        "active": bool(row[8]) if row[8] is not None else True,
+                        "resolution_note": str(row[9] or "").strip(),
+                        "updated_utc": str(row[10] or "").strip(),
+                    }
+                )
+            return out
+        except Exception as e:
+            log.debug("SOP: list_net_sop_conflict_policies failed: %s", e)
+            return []
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _parse_net_row_signature(signature: str) -> Dict[str, str]:
+        parts = str(signature or "").split("|")
+        if len(parts) < 11:
+            return {}
+        return {
+            "group_name": str(parts[1] or "").strip().upper(),
+            "band": str(parts[2] or "").strip().upper(),
+            "frequency": str(parts[3] or "").strip(),
+            "day_utc": str(parts[4] or "").strip().upper(),
+            "recurrence": str(parts[5] or "").strip(),
+            "start_utc": str(parts[8] or "").strip(),
+            "end_utc": str(parts[9] or "").strip(),
+            "name": str(parts[10] or "").strip(),
+        }
+
+    @staticmethod
+    def _parse_sop_row_signature(signature: str) -> Dict[str, str]:
+        parts = str(signature or "").split("|")
+        if len(parts) < 12:
+            return {}
+        return {
+            "sop_profile_id": str(parts[1] or "").strip(),
+            "sop_layer_id": str(parts[2] or "").strip(),
+            "group_name": str(parts[3] or "").strip().upper(),
+            "band": str(parts[4] or "").strip().upper(),
+            "frequency": str(parts[5] or "").strip(),
+            "day_utc": str(parts[6] or "").strip().upper(),
+            "recurrence": str(parts[7] or "").strip(),
+            "start_utc": str(parts[10] or "").strip(),
+            "end_utc": str(parts[11] or "").strip(),
+        }
+
+    def list_net_sop_policy_review_rows(self, *, horizon_days: int = 7) -> List[Dict[str, Any]]:
+        policies = self.list_net_sop_conflict_policies(active_only=True)
+        if not policies:
+            return []
+        current_conflicts = self.collect_active_net_sop_conflicts(horizon_days=horizon_days)
+        current_by_key: Dict[str, Dict[str, Any]] = {}
+        for row in current_conflicts:
+            key = self._policy_conflict_key(
+                str(row.get("net_row_signature") or ""),
+                str(row.get("sop_row_signature") or ""),
+                str(row.get("window_start_utc") or ""),
+                str(row.get("window_end_utc") or ""),
+            )
+            if key and key not in current_by_key:
+                current_by_key[key] = row
+
+        out: List[Dict[str, Any]] = []
+        for row in policies:
+            net_sig = str(row.get("net_row_signature") or "")
+            sop_sig = str(row.get("sop_row_signature") or "")
+            start_utc = str(row.get("window_start_utc") or "")
+            end_utc = str(row.get("window_end_utc") or "")
+            key = self._policy_conflict_key(net_sig, sop_sig, start_utc, end_utc)
+            current = current_by_key.get(key) or {}
+            net_meta = self._parse_net_row_signature(net_sig)
+            sop_meta = self._parse_sop_row_signature(sop_sig)
+            net_summary = str(current.get("net_summary") or "").strip()
+            if not net_summary:
+                net_name = str(net_meta.get("name") or net_meta.get("group_name") or "Net").strip()
+                net_summary = (
+                    f"{net_name} "
+                    f"{str(net_meta.get('band') or '').strip()} "
+                    f"{str(net_meta.get('frequency') or '').strip()} "
+                    f"{str(net_meta.get('day_utc') or '').strip()} "
+                    f"{str(net_meta.get('start_utc') or '').strip()}-{str(net_meta.get('end_utc') or '').strip()}"
+                ).strip()
+            sop_summary = str(current.get("sop_summary") or "").strip()
+            if not sop_summary:
+                sop_group = str(sop_meta.get("group_name") or "SOP").strip()
+                sop_summary = (
+                    f"{sop_group} "
+                    f"{str(sop_meta.get('band') or '').strip()} "
+                    f"{str(sop_meta.get('frequency') or '').strip()} "
+                    f"{str(sop_meta.get('day_utc') or '').strip()} "
+                    f"{str(sop_meta.get('start_utc') or '').strip()}-{str(sop_meta.get('end_utc') or '').strip()}"
+                ).strip()
+            out.append(
+                {
+                    **row,
+                    "state": "Current" if bool(current) else "Stale",
+                    "net_summary": net_summary,
+                    "sop_summary": sop_summary,
+                }
+            )
+        out.sort(
+            key=lambda r: (
+                str(r.get("window_start_utc") or ""),
+                str(r.get("sop_summary") or ""),
+                str(r.get("net_summary") or ""),
+            )
+        )
+        return out
+
+    def save_net_sop_conflict_policies(self, decisions: List[Dict[str, Any]]) -> int:
+        if not decisions:
+            return 0
+        conn = self._connect()
+        saved = 0
+        try:
+            with conn:
+                for row in decisions:
+                    if not isinstance(row, dict):
+                        continue
+                    net_sig = str(row.get("net_row_signature") or "").strip()
+                    sop_sig = str(row.get("sop_row_signature") or "").strip()
+                    start_utc = str(row.get("window_start_utc") or "").strip()
+                    end_utc = str(row.get("window_end_utc") or "").strip()
+                    if not net_sig or not sop_sig or not start_utc or not end_utc:
+                        continue
+                    policy = self._normalize_net_sop_policy(row.get("policy"))
+                    updated_utc = _utc_now_iso()
+                    conn.execute(
+                        """
+                        INSERT INTO sop_net_conflict_policy (
+                            sop_profile_id,
+                            sop_layer_id,
+                            net_row_signature,
+                            sop_row_signature,
+                            policy,
+                            window_start_utc,
+                            window_end_utc,
+                            active,
+                            resolution_note,
+                            updated_utc
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                        ON CONFLICT(net_row_signature, sop_row_signature, window_start_utc, window_end_utc)
+                        DO UPDATE SET
+                            sop_profile_id = excluded.sop_profile_id,
+                            sop_layer_id = excluded.sop_layer_id,
+                            policy = excluded.policy,
+                            active = 1,
+                            resolution_note = excluded.resolution_note,
+                            updated_utc = excluded.updated_utc
+                        """,
+                        (
+                            int(row.get("sop_profile_id") or 0),
+                            int(row.get("sop_layer_id") or 0),
+                            net_sig,
+                            sop_sig,
+                            policy,
+                            start_utc,
+                            end_utc,
+                            str(row.get("resolution_note") or "").strip(),
+                            updated_utc,
+                        ),
+                    )
+                    saved += 1
+            return saved
+        except Exception as e:
+            log.debug("SOP: save_net_sop_conflict_policies failed: %s", e)
+            return saved
+        finally:
+            conn.close()
+
+    def update_net_sop_conflict_policy(self, policy_id: int, policy: Any) -> bool:
+        pid = int(policy_id or 0)
+        if pid <= 0:
+            return False
+        norm_policy = self._normalize_net_sop_policy(policy)
+        now_iso = _utc_now_iso()
+        conn = self._connect()
+        try:
+            with conn:
+                cur = conn.execute(
+                    """
+                    UPDATE sop_net_conflict_policy
+                    SET policy = ?, updated_utc = ?, active = 1
+                    WHERE id = ?
+                    """,
+                    (norm_policy, now_iso, pid),
+                )
+            try:
+                return int(cur.rowcount or 0) > 0
+            except Exception:
+                return True
+        except Exception as e:
+            log.debug("SOP: update_net_sop_conflict_policy failed: %s", e)
+            return False
+        finally:
+            conn.close()
+
+    def clear_net_sop_conflict_policies(self, policy_ids: Optional[List[int]] = None) -> int:
+        ids = sorted({int(v) for v in (policy_ids or []) if int(v) > 0})
+        conn = self._connect()
+        try:
+            with conn:
+                if ids:
+                    marks = ",".join("?" for _ in ids)
+                    cur = conn.execute(
+                        f"""
+                        UPDATE sop_net_conflict_policy
+                        SET active = 0, updated_utc = ?
+                        WHERE id IN ({marks})
+                        """,
+                        (_utc_now_iso(), *ids),
+                    )
+                else:
+                    cur = conn.execute(
+                        """
+                        UPDATE sop_net_conflict_policy
+                        SET active = 0, updated_utc = ?
+                        WHERE COALESCE(active, 1) = 1
+                        """,
+                        (_utc_now_iso(),),
+                    )
+            try:
+                return int(cur.rowcount or 0)
+            except Exception:
+                return 0
+        except Exception as e:
+            log.debug("SOP: clear_net_sop_conflict_policies failed: %s", e)
+            return 0
+        finally:
+            conn.close()
+
+    def _load_active_hf_sop_layer_rows(
+        self,
+        *,
+        include_profile_ids: Optional[Set[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        include_ids = sorted({int(v) for v in (include_profile_ids or set()) if int(v) > 0})
+        conn = self._connect()
+        try:
+            cols_layer = _table_columns(conn, "sop_schedule_layer")
+            cols_profiles = _table_columns(conn, "sop_profiles")
+            if not cols_layer or not cols_profiles:
+                return []
+            category_expr = "UPPER(COALESCE(p.category, 'HF'))"
+            sql = """
+                SELECT
+                    l.id,
+                    l.profile_id,
+                    COALESCE(p.name, ''),
+                    COALESCE(p.operating_group, ''),
+                    COALESCE(l.day_utc, 'ALL'),
+                    COALESCE(l.recurrence, 'Weekly'),
+                    COALESCE(l.biweekly_offset_weeks, 0),
+                    COALESCE(l.month_weeks, ''),
+                    COALESCE(l.band, ''),
+                    COALESCE(l.frequency, ''),
+                    COALESCE(l.start_utc, '00:00'),
+                    COALESCE(l.end_utc, '23:59'),
+                    COALESCE(l.enabled, 1),
+                    COALESCE(l.condition_levels, 'ALL')
+                FROM sop_schedule_layer l
+                JOIN sop_profiles p ON p.id = l.profile_id
+                WHERE COALESCE(l.enabled, 1) = 1
+                  AND {category_expr} = 'HF'
+            """.replace("{category_expr}", category_expr)
+            params: List[Any] = []
+            if include_ids:
+                marks = ",".join("?" for _ in include_ids)
+                sql += f" AND (COALESCE(p.active, 0) = 1 OR p.id IN ({marks}))"
+                params.extend(include_ids)
+            else:
+                sql += " AND COALESCE(p.active, 0) = 1"
+            out: List[Dict[str, Any]] = []
+            condition_levels = self._condition_level_map()
+            for (
+                layer_id,
+                profile_id,
+                profile_name,
+                group_name,
+                day_utc,
+                recurrence,
+                biweekly_offset_weeks,
+                month_weeks,
+                band,
+                frequency,
+                start_utc,
+                end_utc,
+                _enabled,
+                cond_levels,
+            ) in conn.execute(sql, tuple(params)).fetchall():
+                group_txt = str(group_name or "").strip().upper()
+                group_level = condition_levels.get(group_txt)
+                if not self._action_condition_match(str(cond_levels or "ALL"), group_level):
+                    continue
+                out.append(
+                    {
+                        "id": int(layer_id or 0),
+                        "sop_layer_id": int(layer_id or 0),
+                        "sop_profile_id": int(profile_id or 0),
+                        "sop_profile_name": str(profile_name or "").strip(),
+                        "group_name": group_txt,
+                        "day_utc": self._normalize_day_utc(day_utc),
+                        "recurrence": self._normalize_recurrence(recurrence),
+                        "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
+                        "month_weeks": self._normalize_month_weeks(month_weeks),
+                        "band": str(band or "").strip().upper(),
+                        "frequency": self._normalize_frequency(frequency),
+                        "start_utc": self._normalize_hhmm(start_utc or "00:00"),
+                        "end_utc": self._normalize_hhmm(end_utc or "23:59"),
+                        "source": "sop_layer",
+                    }
+                )
+            return out
+        except Exception as e:
+            log.debug("SOP: _load_active_hf_sop_layer_rows failed: %s", e)
+            return []
+        finally:
+            conn.close()
+
+    def _normalize_net_rows_for_conflict_scan(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            start_utc = self._normalize_hhmm(row.get("start_utc") or "")
+            end_utc = self._normalize_hhmm(row.get("end_utc") or "")
+            if not start_utc or not end_utc:
+                continue
+            out.append(
+                {
+                    "day_utc": self._normalize_day_utc(row.get("day_utc") or "ALL"),
+                    "start_utc": start_utc,
+                    "end_utc": end_utc,
+                    "recurrence": self._normalize_recurrence(row.get("recurrence") or "Weekly"),
+                    "month_weeks": self._normalize_month_weeks(row.get("month_weeks") or ""),
+                    "biweekly_offset_weeks": int(row.get("biweekly_offset_weeks") or 0),
+                    "band": str(row.get("band") or "").strip().upper(),
+                    "frequency": self._normalize_frequency(row.get("frequency")),
+                    "name": str(row.get("name") or row.get("net_name") or "").strip(),
+                    "group_name": str(row.get("group_name") or "").strip().upper(),
+                    "source": "net",
+                }
+            )
+        return out
+
+    def collect_active_net_sop_conflicts(
+        self,
+        *,
+        horizon_days: int = 7,
+        include_profile_ids: Optional[Set[int]] = None,
+        net_rows_override: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        window_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_end = window_start + dt.timedelta(days=max(1, int(horizon_days)))
+        if isinstance(net_rows_override, list):
+            net_rows = self._normalize_net_rows_for_conflict_scan(net_rows_override)
+        else:
+            net_rows = self._load_all_schedule_rows(source="net")
+        sop_rows = self._load_active_hf_sop_layer_rows(include_profile_ids=include_profile_ids)
+        if not net_rows or not sop_rows:
+            return []
+
+        net_windows = self._expand_schedule_rows_windows(
+            net_rows,
+            window_start_utc=window_start,
+            window_end_utc=window_end,
+        )
+        sop_windows = self._expand_schedule_rows_windows(
+            sop_rows,
+            window_start_utc=window_start,
+            window_end_utc=window_end,
+        )
+        if not net_windows or not sop_windows:
+            return []
+
+        policy_map: Dict[str, Dict[str, Any]] = {}
+        for row in self.list_net_sop_conflict_policies(active_only=True):
+            key = self._policy_conflict_key(
+                str(row.get("net_row_signature") or ""),
+                str(row.get("sop_row_signature") or ""),
+                str(row.get("window_start_utc") or ""),
+                str(row.get("window_end_utc") or ""),
+            )
+            if key and key not in policy_map:
+                policy_map[key] = row
+
+        out: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for net_row in net_windows:
+            net_start = self._ensure_utc(net_row.get("start_dt_utc"))
+            net_end = self._ensure_utc(net_row.get("end_dt_utc"))
+            net_group = str(net_row.get("group_name") or "").strip().upper()
+            net_band = str(net_row.get("band") or "").strip().upper()
+            net_freq = self._normalize_frequency(net_row.get("frequency"))
+            net_name = str(net_row.get("name") or net_row.get("net_name") or "").strip()
+            for sop_row in sop_windows:
+                sop_start = self._ensure_utc(sop_row.get("start_dt_utc"))
+                sop_end = self._ensure_utc(sop_row.get("end_dt_utc"))
+                if not self._ranges_overlap(net_start, net_end, sop_start, sop_end):
+                    continue
+                sop_group = str(sop_row.get("group_name") or "").strip().upper()
+                if net_group == sop_group:
+                    continue
+                if not (net_group or sop_group):
+                    continue
+                sop_band = str(sop_row.get("band") or "").strip().upper()
+                sop_freq = self._normalize_frequency(sop_row.get("frequency"))
+                same_freq = bool(net_freq and sop_freq and net_freq == sop_freq)
+                if same_freq:
+                    continue
+
+                overlap_start = max(net_start, sop_start)
+                overlap_end = min(net_end, sop_end)
+                if overlap_end <= overlap_start:
+                    continue
+                net_sig = self._net_row_signature(net_row)
+                sop_sig = self._sop_row_signature(sop_row)
+                overlap_start_iso = overlap_start.replace(microsecond=0).isoformat()
+                overlap_end_iso = overlap_end.replace(microsecond=0).isoformat()
+                conflict_key = self._policy_conflict_key(net_sig, sop_sig, overlap_start_iso, overlap_end_iso)
+                if conflict_key in seen:
+                    continue
+                seen.add(conflict_key)
+                existing = policy_map.get(conflict_key) or {}
+                policy = self._normalize_net_sop_policy(existing.get("policy"))
+                profile_name = str(sop_row.get("sop_profile_name") or "").strip() or "HF SOP"
+                net_label = net_name or (net_group or "Net")
+                net_summary = (
+                    f"{net_label} {net_band} {net_freq} "
+                    f"{overlap_start.strftime('%a %H:%M')}-{overlap_end.strftime('%H:%M')}"
+                ).strip()
+                sop_summary = (
+                    f"{profile_name} {sop_group} {sop_band} {sop_freq} "
+                    f"{overlap_start.strftime('%a %H:%M')}-{overlap_end.strftime('%H:%M')}"
+                ).strip()
+                out.append(
+                    {
+                        "sop_profile_id": int(sop_row.get("sop_profile_id") or 0),
+                        "sop_profile_name": profile_name,
+                        "sop_layer_id": int(sop_row.get("sop_layer_id") or 0),
+                        "sop_group_name": sop_group,
+                        "sop_band": sop_band,
+                        "sop_frequency": sop_freq,
+                        "sop_day_utc": str(sop_row.get("day_utc") or "ALL"),
+                        "sop_start_utc": self._normalize_hhmm(sop_row.get("start_utc") or "00:00"),
+                        "sop_end_utc": self._normalize_hhmm(sop_row.get("end_utc") or "23:59"),
+                        "net_group_name": net_group,
+                        "net_name": net_name,
+                        "net_band": net_band,
+                        "net_frequency": net_freq,
+                        "net_day_utc": str(net_row.get("day_utc") or "ALL"),
+                        "net_start_utc": self._normalize_hhmm(net_row.get("start_utc") or "00:00"),
+                        "net_end_utc": self._normalize_hhmm(net_row.get("end_utc") or "23:59"),
+                        "window_start_utc": overlap_start_iso,
+                        "window_end_utc": overlap_end_iso,
+                        "net_row_signature": net_sig,
+                        "sop_row_signature": sop_sig,
+                        "net_summary": net_summary,
+                        "sop_summary": sop_summary,
+                        "conflict_summary": f"{sop_summary} conflicts with {net_summary}",
+                        "resolved_policy": policy if existing else "",
+                        "has_policy": bool(existing),
+                    }
+                )
+        out.sort(
+            key=lambda r: (
+                str(r.get("window_start_utc") or ""),
+                str(r.get("sop_profile_name") or ""),
+                str(r.get("net_name") or ""),
+                str(r.get("net_group_name") or ""),
+            )
+        )
+        return out
 
     def load_secondary_groups(self) -> List[str]:
         conn = self._connect()
@@ -1196,80 +2790,38 @@ class SOPManager:
     def _load_schedule_windows(self, operating_group: str, band: str, frequency: str) -> List[Dict[str, Any]]:
         group = (operating_group or "").strip().upper()
         band_uc = (band or "").strip().upper()
-        freq = ""
-        try:
-            freq = f"{float(frequency):.3f}"
-        except Exception:
-            freq = (frequency or "").strip()
+        freq = self._normalize_frequency(frequency)
         if not group:
             return []
 
         windows: List[Dict[str, Any]] = []
-        conn = self._connect()
         try:
-            daily_sql = """
-                SELECT day_utc, start_utc, end_utc,
-                       'Weekly' AS recurrence, '' AS month_weeks, 0 AS biweekly_offset_weeks
-                FROM daily_schedule_tab
-                WHERE UPPER(COALESCE(group_name, '')) = ?
-            """
-            daily_params: List[Any] = [group]
-            if band_uc:
-                daily_sql += " AND UPPER(COALESCE(band, '')) = ?"
-                daily_params.append(band_uc)
-            if freq:
-                daily_sql += " AND printf('%.3f', CAST(frequency AS REAL)) = ?"
-                daily_params.append(freq)
-            for row in conn.execute(daily_sql, tuple(daily_params)).fetchall():
-                day = str(row[0] or "").strip()
-                start = str(row[1] or "").strip()
-                end = str(row[2] or "").strip()
-                if day and start and end:
+            for source in ("daily", "net"):
+                rows = self._load_group_schedule_rows(operating_group=group, source=source)
+                for row in rows:
+                    row_band = str(row.get("band") or "").strip().upper()
+                    row_freq = self._normalize_frequency(row.get("frequency"))
+                    if band_uc and row_band and row_band != band_uc:
+                        continue
+                    if freq and row_freq and row_freq != freq:
+                        continue
+                    day = self._normalize_day_utc(row.get("day_utc") or "ALL")
+                    start = self._normalize_hhmm(row.get("start_utc") or "00:00")
+                    end = self._normalize_hhmm(row.get("end_utc") or "23:59")
+                    if not day or not start or not end:
+                        continue
                     windows.append(
                         {
                             "day_utc": day,
                             "start_utc": start,
                             "end_utc": end,
-                            "recurrence": "Weekly",
-                            "month_weeks": "",
-                            "biweekly_offset_weeks": 0,
-                        }
-                    )
-
-            net_sql = """
-                SELECT day_utc, start_utc, end_utc,
-                       COALESCE(recurrence, 'Weekly') AS recurrence,
-                       COALESCE(month_weeks, '') AS month_weeks,
-                       COALESCE(biweekly_offset_weeks, 0) AS biweekly_offset_weeks
-                FROM net_schedule_tab
-                WHERE UPPER(COALESCE(group_name, '')) = ?
-            """
-            net_params: List[Any] = [group]
-            if band_uc:
-                net_sql += " AND UPPER(COALESCE(band, '')) = ?"
-                net_params.append(band_uc)
-            if freq:
-                net_sql += " AND printf('%.3f', CAST(frequency AS REAL)) = ?"
-                net_params.append(freq)
-            for row in conn.execute(net_sql, tuple(net_params)).fetchall():
-                day = str(row[0] or "").strip()
-                start = str(row[1] or "").strip()
-                end = str(row[2] or "").strip()
-                if day and start and end:
-                    windows.append(
-                        {
-                            "day_utc": day,
-                            "start_utc": start,
-                            "end_utc": end,
-                            "recurrence": self._normalize_recurrence(row[3]),
-                            "month_weeks": self._normalize_month_weeks(row[4]),
-                            "biweekly_offset_weeks": int(row[5] or 0),
+                            "recurrence": self._normalize_recurrence(row.get("recurrence") or "Weekly"),
+                            "month_weeks": self._normalize_month_weeks(row.get("month_weeks") or ""),
+                            "biweekly_offset_weeks": int(row.get("biweekly_offset_weeks") or 0),
                         }
                     )
         except Exception as e:
             log.debug("SOP: load schedule windows failed: %s", e)
-        finally:
-            conn.close()
         return windows
 
     def _load_sop_layer_windows(
@@ -1292,8 +2844,10 @@ class SOPManager:
                     COALESCE(l.recurrence, 'Weekly') AS recurrence,
                     COALESCE(l.month_weeks, '') AS month_weeks,
                     COALESCE(l.biweekly_offset_weeks, 0) AS biweekly_offset_weeks,
+                    COALESCE(l.condition_levels, 'ALL') AS condition_levels,
                     COALESCE(l.band, '') AS band,
-                    COALESCE(l.frequency, '') AS frequency
+                    COALESCE(l.frequency, '') AS frequency,
+                    COALESCE(p.operating_group, '') AS operating_group
                 FROM sop_schedule_layer l
                 JOIN sop_profiles p ON p.id = l.profile_id
                 WHERE l.enabled = 1
@@ -1303,12 +2857,18 @@ class SOPManager:
             if profile_id and int(profile_id) > 0:
                 sql += " AND l.profile_id = ?"
                 params.append(int(profile_id))
+            condition_levels = self._condition_level_map()
             for row in conn.execute(sql, tuple(params)).fetchall():
-                row_band = str(row[6] or "").strip().upper()
-                row_freq = self._normalize_frequency(row[7])
+                row_band = str(row[7] or "").strip().upper()
+                row_freq = self._normalize_frequency(row[8])
                 if band_uc and row_band and row_band != band_uc:
                     continue
                 if freq and row_freq and row_freq != freq:
+                    continue
+                cond_levels = self._normalize_condition_levels(row[6])
+                group_name = str(row[9] or "").strip().upper()
+                group_level = condition_levels.get(group_name)
+                if not self._action_condition_match(cond_levels, group_level):
                     continue
                 day = str(row[0] or "").strip()
                 start = str(row[1] or "").strip()
@@ -1323,6 +2883,7 @@ class SOPManager:
                         "recurrence": self._normalize_recurrence(row[3]),
                         "month_weeks": self._normalize_month_weeks(row[4]),
                         "biweekly_offset_weeks": int(row[5] or 0),
+                        "condition_levels": cond_levels,
                     }
                 )
             return out
@@ -1643,8 +3204,10 @@ class SOPManager:
         now_utc: Optional[dt.datetime] = None,
     ) -> List[Dict[str, Any]]:
         now = now_utc or dt.datetime.now(dt.timezone.utc)
+        now = self._ensure_utc(now)
         horizon = now + dt.timedelta(hours=max(1, int(horizon_hours)))
         overdue_warn_end = dt.timedelta(minutes=30)
+        condition_levels = self._condition_level_map()
         rows: List[Dict[str, Any]] = []
         for profile in self.list_profiles():
             if only_active and not profile.get("active"):
@@ -1652,58 +3215,69 @@ class SOPManager:
             full = self.get_profile(int(profile["id"]))
             if not full:
                 continue
+            profile_group = str(full.get("operating_group") or "").strip().upper()
             contacts = self.resolve_primary_contacts(
                 full.get("operating_group", ""),
                 full.get("secondary_group", ""),
             )
             for action in full.get("actions", []):
+                if not isinstance(action, dict):
+                    continue
                 if not _is_enabled(action.get("enabled", True)):
                     continue
+                action_group = str(action.get("group_name") or "").strip().upper() or profile_group
+                group_level = condition_levels.get(action_group)
+                if not self._action_condition_match(str(action.get("condition_levels") or "ALL"), group_level):
+                    continue
+
                 interval_m = int(action.get("interval_minutes") or 0)
                 if interval_m <= 0:
                     interval_m = max(1, int(action.get("interval_hours") or 3)) * 60
                 interval_phase_m = max(0, int(action.get("interval_phase_minutes") or 0)) % max(1, interval_m)
-                interval_td = dt.timedelta(minutes=interval_m)
-                next_due = self.compute_next_due(
-                    full.get("sop_start_utc", "00:00"),
-                    interval_m,
-                    now_utc=now,
-                    last_completed_utc=None,
-                    phase_minutes=interval_phase_m,
+                action_for_occurrence = dict(action)
+                if not str(action_for_occurrence.get("daily_start_utc") or "").strip():
+                    action_for_occurrence["daily_start_utc"] = str(full.get("sop_start_utc") or "00:00")
+                occurrence_rows = self.build_action_occurrences_in_window(
+                    action_for_occurrence,
+                    window_start_utc=now - overdue_warn_end,
+                    window_end_utc=horizon + dt.timedelta(minutes=1),
                 )
-                current_due = next_due - interval_td
-                last_completed = _parse_iso_utc(action.get("last_completed_utc"))
-                completed_current = bool(
-                    last_completed
-                    and current_due <= last_completed < (current_due + interval_td)
-                )
+                if not occurrence_rows:
+                    continue
 
-                # Show currently due/overdue item up to 30 minutes past due.
-                due = None
+                due: Optional[dt.datetime] = None
                 status = "Upcoming"
-                if current_due <= now <= (current_due + overdue_warn_end):
-                    due = current_due
-                    if completed_current:
-                        status = "Completed"
-                    elif now <= (current_due + dt.timedelta(minutes=20)):
-                        status = "Due Now"
-                    else:
-                        status = "Overdue"
-                elif next_due <= horizon:
-                    due = next_due
-                    status = "Upcoming"
+                for occ_start, _occ_end in occurrence_rows:
+                    if occ_start <= now <= (occ_start + overdue_warn_end):
+                        due = occ_start
+                        if now <= (occ_start + dt.timedelta(minutes=20)):
+                            status = "Due Now"
+                        else:
+                            status = "Overdue"
+                        break
+                    if occ_start >= now:
+                        due = occ_start
+                        status = "Upcoming"
+                        break
                 if due is None:
                     continue
 
+                interval_td = dt.timedelta(minutes=interval_m)
+                current_due = due
+                last_completed = _parse_iso_utc(action.get("last_completed_utc"))
+                completed_current = bool(last_completed and current_due <= last_completed < (current_due + interval_td))
+                if completed_current and status in {"Due Now", "Overdue"}:
+                    status = "Completed"
+
                 action_band = (action.get("band") or "").strip().upper()
-                action_freq = (action.get("frequency") or "").strip() or full.get("frequency", "")
+                action_freq = self._normalize_frequency((action.get("frequency") or "").strip() or full.get("frequency", ""))
                 rule = (action.get("contact_rule") or "none").strip()
                 aligned = True
                 alignment_reason = "not_evaluated"
                 has_schedule_windows = False
                 if rule not in {"local_profile", "local_group"}:
                     diag = self.diagnose_due_alignment(
-                        full.get("operating_group", ""),
+                        action_group or full.get("operating_group", ""),
                         action_band,
                         action_freq,
                         due,
@@ -1716,41 +3290,36 @@ class SOPManager:
                 selected_target = (action.get("contact_target") or "").strip().upper()
                 targets: List[str] = []
                 if rule == "hub_or_hub_alt":
-                    if selected_target and selected_target != "__ANY_ROLE__":
-                        targets = [selected_target]
-                    else:
-                        targets = ["Any (Role Match)"]
+                    targets = [selected_target] if selected_target and selected_target != "__ANY_ROLE__" else ["Any (Role Match)"]
                 elif rule == "ncs_or_ancs":
-                    if selected_target and selected_target != "__ANY_ROLE__":
-                        targets = [selected_target]
-                    else:
-                        targets = ["Any (Role Match)"]
-                elif rule == "callsign":
-                    target = (action.get("contact_target") or "").strip().upper()
-                    targets = [target] if target else []
-                elif rule == "peer":
-                    target = (action.get("contact_target") or "").strip().upper()
-                    targets = [target] if target else []
-                elif rule in {"local_profile", "local_group"}:
-                    target = (action.get("contact_target") or "").strip().upper()
-                    targets = [target] if target else []
+                    targets = [selected_target] if selected_target and selected_target != "__ANY_ROLE__" else ["Any (Role Match)"]
+                elif rule in {"callsign", "peer", "local_profile", "local_group"}:
+                    targets = [selected_target] if selected_target else []
+
                 rows.append(
                     {
                         "profile_id": int(full["id"]),
                         "profile_name": full.get("name", ""),
-                        "operating_group": full.get("operating_group", ""),
+                        "category": self._normalize_category(full.get("category")),
+                        "operating_group": action_group or full.get("operating_group", ""),
                         "band": action_band,
                         "frequency": action_freq,
-                        "action_id": int(action["id"]),
+                        "action_id": int(action.get("id") or 0),
                         "software": action.get("software", ""),
+                        "mode": str(action.get("mode") or "").strip().upper(),
                         "action_key": action.get("action_key", ""),
                         "action_label": action.get("action_label", ""),
                         "description": action.get("description", ""),
                         "contact_rule": rule,
                         "contact_target": (action.get("contact_target") or "").strip().upper(),
                         "contact_targets": targets,
+                        "condition_levels": self._normalize_condition_levels(action.get("condition_levels")),
                         "interval_minutes": interval_m,
                         "interval_phase_minutes": interval_phase_m,
+                        "daily_start_utc": self._normalize_hhmm(action_for_occurrence.get("daily_start_utc") or "00:00"),
+                        "daily_end_utc": self._normalize_hhmm(action_for_occurrence.get("daily_end_utc") or "23:59"),
+                        "duration_minutes": int(action.get("duration_minutes") or 60),
+                        "conflict_policy": self._normalize_conflict_policy(action.get("conflict_policy")),
                         "next_due_utc": due,
                         "aligned": aligned,
                         "alignment_reason": alignment_reason,
@@ -1849,17 +3418,27 @@ class SOPManager:
             if interval_m <= 0:
                 interval_m = max(1, int(action.get("interval_hours") or 3)) * 60
             interval_phase_m = max(0, int(action.get("interval_phase_minutes") or 0)) % max(1, interval_m)
-            interval_td = dt.timedelta(minutes=interval_m)
-            next_due = self.compute_next_due(
-                full.get("sop_start_utc", "00:00"),
-                interval_m,
-                now_utc=now,
-                last_completed_utc=action.get("last_completed_utc"),
-                phase_minutes=interval_phase_m,
+            action_for_occurrence = dict(action)
+            if not str(action_for_occurrence.get("daily_start_utc") or "").strip():
+                action_for_occurrence["daily_start_utc"] = str(full.get("sop_start_utc") or "00:00")
+            if not str(action_for_occurrence.get("daily_end_utc") or "").strip():
+                action_for_occurrence["daily_end_utc"] = "23:59"
+            occurrences = self.build_action_occurrences_in_window(
+                action_for_occurrence,
+                window_start_utc=now - dt.timedelta(minutes=30),
+                window_end_utc=now + dt.timedelta(hours=24),
             )
-            current_due = next_due - interval_td
+            if not occurrences:
+                continue
+            next_due = occurrences[0][0]
+            for occ_start, _occ_end in occurrences:
+                if occ_start >= now:
+                    next_due = occ_start
+                    break
+            interval_td = dt.timedelta(minutes=interval_m)
+            current_due = next_due
             status = "Upcoming"
-            if current_due <= now < next_due:
+            if current_due <= now < (current_due + dt.timedelta(minutes=30)):
                 late = now - current_due
                 if late <= dt.timedelta(minutes=20):
                     status = "Due Now"
@@ -1874,7 +3453,7 @@ class SOPManager:
                     "profile_name": str(full.get("name") or ""),
                     "operating_group": str(full.get("operating_group") or ""),
                     "secondary_group": str(full.get("secondary_group") or ""),
-                    "sop_start_utc": str(full.get("sop_start_utc") or "00:00"),
+                    "sop_start_utc": str(action_for_occurrence.get("daily_start_utc") or "00:00"),
                     "action_id": int(action.get("id") or 0),
                     "software": str(action.get("software") or ""),
                     "action_label": str(action.get("action_label") or ""),
@@ -1931,20 +3510,28 @@ class SOPManager:
             if interval_m <= 0:
                 interval_m = max(1, int(action.get("interval_hours") or 3)) * 60
             interval_m = max(1, interval_m)
-            phase_m = max(0, int(action.get("interval_phase_minutes") or 0)) % interval_m
-            interval_td = dt.timedelta(minutes=interval_m)
-            due = self.compute_next_due(
-                str(full.get("sop_start_utc") or "00:00"),
-                interval_m,
-                now_utc=start,
-                last_completed_utc=None,
-                phase_minutes=phase_m,
+            phase_m = max(0, int(action.get("interval_phase_minutes") or 0)) % max(1, interval_m)
+            action_for_occurrence = dict(action)
+            action_for_occurrence["interval_minutes"] = interval_m
+            action_for_occurrence["interval_phase_minutes"] = phase_m
+            if not str(action_for_occurrence.get("daily_start_utc") or "").strip():
+                action_for_occurrence["daily_start_utc"] = str(full.get("sop_start_utc") or "00:00")
+            if not str(action_for_occurrence.get("daily_end_utc") or "").strip():
+                action_for_occurrence["daily_end_utc"] = "23:59"
+            occurrences = self.build_action_occurrences_in_window(
+                action_for_occurrence,
+                window_start_utc=start,
+                window_end_utc=end + dt.timedelta(seconds=1),
             )
-            while due < start:
-                due += interval_td
             max_iters = min(240, int(math.ceil(total_window_minutes / max(1, interval_m))) + 3)
             iters = 0
-            while due <= end and iters < max_iters:
+            for due, _due_end in occurrences:
+                if due > end:
+                    continue
+                if due < start:
+                    continue
+                if iters >= max_iters:
+                    break
                 band = str(action.get("band") or "").strip().upper()
                 freq = str(action.get("frequency") or "").strip() or str(full.get("frequency") or "")
                 rows.append(
@@ -1965,7 +3552,6 @@ class SOPManager:
                         "description": str(action.get("description") or ""),
                     }
                 )
-                due += interval_td
                 iters += 1
         rows.sort(
             key=lambda x: (
@@ -2187,6 +3773,7 @@ class SOPManager:
 
         imported = dict(profile)
         imported.pop("id", None)
+        imported["category"] = self._normalize_category(imported.get("category"))
         actions = imported.pop("actions", [])
         schedule_layer = imported.pop("schedule_layer", [])
         name = (imported.get("name") or "Imported SOP").strip()
@@ -2210,15 +3797,25 @@ class SOPManager:
                     continue
                 normalized_actions.append(
                     {
+                        "group_name": (a.get("group_name") or "").strip().upper(),
+                        "condition_levels": self._normalize_condition_levels(a.get("condition_levels")),
                         "band": (a.get("band") or "").strip().upper(),
                         "frequency": (a.get("frequency") or "").strip(),
                         "software": (a.get("software") or "").strip(),
+                        "mode": str(a.get("mode") or "").strip().upper(),
                         "action_key": (a.get("action_key") or "").strip(),
                         "action_label": (a.get("action_label") or "").strip(),
                         "enabled": bool(a.get("enabled", True)),
+                        "daily_start_utc": self._normalize_hhmm(a.get("daily_start_utc") or "00:00"),
+                        "daily_end_utc": self._normalize_hhmm(a.get("daily_end_utc") or "23:59"),
+                        "duration_minutes": int(a.get("duration_minutes") or 60),
                         "interval_hours": int(a.get("interval_hours") or 3),
                         "interval_minutes": int(a.get("interval_minutes") or (int(a.get("interval_hours") or 3) * 60)),
                         "interval_phase_minutes": int(a.get("interval_phase_minutes") or 0),
+                        "conflict_policy": self._normalize_conflict_policy(a.get("conflict_policy")),
+                        "daily_conflict_summary": str(a.get("daily_conflict_summary") or "").strip(),
+                        "net_conflict_summary": str(a.get("net_conflict_summary") or "").strip(),
+                        "schedule_applied": bool(a.get("schedule_applied", True)),
                         "description": (a.get("description") or "").strip(),
                         "contact_rule": (a.get("contact_rule") or "none").strip(),
                         "contact_target": (a.get("contact_target") or "").strip().upper(),

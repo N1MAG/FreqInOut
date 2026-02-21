@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any, Tuple, Set
 
 import platform
 import sqlite3
@@ -33,10 +33,11 @@ from PySide6.QtWidgets import (
     QToolButton,
     QMenu,
 )
-from PySide6.QtGui import QRegularExpressionValidator, QAction
+from PySide6.QtGui import QRegularExpressionValidator, QAction, QColor
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
+from freqinout.core.sop_manager import SOPManager
 from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.theme import resolve_theme, button_style
@@ -213,6 +214,7 @@ class NetScheduleTab(QWidget):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._status_service = SoftwareStatusService(self.settings)
+        self._sop_manager = SOPManager()
         self._net_name_history: List[str] = []
         self.operating_groups: List[Dict[str, str]] = []
         self._clock_timer: QTimer | None = None
@@ -225,6 +227,9 @@ class NetScheduleTab(QWidget):
         self._dirty: bool = False
         self._suspend_dirty_tracking: bool = False
         self._saved_rows_signature: str = ""
+        self._blocking_net_sop_conflict_count: int = 0
+        self._blocking_net_sop_conflict_signatures: Set[str] = set()
+        self._conflict_refresh_timer: QTimer | None = None
 
         self._build_ui()
         self._load()
@@ -273,10 +278,12 @@ class NetScheduleTab(QWidget):
         self.del_btn = QPushButton("Delete Selected")
         self.move_to_resources_btn = QPushButton("Move Selected to Resources")
         self.export_btn = QPushButton("Export Net Schedule")
+        self.manage_net_sop_policies_btn = QPushButton("Manage Net/SOP Policies")
         btn_row.addWidget(self.add_btn)
         btn_row.addWidget(self.del_btn)
         btn_row.addWidget(self.move_to_resources_btn)
         btn_row.addWidget(self.export_btn)
+        btn_row.addWidget(self.manage_net_sop_policies_btn)
         btn_row.addStretch()
         self.save_btn = QPushButton("Save Net Schedule")
         btn_row.addWidget(self.save_btn)
@@ -371,6 +378,7 @@ class NetScheduleTab(QWidget):
         self.move_to_resources_btn.clicked.connect(self._move_selected_schedule_rows_to_resources)
         self.export_btn.clicked.connect(self._export_schedule)
         self.save_btn.clicked.connect(self._save)
+        self.manage_net_sop_policies_btn.clicked.connect(self._open_net_sop_policy_manager)
         self.table.itemSelectionChanged.connect(self._update_delete_button_state)
         self.table.itemChanged.connect(self._on_table_item_changed)
         self.resource_set_combo.currentIndexChanged.connect(self._on_resource_set_changed)
@@ -391,6 +399,10 @@ class NetScheduleTab(QWidget):
         self._resize_table_columns()
         self._update_delete_button_state()
         self._update_resource_action_state()
+        self._conflict_refresh_timer = QTimer(self)
+        self._conflict_refresh_timer.setSingleShot(True)
+        self._conflict_refresh_timer.setInterval(180)
+        self._conflict_refresh_timer.timeout.connect(self._refresh_net_sop_conflict_highlighting)
 
     def _resize_table_columns(self) -> None:
         try:
@@ -443,6 +455,9 @@ class NetScheduleTab(QWidget):
         self._apply_theme()
         self._resize_table_columns()
 
+    def on_sop_data_changed(self) -> None:
+        self._schedule_net_sop_conflict_refresh(force=True)
+
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
         self._update_time_toggle_style(theme)
@@ -450,6 +465,7 @@ class NetScheduleTab(QWidget):
         self.del_btn.setStyleSheet(button_style("muted", theme))
         self.move_to_resources_btn.setStyleSheet(button_style("muted", theme))
         self.export_btn.setStyleSheet(button_style("info", theme))
+        self.manage_net_sop_policies_btn.setStyleSheet(button_style("muted", theme))
         self._refresh_save_button_state(theme)
         self.add_to_schedule_btn.setStyleSheet(button_style("muted", theme))
         self.manage_resources_btn.setStyleSheet(button_style("muted", theme))
@@ -496,7 +512,14 @@ class NetScheduleTab(QWidget):
     def _refresh_save_button_state(self, theme: Optional[Dict[str, str]] = None) -> None:
         if theme is None:
             theme = resolve_theme(self.settings)
-        role = "eligible_success" if self._dirty else "muted"
+        if self._blocking_net_sop_conflict_count > 0:
+            role = "eligible_warning"
+            self.save_btn.setToolTip(
+                f"{self._blocking_net_sop_conflict_count} Net/SOP conflict(s) require Net Priority before save."
+            )
+        else:
+            role = "eligible_success" if self._dirty else "muted"
+            self.save_btn.setToolTip("")
         self.save_btn.setStyleSheet(button_style(role, theme))
 
     def _set_dirty(self, dirty: bool) -> None:
@@ -512,6 +535,7 @@ class NetScheduleTab(QWidget):
         except Exception:
             # While row edits are incomplete (e.g., invalid time), keep save highlighted.
             self._set_dirty(True)
+        self._schedule_net_sop_conflict_refresh()
 
     def _on_table_item_changed(self, _item: QTableWidgetItem) -> None:
         self._mark_dirty()
@@ -535,6 +559,93 @@ class NetScheduleTab(QWidget):
         role = "eligible_danger" if has_selection else "muted"
         self.del_btn.setStyleSheet(button_style(role, theme))
         self.move_to_resources_btn.setStyleSheet(button_style("eligible_info" if has_selection else "muted", theme))
+
+    def _schedule_net_sop_conflict_refresh(self, *, force: bool = False) -> None:
+        timer = self._conflict_refresh_timer
+        if timer is None:
+            return
+        if self._suspend_dirty_tracking and not force:
+            return
+        timer.start()
+
+    @staticmethod
+    def _net_sop_policy_is_net_priority(value: Any) -> bool:
+        return str(value or "").strip().upper() == "NET_PRIORITY"
+
+    def _scan_net_sop_conflicts(
+        self,
+        *,
+        net_rows_override: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Set[str]]:
+        rows: List[Dict[str, Any]]
+        if isinstance(net_rows_override, list):
+            rows = [self._strip_internal_row(r) for r in net_rows_override if isinstance(r, dict)]
+        else:
+            try:
+                rows = [self._strip_internal_row(r) for r in self._collect_rows()]
+            except Exception:
+                return [], [], set()
+        if not rows:
+            return [], [], set()
+        try:
+            conflicts = self._sop_manager.collect_active_net_sop_conflicts(
+                horizon_days=35,
+                net_rows_override=rows,
+            )
+        except Exception as e:
+            log.debug("Net Schedule: active SOP conflict scan failed: %s", e)
+            return [], [], set()
+        blocking: List[Dict[str, Any]] = []
+        signatures: Set[str] = set()
+        for row in conflicts:
+            if not isinstance(row, dict):
+                continue
+            if self._net_sop_policy_is_net_priority(row.get("resolved_policy")):
+                continue
+            blocking.append(row)
+            sig = str(row.get("net_row_signature") or "").strip()
+            if sig:
+                signatures.add(sig)
+        return conflicts, blocking, signatures
+
+    def _refresh_net_sop_conflict_highlighting(self) -> None:
+        _, blocking, conflict_sigs = self._scan_net_sop_conflicts()
+        self._blocking_net_sop_conflict_count = len(blocking)
+        self._blocking_net_sop_conflict_signatures = set(conflict_sigs)
+        prev_block = self.table.blockSignals(True)
+        try:
+            theme = resolve_theme(self.settings)
+            warn = QColor(str(theme.get("warning", "#C99700")))
+            warn.setAlpha(64)
+            try:
+                ui_rows = self._collect_rows_by_ui_index()
+            except Exception:
+                ui_rows = {}
+            for r in range(self.table.rowCount()):
+                for col in (self.COL_FREQ, self.COL_START, self.COL_END):
+                    item = self.table.item(r, col)
+                    if item is None:
+                        continue
+                    base_tip = str(item.data(Qt.UserRole) or "")
+                    item.setData(Qt.BackgroundRole, None)
+                    item.setToolTip(base_tip)
+            for ui_row, row in ui_rows.items():
+                sig = str(self._sop_manager._net_row_signature(row))
+                is_blocking = sig in conflict_sigs
+                for col in (self.COL_FREQ, self.COL_START, self.COL_END):
+                    item = self.table.item(ui_row, col)
+                    if item is None:
+                        continue
+                    base_tip = str(item.data(Qt.UserRole) or "")
+                    if is_blocking:
+                        item.setBackground(warn)
+                        item.setToolTip(
+                            (base_tip + "\n" if base_tip else "")
+                            + "Conflicts with active SOP. Set Net Priority to keep this overlap."
+                        )
+        finally:
+            self.table.blockSignals(prev_block)
+        self._refresh_save_button_state()
 
     # --------- helpers: time / primary groups --------- #
     def _ui_tz_abbr(self, tz_name: str, fallback: str) -> str:
@@ -698,6 +809,7 @@ class NetScheduleTab(QWidget):
         self._update_clock_labels()
         self._resize_table_columns()
         self._mark_dirty()
+        self._schedule_net_sop_conflict_refresh(force=True)
 
 
     # --------- row widgets --------- #
@@ -786,7 +898,9 @@ class NetScheduleTab(QWidget):
         group_names = sorted({g.get("group", "") for g in self.operating_groups if g.get("group")})
         group_combo.addItems(group_names)
         group_val = (row_data.get("group_name") or "").strip()
-        if group_val and group_val in group_names:
+        if group_val:
+            if group_combo.findText(group_val) < 0:
+                group_combo.addItem(group_val)
             group_combo.setCurrentText(group_val)
         group_combo.currentTextChanged.connect(self._mark_dirty)
         self.table.setCellWidget(r, self.COL_GROUP, group_combo)
@@ -875,7 +989,7 @@ class NetScheduleTab(QWidget):
         group_combo.currentTextChanged.connect(on_group_changed)
         band_combo.currentTextChanged.connect(on_band_changed)
         # Ensure initial mode/freq selection is synced to operating group data
-        self._update_mode_freq(r)
+        self._update_mode_freq(r, preserve_frequency=bool(str(row_data.get("frequency") or "").strip()))
         # For rows loaded without explicit FLDigi fields, seed defaults from matching OG.
         if not str(row_data.get("fldigi_mode") or "").strip() and not str(row_data.get("fldigi_offset") or "").strip():
             d_mode, d_offset = self._default_fldigi_for_row(
@@ -1022,6 +1136,7 @@ class NetScheduleTab(QWidget):
         self._update_delete_button_state()
         if selected:
             self._mark_dirty()
+            self._schedule_net_sop_conflict_refresh(force=True)
 
     # --------- Operating group helpers (cascading selections) --------- #
 
@@ -1103,7 +1218,7 @@ class NetScheduleTab(QWidget):
             if fldigi_offset and (force or not current):
                 offset_widget.setText(fldigi_offset)
 
-    def _update_mode_freq(self, row: int):
+    def _update_mode_freq(self, row: int, *, preserve_frequency: bool = False):
         group = self._get_combo_value(row, self.COL_GROUP, "")
         band = self._get_combo_value(row, self.COL_BAND, "")
         entries = self._matching_operating_groups(group, band)
@@ -1124,12 +1239,14 @@ class NetScheduleTab(QWidget):
                 mode_combo.setCurrentText(entry.get("mode", ""))
                 mode_combo.blockSignals(False)
             mode_val = entry.get("mode", "")
-        freq_val = self._format_freq(entry.get("frequency", "")) if entry else ""
         freq_item = self.table.item(row, self.COL_FREQ)
         if freq_item is None:
             freq_item = QTableWidgetItem()
             self.table.setItem(row, self.COL_FREQ, freq_item)
-        freq_item.setText(freq_val)
+        current_freq = (freq_item.text() or "").strip()
+        if not (preserve_frequency and current_freq):
+            freq_val = self._format_freq(entry.get("frequency", "")) if entry else ""
+            freq_item.setText(freq_val)
         self._set_fldigi_from_operating_group(row, entry, force=False)
         # trigger autostart if mode changes
         if mode_val:
@@ -1889,17 +2006,21 @@ class NetScheduleTab(QWidget):
             log.info("Net schedule loaded from %s: %d rows", src, len(data))
             self._saved_rows_signature = self._rows_signature(self._raw_rows)
             self._set_dirty(False)
+            self._schedule_net_sop_conflict_refresh(force=True)
         finally:
             self._suspend_dirty_tracking = False
 
     def _save(self):
         try:
-            rows = [self._strip_internal_row(r) for r in self._collect_rows()]
+            rows = self._collect_rows()
         except ValueError as e:
             QMessageBox.warning(self, "Invalid Net Schedule", str(e))
             return
         clean_rows = [self._strip_internal_row(r) for r in rows]
         self._raw_rows = rows
+        if not self._enforce_net_priority_for_conflicts(rows):
+            self._schedule_net_sop_conflict_refresh(force=True)
+            return
 
         # Save to JSON config
         self.settings.set("net_schedule", clean_rows)
@@ -1925,7 +2046,489 @@ class NetScheduleTab(QWidget):
 
         self._saved_rows_signature = self._rows_signature(self._raw_rows)
         self._set_dirty(False)
+        self._schedule_net_sop_conflict_refresh(force=True)
         QMessageBox.information(self, "Saved", "Net Schedule saved.")
+
+    @staticmethod
+    def _format_conflict_span(start_utc: Any, end_utc: Any) -> str:
+        start_txt = str(start_utc or "").strip()
+        end_txt = str(end_utc or "").strip()
+        if not start_txt or not end_txt:
+            return f"{start_txt} - {end_txt}".strip(" -")
+        try:
+            start_dt = datetime.datetime.fromisoformat(start_txt.replace("Z", "+00:00"))
+            end_dt = datetime.datetime.fromisoformat(end_txt.replace("Z", "+00:00"))
+            return f"{start_dt.strftime('%a %H:%M')} - {end_dt.strftime('%H:%M')} UTC"
+        except Exception:
+            return f"{start_txt} - {end_txt}"
+
+    def _coalesce_net_sop_conflicts(self, conflicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for row in conflicts:
+            if not isinstance(row, dict):
+                continue
+            net_sig = str(row.get("net_row_signature") or "").strip()
+            sop_sig = str(row.get("sop_row_signature") or "").strip()
+            key = (net_sig, sop_sig)
+            grouped.setdefault(key, []).append(row)
+        out: List[Dict[str, Any]] = []
+        for (_net_sig, _sop_sig), rows in grouped.items():
+            rows_sorted = sorted(rows, key=lambda r: str(r.get("window_start_utc") or ""))
+            sample = rows_sorted[0] if rows_sorted else {}
+            out.append(
+                {
+                    "sample": sample,
+                    "rows": rows_sorted,
+                    "count": len(rows_sorted),
+                }
+            )
+        out.sort(key=lambda g: str((g.get("sample") or {}).get("window_start_utc") or ""))
+        return out
+
+    def _conflict_summary_line(self, grouped: Dict[str, Any]) -> str:
+        sample = grouped.get("sample") or {}
+        count = int(grouped.get("count") or 0)
+        sop_name = str(sample.get("sop_profile_name") or "").strip() or "HF SOP"
+        net_name = str(sample.get("net_name") or sample.get("net_group_name") or "Net").strip()
+        span = self._format_conflict_span(sample.get("window_start_utc"), sample.get("window_end_utc"))
+        extra = f" (+{count - 1} more)" if count > 1 else ""
+        return f"{sop_name} vs {net_name}: {span}{extra}"
+
+    def _enforce_net_priority_for_conflicts(
+        self,
+        rows: List[Dict[str, Any]],
+        *,
+        operation_label: str = "save",
+    ) -> bool:
+        _, blocking, _ = self._scan_net_sop_conflicts(net_rows_override=rows)
+        if not blocking:
+            return True
+
+        grouped = self._coalesce_net_sop_conflicts(blocking)
+        lines: List[str] = []
+        for group in grouped[:10]:
+            lines.append(self._conflict_summary_line(group))
+        if len(grouped) > 10:
+            lines.append(f"...and {len(grouped) - 10} more blocking conflict pair(s).")
+        op = str(operation_label or "save").strip().lower()
+        op_title = "Add Blocked" if op == "add" else "Save Blocked"
+        op_btn = "Cancel Add" if op == "add" else "Cancel Save"
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(f"Net/SOP Conflicts Block {op.title()}")
+        box.setText(
+            f"Conflicting Net rows are blocked until overlap windows are set to Net Priority before {op}."
+        )
+        box.setInformativeText("\n".join(lines))
+        net_all_btn = box.addButton("Set Net Priority for All", QMessageBox.AcceptRole)
+        review_btn = box.addButton("Review Each Conflict", QMessageBox.ActionRole)
+        deactivate_btn = box.addButton("Deactivate Active HF SOPs", QMessageBox.DestructiveRole)
+        box.addButton(op_btn, QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is None:
+            return False
+
+        decisions: List[Dict[str, Any]] = []
+        if clicked is deactivate_btn:
+            self._deactivate_active_hf_sops()
+        elif clicked is net_all_btn:
+            decisions = self._build_net_sop_policy_decisions(blocking, "NET_PRIORITY")
+        elif clicked is review_btn:
+            decisions = self._review_each_net_sop_conflict(blocking, allow_sop_priority=False)
+
+        if decisions:
+            saved = 0
+            try:
+                saved = int(self._sop_manager.save_net_sop_conflict_policies(decisions) or 0)
+            except Exception as e:
+                log.debug("Net Schedule: failed saving Net/SOP policy decisions: %s", e)
+            if saved > 0:
+                self._notify_sop_data_changed()
+
+        _, still_blocking, _ = self._scan_net_sop_conflicts(net_rows_override=rows)
+        if still_blocking:
+            QMessageBox.warning(
+                self,
+                op_title,
+                f"{len(still_blocking)} conflict window(s) remain unresolved for Net Priority.\n"
+                f"Set Net Priority, edit times, or remove conflicting rows before {op}.",
+            )
+            return False
+        return True
+
+    def _prompt_active_sop_conflicts_after_net_change(
+        self,
+        *,
+        net_rows_override: Optional[List[Dict[str, Any]]] = None,
+        show_resolved_hint: bool = False,
+        require_net_priority: bool = False,
+    ) -> None:
+        try:
+            conflicts = self._sop_manager.collect_active_net_sop_conflicts(
+                horizon_days=35,
+                net_rows_override=net_rows_override,
+            )
+        except Exception as e:
+            log.debug("Net Schedule: active SOP conflict scan failed: %s", e)
+            return
+        if not conflicts:
+            return
+        if require_net_priority:
+            pending_conflicts = [
+                c for c in conflicts if not self._net_sop_policy_is_net_priority(c.get("resolved_policy"))
+            ]
+        else:
+            pending_conflicts = [c for c in conflicts if not bool(c.get("has_policy"))]
+        if not pending_conflicts:
+            if show_resolved_hint:
+                QMessageBox.information(
+                    self,
+                    "Net/SOP Conflicts Already Resolved" if not require_net_priority else "Net/SOP Conflicts",
+                    "Conflicts were detected, but all matching windows already have saved Net/SOP policies."
+                    if not require_net_priority
+                    else "Conflicts were detected, but all blocking windows are already set to Net Priority.",
+                )
+            return
+        conflicts = pending_conflicts
+        grouped = self._coalesce_net_sop_conflicts(conflicts)
+        lines: List[str] = []
+        for group in grouped[:10]:
+            lines.append(self._conflict_summary_line(group))
+        if len(grouped) > 10:
+            lines.append(f"...and {len(grouped) - 10} more conflict pair(s).")
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Net vs Active SOP Conflicts")
+        if require_net_priority:
+            box.setText("Active HF SOP and Net schedule windows conflict. Net Priority is required to keep overlaps.")
+        else:
+            box.setText("Active HF SOP and Net schedule windows conflict. Choose resolution policy.")
+        box.setInformativeText("\n".join(lines))
+        net_all_btn = box.addButton("Net Priority for All", QMessageBox.AcceptRole)
+        sop_all_btn = box.addButton("SOP Priority for All", QMessageBox.AcceptRole) if not require_net_priority else None
+        review_btn = box.addButton("Review Each Conflict", QMessageBox.ActionRole)
+        deactivate_btn = box.addButton("Deactivate Active HF SOPs", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is None:
+            return
+        if clicked is deactivate_btn:
+            self._deactivate_active_hf_sops()
+            return
+
+        decisions: List[Dict[str, Any]] = []
+        if sop_all_btn is not None and clicked is sop_all_btn:
+            decisions = self._build_net_sop_policy_decisions(conflicts, "SOP_PRIORITY")
+        elif clicked is net_all_btn:
+            decisions = self._build_net_sop_policy_decisions(conflicts, "NET_PRIORITY")
+        elif clicked is review_btn:
+            decisions = self._review_each_net_sop_conflict(conflicts, allow_sop_priority=not require_net_priority)
+        if not decisions:
+            return
+        saved = 0
+        try:
+            saved = int(self._sop_manager.save_net_sop_conflict_policies(decisions) or 0)
+        except Exception as e:
+            log.debug("Net Schedule: failed saving Net/SOP policy decisions: %s", e)
+            saved = 0
+        self._notify_sop_data_changed()
+        if saved > 0:
+            QMessageBox.information(
+                self,
+                "Conflict Policies Saved",
+                f"Saved {saved} Net/SOP conflict policy decision(s).",
+            )
+        self._schedule_net_sop_conflict_refresh(force=True)
+
+    def _build_net_sop_policy_decisions(
+        self,
+        conflicts: List[Dict[str, Any]],
+        policy: str,
+    ) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        chosen = "SOP_PRIORITY" if str(policy).strip().upper() == "SOP_PRIORITY" else "NET_PRIORITY"
+        for row in conflicts:
+            if not isinstance(row, dict):
+                continue
+            net_sig = str(row.get("net_row_signature") or "").strip()
+            sop_sig = str(row.get("sop_row_signature") or "").strip()
+            start_utc = str(row.get("window_start_utc") or "").strip()
+            end_utc = str(row.get("window_end_utc") or "").strip()
+            if not net_sig or not sop_sig or not start_utc or not end_utc:
+                continue
+            out.append(
+                {
+                    "sop_profile_id": int(row.get("sop_profile_id") or 0),
+                    "sop_layer_id": int(row.get("sop_layer_id") or 0),
+                    "net_row_signature": net_sig,
+                    "sop_row_signature": sop_sig,
+                    "window_start_utc": start_utc,
+                    "window_end_utc": end_utc,
+                    "policy": chosen,
+                    "resolution_note": "Net schedule conflict resolution",
+                }
+            )
+        return out
+
+    def _review_each_net_sop_conflict(
+        self,
+        conflicts: List[Dict[str, Any]],
+        *,
+        allow_sop_priority: bool = True,
+    ) -> List[Dict[str, Any]]:
+        decisions: List[Dict[str, Any]] = []
+        grouped = self._coalesce_net_sop_conflicts(conflicts)
+        for idx, group in enumerate(grouped, start=1):
+            rows = list(group.get("rows") or [])
+            if not rows:
+                continue
+            row = rows[0]
+            sop_summary = str(row.get("sop_summary") or "").strip()
+            net_summary = str(row.get("net_summary") or "").strip()
+            existing_vals = {str(r.get("resolved_policy") or "").strip().upper() for r in rows}
+            existing_vals.discard("")
+            existing = existing_vals.pop() if len(existing_vals) == 1 else ""
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle(f"Resolve Net/SOP Conflict ({idx}/{len(grouped)})")
+            if allow_sop_priority:
+                box.setText("Choose which schedule wins for this overlap window.")
+            else:
+                box.setText("Net Priority is required to keep this overlap in Net Schedule.")
+            info_lines = [sop_summary, net_summary]
+            if len(rows) > 1:
+                info_lines.append(f"Applies to {len(rows)} occurrence windows.")
+            if existing in {"SOP_PRIORITY", "NET_PRIORITY"}:
+                info_lines.append(f"Current policy: {'SOP Priority' if existing == 'SOP_PRIORITY' else 'Net Priority'}")
+            box.setInformativeText("\n".join([ln for ln in info_lines if ln]))
+            net_btn = box.addButton("Net Priority", QMessageBox.AcceptRole)
+            sop_btn = box.addButton("SOP Priority", QMessageBox.AcceptRole) if allow_sop_priority else None
+            skip_btn = box.addButton("Skip", QMessageBox.RejectRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is skip_btn or clicked is None:
+                continue
+            policy = "SOP_PRIORITY" if (sop_btn is not None and clicked is sop_btn) else "NET_PRIORITY"
+            built = self._build_net_sop_policy_decisions(rows, policy)
+            if built:
+                decisions.extend(built)
+        return decisions
+
+    def _deactivate_active_hf_sops(self) -> None:
+        changed = 0
+        for profile in self._sop_manager.list_profiles():
+            if not bool(profile.get("active")):
+                continue
+            category = str(profile.get("category") or "HF").strip().upper()
+            if category != "HF":
+                continue
+            try:
+                if self._sop_manager.set_profile_active(int(profile.get("id") or 0), False):
+                    changed += 1
+            except Exception:
+                continue
+        if changed > 0:
+            self._notify_sop_data_changed()
+            QMessageBox.information(self, "SOP", f"Deactivated {changed} active HF SOP profile(s).")
+
+    def _notify_sop_data_changed(self) -> None:
+        try:
+            win = self.window()
+            if hasattr(win, "daily_tab") and hasattr(win.daily_tab, "on_sop_data_changed"):
+                win.daily_tab.on_sop_data_changed()
+            if hasattr(win, "sop_tab") and hasattr(win.sop_tab, "on_sop_profiles_updated"):
+                win.sop_tab.on_sop_profiles_updated()
+            if hasattr(win, "_on_sop_data_changed"):
+                win._on_sop_data_changed()
+        except Exception:
+            pass
+
+    def _open_net_sop_policy_manager(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Manage Net/SOP Policies")
+        dlg.setModal(True)
+        dlg.resize(980, 520)
+        layout = QVBoxLayout(dlg)
+        hint = QLabel("Review or adjust saved Net/SOP conflict policies. Stale rows no longer match active conflicts.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        table = QTableWidget(dlg)
+        table.setColumnCount(7)
+        table.setHorizontalHeaderLabels(
+            [
+                "Start (UTC)",
+                "End (UTC)",
+                "SOP",
+                "Net",
+                "Policy",
+                "State",
+                "Updated",
+            ]
+        )
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        hv = table.horizontalHeader()
+        hv.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hv.setSectionResizeMode(2, QHeaderView.Stretch)
+        hv.setSectionResizeMode(3, QHeaderView.Stretch)
+        layout.addWidget(table)
+
+        controls = QHBoxLayout()
+        refresh_btn = QPushButton("Refresh")
+        set_sop_btn = QPushButton("Set Selected: SOP Priority")
+        set_net_btn = QPushButton("Set Selected: Net Priority")
+        clear_sel_btn = QPushButton("Clear Selected")
+        clear_all_btn = QPushButton("Clear All")
+        close_btn = QPushButton("Close")
+        controls.addWidget(refresh_btn)
+        controls.addWidget(set_sop_btn)
+        controls.addWidget(set_net_btn)
+        controls.addWidget(clear_sel_btn)
+        controls.addWidget(clear_all_btn)
+        controls.addStretch()
+        controls.addWidget(close_btn)
+        layout.addLayout(controls)
+
+        theme = resolve_theme(self.settings)
+        refresh_btn.setStyleSheet(button_style("muted", theme))
+        set_sop_btn.setStyleSheet(button_style("eligible_info", theme))
+        set_net_btn.setStyleSheet(button_style("eligible_primary", theme))
+        clear_sel_btn.setStyleSheet(button_style("eligible_danger", theme))
+        clear_all_btn.setStyleSheet(button_style("danger", theme))
+        close_btn.setStyleSheet(button_style("muted", theme))
+
+        policy_rows: List[Dict[str, Any]] = []
+
+        def _selected_policy_ids() -> List[int]:
+            indexes = {idx.row() for idx in table.selectionModel().selectedRows()} if table.selectionModel() else set()
+            ids: List[int] = []
+            for row_idx in sorted(indexes):
+                item = table.item(row_idx, 0)
+                if item is None:
+                    continue
+                try:
+                    pid = int(item.data(Qt.UserRole) or 0)
+                except Exception:
+                    pid = 0
+                if pid > 0:
+                    ids.append(pid)
+            return ids
+
+        def _refresh_state() -> None:
+            has_rows = bool(policy_rows)
+            selected_ids = _selected_policy_ids()
+            has_selected = bool(selected_ids)
+            set_sop_btn.setEnabled(has_selected)
+            set_net_btn.setEnabled(has_selected)
+            clear_sel_btn.setEnabled(has_selected)
+            clear_all_btn.setEnabled(has_rows)
+            set_sop_btn.setStyleSheet(button_style("eligible_info" if has_selected else "muted", theme))
+            set_net_btn.setStyleSheet(button_style("eligible_primary" if has_selected else "muted", theme))
+            clear_sel_btn.setStyleSheet(button_style("eligible_danger" if has_selected else "muted", theme))
+            clear_all_btn.setStyleSheet(button_style("danger" if has_rows else "muted", theme))
+
+        def _load_rows() -> None:
+            nonlocal policy_rows
+            try:
+                policy_rows = self._sop_manager.list_net_sop_policy_review_rows(horizon_days=7)
+            except Exception as e:
+                policy_rows = []
+                log.debug("Net Schedule: failed loading policy review rows: %s", e)
+            table.setSortingEnabled(False)
+            table.setRowCount(0)
+            for row in policy_rows:
+                r = table.rowCount()
+                table.insertRow(r)
+                policy_val = str(row.get("policy") or "NET_PRIORITY").strip().upper()
+                policy_txt = "SOP Priority" if policy_val == "SOP_PRIORITY" else "Net Priority"
+                state_txt = str(row.get("state") or "Current").strip()
+                values = [
+                    str(row.get("window_start_utc") or ""),
+                    str(row.get("window_end_utc") or ""),
+                    str(row.get("sop_summary") or ""),
+                    str(row.get("net_summary") or ""),
+                    policy_txt,
+                    state_txt,
+                    str(row.get("updated_utc") or ""),
+                ]
+                for c, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    if c == 0:
+                        item.setData(Qt.UserRole, int(row.get("id") or 0))
+                    if c == 5 and state_txt.upper() == "STALE":
+                        item.setForeground(QColor(theme.get("text_muted", "#888888")))
+                    table.setItem(r, c, item)
+            table.setSortingEnabled(True)
+            table.resizeColumnsToContents()
+            _refresh_state()
+
+        def _apply_policy(policy: str) -> None:
+            ids = _selected_policy_ids()
+            if not ids:
+                return
+            changed = 0
+            for pid in ids:
+                try:
+                    if self._sop_manager.update_net_sop_conflict_policy(pid, policy):
+                        changed += 1
+                except Exception:
+                    continue
+            if changed > 0:
+                self._notify_sop_data_changed()
+                self._schedule_net_sop_conflict_refresh(force=True)
+            _load_rows()
+
+        def _clear_selected() -> None:
+            ids = _selected_policy_ids()
+            if not ids:
+                return
+            confirm = QMessageBox.question(
+                dlg,
+                "Clear Selected Policies",
+                f"Clear {len(ids)} selected Net/SOP policy row(s)?",
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            cleared = int(self._sop_manager.clear_net_sop_conflict_policies(ids) or 0)
+            if cleared > 0:
+                self._notify_sop_data_changed()
+                self._schedule_net_sop_conflict_refresh(force=True)
+            _load_rows()
+
+        def _clear_all() -> None:
+            if not policy_rows:
+                return
+            confirm = QMessageBox.question(
+                dlg,
+                "Clear All Policies",
+                "Clear all active Net/SOP conflict policy rows?",
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            cleared = int(self._sop_manager.clear_net_sop_conflict_policies(None) or 0)
+            if cleared > 0:
+                self._notify_sop_data_changed()
+                self._schedule_net_sop_conflict_refresh(force=True)
+            _load_rows()
+
+        refresh_btn.clicked.connect(_load_rows)
+        set_sop_btn.clicked.connect(lambda: _apply_policy("SOP_PRIORITY"))
+        set_net_btn.clicked.connect(lambda: _apply_policy("NET_PRIORITY"))
+        clear_sel_btn.clicked.connect(_clear_selected)
+        clear_all_btn.clicked.connect(_clear_all)
+        close_btn.clicked.connect(dlg.accept)
+        table.itemSelectionChanged.connect(_refresh_state)
+
+        _load_rows()
+        dlg.exec()
 
     def _export_schedule(self) -> None:
         """
@@ -3416,10 +4019,16 @@ class NetScheduleTab(QWidget):
         )
         if confirm != QMessageBox.Yes:
             return
+        prospective_rows = [self._strip_internal_row(r) for r in active_rows]
+        prospective_rows.extend(self._strip_internal_row(r) for r in candidates)
+        if not self._enforce_net_priority_for_conflicts(prospective_rows, operation_label="add"):
+            self._schedule_net_sop_conflict_refresh(force=True)
+            return
         for row in candidates:
             self._add_row(self._to_view_row(row))
         self._raw_rows = self._collect_rows()
         self._update_delete_button_state()
+        self._schedule_net_sop_conflict_refresh(force=True)
         QMessageBox.information(self, "Net Resources", f"Added {len(candidates)} row(s) from {origin}.")
 
     def _add_resources_default(self) -> None:
@@ -3493,6 +4102,153 @@ class NetScheduleTab(QWidget):
             idx += 1
         return mapped
 
+    def _load_resource_row_by_id(self, conn: sqlite3.Connection, resource_id: int) -> Optional[Dict[str, Any]]:
+        rid = int(resource_id or 0)
+        if rid <= 0:
+            return None
+        row = conn.execute(
+            """
+            SELECT
+                id, resource_set, source_type, day_utc, recurrence, biweekly_offset_weeks, month_weeks,
+                group_name, band, mode, frequency, start_utc, end_utc, early_checkin,
+                primary_js8call_group, comment, net_name, fldigi_mode, fldigi_offset
+            FROM net_resources
+            WHERE id = ?
+            """,
+            (rid,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": int(row[0] or 0),
+            "resource_set": str(row[1] or "").strip(),
+            "source_type": str(row[2] or "").strip().lower(),
+            "day_utc": str(row[3] or "").strip(),
+            "recurrence": str(row[4] or "Weekly").strip(),
+            "biweekly_offset_weeks": int(row[5] or 0),
+            "month_weeks": str(row[6] or "").strip(),
+            "group_name": str(row[7] or "").strip(),
+            "band": str(row[8] or "").strip(),
+            "mode": str(row[9] or "").strip(),
+            "frequency": str(row[10] or "").strip(),
+            "start_utc": str(row[11] or "").strip(),
+            "end_utc": str(row[12] or "").strip(),
+            "early_checkin": int(row[13] or 0),
+            "primary_js8call_group": str(row[14] or "").strip(),
+            "comment": str(row[15] or "").strip(),
+            "net_name": str(row[16] or "").strip(),
+            "fldigi_mode": str(row[17] or "").strip(),
+            "fldigi_offset": str(row[18] or "").strip(),
+        }
+
+    def _find_builtin_resource_id_for_schedule_row(
+        self,
+        conn: sqlite3.Connection,
+        row: Dict[str, Any],
+    ) -> Optional[int]:
+        normalized = self._strip_internal_row(row)
+        recurrence = str(normalized.get("recurrence") or "Weekly").strip()
+        if recurrence == "Monthly":
+            recurrence = "Periodic"
+        if recurrence == "Bi-Weekly":
+            recurrence = "Weekly"
+        if recurrence not in ("Weekly", "Daily", "Periodic"):
+            recurrence = "Weekly"
+        month_weeks = self._format_month_weeks(str(normalized.get("month_weeks") or ""))
+        if recurrence != "Periodic":
+            month_weeks = ""
+        freq_key = self._normalize_freq_key(normalized.get("frequency"))
+        try:
+            freq_num = float(freq_key)
+        except Exception:
+            freq_num = None
+        found = conn.execute(
+            """
+            SELECT id
+            FROM net_resources
+            WHERE LOWER(TRIM(COALESCE(source_type,'')))='builtin'
+              AND TRIM(day_utc)=TRIM(?)
+              AND TRIM(COALESCE(recurrence,''))=TRIM(?)
+              AND TRIM(COALESCE(month_weeks,''))=TRIM(?)
+              AND UPPER(TRIM(COALESCE(group_name,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(band,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(mode,'')))=UPPER(TRIM(?))
+              AND TRIM(start_utc)=TRIM(?)
+              AND TRIM(end_utc)=TRIM(?)
+              AND UPPER(TRIM(COALESCE(net_name,'')))=UPPER(TRIM(?))
+              AND UPPER(TRIM(COALESCE(fldigi_mode,'')))=UPPER(TRIM(?))
+              AND (
+                    (CAST(? AS REAL) IS NOT NULL AND ABS(CAST(COALESCE(frequency,'0') AS REAL) - CAST(? AS REAL)) < 0.000001)
+                    OR TRIM(COALESCE(frequency,''))=TRIM(?)
+                  )
+            LIMIT 1
+            """,
+            (
+                self._normalize_day(str(normalized.get("day_utc") or "")),
+                recurrence,
+                month_weeks,
+                str(normalized.get("group_name") or "").strip(),
+                str(normalized.get("band") or "").strip(),
+                str(normalized.get("mode") or "").strip(),
+                self._normalize_hhmm(str(normalized.get("start_utc") or "")),
+                self._normalize_hhmm(str(normalized.get("end_utc") or "")),
+                str(normalized.get("net_name") or "").strip(),
+                str(normalized.get("fldigi_mode") or "").strip(),
+                freq_num if freq_num is not None else None,
+                freq_num if freq_num is not None else None,
+                freq_key,
+            ),
+        ).fetchone()
+        if not found:
+            return None
+        try:
+            rid = int(found[0] or 0)
+        except Exception:
+            rid = 0
+        return rid if rid > 0 else None
+
+    def _schedule_row_matches_resource_row(self, row: Dict[str, Any], resource_row: Dict[str, Any]) -> bool:
+        schedule = self._strip_internal_row(row)
+        recurrence = str(schedule.get("recurrence") or "Weekly").strip()
+        if recurrence == "Monthly":
+            recurrence = "Periodic"
+        if recurrence == "Bi-Weekly":
+            recurrence = "Weekly"
+        if recurrence not in ("Weekly", "Daily", "Periodic"):
+            recurrence = "Weekly"
+        month_weeks = self._format_month_weeks(str(schedule.get("month_weeks") or ""))
+        if recurrence != "Periodic":
+            month_weeks = ""
+        resource_recurrence = str(resource_row.get("recurrence") or "Weekly").strip()
+        if resource_recurrence == "Monthly":
+            resource_recurrence = "Periodic"
+        if resource_recurrence == "Bi-Weekly":
+            resource_recurrence = "Weekly"
+        if resource_recurrence not in ("Weekly", "Daily", "Periodic"):
+            resource_recurrence = "Weekly"
+        resource_month_weeks = self._format_month_weeks(str(resource_row.get("month_weeks") or ""))
+        if resource_recurrence != "Periodic":
+            resource_month_weeks = ""
+        # Compare only fields represented in Net Schedule UI/edit flow.
+        # Fields like primary_js8call_group/comment/coverage are not present on the
+        # schedule grid and should not force built-in rows into Manual source.
+        return (
+            self._normalize_day(str(schedule.get("day_utc") or "")) == self._normalize_day(str(resource_row.get("day_utc") or ""))
+            and recurrence == resource_recurrence
+            and month_weeks == resource_month_weeks
+            and int(schedule.get("biweekly_offset_weeks") or 0) == int(resource_row.get("biweekly_offset_weeks") or 0)
+            and str(schedule.get("group_name") or "").strip().upper() == str(resource_row.get("group_name") or "").strip().upper()
+            and str(schedule.get("band") or "").strip().upper() == str(resource_row.get("band") or "").strip().upper()
+            and str(schedule.get("mode") or "").strip().upper() == str(resource_row.get("mode") or "").strip().upper()
+            and self._normalize_freq_key(schedule.get("frequency")) == self._normalize_freq_key(resource_row.get("frequency"))
+            and self._normalize_hhmm(str(schedule.get("start_utc") or "")) == self._normalize_hhmm(str(resource_row.get("start_utc") or ""))
+            and self._normalize_hhmm(str(schedule.get("end_utc") or "")) == self._normalize_hhmm(str(resource_row.get("end_utc") or ""))
+            and int(schedule.get("early_checkin") or 0) == int(resource_row.get("early_checkin") or 0)
+            and str(schedule.get("net_name") or "").strip().upper() == str(resource_row.get("net_name") or "").strip().upper()
+            and str(schedule.get("fldigi_mode") or "").strip().upper() == str(resource_row.get("fldigi_mode") or "").strip().upper()
+            and str(schedule.get("fldigi_offset") or "").strip() == str(resource_row.get("fldigi_offset") or "").strip()
+        )
+
     def _move_selected_schedule_rows_to_resources(self) -> None:
         selected = self._checked_schedule_row_indexes()
         if not selected:
@@ -3519,6 +4275,7 @@ class NetScheduleTab(QWidget):
                 sw = self.table.cellWidget(r, self.COL_SELECT)
                 existing_id = None
                 existing_set = target_set
+                existing_source_type = ""
                 if isinstance(sw, QWidget):
                     rid = sw.property("resource_id")
                     if rid not in (None, ""):
@@ -3529,6 +4286,18 @@ class NetScheduleTab(QWidget):
                     rset = sw.property("resource_set")
                     if rset not in (None, ""):
                         existing_set = str(rset)
+                if not existing_id:
+                    existing_id = self._find_builtin_resource_id_for_schedule_row(conn, row)
+                existing_resource = self._load_resource_row_by_id(conn, int(existing_id or 0)) if existing_id else None
+                if existing_resource:
+                    existing_source_type = str(existing_resource.get("source_type") or "").strip().lower()
+                    if existing_set in ("", "All"):
+                        existing_set = str(existing_resource.get("resource_set") or "").strip() or target_set
+                if existing_resource and existing_source_type == "builtin":
+                    if self._schedule_row_matches_resource_row(row, existing_resource):
+                        # Unchanged built-in row: treat move as schedule delete only.
+                        moved += 1
+                        continue
                 self._upsert_resource_row(
                     conn,
                     row,
