@@ -489,6 +489,21 @@ def _run_gpg(
     cmd.extend(["--batch", "--yes", "--no-tty"])
     cmd.extend([str(a) for a in args])
     log.debug("GPG: run %s", " ".join(cmd))
+    run_kwargs = {}
+    if os.name == "nt":
+        try:
+            creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+            if creationflags:
+                run_kwargs["creationflags"] = creationflags
+        except Exception:
+            pass
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = 0
+            run_kwargs["startupinfo"] = startupinfo
+        except Exception:
+            pass
     return subprocess.run(
         cmd,
         input=input_text,
@@ -498,4 +513,5 @@ def _run_gpg(
         errors="replace",
         check=False,
         timeout=max(1.0, float(timeout_sec)),
+        **run_kwargs,
     )

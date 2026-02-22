@@ -6,16 +6,16 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 
 - ControlFreq operations dashboard with Frequency Control, Schedule Outlook, Message Summary, propagation forecast, and View presets/chips for card layout control
 - Offline propagation modeling (Modeled/Actual/Blended) with lower-48 targeting (Region/State/Operator) and historical-outcome blending
-- SitRep status pipeline from JS8Spotter forms (`F!104`, `F!301`, `F!304`) with latest-signal-wins logic across ControlFreq, Operators, and Map
+- SitRep status pipeline from CommStatOne and JS8Spotter forms (`F!104`, `F!301`, `F!304`) with latest-signal-wins logic across ControlFreq, Operators, and Map
 - Map intelligence with link filters, propagation overlay, SitRep-only mode, and schedule-risk/QSY awareness
 - UTC-native HF + Net scheduling with controlled enforcement, busy deferral, and NET override behavior
 - SOP Builder v2 with `HF SOP` and `Local Comms SOP` categories, conflict-aware save-time resolution, and Daily interval support
 - Net control operations for both FLDigi and JS8Call (start/track/save/end workflows)
 - Settings redesign: `Fast Light Settings`, `VarAC Settings`, `Launch Control`, and `Logging & Diagnostics`
 - Local operations expansion: `Local Operators` roster tab and `NCS-Local` net control tab
-- Net resources catalog workflow: import JSON into managed Net Resources and promote selected entries into active Net Schedule
+- Net resources catalog workflow via SitRepNet.com or custom JSON: import JSON into managed Net Resources and promote selected entries into active Net Schedule
 - Launch orchestration with configurable start order, per-app startup toggles, global startup mode, and continue-on-failure handling
-- Messages center for JS8/FLMSG/FLAMP/VarAC plus VarAC BBS workflows (view/archive/delete, aging visibility, auto-archive support)
+- Messages center for JS8/FLMSG/FLAMP/VarAC plus VarAC BBS workflows (view/archive/delete, aging visibility, auto-archive support), including GPG/PGP and Hash signature verification
 - Operator History with CSV import/export, group/role standardization, trust tools, sorting/filtering, and SitRep chip updates
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
@@ -28,6 +28,7 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Improved map first-open stability and reduced first-use window flash behavior
 - Added local-net and local-operator data model updates including SitRep and notes workflows
 - Continued performance and reliability hardening across tab activation and render paths
+- Added GPG/PGP and Hash signature verification to messages center
 
 ## Quick Start
 

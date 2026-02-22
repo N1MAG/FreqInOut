@@ -1543,10 +1543,18 @@ class MessageActionDelegate(QStyledItemDelegate):
         link_color = option.palette.color(QPalette.Link)
         painter.setPen(link_color)
         fm = option.fontMetrics
+        parent_widget = self.parent()
         bbs_row = self._is_bbs_file_row(row)
         bbs_copy_row = bool(
-            hasattr(self.parent(), "_can_copy_row_to_varac_bbs")
-            and self.parent()._can_copy_row_to_varac_bbs(row)
+            hasattr(parent_widget, "_can_copy_row_to_varac_bbs")
+            and parent_widget._can_copy_row_to_varac_bbs(row)
+        )
+        bbs_copy_enabled = bool(
+            bbs_copy_row
+            and (
+                not hasattr(parent_widget, "_is_row_bbs_copy_action_enabled")
+                or parent_widget._is_row_bbs_copy_action_enabled(row)
+            )
         )
         view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(rect, fm, bbs_row, bbs_copy_row)
         painter.drawText(view_rect, Qt.AlignVCenter | Qt.AlignLeft, "View")
@@ -1572,7 +1580,10 @@ class MessageActionDelegate(QStyledItemDelegate):
             painter.drawText(aux_rect, Qt.AlignVCenter | Qt.AlignLeft, "\u2691")
 
             if bbs_copy_row:
-                painter.setPen(link_color)
+                if bbs_copy_enabled:
+                    painter.setPen(link_color)
+                else:
+                    painter.setPen(option.palette.color(QPalette.Disabled, QPalette.Text))
                 painter.setFont(option.font)
                 painter.drawText(bbs_rect, Qt.AlignVCenter | Qt.AlignLeft, "+BBS")
 
@@ -1594,17 +1605,27 @@ class MessageActionDelegate(QStyledItemDelegate):
         rect = option.rect
         pos = event.position().toPoint()
         fm = option.fontMetrics
+        parent_widget = self.parent()
         bbs_row = self._is_bbs_file_row(row)
         bbs_copy_row = bool(
-            hasattr(self.parent(), "_can_copy_row_to_varac_bbs")
-            and self.parent()._can_copy_row_to_varac_bbs(row)
+            hasattr(parent_widget, "_can_copy_row_to_varac_bbs")
+            and parent_widget._can_copy_row_to_varac_bbs(row)
+        )
+        bbs_copy_enabled = bool(
+            bbs_copy_row
+            and (
+                not hasattr(parent_widget, "_is_row_bbs_copy_action_enabled")
+                or parent_widget._is_row_bbs_copy_action_enabled(row)
+            )
         )
         _view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(rect, fm, bbs_row, bbs_copy_row)
         if isinstance(row.payload, FileRecord):
             if bbs_row and aux_rect.contains(pos):
                 self.parent()._archive_file_record(row.payload)
             elif bbs_copy_row and bbs_rect.contains(pos):
-                self.parent()._copy_row_to_varac_bbs(row)
+                if bbs_copy_enabled:
+                    self.parent()._copy_row_to_varac_bbs(row)
+                return True
             elif not bbs_row and aux_rect.contains(pos):
                 self.parent()._cycle_flag_state(row.payload)
             elif del_rect.contains(pos):
@@ -1844,6 +1865,8 @@ class MessageViewerTab(QWidget):
         self._signature_verify_generation: int = 0
         self._signature_verify_pending: bool = False
         self._signature_verify_pending_records: List[FileRecord] = []
+        self._signature_verify_deferred_until_active: bool = False
+        self._bbs_copied_session_keys: set[tuple[str, float, int]] = set()
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -3320,7 +3343,12 @@ class MessageViewerTab(QWidget):
         self._refresh_js8_messages(rebuild=False)
         self._refresh_varac_messages(force=True, rebuild=False)
         self._populate_messages_table(force=True)
-        QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
+        if self._has_active_view:
+            QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
+        else:
+            # Hidden startup lazy-prewarm should not launch GPG verification; defer
+            # until the Messages tab is first shown.
+            self._signature_verify_deferred_until_active = True
         self._refresh_pending_backlog()
         self._last_activation_refresh_ts = time.time()
 
@@ -3406,6 +3434,9 @@ class MessageViewerTab(QWidget):
             self._setup_timer()
             self._setup_js8_timer()
             self._setup_pending_timer()
+            if self._signature_verify_deferred_until_active:
+                self._signature_verify_deferred_until_active = False
+                QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
             return
         for timer in (self._timer, self._js8_timer, self._pending_timer):
             if timer:
@@ -6589,8 +6620,47 @@ class MessageViewerTab(QWidget):
         payload = getattr(row, "payload", None)
         return isinstance(payload, FileRecord)
 
+    @staticmethod
+    def _bbs_copy_session_key_for_record(rec: FileRecord | None) -> tuple[str, float, int] | None:
+        if not isinstance(rec, FileRecord):
+            return None
+        try:
+            path_txt = str(rec.path.resolve())
+        except Exception:
+            path_txt = str(rec.path)
+        path_key = os.path.normcase(os.path.normpath(path_txt))
+        try:
+            mtime_key = round(float(rec.mtime or 0.0), 6)
+        except Exception:
+            mtime_key = 0.0
+        try:
+            size_key = int(rec.size or 0)
+        except Exception:
+            size_key = 0
+        return (path_key, mtime_key, size_key)
+
+    def _bbs_copy_session_key_for_row(self, row: UnifiedMessage | None) -> tuple[str, float, int] | None:
+        payload = getattr(row, "payload", None) if row is not None else None
+        return self._bbs_copy_session_key_for_record(payload if isinstance(payload, FileRecord) else None)
+
+    def _is_row_bbs_copy_action_enabled(self, row: UnifiedMessage | None) -> bool:
+        if not self._can_copy_row_to_varac_bbs(row):
+            return False
+        key = self._bbs_copy_session_key_for_row(row)
+        if key is None:
+            return True
+        return key not in self._bbs_copied_session_keys
+
+    def _mark_row_copied_to_varac_bbs_session(self, row: UnifiedMessage | None) -> None:
+        key = self._bbs_copy_session_key_for_row(row)
+        if key is None:
+            return
+        self._bbs_copied_session_keys.add(key)
+
     def _copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> None:
         if row is None or not self._can_copy_row_to_varac_bbs(row):
+            return
+        if not self._is_row_bbs_copy_action_enabled(row):
             return
         payload = getattr(row, "payload", None)
         if not isinstance(payload, FileRecord):
@@ -6629,6 +6699,7 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Copy to VarAC BBS", f"Copy failed:\n{e}")
             return
+        self._mark_row_copied_to_varac_bbs_session(row)
         QMessageBox.information(
             self,
             "Copy to VarAC BBS",

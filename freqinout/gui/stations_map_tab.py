@@ -1222,11 +1222,9 @@ class StationsMapTab(QWidget):
             loading_layout.addWidget(self._map_loading_label)
             loading_layout.addStretch()
             self._map_stack.addWidget(loading_widget)
-            # Create the web view with a parent to avoid transient top-level native
-            # window behavior during first map-tab construction.
-            self.web = QWebEngineView(self._map_stack)
-            self.web.loadFinished.connect(self._on_map_load_finished)
-            self._map_stack.addWidget(self.web)
+            # Defer WebEngine view construction until first Map activation so
+            # Windows startup does not pay the visible helper-window cost.
+            self.web = None
             self._map_stack.setCurrentIndex(0)
             map_layout.addWidget(self._map_stack)
         else:
@@ -4228,6 +4226,38 @@ class StationsMapTab(QWidget):
             log.error("StationsMap: failed loading map html in webview: %s", e)
             return False
 
+    def _ensure_web_view(self) -> bool:
+        """
+        Lazily create the WebEngine view so startup avoids eager WebEngine native
+        view/process initialization. The tab shell and loading placeholder are
+        created during __init__.
+        """
+        if self.web is not None:
+            return True
+        if self._map_stack is None:
+            return False
+        if not _ensure_webengine_imported() or QWebEngineView is None:
+            return False
+        try:
+            web = QWebEngineView(self._map_stack)
+            web.loadFinished.connect(self._on_map_load_finished)
+            self.web = web
+            self._map_stack.addWidget(web)
+            return True
+        except Exception as e:
+            log.error("StationsMap: failed creating WebEngine view lazily: %s", e)
+            self.web = None
+            if self._map_loading_label is not None:
+                self._map_loading_label.setText("Map preview unavailable.")
+            return False
+
+    def prepare_webview_for_first_show(self) -> bool:
+        """
+        Create the map webview while the tab is still hidden (after WebEngine
+        process prewarm) so the first visible Map switch is less disruptive.
+        """
+        return self._ensure_web_view()
+
     # ------------- Map rendering ------------- #
     def _render_map(self, preserve_view: bool = True):
         if not self._map_visible:
@@ -4655,6 +4685,7 @@ class StationsMapTab(QWidget):
         if not self._map_visible or self._is_shutting_down:
             return
         self._ensure_initial_data_loaded()
+        self._ensure_web_view()
         if not self._map_initialized:
             # First visible render: build/load the map HTML before waiting on loadFinished.
             # Clear dirty before first render to avoid an immediate duplicate render in

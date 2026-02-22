@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
+import sys
 
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -363,17 +364,23 @@ class MainWindow(QMainWindow):
         self._lazy_prewarm_index = 0
         self._webengine_warmup_widget = None
         self._webengine_warmup_done = False
+        self._pending_map_switch_index: int | None = None
 
-        # Kick WebEngine warmup during init so first Map activation is not the
-        # first WebEngine surface/process startup path seen by users.
-        self._prewarm_webengine()
+        self._startup_webengine_prewarm_enabled = self._should_prewarm_webengine_at_startup()
+        if self._startup_webengine_prewarm_enabled:
+            # Kick WebEngine warmup during init so first Map activation is not the
+            # first WebEngine surface/process startup path seen by users.
+            self._prewarm_webengine()
+        else:
+            log.info("MainWindow: startup WebEngine prewarm disabled (platform default/settings)")
 
         # Default selection
         if self.nav_buttons:
             self.nav_buttons[0].setChecked(True)
             first_screen_index = self.button_group.id(self.nav_buttons[0])
             self._set_screen(first_screen_index if first_screen_index >= 0 else 0)
-        QTimer.singleShot(150, self._prewarm_webengine)
+        if self._startup_webengine_prewarm_enabled:
+            QTimer.singleShot(150, self._prewarm_webengine)
         QTimer.singleShot(600, self._start_lazy_prewarm)
 
         # Optional: apply callsign to tab captions if already configured
@@ -1859,10 +1866,94 @@ class MainWindow(QMainWindow):
             return
         self._prewarm_next_lazy_tab()
 
+    @staticmethod
+    def _truthy_flag(value: object, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        try:
+            raw = str(value).strip().lower()
+        except Exception:
+            return default
+        if raw == "":
+            return default
+        return raw in {"1", "true", "yes", "on"}
+
+    def _should_prewarm_webengine_at_startup(self) -> bool:
+        """
+        Prefer stable first-Map activation by warming WebEngine during startup.
+        Hidden settings override remains available for troubleshooting.
+        """
+        default_enabled = True
+        try:
+            raw = self.settings.get("map_webengine_startup_prewarm", None)
+        except Exception:
+            raw = None
+        return self._truthy_flag(raw, default_enabled)
+
+    def _restore_nav_selection_to_active_tab(self) -> None:
+        try:
+            idx = self._active_tab_index
+            if idx is None:
+                return
+            nav_idx = self._nav_screen_index_map.get(idx)
+            if nav_idx is None or not (0 <= nav_idx < len(self.nav_buttons)):
+                return
+            btn = self.nav_buttons[nav_idx]
+            if not btn.isChecked():
+                btn.setChecked(True)
+        except Exception:
+            pass
+
+    def _queue_map_switch_after_webengine_warmup(self, index: int) -> bool:
+        """
+        On Windows, keep the current tab visible for the one-time WebEngine
+        warmup so the first Map navigation does not visibly coincide with the
+        helper-process startup path.
+        """
+        if not sys.platform.startswith("win"):
+            return False
+        if self._shutting_down or self._webengine_warmup_done:
+            return False
+        self._pending_map_switch_index = index
+        # Map button click may check itself before we actually switch pages.
+        self._restore_nav_selection_to_active_tab()
+        if self._webengine_warmup_widget is None:
+            self._prewarm_webengine()
+            if self._webengine_warmup_done:
+                self._pending_map_switch_index = None
+                return False
+            if self._webengine_warmup_widget is None:
+                # Warmup unavailable (e.g., Qt WebEngine missing): proceed directly.
+                self._pending_map_switch_index = None
+                return False
+            log.info("MainWindow: deferring first Map switch until WebEngine warmup completes")
+        return True
+
+    def _complete_pending_map_switch_after_webengine_warmup(self) -> None:
+        if self._shutting_down:
+            self._pending_map_switch_index = None
+            return
+        if not self._webengine_warmup_done:
+            return
+        idx = self._pending_map_switch_index
+        if idx is None:
+            return
+        self._pending_map_switch_index = None
+        try:
+            if hasattr(self, "stations_map_tab") and self.stations_map_tab is not None:
+                if hasattr(self.stations_map_tab, "prepare_webview_for_first_show"):
+                    self.stations_map_tab.prepare_webview_for_first_show()
+        except Exception as e:
+            log.debug("MainWindow: hidden Map webview precreate failed: %s", e)
+        QTimer.singleShot(0, lambda i=idx: self._set_screen(i))
+
     def _prewarm_webengine(self) -> None:
         """
-        Warm up Qt WebEngine process/components early so first Map click does not
-        incur a disruptive one-time native window/process startup flash.
+        Warm up Qt WebEngine process/components and native view startup early so
+        first Map activation avoids the one-time close/reopen-style visual glitch
+        on some Windows systems.
         """
         if self._shutting_down:
             return
@@ -1890,8 +1981,12 @@ class MainWindow(QMainWindow):
                     if self._webengine_warmup_widget is web:
                         self._webengine_warmup_widget = None
                     self._webengine_warmup_done = True
-                    web.hide()
+                    try:
+                        web.hide()
+                    except Exception:
+                        pass
                     web.deleteLater()
+                    QTimer.singleShot(0, self._complete_pending_map_switch_after_webengine_warmup)
                 except Exception:
                     pass
 
@@ -1905,7 +2000,8 @@ class MainWindow(QMainWindow):
                 pass
             web.setUrl(QUrl("about:blank"))
             QTimer.singleShot(3000, _cleanup)
-        except Exception:
+        except Exception as e:
+            log.debug("MainWindow: WebEngine warmup (hidden-view) skipped: %s", e)
             self._webengine_warmup_widget = None
 
     def _prewarm_next_lazy_tab(self) -> None:
@@ -2582,6 +2678,11 @@ class MainWindow(QMainWindow):
             min_ms=5.0,
         ):
             if 0 <= index < self.stack.count():
+                label = self._screens[index][0]
+                if label != "Map" and self._pending_map_switch_index is not None:
+                    self._pending_map_switch_index = None
+                if label == "Map" and self._queue_map_switch_after_webengine_warmup(index):
+                    return
                 try:
                     nav_idx = self._nav_screen_index_map.get(index)
                     if nav_idx is not None and 0 <= nav_idx < len(self.nav_buttons):
@@ -2599,7 +2700,6 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-                label = self._screens[index][0]
                 self._ensure_lazy_tab_loaded(label, index)
                 self.stack.setCurrentIndex(index)
                 self._active_tab_index = index
