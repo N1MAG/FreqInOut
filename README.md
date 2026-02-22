@@ -4,11 +4,12 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 
 ## Highlights
 
-- ControlFreq operations dashboard with Frequency Control, Schedule Outlook, Message Summary, Focus Mode, and propagation forecast
+- ControlFreq operations dashboard with Frequency Control, Schedule Outlook, Message Summary, propagation forecast, and View presets/chips for card layout control
 - Offline propagation modeling (Modeled/Actual/Blended) with lower-48 targeting (Region/State/Operator) and historical-outcome blending
 - SitRep status pipeline from JS8Spotter forms (`F!104`, `F!301`, `F!304`) with latest-signal-wins logic across ControlFreq, Operators, and Map
 - Map intelligence with link filters, propagation overlay, SitRep-only mode, and schedule-risk/QSY awareness
 - UTC-native HF + Net scheduling with controlled enforcement, busy deferral, and NET override behavior
+- SOP Builder v2 with `HF SOP` and `Local Comms SOP` categories, conflict-aware save-time resolution, and Daily interval support
 - Net control operations for both FLDigi and JS8Call (start/track/save/end workflows)
 - Settings redesign: `Fast Light Settings`, `VarAC Settings`, `Launch Control`, and `Logging & Diagnostics`
 - Local operations expansion: `Local Operators` roster tab and `NCS-Local` net control tab
@@ -128,6 +129,7 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 - Set radio software paths and JS8Call DIRECTED.TXT in the Settings tab.
 - Populate Operator History before expecting the Map tab to show full results.
 - JS8 live ingest is used when available; log parsing is used as a fallback.
+- Set your operator Grid (Grid 6 recommended) in Settings to enable full propagation forecast output in ControlFreq.
 
 ## Documentation
 
@@ -145,7 +147,7 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 ## Maintainer Tools
 
 - Preflight release checks: `python tools/release_preflight.py`
-- Optional release helper: `python release_builder.py --build-exe`
+- Optional release helper (run from active venv): `python release_builder.py --build-exe`
 
 ## License
 
