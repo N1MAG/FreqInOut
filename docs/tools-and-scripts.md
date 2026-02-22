@@ -158,6 +158,22 @@ python -m pip install pyinstaller
 python build_executable.py
 ```
 
+### GUI smoke sweep
+
+- `tools/gui_smoke_tabs.py`: offscreen GUI smoke runner that activates all `MainWindow` tabs and performs lightweight subsection control sweeps (combos, checkboxes, checkable buttons, nested stacked widgets).
+
+Safe starter commands:
+
+```bash
+python tools/gui_smoke_tabs.py
+python tools/gui_smoke_tabs.py --json-out .benchmarks/gui-smoke-latest.json --keep-config
+```
+
+Notes:
+
+- Runs with isolated config via `FREQINOUT_CONFIG_DIR` by default (`.benchmarks/gui-smoke/<timestamp>`).
+- Exits non-zero if any tab smoke step fails.
+
 ## Common workflows
 
 ### Check DB health without modifying data

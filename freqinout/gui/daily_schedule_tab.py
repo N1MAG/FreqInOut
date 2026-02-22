@@ -35,6 +35,7 @@ from PySide6.QtGui import QAction, QColor
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.logger import log
+from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.sop_manager import SOPManager
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.theme import resolve_theme, button_style
@@ -64,6 +65,7 @@ DAY_OPTIONS = [
     "Saturday",
 ]
 DAY_CANON = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+DAY_INDEX = {name: idx for idx, name in enumerate(DAY_CANON)}
 
 BAND_OPTIONS = [
     "20M",
@@ -1421,7 +1423,11 @@ class DailyScheduleTab(QWidget):
         self.resources_table.setSortingEnabled(True)
         self._update_resource_action_state()
 
-    def _update_resource_action_state(self) -> None:
+    def _update_resource_action_state(
+        self,
+        *,
+        active_conflicts_override: Optional[List[Tuple[int, int, str]]] = None,
+    ) -> None:
         theme = resolve_theme(self.settings)
         selected_rows = self._selected_resource_rows()
         has_selected = bool(selected_rows)
@@ -1430,7 +1436,10 @@ class DailyScheduleTab(QWidget):
         conflict_scope = selected_view_rows if selected_view_rows else self._resource_view_rows
         has_conflicts = any(bool(r.get("_has_conflict")) for r in conflict_scope)
         has_resource_conflicts = any(bool(r.get("_has_conflict")) for r in self._resource_view_rows)
-        has_active_conflicts = bool(self._collect_active_time_conflict_pairs())
+        if active_conflicts_override is not None:
+            has_active_conflicts = bool(active_conflicts_override)
+        else:
+            has_active_conflicts = bool(self._collect_active_time_conflict_pairs())
         deletable_scope = selected_rows if selected_rows else self._resource_view_rows
         has_deletable = any(self._resource_row_is_deletable(r) for r in deletable_scope)
         self.add_selected_resource_action.setEnabled(has_selected)
@@ -1818,6 +1827,7 @@ class DailyScheduleTab(QWidget):
 
     def _dispatch_sop_schedule_change(self) -> None:
         win = self.window()
+        dispatched = False
         try:
             if hasattr(win, "sop_tab") and hasattr(win.sop_tab, "on_sop_profiles_updated"):
                 win.sop_tab.on_sop_profiles_updated()
@@ -1826,15 +1836,17 @@ class DailyScheduleTab(QWidget):
         try:
             if hasattr(win, "_on_sop_data_changed"):
                 win._on_sop_data_changed()
+                dispatched = True
             elif hasattr(win, "scheduler"):
                 win.scheduler.force_refresh()
         except Exception:
             pass
-        self._schedule_resource_token = None
-        self._refresh_sop_overlay_rows_in_table()
-        self._refresh_sop_profiles_panel(force=True)
-        self._update_effective_source_label()
-        self._refresh_schedule_resources(force=True)
+        if not dispatched:
+            self._schedule_resource_token = None
+            self._refresh_sop_overlay_rows_in_table()
+            self._refresh_sop_profiles_panel(force=True)
+            self._update_effective_source_label()
+            self._refresh_schedule_resources(force=True)
 
     def _add_resources_to_sop_layer(self, resources: List[Dict[str, Any]], *, origin: str) -> None:
         if not resources:
@@ -2216,50 +2228,83 @@ class DailyScheduleTab(QWidget):
             else:
                 QMessageBox.information(self, title, f"Auto-adjust skipped.\n\n{detail}")
 
+    def _compute_active_conflict_state(
+        self,
+        selected_scope: Optional[Set[int]] = None,
+    ) -> Tuple[List[Tuple[int, int, str]], Set[int]]:
+        with perf_span(
+            "daily_schedule.active_conflict_state",
+            settings=self.settings,
+            meta={"rows": int(self.table.rowCount()), "selected_scope": bool(selected_scope)},
+            min_ms=5.0,
+        ):
+            selected_rows: Optional[Set[int]] = None
+            if selected_scope:
+                selected_rows = {int(r) for r in selected_scope}
+            day_intervals: Dict[str, List[Tuple[int, int, int, bool]]] = {d: [] for d in DAY_CANON}
+            for r in range(self.table.rowCount()):
+                row = self._active_row_to_utc(r, include_sop_overlay=True)
+                if not row:
+                    continue
+                start_m = self._time_to_minutes(str(row.get("start_utc") or ""))
+                end_m = self._time_to_minutes(str(row.get("end_utc") or ""))
+                if start_m is None or end_m is None:
+                    continue
+                day_names = self._schedule_day_names(str(row.get("day_utc") or "ALL"))
+                is_selected = bool(selected_rows is not None and int(r) in selected_rows)
+                for day_name in day_names:
+                    day_idx = DAY_INDEX.get(day_name, 0)
+                    next_day = DAY_CANON[(day_idx + 1) % len(DAY_CANON)]
+                    if start_m < end_m:
+                        day_intervals[day_name].append((r, start_m, end_m, is_selected))
+                    elif start_m > end_m:
+                        day_intervals[day_name].append((r, start_m, 24 * 60, is_selected))
+                        day_intervals[next_day].append((r, 0, end_m, is_selected))
+                    else:
+                        day_intervals[day_name].append((r, 0, 24 * 60, is_selected))
+
+            out: List[Tuple[int, int, str]] = []
+            seen: Set[Tuple[int, int, str]] = set()
+            conflict_rows: Set[int] = set()
+            for day_name, spans in day_intervals.items():
+                spans_sorted = sorted(spans, key=lambda x: (x[1], x[2], x[0], int(x[3])))
+                active_all: List[Tuple[int, int, bool]] = []
+                active_selected: List[Tuple[int, int]] = []
+                for row_idx, start_m, end_m, is_selected in spans_sorted:
+                    if active_all:
+                        active_all = [entry for entry in active_all if int(entry[1]) > int(start_m)]
+                    if selected_rows is not None and active_selected:
+                        active_selected = [entry for entry in active_selected if int(entry[1]) > int(start_m)]
+
+                    if selected_rows is None or is_selected:
+                        for other_row, _other_end, _other_selected in active_all:
+                            pair_key = (min(row_idx, other_row), max(row_idx, other_row), day_name)
+                            if pair_key in seen:
+                                continue
+                            seen.add(pair_key)
+                            out.append((pair_key[0], pair_key[1], day_name))
+                            conflict_rows.add(pair_key[0])
+                            conflict_rows.add(pair_key[1])
+                    else:
+                        for other_row, _other_end in active_selected:
+                            pair_key = (min(row_idx, other_row), max(row_idx, other_row), day_name)
+                            if pair_key in seen:
+                                continue
+                            seen.add(pair_key)
+                            out.append((pair_key[0], pair_key[1], day_name))
+                            conflict_rows.add(pair_key[0])
+                            conflict_rows.add(pair_key[1])
+
+                    active_all.append((row_idx, end_m, bool(is_selected)))
+                    if is_selected:
+                        active_selected.append((row_idx, end_m))
+            return out, conflict_rows
+
     def _collect_active_time_conflict_pairs(
         self,
         selected_scope: Optional[Set[int]] = None,
     ) -> List[Tuple[int, int, str]]:
-        day_intervals: Dict[str, List[Tuple[int, int, int]]] = {d: [] for d in DAY_CANON}
-        for r in range(self.table.rowCount()):
-            row = self._active_row_to_utc(r, include_sop_overlay=True)
-            if not row:
-                continue
-            start_m = self._time_to_minutes(str(row.get("start_utc") or ""))
-            end_m = self._time_to_minutes(str(row.get("end_utc") or ""))
-            if start_m is None or end_m is None:
-                continue
-            day_names = self._schedule_day_names(str(row.get("day_utc") or "ALL"))
-            for day_name in day_names:
-                day_idx = DAY_CANON.index(day_name)
-                next_day = DAY_CANON[(day_idx + 1) % len(DAY_CANON)]
-                if start_m < end_m:
-                    day_intervals[day_name].append((r, start_m, end_m))
-                elif start_m > end_m:
-                    day_intervals[day_name].append((r, start_m, 24 * 60))
-                    day_intervals[next_day].append((r, 0, end_m))
-                else:
-                    day_intervals[day_name].append((r, 0, 24 * 60))
-
-        out: List[Tuple[int, int, str]] = []
-        seen: Set[Tuple[int, int, str]] = set()
-        for day_name, spans in day_intervals.items():
-            spans_sorted = sorted(spans, key=lambda x: (x[1], x[2], x[0]))
-            for i in range(len(spans_sorted)):
-                r1, s1, e1 = spans_sorted[i]
-                for j in range(i + 1, len(spans_sorted)):
-                    r2, s2, e2 = spans_sorted[j]
-                    if s2 >= e1:
-                        break
-                    if not self._overlap(s1, e1, s2, e2):
-                        continue
-                    if selected_scope and r1 not in selected_scope and r2 not in selected_scope:
-                        continue
-                    pair_key = (min(r1, r2), max(r1, r2), day_name)
-                    if pair_key in seen:
-                        continue
-                    seen.add(pair_key)
-                    out.append((pair_key[0], pair_key[1], day_name))
+        out, _conflict_rows = self._compute_active_conflict_state(selected_scope=selected_scope)
         return out
 
     def _upsert_schedule_resource_row(
@@ -2921,63 +2966,41 @@ class DailyScheduleTab(QWidget):
     def _overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
         return max(a_start, b_start) < min(a_end, b_end)
 
-    def _highlight_time_conflicts(self) -> None:
-        prev_block = self.table.blockSignals(True)
-        try:
-            day_intervals: Dict[str, List[Tuple[int, int, int]]] = {d: [] for d in DAY_CANON}
-            conflict_rows: Set[int] = set()
+    def _highlight_time_conflicts(
+        self,
+        *,
+        conflict_rows_override: Optional[Set[int]] = None,
+    ) -> None:
+        with perf_span(
+            "daily_schedule.highlight_time_conflicts",
+            settings=self.settings,
+            meta={"rows": int(self.table.rowCount()), "reuse": bool(conflict_rows_override is not None)},
+            min_ms=5.0,
+        ):
+            prev_block = self.table.blockSignals(True)
+            try:
+                if conflict_rows_override is None:
+                    _pairs, conflict_rows = self._compute_active_conflict_state()
+                else:
+                    conflict_rows = set(conflict_rows_override)
 
-            for r in range(self.table.rowCount()):
-                row = self._active_row_to_utc(r, include_sop_overlay=True)
-                if not row:
-                    continue
-                start_m = self._time_to_minutes(str(row.get("start_utc") or ""))
-                end_m = self._time_to_minutes(str(row.get("end_utc") or ""))
-                if start_m is None or end_m is None:
-                    continue
-                day_names = self._schedule_day_names(str(row.get("day_utc") or "ALL"))
-                for day_name in day_names:
-                    day_idx = DAY_CANON.index(day_name)
-                    next_day = DAY_CANON[(day_idx + 1) % len(DAY_CANON)]
-                    if start_m < end_m:
-                        day_intervals[day_name].append((r, start_m, end_m))
-                    elif start_m > end_m:
-                        # Overnight span split across day boundary.
-                        day_intervals[day_name].append((r, start_m, 24 * 60))
-                        day_intervals[next_day].append((r, 0, end_m))
-                    else:
-                        # Same start/end means full-day occupancy.
-                        day_intervals[day_name].append((r, 0, 24 * 60))
-
-            for day_name, spans in day_intervals.items():
-                spans_sorted = sorted(spans, key=lambda x: (x[1], x[2], x[0]))
-                for i in range(len(spans_sorted)):
-                    r1, s1, e1 = spans_sorted[i]
-                    for j in range(i + 1, len(spans_sorted)):
-                        r2, s2, e2 = spans_sorted[j]
-                        if s2 >= e1:
-                            break
-                        if self._overlap(s1, e1, s2, e2):
-                            conflict_rows.add(r1)
-                            conflict_rows.add(r2)
-
-            theme = resolve_theme(self.settings)
-            warn = QColor(str(theme.get("warning", "#C99700")))
-            warn.setAlpha(64)
-            for r in range(self.table.rowCount()):
-                for col in (self.COL_START, self.COL_END):
-                    item = self.table.item(r, col)
-                    if item is None:
-                        continue
-                    base_tip = str(item.data(Qt.UserRole) or "")
-                    if r in conflict_rows:
-                        item.setBackground(warn)
-                        item.setToolTip((base_tip + "\n" if base_tip else "") + "Time conflict with another active row.")
-                    else:
-                        item.setData(Qt.BackgroundRole, None)
-                        item.setToolTip(base_tip)
-        finally:
-            self.table.blockSignals(prev_block)
+                theme = resolve_theme(self.settings)
+                warn = QColor(str(theme.get("warning", "#C99700")))
+                warn.setAlpha(64)
+                for r in range(self.table.rowCount()):
+                    for col in (self.COL_START, self.COL_END):
+                        item = self.table.item(r, col)
+                        if item is None:
+                            continue
+                        base_tip = str(item.data(Qt.UserRole) or "")
+                        if r in conflict_rows:
+                            item.setBackground(warn)
+                            item.setToolTip((base_tip + "\n" if base_tip else "") + "Time conflict with another active row.")
+                        else:
+                            item.setData(Qt.BackgroundRole, None)
+                            item.setToolTip(base_tip)
+            finally:
+                self.table.blockSignals(prev_block)
 
     def _save_schedule(self):
         # Ensure in-progress cell edits are committed
@@ -3552,6 +3575,10 @@ class DailyScheduleTab(QWidget):
         self._refresh_schedule_resources(force=True)
 
     def on_sop_data_changed(self) -> None:
+        if not self.isVisible():
+            self._schedule_resource_token = None
+            self._last_sop_panel_refresh_ts = 0.0
+            return
         self._refresh_sop_overlay_rows_in_table()
         self._refresh_sop_profiles_panel(force=True)
         self._update_effective_source_label()
@@ -3663,9 +3690,16 @@ class DailyScheduleTab(QWidget):
             self._set_dirty(True)
 
     def _on_table_item_changed(self, _item: QTableWidgetItem) -> None:
-        self._mark_dirty()
-        self._highlight_time_conflicts()
-        self._update_resource_action_state()
+        with perf_span(
+            "daily_schedule.item_changed_conflicts",
+            settings=self.settings,
+            meta={"rows": int(self.table.rowCount())},
+            min_ms=5.0,
+        ):
+            self._mark_dirty()
+            conflict_pairs, conflict_rows = self._compute_active_conflict_state()
+            self._highlight_time_conflicts(conflict_rows_override=conflict_rows)
+            self._update_resource_action_state(active_conflicts_override=conflict_pairs)
 
     def _has_delete_selection(self) -> bool:
         for r in range(self.table.rowCount()):
@@ -4208,6 +4242,8 @@ class DailyScheduleTab(QWidget):
         # Map JS8 and Tri to Digi for band-plan limits
         if mode_raw in ("Js8", "Tri"):
             eff_mode = "Digi"
+        elif mode_raw in ("Usb", "Lsb"):
+            eff_mode = "SSB"
         else:
             eff_mode = mode_raw
 

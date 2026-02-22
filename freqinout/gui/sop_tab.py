@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 import html
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
@@ -76,7 +77,7 @@ class _LegacySOPTab(QWidget):
         ("callsign", "CallSign"),
     ]
     ANY_ROLE_TOKEN = "__any_role__"
-    INTERVAL_PRESETS = ["00:30", "01:00", "03:00", "06:00", "12:00"]
+    INTERVAL_PRESETS = ["00:30", "01:00", "03:00", "06:00", "12:00", "Daily"]
     SOFTWARES = ["JS8Call", "VarAC", "FLDigi"]
     LOCAL_NET_SOFTWARE = "Local Net"
     LOCAL_NET_ACTION_NCS_KEY = "local_ncs"
@@ -132,6 +133,17 @@ class _LegacySOPTab(QWidget):
         self._layer_sync_has_basis = False
         self._layer_sync_cache_key: Tuple[Any, ...] | None = None
         self._layer_sync_cache_value: Tuple[List[Dict[str, Any]], List[str], int] | None = None
+        self._hf_group_names_cache: List[str] | None = None
+        self._local_group_names_cache: List[str] | None = None
+        self._local_resource_cache: Dict[str, List[str]] = {}
+        self._local_mode_cache: Dict[Tuple[str, str], List[str]] = {}
+        self._hf_bandfreq_cache: Dict[str, List[str]] = {}
+        self._spotter_forms_cache_key: Tuple[str, int] | None = None
+        self._spotter_forms_cache_value: List[Tuple[str, str]] = []
+        self._action_catalog_cache_key: Tuple[Tuple[str, str], ...] | None = None
+        self._action_catalog_cache_value: Dict[str, List[Tuple[str, str]]] | None = None
+        self._contact_lookup_cache: Dict[Tuple[str, str], Tuple[float, List[str]]] = {}
+        self._contact_lookup_cache_ttl_sec = 2.0
 
         self._build_ui()
         self._set_save_dirty(False)
@@ -262,7 +274,7 @@ class _LegacySOPTab(QWidget):
                 "Frequency",
                 "Resource",
                 "Action",
-                "Interval (HH:MM)",
+                "Interval",
                 "Contact Rule",
                 "Contact Target",
                 "Description",
@@ -435,6 +447,7 @@ class _LegacySOPTab(QWidget):
         og = data.get("operating_groups", [])
         self._operating_groups = [g for g in og if isinstance(g, dict)]
         self._load_local_net_profiles_from_data(data)
+        self._invalidate_dynamic_option_caches()
 
         self.group_combo.blockSignals(True)
         self.group_combo.clear()
@@ -448,6 +461,18 @@ class _LegacySOPTab(QWidget):
         self.secondary_combo.addItem("")
         for g in self.manager.load_secondary_groups():
             self.secondary_combo.addItem(g)
+
+    def _invalidate_dynamic_option_caches(self) -> None:
+        self._hf_group_names_cache = None
+        self._local_group_names_cache = None
+        self._local_resource_cache.clear()
+        self._local_mode_cache.clear()
+        self._hf_bandfreq_cache.clear()
+        self._spotter_forms_cache_key = None
+        self._spotter_forms_cache_value = []
+        self._action_catalog_cache_key = None
+        self._action_catalog_cache_value = None
+        self._contact_lookup_cache.clear()
 
     def _load_local_net_profiles_from_data(self, data: Dict[str, Any]) -> None:
         local_profiles = data.get("local_net_profiles", [])
@@ -477,6 +502,7 @@ class _LegacySOPTab(QWidget):
                 str(x.get("target", "")).upper(),
             ),
         )
+        self._invalidate_dynamic_option_caches()
 
     def _local_profile_names(self) -> List[str]:
         names = {
@@ -631,9 +657,25 @@ class _LegacySOPTab(QWidget):
         return sorted(values, key=lambda x: (len(x), x))
 
     def _load_spotter_forms(self) -> List[Tuple[str, str]]:
-        out: List[Tuple[str, str]] = []
         forms_dir = Path(self.settings.get("js8_forms_path", "") or "")
+        try:
+            forms_path = str(forms_dir.resolve())
+        except Exception:
+            forms_path = str(forms_dir)
+        try:
+            forms_mtime = int(forms_dir.stat().st_mtime_ns) if forms_dir.exists() else -1
+        except Exception:
+            forms_mtime = 0
+        cache_key = (forms_path, forms_mtime)
+        if self._spotter_forms_cache_key == cache_key:
+            return list(self._spotter_forms_cache_value)
+
+        out: List[Tuple[str, str]] = []
         if not forms_dir.exists():
+            self._spotter_forms_cache_key = cache_key
+            self._spotter_forms_cache_value = []
+            self._action_catalog_cache_key = None
+            self._action_catalog_cache_value = None
             return out
         for fn in sorted(forms_dir.glob("MCF*.txt")):
             try:
@@ -644,6 +686,10 @@ class _LegacySOPTab(QWidget):
                 out.append((f"js8_spotter_{code}", code))
             except Exception:
                 continue
+        self._spotter_forms_cache_key = cache_key
+        self._spotter_forms_cache_value = list(out)
+        self._action_catalog_cache_key = None
+        self._action_catalog_cache_value = None
         return out
 
     def _action_catalog(self) -> Dict[str, List[Tuple[str, str]]]:
@@ -1738,7 +1784,8 @@ class _LegacySOPTab(QWidget):
 
     @staticmethod
     def _format_interval_spec(interval_minutes: int, phase_minutes: int = 0) -> str:
-        base = SOPTab._format_interval_hhmm(interval_minutes)
+        total = max(1, int(interval_minutes))
+        base = "Daily" if total == (24 * 60) else SOPTab._format_interval_hhmm(total)
         phase = max(0, int(phase_minutes or 0))
         if phase <= 0:
             return base
@@ -1752,6 +1799,8 @@ class _LegacySOPTab(QWidget):
         raw = (text or "").strip().lower()
         if not raw:
             raise ValueError("Interval is required.")
+        if raw in {"daily", "day"}:
+            return 24 * 60
         if raw.endswith("m"):
             return max(1, int(float(raw[:-1].strip())))
         if raw.endswith("h"):
@@ -1877,13 +1926,13 @@ class _LegacySOPTab(QWidget):
             interval_combo.addItem(preset, preset)
         interval_minutes = int((existing or {}).get("interval_minutes") or 0)
         if interval_minutes <= 0:
-            interval_minutes = int((existing or {}).get("interval_hours") or 3) * 60
+            interval_minutes = int((existing or {}).get("interval_hours") or 24) * 60
         interval_phase = int((existing or {}).get("interval_phase_minutes") or 0)
         interval_txt = self._format_interval_spec(interval_minutes, interval_phase)
         if interval_combo.findText(interval_txt) < 0:
             interval_combo.addItem(interval_txt, interval_txt)
         interval_combo.setCurrentText(interval_txt)
-        interval_combo.setToolTip("Examples: 00:45, 90m, 1.5h, 0130, 03:00@30m")
+        interval_combo.setToolTip("Examples: Daily, 00:45, 90m, 1.5h, 0130, 03:00@30m")
         if interval_combo.lineEdit() is not None:
             interval_combo.lineEdit().setPlaceholderText("type or select...")
         self._fit_combo_popup(interval_combo)
@@ -3510,6 +3559,7 @@ class SOPTab(_LegacySOPTab):
         self._update_clock_labels()
         self._update_action_time_headers()
         self._update_time_toggle_style()
+        self._apply_action_table_visual_order()
         self._apply_category_table_view()
 
     def _wire_dirty_tracking(self) -> None:
@@ -3699,152 +3749,23 @@ class SOPTab(_LegacySOPTab):
         if not analyses:
             self._last_realtime_conflict_signature = None
             return
-        for row_index, action, diag, peers in analyses:
+        conflict_signatures: List[Tuple[Any, ...]] = []
+        for row_index, action, diag, _peers in analyses:
             if not bool(diag.get("has_conflict")):
                 continue
-            signature = (
-                int(row_index),
-                str(action.get("action_key") or ""),
-                str(action.get("group_name") or ""),
-                str(action.get("daily_start_utc") or ""),
-                str(action.get("daily_end_utc") or ""),
-                str(diag.get("daily_summary") or ""),
-                str(diag.get("net_summary") or ""),
-                str(diag.get("sop_summary") or ""),
-            )
-            if signature == self._last_realtime_conflict_signature:
-                return
-            # Mark this signature as handled before prompting so one decision
-            # does not immediately retrigger the same dialog on unchanged data.
-            self._last_realtime_conflict_signature = signature
-            self._prompt_realtime_hf_conflict_resolution(row_index, action, diag, peers)
-            return
-        self._last_realtime_conflict_signature = None
-
-    def _prompt_realtime_hf_conflict_resolution(
-        self,
-        row_index: int,
-        action: Dict[str, Any],
-        diag: Dict[str, Any],
-        peer_actions: List[Dict[str, Any]],
-    ) -> None:
-        details = [
-            f"Action Row {row_index + 1}: {action.get('action_label', 'Action')}",
-            f"Group: {str(action.get('group_name') or '').strip().upper()}",
-            "",
-            f"Daily Schedule Conflicts: {diag.get('daily_summary') or 'None'}",
-            f"Net Schedule Conflicts: {diag.get('net_summary') or 'None'}",
-            f"SOP Action Conflicts: {diag.get('sop_summary') or 'None'}",
-            "",
-            "Choose conflict handling policy:",
-        ]
-        msg = QMessageBox(self)
-        msg.setWindowTitle("SOP Conflict Resolution")
-        msg.setText("\n".join(details))
-        sop_btn = msg.addButton("1) SOP Priority For ALL", QMessageBox.AcceptRole)
-        net_btn = msg.addButton("2) Net Priority on Conflicts", QMessageBox.ActionRole)
-        daily_btn = msg.addButton("3) Daily Schedule Priority on Conflicts", QMessageBox.ActionRole)
-        cancel_btn = msg.addButton(QMessageBox.Cancel)
-        msg.exec()
-        clicked = msg.clickedButton()
-        if clicked == cancel_btn:
-            return
-        if clicked == net_btn:
-            policy = self.manager.CONFLICT_POLICY_NET
-        elif clicked == daily_btn:
-            policy = self.manager.CONFLICT_POLICY_DAILY
-        else:
-            policy = self.manager.CONFLICT_POLICY_SOP
-        action["conflict_policy"] = policy
-
-        must_adjust_start = bool(diag.get("first_occurrence_conflict")) and (
-            policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY}
-            or bool(diag.get("sop_conflicts"))
-        )
-        if must_adjust_start:
-            suggested_utc = self.manager.suggest_non_conflicting_start(
-                action=action,
-                operating_group=str(action.get("group_name") or "").strip().upper(),
-                check_all_groups=True,
-                peer_actions=peer_actions,
-            )
-            suggested_display = self._display_start_hhmm_from_utc(suggested_utc, show_local=self._show_local)
-            reason_txt = (
-                "First occurrence overlaps another SOP action."
-                if bool(diag.get("sop_conflicts"))
-                else "First occurrence conflicts with selected priority policy."
-            )
-            prompt = (
-                f"{reason_txt}\n"
-                f"Suggested start: {suggested_display}\n\n"
-                "Enter a new Daily Start time (HH:MM):"
-            )
-            while True:
-                text, ok = QInputDialog.getText(
-                    self,
-                    "Adjust Daily Start",
-                    prompt,
-                    text=suggested_display,
+            conflict_signatures.append(
+                (
+                    int(row_index),
+                    str(action.get("action_key") or ""),
+                    str(action.get("group_name") or ""),
+                    str(action.get("daily_start_utc") or ""),
+                    str(action.get("daily_end_utc") or ""),
+                    str(diag.get("daily_summary") or ""),
+                    str(diag.get("net_summary") or ""),
+                    str(diag.get("sop_summary") or ""),
                 )
-                if not ok:
-                    return
-                candidate = str(text or "").strip()
-                if not self._is_valid_hhmm(candidate):
-                    QMessageBox.warning(self, "SOP Conflict Resolution", "Start time must be HH:MM.")
-                    continue
-                new_start_utc = self._utc_start_hhmm_from_display(candidate, show_local=self._show_local)
-                action["daily_start_utc"] = new_start_utc
-                action["daily_end_utc"] = self._add_minutes_hhmm(new_start_utc, int(action.get("duration_minutes") or 60))
-                validate = self.manager.detect_action_conflicts(
-                    action=action,
-                    operating_group=str(action.get("group_name") or "").strip().upper(),
-                    horizon_days=7,
-                    check_all_groups=True,
-                    peer_actions=peer_actions,
-                )
-                if bool(validate.get("sop_conflicts")):
-                    QMessageBox.warning(
-                        self,
-                        "SOP Conflict Resolution",
-                        "This start time still overlaps another SOP action on a different frequency. Choose another time.",
-                    )
-                    continue
-                if policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY} and bool(
-                    validate.get("first_occurrence_conflict")
-                ):
-                    QMessageBox.warning(
-                        self,
-                        "SOP Conflict Resolution",
-                        "This start time still conflicts for the first occurrence. Choose another time.",
-                    )
-                    continue
-                break
-
-        self._apply_realtime_action_resolution_to_row(row_index, action)
-
-    def _apply_realtime_action_resolution_to_row(self, row_index: int, action: Dict[str, Any]) -> None:
-        if row_index < 0 or row_index >= self.actions_table.rowCount():
-            return
-        group_combo = self.actions_table.cellWidget(row_index, self.COL_GROUP)
-        start_edit = self.actions_table.cellWidget(row_index, self.COL_START)
-        end_edit = self.actions_table.cellWidget(row_index, self.COL_END)
-        if isinstance(group_combo, QComboBox):
-            group_combo.setProperty(
-                "conflict_policy",
-                self.manager._normalize_conflict_policy(action.get("conflict_policy")),
             )
-        display_start = self._display_start_hhmm_from_utc(str(action.get("daily_start_utc") or "00:00"), show_local=self._show_local)
-        display_end = self._display_start_hhmm_from_utc(str(action.get("daily_end_utc") or "23:59"), show_local=self._show_local)
-        self._suppress_realtime_conflict_checks = True
-        try:
-            if isinstance(start_edit, QLineEdit):
-                start_edit.setText(display_start)
-            if isinstance(end_edit, QLineEdit):
-                end_edit.setText(display_end)
-        finally:
-            self._suppress_realtime_conflict_checks = False
-        self._mark_dirty()
-        self._schedule_realtime_hf_conflict_check()
+        self._last_realtime_conflict_signature = tuple(conflict_signatures) if conflict_signatures else None
 
     def _apply_accessibility_width_guards(self) -> None:
         buttons = [
@@ -3923,28 +3844,42 @@ class SOPTab(_LegacySOPTab):
         og = data.get("operating_groups", [])
         self._operating_groups = [g for g in og if isinstance(g, dict)]
         self._load_local_net_profiles_from_data(data)
+        self._invalidate_dynamic_option_caches()
         self._refresh_all_rows_dynamic_options()
 
     def _hf_group_names(self) -> List[str]:
-        return sorted(
+        cached = self._hf_group_names_cache
+        if cached is not None:
+            return list(cached)
+        names = sorted(
             {
                 str(row.get("group", "")).strip().upper()
                 for row in (self._operating_groups or [])
                 if str(row.get("group", "")).strip()
             }
         )
+        self._hf_group_names_cache = list(names)
+        return names
 
     def _local_group_names(self) -> List[str]:
-        return sorted(
+        cached = self._local_group_names_cache
+        if cached is not None:
+            return list(cached)
+        names = sorted(
             {
                 str(row.get("group", "")).strip().upper()
                 for row in (self._local_net_profiles or [])
                 if str(row.get("group", "")).strip()
             }
         )
+        self._local_group_names_cache = list(names)
+        return names
 
     def _local_resources_for_group(self, group: str) -> List[str]:
         grp = str(group or "").strip().upper()
+        cached = self._local_resource_cache.get(grp)
+        if cached is not None:
+            return list(cached)
         out: Set[str] = set()
         for row in self._local_net_profiles or []:
             if str(row.get("group", "")).strip().upper() != grp:
@@ -3954,11 +3889,17 @@ class SOPTab(_LegacySOPTab):
                 out.add(resource)
         if not out:
             out.update(self.LOCAL_RESOURCE_FALLBACK)
-        return sorted(out, key=lambda x: x.upper())
+        resolved = sorted(out, key=lambda x: x.upper())
+        self._local_resource_cache[grp] = list(resolved)
+        return resolved
 
     def _local_modes_for_group_resource(self, group: str, resource: str) -> List[str]:
         grp = str(group or "").strip().upper()
         res = str(resource or "").strip().upper()
+        cache_key = (grp, res)
+        cached = self._local_mode_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
         out: Set[str] = set()
         for row in self._local_net_profiles or []:
             if str(row.get("group", "")).strip().upper() != grp:
@@ -3970,10 +3911,15 @@ class SOPTab(_LegacySOPTab):
                 out.add(mode)
         if not out:
             out.update(self.LOCAL_MODE_FALLBACK)
-        return sorted(out, key=lambda x: x.upper())
+        resolved = sorted(out, key=lambda x: x.upper())
+        self._local_mode_cache[cache_key] = list(resolved)
+        return resolved
 
     def _hf_band_freq_options_for_group(self, group: str) -> List[str]:
         grp = str(group or "").strip().upper()
+        cached = self._hf_bandfreq_cache.get(grp)
+        if cached is not None:
+            return list(cached)
         out: List[Tuple[str, str]] = []
         for row in self._operating_groups or []:
             if str(row.get("group", "")).strip().upper() != grp:
@@ -3988,7 +3934,9 @@ class SOPTab(_LegacySOPTab):
                 freq_fmt = freq
             out.append((band, freq_fmt))
         out = sorted(set(out), key=lambda x: (x[0], float(x[1]) if x[1].replace(".", "", 1).isdigit() else 0.0))
-        return [f"{band} - {freq}" for band, freq in out]
+        resolved = [f"{band} - {freq}" for band, freq in out]
+        self._hf_bandfreq_cache[grp] = list(resolved)
+        return resolved
 
     def _resource_options_for_category(self, category: str, group: str) -> List[str]:
         if category == self.CAT_LOCAL:
@@ -3996,6 +3944,10 @@ class SOPTab(_LegacySOPTab):
         return list(self.HF_RESOURCE_OPTIONS)
 
     def _action_catalog(self) -> Dict[str, List[Tuple[str, str]]]:
+        spotter_forms = tuple(self._load_spotter_forms())
+        if self._action_catalog_cache_key == spotter_forms and self._action_catalog_cache_value is not None:
+            return {name: list(rows) for name, rows in self._action_catalog_cache_value.items()}
+
         catalog: Dict[str, List[Tuple[str, str]]] = {
             "JS8Call": [("js8_send_status", "Status"), ("js8_commstat", "CommStat")],
             "VarAC": [
@@ -4022,8 +3974,10 @@ class SOPTab(_LegacySOPTab):
                 ("local_monitor", "Monitor"),
             ],
         }
-        for key, label in self._load_spotter_forms():
+        for key, label in spotter_forms:
             catalog.setdefault("JS8Call", []).append((key, label))
+        self._action_catalog_cache_key = spotter_forms
+        self._action_catalog_cache_value = {name: list(rows) for name, rows in catalog.items()}
         return catalog
 
     def _current_category(self) -> str:
@@ -4037,8 +3991,20 @@ class SOPTab(_LegacySOPTab):
         self.actions_table.setColumnHidden(self.COL_MODE, is_hf)
         self.actions_table.setColumnHidden(self.COL_END, True)
         self.actions_table.setColumnHidden(self.COL_CONFLICT, not is_hf)
+        self._apply_action_table_visual_order()
         self._autosize_actions_table()
         self._refresh_inline_conflict_badges()
+
+    def _apply_action_table_visual_order(self) -> None:
+        header = self.actions_table.horizontalHeader()
+        if header is None:
+            return
+        try:
+            header.setSectionsMovable(True)
+            header.moveSection(header.visualIndex(self.COL_CONFLICT), 0)
+            header.moveSection(header.visualIndex(self.COL_REMOVE), 1)
+        except Exception:
+            pass
 
     def _profile_id_for_category(self, category: str) -> int:
         cat = self.manager._normalize_category(category)
@@ -4201,14 +4167,24 @@ class SOPTab(_LegacySOPTab):
         if not grp:
             return []
         normalized_rule = str(rule or "none").strip().lower()
+        cache_key = (grp, normalized_rule)
+        now = time.monotonic()
+        cached = self._contact_lookup_cache.get(cache_key)
+        if cached and (now - cached[0]) <= float(self._contact_lookup_cache_ttl_sec):
+            return list(cached[1])
+
+        resolved: List[str]
         contacts = self.manager.resolve_primary_contacts(grp, "")
         if normalized_rule == "hub_or_hub_alt":
-            return list(contacts.get("hub", []) or [])
-        if normalized_rule == "ncs_or_ancs":
-            return list(contacts.get("ncs", []) or [])
-        if normalized_rule == "peer":
-            return list(contacts.get("peer", []) or [])
-        return self.manager.resolve_group_callsigns(grp, "")
+            resolved = list(contacts.get("hub", []) or [])
+        elif normalized_rule == "ncs_or_ancs":
+            resolved = list(contacts.get("ncs", []) or [])
+        elif normalized_rule == "peer":
+            resolved = list(contacts.get("peer", []) or [])
+        else:
+            resolved = self.manager.resolve_group_callsigns(grp, "")
+        self._contact_lookup_cache[cache_key] = (now, list(resolved))
+        return resolved
 
     def _refresh_row_dynamic_options(self, row: int, *, preserve_current: bool) -> None:
         cat = self._current_category()
@@ -4391,13 +4367,13 @@ class SOPTab(_LegacySOPTab):
             interval_combo.addItem(preset, preset)
         interval_minutes = int((existing or {}).get("interval_minutes") or 0)
         if interval_minutes <= 0:
-            interval_minutes = int((existing or {}).get("interval_hours") or 3) * 60
+            interval_minutes = int((existing or {}).get("interval_hours") or 24) * 60
         interval_phase = int((existing or {}).get("interval_phase_minutes") or 0)
         interval_text = self._format_interval_spec(interval_minutes, interval_phase)
         if interval_combo.findText(interval_text) < 0:
             interval_combo.addItem(interval_text, interval_text)
         interval_combo.setCurrentText(interval_text)
-        interval_combo.setToolTip("Examples: 00:30, 01:00, 03:00@30m")
+        interval_combo.setToolTip("Examples: Daily, 00:30, 01:00, 03:00@30m")
         self.actions_table.setCellWidget(row, self.COL_INTERVAL, interval_combo)
 
         contact_combo = QComboBox()
@@ -4708,6 +4684,7 @@ class SOPTab(_LegacySOPTab):
             for a in actions
             if isinstance(a, dict) and not self.manager._is_local_action(a) and bool(a.get("enabled", True))
         ]
+        conflicts: List[Dict[str, Any]] = []
         for idx, action in enumerate(actions):
             group = str(action.get("group_name") or "").strip().upper()
             if not group:
@@ -4724,42 +4701,102 @@ class SOPTab(_LegacySOPTab):
             if not bool(diag.get("has_conflict")):
                 action["conflict_policy"] = self.manager.CONFLICT_POLICY_SOP
                 continue
+            conflicts.append(
+                {
+                    "row_index": idx,
+                    "action": action,
+                    "group": group,
+                    "diag": diag,
+                }
+            )
+        if not conflicts:
+            return True
+        return self._resolve_hf_conflicts_dialog(conflicts, hf_peer_actions)
 
-            details = [
-                f"Action Row {idx + 1}: {action.get('action_label', 'Action')}",
-                f"Group: {group}",
-                "",
-                f"Daily Schedule Conflicts: {diag.get('daily_summary') or 'None'}",
-                f"Net Schedule Conflicts: {diag.get('net_summary') or 'None'}",
-                f"SOP Action Conflicts: {diag.get('sop_summary') or 'None'}",
-                "",
-                "Choose conflict handling policy:",
+    def _resolve_hf_conflicts_dialog(
+        self,
+        conflicts: List[Dict[str, Any]],
+        hf_peer_actions: List[Dict[str, Any]],
+    ) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("SOP Conflict Resolution")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        intro = QLabel(
+            "Review conflict policy and Daily Start for each row.\n"
+            "SOP-vs-SOP overlaps, and first-occurrence conflicts under Net/Daily priority, must be resolved before Save."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        table = QTableWidget(len(conflicts), 8, dialog)
+        table.setHorizontalHeaderLabels(
+            [
+                "Row",
+                "Action",
+                "Group",
+                "Daily Conflicts",
+                "Net Conflicts",
+                "SOP Conflicts",
+                "Policy",
+                "Start",
             ]
-            msg = QMessageBox(self)
-            msg.setWindowTitle("SOP Conflict Resolution")
-            msg.setText("\n".join(details))
-            sop_btn = msg.addButton("1) SOP Priority For ALL", QMessageBox.AcceptRole)
-            net_btn = msg.addButton("2) Net Priority on Conflicts", QMessageBox.ActionRole)
-            daily_btn = msg.addButton("3) Daily Schedule Priority on Conflicts", QMessageBox.ActionRole)
-            cancel_btn = msg.addButton(QMessageBox.Cancel)
-            msg.exec()
-            clicked = msg.clickedButton()
-            if clicked == cancel_btn:
-                return False
-            if clicked == net_btn:
-                policy = self.manager.CONFLICT_POLICY_NET
-            elif clicked == daily_btn:
-                policy = self.manager.CONFLICT_POLICY_DAILY
-            else:
-                policy = self.manager.CONFLICT_POLICY_SOP
+        )
+        table.verticalHeader().setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        table.setColumnWidth(7, 100)
+
+        def _set_readonly_text(row: int, col: int, text: str) -> None:
+            item = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            table.setItem(row, col, item)
+
+        for row, entry in enumerate(conflicts):
+            action = entry["action"]
+            diag = entry["diag"]
+            group = entry["group"]
+            policy = self.manager._normalize_conflict_policy(action.get("conflict_policy"))
             action["conflict_policy"] = policy
 
-            # Net/Daily policy must avoid first-occurrence conflicts; SOP-vs-SOP overlap must always be resolved.
-            must_adjust_start = bool(diag.get("first_occurrence_conflict")) and (
-                policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY}
-                or bool(diag.get("sop_conflicts"))
+            _set_readonly_text(row, 0, str(int(entry.get("row_index", row)) + 1))
+            _set_readonly_text(row, 1, str(action.get("action_label") or "Action"))
+            _set_readonly_text(row, 2, group)
+            _set_readonly_text(row, 3, str(diag.get("daily_summary") or "None"))
+            _set_readonly_text(row, 4, str(diag.get("net_summary") or "None"))
+            _set_readonly_text(row, 5, str(diag.get("sop_summary") or "None"))
+
+            policy_combo = QComboBox(table)
+            policy_combo.addItem("SOP Priority", self.manager.CONFLICT_POLICY_SOP)
+            policy_combo.addItem("Net Priority", self.manager.CONFLICT_POLICY_NET)
+            policy_combo.addItem("Daily Priority", self.manager.CONFLICT_POLICY_DAILY)
+            if policy == self.manager.CONFLICT_POLICY_NET:
+                policy_combo.setCurrentIndex(1)
+            elif policy == self.manager.CONFLICT_POLICY_DAILY:
+                policy_combo.setCurrentIndex(2)
+            else:
+                policy_combo.setCurrentIndex(0)
+            table.setCellWidget(row, 6, policy_combo)
+
+            display_start = self._display_start_hhmm_from_utc(
+                str(action.get("daily_start_utc") or "00:00"),
+                show_local=self._show_local,
             )
-            if must_adjust_start:
+            start_edit = QLineEdit(display_start, table)
+            start_edit.setPlaceholderText("HH:MM")
+            start_edit.setMaxLength(5)
+            start_edit.setAlignment(Qt.AlignCenter)
+            if bool(diag.get("sop_conflicts")) or (
+                policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY}
+                and bool(diag.get("first_occurrence_conflict"))
+            ):
                 suggested_utc = self.manager.suggest_non_conflicting_start(
                     action=action,
                     operating_group=group,
@@ -4767,59 +4804,108 @@ class SOPTab(_LegacySOPTab):
                     peer_actions=hf_peer_actions,
                 )
                 suggested_display = self._display_start_hhmm_from_utc(suggested_utc, show_local=self._show_local)
-                reason_txt = (
-                    "First occurrence overlaps another SOP action."
-                    if bool(diag.get("sop_conflicts"))
-                    else "First occurrence conflicts with selected priority policy."
+                start_edit.setText(suggested_display)
+                start_edit.setToolTip(f"Suggested non-conflicting start: {suggested_display}")
+            table.setCellWidget(row, 7, start_edit)
+
+            entry["policy_combo"] = policy_combo
+            entry["start_edit"] = start_edit
+
+        layout.addWidget(table)
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        dialog.resize(1200, min(620, 220 + (len(conflicts) * 38)))
+
+        while True:
+            if dialog.exec() != QDialog.Accepted:
+                return False
+
+            invalid_rows: List[str] = []
+            for entry in conflicts:
+                action = entry["action"]
+                policy_combo = entry.get("policy_combo")
+                start_edit = entry.get("start_edit")
+                policy = self.manager._normalize_conflict_policy(
+                    policy_combo.currentData() if isinstance(policy_combo, QComboBox) else action.get("conflict_policy")
                 )
-                prompt = (
-                    f"{reason_txt}\n"
-                    f"Suggested start: {suggested_display}\n\n"
-                    "Enter a new Daily Start time (HH:MM):"
+                action["conflict_policy"] = policy
+                candidate = ""
+                if isinstance(start_edit, QLineEdit):
+                    candidate = str(start_edit.text() or "").strip()
+                if not self._is_valid_hhmm(candidate):
+                    invalid_rows.append(str(int(entry.get("row_index", 0)) + 1))
+                    continue
+                new_start_utc = self._utc_start_hhmm_from_display(candidate, show_local=self._show_local)
+                action["daily_start_utc"] = new_start_utc
+                action["daily_end_utc"] = self._add_minutes_hhmm(new_start_utc, int(action.get("duration_minutes") or 60))
+
+            if invalid_rows:
+                QMessageBox.warning(
+                    self,
+                    "SOP Conflict Resolution",
+                    "Start time must be HH:MM for row(s): " + ", ".join(invalid_rows),
                 )
-                while True:
-                    text, ok = QInputDialog.getText(
-                        self,
-                        "Adjust Daily Start",
-                        prompt,
-                        text=suggested_display,
-                    )
-                    if not ok:
-                        return False
-                    candidate = str(text or "").strip()
-                    if not self._is_valid_hhmm(candidate):
-                        QMessageBox.warning(self, "SOP Conflict Resolution", "Start time must be HH:MM.")
-                        continue
-                    new_start_utc = self._utc_start_hhmm_from_display(candidate, show_local=self._show_local)
-                    action["daily_start_utc"] = new_start_utc
-                    action["daily_end_utc"] = self._add_minutes_hhmm(new_start_utc, int(action.get("duration_minutes") or 60))
-                    validate = self.manager.detect_action_conflicts(
-                        action=action,
-                        operating_group=group,
-                        horizon_days=7,
-                        check_all_groups=True,
-                        peer_actions=hf_peer_actions,
-                    )
-                    action["daily_conflict_summary"] = str(validate.get("daily_summary") or "")
-                    action["net_conflict_summary"] = str(validate.get("net_summary") or "")
-                    if bool(validate.get("sop_conflicts")):
-                        QMessageBox.warning(
-                            self,
-                            "SOP Conflict Resolution",
-                            "This start time still overlaps another SOP action on a different frequency. Choose another time.",
-                        )
-                        continue
-                    if policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY} and bool(
-                        validate.get("first_occurrence_conflict")
-                    ):
-                        QMessageBox.warning(
-                            self,
-                            "SOP Conflict Resolution",
-                            "This start time still conflicts for the first occurrence. Choose another time.",
-                        )
-                        continue
-                    break
-        return True
+                continue
+
+            unresolved: List[str] = []
+            for entry in conflicts:
+                action = entry["action"]
+                group = entry["group"]
+                policy = self.manager._normalize_conflict_policy(action.get("conflict_policy"))
+                validate = self.manager.detect_action_conflicts(
+                    action=action,
+                    operating_group=group,
+                    horizon_days=7,
+                    check_all_groups=True,
+                    peer_actions=hf_peer_actions,
+                )
+                action["daily_conflict_summary"] = str(validate.get("daily_summary") or "")
+                action["net_conflict_summary"] = str(validate.get("net_summary") or "")
+
+                has_sop_conflict = bool(validate.get("sop_conflicts"))
+                has_first_occurrence_conflict = bool(validate.get("first_occurrence_conflict"))
+                if not has_sop_conflict and not (
+                    policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY}
+                    and has_first_occurrence_conflict
+                ):
+                    continue
+
+                suggested_utc = self.manager.suggest_non_conflicting_start(
+                    action=action,
+                    operating_group=group,
+                    check_all_groups=True,
+                    peer_actions=hf_peer_actions,
+                )
+                suggested_display = self._display_start_hhmm_from_utc(suggested_utc, show_local=self._show_local)
+                start_edit = entry.get("start_edit")
+                if isinstance(start_edit, QLineEdit):
+                    start_edit.setText(suggested_display)
+
+                row_num = int(entry.get("row_index", 0)) + 1
+                action_name = str(action.get("action_label") or "Action")
+                if has_sop_conflict:
+                    reason = "overlaps another SOP action"
+                else:
+                    reason = "still conflicts for first occurrence under the selected policy"
+                unresolved.append(f"Row {row_num} ({action_name}): {reason}. Suggested start {suggested_display}.")
+
+            if unresolved:
+                preview = unresolved[:8]
+                extra = ""
+                if len(unresolved) > len(preview):
+                    extra = f"\n...and {len(unresolved) - len(preview)} more row(s)."
+                QMessageBox.warning(
+                    self,
+                    "SOP Conflict Resolution",
+                    "Some rows still need adjustment before Save:\n\n"
+                    + "\n".join(preview)
+                    + extra
+                    + "\n\nUpdated suggestions have been applied in the Start column.",
+                )
+                continue
+            return True
 
     def _save_profile(self) -> None:
         timer = getattr(self, "_realtime_conflict_timer", None)
@@ -4829,7 +4915,7 @@ class SOPTab(_LegacySOPTab):
         self._suppress_realtime_conflict_checks = True
         try:
             payload, actions, _schedule_layer = self._collect_profile_payload()
-            if payload.get("category") == self.CAT_HF:
+            if payload.get("category") == self.CAT_HF and bool(payload.get("active")):
                 if not self._resolve_hf_activation_conflicts(actions):
                     return
             profile_id = self.manager.save_profile(payload, actions, schedule_layer=None)
@@ -4935,7 +5021,7 @@ class SOPTab(_LegacySOPTab):
                 clean.pop("id", None)
                 imported_actions.append(clean)
 
-            if category == self.CAT_HF:
+            if category == self.CAT_HF and bool(imported.get("active", True)):
                 if not self._resolve_hf_activation_conflicts(imported_actions):
                     return
             self.manager.save_profile(imported, imported_actions, schedule_layer=None)

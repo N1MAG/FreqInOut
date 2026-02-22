@@ -463,7 +463,7 @@
       </tr>
       <tr id="settings-hf-groups">
         <td>HF Operating Groups</td>
-        <td><code>Add Group</code>, <code>Edit Selected</code>, <code>Delete Selected</code>; table includes <code>Use Condition Levels</code> per row (group-scoped behavior)</td>
+        <td><code>Add Group</code>, <code>Edit Selected</code>, <code>Delete Selected</code>; mode options are <code>Digi</code> and <code>SSB</code>; table includes <code>Use Condition Levels</code> per row (group-scoped behavior)</td>
       </tr>
       <tr>
         <td>Local Comms Groups</td>
@@ -499,6 +499,14 @@
       </tr>
     </tbody>
   </table>
+
+  <h3 id="settings-hf-groups-details">HF Operating Groups Details</h3>
+  <ul class="section-list">
+    <li><strong>Mode choices</strong>: <code>Digi</code> and <code>SSB</code>.</li>
+    <li><strong>Voice sideband behavior</strong>: when <code>Mode=SSB</code>, <code>FLDigi Starting Mode</code> defaults to band-appropriate sideband (<code>LSB</code> on lower HF bands, <code>USB</code> on upper HF bands), and can be manually overridden.</li>
+    <li><strong>Key table columns</strong>: <code>Group</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>VFO</code>, <code>FLDigi Starting Mode</code>, <code>FLDigi Offset</code>, <code>Auto-Tune</code>, <code>Use Condition Levels</code>.</li>
+    <li><strong>Condition levels</strong>: group-scoped; toggling one row applies to all rows for the same Group.</li>
+  </ul>
 
   <h3 id="settings-message-auth">Message Auth (Key/Hash) Details</h3>
   <ul class="section-list">

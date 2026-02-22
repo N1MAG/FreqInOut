@@ -12,6 +12,7 @@ import psutil
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from freqinout.core.logger import log
+from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.rigctl_client import FLRigClient, FrequencyCommand
 from freqinout.radio_interface.js8_status import JS8ControlClient
@@ -245,6 +246,13 @@ class SchedulerEngine(QObject):
         self._varac_wait_prompt_entry_key: Optional[Tuple] = None
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
+        self._status_poll_ttl_s: float = 0.8
+        self._status_poll_retry_s: float = 4.0
+        self._status_flrig_freq_hz: Optional[int] = None
+        self._status_flrig_freq_ts: float = 0.0
+        self._status_flrig_ptt: bool = False
+        self._status_flrig_ptt_ts: float = 0.0
+        self._status_flrig_retry_ts: float = 0.0
         self._control_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-control")
         self._control_future = None
         self._control_future_started_at: Optional[float] = None
@@ -405,17 +413,21 @@ class SchedulerEngine(QObject):
         """
         Determine how (or if) we should control frequency:
           - MANUAL: compute schedule only, no rig commands.
-          - FLRIG: use FLRigClient.
-          - JS8CALL: use JS8ControlClient via js8net.
+          - FLRIG: use FLRigClient when flrig process is running.
+          - JS8CALL: use JS8ControlClient when js8call process is running.
           - NONE: requested backend unavailable.
         """
         mode = (self.settings.get("control_via", "FLRig") or "FLRig").upper()
         if mode == "MANUAL":
             return "MANUAL"
         if mode == "FLRIG":
-            return "FLRIG" if self.rig is not None else "NONE"
+            if self.rig is None:
+                return "NONE"
+            return "FLRIG" if self._flrig_running() else "NONE"
         if mode == "JS8CALL":
-            return "JS8CALL" if self.js8 is not None else "NONE"
+            if self.js8 is None:
+                return "NONE"
+            return "JS8CALL" if self._js8_running() else "NONE"
         return "NONE"
 
     def _js8_offset_setting(self) -> int:
@@ -615,6 +627,7 @@ class SchedulerEngine(QObject):
         source: str,
         freq_hz: int,
         band: str,
+        mode: Optional[str],
         vfo: Optional[str],
         auto_tune: bool,
         js8_offset: Optional[int],
@@ -652,6 +665,7 @@ class SchedulerEngine(QObject):
                     rig_hz=freq_hz,
                     fldigi_center_hz=None,
                     js8_tune_hz=None,
+                    mode=mode,
                     vfo=vfo,
                     js8_group=js8_group or None,
                 )
@@ -895,6 +909,9 @@ class SchedulerEngine(QObject):
     def _js8_running(self) -> bool:
         return self._process_running("js8call")
 
+    def _flrig_running(self) -> bool:
+        return self._process_running("flrig")
+
     def _varac_running(self) -> bool:
         return self._process_running("varac")
 
@@ -1103,10 +1120,10 @@ class SchedulerEngine(QObject):
             self._retry_scheduled = False
             if self._control_future_stuck():
                 self._reset_control_executor("forced retry (stuck control task)")
-            if not self._control_can_attempt():
+            if self._control_future is not None and not self._control_future.done():
                 self._schedule_forced_retry()
                 return
-            if self._control_future is not None and not self._control_future.done():
+            if not self._control_can_attempt():
                 self._schedule_forced_retry()
                 return
             if self._forced_retry_attempts_left <= 0:
@@ -1120,7 +1137,11 @@ class SchedulerEngine(QObject):
                 ignore_suspend=True,
             )
 
-        QTimer.singleShot(1000, _try)
+        delay_ms = 1000
+        remaining_backoff = (self._control_backoff_until or 0.0) - time.time()
+        if remaining_backoff > 0:
+            delay_ms = int(min(60_000, max(1_000, remaining_backoff * 1000.0 + 100.0)))
+        QTimer.singleShot(delay_ms, _try)
 
     @staticmethod
     def _source_net_kind(source: str, entry: Optional[Dict]) -> str:
@@ -1178,8 +1199,13 @@ class SchedulerEngine(QObject):
             use_scheduler = True
         control_mode = self._control_mode()
         entry = self.current_schedule_entry or {}
+        freq_hz = self._current_rig_frequency(control_mode=control_mode, status_cached=True)
         flags = (
-            self._off_schedule_flags(entry)
+            self._off_schedule_flags(
+                entry,
+                control_mode=control_mode,
+                current_freq_hz=freq_hz,
+            )
             if entry
             else {"frequency": False, "mode": False, "offset": False, "fldigi_offset": False}
         )
@@ -1201,15 +1227,11 @@ class SchedulerEngine(QObject):
             fldigi_busy = False
             fldigi_busy_reason = None
         ptt_active = False
-        if self.rig and hasattr(self.rig, "get_ptt"):
-            try:
-                ptt_active = bool(self.rig.get_ptt())
-            except Exception:
-                ptt_active = False
+        if control_mode == "FLRIG":
+            ptt_active = self._status_poll_flrig_ptt()
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         suspended_until = self._suspend_until_dt()
         auto_resume_utc, auto_resume_source = self._auto_resume_utc(now_utc, suspended_until, flags)
-        freq_hz = self._current_rig_frequency()
         freq_label = ""
         if isinstance(freq_hz, (int, float)) and freq_hz > 0:
             freq_label = f"{freq_hz / 1_000_000:.3f}"
@@ -1273,14 +1295,22 @@ class SchedulerEngine(QObject):
         check_frequency: bool = True,
         check_mode: bool = True,
         check_offset: bool = True,
+        control_mode: Optional[str] = None,
+        current_freq_hz: Optional[int] = None,
     ) -> Dict[str, bool]:
         flags = {"frequency": False, "mode": False, "offset": False, "fldigi_offset": False}
         if not entry:
             return flags
+        active_control_mode = (control_mode or self._control_mode()).strip().upper()
         if check_frequency:
             freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
             if freq_hz:
-                cur = self._current_rig_frequency()
+                cur = current_freq_hz
+                if cur is None and active_control_mode not in {"MANUAL", "NONE"}:
+                    cur = self._current_rig_frequency(
+                        control_mode=active_control_mode,
+                        status_cached=True,
+                    )
                 if cur is not None and abs(cur - freq_hz) > 5:
                     flags["frequency"] = True
         if check_offset and self._js8_running() and self.js8:
@@ -1325,7 +1355,8 @@ class SchedulerEngine(QObject):
                 return
         except Exception:
             pass
-        if self._control_mode() in ("MANUAL", "NONE"):
+        control_mode = self._control_mode()
+        if control_mode in ("MANUAL", "NONE"):
             self._prompt_active = False
             self._prompt_items = []
             return
@@ -1366,6 +1397,7 @@ class SchedulerEngine(QObject):
             check_frequency=freq_prompt,
             check_mode=fldigi_prompt,
             check_offset=js8_prompt,
+            control_mode=control_mode,
         )
         if not any(flags.values()):
             self._prompt_active = False
@@ -1487,7 +1519,8 @@ class SchedulerEngine(QObject):
     def _resolve_operating_group(self, entry: Dict) -> Optional[Dict]:
         group_name = (entry.get("group_name") or entry.get("group") or "").strip().upper()
         band = (entry.get("band") or "").strip().upper()
-        mode = (entry.get("mode") or "").strip()
+        mode = normalize_operating_group_mode(entry.get("mode") or "", band)
+        freq = self._normalize_sched_frequency(entry.get("frequency"))
         if not group_name:
             return None
         candidates = []
@@ -1498,18 +1531,73 @@ class SchedulerEngine(QObject):
             if g_name != group_name:
                 continue
             g_band = (g.get("band") or "").strip().upper()
-            g_mode = (g.get("mode") or "").strip()
-            candidates.append((g_band, g_mode, g))
+            g_mode = normalize_operating_group_mode(g.get("mode") or "", g_band)
+            g_freq = self._normalize_sched_frequency(g.get("frequency"))
+            candidates.append((g_band, g_mode, g_freq, g))
         if not candidates:
             return None
-        # Prefer exact band+mode match, then band-only, then first group match
-        for g_band, g_mode, g in candidates:
-            if g_band == band and g_mode == mode:
+        # Prefer exact band+mode match, then band+frequency, then band-only,
+        # then mode-only, then frequency-only, then first group match.
+        for g_band, g_mode, _g_freq, g in candidates:
+            if g_band == band and g_mode == mode and g_mode:
                 return g
-        for g_band, _g_mode, g in candidates:
+        for g_band, _g_mode, g_freq, g in candidates:
+            if g_band == band and g_freq == freq and g_freq:
+                return g
+        for g_band, _g_mode, _g_freq, g in candidates:
             if g_band == band:
                 return g
-        return candidates[0][2]
+        for _g_band, g_mode, _g_freq, g in candidates:
+            if g_mode == mode and g_mode:
+                return g
+        for _g_band, _g_mode, g_freq, g in candidates:
+            if g_freq == freq and g_freq:
+                return g
+        return candidates[0][3]
+
+    def _entry_with_operating_group_overrides(self, entry: Dict) -> Tuple[Dict, Optional[Dict]]:
+        """
+        Return an entry copy with operating-group-backed values overlaid.
+
+        For rows that specify an Operating Group, group values are authoritative
+        for runtime rig control (frequency/vfo/mode), which keeps scheduler/QSY
+        behavior aligned with Settings > Operating Groups.
+        """
+        effective = dict(entry or {})
+        og = self._resolve_operating_group(effective)
+        if not isinstance(og, dict):
+            return effective, None
+
+        og_band = (og.get("band") or "").strip().upper()
+        if og_band:
+            effective["band"] = og_band
+
+        mode_band = (effective.get("band") or "").strip().upper()
+        og_mode = normalize_operating_group_mode(og.get("mode") or "", mode_band)
+        if og_mode:
+            effective["mode"] = og_mode
+
+        og_freq = self._normalize_sched_frequency(og.get("frequency"))
+        if og_freq:
+            effective["frequency"] = og_freq
+
+        og_vfo = (og.get("vfo") or "").strip().upper()
+        if og_vfo in ("A", "B"):
+            effective["vfo"] = og_vfo
+
+        if not str(effective.get("fldigi_mode") or "").strip():
+            fldigi_mode = str(og.get("fldigi_mode") or "").strip()
+            if fldigi_mode:
+                effective["fldigi_mode"] = fldigi_mode
+        if not str(effective.get("fldigi_offset") or "").strip():
+            fldigi_offset = str(og.get("fldigi_offset") or "").strip()
+            if fldigi_offset:
+                effective["fldigi_offset"] = fldigi_offset
+
+        if "auto_tune" not in effective:
+            effective["auto_tune"] = bool(og.get("auto_tune"))
+
+        return effective, og
 
     def _update_desired_fldigi_settings(self, entry: Dict) -> None:
         mode = self._expected_fldigi_mode(entry)
@@ -1979,6 +2067,11 @@ class SchedulerEngine(QObject):
             else:
                 updated_expr = "''"
             condition_expr = "COALESCE(l.condition_levels, 'ALL')" if "condition_levels" in layer_cols else "'ALL'"
+            group_expr = (
+                "COALESCE(NULLIF(TRIM(l.group_name), ''), COALESCE(p.operating_group, ''))"
+                if "group_name" in layer_cols
+                else "COALESCE(p.operating_group, '')"
+            )
             cur = conn.execute(
                 f"""
                 SELECT
@@ -1998,7 +2091,7 @@ class SchedulerEngine(QObject):
                     l.sort_order,
                     l.profile_id,
                     p.name,
-                    p.operating_group,
+                    {group_expr} AS group_name,
                     {priority_expr} AS sop_priority,
                     {updated_expr} AS sop_profile_updated_utc
                 FROM sop_schedule_layer l
@@ -2770,10 +2863,88 @@ class SchedulerEngine(QObject):
     # Rig status helpers
     # ------------------------------------------------------------------
 
-    def _current_rig_frequency(self) -> Optional[int]:
+    def _resolve_rig_mode(self, entry: Dict) -> Optional[str]:
+        mode_txt = (entry.get("mode") or "").strip()
+        band_txt = (entry.get("band") or "").strip()
+        voice_hint = (entry.get("fldigi_mode") or "").strip()
+        return resolve_rig_mode(mode_txt, band_txt, voice_hint=voice_hint)
+
+    def _status_poll_flrig_frequency(self) -> Optional[int]:
         """
-        Query FLRig (preferred) or JS8Call for the current frequency in Hz.
+        Lightweight FLRig status poll with short-lived caching/backoff.
         """
+        if not self.rig or not hasattr(self.rig, "get_vfo_frequency"):
+            self._status_flrig_freq_hz = None
+            return None
+        now_ts = time.time()
+        if now_ts - self._status_flrig_freq_ts < self._status_poll_ttl_s:
+            return self._status_flrig_freq_hz
+        if now_ts < self._status_flrig_retry_ts:
+            return self._status_flrig_freq_hz
+        self._status_flrig_freq_ts = now_ts
+        freq = self._current_rig_frequency(control_mode="FLRIG", status_cached=False)
+        if isinstance(freq, (int, float)) and freq > 0:
+            self._status_flrig_freq_hz = int(freq)
+            self._status_flrig_retry_ts = 0.0
+            return self._status_flrig_freq_hz
+        self._status_flrig_freq_hz = None
+        self._status_flrig_retry_ts = now_ts + self._status_poll_retry_s
+        return None
+
+    def _status_poll_flrig_ptt(self) -> bool:
+        """
+        Lightweight FLRig PTT status poll with shared retry backoff.
+        """
+        if not self.rig or not hasattr(self.rig, "get_ptt"):
+            self._status_flrig_ptt = False
+            return False
+        now_ts = time.time()
+        if now_ts - self._status_flrig_ptt_ts < self._status_poll_ttl_s:
+            return self._status_flrig_ptt
+        if now_ts < self._status_flrig_retry_ts:
+            return self._status_flrig_ptt
+        self._status_flrig_ptt_ts = now_ts
+        try:
+            self._status_flrig_ptt = bool(self.rig.get_ptt())
+        except Exception:
+            self._status_flrig_ptt = False
+        return self._status_flrig_ptt
+
+    def _current_rig_frequency(
+        self,
+        *,
+        control_mode: Optional[str] = None,
+        status_cached: bool = False,
+    ) -> Optional[int]:
+        """
+        Query current control frequency in Hz.
+
+        When control_mode is specified, query only that backend. The legacy
+        fallback path (FLRig then JS8) is kept for compatibility when no mode
+        hint is provided.
+        """
+        mode = (control_mode or "").strip().upper()
+        if control_mode is not None and mode not in {"FLRIG", "JS8CALL"}:
+            return None
+        if mode == "FLRIG":
+            if status_cached:
+                return self._status_poll_flrig_frequency()
+            try:
+                if self.rig and hasattr(self.rig, "get_vfo_frequency"):
+                    freq = self.rig.get_vfo_frequency()
+                    if freq:
+                        return freq
+            except Exception as e:
+                log.error("SchedulerEngine: failed to read current rig frequency: %s", e)
+            return None
+        if mode == "JS8CALL":
+            try:
+                if self.js8 and hasattr(self.js8, "get_frequency"):
+                    return self.js8.get_frequency()  # type: ignore[no-any-return]
+            except Exception as e:
+                log.debug("SchedulerEngine: failed to read JS8Call frequency: %s", e)
+            return None
+
         try:
             if self.rig and hasattr(self.rig, "get_vfo_frequency"):
                 freq = self.rig.get_vfo_frequency()
@@ -2813,59 +2984,59 @@ class SchedulerEngine(QObject):
         We avoid re-sending the same frequency/band data unless
         something actually changed, unless 'force' is True.
         """
+        effective_entry, _og = self._entry_with_operating_group_overrides(entry)
         # Extract fields
-        band = (entry.get("band") or "").strip().upper()
-        freq_text = (entry.get("frequency") or "").strip()
-        js8_group = (entry.get("primary_js8call_group") or "").strip()
-        comment = (entry.get("comment") or "").strip()
-        og = self._resolve_operating_group(entry)
-        vfo_source = og.get("vfo") if isinstance(og, dict) else None
-        vfo_raw = (vfo_source or entry.get("vfo") or "A").strip().upper()
+        band = (effective_entry.get("band") or "").strip().upper()
+        freq_text = (effective_entry.get("frequency") or "").strip()
+        js8_group = (effective_entry.get("primary_js8call_group") or "").strip()
+        comment = (effective_entry.get("comment") or "").strip()
+        vfo_raw = (effective_entry.get("vfo") or "A").strip().upper()
         vfo: Optional[str] = vfo_raw if vfo_raw in ("A", "B") else None
-        auto_tune = bool(entry.get("auto_tune"))
+        auto_tune = bool(effective_entry.get("auto_tune"))
+        rig_mode = self._resolve_rig_mode(effective_entry)
 
         # Update internal state regardless of whether we can actually
         # command the rig. This allows UI elements (Net Control tabs,
         # countdown timers, etc.) to reflect the upcoming change even
         # when running in Manual mode.
         self.current_source = source
-        self.current_schedule_entry = entry
+        self.current_schedule_entry = effective_entry
         self._scheduled_vfo = vfo
         if source != "QSY" and self._manual_qsy_active:
             log.debug("SchedulerEngine: manual QSY active; skipping scheduled frequency change.")
-            self.active_entry_changed.emit(entry, source)
+            self.active_entry_changed.emit(effective_entry, source)
             return
 
         control_mode = self._control_mode()
         # If we're not in JS8CALL mode and have no rig backend, just update UI state.
         if control_mode != "JS8CALL" and self.rig is None:
-            self.active_entry_changed.emit(entry, source)
+            self.active_entry_changed.emit(effective_entry, source)
             return
 
         if control_mode == "MANUAL":
             log.debug("SchedulerEngine: manual control selected; no frequency commands sent.")
-            self.active_entry_changed.emit(entry, source)
+            self.active_entry_changed.emit(effective_entry, source)
             return
         if control_mode == "NONE":
             log.debug(
                 "SchedulerEngine: control backend unavailable for mode=%s; not sending commands.",
                 self.settings.get("control_via", "FLRig"),
             )
-            self.active_entry_changed.emit(entry, source)
+            self.active_entry_changed.emit(effective_entry, source)
             return
         # Respect temporary suspend timer (QSY/Suspend button)
         if not ignore_suspend and self._scheduling_suspended(now_utc or datetime.datetime.now(datetime.timezone.utc)):
             dt = self._suspend_until_dt()
             until_txt = dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ") if dt else ""
             log.debug("SchedulerEngine: scheduling suspended until %s; skipping frequency change.", until_txt)
-            self.active_entry_changed.emit(entry, source)
+            self.active_entry_changed.emit(effective_entry, source)
             return
 
         # Scheduler master switch (from Settings tab)
         try:
             if not bool(self.settings.get("use_scheduler", True)):
                 log.debug("SchedulerEngine: scheduler disabled in settings; no frequency changes sent.")
-                self.active_entry_changed.emit(entry, source)
+                self.active_entry_changed.emit(effective_entry, source)
                 return
         except Exception:
             pass
@@ -2877,7 +3048,7 @@ class SchedulerEngine(QObject):
         if freq_hz is None:
             log.error("SchedulerEngine: invalid frequency text '%s'; skipping.", freq_text)
             return
-        current_freq_hz = self._current_rig_frequency()
+        current_freq_hz = self._current_rig_frequency(control_mode=control_mode)
         freq_matches = current_freq_hz is not None and abs(current_freq_hz - freq_hz) <= 5
         want_freq_change = current_freq_hz is None or not freq_matches
         varac_status = self._varac_status()
@@ -2895,8 +3066,8 @@ class SchedulerEngine(QObject):
             if (not self._varac_wait_prompt_active) or (self._varac_wait_prompt_entry_key != prompt_key):
                 self._varac_wait_prompt_active = True
                 self._varac_wait_prompt_entry_key = prompt_key
-                self.varac_wait_detected.emit({"entry": entry, "source": source})
-            self.active_entry_changed.emit(entry, source)
+                self.varac_wait_detected.emit({"entry": effective_entry, "source": source})
+            self.active_entry_changed.emit(effective_entry, source)
             return
         fldigi_delay, fldigi_reason = self._should_delay_for_fldigi(
             entry_key=prompt_key,
@@ -2906,7 +3077,7 @@ class SchedulerEngine(QObject):
         )
         # Safety: avoid changing frequency while a backend is busy transmitting.
         busy_reasons = []
-        if self.rig and hasattr(self.rig, "get_ptt"):
+        if control_mode == "FLRIG" and self.rig and hasattr(self.rig, "get_ptt"):
             try:
                 if self.rig.get_ptt():
                     busy_reasons.append("FLRig PTT is active")
@@ -2935,20 +3106,21 @@ class SchedulerEngine(QObject):
                 source,
                 "; ".join(busy_reasons),
             )
-            self.active_entry_changed.emit(entry, source)
+            self.active_entry_changed.emit(effective_entry, source)
             return
 
         log.info(
-            "SchedulerEngine applying entry (%s) from %s: band=%s freq=%s vfo=%s comment=%s",
+            "SchedulerEngine applying entry (%s) from %s: band=%s freq=%s vfo=%s mode=%s comment=%s",
             control_mode,
             source,
             band,
             freq_text,
             vfo or "-",
+            rig_mode or "-",
             comment,
         )
 
-        fldigi_center = self._expected_fldigi_offset(entry)
+        fldigi_center = self._expected_fldigi_offset(effective_entry)
         js8_tune = None
         if not apply_fldigi:
             fldigi_center = None
@@ -2961,17 +3133,18 @@ class SchedulerEngine(QObject):
             js8_tune,
             vfo,
             js8_group,
+            rig_mode,
         )
         if self._net_corrections_suppressed() and not force and not ignore_net_suppression:
             if source == "NET" and self._last_entry_key != entry_key:
                 self._net_fldigi_apply_allowed_once = True
             if self._manual_net_fldigi_active or self._manual_net_js8_active:
                 log.debug("SchedulerEngine: net active; skipping schedule enforcement.")
-                self.active_entry_changed.emit(entry, source)
+                self.active_entry_changed.emit(effective_entry, source)
                 return
             if self._last_entry_key == entry_key:
                 log.debug("SchedulerEngine: net schedule active; skipping corrections for current entry.")
-                self.active_entry_changed.emit(entry, source)
+                self.active_entry_changed.emit(effective_entry, source)
                 return
         if source in ("HF", "NET", "SOP") and entry_key != self._last_entry_key:
             # Ensure schedule transitions always enforce FLDigi mode/offset,
@@ -2979,17 +3152,17 @@ class SchedulerEngine(QObject):
             self._fldigi_force_apply_once = True
         if self._pending_entry_key == entry_key and not force:
             log.debug("SchedulerEngine: control action skipped (pending entry key).")
-            self.active_entry_changed.emit(entry, source)
+            self.active_entry_changed.emit(effective_entry, source)
             return
         already_applied = (
             self._last_entry_key == entry_key and self._last_source == source
         )
         if not force and already_applied:
             log.debug("SchedulerEngine: schedule entry already applied; skipping re-apply.")
-            self.active_entry_changed.emit(entry, source)
+            self.active_entry_changed.emit(effective_entry, source)
             return
         if apply_fldigi:
-            self._update_desired_fldigi_settings(entry)
+            self._update_desired_fldigi_settings(effective_entry)
         if current_freq_hz is not None and not freq_matches:
             log.info(
                 "SchedulerEngine: rig currently at %d Hz, target %d Hz; reapplying schedule.",
@@ -2997,7 +3170,6 @@ class SchedulerEngine(QObject):
                 freq_hz,
             )
 
-        ok = False
         js8_offset = self._js8_offset_setting() if apply_js8_offset else None
         queued = self._queue_control_action(
             control_mode=control_mode,
@@ -3005,6 +3177,7 @@ class SchedulerEngine(QObject):
             source=source,
             freq_hz=freq_hz,
             band=band,
+            mode=rig_mode,
             vfo=vfo,
             auto_tune=auto_tune,
             js8_offset=js8_offset,
@@ -3023,9 +3196,11 @@ class SchedulerEngine(QObject):
                 apply_js8_offset=apply_js8_offset,
                 apply_fldigi=apply_fldigi,
             )
-            self._forced_retry_attempts_left = max(self._forced_retry_attempts_left, 5)
-            if self._control_future is not None and not self._control_future.done():
-                self._force_retry_after_control = True
-            self._schedule_forced_retry()
+            should_force_retry = bool(force or source == "QSY" or self._force_retry_after_control)
+            if should_force_retry:
+                self._forced_retry_attempts_left = max(self._forced_retry_attempts_left, 5)
+                if self._control_future is not None and not self._control_future.done():
+                    self._force_retry_after_control = True
+                self._schedule_forced_retry()
         # Update UI state immediately regardless of control action.
-        self.active_entry_changed.emit(entry, source)
+        self.active_entry_changed.emit(effective_entry, source)

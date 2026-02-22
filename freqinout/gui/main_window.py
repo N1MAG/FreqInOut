@@ -1305,7 +1305,7 @@ class MainWindow(QMainWindow):
             self.resume_schedule_btn.setVisible(True)
             try:
                 theme = resolve_theme(self.settings)
-                self.resume_schedule_btn.setStyleSheet(button_style("muted", theme))
+                self.resume_schedule_btn.setStyleSheet(button_style("info", theme))
             except Exception:
                 pass
             self.suspend_schedule_btn.setVisible(True)
@@ -1414,6 +1414,10 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "net_tab") and hasattr(self.net_tab, "on_sop_data_changed"):
                 self.net_tab.on_sop_data_changed()
+        except Exception:
+            pass
+        try:
+            self._refresh_freq_planner_if_loaded()
         except Exception:
             pass
         try:

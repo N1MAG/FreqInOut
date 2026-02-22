@@ -108,6 +108,10 @@ class ControlFreqTab(QWidget):
         self._net_schedule_rows_cache_ts = 0.0
         self._net_schedule_rows_cache_mtime = 0.0
         self._net_schedule_rows_cache_ttl_sec = 10.0
+        self._peer_schedule_rows_cache: List[Dict[str, Any]] = []
+        self._peer_schedule_rows_cache_ts = 0.0
+        self._peer_schedule_rows_cache_mtime = 0.0
+        self._peer_schedule_rows_cache_ttl_sec = 20.0
         self._view_cards: Dict[str, bool] = {
             "activity": True,
             "intersections": True,
@@ -898,10 +902,12 @@ class ControlFreqTab(QWidget):
         preset_cards = self._view_presets().get(preset)
         if not isinstance(preset_cards, dict):
             return
+        previous_cards = dict(self._view_cards)
         self._view_cards = self._normalized_view_cards(preset_cards)
         self._view_preset = preset
         self._sync_view_controls_from_state()
         self._apply_view_state(animated=True)
+        self._refresh_newly_visible_cards(previous_cards)
         self._schedule_persist_ui_state()
 
     def _on_view_chip_toggled(self, key: str, checked: bool) -> None:
@@ -918,11 +924,22 @@ class ControlFreqTab(QWidget):
             finally:
                 self._view_syncing = False
             return
+        previous_cards = dict(self._view_cards)
         self._view_cards = self._normalized_view_cards(next_cards)
         self._view_preset = self._preset_for_view_cards(self._view_cards)
         self._sync_view_controls_from_state()
         self._apply_view_state(animated=True)
+        self._refresh_newly_visible_cards(previous_cards)
         self._schedule_persist_ui_state()
+
+    def _refresh_newly_visible_cards(self, previous_cards: Dict[str, bool]) -> None:
+        try:
+            if bool(self._view_cards.get("propagation", False)) and not bool(previous_cards.get("propagation", False)):
+                # Trigger immediate target + forecast refresh when propagation is first shown.
+                QTimer.singleShot(0, self._refresh_prop_target_controls)
+                QTimer.singleShot(0, self._refresh_propagation_snapshot)
+        except Exception as e:
+            log.debug("ControlFreq: failed to refresh newly visible cards: %s", e)
 
     def _update_view_chip_styles(self, theme: Optional[Dict[str, str]] = None) -> None:
         if not hasattr(self, "view_chip_buttons"):
@@ -1029,8 +1046,7 @@ class ControlFreqTab(QWidget):
         combo_h = max(36, int(QFontMetrics(digital_font).height()) + 14)
         self.freq_combo.setMinimumHeight(combo_h)
         self.freq_combo.setMaximumHeight(combo_h)
-        popup_font = QFont(digital_font)
-        popup_font.setPixelSize(10)
+        popup_font = QFont(self.font())
         popup_font.setBold(False)
         self._freq_popup_font = popup_font
         try:
@@ -1739,6 +1755,51 @@ class ControlFreqTab(QWidget):
         self._net_schedule_rows_cache_mtime = db_mtime
         return rows
 
+    def _peer_schedule_rows(self) -> List[Dict[str, Any]]:
+        db_path = self._db_path()
+        now_ts = time.time()
+        db_mtime = self._safe_db_mtime(db_path)
+        if (
+            self._peer_schedule_rows_cache
+            and (now_ts - float(self._peer_schedule_rows_cache_ts) < self._peer_schedule_rows_cache_ttl_sec)
+            and abs(float(self._peer_schedule_rows_cache_mtime) - db_mtime) < 0.0001
+        ):
+            return self._peer_schedule_rows_cache
+        if not db_path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            has_effective_view = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view' AND name='peer_hf_schedule_effective'"
+            ).fetchone()
+            if has_effective_view:
+                query = """
+                    SELECT owner_callsign, day_utc, start_utc, end_utc, band, frequency
+                    FROM peer_hf_schedule_effective
+                """
+            else:
+                query = """
+                    SELECT owner_callsign, day_utc, start_utc, end_utc, band, frequency
+                    FROM peer_hf_schedule
+                """
+            rows = [dict(r) for r in conn.execute(query).fetchall()]
+        except Exception as e:
+            log.debug("ControlFreq: failed to load peer schedule rows: %s", e)
+            rows = []
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+        self._peer_schedule_rows_cache = rows
+        self._peer_schedule_rows_cache_ts = now_ts
+        self._peer_schedule_rows_cache_mtime = db_mtime
+        return rows
+
     def _load_group_combo(self) -> None:
         groups = self._get_operating_groups()
         current = self.group_combo.currentData()
@@ -2025,6 +2086,7 @@ class ControlFreqTab(QWidget):
                 "band": g.get("band", ""),
                 "auto_tune": bool(g.get("auto_tune", False)),
                 "vfo": (g.get("vfo") or "").strip().upper(),
+                "group": group_txt,
             }
             combo_items.append((label.strip(), meta, freq_val))
             combo_cache_rows.append(
@@ -2043,20 +2105,8 @@ class ControlFreqTab(QWidget):
             self.freq_combo.blockSignals(True)
             self.freq_combo.clear()
             self.freq_combo.addItem("Select frequency", None)
-            try:
-                popup_font = getattr(self, "_freq_popup_font", None)
-                if popup_font is not None:
-                    self.freq_combo.setItemData(0, popup_font, Qt.FontRole)
-            except Exception:
-                pass
             for label, meta, _freq_val in combo_items:
                 self.freq_combo.addItem(label, meta)
-                try:
-                    popup_font = getattr(self, "_freq_popup_font", None)
-                    if popup_font is not None:
-                        self.freq_combo.setItemData(self.freq_combo.count() - 1, popup_font, Qt.FontRole)
-                except Exception:
-                    pass
             self.freq_combo.blockSignals(False)
             self._freq_combo_cache_key = combo_key
 
@@ -2143,35 +2193,8 @@ class ControlFreqTab(QWidget):
         if not my_entries:
             return rows
         operator_groups = self._load_operator_group_map()
-
-        db_path = self._db_path()
-        if not db_path.exists():
-            return rows
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            has_effective_view = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='view' AND name='peer_hf_schedule_effective'"
-            ).fetchone()
-            if has_effective_view:
-                cur.execute(
-                    """
-                    SELECT owner_callsign, day_utc, start_utc, end_utc, band, frequency
-                    FROM peer_hf_schedule_effective
-                    """
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT owner_callsign, day_utc, start_utc, end_utc, band, frequency
-                    FROM peer_hf_schedule
-                    """
-                )
-            peer_rows = cur.fetchall()
-            conn.close()
-        except Exception as e:
-            log.debug("ControlFreq: failed to load peer schedule: %s", e)
+        peer_rows = self._peer_schedule_rows()
+        if not peer_rows:
             return rows
 
         now_calls: Set[str] = set()
@@ -2179,7 +2202,7 @@ class ControlFreqTab(QWidget):
         now_labels: Set[str] = set()
         next_labels: Set[str] = set()
         for r in peer_rows:
-            cs = (r["owner_callsign"] or "").strip().upper()
+            cs = str(r.get("owner_callsign") or "").strip().upper()
             if not cs:
                 continue
             groups = operator_groups.get(cs, set())
@@ -2188,14 +2211,14 @@ class ControlFreqTab(QWidget):
                     continue
             if search and search not in cs and not any(search in g for g in groups):
                 continue
-            peer_start = self._parse_time_minutes(r["start_utc"])
-            peer_end = self._parse_time_minutes(r["end_utc"])
+            peer_start = self._parse_time_minutes(str(r.get("start_utc") or ""))
+            peer_end = self._parse_time_minutes(str(r.get("end_utc") or ""))
             if peer_start is None or peer_end is None:
                 continue
-            peer_segments = self._expand_week_segments((r["day_utc"] or "ALL"), peer_start, peer_end)
+            peer_segments = self._expand_week_segments(str(r.get("day_utc") or "ALL"), peer_start, peer_end)
             if not peer_segments:
                 continue
-            peer_freq = self._parse_frequency_mhz(r["frequency"])
+            peer_freq = self._parse_frequency_mhz(r.get("frequency"))
             if peer_freq is None:
                 continue
 
@@ -2992,6 +3015,7 @@ class ControlFreqTab(QWidget):
                 "band": row.get("band", "") or band,
                 "auto_tune": bool(row.get("auto_tune", False)),
                 "vfo": (row.get("vfo") or "").strip().upper(),
+                "group": grp,
             }
         return {
             "freq": freq,
@@ -2999,6 +3023,7 @@ class ControlFreqTab(QWidget):
             "band": band,
             "auto_tune": False,
             "vfo": "",
+            "group": group,
         }
 
     def _navigate_to_tab(self, label: str) -> None:

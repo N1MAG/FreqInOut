@@ -4135,23 +4135,64 @@ class MessageViewerTab(QWidget):
             pass
 
     def on_settings_saved(self) -> None:
+        prev_watch_sig = ""
+        prev_auth_sig: tuple = tuple()
+        try:
+            prev_watch_sig = self._watch_dirs_signature(self._effective_watch_dirs())
+            prev_auth_sig = self._auth_refresh_signature()
+        except Exception:
+            prev_watch_sig = ""
+            prev_auth_sig = tuple()
         try:
             if hasattr(self.settings, "reload"):
                 self.settings.reload()
         except Exception:
             pass
+        watch_sig_changed = False
+        auth_sig_changed = False
         try:
-            self._refresh_files(force=True)
+            watch_sig_changed = prev_watch_sig != self._watch_dirs_signature(self._effective_watch_dirs())
+            auth_sig_changed = prev_auth_sig != self._auth_refresh_signature()
         except Exception:
+            watch_sig_changed = False
+            auth_sig_changed = False
+        try:
+            if watch_sig_changed:
+                # Only rescan file watches when a watch-root-affecting setting changed.
+                self._refresh_files(force=False)
+        except Exception:
+            if watch_sig_changed:
+                try:
+                    self._refresh_varac_messages(force=True)
+                except Exception:
+                    pass
+        if auth_sig_changed:
             try:
-                self._refresh_varac_messages(force=True)
+                self._start_signature_verification(force=True)
             except Exception:
                 pass
-        try:
-            self._start_signature_verification(force=True)
-        except Exception:
-            pass
         self._update_pending_table()
+
+    def _auth_refresh_signature(self) -> tuple:
+        try:
+            trusted_signers_raw = self.settings.get("gpg_trusted_signers", []) or []
+            if not isinstance(trusted_signers_raw, list):
+                trusted_signers_raw = []
+            trusted_signers = tuple(sorted(normalize_fingerprints(str(v) for v in trusted_signers_raw)))
+        except Exception:
+            trusted_signers = tuple()
+        try:
+            inline_suffixes = tuple(self._inline_signature_name_suffixes())
+        except Exception:
+            inline_suffixes = tuple()
+        return (
+            bool(self.settings.get("gpg_verify_flamp_k2s_enabled", False)),
+            bool(self.settings.get("hash_verify_flamp_k2s_enabled", True)),
+            str(self.settings.get("gpg_executable_path", "") or "").strip(),
+            trusted_signers,
+            inline_suffixes,
+            str(self._trusted_hash_set_signature() or ""),
+        )
 
     def _queue_persist_op(self, op: str, payload: Tuple) -> None:
         self._pending_persist_ops.append((op, payload))

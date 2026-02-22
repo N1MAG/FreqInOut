@@ -7,6 +7,8 @@ from typing import Optional
 
 from xmlrpc.client import ServerProxy, Transport
 
+from freqinout.core.mode_utils import voice_sideband_for_band
+
 log = logging.getLogger(__name__)
 
 
@@ -251,31 +253,148 @@ class FLRigClient:
 
     # ------------- CONTROL METHODS -------------
 
+    @staticmethod
+    def _normalize_rig_mode(mode: Optional[str], band: Optional[str]) -> Optional[str]:
+        txt = str(mode or "").strip()
+        if not txt:
+            return None
+        up = txt.upper()
+        if up in {"USB", "LSB"}:
+            return up
+        if up in {"SSB", "VOICE"}:
+            return voice_sideband_for_band(band)
+        if up in {"DIGI", "DIGITAL", "DATA"}:
+            # FLRig expects explicit data mode labels, not "DIGI".
+            return "DATA-U"
+        return txt
+
     def set_frequency(self, cmd: FrequencyCommand) -> bool:
         """
         Set rig frequency (and optionally mode/VFO) via FLRig.
         """
         try:
             def _do_set(p):
-                # Select VFO if requested
-                if cmd.vfo in ("A", "B"):
-                    log.info("Setting FLRig VFO to %s", cmd.vfo)
-                    p.rig.set_AB(cmd.vfo)
-
-                # Set and verify frequency in Hz
                 freq_hz = cmd.hz
                 freq = float(freq_hz)
+                target_vfo = cmd.vfo if cmd.vfo in ("A", "B") else None
+
+                def _set_vfo(vfo: str) -> None:
+                    log.info("Setting FLRig VFO to %s", vfo)
+                    p.rig.set_AB(vfo)
+
+                def _set_mode(mode_cmd: str, vfo: Optional[str]) -> None:
+                    if vfo == "A":
+                        try:
+                            p.rig.set_verify_modeA(mode_cmd)
+                            return
+                        except Exception:
+                            try:
+                                p.rig.set_modeA(mode_cmd)
+                                return
+                            except Exception:
+                                pass
+                    elif vfo == "B":
+                        try:
+                            p.rig.set_verify_modeB(mode_cmd)
+                            return
+                        except Exception:
+                            try:
+                                p.rig.set_modeB(mode_cmd)
+                                return
+                            except Exception:
+                                pass
+                    try:
+                        p.rig.set_verify_mode(mode_cmd)
+                    except Exception:
+                        p.rig.set_mode(mode_cmd)
+
+                def _set_frequency(freq_val: float, vfo: Optional[str]) -> None:
+                    if vfo == "A":
+                        try:
+                            p.rig.set_verify_vfoA(freq_val)
+                            return
+                        except Exception:
+                            p.rig.set_vfoA(freq_val)
+                            return
+                    if vfo == "B":
+                        try:
+                            p.rig.set_verify_vfoB(freq_val)
+                            return
+                        except Exception:
+                            p.rig.set_vfoB(freq_val)
+                            return
+                    try:
+                        p.rig.set_verify_frequency(freq_val)
+                    except Exception:
+                        p.rig.set_frequency(freq_val)
+
+                def _readback_frequency(vfo: Optional[str]) -> int:
+                    if vfo == "A":
+                        try:
+                            return int(float(p.rig.get_vfoA()))
+                        except Exception:
+                            pass
+                    elif vfo == "B":
+                        try:
+                            return int(float(p.rig.get_vfoB()))
+                        except Exception:
+                            pass
+                    return int(float(p.rig.get_vfo()))
+
+                # Select target VFO first so subsequent mode/frequency calls apply
+                # to the intended side.
+                if target_vfo:
+                    _set_vfo(target_vfo)
+
+                mode_cmd = self._normalize_rig_mode(cmd.mode, cmd.band)
+                if mode_cmd:
+                    log.info("Setting FLRig mode to %s", mode_cmd)
+                    _set_mode(mode_cmd, target_vfo)
+
+                # Apply frequency after mode so rigs with band-stack-per-mode do
+                # not drift off the requested target frequency.
                 log.info("Setting FLRig frequency to %d Hz", freq_hz)
-                p.rig.set_verify_frequency(freq)
+                _set_frequency(freq, target_vfo)
 
-                # Optional mode change (if you configure it to be allowed)
-                if cmd.mode:
-                    log.info("Setting FLRig mode to %s", cmd.mode)
-                    p.rig.set_mode(cmd.mode)
+                # Re-assert selected VFO; some rigs can flip active side during
+                # mode/frequency writes.
+                if target_vfo:
+                    try:
+                        _set_vfo(target_vfo)
+                    except Exception:
+                        pass
+                    active_mismatch = False
+                    try:
+                        active_raw = str(p.rig.get_AB() or "").strip().upper()
+                        active_vfo = active_raw[:1] if active_raw else ""
+                        if active_vfo in {"A", "B"} and active_vfo != target_vfo:
+                            active_mismatch = True
+                    except Exception:
+                        active_mismatch = False
 
-            self._with_proxy(_do_set, label="set_frequency")
+                # Explicit readback check so scheduler can back off when rig does
+                # not converge to requested frequency.
+                try:
+                    verify_hz = _readback_frequency(target_vfo)
+                except Exception as e:
+                    log.warning("Failed to verify FLRig frequency readback: %s", e)
+                    return False
+                if abs(verify_hz - freq_hz) > 20:
+                    log.warning(
+                        "FLRig frequency verify mismatch: target=%dHz readback=%dHz",
+                        freq_hz,
+                        verify_hz,
+                    )
+                    return False
+                if target_vfo and active_mismatch:
+                    log.warning(
+                        "FLRig VFO verify mismatch: target=%s readback=%s (frequency verified on target VFO)",
+                        target_vfo,
+                        active_vfo,
+                    )
+                return True
 
-            return True
+            return bool(self._with_proxy(_do_set, label="set_frequency"))
         except Exception as e:
             log.error("Failed to set frequency via FLRig: %s", e)
             return False

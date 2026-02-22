@@ -5,6 +5,7 @@ import datetime
 import time
 
 from PySide6.QtWidgets import QComboBox, QMessageBox
+from freqinout.core.mode_utils import normalize_operating_group_mode
 
 
 def load_operating_groups(settings) -> List[Dict]:
@@ -24,6 +25,7 @@ def load_operating_groups(settings) -> List[Dict]:
             g["frequency"] = f"{float(g.get('frequency', 0)):.3f}"
         except Exception:
             g["frequency"] = ""
+        g["mode"] = normalize_operating_group_mode(g.get("mode", ""), g.get("band", ""))
         g["auto_tune"] = bool(g.get("auto_tune", False))
         cleaned.append(g)
     return cleaned
@@ -58,6 +60,7 @@ def build_qsy_options(og_list: List[Dict]) -> Dict[str, Dict]:
         key = f"{fval:.3f}"
         auto = bool(g.get("auto_tune", False))
         vfo = (g.get("vfo") or "").strip().upper()
+        group = (g.get("group") or "").strip().upper()
         existing = meta.get(key)
         if existing:
             existing["auto_tune"] = existing.get("auto_tune", False) or auto
@@ -67,6 +70,8 @@ def build_qsy_options(og_list: List[Dict]) -> Dict[str, Dict]:
                 existing["band"] = g.get("band", "")
             if vfo and not existing.get("vfo"):
                 existing["vfo"] = vfo
+            if group and not existing.get("group"):
+                existing["group"] = group
         else:
             meta[key] = {
                 "freq": fval,
@@ -74,6 +79,7 @@ def build_qsy_options(og_list: List[Dict]) -> Dict[str, Dict]:
                 "band": g.get("band", ""),
                 "auto_tune": auto,
                 "vfo": vfo,
+                "group": group,
             }
     return meta
 
@@ -122,6 +128,8 @@ def perform_qsy(window, meta: Dict) -> bool:
         "mode": meta.get("mode", ""),
         "auto_tune": bool(meta.get("auto_tune", False)),
         "vfo": meta.get("vfo", ""),
+        "group": (meta.get("group") or "").strip().upper(),
+        "group_name": (meta.get("group") or "").strip().upper(),
     }
     scheduler.apply_manual_qsy(entry)
     return True

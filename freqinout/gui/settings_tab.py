@@ -65,6 +65,7 @@ from freqinout.core.hash_tools import (
     normalize_hash_hex,
     normalize_trusted_hash_entries,
 )
+from freqinout.core.mode_utils import normalize_operating_group_mode, voice_sideband_for_band
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
@@ -720,7 +721,7 @@ class SettingsTab(QWidget):
                 "Freq (MHz)",
                 "VFO",
                 "FLDigi Starting Mode",
-                "FLDigi Starting Offset",
+                "FLDigi Offset",
                 "Auto-Tune",
                 "Use Condition Levels",
             ]
@@ -728,11 +729,14 @@ class SettingsTab(QWidget):
         header = self.op_groups_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.Interactive)
+        header.setSectionResizeMode(7, QHeaderView.Interactive)
         header.setSectionResizeMode(8, QHeaderView.Fixed)
         header.setSectionResizeMode(9, QHeaderView.Fixed)
-        header.setSectionResizeMode(7, QHeaderView.Stretch)
-        header.setStretchLastSection(True)
+        header.setStretchLastSection(False)
         header.setMinimumSectionSize(50)
+        self.op_groups_table.setColumnWidth(6, 185)
+        self.op_groups_table.setColumnWidth(7, 130)
         self.op_groups_table.setColumnWidth(8, 110)
         self.op_groups_table.setColumnWidth(9, 180)
         self.op_groups_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
@@ -1946,11 +1950,13 @@ class SettingsTab(QWidget):
                         cond_level = 5
                     if cond_level < 1 or cond_level > 5:
                         cond_level = 5
+                    band_val = str(g.get("band", "") or "").strip().upper()
+                    mode_val = normalize_operating_group_mode(g.get("mode", ""), band_val)
                     self.operating_groups.append(
                         {
                             "group": str(g.get("group", "")).upper(),
-                            "mode": g.get("mode", ""),
-                            "band": g.get("band", ""),
+                            "mode": mode_val,
+                            "band": band_val,
                             "frequency": g.get("frequency", ""),
                             "vfo": vfo_val,
                             "fldigi_mode": (g.get("fldigi_mode") or "").strip(),
@@ -3471,17 +3477,55 @@ class SettingsTab(QWidget):
         fldigi_mode_combo.setCompleter(completer)
         form.addRow("FLDigi Starting Mode:", fldigi_mode_combo)
 
-        def _sync_fldigi_mode_for_ssb(text: str):
-            if (text or "").strip().upper() == "SSB":
-                fldigi_mode_combo.setCurrentText("SSB")
+        _manual_voice_override = {"enabled": False}
 
-        mode_combo.currentTextChanged.connect(_sync_fldigi_mode_for_ssb)
-        _sync_fldigi_mode_for_ssb(mode_combo.currentText())
+        def _default_voice_mode() -> str:
+            return voice_sideband_for_band(band_combo.currentText())
+
+        def _sync_fldigi_voice_default(*, force: bool = False) -> None:
+            if (mode_combo.currentText() or "").strip().upper() != "SSB":
+                return
+            current = (fldigi_mode_combo.currentText() or "").strip().upper()
+            desired = _default_voice_mode()
+            if not force and _manual_voice_override["enabled"]:
+                return
+            if force or not current or current in {"USB", "LSB"}:
+                fldigi_mode_combo.blockSignals(True)
+                fldigi_mode_combo.setCurrentText(desired)
+                fldigi_mode_combo.blockSignals(False)
+                _manual_voice_override["enabled"] = False
+
+        def _on_mode_changed(_text: str) -> None:
+            if (mode_combo.currentText() or "").strip().upper() != "SSB":
+                _manual_voice_override["enabled"] = False
+                return
+            _sync_fldigi_voice_default()
+
+        def _on_band_changed(*_args) -> None:
+            _sync_fldigi_voice_default()
+
+        def _on_fldigi_mode_changed(text: str) -> None:
+            if (mode_combo.currentText() or "").strip().upper() != "SSB":
+                _manual_voice_override["enabled"] = False
+                return
+            value = (text or "").strip().upper()
+            desired = _default_voice_mode()
+            _manual_voice_override["enabled"] = bool(value) and value != desired
+
+        mode_combo.currentTextChanged.connect(_on_mode_changed)
+        band_combo.currentTextChanged.connect(_on_band_changed)
+        fldigi_mode_combo.currentTextChanged.connect(_on_fldigi_mode_changed)
+        current_mode = (mode_combo.currentText() or "").strip().upper()
+        current_fldigi = (fldigi_mode_combo.currentText() or "").strip().upper()
+        if current_mode == "SSB" and current_fldigi:
+            _manual_voice_override["enabled"] = current_fldigi != _default_voice_mode()
+        else:
+            _sync_fldigi_voice_default(force=True)
 
         fldigi_offset_edit = QLineEdit()
         fldigi_offset_edit.setValidator(QIntValidator(0, 99999, fldigi_offset_edit))
         fldigi_offset_edit.setPlaceholderText("e.g., 900")
-        form.addRow("FLDigi Starting Offset (Hz):", fldigi_offset_edit)
+        form.addRow("FLDigi Offset:", fldigi_offset_edit)
 
         auto_tune_chk = QCheckBox("Enable Auto-Tune on QSY")
         form.addRow("", auto_tune_chk)
@@ -3499,8 +3543,8 @@ class SettingsTab(QWidget):
 
         def on_accept():
             name = name_edit.text().strip()
-            mode = mode_combo.currentText()
-            band = band_combo.currentText()
+            band = band_combo.currentText().strip().upper()
+            mode = normalize_operating_group_mode(mode_combo.currentText(), band)
             freq_txt = freq_edit.text().strip()
             if not name:
                 QMessageBox.warning(self, "Validation", "Group Name is required.")
@@ -3514,7 +3558,7 @@ class SettingsTab(QWidget):
                 try:
                     int(offset_txt)
                 except Exception:
-                    QMessageBox.warning(self, "Validation", "FLDigi Starting Offset must be an integer.")
+                    QMessageBox.warning(self, "Validation", "FLDigi Offset must be an integer.")
                     return
             fldigi_mode = fldigi_mode_combo.currentText().strip()
             vfo = vfo_combo.currentText().strip().upper() or "A"
@@ -3540,7 +3584,11 @@ class SettingsTab(QWidget):
             freq = float(freq_txt.replace(",", "."))
         except Exception:
             return False
+        band = str(band or "").strip().upper()
+        mode = normalize_operating_group_mode(mode, band)
         # Simple band/mode ranges (same as daily schedule)
+        if mode in {"USB", "LSB"}:
+            mode = "SSB"
         limits = {
             ("20M", "Digi"): (14.000, 14.150),
             ("20M", "SSB"): (14.150, 14.350),
@@ -3592,6 +3640,8 @@ class SettingsTab(QWidget):
     ):
         # replace existing entry with same group+mode+band
         name = name.strip().upper()
+        band = str(band or "").strip().upper()
+        mode = normalize_operating_group_mode(mode, band)
         freq_display = self._format_freq(freq_mhz)
         cond_level: int | None
         if condition_level is None:
@@ -3657,8 +3707,8 @@ class SettingsTab(QWidget):
             [
                 {
                     "group": str(g.get("group", "")).upper(),
-                    "mode": g.get("mode", ""),
-                    "band": g.get("band", ""),
+                    "mode": normalize_operating_group_mode(g.get("mode", ""), g.get("band", "")),
+                    "band": str(g.get("band", "")).strip().upper(),
                     "frequency": g.get("frequency", ""),
                     "vfo": (g.get("vfo") or "A").strip().upper() or "A",
                     "fldigi_mode": (g.get("fldigi_mode") or "").strip(),
@@ -3723,8 +3773,12 @@ class SettingsTab(QWidget):
         header = table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.Interactive)
+        header.setSectionResizeMode(7, QHeaderView.Interactive)
         header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
+        table.setColumnWidth(6, max(table.columnWidth(6), 185))
+        table.setColumnWidth(7, max(table.columnWidth(7), 130))
         self._update_op_group_action_buttons()
         self._refresh_section_titles()
         emit_span(
@@ -3797,10 +3851,12 @@ class SettingsTab(QWidget):
         existing_levels: Dict[Tuple[str, str, str], int] = {}
         for g in self.operating_groups:
             try:
+                band_key = str(g.get("band", "")).strip().upper()
+                mode_key = normalize_operating_group_mode(g.get("mode", ""), band_key)
                 key = (
                     str(g.get("group", "")).strip().upper(),
-                    str(g.get("mode", "")).strip(),
-                    str(g.get("band", "")).strip(),
+                    mode_key,
+                    band_key,
                 )
                 level = int(g.get("condition_level", 5) or 5)
             except Exception:
@@ -3832,7 +3888,8 @@ class SettingsTab(QWidget):
                 self.op_groups_table.item(r, 1).text().strip().upper() if self.op_groups_table.item(r, 1) else ""
             )
             mode = self.op_groups_table.item(r, 2).text().strip() if self.op_groups_table.item(r, 2) else ""
-            band = self.op_groups_table.item(r, 3).text().strip() if self.op_groups_table.item(r, 3) else ""
+            band = self.op_groups_table.item(r, 3).text().strip().upper() if self.op_groups_table.item(r, 3) else ""
+            mode = normalize_operating_group_mode(mode, band)
             freq_txt = self.op_groups_table.item(r, 4).text().strip() if self.op_groups_table.item(r, 4) else ""
             vfo_txt = self.op_groups_table.item(r, 5).text().strip() if self.op_groups_table.item(r, 5) else "A"
             fldigi_mode = (
@@ -3932,11 +3989,13 @@ class SettingsTab(QWidget):
             if chk is not None:
                 use_cond_val = chk.isChecked()
         cond_level_val = 5
+        band = (band or "").strip().upper()
+        mode = normalize_operating_group_mode(mode, band)
         for g in self.operating_groups:
             if (
                 str(g.get("group", "")).strip().upper() == group.strip().upper()
-                and str(g.get("mode", "")).strip() == mode
-                and str(g.get("band", "")).strip() == band
+                and normalize_operating_group_mode(g.get("mode", ""), g.get("band", "")) == mode
+                and str(g.get("band", "")).strip().upper() == band
             ):
                 try:
                     cond_level_val = int(g.get("condition_level", 5) or 5)
@@ -3955,8 +4014,9 @@ class SettingsTab(QWidget):
 
         mode_combo = QComboBox()
         mode_combo.addItems(["Digi", "SSB"])
-        if mode in ["Digi", "SSB"]:
-            mode_combo.setCurrentText(mode)
+        mode_val = normalize_operating_group_mode(mode, band)
+        if mode_val in ["Digi", "SSB"]:
+            mode_combo.setCurrentText(mode_val)
         form.addRow("Mode:", mode_combo)
 
         band_combo = QComboBox()
@@ -4001,17 +4061,55 @@ class SettingsTab(QWidget):
             fldigi_mode_combo.setCurrentText(fldigi_mode_txt)
         form.addRow("FLDigi Starting Mode:", fldigi_mode_combo)
 
-        def _sync_fldigi_mode_for_ssb(text: str):
-            if (text or "").strip().upper() == "SSB":
-                fldigi_mode_combo.setCurrentText("SSB")
+        _manual_voice_override = {"enabled": False}
 
-        mode_combo.currentTextChanged.connect(_sync_fldigi_mode_for_ssb)
-        _sync_fldigi_mode_for_ssb(mode_combo.currentText())
+        def _default_voice_mode() -> str:
+            return voice_sideband_for_band(band_combo.currentText())
+
+        def _sync_fldigi_voice_default(*, force: bool = False) -> None:
+            if (mode_combo.currentText() or "").strip().upper() != "SSB":
+                return
+            current = (fldigi_mode_combo.currentText() or "").strip().upper()
+            desired = _default_voice_mode()
+            if not force and _manual_voice_override["enabled"]:
+                return
+            if force or not current or current in {"USB", "LSB"}:
+                fldigi_mode_combo.blockSignals(True)
+                fldigi_mode_combo.setCurrentText(desired)
+                fldigi_mode_combo.blockSignals(False)
+                _manual_voice_override["enabled"] = False
+
+        def _on_mode_changed(_text: str) -> None:
+            if (mode_combo.currentText() or "").strip().upper() != "SSB":
+                _manual_voice_override["enabled"] = False
+                return
+            _sync_fldigi_voice_default()
+
+        def _on_band_changed(*_args) -> None:
+            _sync_fldigi_voice_default()
+
+        def _on_fldigi_mode_changed(text: str) -> None:
+            if (mode_combo.currentText() or "").strip().upper() != "SSB":
+                _manual_voice_override["enabled"] = False
+                return
+            value = (text or "").strip().upper()
+            desired = _default_voice_mode()
+            _manual_voice_override["enabled"] = bool(value) and value != desired
+
+        mode_combo.currentTextChanged.connect(_on_mode_changed)
+        band_combo.currentTextChanged.connect(_on_band_changed)
+        fldigi_mode_combo.currentTextChanged.connect(_on_fldigi_mode_changed)
+        current_mode = (mode_combo.currentText() or "").strip().upper()
+        current_fldigi = (fldigi_mode_combo.currentText() or "").strip().upper()
+        if current_mode == "SSB" and current_fldigi:
+            _manual_voice_override["enabled"] = current_fldigi != _default_voice_mode()
+        else:
+            _sync_fldigi_voice_default(force=True)
 
         fldigi_offset_edit = QLineEdit(fldigi_offset_txt)
         fldigi_offset_edit.setValidator(QIntValidator(0, 99999, fldigi_offset_edit))
         fldigi_offset_edit.setPlaceholderText("e.g., 900")
-        form.addRow("FLDigi Starting Offset (Hz):", fldigi_offset_edit)
+        form.addRow("FLDigi Offset:", fldigi_offset_edit)
 
         auto_tune_chk = QCheckBox("Enable Auto-Tune on QSY")
         auto_tune_chk.setChecked(auto_val)
@@ -4031,8 +4129,8 @@ class SettingsTab(QWidget):
 
         def on_accept():
             new_name = name_edit.text().strip()
-            new_mode = mode_combo.currentText()
-            new_band = band_combo.currentText()
+            new_band = band_combo.currentText().strip().upper()
+            new_mode = normalize_operating_group_mode(mode_combo.currentText(), new_band)
             new_freq_txt = freq_edit.text().strip()
             if not new_name:
                 QMessageBox.warning(self, "Validation", "Group Name is required.")
@@ -4047,7 +4145,7 @@ class SettingsTab(QWidget):
                 try:
                     int(offset_txt)
                 except Exception:
-                    QMessageBox.warning(self, "Validation", "FLDigi Starting Offset must be an integer.")
+                    QMessageBox.warning(self, "Validation", "FLDigi Offset must be an integer.")
                     return
             fldigi_mode = fldigi_mode_combo.currentText().strip()
             vfo = vfo_combo.currentText().strip().upper() or "A"

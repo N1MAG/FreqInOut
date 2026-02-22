@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import List, Dict, Optional, Any, Tuple, Set
 
 import platform
@@ -38,6 +39,7 @@ from PySide6.QtGui import QRegularExpressionValidator, QAction, QColor
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.sop_manager import SOPManager
+from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.theme import resolve_theme, button_style
@@ -61,7 +63,7 @@ BAND_ORDER = [
 ]
 
 # Updated mode list
-MODES = ["Digi", "SSB"]
+MODES = ["Digi", "SSB", "USB", "LSB"]
 
 # For band limits, JS8 and Tri behave like Digi ranges
 BAND_MODE_LIMITS = {
@@ -230,6 +232,13 @@ class NetScheduleTab(QWidget):
         self._blocking_net_sop_conflict_count: int = 0
         self._blocking_net_sop_conflict_signatures: Set[str] = set()
         self._conflict_refresh_timer: QTimer | None = None
+        self._pending_sop_conflict_refresh: bool = False
+        self._net_sop_conflict_cache: OrderedDict[
+            Tuple[str, float, int, int],
+            Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Set[str]],
+        ] = OrderedDict()
+        self._net_sop_conflict_cache_limit: int = 6
+        self._net_sop_conflict_cache_epoch: int = 0
 
         self._build_ui()
         self._load()
@@ -456,7 +465,16 @@ class NetScheduleTab(QWidget):
         self._resize_table_columns()
 
     def on_sop_data_changed(self) -> None:
+        self._bump_net_sop_conflict_scan_epoch()
+        if not self.isVisible():
+            self._pending_sop_conflict_refresh = True
+            return
         self._schedule_net_sop_conflict_refresh(force=True)
+
+    def on_tab_activated(self) -> None:
+        if self._pending_sop_conflict_refresh:
+            self._pending_sop_conflict_refresh = False
+            self._schedule_net_sop_conflict_refresh(force=True)
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
@@ -560,12 +578,27 @@ class NetScheduleTab(QWidget):
         self.del_btn.setStyleSheet(button_style(role, theme))
         self.move_to_resources_btn.setStyleSheet(button_style("eligible_info" if has_selection else "muted", theme))
 
+    @staticmethod
+    def _safe_mtime(path: Path) -> float:
+        try:
+            return float(path.stat().st_mtime) if path.exists() else 0.0
+        except Exception:
+            return 0.0
+
+    def _bump_net_sop_conflict_scan_epoch(self) -> None:
+        self._net_sop_conflict_cache_epoch += 1
+        self._net_sop_conflict_cache.clear()
+
     def _schedule_net_sop_conflict_refresh(self, *, force: bool = False) -> None:
         timer = self._conflict_refresh_timer
         if timer is None:
             return
         if self._suspend_dirty_tracking and not force:
             return
+        if not self.isVisible():
+            self._pending_sop_conflict_refresh = True
+            return
+        self._pending_sop_conflict_refresh = False
         timer.start()
 
     @staticmethod
@@ -576,6 +609,7 @@ class NetScheduleTab(QWidget):
         self,
         *,
         net_rows_override: Optional[List[Dict[str, Any]]] = None,
+        horizon_days: int = 35,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Set[str]]:
         rows: List[Dict[str, Any]]
         if isinstance(net_rows_override, list):
@@ -587,65 +621,102 @@ class NetScheduleTab(QWidget):
                 return [], [], set()
         if not rows:
             return [], [], set()
-        try:
-            conflicts = self._sop_manager.collect_active_net_sop_conflicts(
-                horizon_days=35,
-                net_rows_override=rows,
-            )
-        except Exception as e:
-            log.debug("Net Schedule: active SOP conflict scan failed: %s", e)
-            return [], [], set()
-        blocking: List[Dict[str, Any]] = []
-        signatures: Set[str] = set()
-        for row in conflicts:
-            if not isinstance(row, dict):
-                continue
-            if self._net_sop_policy_is_net_priority(row.get("resolved_policy")):
-                continue
-            blocking.append(row)
-            sig = str(row.get("net_row_signature") or "").strip()
-            if sig:
-                signatures.add(sig)
-        return conflicts, blocking, signatures
+        cache_key = (
+            self._rows_signature(rows),
+            self._safe_mtime(self._db_path()),
+            int(self._net_sop_conflict_cache_epoch),
+            int(max(1, horizon_days)),
+        )
+        cached = self._net_sop_conflict_cache.get(cache_key)
+        if cached is not None:
+            self._net_sop_conflict_cache.move_to_end(cache_key, last=True)
+            cached_conflicts, cached_blocking, cached_sigs = cached
+            return list(cached_conflicts), list(cached_blocking), set(cached_sigs)
+        with perf_span(
+            "net_schedule.scan_net_sop_conflicts",
+            settings=self.settings,
+            meta={"rows": len(rows), "horizon_days": int(max(1, horizon_days)), "cache": "miss"},
+            min_ms=5.0,
+        ):
+            try:
+                conflicts = self._sop_manager.collect_active_net_sop_conflicts(
+                    horizon_days=max(1, int(horizon_days)),
+                    net_rows_override=rows,
+                )
+            except Exception as e:
+                log.debug("Net Schedule: active SOP conflict scan failed: %s", e)
+                return [], [], set()
+            blocking: List[Dict[str, Any]] = []
+            signatures: Set[str] = set()
+            for row in conflicts:
+                if not isinstance(row, dict):
+                    continue
+                if self._net_sop_policy_is_net_priority(row.get("resolved_policy")):
+                    continue
+                blocking.append(row)
+                sig = str(row.get("net_row_signature") or "").strip()
+                if sig:
+                    signatures.add(sig)
+            self._net_sop_conflict_cache[cache_key] = (list(conflicts), list(blocking), set(signatures))
+            self._net_sop_conflict_cache.move_to_end(cache_key, last=True)
+            while len(self._net_sop_conflict_cache) > max(1, int(self._net_sop_conflict_cache_limit)):
+                self._net_sop_conflict_cache.popitem(last=False)
+            return conflicts, blocking, signatures
 
     def _refresh_net_sop_conflict_highlighting(self) -> None:
-        _, blocking, conflict_sigs = self._scan_net_sop_conflicts()
-        self._blocking_net_sop_conflict_count = len(blocking)
-        self._blocking_net_sop_conflict_signatures = set(conflict_sigs)
-        prev_block = self.table.blockSignals(True)
-        try:
-            theme = resolve_theme(self.settings)
-            warn = QColor(str(theme.get("warning", "#C99700")))
-            warn.setAlpha(64)
+        with perf_span(
+            "net_schedule.refresh_conflict_highlighting",
+            settings=self.settings,
+            meta={"rows": int(self.table.rowCount())},
+            min_ms=5.0,
+        ):
+            rows_utc: Optional[List[Dict[str, Any]]] = None
             try:
-                ui_rows = self._collect_rows_by_ui_index()
+                rows_utc = [self._strip_internal_row(r) for r in self._collect_rows()]
             except Exception:
-                ui_rows = {}
-            for r in range(self.table.rowCount()):
-                for col in (self.COL_FREQ, self.COL_START, self.COL_END):
-                    item = self.table.item(r, col)
-                    if item is None:
-                        continue
-                    base_tip = str(item.data(Qt.UserRole) or "")
-                    item.setData(Qt.BackgroundRole, None)
-                    item.setToolTip(base_tip)
-            for ui_row, row in ui_rows.items():
-                sig = str(self._sop_manager._net_row_signature(row))
-                is_blocking = sig in conflict_sigs
-                for col in (self.COL_FREQ, self.COL_START, self.COL_END):
-                    item = self.table.item(ui_row, col)
-                    if item is None:
-                        continue
-                    base_tip = str(item.data(Qt.UserRole) or "")
-                    if is_blocking:
-                        item.setBackground(warn)
-                        item.setToolTip(
-                            (base_tip + "\n" if base_tip else "")
-                            + "Conflicts with active SOP. Set Net Priority to keep this overlap."
-                        )
-        finally:
-            self.table.blockSignals(prev_block)
-        self._refresh_save_button_state()
+                rows_utc = None
+
+            if rows_utc is None:
+                blocking: List[Dict[str, Any]] = []
+                conflict_sigs: Set[str] = set()
+            else:
+                _, blocking, conflict_sigs = self._scan_net_sop_conflicts(net_rows_override=rows_utc)
+            self._blocking_net_sop_conflict_count = len(blocking)
+            self._blocking_net_sop_conflict_signatures = set(conflict_sigs)
+            prev_block = self.table.blockSignals(True)
+            try:
+                theme = resolve_theme(self.settings)
+                warn = QColor(str(theme.get("warning", "#C99700")))
+                warn.setAlpha(64)
+                try:
+                    ui_rows = self._collect_rows_by_ui_index(rows_override=rows_utc)
+                except Exception:
+                    ui_rows = {}
+                for r in range(self.table.rowCount()):
+                    for col in (self.COL_FREQ, self.COL_START, self.COL_END):
+                        item = self.table.item(r, col)
+                        if item is None:
+                            continue
+                        base_tip = str(item.data(Qt.UserRole) or "")
+                        item.setData(Qt.BackgroundRole, None)
+                        item.setToolTip(base_tip)
+                for ui_row, row in ui_rows.items():
+                    sig = str(self._sop_manager._net_row_signature(row))
+                    is_blocking = sig in conflict_sigs
+                    for col in (self.COL_FREQ, self.COL_START, self.COL_END):
+                        item = self.table.item(ui_row, col)
+                        if item is None:
+                            continue
+                        base_tip = str(item.data(Qt.UserRole) or "")
+                        if is_blocking:
+                            item.setBackground(warn)
+                            item.setToolTip(
+                                (base_tip + "\n" if base_tip else "")
+                                + "Conflicts with active SOP. Set Net Priority to keep this overlap."
+                            )
+            finally:
+                self.table.blockSignals(prev_block)
+            self._refresh_save_button_state()
 
     # --------- helpers: time / primary groups --------- #
     def _ui_tz_abbr(self, tz_name: str, fallback: str) -> str:
@@ -1522,10 +1593,13 @@ class NetScheduleTab(QWidget):
                         % (r + 1)
                     )
             else:
-                # Treat JS8 and Tri as Digi for band limits
+                # Treat JS8 and Tri as Digi for band limits.
+                # USB/LSB voice modes share SSB ranges in this table.
                 mode_for_limits = mode
                 if mode_for_limits in ("JS8", "Tri"):
                     mode_for_limits = "Digi"
+                elif mode_for_limits in ("USB", "LSB"):
+                    mode_for_limits = "SSB"
 
                 limits = BAND_MODE_LIMITS.get((band, mode_for_limits))
                 if limits:
@@ -2038,6 +2112,7 @@ class NetScheduleTab(QWidget):
                 f"Net schedule saved to config.json, but DB save failed:\n{e}",
             )
             return
+        self._bump_net_sop_conflict_scan_epoch()
 
         try:
             self.schedule_saved.emit()
@@ -2336,6 +2411,7 @@ class NetScheduleTab(QWidget):
             QMessageBox.information(self, "SOP", f"Deactivated {changed} active HF SOP profile(s).")
 
     def _notify_sop_data_changed(self) -> None:
+        self._bump_net_sop_conflict_scan_epoch()
         try:
             win = self.window()
             if hasattr(win, "daily_tab") and hasattr(win.daily_tab, "on_sop_data_changed"):
@@ -4089,8 +4165,14 @@ class NetScheduleTab(QWidget):
         net_name = net_edit.text().strip() if isinstance(net_edit, QLineEdit) else ""
         return not (day or band or freq or start or end or net_name)
 
-    def _collect_rows_by_ui_index(self) -> Dict[int, Dict[str, Any]]:
-        rows = self._collect_rows()
+    def _collect_rows_by_ui_index(
+        self,
+        rows_override: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[int, Dict[str, Any]]:
+        if isinstance(rows_override, list):
+            rows = [self._strip_internal_row(r) for r in rows_override if isinstance(r, dict)]
+        else:
+            rows = self._collect_rows()
         mapped: Dict[int, Dict[str, Any]] = {}
         idx = 0
         for r in range(self.table.rowCount()):

@@ -596,8 +596,7 @@ class FreqPlannerTab(QWidget):
     def _load_sop_layer_from_db(self) -> Optional[List[Dict[str, Any]]]:
         """
         Load HF SOP schedule-layer rows from config/freqinout_nets.db.
-        Prefer active profiles; if none are active for HF entries, fall back to
-        enabled layer rows so planner labeling still reflects configured SOP sets.
+        Only active SOP profiles are considered for planner overlay rows.
         """
         conn: sqlite3.Connection | None = None
         try:
@@ -620,14 +619,21 @@ class FreqPlannerTab(QWidget):
             except Exception:
                 layer_cols = set()
             condition_expr = "COALESCE(l.condition_levels, 'ALL')" if "condition_levels" in layer_cols else "'ALL'"
-            resolved_group_expr = (
+            profile_group_expr = (
                 "COALESCE(NULLIF(TRIM(p.operating_group), ''), NULLIF(TRIM(p.secondary_group), ''),"
                 " NULLIF(TRIM(p.name), ''), '')"
                 if has_secondary_group
                 else "COALESCE(NULLIF(TRIM(p.operating_group), ''), NULLIF(TRIM(p.name), ''), '')"
             )
+            layer_group_expr = (
+                f"COALESCE(NULLIF(TRIM(l.group_name), ''), {profile_group_expr})"
+                if "group_name" in layer_cols
+                else profile_group_expr
+            )
             base_sql = """
                 SELECT
+                    COALESCE(l.id, 0),
+                    COALESCE(l.profile_id, 0),
                     COALESCE(l.day_utc, 'ALL'),
                     COALESCE(l.recurrence, 'Weekly'),
                     COALESCE(l.biweekly_offset_weeks, 0),
@@ -639,7 +645,7 @@ class FreqPlannerTab(QWidget):
                     COALESCE(l.frequency, ''),
                     COALESCE(l.start_utc, ''),
                     COALESCE(l.end_utc, ''),
-                    {resolved_group_expr},
+                    {layer_group_expr},
                     COALESCE(p.name, '')
                 FROM sop_schedule_layer l
                 JOIN sop_profiles p ON p.id = l.profile_id
@@ -651,28 +657,19 @@ class FreqPlannerTab(QWidget):
                   {active_clause}
                 ORDER BY p.operating_group COLLATE NOCASE, l.day_utc, l.start_utc
             """
-            # Primary path: active HF SOPs only.
             cur.execute(
                 base_sql.format(
-                    resolved_group_expr=resolved_group_expr,
+                    layer_group_expr=layer_group_expr,
                     condition_expr=condition_expr,
                     active_clause="AND COALESCE(p.active, 0) = 1",
                 )
             )
             rows = cur.fetchall()
-            # Fallback path: no active HF SOP profile rows; show configured HF SOP layers.
-            if not rows:
-                cur.execute(
-                    base_sql.format(
-                        resolved_group_expr=resolved_group_expr,
-                        condition_expr=condition_expr,
-                        active_clause="",
-                    )
-                )
-                rows = cur.fetchall()
             out: List[Dict[str, Any]] = []
             cond_map = self._condition_level_map()
             for (
+                layer_id,
+                profile_id,
                 day_utc,
                 recurrence,
                 biweekly_offset_weeks,
@@ -693,6 +690,9 @@ class FreqPlannerTab(QWidget):
                     continue
                 out.append(
                     {
+                        "id": int(layer_id or 0),
+                        "sop_layer_id": int(layer_id or 0),
+                        "sop_profile_id": int(profile_id or 0),
                         "day_utc": day_utc or "ALL",
                         "recurrence": recurrence or "Weekly",
                         "biweekly_offset_weeks": biweekly_offset_weeks or 0,
