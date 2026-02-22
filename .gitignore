@@ -67,3 +67,6 @@ js8spotter.db
 
 # Local test workspace artifacts
 tests/
+
+# Local benchmark/smoke artifacts
+.benchmarks/
