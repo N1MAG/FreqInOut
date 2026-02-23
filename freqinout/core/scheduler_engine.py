@@ -241,6 +241,7 @@ class SchedulerEngine(QObject):
             "frequency": {"last_prompt_ts": 0.0},
             "mode": {"last_prompt_ts": 0.0},
             "offset": {"last_prompt_ts": 0.0},
+            "fldigi_offset": {"last_prompt_ts": 0.0},
         }
         self._varac_wait_prompt_active: bool = False
         self._varac_wait_prompt_entry_key: Optional[Tuple] = None
@@ -1331,7 +1332,6 @@ class SchedulerEngine(QObject):
             if desired_offset is not None:
                 current_offset = self._current_fldigi_offset()
                 if current_offset is not None and desired_offset != current_offset:
-                    flags["mode"] = True
                     flags["fldigi_offset"] = True
         return flags
 
@@ -1341,7 +1341,13 @@ class SchedulerEngine(QObject):
             for state in self._prompt_state.values():
                 state["last_prompt_ts"] = ts
             return
-        mapping = {"Frequency": "frequency", "Mode": "mode", "Offset": "offset"}
+        mapping = {
+            "Frequency": "frequency",
+            "Mode": "mode",  # legacy compatibility
+            "FLDigi Mode": "mode",
+            "Offset": "offset",
+            "FLDigi Offset": "fldigi_offset",
+        }
         for label in items:
             key = mapping.get(label)
             if key and key in self._prompt_state:
@@ -1419,12 +1425,18 @@ class SchedulerEngine(QObject):
                 now_ts - self._prompt_state["frequency"]["last_prompt_ts"] >= interval * 60
             ):
                 items.append("Frequency")
+        if flags["fldigi_offset"] and fldigi_prompt:
+            interval = self._prompt_interval_minutes("fldigi_prompt_interval")
+            if (not prev_flags.get("fldigi_offset")) or (
+                now_ts - self._prompt_state["fldigi_offset"]["last_prompt_ts"] >= interval * 60
+            ):
+                items.append("FLDigi Offset")
         if flags["mode"] and fldigi_prompt:
             interval = self._prompt_interval_minutes("fldigi_prompt_interval")
             if (not prev_flags.get("mode")) or (
                 now_ts - self._prompt_state["mode"]["last_prompt_ts"] >= interval * 60
             ):
-                items.append("Mode")
+                items.append("FLDigi Mode")
         if flags["offset"] and js8_prompt:
             interval = self._prompt_interval_minutes("js8_prompt_interval")
             if (not prev_flags.get("offset")) or (
@@ -1434,15 +1446,17 @@ class SchedulerEngine(QObject):
         if not items:
             self._last_off_schedule_flags = dict(flags)
             return
-        if "Mode" in items:
+        if any(item in {"Mode", "FLDigi Mode", "FLDigi Offset"} for item in items):
             self._fldigi_force_apply_once = False
         self._prompt_active = True
         self._prompt_items = items
         for item in items:
             if item == "Frequency":
                 self._prompt_state["frequency"]["last_prompt_ts"] = now_ts
-            elif item == "Mode":
+            elif item in {"Mode", "FLDigi Mode"}:
                 self._prompt_state["mode"]["last_prompt_ts"] = now_ts
+            elif item == "FLDigi Offset":
+                self._prompt_state["fldigi_offset"]["last_prompt_ts"] = now_ts
             elif item == "Offset":
                 self._prompt_state["offset"]["last_prompt_ts"] = now_ts
         self.off_schedule_detected.emit({"entry": entry, "items": items})
@@ -1451,14 +1465,15 @@ class SchedulerEngine(QObject):
     def resolve_off_schedule(self, action: str, items: Optional[List[str]] = None) -> None:
         self._prompt_active = False
         self._prompt_items = []
+        fldigi_items = {"Mode", "FLDigi Mode", "FLDigi Offset"}
         if action == "suspend":
-            if items and "Mode" in items:
+            if items and any(item in fldigi_items for item in items):
                 self._fldigi_force_apply_once = False
             self._reset_prompt_timers(items=items)
             self._suspend_for_minutes(30)
             return
         if action == "ignore":
-            if items and "Mode" in items:
+            if items and any(item in fldigi_items for item in items):
                 self._fldigi_force_apply_once = False
             self._reset_prompt_timers(items=items)
             return
@@ -1476,7 +1491,7 @@ class SchedulerEngine(QObject):
                 apply_js8_offset=False,
                 apply_fldigi=False,
             )
-        if "Mode" in apply_items:
+        if any(item in fldigi_items for item in apply_items):
             self._update_desired_fldigi_settings(entry)
             if self._desired_fldigi_mode or self._desired_fldigi_offset is not None:
                 self._fldigi_apply_pending = True
@@ -1658,8 +1673,11 @@ class SchedulerEngine(QObject):
                 return
         if self._enforcement_mode("fldigi_enforcement_mode") == "Prompt":
             flags = self._off_schedule_flags(entry, check_frequency=False, check_mode=True, check_offset=False)
-            if flags.get("mode"):
-                if self._prompt_active and "Mode" in self._prompt_items:
+            fldigi_prompt_mismatch = bool(flags.get("mode") or flags.get("fldigi_offset"))
+            if fldigi_prompt_mismatch:
+                if self._prompt_active and any(
+                    item in {"Mode", "FLDigi Mode", "FLDigi Offset"} for item in self._prompt_items
+                ):
                     return
                 if self._fldigi_force_apply_once:
                     band = (entry.get("band") or "").strip().upper()

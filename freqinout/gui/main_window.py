@@ -1262,11 +1262,11 @@ class MainWindow(QMainWindow):
                 reasons.append("Frequency")
             if flags.get("offset"):
                 reasons.append("JS8 Offset")
-            if flags.get("mode"):
-                if fldigi_mode_off:
-                    reasons.append("FLDigi Mode")
+            if flags.get("mode") or flags.get("fldigi_offset"):
                 if fldigi_offset_off:
                     reasons.append("FLDigi Offset")
+                if fldigi_mode_off:
+                    reasons.append("FLDigi Mode")
                 if not fldigi_mode_off and not fldigi_offset_off:
                     reasons.append("FLDigi Mode/Offset")
             if varac_waiting:

@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.9]
+- Changed: ControlFreq `Frequency Control` now keeps the schedule-state badge focused on `On Schedule` / `Off Schedule` / `Unknown`, and shows traffic/PTT gating on the QSY action button as `Busy: {reason}` (`PTT active`, `JS8Call`, `VarAC`, `FLDigi`) while the action is temporarily disabled.
+- Fixed: Scheduler FLDigi off-schedule detection now distinguishes `FLDigi Mode` vs `FLDigi Offset` (offset drift no longer masquerades as mode mismatch), preserving off-schedule notification while using the existing FLDigi enforcement mode (`On Schedule Change` / `Prompt`) for resolution handling.
+- Changed: App/documentation version references updated to `1.1.9`.
+
 ## [1.1.8]
 - Added: Accessibility `Text Size` setting in `Settings` with bounded presets (`Normal` 100%, `Medium` 110%, `Large` 125%) applied app-wide without restart.
 - Changed: UI text-size presets now persist across restarts via `ui_text_size` and are applied centrally through app-theme refresh.

@@ -91,6 +91,7 @@ class ControlFreqTab(QWidget):
         self._freq_meta_full_text = "Scheduled: -- | Active: --"
         self._hero_combo_font_px = 18
         self._primary_freq_action_mode = "none"
+        self._freq_action_busy_reason_label: Optional[str] = None
         self._freq_combo_cache_key: Tuple[Tuple[str, str, float, str, str, bool], ...] = ()
         self._operator_groups_cache: Dict[str, Set[str]] = {}
         self._operator_groups_cache_ts = 0.0
@@ -1432,6 +1433,7 @@ class ControlFreqTab(QWidget):
             sched = getattr(self.window(), "scheduler", None)
             if not sched or not hasattr(sched, "get_status_summary"):
                 self._set_frequency_state_badge("unknown")
+                self._apply_frequency_action_busy_override(None)
                 self.next_change_label.setText("Next Change: --")
                 self.effective_source_label.setText("Active Source: --")
                 self.effective_source_label.setStyleSheet(f"color: {muted};")
@@ -1486,20 +1488,9 @@ class ControlFreqTab(QWidget):
                 self.effective_source_label.setToolTip("")
             self.effective_source_label.setText(source_text)
             off_schedule = bool(status.get("off_schedule"))
-            blocked = bool(
-                status.get("varac_waiting")
-                or status.get("js8_busy")
-                or status.get("fldigi_busy")
-                or status.get("varac_busy")
-                or status.get("ptt_active")
-            )
-            if blocked:
-                badge_state = "blocked"
-            elif off_schedule:
-                badge_state = "off"
-            else:
-                badge_state = "on"
+            badge_state = "off" if off_schedule else "on"
             self._set_frequency_state_badge(badge_state)
+            self._apply_frequency_action_busy_override(self._frequency_action_busy_reason(status))
 
             next_change = getattr(sched, "next_change_utc", None)
             next_text = "Next Change: --"
@@ -1537,6 +1528,43 @@ class ControlFreqTab(QWidget):
             self._sync_frequency_info_row_heights()
         except Exception as e:
             log.debug("ControlFreq: failed scheduler strip refresh: %s", e)
+
+    @staticmethod
+    def _frequency_action_busy_reason(status: Dict[str, Any]) -> Optional[str]:
+        # Stable precedence keeps the button label from flickering between sources.
+        try:
+            if bool(status.get("ptt_active")):
+                return "PTT active"
+            if bool(status.get("js8_busy")):
+                return "JS8Call"
+            if bool(status.get("varac_waiting")) or bool(status.get("varac_busy")):
+                return "VarAC"
+            if bool(status.get("fldigi_busy")):
+                return "FLDigi"
+        except Exception:
+            return None
+        return None
+
+    def _apply_frequency_action_busy_override(self, reason_label: Optional[str]) -> None:
+        reason = str(reason_label or "").strip()
+        prev_reason = str(self._freq_action_busy_reason_label or "").strip()
+        if not reason:
+            self._freq_action_busy_reason_label = None
+            if prev_reason:
+                self._update_frequency_action_styles()
+            return
+        self._freq_action_busy_reason_label = reason
+        self.freq_action_btn.setText(f"Busy: {reason}")
+        self.freq_action_btn.setToolTip(
+            f"Busy: {reason}. Frequency changes are blocked while traffic or PTT is active."
+        )
+        self.freq_action_btn.setEnabled(False)
+        try:
+            theme = resolve_theme(self.settings)
+        except Exception:
+            theme = None
+        if theme:
+            self.freq_action_btn.setStyleSheet(button_style("warning", theme))
 
     def _normalize_state_abbr(self, value: str) -> str:
         state = (value or "").strip().upper()
@@ -2670,6 +2698,8 @@ class ControlFreqTab(QWidget):
             self.freq_action_btn.setToolTip("QSY Now (Ctrl+Enter)")
             self.freq_action_btn.setEnabled(True)
             self.freq_action_btn.setStyleSheet(button_style("warning", theme))
+            if self._freq_action_busy_reason_label:
+                self._apply_frequency_action_busy_override(self._freq_action_busy_reason_label)
             return
         if mismatch:
             self._primary_freq_action_mode = "resume"
@@ -2677,12 +2707,16 @@ class ControlFreqTab(QWidget):
             self.freq_action_btn.setToolTip("Resume Schedule (Ctrl+Shift+R)")
             self.freq_action_btn.setEnabled(True)
             self.freq_action_btn.setStyleSheet(button_style("info", theme))
+            if self._freq_action_busy_reason_label:
+                self._apply_frequency_action_busy_override(self._freq_action_busy_reason_label)
             return
         self._primary_freq_action_mode = "none"
         self.freq_action_btn.setText("QSY Now")
         self.freq_action_btn.setToolTip("QSY Now (Ctrl+Enter)")
         self.freq_action_btn.setEnabled(False)
         self.freq_action_btn.setStyleSheet(button_style("muted", theme))
+        if self._freq_action_busy_reason_label:
+            self._apply_frequency_action_busy_override(self._freq_action_busy_reason_label)
 
     def _on_primary_freq_action_clicked(self) -> None:
         mode = str(self._primary_freq_action_mode or "none").strip().lower()
