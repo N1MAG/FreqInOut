@@ -148,10 +148,11 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 ## Maintainer Tools
 
 - Preflight release checks: `python tools/release_preflight.py`
+- Linux live-station benchmark capture: `bash tools/linux_fio_bench_capture.sh --duration 300`
+- Linux benchmark summary (rerun on a capture folder): `python tools/linux_fio_bench_summary.py <capture_dir>`
 - Optional release helper (run from active venv): `python release_builder.py --build-exe`
 
 ## License
 
 GNU General Public License v3 (see `LICENSE.md`).
-
 

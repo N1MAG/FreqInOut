@@ -174,6 +174,35 @@ Notes:
 - Runs with isolated config via `FREQINOUT_CONFIG_DIR` by default (`.benchmarks/gui-smoke/<timestamp>`).
 - Exits non-zero if any tab smoke step fails.
 
+### Linux live-station benchmark capture (FIO + radio stack)
+
+- `tools/linux_fio_bench_capture.sh`: single-command low-overhead telemetry capture for Linux station environments (FIO + companion radio apps).
+- `tools/linux_fio_bench_summary.py`: parses a capture folder and writes text/JSON/Markdown summaries.
+- `tools/linux_fio_bench_process_patterns.tsv`: default process grouping regexes (FIO, FLRig/FLDigi/FLAmp/FLMsg, VarAC via Wine, JS8Call/JS8Spotter, CommStatOne aliases).
+
+Safe starter commands:
+
+```bash
+# 5-minute capture with auto-summary + .tar.gz archive
+bash tools/linux_fio_bench_capture.sh --duration 300
+
+# summarize an existing capture folder again (after adding notes/pattern tweaks)
+python tools/linux_fio_bench_summary.py ~/fio-bench/20260223T140000Z_live-net
+```
+
+Recommended dependencies on Linux Mint / Debian / Ubuntu:
+
+```bash
+sudo apt-get install sysstat procps
+```
+
+Notes:
+
+- Capture uses `pidstat`, `sar`, `iostat`, and `vmstat` when available; missing tools are recorded as warnings and the capture still completes.
+- `VarAC` is matched from Wine command lines (`VarAC.exe` path/name).
+- `CommStatOne` defaults include `commstat` and `littlegucci` aliases; edit `tools/linux_fio_bench_process_patterns.tsv` if your command line differs.
+- Use UTC event notes in the generated `operator_notes.txt` for better correlation with logs.
+
 ## Common workflows
 
 ### Check DB health without modifying data
