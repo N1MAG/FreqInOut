@@ -2,6 +2,15 @@
 
 FreqInOut is a cross-workflow HF operations console for amateur radio. It unifies net control (FLDigi/JS8Call), schedule enforcement, SOP action reminders, operator database tooling, message management (JS8/FLMSG/FLAMP/VarAC), and map-based link intelligence in one desktop UI, with UTC-native data handling and practical safeguards for live operating conditions.
 
+<p align="center">
+  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/ControlFreq_tab.png">
+    <img
+      src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/ControlFreq_tab.png"
+      alt="ControlFreq tab showing frequency control, operating status, message summary, and schedule outlook"
+      width="980">
+  </a>
+</p>
+
 ## Highlights
 
 - ControlFreq operations dashboard with Frequency Control, Schedule Outlook, Message Summary, propagation forecast, and View presets/chips for card layout control
@@ -132,6 +141,85 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 - JS8 live ingest is used when available; log parsing is used as a fallback.
 - Set your operator Grid (Grid 6 recommended) in Settings to enable full propagation forecast output in ControlFreq.
 
+## Screenshots
+
+<details>
+<summary>Additional tab screenshots (click to expand)</summary>
+
+### FreqPlanner Tab
+
+<p align="center">
+  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/FreqPlanner_tab.png">
+    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/FreqPlanner_tab.png" alt="FreqPlanner tab screenshot" width="900">
+  </a>
+</p>
+
+### Messages Tab
+
+<p align="center">
+  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Messages_tab.png">
+    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Messages_tab.png" alt="Messages tab screenshot" width="900">
+  </a>
+</p>
+
+### Map Tab
+
+<p align="center">
+  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Map_tab.png">
+    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Map_tab.png" alt="Map tab screenshot" width="900">
+  </a>
+</p>
+
+### NCS Tab
+
+<p align="center">
+  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/NCS_tab.png">
+    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/NCS_tab.png" alt="NCS tab screenshot" width="900">
+  </a>
+</p>
+
+### HF Schedule Tab
+
+<p align="center">
+  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/HF_Schedule_tab.png">
+    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/HF_Schedule_tab.png" alt="HF Schedule tab screenshot" width="900">
+  </a>
+</p>
+
+### NetSchedule Tab
+
+<p align="center">
+  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/NetSchedule_tab.png">
+    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/NetSchedule_tab.png" alt="Net Schedule tab screenshot" width="900">
+  </a>
+</p>
+
+### SOP Builder Tab
+
+<p align="center">
+  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/SOPBuilder_tab.png">
+    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/SOPBuilder_tab.png" alt="SOP Builder tab screenshot" width="900">
+  </a>
+</p>
+
+### Settings Tab
+
+<p align="center">
+  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Settings_tab.png">
+    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Settings_tab.png" alt="Settings tab screenshot" width="900">
+  </a>
+</p>
+
+### Help Tab
+
+<p align="center">
+  <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Help_tab.png">
+    <img src="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/Help_tab.png" alt="Help tab screenshot" width="900">
+  </a>
+</p>
+
+</details>
+
 ## Documentation
 
 - Installation: `docs/Installation.md`
@@ -155,4 +243,3 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 ## License
 
 GNU General Public License v3 (see `LICENSE.md`).
-

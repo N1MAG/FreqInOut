@@ -70,3 +70,6 @@ tests/
 
 # Local benchmark/smoke artifacts
 .benchmarks/
+
+# Local README screenshot staging (use GitHub release assets instead)
+docs/internal/ScreenShots/
