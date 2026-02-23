@@ -1238,23 +1238,10 @@ class SchedulerEngine(QObject):
             freq_label = f"{freq_hz / 1_000_000:.3f}"
         source = self.current_source or "NONE"
         net_kind = self._source_net_kind(source, entry)
-        fldigi_mode_off = False
-        fldigi_offset_off = False
-        if entry and self._fldigi_available():
-            desired_mode = self._expected_fldigi_mode(entry)
-            desired_offset = self._expected_fldigi_offset(entry)
-            try:
-                current_mode = self._current_fldigi_mode()
-                if desired_mode and current_mode is not None and current_mode != desired_mode.strip().upper():
-                    fldigi_mode_off = True
-            except Exception:
-                pass
-            try:
-                current_offset = self._current_fldigi_offset()
-                if desired_offset is not None and current_offset is not None and desired_offset != current_offset:
-                    fldigi_offset_off = True
-            except Exception:
-                pass
+        # Reuse computed off-schedule flags to avoid duplicate FLDigi mode/offset polls
+        # in status-heavy UI refresh paths (sidebar + ControlFreq).
+        fldigi_mode_off = bool(flags.get("mode"))
+        fldigi_offset_off = bool(flags.get("fldigi_offset"))
         return {
             "use_scheduler": use_scheduler,
             "control_mode": control_mode,

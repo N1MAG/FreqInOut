@@ -1426,7 +1426,7 @@ class ControlFreqTab(QWidget):
             lbl.setToolTip("\n".join(lines))
             self._status_checked_at[program_name] = checked_at
 
-    def _refresh_scheduler_strip(self) -> None:
+    def _refresh_scheduler_strip(self, status: Optional[Dict[str, Any]] = None) -> None:
         try:
             theme = resolve_theme(self.settings)
             muted = str(theme.get("text_muted", "#888"))
@@ -1438,7 +1438,8 @@ class ControlFreqTab(QWidget):
                 self.effective_source_label.setText("Active Source: --")
                 self.effective_source_label.setStyleSheet(f"color: {muted};")
                 return
-            status = sched.get_status_summary()
+            if not isinstance(status, dict):
+                status = sched.get_status_summary()
             source = str(status.get("source") or "").strip().upper()
             net_kind = str(status.get("net_kind") or "").strip()
             source_reason_detail = str(status.get("source_reason_detail") or "").strip()
@@ -2154,9 +2155,16 @@ class ControlFreqTab(QWidget):
             self.freq_combo.blockSignals(True)
             self.freq_combo.setCurrentIndex(restore_idx)
             self.freq_combo.blockSignals(False)
+        status_snapshot: Optional[Dict[str, Any]] = None
+        try:
+            sched_obj = getattr(self.window(), "scheduler", None)
+            if sched_obj and hasattr(sched_obj, "get_status_summary"):
+                status_snapshot = sched_obj.get_status_summary()
+        except Exception:
+            status_snapshot = None
         sched_freq = current_scheduler_freq(self.window())
         sched_group = self._get_scheduled_group_name()
-        active_freq = self._get_active_frequency_mhz()
+        active_freq = self._get_active_frequency_mhz(status_snapshot)
         display_freq = active_freq if active_freq is not None else sched_freq
         if (force_resync or restore_idx < 0) and display_freq is not None:
             for idx in range(1, self.freq_combo.count()):
@@ -2179,7 +2187,7 @@ class ControlFreqTab(QWidget):
         self._apply_freq_meta_text()
         self._update_frequency_action_styles(sched_freq, active_freq)
         self._update_active_label_style(sched_freq, active_freq)
-        self._refresh_scheduler_strip()
+        self._refresh_scheduler_strip(status_snapshot)
         if include_intersections:
             self._refresh_intersections()
 
@@ -2640,12 +2648,13 @@ class ControlFreqTab(QWidget):
         except Exception:
             return ""
 
-    def _get_active_frequency_mhz(self) -> Optional[float]:
+    def _get_active_frequency_mhz(self, status: Optional[Dict[str, Any]] = None) -> Optional[float]:
         try:
-            sched = getattr(self.window(), "scheduler", None)
-            if not sched or not hasattr(sched, "get_status_summary"):
-                return None
-            status = sched.get_status_summary()
+            if not isinstance(status, dict):
+                sched = getattr(self.window(), "scheduler", None)
+                if not sched or not hasattr(sched, "get_status_summary"):
+                    return None
+                status = sched.get_status_summary()
             freq_label = status.get("freq_label") or ""
             return self._parse_freq_label(freq_label)
         except Exception:
@@ -2791,15 +2800,13 @@ class ControlFreqTab(QWidget):
         if not self._active:
             return
         self._refresh_frequency_control(include_intersections=False)
-        self._refresh_scheduler_strip()
 
         def _pulse_refresh() -> None:
             self._force_hero_resync = True
             self._refresh_frequency_control(include_intersections=False)
-            self._refresh_scheduler_strip()
 
         # Short pulses absorb asynchronous scheduler/radio apply completion.
-        for delay_ms in (120, 350, 700, 1200, 2000):
+        for delay_ms in (180, 700, 1500):
             QTimer.singleShot(delay_ms, _pulse_refresh)
 
     def _refresh_schedule_outlook(self) -> None:

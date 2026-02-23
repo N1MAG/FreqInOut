@@ -149,6 +149,7 @@ class MainWindow(QMainWindow):
         ]
         self._screen_index_by_label = {label: idx for idx, (label, _w) in enumerate(self._screens)}
         self._condition_levels_signature: tuple[tuple[str, int], ...] = tuple()
+        self._scheduler_status_reason_lines_signature: tuple[str, ...] | None = None
         # Sidebar button order/text requested by user. Keep SOP accessible via in-app links,
         # but do not show it as a primary sidebar button.
         self._nav_specs = [
@@ -1127,7 +1128,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         # Follow-up pulses help UI converge quickly while scheduler/radio apply completes.
-        for delay_ms in (180, 500, 1000, 1800):
+        for delay_ms in (300, 1100):
             try:
                 QTimer.singleShot(delay_ms, self._refresh_scheduler_status_panel)
             except Exception:
@@ -1157,13 +1158,17 @@ class MainWindow(QMainWindow):
     def _set_scheduler_reasons(self, lines: list[str]) -> None:
         if not hasattr(self, "scheduler_status_reasons_layout"):
             return
+        sig = tuple(str(line) for line in (lines or []))
+        if sig == self._scheduler_status_reason_lines_signature:
+            return
+        self._scheduler_status_reason_lines_signature = sig
         layout = self.scheduler_status_reasons_layout
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        for line in lines:
+        for line in sig:
             lbl = QLabel(line)
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setWordWrap(True)

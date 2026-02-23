@@ -29,8 +29,11 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
-## What's New in v1.1.8
+## What's New in v1.1.9
 
+- ControlFreq Frequency Control now keeps the schedule-state badge focused on `On Schedule` / `Off Schedule` / `Unknown`, and moves busy gating to the QSY action button as `Busy: {reason}` (`PTT active`, `JS8Call`, `VarAC`, `FLDigi`)
+- Scheduler FLDigi off-schedule notifications now distinguish `FLDigi Mode` vs `FLDigi Offset`, and FLDigi offset drift remains visible as off-schedule without being treated as a mode mismatch
+- `Resume Schedule` responsiveness improved in ControlFreq and the sidebar `Schedule Status` panel by reducing duplicate resume refresh work and repeated FLDigi status polling during convergence
 - Added `Local Operators` and `NCS-Local` tabs for local net workflows
 - Added Net Resources catalog actions and JSON import flow for schedule resource management
 - Expanded contextual action-highlighting consistency across tabs and themes

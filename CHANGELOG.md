@@ -3,6 +3,7 @@
 ## [1.1.9]
 - Changed: ControlFreq `Frequency Control` now keeps the schedule-state badge focused on `On Schedule` / `Off Schedule` / `Unknown`, and shows traffic/PTT gating on the QSY action button as `Busy: {reason}` (`PTT active`, `JS8Call`, `VarAC`, `FLDigi`) while the action is temporarily disabled.
 - Fixed: Scheduler FLDigi off-schedule detection now distinguishes `FLDigi Mode` vs `FLDigi Offset` (offset drift no longer masquerades as mode mismatch), preserving off-schedule notification while using the existing FLDigi enforcement mode (`On Schedule Change` / `Prompt`) for resolution handling.
+- Changed: `Resume Schedule` responsiveness improved in ControlFreq and sidebar `Schedule Status` by reducing duplicate resume refresh pulses and repeated scheduler/FLDigi status polling in hot UI refresh paths.
 - Changed: App/documentation version references updated to `1.1.9`.
 
 ## [1.1.8]
