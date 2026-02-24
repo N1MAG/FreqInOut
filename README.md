@@ -38,6 +38,7 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Fixed `ControlFreq` top-row `Operating Status` LED container sizing so status LEDs/labels can expand cleanly with available width
 - Fixed `ControlFreq` `Schedule Outlook` `QSY Now` action so the Frequency Control hero indicator resyncs to the active frequency after QSY
 - Fixed `ControlFreq` Frequency Control hero indicator so scheduler-driven frequency changes also resync the hero display (prevents stale frequency display after automatic schedule changes)
+- Fixed `ControlFreq` top-row time display overflow on narrower windows by allowing the clock label to shrink/elide instead of spilling off the right edge
 - Clarified in-app guide wording for `Resume Schedule`, FLDigi offset expectations (including Operating Group fallback), and `Prompt` vs `On Schedule Change` behavior
 - ControlFreq Frequency Control now keeps the schedule-state badge focused on `On Schedule` / `Off Schedule` / `Unknown`, and moves busy gating to the QSY action button as `Busy: {reason}` (`PTT active`, `JS8Call`, `VarAC`, `FLDigi`)
 - Scheduler FLDigi off-schedule notifications now distinguish `FLDigi Mode` vs `FLDigi Offset`, and FLDigi offset drift remains visible as off-schedule without being treated as a mode mismatch

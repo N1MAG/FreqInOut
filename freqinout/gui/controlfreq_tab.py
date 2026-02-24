@@ -94,6 +94,7 @@ class ControlFreqTab(QWidget):
         self._freq_action_busy_reason_label: Optional[str] = None
         self._freq_combo_cache_key: Tuple[Tuple[str, str, float, str, str, bool], ...] = ()
         self._last_hero_sched_freq_mhz: Optional[float] = None
+        self._current_time_full_text = "--"
         self._operator_groups_cache: Dict[str, Set[str]] = {}
         self._operator_groups_cache_ts = 0.0
         self._operator_groups_cache_mtime = 0.0
@@ -201,7 +202,7 @@ class ControlFreqTab(QWidget):
         updated_row = QHBoxLayout()
 
         self.status_group = QGroupBox("Operating Status")
-        self.status_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.status_group.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         status_layout = QHBoxLayout()
         self.status_group.setLayout(status_layout)
         theme = resolve_theme(self.settings)
@@ -224,18 +225,19 @@ class ControlFreqTab(QWidget):
             status_layout.addWidget(QLabel(label))
             status_layout.addSpacing(12)
         status_layout.addStretch(1)
-        updated_row.addWidget(self.status_group, 3)
+        updated_row.addWidget(self.status_group)
         right_status_col = QVBoxLayout()
         right_status_col.setContentsMargins(0, 0, 0, 0)
         right_status_col.setSpacing(6)
         self.current_time_label = QLabel("--")
         self.current_time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.current_time_label.setMinimumWidth(280)
+        self.current_time_label.setMinimumWidth(160)
+        self.current_time_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.current_time_label.setStyleSheet("font-size: 14px; font-weight: 600;")
-        right_status_col.addWidget(self.current_time_label, 0, Qt.AlignRight)
+        right_status_col.addWidget(self.current_time_label)
         self.updated_label = QLabel("Last updated: --")
         self.updated_label.setVisible(False)
-        updated_row.addLayout(right_status_col)
+        updated_row.addLayout(right_status_col, 1)
         root.addLayout(updated_row)
 
         # Top region: left = Activity/Intersections/Messages, right = Frequency/Schedule Outlook
@@ -1302,15 +1304,23 @@ class ControlFreqTab(QWidget):
 
     def _sync_header_time_label_widths(self) -> None:
         try:
-            w_clock = int(self.current_time_label.sizeHint().width())
-            target = max(320, w_clock + 12)
-            self.current_time_label.setMinimumWidth(target)
+            full = str(getattr(self, "_current_time_full_text", "") or "--")
+            width = int(self.current_time_label.width())
+            if width <= 20:
+                self.current_time_label.setText(full)
+                self.current_time_label.setToolTip("")
+                return
+            fm = QFontMetrics(self.current_time_label.font())
+            elided = fm.elidedText(full, Qt.ElideRight, max(24, width - 6))
+            self.current_time_label.setText(elided)
+            self.current_time_label.setToolTip(full if elided != full else "")
         except Exception:
             pass
 
     def _refresh_clock_display(self) -> None:
         now_utc = dt.datetime.now(dt.timezone.utc)
-        self.current_time_label.setText(self._format_display_datetime(now_utc, with_seconds=True))
+        self._current_time_full_text = self._format_display_datetime(now_utc, with_seconds=True)
+        self.current_time_label.setText(self._current_time_full_text)
         self._sync_header_time_label_widths()
 
     def _toggle_time_view(self) -> None:
