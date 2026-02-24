@@ -4,6 +4,8 @@
 - Added: `Settings -> JS8Call Settings` now includes configurable `TCP Host` (`js8_host`) with default `127.0.0.1`, and JS8 status/control/net/map integrations now use the configured hostname/IP instead of assuming localhost.
 - Changed: `Settings -> JS8Call Settings -> Load JS8 Traffic` now shows an in-process indicator (button busy state + progress/status text) during manual JS8 traffic rebuilds so long reloads provide immediate UI feedback.
 - Fixed: On Windows, launching with `python -m freqinout.main` now sets a FreqInOut-specific app identity/icon early so the taskbar button shows the FreqInOut icon instead of the default Python icon.
+- Changed: `HF Schedule` now re-sorts the Active Schedule table immediately after a successful save (using the existing time sort) so newly added rows do not remain visually out of order until reload.
+- Fixed: `HF Schedule` save now blocks on row time-format errors (`HH:MM`) instead of performing a partial save that silently skips malformed rows.
 - Fixed: `ControlFreq` top-row `Operating Status` LED container now expands correctly to fit status indicators/labels without avoidable clipping from the outer layout spacer.
 - Fixed: Clicking `QSY Now` from `ControlFreq` `Schedule Outlook` now forces a hero-frequency resync so the Frequency Control hero indicator reflects the active frequency after QSY.
 - Changed: In-app guide wording now clarifies `Resume Schedule`, FLDigi offset expectations (including Operating Group fallback), and `Prompt` vs `On Schedule Change` behavior.

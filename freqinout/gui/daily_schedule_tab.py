@@ -3011,7 +3011,8 @@ class DailyScheduleTab(QWidget):
 
         hf_rows: List[Dict[str, Any]] = []
         sop_updates: Dict[int, List[Dict[str, Any]]] = {}
-        errors: List[str] = []
+        format_errors: List[str] = []
+        save_warnings: List[str] = []
 
         for r in range(self.table.rowCount()):
             is_sop = self._is_sop_overlay_row(r)
@@ -3034,7 +3035,7 @@ class DailyScheduleTab(QWidget):
 
             # Validate times
             if not self._validate_time(start_val) or not self._validate_time(end_val):
-                errors.append(f"Row {r+1}: Start/End must be HH:MM (24h)")
+                format_errors.append(f"Row {r+1}: Start/End must be HH:MM (24h)")
                 continue
 
             if self._show_local:
@@ -3064,7 +3065,7 @@ class DailyScheduleTab(QWidget):
                         layer_id = 0
                     vfo = str(sel_wrap.property("sop_overlay_vfo") or "A").strip().upper() or "A"
                 if profile_id <= 0:
-                    errors.append(f"Row {r+1}: SOP row missing profile mapping; skipped.")
+                    save_warnings.append(f"Row {r+1}: SOP row missing profile mapping; skipped.")
                     continue
                 sop_updates.setdefault(profile_id, []).append(
                     {
@@ -3102,11 +3103,19 @@ class DailyScheduleTab(QWidget):
                 }
             )
 
-        if errors:
+        if format_errors:
+            QMessageBox.warning(
+                self,
+                "Save Blocked",
+                "Fix formatting issues before saving:\n" + "\n".join(format_errors),
+            )
+            return
+
+        if save_warnings:
             QMessageBox.warning(
                 self,
                 "Partial Save",
-                "Some rows were skipped:\n" + "\n".join(errors),
+                "Some rows were skipped:\n" + "\n".join(save_warnings),
             )
 
         # Persist via SettingsManager
@@ -3163,11 +3172,9 @@ class DailyScheduleTab(QWidget):
                 "Some SOP rows could not be updated:\n" + "\n".join(sop_failures[:12]),
             )
 
-        QMessageBox.information(
-            self,
-            "Saved",
-            f"HF Schedule saved. HF rows: {len(hf_rows)} | SOP rows updated: {sop_changed}.",
-        )
+        if self.table.rowCount() > 1:
+            self._sort_active_schedule_by_time()
+
         log.info("HF Frequency Schedule saved: %d HF rows, %d SOP rows updated", len(hf_rows), sop_changed)
         self._raw_schedule = hf_rows
         self._saved_rows_signature = self._rows_signature(self._collect_rows_for_signature())
@@ -3175,6 +3182,11 @@ class DailyScheduleTab(QWidget):
         self._refresh_freq_planner()
         self._refresh_schedule_resources(force=True)
         self._refresh_schedule_issues(force=True)
+        QMessageBox.information(
+            self,
+            "Saved",
+            f"HF Schedule saved. HF rows: {len(hf_rows)} | SOP rows updated: {sop_changed}.",
+        )
         self._prompt_active_sop_conflicts_after_schedule_change()
 
     def _prompt_active_sop_conflicts_after_schedule_change(self) -> None:

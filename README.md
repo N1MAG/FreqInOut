@@ -34,6 +34,7 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Added configurable `JS8 Host` (`Settings` -> `JS8Call Settings`) with default `127.0.0.1`; JS8 status/control/net/map integrations now honor custom JS8Call TCP hostname/IP settings instead of assuming localhost
 - Improved `Settings` -> `JS8Call Settings` -> `Load JS8 Traffic` with an in-process indicator (busy button + progress/status text) so long manual JS8 log rebuilds show immediate feedback
 - Fixed Windows `python -m freqinout.main` launches so the taskbar button uses the FreqInOut icon instead of the default Python icon
+- Improved `HF Schedule` save behavior: Active Schedule now re-sorts immediately after successful save, and save is blocked (no partial save) when row time formatting is invalid
 - Fixed `ControlFreq` top-row `Operating Status` LED container sizing so status LEDs/labels can expand cleanly with available width
 - Fixed `ControlFreq` `Schedule Outlook` `QSY Now` action so the Frequency Control hero indicator resyncs to the active frequency after QSY
 - Clarified in-app guide wording for `Resume Schedule`, FLDigi offset expectations (including Operating Group fallback), and `Prompt` vs `On Schedule Change` behavior
