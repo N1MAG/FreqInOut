@@ -80,6 +80,7 @@
       </tr>
     </tbody>
   </table>
+  <p><strong>Resume Schedule note</strong>: <code>Resume Schedule</code> clears a temporary schedule suspension and returns control to the scheduler. It does not act as a blanket "force reset" for every off-schedule item; FLDigi and JS8 corrections still follow the configured enforcement mode.</p>
 
   <h2 id="controlfreq">ControlFreq</h2>
   <p><strong>Purpose</strong>: primary operating dashboard for station state, schedule actions, and near-term decision support.</p>
@@ -97,7 +98,7 @@
       <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed time labels.</td></tr>
       <tr><td><code>Focus Mode: Off/On</code></td><td>Toggles focus display behavior for tighter operating context.</td></tr>
       <tr><td>Frequency dropdown</td><td>Selects a target operating frequency profile.</td></tr>
-      <tr><td>Primary frequency action button</td><td>Contextual action: <code>QSY Now</code> or <code>Resume Schedule</code>.</td></tr>
+      <tr><td>Primary frequency action button</td><td>Contextual action: <code>QSY Now</code>, <code>Resume Schedule</code>, or a temporary disabled busy state (for example <code>Busy: JS8Call</code>, <code>Busy: FLDigi</code>). <code>Resume Schedule</code> resumes scheduler control; it does not override prompt-mode behavior.</td></tr>
       <tr><td>Schedule state badge</td><td>Shows current state such as <code>On Schedule</code>, <code>Off Schedule</code>, or suspended/manual state.</td></tr>
       <tr><td>View chips</td><td>Toggle visibility of <code>Activity</code>, <code>Intersections</code>, <code>Schedule</code>, and <code>Propagation</code> sections.</td></tr>
       <tr><td>Schedule Outlook row action</td><td>Per row button in <em>Actions</em> column (for example QSY, open Net Schedule, open SOP Builder).</td></tr>
@@ -106,6 +107,7 @@
     </tbody>
   </table>
   <p>The right side of Frequency Control includes a live time/date readout aligned with the selected <code>Showing</code> mode (Local or UTC).</p>
+  <p><strong>Scheduler enforcement note</strong>: The scheduler can notify off-schedule conditions without immediately correcting them, depending on the enforcement settings. This is most visible for FLDigi mode and FLDigi offset.</p>
 
   <h3 id="controlfreq-tables">Tables</h3>
   <table>
@@ -499,12 +501,15 @@
       </tr>
     </tbody>
   </table>
+  <p><strong>Enforcement and prompt intervals</strong> control how schedule corrections behave when the station drifts off schedule. <code>On Schedule Change</code> applies corrections when the scheduler moves to a new schedule row. <code>Prompt</code> raises an off-schedule prompt and waits for user action. FLDigi mode and FLDigi offset may be prompted separately.</p>
 
   <h3 id="settings-hf-groups-details">HF Operating Groups Details</h3>
   <ul class="section-list">
     <li><strong>Mode choices</strong>: <code>Digi</code> and <code>SSB</code>.</li>
     <li><strong>Voice sideband behavior</strong>: when <code>Mode=SSB</code>, <code>FLDigi Starting Mode</code> defaults to band-appropriate sideband (<code>LSB</code> on lower HF bands, <code>USB</code> on upper HF bands), and can be manually overridden.</li>
     <li><strong>Key table columns</strong>: <code>Group</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>VFO</code>, <code>FLDigi Starting Mode</code>, <code>FLDigi Offset</code>, <code>Auto-Tune</code>, <code>Use Condition Levels</code>.</li>
+    <li><strong>FLDigi Offset meaning</strong>: this is the expected/scheduled FLDigi carrier offset for the group row (for example <code>900</code>). If a schedule row omits FLDigi offset, the matching Operating Group value is used as the expected offset.</li>
+    <li><strong>Drift behavior</strong>: FLDigi offset may drift during operation and appear as off-schedule. Whether it is auto-corrected immediately or waits for a prompt depends on the FLDigi enforcement mode; active net operation can also suppress scheduler corrections.</li>
     <li><strong>Condition levels</strong>: group-scoped; toggling one row applies to all rows for the same Group.</li>
   </ul>
 
@@ -525,6 +530,7 @@
     <li><strong>Guide viewer</strong> (right): renders <code>docs/guide.html</code>.</li>
     <li><strong>Export to PDF</strong>: exports the displayed guide.</li>
   </ul>
+  <p><strong>Off-schedule prompt note</strong>: When enforcement is set to <code>Prompt</code>, the scheduler can raise an off-schedule prompt for items such as <code>Frequency</code>, <code>FLDigi Mode</code>, and <code>FLDigi Offset</code> (these may appear separately). <code>Apply</code> corrects the selected items, <code>Ignore/Skip</code> leaves them off-schedule for now, and <code>Suspend/Pause</code> temporarily suspends scheduler corrections.</p>
 
   <h2 id="logs-viewer">Logs Viewer (from Settings)</h2>
   <p>Logs are opened from <code>Settings &gt; Logging &amp; Diagnostics &gt; Open Logs</code>.</p>
@@ -541,6 +547,7 @@
   <ul class="section-list">
     <li>If a button appears disabled, confirm required row selection or required fields.</li>
     <li>If schedule behavior is unexpected, check <code>Schedule Status</code> first (paused/off-schedule/manual mode reasons).</li>
+    <li>If FLDigi offset returns unexpectedly, check <code>Settings &gt; FreqInOut Settings</code> for FLDigi enforcement mode (<code>On Schedule Change</code> vs <code>Prompt</code>) and confirm whether a new schedule row transition occurred.</li>
     <li>If message actions are missing (for example <code>+BBS</code>), verify required Settings paths are configured.</li>
     <li>If signature/hash states are neutral, verify Message Auth settings and trusted key/hash entries.</li>
   </ul>
