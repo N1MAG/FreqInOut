@@ -243,6 +243,7 @@ class SchedulerEngine(QObject):
             "offset": {"last_prompt_ts": 0.0},
             "fldigi_offset": {"last_prompt_ts": 0.0},
         }
+        self._last_fldigi_offset_prompt_sig: Optional[Tuple[Optional[int], Optional[int]]] = None
         self._varac_wait_prompt_active: bool = False
         self._varac_wait_prompt_entry_key: Optional[Tuple] = None
         self._proc_snapshot: List[str] = []
@@ -303,6 +304,7 @@ class SchedulerEngine(QObject):
         self._next_transition_utc: Optional[datetime.datetime] = None
         self._next_transition_note: str = ""
         self._next_source_change: bool = False
+        self._last_scheduler_selection_sig: Optional[Tuple] = None
 
         self.timer = QTimer(self)
         self.timer.setInterval(poll_interval_ms)
@@ -828,6 +830,7 @@ class SchedulerEngine(QObject):
         prompt_specs = [
             ("frequency", "freq_enforcement_mode", "freq_prompt_interval"),
             ("mode", "fldigi_enforcement_mode", "fldigi_prompt_interval"),
+            ("fldigi_offset", "fldigi_enforcement_mode", "fldigi_prompt_interval"),
             ("offset", "js8_enforcement_mode", "js8_prompt_interval"),
         ]
         for flag_key, mode_key, interval_key in prompt_specs:
@@ -1016,6 +1019,8 @@ class SchedulerEngine(QObject):
         ignore_suspend: bool = False,
         ignore_net_suppression: bool = False,
         ignore_fldigi_busy: bool = False,
+        apply_js8_offset: bool = True,
+        apply_fldigi: bool = True,
     ) -> None:
         entry = self.current_schedule_entry or {}
         if not entry:
@@ -1031,6 +1036,8 @@ class SchedulerEngine(QObject):
             ignore_suspend=ignore_suspend,
             ignore_net_suppression=ignore_net_suppression,
             ignore_fldigi_busy=ignore_fldigi_busy,
+            apply_js8_offset=apply_js8_offset,
+            apply_fldigi=apply_fldigi,
         )
 
     def resolve_varac_wait(self, action: str) -> None:
@@ -1059,7 +1066,39 @@ class SchedulerEngine(QObject):
         self._prompt_items = []
         self._prompt_entry_key = None
         self._reset_prompt_timers()
-        self._fldigi_force_apply_once = True
+        resume_skip_fldigi_apply = False
+        entry = self.current_schedule_entry or {}
+        if entry:
+            try:
+                effective_entry, _og = self._entry_with_operating_group_overrides(entry)
+                band = (effective_entry.get("band") or "").strip().upper()
+                freq_hz = self._parse_freq_hz((effective_entry.get("frequency") or "").strip())
+                js8_group = (effective_entry.get("primary_js8call_group") or "").strip()
+                vfo_raw = (effective_entry.get("vfo") or "A").strip().upper()
+                vfo = vfo_raw if vfo_raw in ("A", "B") else None
+                rig_mode = self._resolve_rig_mode(effective_entry)
+                resume_entry_key = (
+                    band,
+                    freq_hz,
+                    self._expected_fldigi_offset(effective_entry),
+                    self._js8_offset_setting(),
+                    vfo,
+                    js8_group,
+                    rig_mode,
+                )
+                # Resume should restore scheduler activity, but avoid re-forcing FLDigi
+                # for the already-current entry so offset drift stays notify-only.
+                same_source = (self._last_source or "") == (self.current_source or "NONE")
+                resume_skip_fldigi_apply = bool(
+                    same_source
+                    and (
+                        self._last_entry_key == resume_entry_key
+                        or self._last_entry_matches_schedule_identity(effective_entry)
+                    )
+                )
+            except Exception:
+                resume_skip_fldigi_apply = False
+        self._fldigi_force_apply_once = not resume_skip_fldigi_apply
         self._latest_intent = None
         self._latest_intent_ts = 0.0
         self._retry_scheduled = False
@@ -1078,8 +1117,12 @@ class SchedulerEngine(QObject):
             ignore_suspend=True,
             ignore_net_suppression=True,
             ignore_fldigi_busy=True,
+            apply_fldigi=not resume_skip_fldigi_apply,
         )
-        self._maybe_apply_fldigi()
+        if resume_skip_fldigi_apply:
+            self._fldigi_apply_pending = False
+        if not resume_skip_fldigi_apply:
+            self._maybe_apply_fldigi()
         self._net_resume_apply_once = False
         self._schedule_forced_retry()
 
@@ -1171,6 +1214,33 @@ class SchedulerEngine(QObject):
             (row.get("frequency") or "").strip(),
             (row.get("start_utc") or "").strip(),
             (row.get("end_utc") or "").strip(),
+        )
+
+    def _last_entry_matches_schedule_identity(self, entry: Optional[Dict]) -> bool:
+        key = self._last_entry_key
+        if not isinstance(key, tuple) or len(key) < 7:
+            return False
+        row = entry or {}
+        band = (row.get("band") or "").strip().upper()
+        freq_hz = self._parse_freq_hz((row.get("frequency") or "").strip())
+        js8_group = (row.get("primary_js8call_group") or "").strip()
+        og = self._resolve_operating_group(row)
+        vfo_source = og.get("vfo") if isinstance(og, dict) else None
+        vfo_raw = (vfo_source or row.get("vfo") or "A").strip().upper()
+        vfo = vfo_raw if vfo_raw in ("A", "B") else None
+        rig_mode = self._resolve_rig_mode(row)
+        return (
+            key[0],
+            key[1],
+            key[4],
+            key[5],
+            key[6],
+        ) == (
+            band,
+            freq_hz,
+            vfo,
+            js8_group,
+            rig_mode,
         )
 
     def _derive_source_reason(
@@ -1345,6 +1415,7 @@ class SchedulerEngine(QObject):
             if not bool(self.settings.get("use_scheduler", True)):
                 self._prompt_active = False
                 self._prompt_items = []
+                self._last_fldigi_offset_prompt_sig = None
                 return
         except Exception:
             pass
@@ -1352,15 +1423,18 @@ class SchedulerEngine(QObject):
         if control_mode in ("MANUAL", "NONE"):
             self._prompt_active = False
             self._prompt_items = []
+            self._last_fldigi_offset_prompt_sig = None
             return
         if self._net_corrections_suppressed():
             self._prompt_active = False
             self._prompt_items = []
+            self._last_fldigi_offset_prompt_sig = None
             return
         entry = self.current_schedule_entry or {}
         if not entry:
             self._prompt_active = False
             self._prompt_items = []
+            self._last_fldigi_offset_prompt_sig = None
             return
         entry_key = (entry.get("frequency"), entry.get("band"), entry.get("mode"), entry.get("group_name"))
         now_ts = time.time()
@@ -1368,6 +1442,7 @@ class SchedulerEngine(QObject):
             self._prompt_active = False
             self._prompt_items = []
             self._prompt_entry_key = entry_key
+            self._last_fldigi_offset_prompt_sig = None
             self._reset_prompt_timers(now_ts)
             try:
                 self.off_schedule_cleared.emit()
@@ -1384,6 +1459,7 @@ class SchedulerEngine(QObject):
         if not (freq_prompt or fldigi_prompt or js8_prompt):
             self._prompt_active = False
             self._prompt_items = []
+            self._last_fldigi_offset_prompt_sig = None
             return
         flags = self._off_schedule_flags(
             entry,
@@ -1395,6 +1471,7 @@ class SchedulerEngine(QObject):
         if not any(flags.values()):
             self._prompt_active = False
             self._prompt_items = []
+            self._last_fldigi_offset_prompt_sig = None
             self._last_off_schedule_flags = {
                 "frequency": False,
                 "mode": False,
@@ -1403,7 +1480,20 @@ class SchedulerEngine(QObject):
             }
             return
         if self._prompt_active:
+            if not bool(flags.get("fldigi_offset")):
+                self._last_fldigi_offset_prompt_sig = None
             return
+        fldigi_offset_prompt_sig: Optional[Tuple[Optional[int], Optional[int]]] = None
+        fldigi_offset_prompt_changed = False
+        if fldigi_prompt and bool(flags.get("fldigi_offset")):
+            fldigi_offset_prompt_sig = (
+                self._expected_fldigi_offset(entry),
+                self._current_fldigi_offset(),
+            )
+            fldigi_offset_prompt_changed = (
+                self._last_fldigi_offset_prompt_sig is not None
+                and fldigi_offset_prompt_sig != self._last_fldigi_offset_prompt_sig
+            )
         prev_flags = self._last_off_schedule_flags or {}
         items: List[str] = []
         if flags["frequency"] and freq_prompt:
@@ -1414,7 +1504,7 @@ class SchedulerEngine(QObject):
                 items.append("Frequency")
         if flags["fldigi_offset"] and fldigi_prompt:
             interval = self._prompt_interval_minutes("fldigi_prompt_interval")
-            if (not prev_flags.get("fldigi_offset")) or (
+            if fldigi_offset_prompt_changed or (not prev_flags.get("fldigi_offset")) or (
                 now_ts - self._prompt_state["fldigi_offset"]["last_prompt_ts"] >= interval * 60
             ):
                 items.append("FLDigi Offset")
@@ -1431,6 +1521,10 @@ class SchedulerEngine(QObject):
             ):
                 items.append("Offset")
         if not items:
+            if bool(flags.get("fldigi_offset")):
+                self._last_fldigi_offset_prompt_sig = fldigi_offset_prompt_sig
+            else:
+                self._last_fldigi_offset_prompt_sig = None
             self._last_off_schedule_flags = dict(flags)
             return
         if any(item in {"Mode", "FLDigi Mode", "FLDigi Offset"} for item in items):
@@ -1447,6 +1541,7 @@ class SchedulerEngine(QObject):
             elif item == "Offset":
                 self._prompt_state["offset"]["last_prompt_ts"] = now_ts
         self.off_schedule_detected.emit({"entry": entry, "items": items})
+        self._last_fldigi_offset_prompt_sig = fldigi_offset_prompt_sig if bool(flags.get("fldigi_offset")) else None
         self._last_off_schedule_flags = dict(flags)
 
     def resolve_off_schedule(self, action: str, items: Optional[List[str]] = None) -> None:
@@ -1604,16 +1699,26 @@ class SchedulerEngine(QObject):
     def _update_desired_fldigi_settings(self, entry: Dict) -> None:
         mode = self._expected_fldigi_mode(entry)
         offset = self._expected_fldigi_offset(entry)
+        prev_desired = (self._desired_fldigi_mode, self._desired_fldigi_offset)
+        desired = (mode, offset)
         self._desired_fldigi_mode = mode
         self._desired_fldigi_offset = offset
         if mode is None and offset is None:
             self._fldigi_apply_pending = False
         else:
-            self._fldigi_apply_pending = True
-        if mode or offset is not None:
+            # Only re-queue FLDigi apply when the desired tuple changed, a prior
+            # apply is still pending, we have never applied this tuple, or a real
+            # schedule transition/user action explicitly forced FLDigi re-apply.
+            self._fldigi_apply_pending = bool(
+                self._fldigi_apply_pending
+                or desired != prev_desired
+                or self._last_fldigi_apply != desired
+                or self._fldigi_force_apply_once
+            )
+        if (mode or offset is not None) and self._fldigi_apply_pending:
             # Request immediate apply if FLDigi is already available.
             self._fldigi_apply_after_ts = 0.0
-        else:
+        elif mode is None and offset is None:
             self._fldigi_apply_after_ts = None
 
     def _maybe_apply_fldigi(self) -> None:
@@ -1627,6 +1732,12 @@ class SchedulerEngine(QObject):
         if self._control_mode() in ("MANUAL", "NONE"):
             return
         entry = self.current_schedule_entry or {}
+        rig_mode = self._resolve_rig_mode(entry)
+        js8_tune = self._js8_offset_setting()
+        same_source_entry = bool(
+            (self._last_source or "") == (self.current_source or "NONE")
+            and self._last_entry_matches_schedule_identity(entry)
+        )
         if self._net_corrections_suppressed():
             band = (entry.get("band") or "").strip().upper()
             freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
@@ -1639,9 +1750,10 @@ class SchedulerEngine(QObject):
                 band,
                 freq_hz,
                 self._expected_fldigi_offset(entry),
-                None,
+                js8_tune,
                 vfo,
                 js8_group,
+                rig_mode,
             )
             if self._net_schedule_active and self._net_schedule_entry_key is None:
                 self._net_schedule_entry_key = entry_key
@@ -1656,7 +1768,7 @@ class SchedulerEngine(QObject):
                     if time.time() - self._net_schedule_started_at > 12:
                         self._net_fldigi_apply_allowed_once = False
                         return
-            if self._last_entry_key == entry_key and not self._fldigi_force_apply_once:
+            if (self._last_entry_key == entry_key or same_source_entry) and not self._fldigi_force_apply_once:
                 return
         if self._enforcement_mode("fldigi_enforcement_mode") == "Prompt":
             flags = self._off_schedule_flags(entry, check_frequency=False, check_mode=True, check_offset=False)
@@ -1678,11 +1790,12 @@ class SchedulerEngine(QObject):
                         band,
                         freq_hz,
                         self._expected_fldigi_offset(entry),
-                        None,
+                        js8_tune,
                         vfo,
                         js8_group,
+                        rig_mode,
                     )
-                    if self._last_entry_key == entry_key:
+                    if self._last_entry_key == entry_key or same_source_entry:
                         self._fldigi_force_apply_once = False
                         return
                 if not self._fldigi_force_apply_once:
@@ -2518,6 +2631,7 @@ class SchedulerEngine(QObject):
             self._net_fldigi_apply_allowed_once = False
             self._net_schedule_started_at = None
             self._net_schedule_entry_key = None
+            self._last_scheduler_selection_sig = None
             return
 
         # Apply to rig (if needed) and emit active_entry_changed
@@ -2542,6 +2656,13 @@ class SchedulerEngine(QObject):
             self._net_schedule_started_at = time.time()
             self._net_schedule_entry_key = None
             self._net_fldigi_apply_allowed_once = True
+        scheduler_transition = False
+        if source in {"HF", "NET", "SOP"}:
+            selection_sig = (source,) + self._entry_transition_signature(active_entry)
+            scheduler_transition = selection_sig != self._last_scheduler_selection_sig
+            self._last_scheduler_selection_sig = selection_sig
+        else:
+            self._last_scheduler_selection_sig = None
         self._apply_schedule_entry(
             active_entry,
             source,
@@ -2549,6 +2670,7 @@ class SchedulerEngine(QObject):
             force=force or net_ended,
             ignore_wait_prompt=net_ended,
             ignore_net_suppression=net_ended,
+            scheduler_transition=scheduler_transition,
         )
 
     def apply_manual_qsy(self, entry: Dict) -> None:
@@ -2982,6 +3104,7 @@ class SchedulerEngine(QObject):
         ignore_fldigi_busy: bool = False,
         apply_js8_offset: bool = True,
         apply_fldigi: bool = True,
+        scheduler_transition: bool = False,
     ) -> None:
         """
         Apply a single schedule entry to the rig.
@@ -3151,9 +3274,10 @@ class SchedulerEngine(QObject):
                 log.debug("SchedulerEngine: net schedule active; skipping corrections for current entry.")
                 self.active_entry_changed.emit(effective_entry, source)
                 return
-        if source in ("HF", "NET", "SOP") and entry_key != self._last_entry_key:
-            # Ensure schedule transitions always enforce FLDigi mode/offset,
-            # even if the user previously skipped a prompt.
+        if source in ("HF", "NET", "SOP") and scheduler_transition and apply_fldigi:
+            # Only real scheduler row transitions should re-arm one-shot FLDigi
+            # enforcement. Internal reapply key differences (resume/retry/
+            # frequency-only actions) must not behave like schedule transitions.
             self._fldigi_force_apply_once = True
         if self._pending_entry_key == entry_key and not force:
             log.debug("SchedulerEngine: control action skipped (pending entry key).")
