@@ -8,6 +8,7 @@
 - Fixed: `HF Schedule` save now blocks on row time-format errors (`HH:MM`) instead of performing a partial save that silently skips malformed rows.
 - Fixed: `ControlFreq` top-row `Operating Status` LED container now expands correctly to fit status indicators/labels without avoidable clipping from the outer layout spacer.
 - Fixed: Clicking `QSY Now` from `ControlFreq` `Schedule Outlook` now forces a hero-frequency resync so the Frequency Control hero indicator reflects the active frequency after QSY.
+- Fixed: `ControlFreq` Frequency Control hero indicator now re-syncs when the scheduler changes to a new scheduled frequency, preventing stale hero frequency display after automatic schedule-driven QSY changes.
 - Changed: In-app guide wording now clarifies `Resume Schedule`, FLDigi offset expectations (including Operating Group fallback), and `Prompt` vs `On Schedule Change` behavior.
 - Changed: App/documentation version references updated to `1.2.0`.
 

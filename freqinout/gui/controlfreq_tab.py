@@ -93,6 +93,7 @@ class ControlFreqTab(QWidget):
         self._primary_freq_action_mode = "none"
         self._freq_action_busy_reason_label: Optional[str] = None
         self._freq_combo_cache_key: Tuple[Tuple[str, str, float, str, str, bool], ...] = ()
+        self._last_hero_sched_freq_mhz: Optional[float] = None
         self._operator_groups_cache: Dict[str, Set[str]] = {}
         self._operator_groups_cache_ts = 0.0
         self._operator_groups_cache_mtime = 0.0
@@ -2163,9 +2164,29 @@ class ControlFreqTab(QWidget):
         except Exception:
             status_snapshot = None
         sched_freq = current_scheduler_freq(self.window())
+        scheduler_freq_changed = False
+        prev_sched_freq = self._last_hero_sched_freq_mhz
+        if sched_freq is None:
+            scheduler_freq_changed = prev_sched_freq is not None
+            self._last_hero_sched_freq_mhz = None
+        else:
+            try:
+                sched_freq_f = float(sched_freq)
+            except Exception:
+                sched_freq_f = None
+            if sched_freq_f is not None:
+                scheduler_freq_changed = prev_sched_freq is None or abs(prev_sched_freq - sched_freq_f) > 0.0005
+                self._last_hero_sched_freq_mhz = sched_freq_f
+        if scheduler_freq_changed:
+            force_resync = True
         sched_group = self._get_scheduled_group_name()
         active_freq = self._get_active_frequency_mhz(status_snapshot)
         display_freq = active_freq if active_freq is not None else sched_freq
+        if scheduler_freq_changed and sched_freq is not None:
+            # On scheduler transitions, prefer the new scheduled target for the
+            # hero selection so a briefly stale active-frequency poll does not
+            # preserve the prior combo item indefinitely.
+            display_freq = sched_freq
         if (force_resync or restore_idx < 0) and display_freq is not None:
             for idx in range(1, self.freq_combo.count()):
                 meta = self.freq_combo.itemData(idx)
