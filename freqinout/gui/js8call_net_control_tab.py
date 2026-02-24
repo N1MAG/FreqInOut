@@ -194,7 +194,7 @@ class JS8CallNetControlTab(QWidget):
         """
         Send a one-shot TX.SEND_MESSAGE to JS8Call over the TCP API.
         """
-        host = "127.0.0.1"
+        host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
@@ -501,11 +501,12 @@ class JS8CallNetControlTab(QWidget):
         if not self._js8_rx_registered:
             self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
             self._js8_rx_registered = True
+        host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
-        self._js8_rx_hub.start("127.0.0.1", port)
+        self._js8_rx_hub.start(host, port)
 
     def _update_timer_interval(self):
         if self._poll_timer:
@@ -1857,8 +1858,9 @@ class JS8CallNetControlTab(QWidget):
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
+        host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
-            js8net.start_net("127.0.0.1", port)
+            js8net.start_net(host, port)
             self._js8_client = js8net
             self._js8_net_started = True
             return js8net

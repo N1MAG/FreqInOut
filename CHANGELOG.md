@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.0]
+- Added: `Settings -> JS8Call Settings` now includes configurable `TCP Host` (`js8_host`) with default `127.0.0.1`, and JS8 status/control/net/map integrations now use the configured hostname/IP instead of assuming localhost.
+- Changed: `Settings -> JS8Call Settings -> Load JS8 Traffic` now shows an in-process indicator (button busy state + progress/status text) during manual JS8 traffic rebuilds so long reloads provide immediate UI feedback.
+- Fixed: On Windows, launching with `python -m freqinout.main` now sets a FreqInOut-specific app identity/icon early so the taskbar button shows the FreqInOut icon instead of the default Python icon.
+- Fixed: `ControlFreq` top-row `Operating Status` LED container now expands correctly to fit status indicators/labels without avoidable clipping from the outer layout spacer.
+- Fixed: Clicking `QSY Now` from `ControlFreq` `Schedule Outlook` now forces a hero-frequency resync so the Frequency Control hero indicator reflects the active frequency after QSY.
+- Changed: In-app guide wording now clarifies `Resume Schedule`, FLDigi offset expectations (including Operating Group fallback), and `Prompt` vs `On Schedule Change` behavior.
+- Changed: App/documentation version references updated to `1.2.0`.
+
 ## [1.1.9]
 - Changed: ControlFreq `Frequency Control` now keeps the schedule-state badge focused on `On Schedule` / `Off Schedule` / `Unknown`, and shows traffic/PTT gating on the QSY action button as `Busy: {reason}` (`PTT active`, `JS8Call`, `VarAC`, `FLDigi`) while the action is temporarily disabled.
 - Fixed: Scheduler FLDigi off-schedule detection now distinguishes `FLDigi Mode` vs `FLDigi Offset` (offset drift no longer masquerades as mode mismatch), preserving off-schedule notification while using the existing FLDigi enforcement mode (`On Schedule Change` / `Prompt`) for resolution handling.
@@ -7,7 +16,6 @@
 - Fixed: FLDigi offset drift is no longer re-queued for immediate enforcement by same-entry resume/retry/reapply paths; offset drift can remain off-schedule until prompt/apply or an actual schedule entry change.
 - Fixed: FLDigi `On Schedule Change` enforcement now keys off real scheduler row transitions (not internal reapply-key differences), and `Prompt` mode treats changed FLDigi offset drift values as a new prompt cycle.
 - Changed: `Resume Schedule` responsiveness improved in ControlFreq and sidebar `Schedule Status` by reducing duplicate resume refresh pulses and repeated scheduler/FLDigi status polling in hot UI refresh paths.
-- Changed: App/documentation version references updated to `1.1.9`.
 
 ## [1.1.8]
 - Added: Accessibility `Text Size` setting in `Settings` with bounded presets (`Normal` 100%, `Medium` 110%, `Large` 125%) applied app-wide without restart.

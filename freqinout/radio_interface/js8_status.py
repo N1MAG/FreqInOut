@@ -36,9 +36,19 @@ class JS8StatusClient:
     for status checks.
     """
 
-    def __init__(self, host: str = "127.0.0.1"):
-        self.host = host
+    def __init__(self, host: Optional[str] = None):
         self.settings = SettingsManager()
+        self.host = self._resolve_host(host)
+
+    def _resolve_host(self, host: Optional[str]) -> str:
+        host_txt = str(host or "").strip()
+        if host_txt:
+            return host_txt
+        try:
+            host_txt = str(self.settings.get("js8_host", "") or "").strip()
+        except Exception:
+            host_txt = ""
+        return host_txt or "127.0.0.1"
 
     def _get_port(self) -> int:
         """
@@ -85,7 +95,7 @@ class JS8ControlClient(JS8StatusClient):
     Call set_frequency() from your rig-control path when control_via == 'JS8Call'.
     """
 
-    def __init__(self, host: str = "127.0.0.1"):
+    def __init__(self, host: Optional[str] = None):
         super().__init__(host=host)
         self._net_started = False
 

@@ -2226,10 +2226,17 @@ class MainWindow(QMainWindow):
 
     def _set_window_icon(self):
         assets_dir = Path(__file__).resolve().parents[2] / "assets"
-        icon_path = assets_dir / "FreqInOut-desktop.png"
-        if not icon_path.exists():
-            return
-        icon = QIcon(str(icon_path))
+        icon = QIcon()
+        candidates = ["FreqInOut.ico", "FreqInOut-desktop.png"] if sys.platform == "win32" else ["FreqInOut-desktop.png", "FreqInOut.ico"]
+        for name in candidates:
+            icon_path = assets_dir / name
+            if not icon_path.exists():
+                continue
+            candidate = QIcon(str(icon_path))
+            if candidate.isNull():
+                continue
+            icon = candidate
+            break
         if icon.isNull():
             return
         self.setWindowIcon(icon)

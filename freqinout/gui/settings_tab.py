@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QProgressBar,
     QHeaderView,
     QSizePolicy,
     QAbstractScrollArea,
@@ -814,6 +815,20 @@ class SettingsTab(QWidget):
         js8_group.setLayout(js8_v)
         js8_label_width = 170
 
+        js8_host_row = QHBoxLayout()
+        js8_host_row.setSpacing(8)
+        js8_host_row.setContentsMargins(0, 0, 0, 0)
+        js8_host_label = QLabel("TCP Host")
+        js8_host_label.setFixedWidth(70)
+        js8_host_row.addWidget(js8_host_label)
+        self.js8_host_edit = QLineEdit()
+        self.js8_host_edit.setPlaceholderText("127.0.0.1")
+        self.js8_host_edit.setText("127.0.0.1")
+        self.js8_host_edit.setFixedWidth(220)
+        js8_host_row.addWidget(self.js8_host_edit)
+        js8_host_row.addStretch()
+        js8_v.addLayout(js8_host_row)
+
         js8_port_row = QHBoxLayout()
         js8_port_row.setSpacing(8)
         js8_port_row.setContentsMargins(0, 0, 0, 0)
@@ -916,6 +931,16 @@ class SettingsTab(QWidget):
         self.load_js8_btn = QPushButton("Load JS8 Traffic")
         self.load_js8_btn.clicked.connect(self._load_js8_logs)
         load_links_row.addWidget(self.load_js8_btn)
+        self.load_js8_progress = QProgressBar()
+        self.load_js8_progress.setRange(0, 0)
+        self.load_js8_progress.setTextVisible(False)
+        self.load_js8_progress.setFixedWidth(120)
+        self.load_js8_progress.setFixedHeight(12)
+        self.load_js8_progress.setVisible(False)
+        load_links_row.addWidget(self.load_js8_progress)
+        self.load_js8_status_label = QLabel("Loading JS8 traffic...")
+        self.load_js8_status_label.setVisible(False)
+        load_links_row.addWidget(self.load_js8_status_label)
         load_links_row.addStretch()
         js8_v.addLayout(load_links_row)
 
@@ -1830,6 +1855,8 @@ class SettingsTab(QWidget):
             "Normal" if ui_text_size == "normal" else ("Medium" if ui_text_size == "medium" else "Large")
         )
 
+        js8_host_txt = str(data.get("js8_host", "") or "").strip() or "127.0.0.1"
+        self.js8_host_edit.setText(js8_host_txt)
         port_txt = str(data.get("js8_port", "2442") or "2442")
         self.js8_port_edit.setText(port_txt)
         offset_val = data.get("js8_offset_hz", None)
@@ -2092,6 +2119,12 @@ class SettingsTab(QWidget):
         data["ui_theme"] = self.theme_combo.currentText().strip().lower()
         data["ui_text_size"] = normalize_ui_text_size(self.text_size_combo.currentText())
 
+        host_val = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
+        if not host_val:
+            host_val = "127.0.0.1"
+            if hasattr(self, "js8_host_edit"):
+                self.js8_host_edit.setText(host_val)
+        data["js8_host"] = host_val
         try:
             port_val = int(self.js8_port_edit.text().strip() or "2442")
         except ValueError:
@@ -2278,6 +2311,7 @@ class SettingsTab(QWidget):
                 "js8_enforcement_mode": data.get("js8_enforcement_mode", "On Schedule Change"),
                 "js8_prompt_interval": data.get("js8_prompt_interval", "Hourly"),
                 "ui_theme": data.get("ui_theme", "light"),
+                "js8_host": data.get("js8_host", "127.0.0.1"),
                 "js8_port": data["js8_port"],
                 "js8_offset_hz": data.get("js8_offset_hz", 0),
                 "primary_js8_groups": data["primary_js8_groups"],
@@ -2332,6 +2366,7 @@ class SettingsTab(QWidget):
             self.settings.set("fldigi_prompt_interval", data.get("fldigi_prompt_interval", "Hourly"))
             self.settings.set("js8_enforcement_mode", data.get("js8_enforcement_mode", "On Schedule Change"))
             self.settings.set("js8_prompt_interval", data.get("js8_prompt_interval", "Hourly"))
+            self.settings.set("js8_host", data.get("js8_host", "127.0.0.1"))
             self.settings.set("js8_port", data["js8_port"])
             self.settings.set("js8_offset_hz", data.get("js8_offset_hz", 0))
             self.settings.set("primary_js8_groups", data["primary_js8_groups"])
@@ -2779,12 +2814,37 @@ class SettingsTab(QWidget):
         self.loading_label.setText(text)
         self.loading_label.setVisible(bool(active))
 
+    def _set_js8_load_busy(self, active: bool, text: str = "Loading JS8 traffic...") -> None:
+        was_active = bool(getattr(self, "_js8_load_busy_active", False))
+        self._js8_load_busy_active = bool(active)
+        if hasattr(self, "load_js8_btn") and self.load_js8_btn:
+            self.load_js8_btn.setEnabled(not active)
+            self.load_js8_btn.setText("Loading..." if active else "Load JS8 Traffic")
+        if hasattr(self, "load_js8_progress") and self.load_js8_progress:
+            self.load_js8_progress.setVisible(bool(active))
+        if hasattr(self, "load_js8_status_label") and self.load_js8_status_label:
+            self.load_js8_status_label.setText(text)
+            self.load_js8_status_label.setVisible(bool(active))
+        if active and not was_active:
+            try:
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+            except Exception:
+                pass
+        if active:
+            QApplication.processEvents()
+        elif was_active:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+
     def _wire_dirty_tracking(self) -> None:
         edits = [
             self.callsign_edit,
             self.name_edit,
             self.state_edit,
             self.grid6_edit,
+            self.js8_host_edit,
             self.js8_port_edit,
             self.js8_offset_edit,
             self.js8_directed_edit,
@@ -3315,11 +3375,16 @@ class SettingsTab(QWidget):
         theme = resolve_theme(self.settings)
         port_override: Optional[int] = None
         try:
+            host_txt = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
+            host_override = host_txt or "127.0.0.1"
+        except Exception:
+            host_override = "127.0.0.1"
+        try:
             txt = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
             port_override = int(txt) if txt else None
         except Exception:
             port_override = None
-        snapshot = self._status_service.status_snapshot(port_override=port_override)
+        snapshot = self._status_service.status_snapshot(port_override=port_override, host_override=host_override)
         for program_name, lbl in self.status_labels.items():
             info = snapshot.get(program_name, {})
             state = str(info.get("state", "idle"))
@@ -3399,12 +3464,17 @@ class SettingsTab(QWidget):
 
     def _js8_api_reachable(self) -> bool:
         try:
+            host_txt = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
+            host_override = host_txt or "127.0.0.1"
+        except Exception:
+            host_override = "127.0.0.1"
+        try:
             port_txt = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
             port_override = int(port_txt) if port_txt else None
         except Exception:
             port_override = None
         try:
-            return bool(self._status_service.js8_api_reachable(port_override=port_override))
+            return bool(self._status_service.js8_api_reachable(port_override=port_override, host_override=host_override))
         except Exception:
             return False
 
@@ -5126,7 +5196,10 @@ class SettingsTab(QWidget):
         from freqinout.core.config_paths import get_config_dir
 
         db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        self._set_js8_load_busy(True, "Rebuilding JS8 traffic from logs...")
+        self._set_loading(True, "Loading JS8 traffic...")
         try:
+            self._set_js8_load_busy(True, "Preparing JS8 traffic rebuild...")
             indexer = JS8LogLinkIndexer(self.settings, db_path)
             indexer._base_callsign = JS8LogLinkIndexer._base_callsign  # ensure suffix handling
             self._maybe_backfill_js8_geo()
@@ -5138,15 +5211,20 @@ class SettingsTab(QWidget):
                     "js8_links_last_load_utc": 0,
                 }
             )
+            self._set_js8_load_busy(True, "Clearing prior JS8 traffic rows...")
             conn = sqlite3.connect(db_path)
             try:
                 indexer._ensure_table(conn)
                 indexer._clear_table(conn)
             finally:
                 conn.close()
+            self._set_js8_load_busy(True, "Scanning JS8 logs (this may take a while)...")
             count = int(indexer.update(since_ts=0) or 0)
             latest_ts = float(indexer._ensure_latest_ts(last_default=0.0) or 0.0)
+            self._set_js8_load_busy(True, "Finalizing JS8 traffic rebuild...")
             self.settings.set("js8_links_last_load_utc", latest_ts)
+            self._set_js8_load_busy(False)
+            self._set_loading(False)
             QMessageBox.information(
                 self,
                 "JS8 Traffic Loaded",
@@ -5155,8 +5233,13 @@ class SettingsTab(QWidget):
             self._refresh_operator_history_views()
         except Exception as e:
             log.error("SettingsTab: JS8 log ingest failed: %s", e)
+            self._set_js8_load_busy(False)
+            self._set_loading(False)
             QMessageBox.critical(self, "Error", f"Failed to ingest JS8 logs:\n{e}")
             self._refresh_operator_history_views()
+        finally:
+            self._set_js8_load_busy(False)
+            self._set_loading(False)
 
     def _maybe_backfill_js8_geo(self) -> None:
         if self._loading_settings:

@@ -200,6 +200,7 @@ class ControlFreqTab(QWidget):
         updated_row = QHBoxLayout()
 
         self.status_group = QGroupBox("Operating Status")
+        self.status_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         status_layout = QHBoxLayout()
         self.status_group.setLayout(status_layout)
         theme = resolve_theme(self.settings)
@@ -223,7 +224,6 @@ class ControlFreqTab(QWidget):
             status_layout.addSpacing(12)
         status_layout.addStretch(1)
         updated_row.addWidget(self.status_group, 3)
-        updated_row.addStretch(1)
         right_status_col = QVBoxLayout()
         right_status_col.setContentsMargins(0, 0, 0, 0)
         right_status_col.setSpacing(6)
@@ -3030,8 +3030,14 @@ class ControlFreqTab(QWidget):
             return
         ok = perform_qsy(self.window(), meta)
         if ok:
+            self._force_hero_resync = True
             self._refresh_frequency_control()
-            QTimer.singleShot(800, self._refresh_frequency_control)
+
+            def _refresh_qsy_hero() -> None:
+                self._force_hero_resync = True
+                self._refresh_frequency_control()
+
+            QTimer.singleShot(800, _refresh_qsy_hero)
 
     def _schedule_qsy_meta(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         group = str(entry.get("group") or "").strip().upper()

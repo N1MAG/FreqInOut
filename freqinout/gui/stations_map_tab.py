@@ -674,11 +674,12 @@ class StationsMapTab(QWidget):
         if not self._js8_rx_registered:
             self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
             self._js8_rx_registered = True
+        host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
-        self._js8_rx_hub.start("127.0.0.1", port)
+        self._js8_rx_hub.start(host, port)
 
     def _get_js8_indexer(self) -> Optional[JS8LogLinkIndexer]:
         if self._js8_indexer is None:

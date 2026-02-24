@@ -165,6 +165,7 @@ class SoftwareStatusService:
         self,
         *,
         port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
         allow_fallback: bool = True,
         force: bool = False,
     ) -> bool:
@@ -177,12 +178,14 @@ class SoftwareStatusService:
                 port = 2442
 
         hosts: List[str] = []
-        try:
-            host_cfg = (self.settings.get("js8_host", "") or "").strip()
-            if host_cfg:
-                hosts.append(host_cfg)
-        except Exception:
-            pass
+        host_cfg = (host_override or "").strip()
+        if not host_cfg:
+            try:
+                host_cfg = (self.settings.get("js8_host", "") or "").strip()
+            except Exception:
+                host_cfg = ""
+        if host_cfg:
+            hosts.append(host_cfg)
         cache_host = hosts[0].strip().lower() if hosts else ""
         cache_key = (cache_host, int(port), bool(allow_fallback))
         now = time.monotonic()
@@ -196,7 +199,9 @@ class SoftwareStatusService:
                 self._js8_api_cache_ts = float(cached_ts or now)
                 return bool(cached_ok)
 
-        hosts.extend(["127.0.0.1", "localhost", "::1"])
+        primary_host = hosts[0] if hosts else None
+        if not hosts:
+            hosts.extend(["127.0.0.1", "localhost", "::1"])
         reachable = False
         for host in hosts:
             try:
@@ -211,7 +216,7 @@ class SoftwareStatusService:
             try:
                 from freqinout.radio_interface.js8_status import JS8ControlClient
 
-                client = JS8ControlClient()
+                client = JS8ControlClient(host=primary_host)
                 reachable = client.get_frequency() is not None
             except Exception:
                 reachable = False
@@ -222,10 +227,16 @@ class SoftwareStatusService:
         cls._shared_js8_api_cache[cache_key] = (self._js8_api_cache_ts, self._js8_api_cache_ok)
         return bool(reachable)
 
-    def status_snapshot(self, *, port_override: Optional[int] = None) -> Dict[str, Dict[str, object]]:
+    def status_snapshot(
+        self,
+        *,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+    ) -> Dict[str, Dict[str, object]]:
         running_js8 = self.program_is_running("JS8Call")
         api_ok = self.js8_api_reachable(
             port_override=port_override,
+            host_override=host_override,
             allow_fallback=False,
         ) if running_js8 else False
 
