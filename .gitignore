@@ -67,6 +67,9 @@ js8spotter.db
 
 # Local test workspace artifacts
 tests/
+!tests/
+tests/*
+!tests/__init__.py
 
 # Local benchmark/smoke artifacts
 .benchmarks/

@@ -29,4 +29,4 @@ jobs:
         run: python -m compileall freqinout
 
       - name: Propagation regression tests
-        run: python -m unittest discover -s tests -p "test_propagation*.py" -v
+        run: python -m unittest discover -s tests -t . -p "test_propagation*.py" -v
