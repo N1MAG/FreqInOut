@@ -107,6 +107,8 @@ SCAN_CHOICES = [1, 15, 30, 60]  # minutes
 JS8_POLL_SECONDS = 90  # 90 seconds
 PENDING_POLL_SECONDS = 30
 JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
+BBS_AUTO_ARCHIVE_INTERVAL_SECONDS = 24 * 60 * 60  # once daily max
+BBS_AUTO_ARCHIVE_LAST_CHECK_KEY = "varac_bbs_auto_archive_last_check_ts"
 
 
 @dataclass
@@ -476,6 +478,116 @@ class _FileScanWorker(QObject):
         except Exception:
             records, dir_mtimes = self._run_full()
             self.finished.emit({"records": records, "dir_mtimes": dir_mtimes, "mode": "fallback"}, self._force)
+
+
+class _BbsAutoArchiveWorker(QObject):
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        *,
+        bbs_dir: str,
+        archive_dir: str,
+        days: int,
+        allowed_exts: List[str],
+        reason: str,
+    ):
+        super().__init__()
+        self._bbs_dir = Path(str(bbs_dir or ""))
+        self._archive_dir = Path(str(archive_dir or ""))
+        try:
+            self._days = max(1, int(days or 1))
+        except Exception:
+            self._days = 1
+        self._allowed_exts = {
+            str(ext or "").strip().lower()
+            for ext in (allowed_exts or [])
+            if str(ext or "").strip()
+        }
+        self._reason = str(reason or "").strip() or "timer"
+
+    def _archive_destination(self, src: Path) -> Path:
+        dst = self._archive_dir / src.name
+        if not dst.exists():
+            return dst
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+        dst = self._archive_dir / f"{src.stem}_{stamp}{src.suffix}"
+        attempt = 2
+        while dst.exists():
+            dst = self._archive_dir / f"{src.stem}_{stamp}_{attempt}{src.suffix}"
+            attempt += 1
+        return dst
+
+    def run(self) -> None:
+        started_ts = time.time()
+        completed_ts = started_ts
+        scanned_count = 0
+        eligible_count = 0
+        moved_count = 0
+        error_count = 0
+        moved_items: List[tuple[str, str]] = []
+        errors: List[str] = []
+        cutoff_ts = started_ts - (float(self._days) * 86400.0)
+        try:
+            with os.scandir(self._bbs_dir) as it:
+                for dent in it:
+                    try:
+                        if not dent.is_file(follow_symlinks=False):
+                            continue
+                        scanned_count += 1
+                        suffix = Path(dent.name).suffix.lower()
+                        if self._allowed_exts and suffix not in self._allowed_exts:
+                            continue
+                        st = dent.stat()
+                        if float(st.st_mtime) > cutoff_ts:
+                            continue
+                        src = Path(dent.path)
+                        dst = self._archive_destination(src)
+                        eligible_count += 1
+                        shutil.move(str(src), str(dst))
+                        moved_count += 1
+                        moved_items.append((str(src), str(dst)))
+                    except Exception as e:
+                        error_count += 1
+                        errors.append(str(e))
+                        continue
+        except Exception as e:
+            completed_ts = time.time()
+            self.finished.emit(
+                {
+                    "reason": self._reason,
+                    "started_ts": started_ts,
+                    "completed_ts": completed_ts,
+                    "days": self._days,
+                    "bbs_dir": str(self._bbs_dir),
+                    "archive_dir": str(self._archive_dir),
+                    "scanned_count": scanned_count,
+                    "eligible_count": eligible_count,
+                    "moved_count": moved_count,
+                    "error_count": error_count + 1,
+                    "moved_items": moved_items,
+                    "errors": errors + [str(e)],
+                    "fatal_error": str(e),
+                }
+            )
+            return
+        completed_ts = time.time()
+        self.finished.emit(
+            {
+                "reason": self._reason,
+                "started_ts": started_ts,
+                "completed_ts": completed_ts,
+                "days": self._days,
+                "bbs_dir": str(self._bbs_dir),
+                "archive_dir": str(self._archive_dir),
+                "scanned_count": scanned_count,
+                "eligible_count": eligible_count,
+                "moved_count": moved_count,
+                "error_count": error_count,
+                "moved_items": moved_items,
+                "errors": errors,
+            }
+        )
 
 
 class _RowsBuildWorker(QObject):
@@ -1843,6 +1955,13 @@ class MessageViewerTab(QWidget):
         self._activation_refresh_pending: bool = False
         self._activation_refresh_interval_sec: float = 60.0
         self._last_activation_refresh_ts: float = 0.0
+        self._bbs_auto_archive_timer: QTimer | None = None
+        self._bbs_auto_archive_thread: QThread | None = None
+        self._bbs_auto_archive_worker: _BbsAutoArchiveWorker | None = None
+        self._bbs_auto_archive_inflight: bool = False
+        self._bbs_auto_archive_check_pending: bool = False
+        self._bbs_auto_archive_first_activation_pending: bool = True
+        self._bbs_auto_archive_interval_sec: float = float(BBS_AUTO_ARCHIVE_INTERVAL_SECONDS)
         self._varac_ingest_interval_sec: float = 20.0
         self._last_varac_ingest_ts: float = 0.0
         self._js8_ingest_interval_sec: float = 20.0
@@ -3311,6 +3430,16 @@ class MessageViewerTab(QWidget):
         self._pending_timer.timeout.connect(self._refresh_pending_backlog)
         self._pending_timer.start(PENDING_POLL_SECONDS * 1000)
 
+    def _setup_bbs_auto_archive_timer(self):
+        if self._bbs_auto_archive_timer:
+            self._bbs_auto_archive_timer.stop()
+        self._bbs_auto_archive_timer = QTimer(self)
+        self._bbs_auto_archive_timer.timeout.connect(self._on_bbs_auto_archive_timer)
+        self._bbs_auto_archive_timer.start(int(self._bbs_auto_archive_interval_sec * 1000))
+
+    def _on_bbs_auto_archive_timer(self) -> None:
+        self._queue_bbs_auto_archive_check("timer", delay_ms=0)
+
     def _on_refresh_now(self) -> None:
         self._unfreeze_table()
         self._set_loading(True)
@@ -3391,6 +3520,11 @@ class MessageViewerTab(QWidget):
                 self._refresh_message_filters(self._message_rows)
                 self._apply_message_filters_preserve_scroll()
             self._update_pending_table()
+            if self._bbs_auto_archive_first_activation_pending:
+                self._bbs_auto_archive_first_activation_pending = False
+                self._queue_bbs_auto_archive_check("first_activation", delay_ms=1200)
+            else:
+                self._queue_bbs_auto_archive_check("tab_activated", delay_ms=250)
             now = time.time()
             stale = (not self._message_rows) or (
                 now - float(self._last_activation_refresh_ts) >= self._activation_refresh_interval_sec
@@ -3434,13 +3568,165 @@ class MessageViewerTab(QWidget):
             self._setup_timer()
             self._setup_js8_timer()
             self._setup_pending_timer()
+            self._setup_bbs_auto_archive_timer()
             if self._signature_verify_deferred_until_active:
                 self._signature_verify_deferred_until_active = False
                 QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
             return
-        for timer in (self._timer, self._js8_timer, self._pending_timer):
+        for timer in (self._timer, self._js8_timer, self._pending_timer, self._bbs_auto_archive_timer):
             if timer:
                 timer.stop()
+
+    # ---------- BBS Auto-Archive ----------
+
+    def _bbs_auto_archive_settings_snapshot(self) -> Optional[Dict[str, object]]:
+        if not self._is_truthy(self.settings.get("varac_bbs_auto_archive_enabled", False), False):
+            return None
+        bbs_dir_txt = str(self.settings.get("varac_bbs_dir", "") or "").strip()
+        archive_dir_txt = str(self.settings.get("varac_bbs_archive_dir", "") or "").strip()
+        if not bbs_dir_txt or not archive_dir_txt:
+            log.debug("MessageViewer: BBS auto-archive skipped (paths not configured)")
+            return None
+        bbs_dir = Path(bbs_dir_txt)
+        archive_dir = Path(archive_dir_txt)
+        if not bbs_dir.exists() or not bbs_dir.is_dir() or not archive_dir.exists() or not archive_dir.is_dir():
+            log.debug("MessageViewer: BBS auto-archive skipped (invalid directories)")
+            return None
+        try:
+            if bbs_dir.resolve() == archive_dir.resolve():
+                log.debug("MessageViewer: BBS auto-archive skipped (BBS and archive dirs are the same)")
+                return None
+        except Exception:
+            pass
+        days_raw = self.settings.get("varac_bbs_auto_archive_days", 14)
+        try:
+            days_val = max(1, int(days_raw or 14))
+        except Exception:
+            days_val = 14
+        allowed = sorted(set(ORIGIN_EXTS.get("bbs", set(SUPPORTED_EXT))))
+        return {
+            "bbs_dir": str(bbs_dir),
+            "archive_dir": str(archive_dir),
+            "days": int(days_val),
+            "allowed_exts": allowed,
+        }
+
+    def _bbs_auto_archive_last_check_ts(self) -> float:
+        raw = self.settings.get(BBS_AUTO_ARCHIVE_LAST_CHECK_KEY, 0.0)
+        try:
+            return float(raw or 0.0)
+        except Exception:
+            return 0.0
+
+    def _bbs_auto_archive_due_now(self, now_ts: Optional[float] = None) -> bool:
+        now_val = float(now_ts if now_ts is not None else time.time())
+        last_ts = self._bbs_auto_archive_last_check_ts()
+        if last_ts <= 0:
+            return True
+        return (now_val - last_ts) >= float(self._bbs_auto_archive_interval_sec)
+
+    def _set_bbs_auto_archive_last_check_ts(self, ts: float) -> None:
+        try:
+            self.settings.set(BBS_AUTO_ARCHIVE_LAST_CHECK_KEY, float(ts))
+        except Exception as e:
+            log.debug("MessageViewer: failed to persist BBS auto-archive check ts: %s", e)
+
+    def _queue_bbs_auto_archive_check(self, reason: str, delay_ms: int = 0) -> None:
+        if self._is_shutting_down:
+            return
+        if self._bbs_auto_archive_check_pending or self._bbs_auto_archive_inflight:
+            return
+        self._bbs_auto_archive_check_pending = True
+
+        def _run() -> None:
+            self._bbs_auto_archive_check_pending = False
+            self._run_bbs_auto_archive_if_due(reason=reason)
+
+        QTimer.singleShot(max(0, int(delay_ms)), _run)
+
+    def _run_bbs_auto_archive_if_due(self, *, reason: str) -> None:
+        if self._is_shutting_down or self._bbs_auto_archive_inflight:
+            return
+        if not self._has_active_view:
+            return
+        if self._bbs_auto_archive_thread:
+            try:
+                if self._bbs_auto_archive_thread.isRunning():
+                    return
+            except RuntimeError:
+                self._bbs_auto_archive_thread = None
+                self._bbs_auto_archive_worker = None
+        snapshot = self._bbs_auto_archive_settings_snapshot()
+        if not snapshot:
+            return
+        if not self._bbs_auto_archive_due_now():
+            return
+        if self._refresh_files_inflight:
+            self._queue_bbs_auto_archive_check(reason, delay_ms=3000)
+            return
+        self._bbs_auto_archive_inflight = True
+        self._bbs_auto_archive_thread = QThread(self)
+        self._bbs_auto_archive_worker = _BbsAutoArchiveWorker(
+            bbs_dir=str(snapshot.get("bbs_dir", "") or ""),
+            archive_dir=str(snapshot.get("archive_dir", "") or ""),
+            days=int(snapshot.get("days", 14) or 14),
+            allowed_exts=[str(v) for v in (snapshot.get("allowed_exts", []) or [])],
+            reason=str(reason or "timer"),
+        )
+        self._bbs_auto_archive_worker.moveToThread(self._bbs_auto_archive_thread)
+        self._bbs_auto_archive_thread.started.connect(self._bbs_auto_archive_worker.run)
+        self._bbs_auto_archive_worker.finished.connect(self._on_bbs_auto_archive_finished)
+        self._bbs_auto_archive_worker.finished.connect(self._bbs_auto_archive_thread.quit)
+        self._bbs_auto_archive_worker.finished.connect(self._bbs_auto_archive_worker.deleteLater)
+        self._bbs_auto_archive_thread.finished.connect(self._on_bbs_auto_archive_thread_finished)
+        self._bbs_auto_archive_thread.finished.connect(self._bbs_auto_archive_thread.deleteLater)
+        self._bbs_auto_archive_thread.start()
+
+    def _on_bbs_auto_archive_thread_finished(self) -> None:
+        self._bbs_auto_archive_thread = None
+        self._bbs_auto_archive_worker = None
+
+    def _on_bbs_auto_archive_finished(self, payload: object) -> None:
+        self._bbs_auto_archive_inflight = False
+        if self._is_shutting_down:
+            return
+        data = payload if isinstance(payload, dict) else {}
+        try:
+            completed_ts = float(data.get("completed_ts", time.time()) or time.time())
+        except Exception:
+            completed_ts = time.time()
+        self._set_bbs_auto_archive_last_check_ts(completed_ts)
+        reason = str(data.get("reason", "") or "timer")
+        moved_count = int(data.get("moved_count", 0) or 0)
+        error_count = int(data.get("error_count", 0) or 0)
+        scanned_count = int(data.get("scanned_count", 0) or 0)
+        eligible_count = int(data.get("eligible_count", 0) or 0)
+        fatal_error = str(data.get("fatal_error", "") or "").strip()
+        if fatal_error:
+            log.warning("MessageViewer: BBS auto-archive failed (%s): %s", reason, fatal_error)
+            return
+        if moved_count or error_count:
+            log.info(
+                "MessageViewer: BBS auto-archive check (%s) scanned=%s eligible=%s moved=%s errors=%s",
+                reason,
+                scanned_count,
+                eligible_count,
+                moved_count,
+                error_count,
+            )
+        else:
+            log.debug(
+                "MessageViewer: BBS auto-archive check (%s) scanned=%s eligible=%s moved=0",
+                reason,
+                scanned_count,
+                eligible_count,
+            )
+        if moved_count > 0:
+            if self._refresh_files_inflight:
+                QTimer.singleShot(1200, lambda: self._refresh_files(force=False))
+            else:
+                self._refresh_files(force=False)
+
 
     # ---------- Paths ----------
 
@@ -3505,7 +3791,7 @@ class MessageViewerTab(QWidget):
         return out
 
     def _refresh_files(self, force: bool = False):
-        if self._is_shutting_down or self._refresh_files_inflight:
+        if self._is_shutting_down or self._refresh_files_inflight or self._bbs_auto_archive_inflight:
             return
         if self._file_scan_thread:
             try:
@@ -4142,6 +4428,11 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
         try:
+            if self._bbs_auto_archive_timer:
+                self._bbs_auto_archive_timer.stop()
+        except Exception:
+            pass
+        try:
             if self._filter_timer:
                 self._filter_timer.stop()
         except Exception:
@@ -4162,6 +4453,12 @@ class MessageViewerTab(QWidget):
             if self._signature_verify_thread and self._signature_verify_thread.isRunning():
                 self._signature_verify_thread.quit()
                 self._signature_verify_thread.wait(1000)
+        except Exception:
+            pass
+        try:
+            if self._bbs_auto_archive_thread and self._bbs_auto_archive_thread.isRunning():
+                self._bbs_auto_archive_thread.quit()
+                self._bbs_auto_archive_thread.wait(1000)
         except Exception:
             pass
 
@@ -4202,6 +4499,11 @@ class MessageViewerTab(QWidget):
                 self._start_signature_verification(force=True)
             except Exception:
                 pass
+        try:
+            if self._has_active_view:
+                self._queue_bbs_auto_archive_check("settings_saved", delay_ms=1500)
+        except Exception:
+            pass
         self._update_pending_table()
 
     def _auth_refresh_signature(self) -> tuple:
