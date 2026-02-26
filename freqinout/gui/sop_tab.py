@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPageLayout, QPageSize, QTextDocument
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QPageLayout, QPageSize, QTextDocument, QStandardItem, QStandardItemModel
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -57,6 +57,186 @@ def _contrast_text_hex(bg_hex: str) -> str:
         return "#111111"
     yiq = ((r * 299) + (g * 587) + (b * 114)) / 1000
     return "#111111" if yiq >= 140 else "#FFFFFF"
+
+
+class _ConditionLevelsMultiCombo(QComboBox):
+    selectionChanged = Signal()
+
+    _OPTIONS = ("ALL", "1", "2", "3", "4", "5")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        if self.lineEdit() is not None:
+            self.lineEdit().setReadOnly(True)
+            self.lineEdit().setPlaceholderText("ALL")
+        model = QStandardItemModel(self)
+        self.setModel(model)
+        self._syncing = False
+        self._build_items()
+        try:
+            self.view().viewport().installEventFilter(self)
+        except Exception:
+            pass
+        self.set_normalized_value("ALL", emit=False)
+
+    def _build_items(self) -> None:
+        model = self.model()
+        if not isinstance(model, QStandardItemModel):
+            return
+        model.clear()
+        for label in self._OPTIONS:
+            item = QStandardItem(label)
+            item.setEditable(False)
+            item.setCheckable(True)
+            item.setSelectable(True)
+            item.setData(label, Qt.UserRole)
+            item.setCheckState(Qt.Unchecked)
+            model.appendRow(item)
+
+    def _item(self, row: int) -> QStandardItem | None:
+        model = self.model()
+        if not isinstance(model, QStandardItemModel):
+            return None
+        item = model.item(row)
+        return item if isinstance(item, QStandardItem) else None
+
+    def _find_row(self, value: str) -> int:
+        target = str(value or "").strip().upper()
+        model = self.model()
+        if not isinstance(model, QStandardItemModel):
+            return -1
+        for row in range(model.rowCount()):
+            item = model.item(row)
+            if not isinstance(item, QStandardItem):
+                continue
+            if str(item.data(Qt.UserRole) or item.text() or "").strip().upper() == target:
+                return row
+        return -1
+
+    def _set_checked(self, value: str, checked: bool) -> None:
+        row = self._find_row(value)
+        item = self._item(row)
+        if item is None:
+            return
+        item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+
+    def _is_checked(self, value: str) -> bool:
+        row = self._find_row(value)
+        item = self._item(row)
+        if item is None:
+            return False
+        return item.checkState() == Qt.Checked
+
+    def _checked_levels(self) -> List[int]:
+        out: List[int] = []
+        for val in ("1", "2", "3", "4", "5"):
+            if self._is_checked(val):
+                try:
+                    out.append(int(val))
+                except Exception:
+                    continue
+        return out
+
+    def normalized_value(self) -> str:
+        if self._is_checked("ALL"):
+            return "ALL"
+        levels = sorted(set(self._checked_levels()))
+        if not levels:
+            return "ALL"
+        if levels == [1, 2, 3, 4, 5]:
+            return "ALL"
+        return ",".join(str(v) for v in levels)
+
+    def set_normalized_value(self, value: str, *, emit: bool = False) -> None:
+        raw = str(value or "").strip().upper()
+        use_all = (not raw) or (raw == "ALL")
+        selected: Set[int] = set()
+        if not use_all:
+            for token in raw.replace(";", ",").replace("|", ",").split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                if token == "ALL":
+                    use_all = True
+                    selected.clear()
+                    break
+                try:
+                    lvl = int(token)
+                except Exception:
+                    continue
+                if 1 <= lvl <= 5:
+                    selected.add(lvl)
+            if not selected and not use_all:
+                use_all = True
+            if selected == {1, 2, 3, 4, 5}:
+                use_all = True
+                selected.clear()
+
+        self._syncing = True
+        try:
+            self._set_checked("ALL", use_all)
+            for lvl in ("1", "2", "3", "4", "5"):
+                self._set_checked(lvl, (not use_all) and int(lvl) in selected)
+            self._update_display_text()
+        finally:
+            self._syncing = False
+        if emit:
+            self.selectionChanged.emit()
+
+    def _update_display_text(self) -> None:
+        text = self.normalized_value()
+        if self.lineEdit() is not None:
+            self.lineEdit().setText(text)
+        else:
+            self.setCurrentText(text)
+
+    def _normalize_after_toggle(self, toggled_label: str) -> None:
+        label = str(toggled_label or "").strip().upper()
+        if label == "ALL":
+            if self._is_checked("ALL"):
+                for lvl in ("1", "2", "3", "4", "5"):
+                    self._set_checked(lvl, False)
+            else:
+                if not self._checked_levels():
+                    self._set_checked("ALL", True)
+        else:
+            if self._is_checked(label):
+                self._set_checked("ALL", False)
+            levels = self._checked_levels()
+            if not levels:
+                self._set_checked("ALL", True)
+            elif sorted(set(levels)) == [1, 2, 3, 4, 5]:
+                self._set_checked("ALL", True)
+                for lvl in ("1", "2", "3", "4", "5"):
+                    self._set_checked(lvl, False)
+        self._update_display_text()
+
+    def _toggle_row(self, row: int) -> None:
+        item = self._item(row)
+        if item is None:
+            return
+        label = str(item.data(Qt.UserRole) or item.text() or "").strip().upper()
+        next_checked = item.checkState() != Qt.Checked
+        self._syncing = True
+        try:
+            item.setCheckState(Qt.Checked if next_checked else Qt.Unchecked)
+            self._normalize_after_toggle(label)
+        finally:
+            self._syncing = False
+        self.selectionChanged.emit()
+
+    def eventFilter(self, obj, event) -> bool:
+        try:
+            if obj is self.view().viewport() and event is not None and event.type() == QEvent.MouseButtonRelease:
+                idx = self.view().indexAt(event.pos())
+                if idx.isValid():
+                    self._toggle_row(int(idx.row()))
+                    return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
 
 class _LegacySOPTab(QWidget):
@@ -134,6 +314,8 @@ class _LegacySOPTab(QWidget):
         self._layer_sync_cache_key: Tuple[Any, ...] | None = None
         self._layer_sync_cache_value: Tuple[List[Dict[str, Any]], List[str], int] | None = None
         self._hf_group_names_cache: List[str] | None = None
+        self._hf_group_condition_meta_cache: Dict[str, Tuple[bool, int | None]] | None = None
+        self._condition_level_selector_values_cache: List[str] | None = None
         self._local_group_names_cache: List[str] | None = None
         self._local_resource_cache: Dict[str, List[str]] = {}
         self._local_mode_cache: Dict[Tuple[str, str], List[str]] = {}
@@ -464,6 +646,7 @@ class _LegacySOPTab(QWidget):
 
     def _invalidate_dynamic_option_caches(self) -> None:
         self._hf_group_names_cache = None
+        self._hf_group_condition_meta_cache = None
         self._local_group_names_cache = None
         self._local_resource_cache.clear()
         self._local_mode_cache.clear()
@@ -3585,7 +3768,7 @@ class SOPTab(_LegacySOPTab):
         if self._current_category() != self.CAT_HF:
             return None
         group_combo = self.actions_table.cellWidget(row_index, self.COL_GROUP)
-        cond_edit = self.actions_table.cellWidget(row_index, self.COL_COND)
+        cond_widget = self.actions_table.cellWidget(row_index, self.COL_COND)
         resource_combo = self.actions_table.cellWidget(row_index, self.COL_RESOURCE)
         action_combo = self.actions_table.cellWidget(row_index, self.COL_ACTION)
         bandfreq_combo = self.actions_table.cellWidget(row_index, self.COL_BANDFREQ)
@@ -3614,6 +3797,8 @@ class SOPTab(_LegacySOPTab):
         start_display = start_edit.text().strip()
         if not (group_name and resource and action_key and band and freq and self._is_valid_hhmm(start_display)):
             return None
+        if not self._hf_group_uses_condition_levels(group_name):
+            return None
         start_utc = self._utc_start_hhmm_from_display(start_display, show_local=self._show_local)
         duration_minutes = int(duration_combo.currentData() or 60)
         if duration_minutes not in {30, 60}:
@@ -3622,9 +3807,7 @@ class SOPTab(_LegacySOPTab):
         interval_minutes, phase_minutes = self._parse_interval_spec(interval_combo.currentText())
         if interval_minutes <= 0:
             return None
-        condition_levels = "ALL"
-        if isinstance(cond_edit, QLineEdit):
-            condition_levels = self.manager._normalize_condition_levels(cond_edit.text().strip())
+        condition_levels = self._condition_levels_from_widget(cond_widget)
         contact_rule = str(contact_combo.currentData() or "none").strip()
         contact_target = str(target_combo.currentText() or "").strip().upper()
         if contact_target == "ANY (ROLE MATCH)":
@@ -3664,7 +3847,7 @@ class SOPTab(_LegacySOPTab):
 
     def _set_inline_conflict_badge(self, row_index: int, status: str, tooltip: str = "") -> None:
         badge = self.actions_table.cellWidget(row_index, self.COL_CONFLICT)
-        if not isinstance(badge, QLabel):
+        if not isinstance(badge, (QLabel, QToolButton)):
             return
         theme = resolve_theme(self.settings)
         status_key = str(status or "").strip().lower()
@@ -3686,18 +3869,175 @@ class SOPTab(_LegacySOPTab):
             label = "Pending"
         badge.setText(label)
         badge.setToolTip(str(tooltip or "").strip())
-        badge.setAlignment(Qt.AlignCenter)
+        if isinstance(badge, QLabel):
+            badge.setAlignment(Qt.AlignCenter)
+        if isinstance(badge, QToolButton):
+            badge.setEnabled(status_key == "conflict")
+            try:
+                badge.setCursor(Qt.PointingHandCursor if status_key == "conflict" else Qt.ArrowCursor)
+            except Exception:
+                pass
         badge.setStyleSheet(
             (
-                "QLabel {"
+                "QLabel, QToolButton {"
                 f"background: {bg};"
                 f"color: {fg};"
                 "padding: 2px 8px;"
                 "border-radius: 10px;"
                 "font-weight: 600;"
+                "border: none;"
+                "}"
+                "QToolButton:disabled {"
+                f"background: {bg};"
+                f"color: {fg};"
+                "border: none;"
                 "}"
             )
         )
+        if isinstance(badge, QToolButton):
+            badge.setProperty("conflict_status", status_key)
+
+    def _show_inline_conflict_details_for_button(self, btn: QToolButton) -> None:
+        for r in range(self.actions_table.rowCount()):
+            if self.actions_table.cellWidget(r, self.COL_CONFLICT) is btn:
+                self._show_inline_conflict_details_for_row(r)
+                return
+
+    def _format_conflict_overlap_span(self, start_iso: str, end_iso: str) -> str:
+        try:
+            start_dt = datetime.datetime.fromisoformat(str(start_iso or "").strip())
+            end_dt = datetime.datetime.fromisoformat(str(end_iso or "").strip())
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
+            else:
+                start_dt = start_dt.astimezone(datetime.timezone.utc)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=datetime.timezone.utc)
+            else:
+                end_dt = end_dt.astimezone(datetime.timezone.utc)
+            if self._show_local:
+                tz_name = self.settings.get("timezone", "UTC") or "UTC"
+                tz = get_timezone(tz_name)
+                start_dt = start_dt.astimezone(tz)
+                end_dt = end_dt.astimezone(tz)
+                tz_tag = self._tz_short_name()
+            else:
+                tz_tag = "UTC"
+            if start_dt.date() == end_dt.date():
+                return f"{start_dt.strftime('%a %H:%M')}-{end_dt.strftime('%H:%M')} {tz_tag}"
+            return f"{start_dt.strftime('%a %H:%M')}-{end_dt.strftime('%a %H:%M')} {tz_tag}"
+        except Exception:
+            return f"{str(start_iso or '').strip()} to {str(end_iso or '').strip()}".strip()
+
+    def _build_conflict_detail_lines(
+        self,
+        title: str,
+        rows: List[Dict[str, Any]],
+        overflow_count: int = 0,
+    ) -> List[str]:
+        if not rows:
+            return [f"{title}: none"]
+        lines: List[str] = [f"{title}:"]
+        for row in rows[:10]:
+            span = self._format_conflict_overlap_span(
+                str(row.get("overlap_start_utc") or ""),
+                str(row.get("overlap_end_utc") or ""),
+            )
+            other_label = str(row.get("other_label") or "").strip() or "Schedule row"
+            other_group = str(row.get("other_group") or "").strip().upper()
+            other_band = str(row.get("other_band") or "").strip().upper()
+            other_freq = str(row.get("other_frequency") or "").strip()
+            freq_text = " ".join([t for t in [other_band, other_freq] if t]).strip()
+            label_text = other_label
+            if other_group and other_group not in label_text.upper():
+                label_text = f"{other_group}: {other_label}"
+            if freq_text:
+                label_text = f"{label_text} [{freq_text}]"
+            lines.append(f"  - {span} | {label_text}")
+        hidden = max(0, len(rows) - 10) + max(0, int(overflow_count or 0))
+        if hidden > 0:
+            lines.append(f"  - ...and {hidden} more")
+        return lines
+
+    def _show_inline_conflict_details_for_row(self, row_index: int) -> None:
+        badge = self.actions_table.cellWidget(row_index, self.COL_CONFLICT)
+        if isinstance(badge, QToolButton):
+            if str(badge.property("conflict_status") or "").strip().lower() != "conflict":
+                return
+
+        if self._current_category() != self.CAT_HF:
+            QMessageBox.information(self, "SOP Conflict Details", "Local Comms rows do not use HF conflict checks.")
+            return
+
+        action_rows = self._collect_hf_actions_for_realtime()
+        action_map = {r: a for r, a in action_rows}
+        action = action_map.get(int(row_index))
+        if not isinstance(action, dict):
+            QMessageBox.information(
+                self,
+                "SOP Conflict Details",
+                "Complete Group, Resource, Action, Band-Freq, Start, Duration, and Interval to review conflicts.",
+            )
+            return
+        peers = [dict(other_action) for other_row, other_action in action_rows if int(other_row) != int(row_index)]
+        diag = self.manager.detect_action_conflicts(
+            action=action,
+            operating_group=str(action.get("group_name") or "").strip().upper(),
+            horizon_days=7,
+            check_all_groups=True,
+            peer_actions=peers,
+            include_details=True,
+        )
+        if not bool(diag.get("has_conflict")):
+            QMessageBox.information(self, "SOP Conflict Details", "No Daily/Net/SOP conflicts detected.")
+            self._set_inline_conflict_badge(row_index, "ok", "No Daily/Net/SOP conflicts detected.")
+            return
+
+        action_label = str(action.get("action_label") or action.get("action_key") or "Action").strip() or "Action"
+        group_name = str(action.get("group_name") or "").strip().upper()
+        band = str(action.get("band") or "").strip().upper()
+        freq = str(action.get("frequency") or "").strip()
+        policy = self.manager._normalize_conflict_policy(action.get("conflict_policy"))
+
+        daily_details = list(diag.get("daily_details") or [])
+        net_details = list(diag.get("net_details") or [])
+        sop_details = list(diag.get("sop_details") or [])
+        daily_over = int(diag.get("daily_detail_overflow") or 0)
+        net_over = int(diag.get("net_detail_overflow") or 0)
+        sop_over = int(diag.get("sop_detail_overflow") or 0)
+
+        lines: List[str] = []
+        lines.extend(self._build_conflict_detail_lines("HF Schedule", daily_details, daily_over))
+        lines.append("")
+        lines.extend(self._build_conflict_detail_lines("Net Schedule", net_details, net_over))
+        lines.append("")
+        lines.extend(self._build_conflict_detail_lines("SOP Actions", sop_details, sop_over))
+        lines.append("")
+        lines.append("Recommended actions:")
+        if daily_details:
+            lines.append("  - HF Schedule: adjust SOP Start/Duration, or change band/frequency.")
+        if net_details:
+            lines.append("  - Net Schedule: adjust SOP timing/frequency, or choose Net/SOP Priority for intentional overlaps.")
+        if sop_details:
+            lines.append("  - SOP Actions: move one action time, or intentionally align to the same band/frequency.")
+        if policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY} and bool(diag.get("first_occurrence_conflict")):
+            policy_name = "Net Priority" if policy == self.manager.CONFLICT_POLICY_NET else "Daily Priority"
+            lines.append(f"  - Current policy is {policy_name}; first-occurrence conflicts can block Save.")
+        lines.append("  - Same-frequency overlaps are allowed and are not shown here.")
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("SOP Conflict Details")
+        heading = f"Row {int(row_index) + 1}: {action_label}"
+        context = " ".join([t for t in [band, freq] if t]).strip()
+        if group_name:
+            heading += f" ({group_name})"
+        if context:
+            heading += f" [{context}]"
+        box.setText(heading)
+        box.setInformativeText("\n".join(lines))
+        box.addButton(QMessageBox.Close)
+        box.exec()
 
     def _refresh_inline_conflict_badges(
         self,
@@ -3730,9 +4070,10 @@ class SOPTab(_LegacySOPTab):
             )
             if bool(diag.get("has_conflict")):
                 tooltip_lines = [
-                    f"Daily: {diag.get('daily_summary') or 'None'}",
-                    f"Nets: {diag.get('net_summary') or 'None'}",
-                    f"SOP: {diag.get('sop_summary') or 'None'}",
+                    f"HF Schedule: {diag.get('daily_summary') or 'None'}",
+                    f"Net Schedule: {diag.get('net_summary') or 'None'}",
+                    f"SOP Actions: {diag.get('sop_summary') or 'None'}",
+                    "Click Conflict for details.",
                 ]
                 self._set_inline_conflict_badge(row_index, "conflict", "\n".join(tooltip_lines))
             else:
@@ -3847,15 +4188,129 @@ class SOPTab(_LegacySOPTab):
         self._invalidate_dynamic_option_caches()
         self._refresh_all_rows_dynamic_options()
 
+    def _hf_group_condition_meta(self) -> Dict[str, Tuple[bool, int | None]]:
+        cached = self._hf_group_condition_meta_cache
+        if cached is not None:
+            return dict(cached)
+        out: Dict[str, Tuple[bool, int | None]] = {}
+        for row in (self._operating_groups or []):
+            group = str(row.get("group", "")).strip().upper()
+            if not group:
+                continue
+            prev_enabled, prev_level = out.get(group, (False, None))
+            use_levels = bool(row.get("use_condition_levels", False))
+            level_val = prev_level
+            if use_levels:
+                try:
+                    parsed_level = int(row.get("condition_level", 0) or 0)
+                except Exception:
+                    parsed_level = 0
+                if 1 <= parsed_level <= 5:
+                    if level_val is None or parsed_level < level_val:
+                        level_val = parsed_level
+            out[group] = (bool(prev_enabled or use_levels), level_val)
+        self._hf_group_condition_meta_cache = dict(out)
+        return dict(out)
+
+    def _hf_group_uses_condition_levels(self, group: str) -> bool:
+        grp = str(group or "").strip().upper()
+        if not grp:
+            return False
+        enabled, _level = self._hf_group_condition_meta().get(grp, (False, None))
+        return bool(enabled)
+
+    def _condition_level_selector_values(self) -> List[str]:
+        cached = self._condition_level_selector_values_cache
+        if cached is not None:
+            return list(cached)
+        values: List[str] = ["ALL", "1", "2", "3", "4", "5"]
+        self._condition_level_selector_values_cache = list(values)
+        return list(values)
+
+    def _condition_levels_from_widget(self, widget: object) -> str:
+        if isinstance(widget, _ConditionLevelsMultiCombo):
+            return self.manager._normalize_condition_levels(widget.normalized_value())
+        if isinstance(widget, QComboBox):
+            raw = widget.currentData()
+            if raw is None:
+                raw = widget.currentText()
+            return self.manager._normalize_condition_levels(str(raw or "").strip())
+        if isinstance(widget, QLineEdit):
+            return self.manager._normalize_condition_levels(widget.text().strip())
+        return "ALL"
+
+    def _refresh_action_row_condition_widget(
+        self,
+        *,
+        category: str,
+        group_name: str,
+        cond_widget: object,
+    ) -> None:
+        if isinstance(cond_widget, _ConditionLevelsMultiCombo):
+            normalized_current = self._condition_levels_from_widget(cond_widget)
+            cond_widget.set_normalized_value(normalized_current, emit=False)
+            if category != self.CAT_HF:
+                cond_widget.set_normalized_value("ALL", emit=False)
+                cond_widget.setEnabled(False)
+                cond_widget.setToolTip("Condition levels apply to HF action rows only.")
+            elif not self._hf_group_uses_condition_levels(group_name):
+                cond_widget.set_normalized_value("ALL", emit=False)
+                cond_widget.setEnabled(False)
+                cond_widget.setToolTip("Group must have 'Use Condition Levels' enabled in Settings for HF SOP actions.")
+            else:
+                cond_widget.setEnabled(True)
+                cond_widget.setToolTip("Applies only when the group's current condition level matches this selection.")
+            self._fit_combo_popup(cond_widget)
+            return
+        if isinstance(cond_widget, QLineEdit):
+            if category == self.CAT_HF:
+                if not cond_widget.text().strip():
+                    cond_widget.setText("ALL")
+                cond_widget.setEnabled(self._hf_group_uses_condition_levels(group_name))
+                return
+            cond_widget.setText("ALL")
+            cond_widget.setEnabled(False)
+            return
+        if not isinstance(cond_widget, QComboBox):
+            return
+
+        normalized_current = self._condition_levels_from_widget(cond_widget)
+        values = self._condition_level_selector_values()
+        cond_widget.blockSignals(True)
+        cond_widget.clear()
+        for val in values:
+            cond_widget.addItem(val, val)
+        if normalized_current not in values:
+            normalized_current = "ALL"
+        idx = cond_widget.findData(normalized_current)
+        cond_widget.setCurrentIndex(idx if idx >= 0 else 0)
+        cond_widget.setEditable(False)
+
+        if category != self.CAT_HF:
+            idx_all = cond_widget.findData("ALL")
+            cond_widget.setCurrentIndex(idx_all if idx_all >= 0 else 0)
+            cond_widget.setEnabled(False)
+            cond_widget.setToolTip("Condition levels apply to HF action rows only.")
+        elif not self._hf_group_uses_condition_levels(group_name):
+            idx_all = cond_widget.findData("ALL")
+            cond_widget.setCurrentIndex(idx_all if idx_all >= 0 else 0)
+            cond_widget.setEnabled(False)
+            cond_widget.setToolTip("Group must have 'Use Condition Levels' enabled in Settings for HF SOP actions.")
+        else:
+            cond_widget.setEnabled(True)
+            cond_widget.setToolTip("Applies only when the group's current condition level matches this selection.")
+        self._fit_combo_popup(cond_widget)
+        cond_widget.blockSignals(False)
+
     def _hf_group_names(self) -> List[str]:
         cached = self._hf_group_names_cache
         if cached is not None:
             return list(cached)
         names = sorted(
             {
-                str(row.get("group", "")).strip().upper()
-                for row in (self._operating_groups or [])
-                if str(row.get("group", "")).strip()
+                group
+                for group, (use_levels, _lvl) in self._hf_group_condition_meta().items()
+                if use_levels and group
             }
         )
         self._hf_group_names_cache = list(names)
@@ -4189,7 +4644,7 @@ class SOPTab(_LegacySOPTab):
     def _refresh_row_dynamic_options(self, row: int, *, preserve_current: bool) -> None:
         cat = self._current_category()
         group_combo = self.actions_table.cellWidget(row, self.COL_GROUP)
-        cond_edit = self.actions_table.cellWidget(row, self.COL_COND)
+        cond_widget = self.actions_table.cellWidget(row, self.COL_COND)
         resource_combo = self.actions_table.cellWidget(row, self.COL_RESOURCE)
         mode_combo = self.actions_table.cellWidget(row, self.COL_MODE)
         action_combo = self.actions_table.cellWidget(row, self.COL_ACTION)
@@ -4273,14 +4728,11 @@ class SOPTab(_LegacySOPTab):
         self._fit_combo_popup(contact_combo)
         contact_combo.blockSignals(False)
 
-        if cat == self.CAT_HF and isinstance(cond_edit, QLineEdit):
-            if not cond_edit.text().strip():
-                cond_edit.setText("ALL")
-        if cat == self.CAT_LOCAL and isinstance(cond_edit, QLineEdit):
-            cond_edit.setText("ALL")
-            cond_edit.setEnabled(False)
-        elif isinstance(cond_edit, QLineEdit):
-            cond_edit.setEnabled(True)
+        self._refresh_action_row_condition_widget(
+            category=cat,
+            group_name=group_current,
+            cond_widget=cond_widget,
+        )
 
         selected_contact = str(contact_combo.currentData() or "none").strip()
         target_enabled = selected_contact != "none"
@@ -4325,9 +4777,11 @@ class SOPTab(_LegacySOPTab):
         )
         self.actions_table.setCellWidget(row, self.COL_GROUP, group_combo)
 
-        cond_edit = QLineEdit(self.manager._normalize_condition_levels((existing or {}).get("condition_levels") or "ALL"))
-        cond_edit.setPlaceholderText("ALL or 1,3,5")
-        self.actions_table.setCellWidget(row, self.COL_COND, cond_edit)
+        cond_combo = _ConditionLevelsMultiCombo()
+        initial_cond = self.manager._normalize_condition_levels((existing or {}).get("condition_levels") or "ALL")
+        cond_combo.set_normalized_value(initial_cond, emit=False)
+        self._fit_combo_popup(cond_combo)
+        self.actions_table.setCellWidget(row, self.COL_COND, cond_combo)
 
         resource_combo = QComboBox()
         resource_combo.setEditable(True)
@@ -4392,8 +4846,10 @@ class SOPTab(_LegacySOPTab):
         desc_edit.setPlaceholderText("Optional description")
         self.actions_table.setCellWidget(row, self.COL_DESC, desc_edit)
 
-        conflict_badge = QLabel("Pending")
-        conflict_badge.setAlignment(Qt.AlignCenter)
+        conflict_badge = QToolButton()
+        conflict_badge.setText("Pending")
+        conflict_badge.setAutoRaise(False)
+        conflict_badge.clicked.connect(lambda _=False, b=conflict_badge: self._show_inline_conflict_details_for_button(b))
         self.actions_table.setCellWidget(row, self.COL_CONFLICT, conflict_badge)
 
         remove_btn = QPushButton("Remove")
@@ -4436,9 +4892,11 @@ class SOPTab(_LegacySOPTab):
         action_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
         contact_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
 
+        cond_combo.selectionChanged.connect(self._mark_dirty)
+        cond_combo.selectionChanged.connect(self._schedule_realtime_hf_conflict_check)
+
         for widget in (
             group_combo,
-            cond_edit,
             resource_combo,
             mode_combo,
             action_combo,
@@ -4548,7 +5006,7 @@ class SOPTab(_LegacySOPTab):
         actions: List[Dict[str, Any]] = []
         for r in range(self.actions_table.rowCount()):
             group_combo = self.actions_table.cellWidget(r, self.COL_GROUP)
-            cond_edit = self.actions_table.cellWidget(r, self.COL_COND)
+            cond_widget = self.actions_table.cellWidget(r, self.COL_COND)
             resource_combo = self.actions_table.cellWidget(r, self.COL_RESOURCE)
             mode_combo = self.actions_table.cellWidget(r, self.COL_MODE)
             action_combo = self.actions_table.cellWidget(r, self.COL_ACTION)
@@ -4574,7 +5032,7 @@ class SOPTab(_LegacySOPTab):
                 continue
 
             group_name = group_combo.currentText().strip().upper()
-            condition_levels = self.manager._normalize_condition_levels(cond_edit.text().strip()) if isinstance(cond_edit, QLineEdit) else "ALL"
+            condition_levels = self._condition_levels_from_widget(cond_widget)
             resource = resource_combo.currentText().strip()
             mode = mode_combo.currentText().strip().upper()
             action_key = str(action_combo.currentData() or "").strip()
@@ -4599,6 +5057,10 @@ class SOPTab(_LegacySOPTab):
                 raise ValueError(f"Row {r + 1}: Group is required for HF SOP.")
             if category == self.CAT_LOCAL and not group_name:
                 raise ValueError(f"Row {r + 1}: Group is required for Local Comms SOP.")
+            if category == self.CAT_HF and not self._hf_group_uses_condition_levels(group_name):
+                raise ValueError(
+                    f"Row {r + 1}: Group '{group_name}' must have Use Condition Levels enabled in Settings."
+                )
             if not resource:
                 raise ValueError(f"Row {r + 1}: Resource is required.")
             if not action_key:
@@ -4914,6 +5376,7 @@ class SOPTab(_LegacySOPTab):
         prev_suppress = getattr(self, "_suppress_realtime_conflict_checks", False)
         self._suppress_realtime_conflict_checks = True
         try:
+            prior_profile = self.manager.get_profile(int(self._selected_profile_id or 0)) or {}
             payload, actions, _schedule_layer = self._collect_profile_payload()
             if payload.get("category") == self.CAT_HF and bool(payload.get("active")):
                 if not self._resolve_hf_activation_conflicts(actions):
@@ -4922,6 +5385,25 @@ class SOPTab(_LegacySOPTab):
             self._reload_profiles(select_id=profile_id)
             self._set_save_dirty(False)
             self._emit_sop_data_changed()
+            try:
+                category = self.manager._normalize_category(payload.get("category"))
+            except Exception:
+                category = str(payload.get("category") or "").strip().upper()
+            prior_active = bool(prior_profile.get("active"))
+            new_active = bool(payload.get("active"))
+            if category == self.CAT_HF:
+                win = self.window()
+                daily_tab = getattr(win, "daily_tab", None)
+                if not prior_active and new_active and daily_tab is not None and hasattr(daily_tab, "register_sop_session_activation"):
+                    try:
+                        daily_tab.register_sop_session_activation(profile_id, str(payload.get("name") or ""))
+                    except Exception:
+                        pass
+                if prior_active and not new_active and daily_tab is not None and hasattr(daily_tab, "prompt_sop_return_to_normal_after_deactivation"):
+                    try:
+                        daily_tab.prompt_sop_return_to_normal_after_deactivation([int(profile_id or 0)], origin_label="SOP Builder")
+                    except Exception:
+                        pass
             QMessageBox.information(self, "SOP", "SOP saved.")
         except Exception as e:
             QMessageBox.warning(self, "SOP", str(e))
@@ -4949,6 +5431,14 @@ class SOPTab(_LegacySOPTab):
         self._reload_profiles(select_id=int(profile.get("id") or 0))
         self._set_save_dirty(False)
         self._emit_sop_data_changed()
+        if self.manager._normalize_category(profile.get("category")) == self.CAT_HF and bool(profile.get("active")):
+            try:
+                win = self.window()
+                daily_tab = getattr(win, "daily_tab", None)
+                if daily_tab is not None and hasattr(daily_tab, "prompt_sop_return_to_normal_after_deactivation"):
+                    daily_tab.prompt_sop_return_to_normal_after_deactivation([int(profile.get("id") or 0)], origin_label="SOP Builder")
+            except Exception:
+                pass
 
     def refresh_upcoming(self) -> None:
         self._upcoming_rows = []

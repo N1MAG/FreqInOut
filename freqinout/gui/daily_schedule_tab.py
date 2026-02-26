@@ -5,6 +5,7 @@ import sqlite3
 import platform
 import subprocess
 import json
+import uuid
 from pathlib import Path
 from typing import Any, List, Dict, Optional, Set, Tuple
 
@@ -186,6 +187,8 @@ class DailyScheduleTab(QWidget):
         self._sop_profile_lookup: Dict[int, Dict[str, Any]] = {}
         self._sop_group_profile_choice: Dict[str, int] = {}
         self._hidden_sop_overlay_keys: Set[str] = set()
+        self._sop_session_journal_cache: Dict[str, Any] | None = None
+        self._sop_return_to_normal_prompt_active: bool = False
 
         self._build_ui()
         self._refresh_qsy_options()
@@ -692,6 +695,675 @@ class DailyScheduleTab(QWidget):
         return get_config_dir() / "config" / "freqinout_nets.db"
 
     @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+    def _sop_session_journal_path(self) -> Path:
+        try:
+            return self._db_path().parent / "sop_hf_session_journal.json"
+        except Exception:
+            from freqinout.core.config_paths import get_config_dir
+
+            return get_config_dir() / "config" / "sop_hf_session_journal.json"
+
+    def _empty_sop_session_journal(self) -> Dict[str, Any]:
+        now_iso = self._utc_now_iso()
+        return {
+            "version": 1,
+            "session_id": "",
+            "status": "idle",
+            "started_utc": "",
+            "updated_utc": now_iso,
+            "active_profile_ids": [],
+            "profile_names": {},
+            "hf_restore": {
+                "available": False,
+                "captured_utc": "",
+                "pre_adjust_signature": "",
+                "post_adjust_signature": "",
+                "hf_rows_before": [],
+                "restored_utc": "",
+            },
+            "temp_net_sop_policies": [],
+        }
+
+    def _load_sop_session_journal(self, *, force: bool = False) -> Dict[str, Any]:
+        if not force and isinstance(self._sop_session_journal_cache, dict):
+            return dict(self._sop_session_journal_cache)
+
+        path = self._sop_session_journal_path()
+        out = self._empty_sop_session_journal()
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    out.update(raw)
+            except Exception as e:
+                log.debug("HF Schedule: failed loading SOP session journal %s: %s", path, e)
+
+        hf_restore = out.get("hf_restore")
+        if not isinstance(hf_restore, dict):
+            hf_restore = {}
+        base_restore = dict(self._empty_sop_session_journal().get("hf_restore") or {})
+        base_restore.update(hf_restore)
+        base_restore["available"] = bool(base_restore.get("available"))
+        if not isinstance(base_restore.get("hf_rows_before"), list):
+            base_restore["hf_rows_before"] = []
+        out["hf_restore"] = base_restore
+
+        if not isinstance(out.get("active_profile_ids"), list):
+            out["active_profile_ids"] = []
+        out["active_profile_ids"] = [
+            int(v) for v in out.get("active_profile_ids", []) if str(v).strip().lstrip("-").isdigit() and int(v) > 0
+        ]
+        if not isinstance(out.get("profile_names"), dict):
+            out["profile_names"] = {}
+        if not isinstance(out.get("temp_net_sop_policies"), list):
+            out["temp_net_sop_policies"] = []
+        out["version"] = 1
+        out["updated_utc"] = str(out.get("updated_utc") or "") or self._utc_now_iso()
+
+        self._sop_session_journal_cache = dict(out)
+        return dict(out)
+
+    def _save_sop_session_journal(self, journal: Dict[str, Any]) -> None:
+        data = dict(journal or {})
+        data["version"] = 1
+        data["updated_utc"] = self._utc_now_iso()
+        path = self._sop_session_journal_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+            self._sop_session_journal_cache = dict(data)
+        except Exception as e:
+            log.debug("HF Schedule: failed saving SOP session journal %s: %s", path, e)
+
+    def _active_hf_sop_profiles(self) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for row in self._load_sop_profile_catalog():
+            if not bool(row.get("active")):
+                continue
+            category = str(row.get("category") or "HF").strip().upper()
+            if category != "HF":
+                continue
+            out.append(row)
+        return out
+
+    def _collect_current_hf_rows_utc(self) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for r in range(self.table.rowCount()):
+            if self._is_sop_overlay_row(r):
+                continue
+            row = self._active_row_to_utc(r, include_sop_overlay=False)
+            if not row:
+                continue
+            rows.append(
+                {
+                    "day_utc": str(row.get("day_utc") or "ALL"),
+                    "band": str(row.get("band") or "").strip().upper(),
+                    "mode": str(row.get("mode") or "").strip().upper(),
+                    "vfo": "A",
+                    "frequency": self._normalize_freq_text(str(row.get("frequency") or "")),
+                    "start_utc": self._normalize_hhmm(str(row.get("start_utc") or "")),
+                    "end_utc": self._normalize_hhmm(str(row.get("end_utc") or "")),
+                    "group_name": str(row.get("group_name") or "").strip(),
+                    "fldigi_offset": "",
+                    "js8_offset": "",
+                    "primary_js8call_group": "",
+                    "comment": "",
+                    "auto_tune": bool(row.get("auto_tune", False)),
+                }
+            )
+        return rows
+
+    def _hf_rows_signature(self, rows: List[Dict[str, Any]]) -> str:
+        sig_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            sig_rows.append(
+                {
+                    "source": "HF",
+                    "source_key": "",
+                    "day_utc": str(row.get("day_utc") or ""),
+                    "group_name": str(row.get("group_name") or ""),
+                    "mode": str(row.get("mode") or ""),
+                    "band": str(row.get("band") or ""),
+                    "frequency": str(row.get("frequency") or ""),
+                    "start_utc": str(row.get("start_utc") or ""),
+                    "end_utc": str(row.get("end_utc") or ""),
+                    "auto_tune": bool(row.get("auto_tune", False)),
+                }
+            )
+        return self._rows_signature(sig_rows)
+
+    def _current_hf_rows_signature(self) -> str:
+        return self._hf_rows_signature(self._collect_current_hf_rows_utc())
+
+    def _replace_hf_rows_in_table(self, hf_rows: List[Dict[str, Any]]) -> None:
+        prev_suspend = self._suspend_dirty_tracking
+        self._suspend_dirty_tracking = True
+        try:
+            self.table.setRowCount(0)
+            self._raw_schedule = list(hf_rows)
+            for entry in (hf_rows or []):
+                self._append_entry_row(self._entry_for_display(dict(entry)))
+            if self.table.rowCount() == 0:
+                self._add_row()
+            self._append_sop_overlay_rows()
+        finally:
+            self._suspend_dirty_tracking = prev_suspend
+        self.table.clearSelection()
+        self._update_delete_button_state()
+        self._refresh_schedule_resources(force=True)
+        self._refresh_schedule_issues(force=True)
+        if self.table.rowCount() > 1:
+            self._sort_active_schedule_by_time()
+        else:
+            self._highlight_time_conflicts()
+            self._update_resource_action_state()
+        self._mark_dirty()
+
+    def _start_or_refresh_sop_session(self, profiles: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        active_profiles = profiles if isinstance(profiles, list) else self._active_hf_sop_profiles()
+        active_ids = sorted({int(p.get("id") or 0) for p in active_profiles if int(p.get("id") or 0) > 0})
+        profile_names = {
+            str(int(p.get("id") or 0)): str(p.get("name") or "").strip()
+            for p in active_profiles
+            if int(p.get("id") or 0) > 0
+        }
+        now_iso = self._utc_now_iso()
+
+        journal = self._load_sop_session_journal()
+        status = str(journal.get("status") or "idle").strip().lower()
+        existing_ids = sorted({int(v) for v in (journal.get("active_profile_ids") or []) if int(v) > 0})
+        if status == "active" and existing_ids and existing_ids == active_ids:
+            journal["profile_names"] = dict(journal.get("profile_names") or {})
+            journal["profile_names"].update(profile_names)
+            journal["updated_utc"] = now_iso
+            self._save_sop_session_journal(journal)
+            return journal
+
+        if active_ids:
+            journal = self._empty_sop_session_journal()
+            journal["session_id"] = uuid.uuid4().hex
+            journal["status"] = "active"
+            journal["started_utc"] = now_iso
+            journal["active_profile_ids"] = list(active_ids)
+            journal["profile_names"] = dict(profile_names)
+            self._save_sop_session_journal(journal)
+        return journal
+
+    def register_sop_session_activation(self, profile_id: int, profile_name: str = "") -> None:
+        pid = int(profile_id or 0)
+        if pid <= 0:
+            return
+        profiles = self._active_hf_sop_profiles()
+        known = {int(p.get("id") or 0) for p in profiles}
+        if pid not in known:
+            profiles.append({"id": pid, "name": profile_name, "active": True, "category": "HF"})
+        journal = self._start_or_refresh_sop_session(profiles)
+        if str(profile_name or "").strip():
+            names = dict(journal.get("profile_names") or {})
+            names[str(pid)] = str(profile_name or "").strip()
+            journal["profile_names"] = names
+            journal["status"] = "active"
+            journal["active_profile_ids"] = sorted({int(v) for v in (journal.get("active_profile_ids") or []) if int(v) > 0} | {pid})
+            self._save_sop_session_journal(journal)
+
+    def _record_sop_auto_adjust_snapshot_before(self) -> None:
+        active_profiles = self._active_hf_sop_profiles()
+        if not active_profiles:
+            return
+        journal = self._start_or_refresh_sop_session(active_profiles)
+        hf_restore = dict(journal.get("hf_restore") or {})
+        if bool(hf_restore.get("available")) and isinstance(hf_restore.get("hf_rows_before"), list) and hf_restore.get("hf_rows_before"):
+            # Preserve the first pre-adjust snapshot for the current session.
+            return
+        before_rows = self._collect_current_hf_rows_utc()
+        hf_restore = {
+            "available": True,
+            "captured_utc": self._utc_now_iso(),
+            "pre_adjust_signature": self._hf_rows_signature(before_rows),
+            "post_adjust_signature": "",
+            "hf_rows_before": before_rows,
+            "restored_utc": "",
+        }
+        journal["hf_restore"] = hf_restore
+        self._save_sop_session_journal(journal)
+
+    def _record_sop_auto_adjust_snapshot_after(self) -> None:
+        journal = self._load_sop_session_journal()
+        hf_restore = dict(journal.get("hf_restore") or {})
+        if not bool(hf_restore.get("available")):
+            return
+        hf_restore["post_adjust_signature"] = self._current_hf_rows_signature()
+        journal["hf_restore"] = hf_restore
+        self._save_sop_session_journal(journal)
+
+    def _policy_conflict_key_for_row(self, row: Dict[str, Any]) -> str:
+        try:
+            return self._sop_manager._policy_conflict_key(
+                str(row.get("net_row_signature") or "").strip(),
+                str(row.get("sop_row_signature") or "").strip(),
+                str(row.get("window_start_utc") or "").strip(),
+                str(row.get("window_end_utc") or "").strip(),
+            )
+        except Exception:
+            return ""
+
+    def _active_net_sop_policy_rows_by_key(self) -> Dict[str, Dict[str, Any]]:
+        out: Dict[str, Dict[str, Any]] = {}
+        try:
+            rows = self._sop_manager.list_net_sop_conflict_policies(active_only=True)
+        except Exception:
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = self._policy_conflict_key_for_row(row)
+            if key and key not in out:
+                out[key] = row
+        return out
+
+    def _record_temp_session_net_sop_policy_decisions(
+        self,
+        decisions: List[Dict[str, Any]],
+        *,
+        before_by_key: Dict[str, Dict[str, Any]],
+        origin: str,
+        profiles_hint: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        active_profiles = self._active_hf_sop_profiles()
+        if isinstance(profiles_hint, list):
+            known_ids = {int(p.get("id") or 0) for p in active_profiles if int(p.get("id") or 0) > 0}
+            for p in profiles_hint:
+                if not isinstance(p, dict):
+                    continue
+                pid = int(p.get("id") or 0)
+                if pid <= 0 or pid in known_ids:
+                    continue
+                active_profiles.append(dict(p))
+                known_ids.add(pid)
+        if not active_profiles:
+            return
+        journal = self._start_or_refresh_sop_session(active_profiles)
+        after_by_key = self._active_net_sop_policy_rows_by_key()
+        rows = list(journal.get("temp_net_sop_policies") or [])
+        row_map: Dict[str, Dict[str, Any]] = {}
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("conflict_key") or "").strip()
+            if key and key not in row_map:
+                row_map[key] = item
+
+        changed = False
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                continue
+            key = self._policy_conflict_key_for_row(decision)
+            if not key:
+                continue
+            before = before_by_key.get(key) or {}
+            after = after_by_key.get(key) or {}
+            expected_policy = str(after.get("policy") or decision.get("policy") or "").strip().upper()
+            if expected_policy not in {"SOP_PRIORITY", "NET_PRIORITY"}:
+                continue
+            item = row_map.get(key)
+            if not isinstance(item, dict):
+                item = {
+                    "conflict_key": key,
+                    "net_row_signature": str(decision.get("net_row_signature") or "").strip(),
+                    "sop_row_signature": str(decision.get("sop_row_signature") or "").strip(),
+                    "window_start_utc": str(decision.get("window_start_utc") or "").strip(),
+                    "window_end_utc": str(decision.get("window_end_utc") or "").strip(),
+                    "sop_profile_id": int(decision.get("sop_profile_id") or 0),
+                    "sop_layer_id": int(decision.get("sop_layer_id") or 0),
+                    "prev_exists": bool(before),
+                    "prev_policy": str(before.get("policy") or "").strip().upper(),
+                    "prev_policy_id": int(before.get("id") or 0),
+                    "prev_updated_utc": str(before.get("updated_utc") or "").strip(),
+                    "expected_policy": expected_policy,
+                    "expected_updated_utc": str(after.get("updated_utc") or "").strip(),
+                    "origin": str(origin or "").strip(),
+                    "saved_utc": self._utc_now_iso(),
+                    "reverted": False,
+                    "reverted_utc": "",
+                }
+                rows.append(item)
+                row_map[key] = item
+            else:
+                item["expected_policy"] = expected_policy
+                item["expected_updated_utc"] = str(after.get("updated_utc") or "").strip()
+                item["origin"] = str(origin or item.get("origin") or "").strip()
+                item["saved_utc"] = self._utc_now_iso()
+                item["reverted"] = False
+                item["reverted_utc"] = ""
+            changed = True
+
+        if changed:
+            journal["temp_net_sop_policies"] = rows
+            self._save_sop_session_journal(journal)
+
+    def save_net_sop_conflict_policies_with_session_tracking(
+        self,
+        decisions: List[Dict[str, Any]],
+        *,
+        origin: str = "",
+        session_profile_hint: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        valid_decisions = [d for d in (decisions or []) if isinstance(d, dict)]
+        if not valid_decisions:
+            return 0
+        before_by_key = self._active_net_sop_policy_rows_by_key()
+        saved = int(self._sop_manager.save_net_sop_conflict_policies(valid_decisions) or 0)
+        if saved > 0:
+            try:
+                self._record_temp_session_net_sop_policy_decisions(
+                    valid_decisions,
+                    before_by_key=before_by_key,
+                    origin=origin or "Net/SOP conflict decision",
+                    profiles_hint=[dict(session_profile_hint)] if isinstance(session_profile_hint, dict) else None,
+                )
+            except Exception as e:
+                log.debug("HF Schedule: failed recording temp Net/SOP policy decisions: %s", e)
+        return saved
+
+    def _session_pending_temp_policy_entries(
+        self,
+        journal: Dict[str, Any],
+        *,
+        target_profile_ids: Optional[Set[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        target_ids = {int(v) for v in (target_profile_ids or set()) if int(v) > 0}
+        for row in (journal.get("temp_net_sop_policies") or []):
+            if not isinstance(row, dict):
+                continue
+            if bool(row.get("reverted")):
+                continue
+            pid = int(row.get("sop_profile_id") or 0)
+            if target_ids and pid > 0 and pid not in target_ids:
+                continue
+            out.append(row)
+        return out
+
+    def _restore_hf_from_session_snapshot(self, *, force_overwrite: bool = False) -> Tuple[bool, str]:
+        journal = self._load_sop_session_journal()
+        hf_restore = dict(journal.get("hf_restore") or {})
+        if not bool(hf_restore.get("available")):
+            return False, "No pre-auto-adjust HF snapshot is available."
+        rows_before = [dict(r) for r in (hf_restore.get("hf_rows_before") or []) if isinstance(r, dict)]
+        if not rows_before:
+            return False, "HF restore snapshot is empty."
+        post_sig = str(hf_restore.get("post_adjust_signature") or "").strip()
+        if post_sig and not force_overwrite:
+            current_sig = self._current_hf_rows_signature()
+            if current_sig and current_sig != post_sig:
+                return False, "HF schedule changed after auto-adjust; restore requires overwrite confirmation."
+        self._replace_hf_rows_in_table(rows_before)
+        hf_restore["available"] = False
+        hf_restore["restored_utc"] = self._utc_now_iso()
+        journal["hf_restore"] = hf_restore
+        self._save_sop_session_journal(journal)
+        return True, f"Restored {len(rows_before)} HF row(s) from pre-auto-adjust snapshot."
+
+    def _revert_session_temp_net_sop_policies(
+        self,
+        *,
+        target_profile_ids: Optional[Set[int]] = None,
+    ) -> Tuple[int, int, str]:
+        journal = self._load_sop_session_journal()
+        pending = self._session_pending_temp_policy_entries(journal, target_profile_ids=target_profile_ids)
+        if not pending:
+            return 0, 0, "No temporary Net/SOP policy decisions to revert."
+
+        current_by_key = self._active_net_sop_policy_rows_by_key()
+        restore_decisions: List[Dict[str, Any]] = []
+        clear_ids: List[int] = []
+        skipped = 0
+        apply_keys: Set[str] = set()
+
+        for item in pending:
+            key = str(item.get("conflict_key") or "").strip()
+            if not key:
+                skipped += 1
+                continue
+            current = current_by_key.get(key) or {}
+            expected_policy = str(item.get("expected_policy") or "").strip().upper()
+            current_policy = str(current.get("policy") or "").strip().upper()
+            if current and expected_policy and current_policy and current_policy != expected_policy:
+                skipped += 1
+                continue
+
+            prev_exists = bool(item.get("prev_exists"))
+            if prev_exists:
+                prev_policy = str(item.get("prev_policy") or "").strip().upper()
+                if prev_policy not in {"SOP_PRIORITY", "NET_PRIORITY"}:
+                    prev_policy = "NET_PRIORITY"
+                restore_decisions.append(
+                    {
+                        "sop_profile_id": int(item.get("sop_profile_id") or 0),
+                        "sop_layer_id": int(item.get("sop_layer_id") or 0),
+                        "net_row_signature": str(item.get("net_row_signature") or "").strip(),
+                        "sop_row_signature": str(item.get("sop_row_signature") or "").strip(),
+                        "window_start_utc": str(item.get("window_start_utc") or "").strip(),
+                        "window_end_utc": str(item.get("window_end_utc") or "").strip(),
+                        "policy": prev_policy,
+                        "resolution_note": "SOP session return-to-normal restore",
+                    }
+                )
+            else:
+                cur_id = int(current.get("id") or 0)
+                if cur_id > 0:
+                    clear_ids.append(cur_id)
+            apply_keys.add(key)
+
+        restored = 0
+        cleared = 0
+        if restore_decisions:
+            try:
+                restored = int(self._sop_manager.save_net_sop_conflict_policies(restore_decisions) or 0)
+            except Exception as e:
+                log.debug("HF Schedule: failed restoring prior Net/SOP policies: %s", e)
+        if clear_ids:
+            try:
+                cleared = int(self._sop_manager.clear_net_sop_conflict_policies(sorted(set(clear_ids))) or 0)
+            except Exception as e:
+                log.debug("HF Schedule: failed clearing temp Net/SOP policies: %s", e)
+
+        if apply_keys:
+            changed = False
+            for item in (journal.get("temp_net_sop_policies") or []):
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("conflict_key") or "").strip() not in apply_keys:
+                    continue
+                item["reverted"] = True
+                item["reverted_utc"] = self._utc_now_iso()
+                changed = True
+            if changed:
+                self._save_sop_session_journal(journal)
+
+        summary = f"Reverted {restored + cleared} temporary Net/SOP decision(s)."
+        if skipped > 0:
+            summary += f" Skipped {skipped} modified decision(s)."
+        return (restored + cleared), skipped, summary
+
+    def _close_or_update_sop_session_after_deactivation(
+        self,
+        *,
+        deactivated_profile_ids: Set[int],
+    ) -> Dict[str, Any]:
+        journal = self._load_sop_session_journal()
+        active_ids = {int(v) for v in (journal.get("active_profile_ids") or []) if int(v) > 0}
+        active_ids.difference_update({int(v) for v in deactivated_profile_ids if int(v) > 0})
+        journal["active_profile_ids"] = sorted(active_ids)
+        if active_ids:
+            journal["status"] = "active"
+            self._save_sop_session_journal(journal)
+            return journal
+
+        hf_restore = dict(journal.get("hf_restore") or {})
+        pending_hf = bool(hf_restore.get("available"))
+        pending_temp = bool(self._session_pending_temp_policy_entries(journal))
+        journal["status"] = "inactive_pending_restore" if (pending_hf or pending_temp) else "closed"
+        self._save_sop_session_journal(journal)
+        return journal
+
+    def _perform_sop_profile_deactivation(self, target_profile_ids: Set[int]) -> int:
+        changed = 0
+        for pid in sorted({int(v) for v in target_profile_ids if int(v) > 0}):
+            try:
+                if self._sop_manager.set_profile_active(pid, False):
+                    changed += 1
+            except Exception as e:
+                log.debug("HF Schedule: failed deactivating SOP profile %s: %s", pid, e)
+        return changed
+
+    def deactivate_hf_sops_with_return_to_normal(
+        self,
+        profile_ids: Optional[List[int]] = None,
+        *,
+        origin_label: str = "Daily Schedule",
+        already_deactivated: bool = False,
+    ) -> bool:
+        if self._sop_return_to_normal_prompt_active:
+            return False
+        active_profiles = self._active_hf_sop_profiles()
+        active_ids = {int(p.get("id") or 0) for p in active_profiles if int(p.get("id") or 0) > 0}
+        requested_ids = {int(v) for v in (profile_ids or []) if int(v) > 0}
+        if not requested_ids:
+            requested_ids = set(active_ids)
+        target_ids = requested_ids if already_deactivated else (requested_ids & active_ids)
+        if not target_ids and not already_deactivated:
+            return False
+
+        remaining_active_ids = set(active_ids) if already_deactivated else (set(active_ids) - set(target_ids))
+        journal = self._load_sop_session_journal()
+        target_pending_temp = self._session_pending_temp_policy_entries(journal, target_profile_ids=set(target_ids))
+        hf_restore = dict(journal.get("hf_restore") or {})
+        can_restore = not remaining_active_ids
+        pending_hf_restore = bool(can_restore and hf_restore.get("available"))
+        pending_temp_restore = bool(can_restore and target_pending_temp)
+        has_pending_actions = bool(pending_hf_restore or pending_temp_restore)
+
+        current_hf_sig = ""
+        post_adjust_sig = ""
+        hf_overwrite_warning = False
+        if pending_hf_restore:
+            try:
+                current_hf_sig = self._current_hf_rows_signature()
+            except Exception:
+                current_hf_sig = ""
+            post_adjust_sig = str(hf_restore.get("post_adjust_signature") or "").strip()
+            hf_overwrite_warning = bool(post_adjust_sig and current_hf_sig and current_hf_sig != post_adjust_sig)
+
+        do_return_to_normal = False
+        if has_pending_actions:
+            self._sop_return_to_normal_prompt_active = True
+            try:
+                names = []
+                profile_name_map = dict(journal.get("profile_names") or {})
+                for pid in sorted(target_ids):
+                    txt = str(profile_name_map.get(str(pid)) or self._sop_profile_lookup.get(pid, {}).get("name") or "").strip()
+                    if txt:
+                        names.append(txt)
+                target_label = ", ".join(names) if names else f"{len(target_ids)} HF SOP profile(s)"
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Warning)
+                if already_deactivated:
+                    box.setWindowTitle("Return to Normal After SOP Deactivation")
+                    box.setText("SOP deactivation completed. Restore the pre-SOP HF/Net state now?")
+                else:
+                    box.setWindowTitle("Deactivate SOP and Return to Normal")
+                    box.setText(f"Deactivate {target_label} and return to normal scheduling state?")
+                detail_lines: List[str] = []
+                if pending_hf_restore:
+                    count_rows = len([r for r in (hf_restore.get("hf_rows_before") or []) if isinstance(r, dict)])
+                    detail_lines.append(f"HF Schedule: restore {count_rows} row(s) from pre-auto-adjust snapshot.")
+                if pending_temp_restore:
+                    detail_lines.append(f"Net/SOP: revert {len(target_pending_temp)} temporary session decision(s).")
+                if remaining_active_ids:
+                    detail_lines.append("Other HF SOP profiles remain active; return-to-normal restore is not available yet.")
+                if hf_overwrite_warning:
+                    detail_lines.append("Warning: HF schedule changed after auto-adjust. Restore will overwrite newer HF edits.")
+                if detail_lines:
+                    box.setInformativeText("\n".join(detail_lines))
+
+                if already_deactivated:
+                    return_btn = box.addButton("Return to Normal", QMessageBox.AcceptRole)
+                    keep_btn = box.addButton("Keep Current HF/Net", QMessageBox.RejectRole)
+                    box.exec()
+                    if box.clickedButton() is return_btn:
+                        do_return_to_normal = True
+                    elif box.clickedButton() is keep_btn:
+                        do_return_to_normal = False
+                    else:
+                        return False
+                else:
+                    do_all_btn = box.addButton("Deactivate + Return to Normal", QMessageBox.AcceptRole)
+                    deact_only_btn = box.addButton("Deactivate SOP Only", QMessageBox.ActionRole)
+                    box.addButton("Cancel", QMessageBox.RejectRole)
+                    box.exec()
+                    clicked = box.clickedButton()
+                    if clicked is do_all_btn:
+                        do_return_to_normal = True
+                    elif clicked is deact_only_btn:
+                        do_return_to_normal = False
+                    else:
+                        return False
+            finally:
+                self._sop_return_to_normal_prompt_active = False
+
+        changed = 0
+        if not already_deactivated:
+            changed = self._perform_sop_profile_deactivation(set(target_ids))
+            if changed <= 0 and target_ids:
+                QMessageBox.warning(self, "SOP", "Could not update SOP active state.")
+                return False
+
+        restore_msg = ""
+        restore_ok = False
+        policy_msg = ""
+        reverted_count = 0
+        skipped_policy = 0
+        if do_return_to_normal and can_restore:
+            if pending_hf_restore:
+                restore_ok, restore_msg = self._restore_hf_from_session_snapshot(force_overwrite=hf_overwrite_warning)
+            if pending_temp_restore:
+                reverted_count, skipped_policy, policy_msg = self._revert_session_temp_net_sop_policies(
+                    target_profile_ids=set(target_ids)
+                )
+
+        self._close_or_update_sop_session_after_deactivation(deactivated_profile_ids=set(target_ids))
+        self._dispatch_sop_schedule_change()
+
+        if has_pending_actions and do_return_to_normal:
+            lines: List[str] = []
+            if pending_hf_restore:
+                lines.append(restore_msg or ("HF schedule restored." if restore_ok else "HF schedule restore skipped."))
+            if pending_temp_restore:
+                lines.append(policy_msg or f"Reverted {reverted_count} temporary Net/SOP decision(s).")
+                if skipped_policy > 0:
+                    lines.append(f"Skipped {skipped_policy} modified Net/SOP decision(s).")
+            QMessageBox.information(self, "Return to Normal", "\n".join([ln for ln in lines if ln]) or "Completed.")
+        elif not already_deactivated and changed > 0:
+            QMessageBox.information(self, "SOP", f"Deactivated {changed} active HF SOP profile(s).")
+        return True
+
+    def prompt_sop_return_to_normal_after_deactivation(
+        self,
+        profile_ids: Optional[List[int]] = None,
+        *,
+        origin_label: str = "SOP Builder",
+    ) -> bool:
+        return self.deactivate_hf_sops_with_return_to_normal(
+            profile_ids=profile_ids,
+            origin_label=origin_label,
+            already_deactivated=True,
+        )
+
+    @staticmethod
     def _normalize_freq_text(value: str) -> str:
         txt = str(value or "").strip()
         if not txt:
@@ -880,6 +1552,8 @@ class DailyScheduleTab(QWidget):
                     )
                     if confirm != QMessageBox.Yes:
                         return
+                self.deactivate_hf_sops_with_return_to_normal([profile_id], origin_label="Daily Schedule")
+                return
             if active:
                 try:
                     conflicts = self._sop_manager.collect_active_net_sop_conflicts(
@@ -900,7 +1574,10 @@ class DailyScheduleTab(QWidget):
                     box = QMessageBox(self)
                     box.setIcon(QMessageBox.Warning)
                     box.setWindowTitle("Resolve Net/SOP Conflicts Before Activation")
-                    box.setText("Active Net windows conflict with this SOP. Choose priority to continue.")
+                    box.setText(
+                        "Active Net windows conflict with this SOP. Choose priority to continue.\n"
+                        "These overlap decisions are temporary for this SOP session by default."
+                    )
                     box.setInformativeText("\n".join(lines))
                     sop_btn = box.addButton("SOP Priority for All", QMessageBox.AcceptRole)
                     net_btn = box.addButton("Net Priority for All", QMessageBox.AcceptRole)
@@ -931,13 +1608,30 @@ class DailyScheduleTab(QWidget):
                             }
                         )
                     if decisions:
-                        saved = int(self._sop_manager.save_net_sop_conflict_policies(decisions) or 0)
+                        saved = int(
+                            self.save_net_sop_conflict_policies_with_session_tracking(
+                                decisions,
+                                origin="Daily SOP activation conflict resolution",
+                                session_profile_hint={
+                                    "id": int(profile_id or 0),
+                                    "name": profile_name,
+                                    "active": True,
+                                    "category": "HF",
+                                },
+                            )
+                            or 0
+                        )
                         if saved <= 0:
                             QMessageBox.warning(self, "SOP", "Could not save Net/SOP conflict policy decisions.")
                             return
             if not self._sop_manager.set_profile_active(profile_id, active):
                 QMessageBox.warning(self, "SOP", "Could not update SOP active state.")
                 return
+            if active:
+                try:
+                    self.register_sop_session_activation(profile_id, profile_name)
+                except Exception as e:
+                    log.debug("HF Schedule: failed registering SOP session activation: %s", e)
             self._schedule_resource_token = None
             win = self.window()
             dispatched = False
@@ -2153,6 +2847,11 @@ class DailyScheduleTab(QWidget):
         if changed_rows <= 0:
             return False, "No HF rows changed during auto-adjust."
 
+        try:
+            self._record_sop_auto_adjust_snapshot_before()
+        except Exception as e:
+            log.debug("HF Schedule: failed capturing pre-auto-adjust SOP snapshot: %s", e)
+
         prev_suspend = self._suspend_dirty_tracking
         self._suspend_dirty_tracking = True
         try:
@@ -2166,10 +2865,15 @@ class DailyScheduleTab(QWidget):
         self._highlight_time_conflicts()
         self._update_resource_action_state()
         self._set_dirty(True)
+        try:
+            self._record_sop_auto_adjust_snapshot_after()
+        except Exception as e:
+            log.debug("HF Schedule: failed recording post-auto-adjust SOP snapshot: %s", e)
 
         detail = (
             f"Auto-adjust complete. Updated {changed_rows} HF row(s), removed {removed_rows}, created {split_rows} split row(s)."
         )
+        detail += "\nA pre-adjust HF snapshot was saved and can be restored when SOP is deactivated."
         if skipped_pairs > 0:
             detail += f"\n{skipped_pairs} conflict pair(s) require manual resolution."
         return True, detail
@@ -2217,7 +2921,7 @@ class DailyScheduleTab(QWidget):
         box.setText(body)
         auto_btn = None
         if self._can_auto_adjust_hf_around_sop(conflicts):
-            auto_btn = box.addButton("Auto-Adjust HF Around SOP", QMessageBox.ActionRole)
+            auto_btn = box.addButton("Auto-Adjust HF Around SOP (Reversible)", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Ok)
         box.exec()
         if auto_btn is not None and box.clickedButton() is auto_btn:
@@ -3227,21 +3931,7 @@ class DailyScheduleTab(QWidget):
         box.exec()
         if box.clickedButton() is not deactivate_btn:
             return
-        changed = 0
-        for profile in self._sop_manager.list_profiles():
-            if not bool(profile.get("active")):
-                continue
-            category = str(profile.get("category") or "HF").strip().upper()
-            if category != "HF":
-                continue
-            try:
-                if self._sop_manager.set_profile_active(int(profile.get("id") or 0), False):
-                    changed += 1
-            except Exception:
-                continue
-        if changed > 0:
-            self._dispatch_sop_schedule_change()
-            QMessageBox.information(self, "SOP", f"Deactivated {changed} active HF SOP profile(s).")
+        self.deactivate_hf_sops_with_return_to_normal(origin_label="Daily Schedule")
 
     def _export_schedule(self):
         """

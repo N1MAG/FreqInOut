@@ -2193,7 +2193,8 @@ class NetScheduleTab(QWidget):
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle(f"Net/SOP Conflicts Block {op.title()}")
         box.setText(
-            f"Conflicting Net rows are blocked until overlap windows are set to Net Priority before {op}."
+            f"Conflicting Net rows are blocked until overlap windows are set to Net Priority before {op}.\n"
+            "Saved overlap decisions from this dialog are temporary for the current SOP session by default."
         )
         box.setInformativeText("\n".join(lines))
         net_all_btn = box.addButton("Set Net Priority for All", QMessageBox.AcceptRole)
@@ -2216,7 +2217,13 @@ class NetScheduleTab(QWidget):
         if decisions:
             saved = 0
             try:
-                saved = int(self._sop_manager.save_net_sop_conflict_policies(decisions) or 0)
+                saved = int(
+                    self._save_net_sop_policy_decisions_session_aware(
+                        decisions,
+                        origin="Net Schedule save-blocking conflict resolution",
+                    )
+                    or 0
+                )
             except Exception as e:
                 log.debug("Net Schedule: failed saving Net/SOP policy decisions: %s", e)
             if saved > 0:
@@ -2278,9 +2285,15 @@ class NetScheduleTab(QWidget):
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle("Net vs Active SOP Conflicts")
         if require_net_priority:
-            box.setText("Active HF SOP and Net schedule windows conflict. Net Priority is required to keep overlaps.")
+            box.setText(
+                "Active HF SOP and Net schedule windows conflict. Net Priority is required to keep overlaps.\n"
+                "Saved overlap decisions from this dialog are temporary for the current SOP session by default."
+            )
         else:
-            box.setText("Active HF SOP and Net schedule windows conflict. Choose resolution policy.")
+            box.setText(
+                "Active HF SOP and Net schedule windows conflict. Choose resolution policy.\n"
+                "Saved overlap decisions from this dialog are temporary for the current SOP session by default."
+            )
         box.setInformativeText("\n".join(lines))
         net_all_btn = box.addButton("Net Priority for All", QMessageBox.AcceptRole)
         sop_all_btn = box.addButton("SOP Priority for All", QMessageBox.AcceptRole) if not require_net_priority else None
@@ -2306,7 +2319,13 @@ class NetScheduleTab(QWidget):
             return
         saved = 0
         try:
-            saved = int(self._sop_manager.save_net_sop_conflict_policies(decisions) or 0)
+            saved = int(
+                self._save_net_sop_policy_decisions_session_aware(
+                    decisions,
+                    origin="Net Schedule active conflict resolution",
+                )
+                or 0
+            )
         except Exception as e:
             log.debug("Net Schedule: failed saving Net/SOP policy decisions: %s", e)
             saved = 0
@@ -2393,7 +2412,31 @@ class NetScheduleTab(QWidget):
                 decisions.extend(built)
         return decisions
 
+    def _save_net_sop_policy_decisions_session_aware(self, decisions: List[Dict[str, Any]], *, origin: str) -> int:
+        win = self.window()
+        try:
+            daily_tab = getattr(win, "daily_tab", None)
+            if daily_tab is not None and hasattr(daily_tab, "save_net_sop_conflict_policies_with_session_tracking"):
+                return int(
+                    daily_tab.save_net_sop_conflict_policies_with_session_tracking(
+                        decisions,
+                        origin=origin,
+                    )
+                    or 0
+                )
+        except Exception as e:
+            log.debug("Net Schedule: session-aware Net/SOP policy save fallback due to error: %s", e)
+        return int(self._sop_manager.save_net_sop_conflict_policies(decisions) or 0)
+
     def _deactivate_active_hf_sops(self) -> None:
+        win = self.window()
+        try:
+            daily_tab = getattr(win, "daily_tab", None)
+            if daily_tab is not None and hasattr(daily_tab, "deactivate_hf_sops_with_return_to_normal"):
+                daily_tab.deactivate_hf_sops_with_return_to_normal(origin_label="Net Schedule")
+                return
+        except Exception as e:
+            log.debug("Net Schedule: unified SOP deactivation flow unavailable: %s", e)
         changed = 0
         for profile in self._sop_manager.list_profiles():
             if not bool(profile.get("active")):

@@ -1337,7 +1337,8 @@ class SettingsTab(QWidget):
         bbs_policy_row.addStretch()
         varac_hint = QLabel("Moves files older than selected days from BBS Directory to BBS Archive.")
         varac_hint.setWordWrap(True)
-        varac_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        varac_hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        varac_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         policy_wrap = QVBoxLayout()
         policy_wrap.setSpacing(3)
         policy_wrap.setContentsMargins(0, 0, 0, 0)
@@ -1345,7 +1346,7 @@ class SettingsTab(QWidget):
         hint_row = QHBoxLayout()
         hint_row.setContentsMargins(0, 0, 0, 0)
         hint_row.addSpacing(msg_label_width)
-        hint_row.addWidget(varac_hint, 1, Qt.AlignLeft | Qt.AlignTop)
+        hint_row.addWidget(varac_hint, 1)
         policy_wrap.addLayout(hint_row)
         varac_v.addLayout(policy_wrap)
 

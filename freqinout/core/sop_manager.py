@@ -1933,6 +1933,7 @@ class SOPManager:
         horizon_days: int = 7,
         check_all_groups: bool = False,
         peer_actions: Optional[List[Dict[str, Any]]] = None,
+        include_details: bool = False,
     ) -> Dict[str, Any]:
         now_utc = dt.datetime.now(dt.timezone.utc)
         window_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1963,10 +1964,68 @@ class SOPManager:
         daily_conflicts: Set[str] = set()
         net_conflicts: Set[str] = set()
         sop_conflicts: Set[str] = set()
+        daily_details: List[Dict[str, Any]] = []
+        net_details: List[Dict[str, Any]] = []
+        sop_details: List[Dict[str, Any]] = []
+        daily_detail_seen: Set[Tuple[str, str, str, str, str, str]] = set()
+        net_detail_seen: Set[Tuple[str, str, str, str, str, str]] = set()
+        sop_detail_seen: Set[Tuple[str, str, str, str, str, str]] = set()
+        detail_limit_per_source = 80
+        detail_overflow = {"daily": 0, "net": 0, "sop": 0}
         first_conflict = False
         first_occurrence_checked = False
 
-        peer_windows: List[Tuple[dt.datetime, dt.datetime, str]] = []
+        def _append_detail(
+            *,
+            bucket_key: str,
+            target: List[Dict[str, Any]],
+            seen: Set[Tuple[str, str, str, str, str, str]],
+            occ_start: dt.datetime,
+            occ_end: dt.datetime,
+            other_start: dt.datetime,
+            other_end: dt.datetime,
+            other_label: str,
+            other_group: str,
+            other_band: str,
+            other_freq: str,
+        ) -> None:
+            if not include_details:
+                return
+            overlap_start = max(self._ensure_utc(occ_start), self._ensure_utc(other_start))
+            overlap_end = min(self._ensure_utc(occ_end), self._ensure_utc(other_end))
+            if overlap_end <= overlap_start:
+                return
+            overlap_start_iso = overlap_start.replace(microsecond=0).isoformat()
+            overlap_end_iso = overlap_end.replace(microsecond=0).isoformat()
+            key = (
+                overlap_start_iso,
+                overlap_end_iso,
+                str(other_label or "").strip(),
+                str(other_group or "").strip().upper(),
+                str(other_band or "").strip().upper(),
+                self._normalize_frequency(other_freq),
+            )
+            if key in seen:
+                return
+            if len(target) >= detail_limit_per_source:
+                detail_overflow[bucket_key] = int(detail_overflow.get(bucket_key) or 0) + 1
+                return
+            seen.add(key)
+            target.append(
+                {
+                    "overlap_start_utc": overlap_start_iso,
+                    "overlap_end_utc": overlap_end_iso,
+                    "other_label": str(other_label or "").strip(),
+                    "other_group": str(other_group or "").strip().upper(),
+                    "other_band": str(other_band or "").strip().upper(),
+                    "other_frequency": self._normalize_frequency(other_freq),
+                    "action_band": action_band,
+                    "action_frequency": action_freq,
+                    "reason": "Time overlap on different frequency",
+                }
+            )
+
+        peer_windows: List[Dict[str, Any]] = []
         for peer in peer_actions or []:
             if not isinstance(peer, dict):
                 continue
@@ -1992,7 +2051,17 @@ class SOPManager:
                 window_end_utc=window_end,
             )
             for p_start, p_end in peer_occurrences:
-                peer_windows.append((p_start, p_end, peer_desc))
+                peer_windows.append(
+                    {
+                        "start_dt_utc": p_start,
+                        "end_dt_utc": p_end,
+                        "desc": peer_desc,
+                        "label": peer_label,
+                        "group": peer_group,
+                        "band": peer_band,
+                        "frequency": peer_freq,
+                    }
+                )
 
         for occ_start, occ_end in occurrences:
             occ_daily = False
@@ -2011,6 +2080,19 @@ class SOPManager:
                     continue
                 name = str(row.get("name") or operating_group).strip().upper() or operating_group
                 daily_conflicts.add(name)
+                _append_detail(
+                    bucket_key="daily",
+                    target=daily_details,
+                    seen=daily_detail_seen,
+                    occ_start=occ_start,
+                    occ_end=occ_end,
+                    other_start=self._ensure_utc(row["start_dt_utc"]),
+                    other_end=self._ensure_utc(row["end_dt_utc"]),
+                    other_label=name,
+                    other_group=str(row.get("group_name") or operating_group),
+                    other_band=str(row.get("band") or "").strip().upper(),
+                    other_freq=row.get("frequency") or "",
+                )
                 occ_daily = True
             for row in net_windows:
                 if not self._ranges_overlap(
@@ -2026,11 +2108,40 @@ class SOPManager:
                 name = str(row.get("name") or "Net").strip() or "Net"
                 day_txt = self._day_abbrev_for_dt(self._ensure_utc(row["start_dt_utc"]))
                 net_conflicts.add(f"{name} ({day_txt})" if day_txt else name)
+                _append_detail(
+                    bucket_key="net",
+                    target=net_details,
+                    seen=net_detail_seen,
+                    occ_start=occ_start,
+                    occ_end=occ_end,
+                    other_start=self._ensure_utc(row["start_dt_utc"]),
+                    other_end=self._ensure_utc(row["end_dt_utc"]),
+                    other_label=name,
+                    other_group=str(row.get("group_name") or ""),
+                    other_band=str(row.get("band") or "").strip().upper(),
+                    other_freq=row.get("frequency") or "",
+                )
                 occ_net = True
-            for p_start, p_end, p_desc in peer_windows:
-                if not self._ranges_overlap(occ_start, occ_end, self._ensure_utc(p_start), self._ensure_utc(p_end)):
+            for peer_row in peer_windows:
+                p_start = self._ensure_utc(peer_row.get("start_dt_utc"))
+                p_end = self._ensure_utc(peer_row.get("end_dt_utc"))
+                if not self._ranges_overlap(occ_start, occ_end, p_start, p_end):
                     continue
+                p_desc = str(peer_row.get("desc") or "").strip()
                 sop_conflicts.add(p_desc)
+                _append_detail(
+                    bucket_key="sop",
+                    target=sop_details,
+                    seen=sop_detail_seen,
+                    occ_start=occ_start,
+                    occ_end=occ_end,
+                    other_start=p_start,
+                    other_end=p_end,
+                    other_label=str(peer_row.get("label") or p_desc or "SOP Action"),
+                    other_group=str(peer_row.get("group") or ""),
+                    other_band=str(peer_row.get("band") or "").strip().upper(),
+                    other_freq=peer_row.get("frequency") or "",
+                )
                 occ_sop = True
             if not first_occurrence_checked:
                 first_conflict = bool(occ_daily or occ_net or occ_sop)
@@ -2038,6 +2149,21 @@ class SOPManager:
         daily_summary = ", ".join(sorted(daily_conflicts))
         net_summary = ", ".join(sorted(net_conflicts))
         sop_summary = ", ".join(sorted(sop_conflicts))
+
+        def _detail_sort_key(row: Dict[str, Any]) -> Tuple[str, str, str, str]:
+            return (
+                str(row.get("overlap_start_utc") or ""),
+                str(row.get("other_label") or "").upper(),
+                str(row.get("other_band") or "").upper(),
+                str(row.get("other_frequency") or ""),
+            )
+
+        if daily_details:
+            daily_details.sort(key=_detail_sort_key)
+        if net_details:
+            net_details.sort(key=_detail_sort_key)
+        if sop_details:
+            sop_details.sort(key=_detail_sort_key)
         return {
             "daily_conflicts": sorted(daily_conflicts),
             "net_conflicts": sorted(net_conflicts),
@@ -2045,6 +2171,12 @@ class SOPManager:
             "daily_summary": daily_summary,
             "net_summary": net_summary,
             "sop_summary": sop_summary,
+            "daily_details": daily_details,
+            "net_details": net_details,
+            "sop_details": sop_details,
+            "daily_detail_overflow": int(detail_overflow.get("daily") or 0),
+            "net_detail_overflow": int(detail_overflow.get("net") or 0),
+            "sop_detail_overflow": int(detail_overflow.get("sop") or 0),
             "has_conflict": bool(daily_conflicts or net_conflicts or sop_conflicts),
             "first_occurrence_conflict": bool(first_conflict),
         }
@@ -3787,10 +3919,16 @@ class SOPManager:
             full.get("operating_group", ""),
             full.get("secondary_group", ""),
         )
+        profile_group = str(full.get("operating_group") or "").strip().upper()
+        condition_levels = self._condition_level_map()
         rows: List[Dict[str, Any]] = []
         total_window_minutes = max(1, int((end - start).total_seconds() // 60))
         for action in full.get("actions", []):
             if not _is_enabled(action.get("enabled", True)):
+                continue
+            action_group = str(action.get("group_name") or "").strip().upper() or profile_group
+            group_level = condition_levels.get(action_group)
+            if not self._action_condition_match(str(action.get("condition_levels") or "ALL"), group_level):
                 continue
             interval_m = int(action.get("interval_minutes") or 0)
             if interval_m <= 0:
@@ -3857,6 +3995,8 @@ class SOPManager:
             full.get("operating_group", ""),
             full.get("secondary_group", ""),
         )
+        profile_group = str(full.get("operating_group") or "").strip().upper()
+        condition_levels = self._condition_level_map()
         periodic_layers = [
             row
             for row in (full.get("schedule_layer") or [])
@@ -3873,11 +4013,19 @@ class SOPManager:
             weeks = self._normalize_month_weeks(layer.get("month_weeks"))
             if not weeks:
                 continue
+            layer_group = str(layer.get("group_name") or "").strip().upper() or profile_group
+            layer_group_level = condition_levels.get(layer_group)
+            if not self._action_condition_match(str(layer.get("condition_levels") or "ALL"), layer_group_level):
+                continue
             day = self._normalize_day_utc(layer.get("day_utc"))
             layer_band = str(layer.get("band") or "").strip().upper()
             layer_freq = str(layer.get("frequency") or "").strip()
             for action in full.get("actions", []):
                 if not _is_enabled(action.get("enabled", True)):
+                    continue
+                action_group = str(action.get("group_name") or "").strip().upper() or profile_group
+                action_group_level = condition_levels.get(action_group)
+                if not self._action_condition_match(str(action.get("condition_levels") or "ALL"), action_group_level):
                     continue
                 band = str(action.get("band") or "").strip().upper() or layer_band
                 freq = str(action.get("frequency") or "").strip() or layer_freq or str(full.get("frequency") or "")
