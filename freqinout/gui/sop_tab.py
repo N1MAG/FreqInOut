@@ -3545,6 +3545,12 @@ class _LegacySOPTab(QWidget):
             self.alignment_label.setStyleSheet(f"color: {theme.get('warning', '#B71C1C')}; font-weight: 600;")
             self.layer_validation_label.setStyleSheet(f"color: {theme.get('warning', '#B71C1C')}; font-weight: 600;")
             self.terms_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            if hasattr(self, "activation_defaults_hint_label"):
+                self.activation_defaults_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            if hasattr(self, "activation_conflict_summary_label"):
+                self.activation_conflict_summary_label.setStyleSheet(
+                    f"color: {theme.get('text', '#e5e7eb')}; font-weight: 600;"
+                )
             self._update_time_toggle_style(theme)
             self._update_profile_action_styles(theme)
             self._apply_accessibility_width_guards()
@@ -3578,6 +3584,17 @@ class SOPTab(_LegacySOPTab):
     COL_DESC = 12
     COL_CONFLICT = 13
     COL_REMOVE = 14
+    WB_COL_ROW = 0
+    WB_COL_ACTION = 1
+    WB_COL_GROUP = 2
+    WB_COL_HF = 3
+    WB_COL_NET = 4
+    WB_COL_SOP = 5
+    WB_COL_POLICY = 6
+    WB_COL_NEXT = 7
+    WB_COL_SUGGESTED = 8
+    WB_COL_APPLY = 9
+    WB_COL_DETAILS = 10
 
     DURATION_OPTIONS: List[Tuple[str, int]] = [("00:30", 30), ("01:00", 60)]
     HF_RESOURCE_OPTIONS = ["FLDigi", "JS8Call", "VarAC", "SSB"]
@@ -3587,6 +3604,12 @@ class SOPTab(_LegacySOPTab):
         ("ncs_or_ancs", "NCS"),
         ("callsign", "Callsign"),
     ]
+    SOP_BUILDER_SETTING_HF_CONFLICT_MODE = "sop_builder_hf_conflict_mode"
+    SOP_BUILDER_SETTING_NET_CONFLICT_MODE = "sop_builder_net_conflict_mode"
+    HF_CONFLICT_MODE_AUTO_ADJUST = "AUTO_ADJUST"
+    HF_CONFLICT_MODE_REVIEW_DAILY = "REVIEW_DAILY"
+    NET_CONFLICT_MODE_SOP_PRIORITY_TEMP = "SOP_PRIORITY_TEMP"
+    NET_CONFLICT_MODE_REVIEW_NET = "REVIEW_NET"
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -3656,6 +3679,42 @@ class SOPTab(_LegacySOPTab):
         self.terms_hint_label.setWordWrap(True)
         cfg_layout.addWidget(self.terms_hint_label)
 
+        self.activation_defaults_box = QGroupBox("SOP Activation Conflict Defaults")
+        activation_defaults_layout = QFormLayout(self.activation_defaults_box)
+        activation_defaults_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self.hf_activation_conflict_mode_combo = QComboBox()
+        self.hf_activation_conflict_mode_combo.addItem(
+            "Auto-adjust HF Schedule around SOP (Reversible)",
+            self.HF_CONFLICT_MODE_AUTO_ADJUST,
+        )
+        self.hf_activation_conflict_mode_combo.addItem(
+            "Add SOP, review HF conflicts in Daily Schedule",
+            self.HF_CONFLICT_MODE_REVIEW_DAILY,
+        )
+        self.net_activation_conflict_mode_combo = QComboBox()
+        self.net_activation_conflict_mode_combo.addItem(
+            "Temporary SOP Priority for Net overlaps (this SOP session)",
+            self.NET_CONFLICT_MODE_SOP_PRIORITY_TEMP,
+        )
+        self.net_activation_conflict_mode_combo.addItem(
+            "Add SOP, review conflicts in Net Schedule",
+            self.NET_CONFLICT_MODE_REVIEW_NET,
+        )
+        self.hf_activation_conflict_mode_combo.currentIndexChanged.connect(self._on_activation_conflict_defaults_changed)
+        self.net_activation_conflict_mode_combo.currentIndexChanged.connect(self._on_activation_conflict_defaults_changed)
+        activation_defaults_layout.addRow("HF Schedule:", self.hf_activation_conflict_mode_combo)
+        activation_defaults_layout.addRow("Net Schedule:", self.net_activation_conflict_mode_combo)
+        self.activation_defaults_hint_label = QLabel(
+            "These defaults are stored locally and applied when saving an active HF SOP. "
+            "You can still review timing conflicts when a row needs manual adjustment."
+        )
+        self.activation_defaults_hint_label.setWordWrap(True)
+        activation_defaults_layout.addRow(self.activation_defaults_hint_label)
+        self.activation_conflict_summary_label = QLabel("Conflict Summary: No HF action rows to evaluate yet.")
+        self.activation_conflict_summary_label.setWordWrap(True)
+        activation_defaults_layout.addRow(self.activation_conflict_summary_label)
+        cfg_layout.addWidget(self.activation_defaults_box)
+
         rows_head = QHBoxLayout()
         rows_head.addWidget(QLabel("Action Rows"))
         rows_head.addStretch()
@@ -3710,6 +3769,69 @@ class SOPTab(_LegacySOPTab):
         self.actions_table.setColumnWidth(self.COL_INTERVAL, 110)
         self.actions_table.setColumnWidth(self.COL_CONTACT_TARGET, 170)
         cfg_layout.addWidget(self.actions_table)
+
+        self.conflict_workbench_box = QGroupBox("Conflict Workbench")
+        conflict_workbench_layout = QVBoxLayout(self.conflict_workbench_box)
+        self.conflict_workbench_hint_label = QLabel(
+            "Resolve conflict policy choices here before Save. Rows that still need timing changes will be flagged and handled in the Save-time conflict dialog."
+        )
+        self.conflict_workbench_hint_label.setWordWrap(True)
+        conflict_workbench_layout.addWidget(self.conflict_workbench_hint_label)
+
+        wb_actions_row = QHBoxLayout()
+        self.conflict_workbench_status_label = QLabel("No HF conflicts detected.")
+        self.conflict_workbench_status_label.setWordWrap(True)
+        wb_actions_row.addWidget(self.conflict_workbench_status_label, stretch=1)
+        self.workbench_set_sop_btn = QPushButton("Set SOP Priority")
+        self.workbench_set_net_btn = QPushButton("Set Net Priority")
+        self.workbench_set_daily_btn = QPushButton("Set Daily Priority")
+        self.workbench_apply_defaults_btn = QPushButton("Apply Builder Defaults")
+        self.workbench_set_sop_btn.clicked.connect(lambda: self._apply_conflict_workbench_policy_batch("SOP"))
+        self.workbench_set_net_btn.clicked.connect(lambda: self._apply_conflict_workbench_policy_batch("NET"))
+        self.workbench_set_daily_btn.clicked.connect(lambda: self._apply_conflict_workbench_policy_batch("DAILY"))
+        self.workbench_apply_defaults_btn.clicked.connect(self._apply_conflict_workbench_builder_defaults)
+        for btn in (
+            self.workbench_set_sop_btn,
+            self.workbench_set_net_btn,
+            self.workbench_set_daily_btn,
+            self.workbench_apply_defaults_btn,
+        ):
+            wb_actions_row.addWidget(btn)
+        conflict_workbench_layout.addLayout(wb_actions_row)
+
+        self.conflict_workbench_table = QTableWidget(0, 11)
+        self.conflict_workbench_table.setHorizontalHeaderLabels(
+            [
+                "Row",
+                "Action",
+                "Group",
+                "HF Schedule",
+                "Net Schedule",
+                "SOP Actions",
+                "Policy",
+                "Next Step",
+                "Suggested Start",
+                "Apply",
+                "Details",
+            ]
+        )
+        self.conflict_workbench_table.verticalHeader().setVisible(False)
+        self.conflict_workbench_table.setAlternatingRowColors(True)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_ROW, QHeaderView.ResizeToContents)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_ACTION, QHeaderView.ResizeToContents)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_GROUP, QHeaderView.ResizeToContents)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_HF, QHeaderView.Stretch)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_NET, QHeaderView.Stretch)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_SOP, QHeaderView.Stretch)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_POLICY, QHeaderView.ResizeToContents)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_NEXT, QHeaderView.ResizeToContents)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_SUGGESTED, QHeaderView.ResizeToContents)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_APPLY, QHeaderView.ResizeToContents)
+        self.conflict_workbench_table.horizontalHeader().setSectionResizeMode(self.WB_COL_DETAILS, QHeaderView.ResizeToContents)
+        self.conflict_workbench_table.setMinimumHeight(170)
+        self.conflict_workbench_table.setMaximumHeight(260)
+        conflict_workbench_layout.addWidget(self.conflict_workbench_table)
+        cfg_layout.addWidget(self.conflict_workbench_box)
         root.addWidget(cfg_box, stretch=1)
 
         # Compatibility placeholders for inherited methods not used in v2 UI.
@@ -3737,11 +3859,17 @@ class SOPTab(_LegacySOPTab):
         self._realtime_conflict_timer.setInterval(550)
         self._realtime_conflict_timer.timeout.connect(self._run_realtime_hf_conflict_check)
         self._last_realtime_conflict_signature: Tuple[Any, ...] | None = None
+        self._last_realtime_hf_analyses_cache: List[Tuple[int, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]] = []
         self._suppress_realtime_conflict_checks = False
+        self._conflict_workbench_updating = False
+        self._conflict_workbench_signature: Tuple[Any, ...] | None = None
+        self._conflict_workbench_diag_cache: Dict[int, Dict[str, Any]] = {}
+        self._conflict_workbench_suggested_start_utc: Dict[int, str] = {}
         self._apply_accessibility_width_guards()
         self._update_clock_labels()
         self._update_action_time_headers()
         self._update_time_toggle_style()
+        self._load_activation_conflict_defaults_ui()
         self._apply_action_table_visual_order()
         self._apply_category_table_view()
 
@@ -3749,6 +3877,636 @@ class SOPTab(_LegacySOPTab):
         self.name_edit.textChanged.connect(self._mark_dirty)
         self.category_combo.currentIndexChanged.connect(self._mark_dirty)
         self.active_cb.toggled.connect(self._mark_dirty)
+
+    def _normalize_hf_activation_conflict_mode(self, value: Any) -> str:
+        raw = str(value or "").strip().upper()
+        if raw == self.HF_CONFLICT_MODE_REVIEW_DAILY:
+            return self.HF_CONFLICT_MODE_REVIEW_DAILY
+        return self.HF_CONFLICT_MODE_AUTO_ADJUST
+
+    def _normalize_net_activation_conflict_mode(self, value: Any) -> str:
+        raw = str(value or "").strip().upper()
+        if raw == self.NET_CONFLICT_MODE_REVIEW_NET:
+            return self.NET_CONFLICT_MODE_REVIEW_NET
+        return self.NET_CONFLICT_MODE_SOP_PRIORITY_TEMP
+
+    def _activation_conflict_defaults(self) -> Dict[str, str]:
+        hf_mode = self._normalize_hf_activation_conflict_mode(
+            self.settings.get(self.SOP_BUILDER_SETTING_HF_CONFLICT_MODE, self.HF_CONFLICT_MODE_AUTO_ADJUST)
+        )
+        net_mode = self._normalize_net_activation_conflict_mode(
+            self.settings.get(
+                self.SOP_BUILDER_SETTING_NET_CONFLICT_MODE,
+                self.NET_CONFLICT_MODE_SOP_PRIORITY_TEMP,
+            )
+        )
+        return {"hf_mode": hf_mode, "net_mode": net_mode}
+
+    def _load_activation_conflict_defaults_ui(self) -> None:
+        hf_combo = getattr(self, "hf_activation_conflict_mode_combo", None)
+        net_combo = getattr(self, "net_activation_conflict_mode_combo", None)
+        if not isinstance(hf_combo, QComboBox) or not isinstance(net_combo, QComboBox):
+            return
+        defaults = self._activation_conflict_defaults()
+        hf_combo.blockSignals(True)
+        net_combo.blockSignals(True)
+        try:
+            hf_idx = hf_combo.findData(defaults.get("hf_mode"))
+            net_idx = net_combo.findData(defaults.get("net_mode"))
+            hf_combo.setCurrentIndex(hf_idx if hf_idx >= 0 else 0)
+            net_combo.setCurrentIndex(net_idx if net_idx >= 0 else 0)
+        finally:
+            hf_combo.blockSignals(False)
+            net_combo.blockSignals(False)
+        self._update_activation_conflict_summary([])
+
+    def _on_activation_conflict_defaults_changed(self, *_args) -> None:
+        if getattr(self, "_loading_ui", False):
+            return
+        hf_combo = getattr(self, "hf_activation_conflict_mode_combo", None)
+        net_combo = getattr(self, "net_activation_conflict_mode_combo", None)
+        if not isinstance(hf_combo, QComboBox) or not isinstance(net_combo, QComboBox):
+            return
+        hf_mode = self._normalize_hf_activation_conflict_mode(hf_combo.currentData())
+        net_mode = self._normalize_net_activation_conflict_mode(net_combo.currentData())
+        try:
+            self.settings.set_many(
+                {
+                    self.SOP_BUILDER_SETTING_HF_CONFLICT_MODE: hf_mode,
+                    self.SOP_BUILDER_SETTING_NET_CONFLICT_MODE: net_mode,
+                }
+            )
+        except Exception as e:
+            log.debug("SOP Builder: failed saving activation conflict defaults: %s", e)
+        try:
+            self._update_conflict_workbench_batch_actions()
+        except Exception:
+            pass
+
+    def _update_activation_conflict_summary(
+        self,
+        analyses: List[Tuple[int, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]] | None = None,
+    ) -> None:
+        label = getattr(self, "activation_conflict_summary_label", None)
+        if not isinstance(label, QLabel):
+            return
+        if self._current_category() != self.CAT_HF:
+            label.setText("Conflict Summary: Local Comms SOP does not use HF/Net conflict checks.")
+            return
+        total_rows = int(self.actions_table.rowCount()) if isinstance(getattr(self, "actions_table", None), QTableWidget) else 0
+        if total_rows <= 0:
+            label.setText("Conflict Summary: No action rows to evaluate.")
+            return
+        checked = list(analyses or [])
+        if not checked:
+            label.setText(
+                "Conflict Summary: Pending. Complete Group, Action, Band-Freq, Start, Duration, and Interval to evaluate conflicts."
+            )
+            return
+        rows_with_any = 0
+        rows_hf = 0
+        rows_net = 0
+        rows_sop = 0
+        for _row_index, _action, diag, _peers in checked:
+            has_daily = bool(diag.get("daily_conflicts"))
+            has_net = bool(diag.get("net_conflicts"))
+            has_sop = bool(diag.get("sop_conflicts"))
+            if has_daily:
+                rows_hf += 1
+            if has_net:
+                rows_net += 1
+            if has_sop:
+                rows_sop += 1
+            if has_daily or has_net or has_sop:
+                rows_with_any += 1
+        pending_rows = max(0, total_rows - len(checked))
+        parts = [
+            f"Rows needing review: {rows_with_any}",
+            f"HF Schedule: {rows_hf}",
+            f"Net Schedule: {rows_net}",
+            f"SOP Actions: {rows_sop}",
+        ]
+        if pending_rows > 0:
+            parts.append(f"Pending rows: {pending_rows}")
+        label.setText("Conflict Summary: " + " | ".join(parts))
+
+    def _action_row_group_combo(self, row_index: int) -> QComboBox | None:
+        try:
+            row = int(row_index)
+        except Exception:
+            return None
+        if row < 0 or row >= self.actions_table.rowCount():
+            return None
+        widget = self.actions_table.cellWidget(row, self.COL_GROUP)
+        return widget if isinstance(widget, QComboBox) else None
+
+    def _action_row_conflict_policy(self, row_index: int) -> str:
+        combo = self._action_row_group_combo(row_index)
+        if combo is None:
+            return self.manager.CONFLICT_POLICY_SOP
+        return self.manager._normalize_conflict_policy(combo.property("conflict_policy"))
+
+    def _set_action_row_conflict_policy(
+        self,
+        row_index: int,
+        policy: Any,
+        *,
+        mark_dirty: bool = True,
+        schedule_refresh: bool = True,
+    ) -> bool:
+        combo = self._action_row_group_combo(row_index)
+        if combo is None:
+            return False
+        normalized = self.manager._normalize_conflict_policy(policy)
+        current = self.manager._normalize_conflict_policy(combo.property("conflict_policy"))
+        if current == normalized:
+            return False
+        combo.setProperty("conflict_policy", normalized)
+        if mark_dirty:
+            self._mark_dirty()
+        if schedule_refresh:
+            self._schedule_realtime_hf_conflict_check()
+            try:
+                self._update_conflict_workbench(self._last_realtime_hf_analyses_cache)
+            except Exception:
+                pass
+        return True
+
+    def _conflict_policy_combo_index(self, combo: QComboBox, policy: str) -> int:
+        idx = combo.findData(policy)
+        return idx if idx >= 0 else 0
+
+    def _workbench_policy_combo_changed(self, combo: QComboBox) -> None:
+        if getattr(self, "_conflict_workbench_updating", False):
+            return
+        if not isinstance(combo, QComboBox):
+            return
+        try:
+            row_index = int(combo.property("sop_row_index") or -1)
+        except Exception:
+            row_index = -1
+        if row_index < 0:
+            return
+        self._set_action_row_conflict_policy(row_index, combo.currentData())
+
+    def _conflict_workbench_action_state(self) -> Dict[str, int | bool]:
+        rows_total = 0
+        rows_policy_relevant = 0
+        rows_timing_only = 0
+        can_set_sop = 0
+        can_set_net = 0
+        can_set_daily = 0
+        can_apply_defaults = 0
+        for row_index, diag in list((self._conflict_workbench_diag_cache or {}).items()):
+            if not isinstance(diag, dict):
+                continue
+            rows_total += 1
+            has_daily = bool(diag.get("daily_conflicts"))
+            has_net = bool(diag.get("net_conflicts"))
+            has_sop = bool(diag.get("sop_conflicts"))
+            policy_relevant = bool(has_daily or has_net)
+            if policy_relevant:
+                rows_policy_relevant += 1
+            elif has_sop:
+                rows_timing_only += 1
+            policy = self._action_row_conflict_policy(int(row_index))
+            default_policy = self._activation_row_builder_default_policy(diag)
+            if policy_relevant and policy != self.manager.CONFLICT_POLICY_SOP:
+                can_set_sop += 1
+            if policy_relevant and policy != self.manager.CONFLICT_POLICY_NET:
+                can_set_net += 1
+            if policy_relevant and policy != self.manager.CONFLICT_POLICY_DAILY:
+                can_set_daily += 1
+            if policy != default_policy:
+                can_apply_defaults += 1
+        return {
+            "rows_total": rows_total,
+            "rows_policy_relevant": rows_policy_relevant,
+            "rows_timing_only": rows_timing_only,
+            "can_set_sop": can_set_sop,
+            "can_set_net": can_set_net,
+            "can_set_daily": can_set_daily,
+            "can_apply_defaults": can_apply_defaults,
+            "all_timing_only": bool(rows_total > 0 and rows_policy_relevant == 0 and rows_timing_only > 0),
+        }
+
+    def _apply_conflict_workbench_batch_button_styles(self) -> None:
+        try:
+            theme = resolve_theme(self.settings)
+        except Exception:
+            return
+        styled_buttons = [
+            (getattr(self, "workbench_set_sop_btn", None), "eligible_success"),
+            (getattr(self, "workbench_set_net_btn", None), "eligible_warning"),
+            (getattr(self, "workbench_set_daily_btn", None), "eligible_info"),
+            (getattr(self, "workbench_apply_defaults_btn", None), "eligible_primary"),
+        ]
+        for btn, role in styled_buttons:
+            if not isinstance(btn, QPushButton):
+                continue
+            btn.setStyleSheet(button_style(role if btn.isEnabled() else "muted", theme))
+
+    def _update_conflict_workbench_batch_actions(self) -> None:
+        state = self._conflict_workbench_action_state()
+        rows_total = int(state.get("rows_total") or 0)
+        rows_policy_relevant = int(state.get("rows_policy_relevant") or 0)
+        all_timing_only = bool(state.get("all_timing_only"))
+
+        btn_sop = getattr(self, "workbench_set_sop_btn", None)
+        btn_net = getattr(self, "workbench_set_net_btn", None)
+        btn_daily = getattr(self, "workbench_set_daily_btn", None)
+        btn_defaults = getattr(self, "workbench_apply_defaults_btn", None)
+
+        if isinstance(btn_sop, QPushButton):
+            btn_sop.setEnabled(int(state.get("can_set_sop") or 0) > 0)
+            if all_timing_only:
+                btn_sop.setToolTip("Timing-only SOP overlaps require start-time adjustments; policy changes do not apply.")
+            elif rows_total <= 0:
+                btn_sop.setToolTip("No conflicts to update.")
+            elif rows_policy_relevant <= 0:
+                btn_sop.setToolTip("No HF/Net conflict rows are available for batch policy changes.")
+            elif btn_sop.isEnabled():
+                btn_sop.setToolTip("Set SOP Priority for all workbench rows with HF/Net conflicts.")
+            else:
+                btn_sop.setToolTip("Applicable rows are already set to SOP Priority.")
+        if isinstance(btn_net, QPushButton):
+            btn_net.setEnabled(int(state.get("can_set_net") or 0) > 0)
+            if all_timing_only:
+                btn_net.setToolTip("Timing-only SOP overlaps require start-time adjustments; policy changes do not apply.")
+            elif rows_total <= 0:
+                btn_net.setToolTip("No conflicts to update.")
+            elif rows_policy_relevant <= 0:
+                btn_net.setToolTip("No HF/Net conflict rows are available for batch policy changes.")
+            elif btn_net.isEnabled():
+                btn_net.setToolTip("Set Net Priority for all workbench rows with HF/Net conflicts.")
+            else:
+                btn_net.setToolTip("Applicable rows are already set to Net Priority.")
+        if isinstance(btn_daily, QPushButton):
+            btn_daily.setEnabled(int(state.get("can_set_daily") or 0) > 0)
+            if all_timing_only:
+                btn_daily.setToolTip("Timing-only SOP overlaps require start-time adjustments; policy changes do not apply.")
+            elif rows_total <= 0:
+                btn_daily.setToolTip("No conflicts to update.")
+            elif rows_policy_relevant <= 0:
+                btn_daily.setToolTip("No HF/Net conflict rows are available for batch policy changes.")
+            elif btn_daily.isEnabled():
+                btn_daily.setToolTip("Set Daily Priority for all workbench rows with HF/Net conflicts.")
+            else:
+                btn_daily.setToolTip("Applicable rows are already set to Daily Priority.")
+        if isinstance(btn_defaults, QPushButton):
+            btn_defaults.setEnabled(int(state.get("can_apply_defaults") or 0) > 0)
+            if rows_total <= 0:
+                btn_defaults.setToolTip("No conflicts to update.")
+            elif btn_defaults.isEnabled():
+                btn_defaults.setToolTip("Reset row policies in the workbench to the current SOP Builder Activation Conflict Defaults.")
+            else:
+                btn_defaults.setToolTip("Workbench row policies already match the current builder defaults.")
+
+        self._apply_conflict_workbench_batch_button_styles()
+
+    def _apply_conflict_workbench_policy_batch(self, mode: str) -> None:
+        if self._current_category() != self.CAT_HF:
+            return
+        mode_key = str(mode or "").strip().upper()
+        if mode_key == "NET":
+            target_policy = self.manager.CONFLICT_POLICY_NET
+        elif mode_key == "DAILY":
+            target_policy = self.manager.CONFLICT_POLICY_DAILY
+        else:
+            target_policy = self.manager.CONFLICT_POLICY_SOP
+            mode_key = "SOP"
+
+        changed = 0
+        for row_index, diag in list((self._conflict_workbench_diag_cache or {}).items()):
+            if not isinstance(diag, dict):
+                continue
+            if mode_key == "NET" and not bool(diag.get("net_conflicts")):
+                continue
+            if mode_key == "DAILY" and not bool(diag.get("daily_conflicts")):
+                continue
+            if self._set_action_row_conflict_policy(
+                int(row_index),
+                target_policy,
+                mark_dirty=False,
+                schedule_refresh=False,
+            ):
+                changed += 1
+        if changed > 0:
+            self._mark_dirty()
+            self._schedule_realtime_hf_conflict_check()
+            self._update_conflict_workbench(self._last_realtime_hf_analyses_cache)
+            return
+        status_label = getattr(self, "conflict_workbench_status_label", None)
+        if isinstance(status_label, QLabel):
+            state = self._conflict_workbench_action_state()
+            if bool(state.get("all_timing_only")):
+                status_label.setText(
+                    "Current workbench conflicts are timing-only SOP overlaps. Use Details or Save to review timing suggestions."
+                )
+            else:
+                policy_name = "SOP Priority" if mode_key == "SOP" else ("Net Priority" if mode_key == "NET" else "Daily Priority")
+                status_label.setText(f"No rows changed. Applicable workbench rows already use {policy_name}.")
+
+    def _apply_conflict_workbench_builder_defaults(self) -> None:
+        if self._current_category() != self.CAT_HF:
+            return
+        changed = 0
+        for row_index, diag in list((self._conflict_workbench_diag_cache or {}).items()):
+            if not isinstance(diag, dict):
+                continue
+            default_policy = self._activation_row_builder_default_policy(diag)
+            if self._set_action_row_conflict_policy(
+                int(row_index),
+                default_policy,
+                mark_dirty=False,
+                schedule_refresh=False,
+            ):
+                changed += 1
+        if changed > 0:
+            self._mark_dirty()
+            self._schedule_realtime_hf_conflict_check()
+            self._update_conflict_workbench(self._last_realtime_hf_analyses_cache)
+            return
+        status_label = getattr(self, "conflict_workbench_status_label", None)
+        if isinstance(status_label, QLabel):
+            state = self._conflict_workbench_action_state()
+            if bool(state.get("all_timing_only")):
+                status_label.setText(
+                    "Current workbench conflicts are timing-only SOP overlaps. Builder defaults do not resolve timing conflicts."
+                )
+            else:
+                status_label.setText("No rows changed. Workbench row policies already match the current builder defaults.")
+
+    def _open_conflict_workbench_details_for_button(self, btn: QToolButton) -> None:
+        if not isinstance(btn, QToolButton):
+            return
+        try:
+            row_index = int(btn.property("sop_row_index") or -1)
+        except Exception:
+            row_index = -1
+        if row_index < 0:
+            return
+        self._show_inline_conflict_details_for_row(row_index)
+
+    def _request_conflict_workbench_suggested_start_for_button(self, btn: QToolButton) -> None:
+        if not isinstance(btn, QToolButton):
+            return
+        try:
+            row_index = int(btn.property("sop_row_index") or -1)
+        except Exception:
+            row_index = -1
+        if row_index < 0:
+            return
+        self._request_conflict_workbench_suggested_start(row_index)
+
+    def _apply_conflict_workbench_suggested_start_for_button(self, btn: QPushButton) -> None:
+        if not isinstance(btn, QPushButton):
+            return
+        try:
+            row_index = int(btn.property("sop_row_index") or -1)
+        except Exception:
+            row_index = -1
+        if row_index < 0:
+            return
+        self._apply_conflict_workbench_suggested_start(row_index)
+
+    def _request_conflict_workbench_suggested_start(self, row_index: int) -> None:
+        if self._current_category() != self.CAT_HF:
+            return
+        try:
+            target_row = int(row_index)
+        except Exception:
+            return
+        action_rows = self._collect_hf_actions_for_realtime()
+        action_map = {int(r): dict(a) for r, a in action_rows if isinstance(a, dict)}
+        action = action_map.get(target_row)
+        if not isinstance(action, dict):
+            status_label = getattr(self, "conflict_workbench_status_label", None)
+            if isinstance(status_label, QLabel):
+                status_label.setText("Complete row fields before requesting a suggested start time.")
+            return
+        peers = [dict(other) for r, other in action_rows if int(r) != target_row and isinstance(other, dict)]
+        group_name = str(action.get("group_name") or "").strip().upper()
+        try:
+            suggested_utc = self.manager.suggest_non_conflicting_start(
+                action=action,
+                operating_group=group_name,
+                check_all_groups=True,
+                peer_actions=peers,
+            )
+        except Exception as e:
+            log.debug("SOP Builder: failed computing workbench suggested start for row %s: %s", target_row, e)
+            suggested_utc = ""
+        suggested_utc = self.manager._normalize_hhmm(suggested_utc or "")
+        if not suggested_utc:
+            status_label = getattr(self, "conflict_workbench_status_label", None)
+            if isinstance(status_label, QLabel):
+                status_label.setText(f"Could not compute a suggested start for row {target_row + 1}.")
+            return
+        self._conflict_workbench_suggested_start_utc[int(target_row)] = suggested_utc
+        display_txt = self._display_start_hhmm_from_utc(suggested_utc, show_local=self._show_local)
+        status_label = getattr(self, "conflict_workbench_status_label", None)
+        if isinstance(status_label, QLabel):
+            status_label.setText(f"Suggested start for row {target_row + 1}: {display_txt}. Click Apply to use it.")
+        self._update_conflict_workbench(self._last_realtime_hf_analyses_cache, force=True)
+
+    def _apply_conflict_workbench_suggested_start(self, row_index: int) -> None:
+        if self._current_category() != self.CAT_HF:
+            return
+        try:
+            target_row = int(row_index)
+        except Exception:
+            return
+        suggested_utc = self.manager._normalize_hhmm(self._conflict_workbench_suggested_start_utc.get(target_row) or "")
+        if not suggested_utc:
+            self._request_conflict_workbench_suggested_start(target_row)
+            suggested_utc = self.manager._normalize_hhmm(self._conflict_workbench_suggested_start_utc.get(target_row) or "")
+            if not suggested_utc:
+                return
+
+        start_edit = self.actions_table.cellWidget(target_row, self.COL_START)
+        end_edit = self.actions_table.cellWidget(target_row, self.COL_END)
+        duration_combo = self.actions_table.cellWidget(target_row, self.COL_DURATION)
+        if not isinstance(start_edit, QLineEdit):
+            return
+        duration_minutes = 60
+        if isinstance(duration_combo, QComboBox):
+            try:
+                duration_minutes = int(duration_combo.currentData() or 60)
+            except Exception:
+                duration_minutes = 60
+        if duration_minutes not in {30, 60}:
+            duration_minutes = 60
+        end_utc = self._add_minutes_hhmm(suggested_utc, duration_minutes)
+        start_display = self._display_start_hhmm_from_utc(suggested_utc, show_local=self._show_local)
+        end_display = self._display_start_hhmm_from_utc(end_utc, show_local=self._show_local)
+        start_edit.setText(start_display)
+        if isinstance(end_edit, QLineEdit):
+            end_edit.setText(end_display)
+        status_label = getattr(self, "conflict_workbench_status_label", None)
+        if isinstance(status_label, QLabel):
+            status_label.setText(f"Applied suggested start to row {target_row + 1}: {start_display}.")
+        self._schedule_realtime_hf_conflict_check()
+
+    def _update_conflict_workbench(
+        self,
+        analyses: List[Tuple[int, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]] | None,
+        *,
+        force: bool = False,
+    ) -> None:
+        box = getattr(self, "conflict_workbench_box", None)
+        table = getattr(self, "conflict_workbench_table", None)
+        status_label = getattr(self, "conflict_workbench_status_label", None)
+        if not isinstance(box, QGroupBox) or not isinstance(table, QTableWidget) or not isinstance(status_label, QLabel):
+            return
+        if self._current_category() != self.CAT_HF:
+            box.setVisible(False)
+            table.setRowCount(0)
+            self._conflict_workbench_diag_cache = {}
+            self._conflict_workbench_suggested_start_utc = {}
+            self._conflict_workbench_signature = None
+            return
+
+        box.setVisible(True)
+        rows: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
+        for row_index, action, diag, _peers in list(analyses or []):
+            if not isinstance(diag, dict) or not bool(diag.get("has_conflict")):
+                continue
+            rows.append((int(row_index), dict(action or {}), dict(diag or {})))
+
+        pending_rows = max(0, int(self.actions_table.rowCount()) - len(list(analyses or [])))
+        signature_rows: List[Tuple[Any, ...]] = []
+        for row_index, action_for_sig, diag in rows:
+            policy = self._action_row_conflict_policy(row_index)
+            signature_rows.append(
+                (
+                    int(row_index),
+                    policy,
+                    str(action_for_sig.get("daily_start_utc") or ""),
+                    str(action_for_sig.get("daily_end_utc") or ""),
+                    str(diag.get("daily_summary") or ""),
+                    str(diag.get("net_summary") or ""),
+                    str(diag.get("sop_summary") or ""),
+                    bool(diag.get("first_occurrence_conflict")),
+                    bool(diag.get("daily_conflicts")),
+                    bool(diag.get("net_conflicts")),
+                    bool(diag.get("sop_conflicts")),
+                )
+            )
+        signature = (tuple(signature_rows), int(pending_rows))
+        if (not force) and signature == getattr(self, "_conflict_workbench_signature", None):
+            return
+        if signature != getattr(self, "_conflict_workbench_signature", None):
+            self._conflict_workbench_suggested_start_utc = {}
+        self._conflict_workbench_signature = signature
+
+        def _readonly_item(text: str) -> QTableWidgetItem:
+            item = QTableWidgetItem(str(text or ""))
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            return item
+
+        self._conflict_workbench_updating = True
+        try:
+            table.setRowCount(len(rows))
+            self._conflict_workbench_diag_cache = {int(row_index): dict(diag) for row_index, _action, diag in rows}
+            needs_time_count = 0
+            for t_row, (row_index, action, diag) in enumerate(rows):
+                policy = self._action_row_conflict_policy(row_index)
+                has_sop_conflict = bool(diag.get("sop_conflicts"))
+                first_occurrence = bool(diag.get("first_occurrence_conflict"))
+                needs_time = has_sop_conflict or (
+                    policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY} and first_occurrence
+                )
+                if needs_time:
+                    needs_time_count += 1
+                next_step = "Use Suggest/Apply"
+                if has_sop_conflict:
+                    next_step = "Use Suggest/Apply (SOP overlap)"
+                elif policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY} and first_occurrence:
+                    next_step = "Use Suggest/Apply (first occurrence)"
+                else:
+                    next_step = "Policy ready"
+
+                action_label = str(action.get("action_label") or action.get("action_key") or "Action").strip() or "Action"
+                group_name = str(action.get("group_name") or "").strip().upper()
+                table.setItem(t_row, self.WB_COL_ROW, _readonly_item(str(int(row_index) + 1)))
+                table.setItem(t_row, self.WB_COL_ACTION, _readonly_item(action_label))
+                table.setItem(t_row, self.WB_COL_GROUP, _readonly_item(group_name))
+                table.setItem(t_row, self.WB_COL_HF, _readonly_item(str(diag.get("daily_summary") or "None")))
+                table.setItem(t_row, self.WB_COL_NET, _readonly_item(str(diag.get("net_summary") or "None")))
+                table.setItem(t_row, self.WB_COL_SOP, _readonly_item(str(diag.get("sop_summary") or "None")))
+                table.setItem(t_row, self.WB_COL_NEXT, _readonly_item(next_step))
+
+                policy_combo = QComboBox(table)
+                policy_combo.addItem("SOP Priority", self.manager.CONFLICT_POLICY_SOP)
+                policy_combo.addItem("Net Priority", self.manager.CONFLICT_POLICY_NET)
+                policy_combo.addItem("Daily Priority", self.manager.CONFLICT_POLICY_DAILY)
+                policy_combo.setProperty("sop_row_index", int(row_index))
+                policy_combo.setCurrentIndex(self._conflict_policy_combo_index(policy_combo, policy))
+                policy_combo.currentIndexChanged.connect(lambda _=0, c=policy_combo: self._workbench_policy_combo_changed(c))
+                table.setCellWidget(t_row, self.WB_COL_POLICY, policy_combo)
+
+                suggested_btn = QToolButton(table)
+                suggested_btn.setProperty("sop_row_index", int(row_index))
+                suggested_btn.clicked.connect(
+                    lambda _=False, b=suggested_btn: self._request_conflict_workbench_suggested_start_for_button(b)
+                )
+                apply_btn = QPushButton("Apply", table)
+                apply_btn.setProperty("sop_row_index", int(row_index))
+                apply_btn.clicked.connect(
+                    lambda _=False, b=apply_btn: self._apply_conflict_workbench_suggested_start_for_button(b)
+                )
+                suggested_utc = self.manager._normalize_hhmm(self._conflict_workbench_suggested_start_utc.get(int(row_index)) or "")
+                if needs_time:
+                    if suggested_utc:
+                        suggested_display = self._display_start_hhmm_from_utc(suggested_utc, show_local=self._show_local)
+                        suggested_btn.setText(suggested_display)
+                        suggested_btn.setToolTip("Recompute suggested non-conflicting start.")
+                    else:
+                        suggested_btn.setText("Suggest")
+                        suggested_btn.setToolTip("Compute a suggested non-conflicting start time for this row.")
+                    apply_btn.setEnabled(bool(suggested_utc))
+                    apply_btn.setToolTip(
+                        "Apply the suggested start to the SOP action row."
+                        if bool(suggested_utc)
+                        else "Click Suggest first to compute a proposed start time."
+                    )
+                else:
+                    suggested_btn.setText("-")
+                    suggested_btn.setEnabled(False)
+                    suggested_btn.setToolTip("No timing adjustment is needed for this row.")
+                    apply_btn.setEnabled(False)
+                    apply_btn.setToolTip("No timing adjustment is needed for this row.")
+                table.setCellWidget(t_row, self.WB_COL_SUGGESTED, suggested_btn)
+                table.setCellWidget(t_row, self.WB_COL_APPLY, apply_btn)
+
+                detail_btn = QToolButton(table)
+                detail_btn.setText("Details")
+                detail_btn.setProperty("sop_row_index", int(row_index))
+                detail_btn.clicked.connect(lambda _=False, b=detail_btn: self._open_conflict_workbench_details_for_button(b))
+                table.setCellWidget(t_row, self.WB_COL_DETAILS, detail_btn)
+
+            if not rows:
+                if pending_rows > 0:
+                    status_label.setText(
+                        "No actionable conflicts yet. Complete HF action row fields to evaluate conflicts."
+                    )
+                else:
+                    status_label.setText("No HF conflicts detected.")
+            else:
+                status_text = f"{len(rows)} conflicting row(s)"
+                if needs_time_count > 0:
+                    status_text += f" | {needs_time_count} still need timing changes at Save"
+                state = self._conflict_workbench_action_state()
+                if bool(state.get("all_timing_only")):
+                    status_text += " | Timing-only conflicts: batch priority buttons do not apply"
+                if pending_rows > 0:
+                    status_text += f" | {pending_rows} row(s) pending validation"
+                status_label.setText(status_text)
+
+            self._update_conflict_workbench_batch_actions()
+        finally:
+            self._conflict_workbench_updating = False
 
     def _schedule_realtime_hf_conflict_check(self, *_args) -> None:
         if getattr(self, "_loading_ui", False):
@@ -4043,8 +4801,11 @@ class SOPTab(_LegacySOPTab):
         self,
     ) -> List[Tuple[int, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]]:
         if self._current_category() != self.CAT_HF:
+            self._last_realtime_hf_analyses_cache = []
             for r in range(self.actions_table.rowCount()):
                 self._set_inline_conflict_badge(r, "local", "Local Comms actions do not use HF conflict checks.")
+            self._update_activation_conflict_summary([])
+            self._update_conflict_workbench([])
             return []
 
         action_rows = self._collect_hf_actions_for_realtime()
@@ -4079,6 +4840,9 @@ class SOPTab(_LegacySOPTab):
             else:
                 self._set_inline_conflict_badge(row_index, "ok", "No Daily/Net/SOP conflicts detected.")
             out.append((row_index, action, diag, peers))
+        self._last_realtime_hf_analyses_cache = list(out)
+        self._update_activation_conflict_summary(out)
+        self._update_conflict_workbench(out)
         return out
 
     def _run_realtime_hf_conflict_check(self) -> None:
@@ -4117,8 +4881,14 @@ class SOPTab(_LegacySOPTab):
             self.export_pdf_btn,
             self.export_import_btn,
             self.add_row_btn,
+            getattr(self, "workbench_set_sop_btn", None),
+            getattr(self, "workbench_set_net_btn", None),
+            getattr(self, "workbench_set_daily_btn", None),
+            getattr(self, "workbench_apply_defaults_btn", None),
         ]
         for btn in buttons:
+            if btn is None:
+                continue
             txt = str(btn.text() or "").replace("&", "").strip()
             if not txt:
                 continue
@@ -4178,6 +4948,10 @@ class SOPTab(_LegacySOPTab):
                 if self._is_valid_hhmm(current):
                     utc_hhmm = self._utc_start_hhmm_from_display(current, show_local=old_show_local)
                     end_edit.setText(self._display_start_hhmm_from_utc(utc_hhmm, show_local=self._show_local))
+        try:
+            self._update_conflict_workbench(self._last_realtime_hf_analyses_cache, force=True)
+        except Exception:
+            pass
         self._mark_dirty()
 
     def _refresh_reference_data(self) -> None:
@@ -4441,6 +5215,14 @@ class SOPTab(_LegacySOPTab):
     def _apply_category_table_view(self) -> None:
         cat = self._current_category()
         is_hf = cat == self.CAT_HF
+        try:
+            self.activation_defaults_box.setVisible(is_hf)
+        except Exception:
+            pass
+        try:
+            self.conflict_workbench_box.setVisible(is_hf)
+        except Exception:
+            pass
         self.actions_table.setColumnHidden(self.COL_COND, not is_hf)
         self.actions_table.setColumnHidden(self.COL_BANDFREQ, not is_hf)
         self.actions_table.setColumnHidden(self.COL_MODE, is_hf)
@@ -5140,6 +5922,182 @@ class SOPTab(_LegacySOPTab):
         }
         return payload, actions, None
 
+    def _activation_row_builder_default_policy(self, diag: Dict[str, Any]) -> str:
+        defaults = self._activation_conflict_defaults()
+        if bool(diag.get("sop_conflicts")):
+            return self.manager.CONFLICT_POLICY_SOP
+        if bool(diag.get("daily_conflicts")) and defaults.get("hf_mode") == self.HF_CONFLICT_MODE_AUTO_ADJUST:
+            return self.manager.CONFLICT_POLICY_SOP
+        if bool(diag.get("net_conflicts")) and defaults.get("net_mode") == self.NET_CONFLICT_MODE_SOP_PRIORITY_TEMP:
+            return self.manager.CONFLICT_POLICY_SOP
+        return self.manager.CONFLICT_POLICY_SOP
+
+    def _activation_row_default_conflict_policy(self, diag: Dict[str, Any], current_policy: Any) -> str:
+        policy = self.manager._normalize_conflict_policy(current_policy)
+        if policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY}:
+            # Preserve explicit row policy choices (including workbench edits).
+            return policy
+        return self._activation_row_builder_default_policy(diag)
+
+    def _build_sop_priority_net_policy_decisions(
+        self,
+        conflicts: List[Dict[str, Any]],
+        *,
+        profile_id: int,
+    ) -> List[Dict[str, Any]]:
+        decisions: List[Dict[str, Any]] = []
+        for row in conflicts:
+            net_sig = str(row.get("net_row_signature") or "").strip()
+            sop_sig = str(row.get("sop_row_signature") or "").strip()
+            start_utc = str(row.get("window_start_utc") or "").strip()
+            end_utc = str(row.get("window_end_utc") or "").strip()
+            if not net_sig or not sop_sig or not start_utc or not end_utc:
+                continue
+            decisions.append(
+                {
+                    "sop_profile_id": int(row.get("sop_profile_id") or profile_id),
+                    "sop_layer_id": int(row.get("sop_layer_id") or 0),
+                    "net_row_signature": net_sig,
+                    "sop_row_signature": sop_sig,
+                    "window_start_utc": start_utc,
+                    "window_end_utc": end_utc,
+                    "policy": self.manager.NET_SOP_POLICY_SOP,
+                    "resolution_note": "SOP Builder activation default (temporary SOP session)",
+                }
+            )
+        return decisions
+
+    def _apply_post_save_hf_activation_defaults(
+        self,
+        *,
+        profile_id: int,
+        profile_name: str,
+        actions: List[Dict[str, Any]] | None = None,
+    ) -> Tuple[List[str], bool]:
+        notes: List[str] = []
+        should_emit_refresh = False
+        defaults = self._activation_conflict_defaults()
+        profile_ids = {int(profile_id or 0)} if int(profile_id or 0) > 0 else set()
+        explicit_non_sop_policy = False
+        for row in (actions or []):
+            if not isinstance(row, dict):
+                continue
+            policy = self.manager._normalize_conflict_policy(row.get("conflict_policy"))
+            if policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY}:
+                explicit_non_sop_policy = True
+                break
+
+        active_hf_conflicts: List[Dict[str, Any]] | None = None
+        active_net_conflicts: List[Dict[str, Any]] | None = None
+
+        def _load_active_hf_conflicts() -> List[Dict[str, Any]]:
+            nonlocal active_hf_conflicts
+            if active_hf_conflicts is not None:
+                return list(active_hf_conflicts)
+            try:
+                rows = self.manager.collect_active_hf_conflicts()
+            except Exception as e:
+                log.debug("SOP Builder: active HF conflict scan after save failed: %s", e)
+                rows = []
+            if profile_ids:
+                rows = [r for r in rows if int(r.get("profile_id") or 0) in profile_ids]
+            active_hf_conflicts = list(rows)
+            return list(active_hf_conflicts)
+
+        def _load_active_net_conflicts() -> List[Dict[str, Any]]:
+            nonlocal active_net_conflicts
+            if active_net_conflicts is not None:
+                return list(active_net_conflicts)
+            try:
+                rows = self.manager.collect_active_net_sop_conflicts(horizon_days=7, include_profile_ids=profile_ids or None)
+            except Exception as e:
+                log.debug("SOP Builder: active Net/SOP conflict scan after save failed: %s", e)
+                rows = []
+            active_net_conflicts = list(rows)
+            return list(active_net_conflicts)
+
+        win = self.window()
+        daily_tab = getattr(win, "daily_tab", None)
+
+        if defaults.get("net_mode") == self.NET_CONFLICT_MODE_SOP_PRIORITY_TEMP and not explicit_non_sop_policy:
+            pending_net = [r for r in _load_active_net_conflicts() if not bool(r.get("has_policy"))]
+            if pending_net:
+                decisions = self._build_sop_priority_net_policy_decisions(pending_net, profile_id=profile_id)
+                saved = 0
+                if decisions:
+                    try:
+                        if daily_tab is not None and hasattr(daily_tab, "save_net_sop_conflict_policies_with_session_tracking"):
+                            saved = int(
+                                daily_tab.save_net_sop_conflict_policies_with_session_tracking(
+                                    decisions,
+                                    origin="SOP Builder activation default (Net SOP Priority)",
+                                    session_profile_hint={
+                                        "id": int(profile_id or 0),
+                                        "name": str(profile_name or ""),
+                                        "active": True,
+                                        "category": "HF",
+                                    },
+                                )
+                                or 0
+                            )
+                    except Exception as e:
+                        log.debug("SOP Builder: failed applying temporary Net/SOP priority defaults: %s", e)
+                        saved = 0
+                if saved > 0:
+                    notes.append(f"Net Schedule: applied temporary SOP Priority to {saved} overlap window(s) for this SOP session.")
+                    should_emit_refresh = True
+                else:
+                    notes.append(
+                        f"Net Schedule: detected {len(pending_net)} overlap window(s), but temporary SOP Priority could not be applied automatically. Review in Net Schedule."
+                    )
+            else:
+                notes.append("Net Schedule: no unresolved Net/SOP overlaps found for this SOP.")
+        elif defaults.get("net_mode") == self.NET_CONFLICT_MODE_SOP_PRIORITY_TEMP and explicit_non_sop_policy:
+            pending_net = [r for r in _load_active_net_conflicts() if not bool(r.get("has_policy"))]
+            if pending_net:
+                notes.append(
+                    f"Net Schedule: builder auto-apply skipped because explicit row policies were selected; review {len(pending_net)} overlap window(s) in Net Schedule."
+                )
+        else:
+            pending_net = [r for r in _load_active_net_conflicts() if not bool(r.get("has_policy"))]
+            if pending_net:
+                notes.append(f"Net Schedule: review {len(pending_net)} overlap window(s) in Net Schedule to choose priority.")
+
+        if defaults.get("hf_mode") == self.HF_CONFLICT_MODE_AUTO_ADJUST and not explicit_non_sop_policy:
+            applied = False
+            if daily_tab is not None:
+                try:
+                    if hasattr(daily_tab, "_refresh_sop_overlay_rows_in_table"):
+                        daily_tab._refresh_sop_overlay_rows_in_table()
+                    if hasattr(daily_tab, "_collect_active_time_conflict_pairs") and hasattr(daily_tab, "_can_auto_adjust_hf_around_sop"):
+                        active_pairs = list(daily_tab._collect_active_time_conflict_pairs() or [])
+                        if active_pairs and bool(daily_tab._can_auto_adjust_hf_around_sop(active_pairs)):
+                            changed, detail = daily_tab._auto_adjust_hf_around_sop(active_pairs)
+                            notes.append(f"HF Schedule: {detail}")
+                            applied = True
+                        elif _load_active_hf_conflicts():
+                            notes.append("HF Schedule: active SOP conflicts remain. Review in Daily Schedule.")
+                            applied = True
+                    elif _load_active_hf_conflicts():
+                        notes.append("HF Schedule: review active SOP conflicts in Daily Schedule.")
+                        applied = True
+                except Exception as e:
+                    log.debug("SOP Builder: Daily auto-adjust via activation default failed: %s", e)
+            if not applied and _load_active_hf_conflicts():
+                notes.append("HF Schedule: review active SOP conflicts in Daily Schedule.")
+        elif defaults.get("hf_mode") == self.HF_CONFLICT_MODE_AUTO_ADJUST and explicit_non_sop_policy:
+            hf_conflicts = _load_active_hf_conflicts()
+            if hf_conflicts:
+                notes.append(
+                    f"HF Schedule: builder auto-adjust skipped because explicit row policies were selected; review {len(hf_conflicts)} active conflict row(s) in Daily Schedule."
+                )
+        else:
+            hf_conflicts = _load_active_hf_conflicts()
+            if hf_conflicts:
+                notes.append(f"HF Schedule: review {len(hf_conflicts)} active conflict row(s) in Daily Schedule.")
+
+        return notes, should_emit_refresh
+
     def _resolve_hf_activation_conflicts(self, actions: List[Dict[str, Any]]) -> bool:
         hf_peer_actions = [
             a
@@ -5147,6 +6105,7 @@ class SOPTab(_LegacySOPTab):
             if isinstance(a, dict) and not self.manager._is_local_action(a) and bool(a.get("enabled", True))
         ]
         conflicts: List[Dict[str, Any]] = []
+        manual_conflicts: List[Dict[str, Any]] = []
         for idx, action in enumerate(actions):
             group = str(action.get("group_name") or "").strip().upper()
             if not group:
@@ -5163,31 +6122,57 @@ class SOPTab(_LegacySOPTab):
             if not bool(diag.get("has_conflict")):
                 action["conflict_policy"] = self.manager.CONFLICT_POLICY_SOP
                 continue
+            action["conflict_policy"] = self._activation_row_default_conflict_policy(diag, action.get("conflict_policy"))
+            policy = self.manager._normalize_conflict_policy(action.get("conflict_policy"))
+            entry = {
+                "row_index": idx,
+                "action": action,
+                "group": group,
+                "diag": diag,
+            }
             conflicts.append(
-                {
-                    "row_index": idx,
-                    "action": action,
-                    "group": group,
-                    "diag": diag,
-                }
+                entry
             )
+            needs_manual = bool(diag.get("sop_conflicts")) or (
+                policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY}
+                and bool(diag.get("first_occurrence_conflict"))
+            )
+            if needs_manual:
+                manual_conflicts.append(entry)
         if not conflicts:
             return True
-        return self._resolve_hf_conflicts_dialog(conflicts, hf_peer_actions)
+        if not manual_conflicts:
+            return True
+        return self._resolve_hf_conflicts_dialog(
+            manual_conflicts,
+            hf_peer_actions,
+            total_conflict_count=len(conflicts),
+        )
 
     def _resolve_hf_conflicts_dialog(
         self,
         conflicts: List[Dict[str, Any]],
         hf_peer_actions: List[Dict[str, Any]],
+        *,
+        total_conflict_count: int | None = None,
     ) -> bool:
         dialog = QDialog(self)
         dialog.setWindowTitle("SOP Conflict Resolution")
         dialog.setModal(True)
         layout = QVBoxLayout(dialog)
-        intro = QLabel(
-            "Review conflict policy and Daily Start for each row.\n"
-            "SOP-vs-SOP overlaps, and first-occurrence conflicts under Net/Daily priority, must be resolved before Save."
-        )
+        intro_lines = [
+            "Review conflict policy and Daily Start for each row.",
+            "SOP-vs-SOP overlaps, and first-occurrence conflicts under Net/Daily priority, must be resolved before Save.",
+        ]
+        try:
+            total_count = int(total_conflict_count or 0)
+        except Exception:
+            total_count = 0
+        if total_count > len(conflicts):
+            intro_lines.append(
+                f"Only {len(conflicts)} of {total_count} conflicting row(s) need manual changes; other rows will follow SOP Builder activation defaults."
+            )
+        intro = QLabel("\n".join(intro_lines))
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -5385,6 +6370,7 @@ class SOPTab(_LegacySOPTab):
             self._reload_profiles(select_id=profile_id)
             self._set_save_dirty(False)
             self._emit_sop_data_changed()
+            post_save_notes: List[str] = []
             try:
                 category = self.manager._normalize_category(payload.get("category"))
             except Exception:
@@ -5394,17 +6380,34 @@ class SOPTab(_LegacySOPTab):
             if category == self.CAT_HF:
                 win = self.window()
                 daily_tab = getattr(win, "daily_tab", None)
-                if not prior_active and new_active and daily_tab is not None and hasattr(daily_tab, "register_sop_session_activation"):
+                activated_now = (not prior_active) and new_active
+                if activated_now and daily_tab is not None and hasattr(daily_tab, "register_sop_session_activation"):
                     try:
                         daily_tab.register_sop_session_activation(profile_id, str(payload.get("name") or ""))
                     except Exception:
                         pass
+                if activated_now:
+                    try:
+                        notes, should_emit_refresh = self._apply_post_save_hf_activation_defaults(
+                            profile_id=int(profile_id or 0),
+                            profile_name=str(payload.get("name") or ""),
+                            actions=actions,
+                        )
+                        post_save_notes.extend([str(n).strip() for n in notes if str(n).strip()])
+                        if should_emit_refresh:
+                            self._emit_sop_data_changed()
+                    except Exception as e:
+                        log.debug("SOP Builder: post-save activation defaults failed: %s", e)
                 if prior_active and not new_active and daily_tab is not None and hasattr(daily_tab, "prompt_sop_return_to_normal_after_deactivation"):
                     try:
                         daily_tab.prompt_sop_return_to_normal_after_deactivation([int(profile_id or 0)], origin_label="SOP Builder")
                     except Exception:
                         pass
-            QMessageBox.information(self, "SOP", "SOP saved.")
+            message_lines = ["SOP saved."]
+            if post_save_notes:
+                message_lines.append("")
+                message_lines.extend(post_save_notes)
+            QMessageBox.information(self, "SOP", "\n".join(message_lines))
         except Exception as e:
             QMessageBox.warning(self, "SOP", str(e))
         finally:
@@ -5449,6 +6452,7 @@ class SOPTab(_LegacySOPTab):
         except Exception:
             pass
         selected_id = int(self._selected_profile_id or 0)
+        self._load_activation_conflict_defaults_ui()
         self._refresh_reference_data()
         self._reload_profiles(select_id=selected_id)
         self._update_clock_labels()
@@ -5528,9 +6532,31 @@ class SOPTab(_LegacySOPTab):
         try:
             theme = resolve_theme(self.settings)
             self.terms_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            if hasattr(self, "activation_defaults_hint_label"):
+                self.activation_defaults_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            if hasattr(self, "activation_conflict_summary_label"):
+                self.activation_conflict_summary_label.setStyleSheet(
+                    f"color: {theme.get('text', '#e5e7eb')}; font-weight: 600;"
+                )
+            if hasattr(self, "conflict_workbench_hint_label"):
+                self.conflict_workbench_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            if hasattr(self, "conflict_workbench_status_label"):
+                self.conflict_workbench_status_label.setStyleSheet(
+                    f"color: {theme.get('text', '#e5e7eb')}; font-weight: 600;"
+                )
+            for btn_name in (
+                "workbench_set_sop_btn",
+                "workbench_set_net_btn",
+                "workbench_set_daily_btn",
+                "workbench_apply_defaults_btn",
+            ):
+                btn = getattr(self, btn_name, None)
+                if isinstance(btn, QPushButton):
+                    btn.setStyleSheet(button_style("muted", theme))
             self._update_time_toggle_style(theme)
             self._update_profile_action_styles(theme)
             self._apply_accessibility_width_guards()
             self._refresh_inline_conflict_badges()
+            self._update_conflict_workbench_batch_actions()
         except Exception:
             pass
