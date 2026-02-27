@@ -16,6 +16,7 @@
 - Fixed: SOP action-row `Condition Levels` multi-select interaction and persistence were stabilized so saved condition-level edits reliably reload and render across tabs.
 - Changed: Main-tab condition-level edits now fan out through a lightweight debounced refresh path so SOP/FreqPlanner/ControlFreq updates are faster and automation-ready.
 - Changed: VarAC BBS archive behavior is now explicit and consistent: manual `Archive` moves files from `BBS Directory` to `BBS Archive`, and auto-archive runs on first Messages activation after startup and then periodically (daily).
+- Fixed: Linux Launch Control can now start VarAC under Wine using a new optional `VarAC Launch Command` setting; when omitted, path-derived `VarAC.exe` launches are Wine-wrapped automatically when Wine is available.
 - Changed: In-app guide wording now clarifies `Resume Schedule`, FLDigi offset expectations (including Operating Group fallback), and `Prompt` vs `On Schedule Change` behavior.
 - Changed: App/documentation version references updated to `1.2.0`.
 

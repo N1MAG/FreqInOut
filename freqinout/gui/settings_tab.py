@@ -1279,6 +1279,23 @@ class SettingsTab(QWidget):
         varac_row.addWidget(varac_browse)
         varac_v.addLayout(varac_row)
 
+        varac_launch_row = QHBoxLayout()
+        varac_launch_row.setContentsMargins(0, 0, 0, 0)
+        varac_launch_row.setSpacing(8)
+        varac_launch_label = QLabel("VarAC Launch Command:")
+        varac_launch_label.setFixedWidth(msg_label_width)
+        varac_launch_row.addWidget(varac_launch_label)
+        self.varac_launch_cmd_edit = QLineEdit()
+        if platform.system() == "Windows":
+            self.varac_launch_cmd_edit.setPlaceholderText("Optional custom command (advanced)")
+        else:
+            self.varac_launch_cmd_edit.setPlaceholderText(
+                'Optional (Linux): env WINEPREFIX="~/.wine" wine-stable /path/to/VarAC.exe'
+            )
+        self.varac_launch_cmd_edit.textChanged.connect(self._on_launch_paths_changed)
+        varac_launch_row.addWidget(self.varac_launch_cmd_edit, 1)
+        varac_v.addLayout(varac_launch_row)
+
         varac_v.addWidget(
             build_msg_row(
                 "VarAC Incoming Files",
@@ -1724,6 +1741,7 @@ class SettingsTab(QWidget):
 
     def _summary_varac_settings(self) -> str:
         install_set = bool(hasattr(self, "varac_path_edit") and self.varac_path_edit.text().strip())
+        launch_cmd_set = bool(hasattr(self, "varac_launch_cmd_edit") and self.varac_launch_cmd_edit.text().strip())
         incoming_set = bool(self.msg_paths_edits.get("varac") and self.msg_paths_edits["varac"].text().strip())
         bbs_set = bool(
             hasattr(self, "varac_bbs_dir_edit")
@@ -1734,6 +1752,7 @@ class SettingsTab(QWidget):
         archive_on = bool(hasattr(self, "varac_bbs_auto_archive_chk") and self.varac_bbs_auto_archive_chk.isChecked())
         return (
             f"Install {'set' if install_set else 'missing'}, "
+            f"Launch {'cmd' if launch_cmd_set else 'auto'}, "
             f"Incoming {'set' if incoming_set else 'missing'}, "
             f"BBS {'set' if bbs_set else 'missing'}, "
             f"Archive {'on' if archive_on else 'off'}"
@@ -1926,6 +1945,8 @@ class SettingsTab(QWidget):
                     varac_path = legacy_db
         if hasattr(self, "varac_path_edit"):
             self.varac_path_edit.setText(varac_path)
+        if hasattr(self, "varac_launch_cmd_edit"):
+            self.varac_launch_cmd_edit.setText((data.get("varac_launch_cmd", "") or "").strip())
         if hasattr(self, "varac_bbs_dir_edit"):
             self.varac_bbs_dir_edit.setText((data.get("varac_bbs_dir", "") or "").strip())
         if hasattr(self, "varac_bbs_archive_dir_edit"):
@@ -2172,6 +2193,9 @@ class SettingsTab(QWidget):
         varac_path = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
         data["varac_path"] = varac_path
         data["varac_db_path"] = str(Path(varac_path) / "VarAC.db") if varac_path else ""
+        data["varac_launch_cmd"] = (
+            self.varac_launch_cmd_edit.text().strip() if hasattr(self, "varac_launch_cmd_edit") else ""
+        )
         data["varac_bbs_dir"] = (
             self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
         )
@@ -2330,6 +2354,7 @@ class SettingsTab(QWidget):
                 "trusted_file_hashes": data.get("trusted_file_hashes", []),
                 "varac_path": data.get("varac_path", ""),
                 "varac_db_path": data.get("varac_db_path", ""),
+                "varac_launch_cmd": data.get("varac_launch_cmd", ""),
                 "varac_bbs_dir": data.get("varac_bbs_dir", ""),
                 "varac_bbs_archive_dir": data.get("varac_bbs_archive_dir", ""),
                 "varac_bbs_auto_archive_enabled": data.get("varac_bbs_auto_archive_enabled", False),
@@ -2388,6 +2413,7 @@ class SettingsTab(QWidget):
             self.settings.set("trusted_file_hashes", data.get("trusted_file_hashes", []))
             self.settings.set("varac_path", data.get("varac_path", ""))
             self.settings.set("varac_db_path", data.get("varac_db_path", ""))
+            self.settings.set("varac_launch_cmd", data.get("varac_launch_cmd", ""))
             self.settings.set("varac_bbs_dir", data.get("varac_bbs_dir", ""))
             self.settings.set("varac_bbs_archive_dir", data.get("varac_bbs_archive_dir", ""))
             self.settings.set("varac_bbs_auto_archive_enabled", data.get("varac_bbs_auto_archive_enabled", False))
@@ -2857,6 +2883,7 @@ class SettingsTab(QWidget):
             self.fldigi_log_path_edit,
             self.varac_bbs_dir_edit,
             self.varac_bbs_archive_dir_edit,
+            self.varac_launch_cmd_edit,
             self.flrig_port_edit,
         ]
         edits.extend(self.msg_paths_edits.values())
@@ -2923,7 +2950,8 @@ class SettingsTab(QWidget):
     def _is_launch_item_configured(self, name: str) -> bool:
         if name == "VarAC":
             path_val = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
-            return bool(path_val)
+            launch_cmd = self.varac_launch_cmd_edit.text().strip() if hasattr(self, "varac_launch_cmd_edit") else ""
+            return bool(path_val or launch_cmd)
         if name == "JS8Call":
             return bool(self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else "")
         if name == "JS8Spotter":

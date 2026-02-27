@@ -56,6 +56,7 @@ LAUNCH_APP_META: Dict[str, Dict[str, Any]] = {
     },
     "VarAC": {
         "path_key": "varac_path",
+        "launch_cmd_key": "varac_launch_cmd",
         "legacy_autostart_key": None,
         "fallback_cmds": ["VarAC", "varac"],
         "folder_candidates": ["VarAC.exe", "varac.exe", "VarAC", "varac"],
@@ -370,19 +371,31 @@ class LaunchOrchestrator(QObject):
 
     def _resolve_launch_command(self, name: str) -> Tuple[Optional[List[str]], str]:
         meta = LAUNCH_APP_META.get(name, {})
+        launch_cmd_key = str(meta.get("launch_cmd_key", "") or "")
+        if launch_cmd_key:
+            raw_launch_cmd = str(self.settings.get(launch_cmd_key, "") or "").strip()
+            if raw_launch_cmd:
+                cmd = self._command_from_freeform(raw_launch_cmd)
+                if cmd:
+                    return self._finalize_launch_command(name, cmd), "configured launch command"
         path_key = str(meta.get("path_key", "") or "")
         raw = str(self.settings.get(path_key, "") or "").strip() if path_key else ""
         if raw:
             cmd = self._command_from_config_path(name, raw)
             if cmd:
-                return cmd, "configured path"
+                return self._finalize_launch_command(name, cmd), "configured path"
             cmd = self._command_from_freeform(raw)
             if cmd:
-                return cmd, "configured command"
+                return self._finalize_launch_command(name, cmd), "configured command"
         fallback = self._fallback_cmd(name)
         if fallback:
-            return fallback, "fallback command"
+            return self._finalize_launch_command(name, fallback), "fallback command"
         return None, "none"
+
+    def _finalize_launch_command(self, name: str, cmd: List[str]) -> List[str]:
+        if str(name or "").strip() == "VarAC":
+            return self._wrap_varac_wine_if_needed(cmd)
+        return cmd
 
     def _command_from_config_path(self, name: str, raw: str) -> Optional[List[str]]:
         p = Path(raw)
@@ -417,6 +430,39 @@ class LaunchOrchestrator(QObject):
             py_cmd = "python" if platform.system() == "Windows" else "python3"
             return [py_cmd, str(path)]
         return [str(path)]
+
+    @staticmethod
+    def _token_looks_like_varac_exe(token: str) -> bool:
+        txt = str(token or "").strip().lower()
+        if not txt:
+            return False
+        normalized = txt.replace("\\", "/")
+        return normalized.endswith("/varac.exe") or normalized == "varac.exe"
+
+    @staticmethod
+    def _is_wine_prefixed_command(cmd: List[str]) -> bool:
+        for token in cmd:
+            txt = str(token or "").strip()
+            if not txt or "=" in txt:
+                continue
+            base = os.path.basename(txt).strip().lower()
+            if base.startswith("wine"):
+                return True
+        return False
+
+    def _wrap_varac_wine_if_needed(self, cmd: List[str]) -> List[str]:
+        if platform.system() == "Windows":
+            return cmd
+        if not cmd:
+            return cmd
+        if self._is_wine_prefixed_command(cmd):
+            return cmd
+        if not any(self._token_looks_like_varac_exe(token) for token in cmd):
+            return cmd
+        wine_cmd = shutil.which("wine-stable") or shutil.which("wine") or shutil.which("wine64")
+        if not wine_cmd:
+            return cmd
+        return [str(wine_cmd), *cmd]
 
     def _is_self_launch_command(self, cmd: List[str]) -> bool:
         """
@@ -476,6 +522,11 @@ class LaunchOrchestrator(QObject):
         if cmd_desc != "configured path" or not cmd:
             return None
         try:
+            first_name = os.path.basename(str(cmd[0])).lower()
+            if first_name.startswith("wine") and len(cmd) >= 2:
+                second = Path(str(cmd[1])).expanduser()
+                if second.exists() and second.is_file():
+                    return str(second.parent)
             first = Path(str(cmd[0])).expanduser()
             if first.exists() and first.is_file():
                 return str(first.parent)
