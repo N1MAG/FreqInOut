@@ -1282,19 +1282,32 @@ class SettingsTab(QWidget):
         varac_launch_row = QHBoxLayout()
         varac_launch_row.setContentsMargins(0, 0, 0, 0)
         varac_launch_row.setSpacing(8)
-        varac_launch_label = QLabel("VarAC Launch Command:")
+        varac_launch_label = QLabel("VarAC Launch Command (Advanced):")
         varac_launch_label.setFixedWidth(msg_label_width)
         varac_launch_row.addWidget(varac_launch_label)
         self.varac_launch_cmd_edit = QLineEdit()
         if platform.system() == "Windows":
-            self.varac_launch_cmd_edit.setPlaceholderText("Optional custom command (advanced)")
+            self.varac_launch_cmd_edit.setPlaceholderText("Usually leave blank (auto-launch from Install Folder)")
         else:
             self.varac_launch_cmd_edit.setPlaceholderText(
-                'Optional (Linux): env WINEPREFIX="~/.wine" wine-stable /path/to/VarAC.exe'
+                "Usually leave blank. Advanced override only (example: env WINEPREFIX=/home/user/.wine wine-stable C:\\VarAC\\VarAC.exe)"
             )
+        self.varac_launch_cmd_edit.setToolTip(
+            "Recommended: leave blank. FreqInOut auto-launches VarAC from Install Folder (including Wine wrapping on Linux). "
+            "Use only if default launch fails or you need a custom Wine command/prefix."
+        )
         self.varac_launch_cmd_edit.textChanged.connect(self._on_launch_paths_changed)
         varac_launch_row.addWidget(self.varac_launch_cmd_edit, 1)
         varac_v.addLayout(varac_launch_row)
+        varac_launch_hint_row = QHBoxLayout()
+        varac_launch_hint_row.setContentsMargins(0, 0, 0, 0)
+        varac_launch_hint_row.addSpacing(msg_label_width)
+        varac_launch_hint = QLabel(
+            "Recommended: leave blank. This is an advanced override for custom Wine launch scenarios."
+        )
+        varac_launch_hint.setWordWrap(True)
+        varac_launch_hint_row.addWidget(varac_launch_hint, 1)
+        varac_v.addLayout(varac_launch_hint_row)
 
         varac_v.addWidget(
             build_msg_row(
@@ -1752,7 +1765,7 @@ class SettingsTab(QWidget):
         archive_on = bool(hasattr(self, "varac_bbs_auto_archive_chk") and self.varac_bbs_auto_archive_chk.isChecked())
         return (
             f"Install {'set' if install_set else 'missing'}, "
-            f"Launch {'cmd' if launch_cmd_set else 'auto'}, "
+            f"Launch {'override' if launch_cmd_set else 'auto'}, "
             f"Incoming {'set' if incoming_set else 'missing'}, "
             f"BBS {'set' if bbs_set else 'missing'}, "
             f"Archive {'on' if archive_on else 'off'}"

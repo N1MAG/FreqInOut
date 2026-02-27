@@ -522,7 +522,7 @@
       </tr>
       <tr>
         <td>Launch Control</td>
-        <td>Per-app enable/startup toggles, order management (<code>Up</code>, <code>Down</code>, <code>Reset Default Order</code>), launch/stop controls</td>
+        <td>Per-app enable/startup toggles, order management (<code>Up</code>, <code>Down</code>, <code>Reset Default Order</code>), launch/stop controls, and dependency-aware readiness pacing (JS8 API + targeted settle delays)</td>
       </tr>
       <tr>
         <td>Logging &amp; Diagnostics</td>
@@ -550,7 +550,7 @@
   <ul class="section-list">
     <li><strong>BBS Directory</strong>: where incoming BBS files are read from.</li>
     <li><strong>BBS Archive</strong>: where archived BBS files are moved to.</li>
-    <li><strong>VarAC Launch Command</strong>: optional custom command for Launch Control. On Linux, use this for Wine launch strings (for example <code>env WINEPREFIX="~/.wine" wine-stable /path/to/VarAC.exe</code>).</li>
+    <li><strong>VarAC Launch Command</strong>: advanced override. Recommended: leave blank so FreqInOut auto-launches from <code>VarAC Install Folder</code>. On Linux, set this only if default launch fails or you need a custom Wine prefix/command (use absolute paths, for example <code>env WINEPREFIX=/home/user/.wine wine-stable C:\VarAC\VarAC.exe</code>).</li>
     <li><strong>Enable Auto-Archive</strong>: turns on background checks (first Messages open after startup, then about daily).</li>
     <li><strong>After &lt;days&gt; days</strong>: older files are moved from <code>BBS Directory</code> to <code>BBS Archive</code>.</li>
   </ul>
@@ -591,7 +591,8 @@
     <li>If schedule behavior is unexpected, check <code>Schedule Status</code> first (paused/off-schedule/manual mode reasons).</li>
     <li>If FLDigi offset returns unexpectedly, check <code>Settings &gt; FreqInOut Settings</code> for FLDigi enforcement mode (<code>On Schedule Change</code> vs <code>Prompt</code>) and confirm whether a new schedule row transition occurred.</li>
     <li>If message actions are missing (for example <code>+BBS</code>), verify required Settings paths are configured.</li>
-    <li>If VarAC does not launch from Launch Control on Linux, set <code>Settings &gt; VarAC Settings &gt; VarAC Launch Command</code> to your Wine command.</li>
+    <li>If VarAC does not launch from Launch Control on Linux, first clear <code>VarAC Launch Command</code> and test auto-launch from <code>VarAC Install Folder</code>. If needed, then set a custom Wine command using absolute paths.</li>
+    <li>If JS8Spotter/CommStat launch too early, keep JS8Call earlier in Launch Control order; FreqInOut now waits for JS8 API readiness before proceeding.</li>
     <li>If BBS auto-archive does not run, turn on <code>Enable Auto-Archive</code>, confirm both BBS paths are valid and different, then open Messages once after startup.</li>
     <li>If signature/hash states are neutral, verify Message Auth settings and trusted key/hash entries.</li>
   </ul>

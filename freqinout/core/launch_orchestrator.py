@@ -28,6 +28,10 @@ LAUNCH_APP_ORDER: List[str] = [
     "CommStat",
 ]
 
+JS8_DEPENDENT_APPS = {"JS8Spotter", "CommStat"}
+DEFAULT_VARAC_SETTLE_DELAY_SEC = 12.0
+DEFAULT_JS8CALL_DEPENDENT_DELAY_SEC = 4.0
+
 
 LAUNCH_APP_META: Dict[str, Dict[str, Any]] = {
     "FLRig": {
@@ -215,11 +219,18 @@ class LaunchOrchestrator(QObject):
         return str(LAUNCH_APP_META.get(name, {}).get("path_key", "") or "")
 
     def is_configured(self, name: str) -> bool:
-        path_key = self.app_path_key(name)
-        if not path_key:
-            return False
-        raw = self.settings.get(path_key, "")
-        return bool(str(raw or "").strip())
+        meta = LAUNCH_APP_META.get(name, {})
+        launch_cmd_key = str(meta.get("launch_cmd_key", "") or "")
+        if launch_cmd_key:
+            launch_cmd = self.settings.get(launch_cmd_key, "")
+            if str(launch_cmd or "").strip():
+                return True
+        path_key = str(meta.get("path_key", "") or "")
+        if path_key:
+            raw = self.settings.get(path_key, "")
+            if str(raw or "").strip():
+                return True
+        return False
 
     def _migrate_if_needed(self) -> None:
         migrated = self.is_truthy(self.settings.get("launch_control_migrated_v1", False))
@@ -261,6 +272,52 @@ class LaunchOrchestrator(QObject):
             queue.append(name)
         return queue
 
+    def _schedule_advance_queue(self, delay_ms: int = 0) -> None:
+        QTimer.singleShot(max(0, int(delay_ms)), self._advance_queue)
+
+    @staticmethod
+    def _coerce_delay_seconds(raw: Any, default: float) -> float:
+        try:
+            val = float(raw)
+        except Exception:
+            val = float(default)
+        if val < 0.0:
+            return 0.0
+        if val > 120.0:
+            return 120.0
+        return float(val)
+
+    def _program_ready_for_sequence(self, name: str) -> bool:
+        if not self._program_running(name):
+            return False
+        if name == "JS8Call":
+            try:
+                return bool(self.status.js8_api_reachable(allow_fallback=False))
+            except Exception:
+                return False
+        return True
+
+    def _pending_queue_contains(self, names: set[str]) -> bool:
+        if not names:
+            return False
+        if self._index >= len(self._queue):
+            return False
+        for name in self._queue[self._index :]:
+            if name in names:
+                return True
+        return False
+
+    def _post_ready_settle_delay_seconds(self, name: str) -> float:
+        if self._index >= len(self._queue):
+            return 0.0
+        if name == "VarAC":
+            raw = self.settings.get("launch_varac_settle_delay_sec", DEFAULT_VARAC_SETTLE_DELAY_SEC)
+            return self._coerce_delay_seconds(raw, DEFAULT_VARAC_SETTLE_DELAY_SEC)
+        if name == "JS8Call" and self._pending_queue_contains(JS8_DEPENDENT_APPS):
+            raw = self.settings.get("launch_js8call_settle_delay_sec", DEFAULT_JS8CALL_DEPENDENT_DELAY_SEC)
+            return self._coerce_delay_seconds(raw, DEFAULT_JS8CALL_DEPENDENT_DELAY_SEC)
+        return 0.0
+
     def _start_sequence(self, trigger: str, queue: List[str]) -> bool:
         self._active = True
         self._cancel_requested = False
@@ -276,7 +333,7 @@ class LaunchOrchestrator(QObject):
         except Exception:
             self._wait_timeout_sec = 30
         self.sequence_started.emit({"trigger": trigger, "queue": list(queue)})
-        QTimer.singleShot(0, self._advance_queue)
+        self._schedule_advance_queue(0)
         return True
 
     def _advance_queue(self) -> None:
@@ -291,30 +348,36 @@ class LaunchOrchestrator(QObject):
         name = self._queue[self._index]
         self._index += 1
         if self._program_running(name):
-            result = {"name": name, "status": "already_running", "detail": "already running"}
-            self._results.append(result)
-            self.sequence_progress.emit(result)
-            QTimer.singleShot(0, self._advance_queue)
+            if self._program_ready_for_sequence(name):
+                result = {"name": name, "status": "already_running", "detail": "already running"}
+                self._results.append(result)
+                self.sequence_progress.emit(result)
+                self._schedule_advance_queue(0)
+                return
+            self._current_name = name
+            self._current_cmd = None
+            self._current_started_monotonic = time.monotonic()
+            self._poll_timer.start()
             return
         cmd, cmd_desc = self._resolve_launch_command(name)
         if not cmd:
             result = {"name": name, "status": "failed", "detail": "no launch command"}
             self._results.append(result)
             self.sequence_progress.emit(result)
-            QTimer.singleShot(0, self._advance_queue)
+            self._schedule_advance_queue(0)
             return
         if self._is_self_launch_command(cmd):
             result = {"name": name, "status": "blocked_self", "detail": "blocked self-launch target"}
             self._results.append(result)
             self.sequence_progress.emit(result)
             log.warning("LaunchOrchestrator: blocked self-launch target for %s via %r", name, cmd)
-            QTimer.singleShot(0, self._advance_queue)
+            self._schedule_advance_queue(0)
             return
         try:
             creationflags = 0
             if platform.system() == "Windows":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-            cwd = self._infer_launch_cwd(cmd, cmd_desc)
+            cwd = self._infer_launch_cwd(name, cmd, cmd_desc)
             subprocess.Popen(cmd, shell=False, creationflags=creationflags, cwd=cwd)
             if cwd:
                 log.info("LaunchOrchestrator: launched %s via %s (cwd=%s)", name, cmd_desc, cwd)
@@ -329,7 +392,7 @@ class LaunchOrchestrator(QObject):
             result = {"name": name, "status": "failed", "detail": str(e)}
             self._results.append(result)
             self.sequence_progress.emit(result)
-            QTimer.singleShot(0, self._advance_queue)
+            self._schedule_advance_queue(0)
 
     def _poll_current_readiness(self) -> None:
         if not self._active:
@@ -342,17 +405,21 @@ class LaunchOrchestrator(QObject):
         name = self._current_name
         if not name:
             self._poll_timer.stop()
-            QTimer.singleShot(0, self._advance_queue)
+            self._schedule_advance_queue(0)
             return
         elapsed = max(0.0, time.monotonic() - self._current_started_monotonic)
-        if self._program_running(name):
+        if self._program_ready_for_sequence(name):
             self._poll_timer.stop()
-            result = {"name": name, "status": "launched", "detail": f"ready in {elapsed:.1f}s"}
+            delay_sec = self._post_ready_settle_delay_seconds(name)
+            detail = f"ready in {elapsed:.1f}s"
+            if delay_sec > 0:
+                detail += f"; waiting {delay_sec:.1f}s before next launch"
+            result = {"name": name, "status": "launched", "detail": detail}
             self._results.append(result)
             self.sequence_progress.emit(result)
             self._current_name = None
             self._current_cmd = None
-            QTimer.singleShot(0, self._advance_queue)
+            self._schedule_advance_queue(int(delay_sec * 1000.0))
             return
         if elapsed >= float(self._wait_timeout_sec):
             self._poll_timer.stop()
@@ -361,7 +428,7 @@ class LaunchOrchestrator(QObject):
             self.sequence_progress.emit(result)
             self._current_name = None
             self._current_cmd = None
-            QTimer.singleShot(0, self._advance_queue)
+            self._schedule_advance_queue(0)
 
     def _program_running(self, name: str) -> bool:
         try:
@@ -416,9 +483,22 @@ class LaunchOrchestrator(QObject):
             parts = shlex.split(raw, posix=platform.system() != "Windows")
             if not parts:
                 return None
-            return [str(p) for p in parts]
+            return [self._normalize_command_token(p) for p in parts]
         except Exception:
             return None
+
+    @staticmethod
+    def _normalize_command_token(token: str) -> str:
+        txt = str(token or "")
+        if not txt:
+            return ""
+        # Expand user/env paths for shell=False launches so copied desktop-style
+        # command values behave consistently in Launch Control.
+        if "=" in txt and not txt.startswith("-"):
+            key, value = txt.split("=", 1)
+            expanded = os.path.expanduser(os.path.expandvars(value))
+            return f"{key}={expanded}"
+        return os.path.expanduser(os.path.expandvars(txt))
 
     def _command_for_file(self, path: Path) -> Optional[List[str]]:
         suffix = path.suffix.lower()
@@ -514,14 +594,24 @@ class LaunchOrchestrator(QObject):
             return [cand_s]
         return None
 
-    def _infer_launch_cwd(self, cmd: List[str], cmd_desc: str) -> Optional[str]:
+    def _infer_launch_cwd(self, name: str, cmd: List[str], cmd_desc: str) -> Optional[str]:
         """
         For configured paths, launch from the app/script directory so relative
         resources resolve the same as direct desktop launch.
         """
-        if cmd_desc != "configured path" or not cmd:
+        if not cmd:
             return None
         try:
+            if name == "VarAC" and cmd_desc == "configured launch command":
+                varac_root = str(self.settings.get("varac_path", "") or "").strip()
+                if varac_root:
+                    root = Path(varac_root).expanduser()
+                    if root.exists() and root.is_dir():
+                        return str(root)
+                    if root.exists() and root.is_file():
+                        return str(root.parent)
+            if cmd_desc != "configured path":
+                return None
             first_name = os.path.basename(str(cmd[0])).lower()
             if first_name.startswith("wine") and len(cmd) >= 2:
                 second = Path(str(cmd[1])).expanduser()

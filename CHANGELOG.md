@@ -17,6 +17,9 @@
 - Changed: Main-tab condition-level edits now fan out through a lightweight debounced refresh path so SOP/FreqPlanner/ControlFreq updates are faster and automation-ready.
 - Changed: VarAC BBS archive behavior is now explicit and consistent: manual `Archive` moves files from `BBS Directory` to `BBS Archive`, and auto-archive runs on first Messages activation after startup and then periodically (daily).
 - Fixed: Linux Launch Control can now start VarAC under Wine using a new optional `VarAC Launch Command` setting; when omitted, path-derived `VarAC.exe` launches are Wine-wrapped automatically when Wine is available.
+- Changed: Launch Control readiness is now dependency-aware: `JS8Call` must be API-reachable (not only process-running) before it is marked ready, and launch pacing adds targeted settle delays after `VarAC` and before `JS8Spotter`/`CommStat` when they depend on `JS8Call`.
+- Fixed: VarAC custom launch-command mode now hardens launch context by normalizing user/env path tokens and preferring `VarAC Install Folder` as working directory, reducing Linux profile/config drift between desktop-launch and Launch Control.
+- Changed: `VarAC Launch Command` UI wording now marks it as an advanced override and recommends leaving it blank unless default auto-launch fails.
 - Changed: In-app guide wording now clarifies `Resume Schedule`, FLDigi offset expectations (including Operating Group fallback), and `Prompt` vs `On Schedule Change` behavior.
 - Changed: App/documentation version references updated to `1.2.0`.
 
