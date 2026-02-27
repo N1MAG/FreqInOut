@@ -229,11 +229,19 @@ class _ConditionLevelsMultiCombo(QComboBox):
 
     def eventFilter(self, obj, event) -> bool:
         try:
-            if obj is self.view().viewport() and event is not None and event.type() == QEvent.MouseButtonRelease:
-                idx = self.view().indexAt(event.pos())
-                if idx.isValid():
-                    self._toggle_row(int(idx.row()))
-                    return True
+            if obj is self.view().viewport() and event is not None:
+                event_type = event.type()
+                if event_type == QEvent.MouseButtonPress:
+                    idx = self.view().indexAt(event.pos())
+                    if idx.isValid():
+                        self._toggle_row(int(idx.row()))
+                        return True
+                if event_type == QEvent.MouseButtonRelease:
+                    idx = self.view().indexAt(event.pos())
+                    if idx.isValid():
+                        # Consume release so default combo selection handling does not
+                        # re-toggle/close unexpectedly after our manual press toggle.
+                        return True
         except Exception:
             pass
         return super().eventFilter(obj, event)
@@ -589,6 +597,7 @@ class _LegacySOPTab(QWidget):
             self.new_btn,
             self.save_btn,
             self.delete_btn,
+            self.versions_btn,
             self.export_pdf_btn,
             self.export_import_btn,
             self.add_row_btn,
@@ -3610,6 +3619,11 @@ class SOPTab(_LegacySOPTab):
     HF_CONFLICT_MODE_REVIEW_DAILY = "REVIEW_DAILY"
     NET_CONFLICT_MODE_SOP_PRIORITY_TEMP = "SOP_PRIORITY_TEMP"
     NET_CONFLICT_MODE_REVIEW_NET = "REVIEW_NET"
+    WB_FILTER_ALL = "ALL"
+    WB_FILTER_HF = "HF"
+    WB_FILTER_NET = "NET"
+    WB_FILTER_SOP = "SOP"
+    WB_FILTER_NEEDS_TIME = "NEEDS_TIME"
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -3635,6 +3649,14 @@ class SOPTab(_LegacySOPTab):
         self.new_btn = QPushButton("New SOP")
         self.save_btn = QPushButton("Save")
         self.delete_btn = QPushButton("Delete")
+        self.versions_btn = QToolButton()
+        self.versions_btn.setText("Versions")
+        self.versions_btn.setPopupMode(QToolButton.InstantPopup)
+        self.versions_menu = QMenu(self.versions_btn)
+        self.save_version_action = self.versions_menu.addAction("Save Version")
+        self.load_version_action = self.versions_menu.addAction("Load Version")
+        self.delete_version_action = self.versions_menu.addAction("Delete Version")
+        self.versions_btn.setMenu(self.versions_menu)
         self.export_pdf_btn = QPushButton("Export PDF")
         self.export_import_btn = QToolButton()
         self.export_import_btn.setText("Export/Import")
@@ -3647,10 +3669,20 @@ class SOPTab(_LegacySOPTab):
         self.new_btn.clicked.connect(self._new_profile)
         self.save_btn.clicked.connect(self._save_profile)
         self.delete_btn.clicked.connect(self._delete_profile)
+        self.save_version_action.triggered.connect(self._save_current_version)
+        self.load_version_action.triggered.connect(self._load_saved_version)
+        self.delete_version_action.triggered.connect(self._delete_saved_version)
         self.export_pdf_btn.clicked.connect(self._export_pdf)
         self.export_json_action.triggered.connect(self._export_profile)
         self.import_json_action.triggered.connect(self._import_profile)
-        for btn in (self.new_btn, self.save_btn, self.delete_btn, self.export_pdf_btn, self.export_import_btn):
+        for btn in (
+            self.new_btn,
+            self.save_btn,
+            self.delete_btn,
+            self.versions_btn,
+            self.export_pdf_btn,
+            self.export_import_btn,
+        ):
             header.addWidget(btn)
         root.addLayout(header)
 
@@ -3678,6 +3710,9 @@ class SOPTab(_LegacySOPTab):
         )
         self.terms_hint_label.setWordWrap(True)
         cfg_layout.addWidget(self.terms_hint_label)
+        self.sop_workflow_status_label = QLabel("")
+        self.sop_workflow_status_label.setWordWrap(True)
+        cfg_layout.addWidget(self.sop_workflow_status_label)
 
         self.activation_defaults_box = QGroupBox("SOP Activation Conflict Defaults")
         activation_defaults_layout = QFormLayout(self.activation_defaults_box)
@@ -3713,7 +3748,20 @@ class SOPTab(_LegacySOPTab):
         self.activation_conflict_summary_label = QLabel("Conflict Summary: No HF action rows to evaluate yet.")
         self.activation_conflict_summary_label.setWordWrap(True)
         activation_defaults_layout.addRow(self.activation_conflict_summary_label)
+        self.activation_defaults_toggle_btn = QToolButton()
+        self.activation_defaults_toggle_btn.setCheckable(True)
+        self.activation_defaults_toggle_btn.clicked.connect(
+            lambda checked=False: self._set_activation_defaults_expanded(bool(checked))
+        )
+        self.activation_defaults_summary_label = QLabel("")
+        self.activation_defaults_summary_label.setWordWrap(True)
+        activation_header = QHBoxLayout()
+        activation_header.addWidget(self.activation_defaults_toggle_btn)
+        activation_header.addWidget(self.activation_defaults_summary_label, stretch=1)
+        cfg_layout.addLayout(activation_header)
         cfg_layout.addWidget(self.activation_defaults_box)
+        self._activation_defaults_expanded = False
+        self._set_activation_defaults_expanded(False, refresh=False)
 
         rows_head = QHBoxLayout()
         rows_head.addWidget(QLabel("Action Rows"))
@@ -3770,6 +3818,18 @@ class SOPTab(_LegacySOPTab):
         self.actions_table.setColumnWidth(self.COL_CONTACT_TARGET, 170)
         cfg_layout.addWidget(self.actions_table)
 
+        self.conflict_workbench_toggle_btn = QToolButton()
+        self.conflict_workbench_toggle_btn.setCheckable(True)
+        self.conflict_workbench_toggle_btn.clicked.connect(
+            lambda checked=False: self._set_conflict_workbench_expanded(bool(checked))
+        )
+        self.conflict_workbench_summary_label = QLabel("")
+        self.conflict_workbench_summary_label.setWordWrap(True)
+        workbench_header = QHBoxLayout()
+        workbench_header.addWidget(self.conflict_workbench_toggle_btn)
+        workbench_header.addWidget(self.conflict_workbench_summary_label, stretch=1)
+        cfg_layout.addLayout(workbench_header)
+
         self.conflict_workbench_box = QGroupBox("Conflict Workbench")
         conflict_workbench_layout = QVBoxLayout(self.conflict_workbench_box)
         self.conflict_workbench_hint_label = QLabel(
@@ -3777,6 +3837,28 @@ class SOPTab(_LegacySOPTab):
         )
         self.conflict_workbench_hint_label.setWordWrap(True)
         conflict_workbench_layout.addWidget(self.conflict_workbench_hint_label)
+
+        wb_filter_row = QHBoxLayout()
+        self.conflict_workbench_filter_label = QLabel("Show:")
+        wb_filter_row.addWidget(self.conflict_workbench_filter_label)
+        self._conflict_workbench_filter_mode = self.WB_FILTER_ALL
+        self._conflict_workbench_filter_buttons: Dict[str, QToolButton] = {}
+        filter_defs = [
+            (self.WB_FILTER_ALL, "All"),
+            (self.WB_FILTER_HF, "HF"),
+            (self.WB_FILTER_NET, "Net"),
+            (self.WB_FILTER_SOP, "SOP"),
+            (self.WB_FILTER_NEEDS_TIME, "Needs Time"),
+        ]
+        for mode_key, label in filter_defs:
+            btn = QToolButton(self.conflict_workbench_box)
+            btn.setText(label)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _=False, m=mode_key: self._set_conflict_workbench_filter_mode(m))
+            self._conflict_workbench_filter_buttons[mode_key] = btn
+            wb_filter_row.addWidget(btn)
+        wb_filter_row.addStretch()
+        conflict_workbench_layout.addLayout(wb_filter_row)
 
         wb_actions_row = QHBoxLayout()
         self.conflict_workbench_status_label = QLabel("No HF conflicts detected.")
@@ -3832,6 +3914,10 @@ class SOPTab(_LegacySOPTab):
         self.conflict_workbench_table.setMaximumHeight(260)
         conflict_workbench_layout.addWidget(self.conflict_workbench_table)
         cfg_layout.addWidget(self.conflict_workbench_box)
+        self._conflict_workbench_total_conflicts = 0
+        self._conflict_workbench_expanded = False
+        self._set_conflict_workbench_expanded(False, refresh=False)
+        self._set_conflict_workbench_filter_mode(self.WB_FILTER_ALL, refresh=False)
         root.addWidget(cfg_box, stretch=1)
 
         # Compatibility placeholders for inherited methods not used in v2 UI.
@@ -3865,6 +3951,11 @@ class SOPTab(_LegacySOPTab):
         self._conflict_workbench_signature: Tuple[Any, ...] | None = None
         self._conflict_workbench_diag_cache: Dict[int, Dict[str, Any]] = {}
         self._conflict_workbench_suggested_start_utc: Dict[int, str] = {}
+        self._conflict_workbench_suggest_queue: List[int] = []
+        self._conflict_workbench_suggest_timer = QTimer(self)
+        self._conflict_workbench_suggest_timer.setSingleShot(True)
+        self._conflict_workbench_suggest_timer.setInterval(15)
+        self._conflict_workbench_suggest_timer.timeout.connect(self._run_conflict_workbench_auto_suggest_step)
         self._apply_accessibility_width_guards()
         self._update_clock_labels()
         self._update_action_time_headers()
@@ -3918,7 +4009,9 @@ class SOPTab(_LegacySOPTab):
         finally:
             hf_combo.blockSignals(False)
             net_combo.blockSignals(False)
+        self._update_activation_defaults_header_summary()
         self._update_activation_conflict_summary([])
+        self._update_sop_builder_workflow_status(self._last_realtime_hf_analyses_cache)
 
     def _on_activation_conflict_defaults_changed(self, *_args) -> None:
         if getattr(self, "_loading_ui", False):
@@ -3938,10 +4031,171 @@ class SOPTab(_LegacySOPTab):
             )
         except Exception as e:
             log.debug("SOP Builder: failed saving activation conflict defaults: %s", e)
+        self._update_activation_defaults_header_summary()
         try:
             self._update_conflict_workbench_batch_actions()
         except Exception:
             pass
+        self._update_sop_builder_workflow_status(self._last_realtime_hf_analyses_cache)
+
+    def _activation_defaults_summary_text(self) -> str:
+        defaults = self._activation_conflict_defaults()
+        hf_txt = (
+            "Auto-adjust"
+            if defaults.get("hf_mode") == self.HF_CONFLICT_MODE_AUTO_ADJUST
+            else "Review in Daily"
+        )
+        net_txt = (
+            "Temporary SOP Priority"
+            if defaults.get("net_mode") == self.NET_CONFLICT_MODE_SOP_PRIORITY_TEMP
+            else "Review in Net"
+        )
+        return f"HF: {hf_txt} | Net: {net_txt}"
+
+    def _update_activation_defaults_header_summary(self) -> None:
+        label = getattr(self, "activation_defaults_summary_label", None)
+        if not isinstance(label, QLabel):
+            return
+        prefix = "Activation Defaults"
+        summary = self._activation_defaults_summary_text()
+        if bool(getattr(self, "_activation_defaults_expanded", False)):
+            label.setText(f"{prefix}: {summary}")
+        else:
+            label.setText(f"{prefix}: {summary}")
+        btn = getattr(self, "activation_defaults_toggle_btn", None)
+        if isinstance(btn, QToolButton):
+            btn.setText("Hide Defaults" if bool(getattr(self, "_activation_defaults_expanded", False)) else "Show Defaults")
+
+    def _set_activation_defaults_expanded(self, expanded: bool, *, refresh: bool = True) -> None:
+        is_expanded = bool(expanded)
+        self._activation_defaults_expanded = is_expanded
+        box = getattr(self, "activation_defaults_box", None)
+        if isinstance(box, QGroupBox):
+            box.setVisible(is_expanded)
+        btn = getattr(self, "activation_defaults_toggle_btn", None)
+        if isinstance(btn, QToolButton):
+            btn.blockSignals(True)
+            btn.setChecked(is_expanded)
+            btn.blockSignals(False)
+        self._update_activation_defaults_header_summary()
+        self._apply_workflow_section_toggle_styles()
+        if refresh:
+            self._update_sop_builder_workflow_status(self._last_realtime_hf_analyses_cache)
+
+    def _update_conflict_workbench_header_summary(
+        self,
+        *,
+        total_rows: int,
+        visible_rows: int,
+        needs_time_rows: int,
+    ) -> None:
+        label = getattr(self, "conflict_workbench_summary_label", None)
+        btn = getattr(self, "conflict_workbench_toggle_btn", None)
+        total = max(0, int(total_rows))
+        self._conflict_workbench_total_conflicts = total
+        if isinstance(btn, QToolButton):
+            is_expanded = bool(getattr(self, "_conflict_workbench_expanded", False))
+            if is_expanded:
+                btn.setText("Hide Workbench")
+            elif total > 0:
+                btn.setText(f"Review Conflicts ({total})")
+            else:
+                btn.setText("Show Workbench")
+        if not isinstance(label, QLabel):
+            self._apply_workflow_section_toggle_styles()
+            return
+        if total <= 0:
+            label.setText("Conflict Workbench: No conflicts detected.")
+            self._apply_workflow_section_toggle_styles()
+            return
+        if visible_rows != total:
+            base = f"Conflict Workbench: Showing {visible_rows} of {total} conflicts"
+        else:
+            base = f"Conflict Workbench: {total} conflict row(s)"
+        if needs_time_rows > 0:
+            base += f" | {needs_time_rows} need timing changes"
+        label.setText(base)
+        self._apply_workflow_section_toggle_styles()
+
+    def _set_conflict_workbench_expanded(self, expanded: bool, *, refresh: bool = True) -> None:
+        is_expanded = bool(expanded)
+        self._conflict_workbench_expanded = is_expanded
+        box = getattr(self, "conflict_workbench_box", None)
+        if isinstance(box, QGroupBox):
+            box.setVisible(is_expanded)
+        btn = getattr(self, "conflict_workbench_toggle_btn", None)
+        if isinstance(btn, QToolButton):
+            btn.blockSignals(True)
+            btn.setChecked(is_expanded)
+            btn.blockSignals(False)
+            btn.setText("Hide Workbench" if is_expanded else "Show Workbench")
+        self._apply_workflow_section_toggle_styles()
+        if refresh:
+            self._update_sop_builder_workflow_status(self._last_realtime_hf_analyses_cache)
+
+    def _apply_workflow_section_toggle_styles(self) -> None:
+        try:
+            theme = resolve_theme(self.settings)
+        except Exception:
+            return
+        activation_btn = getattr(self, "activation_defaults_toggle_btn", None)
+        if isinstance(activation_btn, QToolButton):
+            activation_btn.setStyleSheet(
+                button_style("eligible_info" if bool(getattr(self, "_activation_defaults_expanded", False)) else "muted", theme)
+            )
+        workbench_btn = getattr(self, "conflict_workbench_toggle_btn", None)
+        if isinstance(workbench_btn, QToolButton):
+            conflict_total = max(0, int(getattr(self, "_conflict_workbench_total_conflicts", 0) or 0))
+            is_expanded = bool(getattr(self, "_conflict_workbench_expanded", False))
+            if is_expanded:
+                wb_role = "eligible_info"
+            elif conflict_total > 0:
+                wb_role = "eligible_warning"
+            else:
+                wb_role = "muted"
+            workbench_btn.setStyleSheet(
+                button_style(wb_role, theme)
+            )
+
+    def _update_sop_builder_workflow_status(
+        self,
+        analyses: List[Tuple[int, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]] | None = None,
+    ) -> None:
+        label = getattr(self, "sop_workflow_status_label", None)
+        if not isinstance(label, QLabel):
+            return
+        cat = self._current_category()
+        total_rows = int(self.actions_table.rowCount()) if isinstance(getattr(self, "actions_table", None), QTableWidget) else 0
+        checked_rows = len(list(analyses or []))
+        conflict_rows = 0
+        needs_time_rows = 0
+        for _row_index, action, diag, _peers in list(analyses or []):
+            if not bool(diag.get("has_conflict")):
+                continue
+            conflict_rows += 1
+            policy = self._action_row_conflict_policy(int(action.get("sort_order") or _row_index))
+            if bool(diag.get("sop_conflicts")) or (
+                policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY}
+                and bool(diag.get("first_occurrence_conflict"))
+            ):
+                needs_time_rows += 1
+        if cat != self.CAT_HF:
+            label.setText("Workflow: 1) Configure Local Comms action rows 2) Review contacts/targets 3) Save.")
+            return
+        defaults_summary = self._activation_defaults_summary_text()
+        if total_rows <= 0:
+            label.setText(f"Workflow: Add action rows, then save. Defaults: {defaults_summary}.")
+            return
+        next_step = "Next: Save SOP."
+        if checked_rows < total_rows:
+            next_step = "Next: complete required fields in Action Rows."
+        elif conflict_rows > 0 and needs_time_rows > 0:
+            next_step = "Next: use Conflict Workbench Suggest/Apply for timing rows, then Save."
+        elif conflict_rows > 0:
+            next_step = "Next: review policy choices in Conflict Workbench, then Save."
+        label.setText(
+            f"Workflow: Rows validated {checked_rows}/{total_rows} | Conflicts {conflict_rows} | Timing {needs_time_rows}. {next_step} Defaults: {defaults_summary}."
+        )
 
     def _update_activation_conflict_summary(
         self,
@@ -3952,16 +4206,19 @@ class SOPTab(_LegacySOPTab):
             return
         if self._current_category() != self.CAT_HF:
             label.setText("Conflict Summary: Local Comms SOP does not use HF/Net conflict checks.")
+            self._update_sop_builder_workflow_status([])
             return
         total_rows = int(self.actions_table.rowCount()) if isinstance(getattr(self, "actions_table", None), QTableWidget) else 0
         if total_rows <= 0:
             label.setText("Conflict Summary: No action rows to evaluate.")
+            self._update_sop_builder_workflow_status([])
             return
         checked = list(analyses or [])
         if not checked:
             label.setText(
                 "Conflict Summary: Pending. Complete Group, Action, Band-Freq, Start, Duration, and Interval to evaluate conflicts."
             )
+            self._update_sop_builder_workflow_status([])
             return
         rows_with_any = 0
         rows_hf = 0
@@ -3989,6 +4246,7 @@ class SOPTab(_LegacySOPTab):
         if pending_rows > 0:
             parts.append(f"Pending rows: {pending_rows}")
         label.setText("Conflict Summary: " + " | ".join(parts))
+        self._update_sop_builder_workflow_status(checked)
 
     def _action_row_group_combo(self, row_index: int) -> QComboBox | None:
         try:
@@ -4048,6 +4306,64 @@ class SOPTab(_LegacySOPTab):
         if row_index < 0:
             return
         self._set_action_row_conflict_policy(row_index, combo.currentData())
+
+    def _normalize_conflict_workbench_filter_mode(self, value: Any) -> str:
+        raw = str(value or "").strip().upper()
+        valid = {
+            self.WB_FILTER_ALL,
+            self.WB_FILTER_HF,
+            self.WB_FILTER_NET,
+            self.WB_FILTER_SOP,
+            self.WB_FILTER_NEEDS_TIME,
+        }
+        return raw if raw in valid else self.WB_FILTER_ALL
+
+    def _apply_conflict_workbench_filter_button_styles(self) -> None:
+        try:
+            theme = resolve_theme(self.settings)
+        except Exception:
+            return
+        for mode_key, btn in dict(getattr(self, "_conflict_workbench_filter_buttons", {}) or {}).items():
+            if not isinstance(btn, QToolButton):
+                continue
+            role = "eligible_primary" if str(mode_key) == str(getattr(self, "_conflict_workbench_filter_mode", self.WB_FILTER_ALL)) else "muted"
+            btn.setStyleSheet(button_style(role, theme))
+
+    def _set_conflict_workbench_filter_mode(self, mode: Any, *, refresh: bool = True) -> None:
+        selected = self._normalize_conflict_workbench_filter_mode(mode)
+        self._conflict_workbench_filter_mode = selected
+        for mode_key, btn in dict(getattr(self, "_conflict_workbench_filter_buttons", {}) or {}).items():
+            if not isinstance(btn, QToolButton):
+                continue
+            btn.blockSignals(True)
+            btn.setChecked(str(mode_key) == selected)
+            btn.blockSignals(False)
+        self._apply_conflict_workbench_filter_button_styles()
+        if refresh:
+            self._update_conflict_workbench(self._last_realtime_hf_analyses_cache, force=True)
+            self._update_sop_builder_workflow_status(self._last_realtime_hf_analyses_cache)
+
+    def _workbench_row_matches_filter(
+        self,
+        *,
+        diag: Dict[str, Any],
+        policy: str,
+    ) -> bool:
+        mode = self._normalize_conflict_workbench_filter_mode(getattr(self, "_conflict_workbench_filter_mode", self.WB_FILTER_ALL))
+        has_daily = bool(diag.get("daily_conflicts"))
+        has_net = bool(diag.get("net_conflicts"))
+        has_sop = bool(diag.get("sop_conflicts"))
+        first_occurrence = bool(diag.get("first_occurrence_conflict"))
+        needs_time = has_sop or (policy in {self.manager.CONFLICT_POLICY_NET, self.manager.CONFLICT_POLICY_DAILY} and first_occurrence)
+        if mode == self.WB_FILTER_HF:
+            return has_daily
+        if mode == self.WB_FILTER_NET:
+            return has_net
+        if mode == self.WB_FILTER_SOP:
+            return has_sop
+        if mode == self.WB_FILTER_NEEDS_TIME:
+            return needs_time
+        return True
 
     def _conflict_workbench_action_state(self) -> Dict[str, int | bool]:
         rows_total = 0
@@ -4259,6 +4575,83 @@ class SOPTab(_LegacySOPTab):
             return
         self._request_conflict_workbench_suggested_start(row_index)
 
+    def _compute_conflict_workbench_suggested_start_utc(self, row_index: int) -> str:
+        if self._current_category() != self.CAT_HF:
+            return ""
+        try:
+            target_row = int(row_index)
+        except Exception:
+            return ""
+        action_rows = self._collect_hf_actions_for_realtime()
+        action_map = {int(r): dict(a) for r, a in action_rows if isinstance(a, dict)}
+        action = action_map.get(target_row)
+        if not isinstance(action, dict):
+            return ""
+        peers = [dict(other) for r, other in action_rows if int(r) != target_row and isinstance(other, dict)]
+        group_name = str(action.get("group_name") or "").strip().upper()
+        try:
+            suggested_utc = self.manager.suggest_non_conflicting_start(
+                action=action,
+                operating_group=group_name,
+                check_all_groups=True,
+                peer_actions=peers,
+            )
+        except Exception as e:
+            log.debug("SOP Builder: failed computing workbench suggested start for row %s: %s", target_row, e)
+            suggested_utc = ""
+        return self.manager._normalize_hhmm(suggested_utc or "")
+
+    def _queue_conflict_workbench_auto_suggestions(self, row_indices: List[int]) -> None:
+        if self._current_category() != self.CAT_HF:
+            return
+        pending = list(getattr(self, "_conflict_workbench_suggest_queue", []) or [])
+        valid_rows = {int(r) for r in self._conflict_workbench_diag_cache.keys()}
+        pending = [
+            int(r)
+            for r in pending
+            if int(r) in valid_rows and not bool(self._conflict_workbench_suggested_start_utc.get(int(r)))
+        ]
+        for row_index in row_indices:
+            try:
+                row = int(row_index)
+            except Exception:
+                continue
+            if row not in valid_rows:
+                continue
+            if bool(self._conflict_workbench_suggested_start_utc.get(row)):
+                continue
+            if row not in pending:
+                pending.append(row)
+        self._conflict_workbench_suggest_queue = pending
+        timer = getattr(self, "_conflict_workbench_suggest_timer", None)
+        if pending and isinstance(timer, QTimer) and not timer.isActive():
+            self._conflict_workbench_suggest_timer.start()
+
+    def _run_conflict_workbench_auto_suggest_step(self) -> None:
+        if self._current_category() != self.CAT_HF:
+            self._conflict_workbench_suggest_queue = []
+            return
+        queue = list(getattr(self, "_conflict_workbench_suggest_queue", []) or [])
+        if not queue:
+            self._conflict_workbench_suggest_queue = []
+            return
+        row_index = int(queue.pop(0))
+        self._conflict_workbench_suggest_queue = queue
+        if row_index not in self._conflict_workbench_diag_cache:
+            if queue:
+                self._conflict_workbench_suggest_timer.start()
+            return
+        if bool(self._conflict_workbench_suggested_start_utc.get(row_index)):
+            if queue:
+                self._conflict_workbench_suggest_timer.start()
+            return
+        suggested_utc = self._compute_conflict_workbench_suggested_start_utc(row_index)
+        if suggested_utc:
+            self._conflict_workbench_suggested_start_utc[row_index] = suggested_utc
+            self._update_conflict_workbench(self._last_realtime_hf_analyses_cache, force=True)
+        if self._conflict_workbench_suggest_queue:
+            self._conflict_workbench_suggest_timer.start()
+
     def _apply_conflict_workbench_suggested_start_for_button(self, btn: QPushButton) -> None:
         if not isinstance(btn, QPushButton):
             return
@@ -4277,27 +4670,7 @@ class SOPTab(_LegacySOPTab):
             target_row = int(row_index)
         except Exception:
             return
-        action_rows = self._collect_hf_actions_for_realtime()
-        action_map = {int(r): dict(a) for r, a in action_rows if isinstance(a, dict)}
-        action = action_map.get(target_row)
-        if not isinstance(action, dict):
-            status_label = getattr(self, "conflict_workbench_status_label", None)
-            if isinstance(status_label, QLabel):
-                status_label.setText("Complete row fields before requesting a suggested start time.")
-            return
-        peers = [dict(other) for r, other in action_rows if int(r) != target_row and isinstance(other, dict)]
-        group_name = str(action.get("group_name") or "").strip().upper()
-        try:
-            suggested_utc = self.manager.suggest_non_conflicting_start(
-                action=action,
-                operating_group=group_name,
-                check_all_groups=True,
-                peer_actions=peers,
-            )
-        except Exception as e:
-            log.debug("SOP Builder: failed computing workbench suggested start for row %s: %s", target_row, e)
-            suggested_utc = ""
-        suggested_utc = self.manager._normalize_hhmm(suggested_utc or "")
+        suggested_utc = self._compute_conflict_workbench_suggested_start_utc(target_row)
         if not suggested_utc:
             status_label = getattr(self, "conflict_workbench_status_label", None)
             if isinstance(status_label, QLabel):
@@ -4360,19 +4733,30 @@ class SOPTab(_LegacySOPTab):
         if not isinstance(box, QGroupBox) or not isinstance(table, QTableWidget) or not isinstance(status_label, QLabel):
             return
         if self._current_category() != self.CAT_HF:
-            box.setVisible(False)
+            self._set_conflict_workbench_expanded(False, refresh=False)
             table.setRowCount(0)
             self._conflict_workbench_diag_cache = {}
             self._conflict_workbench_suggested_start_utc = {}
+            self._conflict_workbench_suggest_queue = []
+            try:
+                self._conflict_workbench_suggest_timer.stop()
+            except Exception:
+                pass
             self._conflict_workbench_signature = None
+            self._update_conflict_workbench_header_summary(total_rows=0, visible_rows=0, needs_time_rows=0)
             return
 
-        box.setVisible(True)
-        rows: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
+        rows_all: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
         for row_index, action, diag, _peers in list(analyses or []):
             if not isinstance(diag, dict) or not bool(diag.get("has_conflict")):
                 continue
-            rows.append((int(row_index), dict(action or {}), dict(diag or {})))
+            rows_all.append((int(row_index), dict(action or {}), dict(diag or {})))
+        rows: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
+        for row_index, action_row, diag_row in rows_all:
+            policy_for_filter = self._action_row_conflict_policy(int(row_index))
+            if not self._workbench_row_matches_filter(diag=diag_row, policy=policy_for_filter):
+                continue
+            rows.append((int(row_index), dict(action_row), dict(diag_row)))
 
         pending_rows = max(0, int(self.actions_table.rowCount()) - len(list(analyses or [])))
         signature_rows: List[Tuple[Any, ...]] = []
@@ -4393,11 +4777,21 @@ class SOPTab(_LegacySOPTab):
                     bool(diag.get("sop_conflicts")),
                 )
             )
-        signature = (tuple(signature_rows), int(pending_rows))
+        signature = (
+            self._normalize_conflict_workbench_filter_mode(getattr(self, "_conflict_workbench_filter_mode", self.WB_FILTER_ALL)),
+            int(len(rows_all)),
+            tuple(signature_rows),
+            int(pending_rows),
+        )
         if (not force) and signature == getattr(self, "_conflict_workbench_signature", None):
             return
         if signature != getattr(self, "_conflict_workbench_signature", None):
             self._conflict_workbench_suggested_start_utc = {}
+            self._conflict_workbench_suggest_queue = []
+            try:
+                self._conflict_workbench_suggest_timer.stop()
+            except Exception:
+                pass
         self._conflict_workbench_signature = signature
 
         def _readonly_item(text: str) -> QTableWidgetItem:
@@ -4410,6 +4804,7 @@ class SOPTab(_LegacySOPTab):
             table.setRowCount(len(rows))
             self._conflict_workbench_diag_cache = {int(row_index): dict(diag) for row_index, _action, diag in rows}
             needs_time_count = 0
+            rows_needing_suggest: List[int] = []
             for t_row, (row_index, action, diag) in enumerate(rows):
                 policy = self._action_row_conflict_policy(row_index)
                 has_sop_conflict = bool(diag.get("sop_conflicts"))
@@ -4446,39 +4841,39 @@ class SOPTab(_LegacySOPTab):
                 policy_combo.currentIndexChanged.connect(lambda _=0, c=policy_combo: self._workbench_policy_combo_changed(c))
                 table.setCellWidget(t_row, self.WB_COL_POLICY, policy_combo)
 
-                suggested_btn = QToolButton(table)
-                suggested_btn.setProperty("sop_row_index", int(row_index))
-                suggested_btn.clicked.connect(
-                    lambda _=False, b=suggested_btn: self._request_conflict_workbench_suggested_start_for_button(b)
-                )
-                apply_btn = QPushButton("Apply", table)
-                apply_btn.setProperty("sop_row_index", int(row_index))
-                apply_btn.clicked.connect(
-                    lambda _=False, b=apply_btn: self._apply_conflict_workbench_suggested_start_for_button(b)
-                )
-                suggested_utc = self.manager._normalize_hhmm(self._conflict_workbench_suggested_start_utc.get(int(row_index)) or "")
+                table.removeCellWidget(t_row, self.WB_COL_SUGGESTED)
+                table.removeCellWidget(t_row, self.WB_COL_APPLY)
                 if needs_time:
+                    suggested_btn = QToolButton(table)
+                    suggested_btn.setProperty("sop_row_index", int(row_index))
+                    suggested_btn.clicked.connect(
+                        lambda _=False, b=suggested_btn: self._request_conflict_workbench_suggested_start_for_button(b)
+                    )
+                    apply_btn = QPushButton("Apply", table)
+                    apply_btn.setProperty("sop_row_index", int(row_index))
+                    apply_btn.clicked.connect(
+                        lambda _=False, b=apply_btn: self._apply_conflict_workbench_suggested_start_for_button(b)
+                    )
+                    suggested_utc = self.manager._normalize_hhmm(
+                        self._conflict_workbench_suggested_start_utc.get(int(row_index)) or ""
+                    )
                     if suggested_utc:
                         suggested_display = self._display_start_hhmm_from_utc(suggested_utc, show_local=self._show_local)
                         suggested_btn.setText(suggested_display)
                         suggested_btn.setToolTip("Recompute suggested non-conflicting start.")
+                        apply_btn.setEnabled(True)
+                        apply_btn.setToolTip("Apply the suggested start to the SOP action row.")
                     else:
-                        suggested_btn.setText("Suggest")
-                        suggested_btn.setToolTip("Compute a suggested non-conflicting start time for this row.")
-                    apply_btn.setEnabled(bool(suggested_utc))
-                    apply_btn.setToolTip(
-                        "Apply the suggested start to the SOP action row."
-                        if bool(suggested_utc)
-                        else "Click Suggest first to compute a proposed start time."
-                    )
+                        rows_needing_suggest.append(int(row_index))
+                        suggested_btn.setText("Computing...")
+                        suggested_btn.setToolTip("Auto-computing suggested start. Click to compute immediately.")
+                        apply_btn.setEnabled(False)
+                        apply_btn.setToolTip("Waiting for suggested start.")
+                    table.setCellWidget(t_row, self.WB_COL_SUGGESTED, suggested_btn)
+                    table.setCellWidget(t_row, self.WB_COL_APPLY, apply_btn)
                 else:
-                    suggested_btn.setText("-")
-                    suggested_btn.setEnabled(False)
-                    suggested_btn.setToolTip("No timing adjustment is needed for this row.")
-                    apply_btn.setEnabled(False)
-                    apply_btn.setToolTip("No timing adjustment is needed for this row.")
-                table.setCellWidget(t_row, self.WB_COL_SUGGESTED, suggested_btn)
-                table.setCellWidget(t_row, self.WB_COL_APPLY, apply_btn)
+                    table.setItem(t_row, self.WB_COL_SUGGESTED, _readonly_item("Not needed"))
+                    table.setItem(t_row, self.WB_COL_APPLY, _readonly_item(""))
 
                 detail_btn = QToolButton(table)
                 detail_btn.setText("Details")
@@ -4487,14 +4882,33 @@ class SOPTab(_LegacySOPTab):
                 table.setCellWidget(t_row, self.WB_COL_DETAILS, detail_btn)
 
             if not rows:
-                if pending_rows > 0:
+                filter_mode = self._normalize_conflict_workbench_filter_mode(
+                    getattr(self, "_conflict_workbench_filter_mode", self.WB_FILTER_ALL)
+                )
+                filter_labels = {
+                    self.WB_FILTER_ALL: "All",
+                    self.WB_FILTER_HF: "HF",
+                    self.WB_FILTER_NET: "Net",
+                    self.WB_FILTER_SOP: "SOP",
+                    self.WB_FILTER_NEEDS_TIME: "Needs Time",
+                }
+                filter_label = filter_labels.get(filter_mode, "All")
+                if rows_all and filter_mode != self.WB_FILTER_ALL:
+                    status_label.setText(
+                        f"No conflicts match filter '{filter_label}'. Showing 0 of {len(rows_all)} conflicting row(s)."
+                    )
+                elif pending_rows > 0:
                     status_label.setText(
                         "No actionable conflicts yet. Complete HF action row fields to evaluate conflicts."
                     )
                 else:
                     status_label.setText("No HF conflicts detected.")
             else:
-                status_text = f"{len(rows)} conflicting row(s)"
+                status_text = (
+                    f"Showing {len(rows)} of {len(rows_all)} conflicting row(s)"
+                    if len(rows) != len(rows_all)
+                    else f"{len(rows)} conflicting row(s)"
+                )
                 if needs_time_count > 0:
                     status_text += f" | {needs_time_count} still need timing changes at Save"
                 state = self._conflict_workbench_action_state()
@@ -4504,7 +4918,13 @@ class SOPTab(_LegacySOPTab):
                     status_text += f" | {pending_rows} row(s) pending validation"
                 status_label.setText(status_text)
 
+            self._update_conflict_workbench_header_summary(
+                total_rows=len(rows_all),
+                visible_rows=len(rows),
+                needs_time_rows=needs_time_count,
+            )
             self._update_conflict_workbench_batch_actions()
+            self._queue_conflict_workbench_auto_suggestions(rows_needing_suggest)
         finally:
             self._conflict_workbench_updating = False
 
@@ -4885,7 +5305,11 @@ class SOPTab(_LegacySOPTab):
             getattr(self, "workbench_set_net_btn", None),
             getattr(self, "workbench_set_daily_btn", None),
             getattr(self, "workbench_apply_defaults_btn", None),
+            getattr(self, "activation_defaults_toggle_btn", None),
+            getattr(self, "conflict_workbench_toggle_btn", None),
         ]
+        for _mode_key, _btn in dict(getattr(self, "_conflict_workbench_filter_buttons", {}) or {}).items():
+            buttons.append(_btn)
         for btn in buttons:
             if btn is None:
                 continue
@@ -5216,11 +5640,19 @@ class SOPTab(_LegacySOPTab):
         cat = self._current_category()
         is_hf = cat == self.CAT_HF
         try:
-            self.activation_defaults_box.setVisible(is_hf)
+            self.activation_defaults_toggle_btn.setVisible(is_hf)
+            self.activation_defaults_summary_label.setVisible(is_hf)
+            self.activation_defaults_box.setVisible(is_hf and bool(getattr(self, "_activation_defaults_expanded", False)))
         except Exception:
             pass
         try:
-            self.conflict_workbench_box.setVisible(is_hf)
+            self.conflict_workbench_toggle_btn.setVisible(is_hf)
+            self.conflict_workbench_summary_label.setVisible(is_hf)
+            self.conflict_workbench_filter_label.setVisible(is_hf)
+            for _mode_key, _btn in dict(getattr(self, "_conflict_workbench_filter_buttons", {}) or {}).items():
+                if isinstance(_btn, QToolButton):
+                    _btn.setVisible(is_hf)
+            self.conflict_workbench_box.setVisible(is_hf and bool(getattr(self, "_conflict_workbench_expanded", False)))
         except Exception:
             pass
         self.actions_table.setColumnHidden(self.COL_COND, not is_hf)
@@ -5228,6 +5660,9 @@ class SOPTab(_LegacySOPTab):
         self.actions_table.setColumnHidden(self.COL_MODE, is_hf)
         self.actions_table.setColumnHidden(self.COL_END, True)
         self.actions_table.setColumnHidden(self.COL_CONFLICT, not is_hf)
+        self._update_activation_defaults_header_summary()
+        self._apply_workflow_section_toggle_styles()
+        self._apply_conflict_workbench_filter_button_styles()
         self._apply_action_table_visual_order()
         self._autosize_actions_table()
         self._refresh_inline_conflict_badges()
@@ -5363,6 +5798,181 @@ class SOPTab(_LegacySOPTab):
                 self.active_cb.setChecked(False)
                 self._set_save_dirty(True)
 
+    def _category_display_label(self, category: str) -> str:
+        cat = self.manager._normalize_category(category)
+        return "HF SOP" if cat == self.CAT_HF else "Local Comms SOP"
+
+    @staticmethod
+    def _version_time_label(iso_text: str) -> str:
+        txt = str(iso_text or "").strip()
+        if not txt:
+            return "Unknown time"
+        return txt.replace("T", " ").replace("+00:00", "Z")
+
+    def _pick_saved_version(self, *, purpose_title: str) -> Dict[str, Any] | None:
+        category = self._current_category()
+        versions = self.manager.list_profile_versions(category=category, limit=250)
+        if not versions:
+            QMessageBox.information(
+                self,
+                "SOP Versions",
+                f"No saved versions for {self._category_display_label(category)}.",
+            )
+            return None
+        labels: List[str] = []
+        for row in versions:
+            vid = int(row.get("id") or 0)
+            label = str(row.get("label") or "").strip() or f"Version {vid}"
+            created = self._version_time_label(str(row.get("created_utc") or ""))
+            actions = int(row.get("action_count") or 0)
+            note = str(row.get("note") or "").strip()
+            display = f"#{vid} | {created} | {label} | {actions} action(s)"
+            if note:
+                display += f" | {note[:72]}"
+            labels.append(display)
+        choice, ok = QInputDialog.getItem(self, purpose_title, "Select version:", labels, 0, False)
+        if not ok or not choice:
+            return None
+        try:
+            idx = labels.index(choice)
+        except Exception:
+            idx = -1
+        if idx < 0 or idx >= len(versions):
+            return None
+        return dict(versions[idx])
+
+    def _save_current_version(self) -> None:
+        category = self._current_category()
+        if int(self._selected_profile_id or 0) <= 0:
+            QMessageBox.warning(self, "SOP Versions", "Select a SOP profile first.")
+            return
+        default_label = self.manager.default_profile_version_label(category)
+        label, ok = QInputDialog.getText(
+            self,
+            "Save SOP Version",
+            f"Version name ({self._category_display_label(category)}):",
+            text=default_label,
+        )
+        if not ok:
+            return
+        try:
+            payload, actions, schedule_layer = self._collect_profile_payload()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "SOP Versions",
+                f"Version save needs valid action rows.\n\n{e}",
+            )
+            return
+        snapshot_profile = dict(payload)
+        snapshot_profile["id"] = int(self._selected_profile_id or 0)
+        snapshot = {
+            "schema_version": 1,
+            "captured_utc": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat(),
+            "profile": snapshot_profile,
+            "actions": [dict(row) for row in (actions or []) if isinstance(row, dict)],
+            "schedule_layer": [dict(row) for row in (schedule_layer or []) if isinstance(row, dict)],
+        }
+        try:
+            version_id = int(
+                self.manager.save_profile_version(
+                    category=category,
+                    snapshot=snapshot,
+                    label=str(label or "").strip(),
+                    note="",
+                )
+                or 0
+            )
+            if version_id <= 0:
+                raise RuntimeError("Version save returned no version id.")
+            QMessageBox.information(self, "SOP Versions", f"Saved version #{version_id}.")
+        except Exception as e:
+            QMessageBox.warning(self, "SOP Versions", f"Could not save version:\n{e}")
+
+    def _load_saved_version(self) -> None:
+        selected = self._pick_saved_version(purpose_title="Load SOP Version")
+        if not selected:
+            return
+        if bool(self._dirty):
+            resp = QMessageBox.question(
+                self,
+                "Load SOP Version",
+                "Discard unsaved edits and load this saved version into SOP Builder?",
+            )
+            if resp != QMessageBox.Yes:
+                return
+        version_id = int(selected.get("id") or 0)
+        if version_id <= 0:
+            return
+        loaded = self.manager.get_profile_version(version_id)
+        if not loaded:
+            QMessageBox.warning(self, "SOP Versions", "Selected version could not be loaded.")
+            return
+        snapshot = loaded.get("snapshot")
+        if not isinstance(snapshot, dict):
+            QMessageBox.warning(self, "SOP Versions", "Saved version snapshot is invalid.")
+            return
+        profile = snapshot.get("profile")
+        if not isinstance(profile, dict):
+            QMessageBox.warning(self, "SOP Versions", "Saved version is missing profile data.")
+            return
+        target_category = self._current_category()
+        snap_category = self.manager._normalize_category(profile.get("category") or target_category)
+        if snap_category != target_category:
+            QMessageBox.warning(
+                self,
+                "SOP Versions",
+                "Saved version category does not match current SOP category.",
+            )
+            return
+        actions_raw = snapshot.get("actions")
+        actions = [dict(row) for row in actions_raw if isinstance(row, dict)] if isinstance(actions_raw, list) else []
+        if target_category == self.CAT_HF:
+            actions = [row for row in actions if not self._is_local_action_dict(row)]
+        else:
+            actions = [row for row in actions if self._is_local_action_dict(row)]
+        self._loading_ui = True
+        try:
+            self.name_edit.setText(
+                str(profile.get("name") or self._category_display_label(target_category))
+            )
+            self.active_cb.setChecked(bool(profile.get("active")))
+            self.category_combo.setCurrentIndex(0 if target_category == self.CAT_HF else 1)
+            self._populate_actions(actions)
+        finally:
+            self._loading_ui = False
+        self._apply_category_table_view()
+        self._set_save_dirty(True)
+        self._schedule_realtime_hf_conflict_check()
+        QMessageBox.information(
+            self,
+            "SOP Versions",
+            "Version loaded into SOP Builder. Click Save to apply it.",
+        )
+
+    def _delete_saved_version(self) -> None:
+        selected = self._pick_saved_version(purpose_title="Delete SOP Version")
+        if not selected:
+            return
+        version_id = int(selected.get("id") or 0)
+        if version_id <= 0:
+            return
+        label = str(selected.get("label") or f"Version {version_id}").strip()
+        resp = QMessageBox.question(
+            self,
+            "Delete SOP Version",
+            f"Delete saved version '{label}'?",
+        )
+        if resp != QMessageBox.Yes:
+            return
+        try:
+            if not self.manager.delete_profile_version(version_id):
+                QMessageBox.warning(self, "SOP Versions", "Version could not be deleted.")
+                return
+            QMessageBox.information(self, "SOP Versions", f"Deleted version '{label}'.")
+        except Exception as e:
+            QMessageBox.warning(self, "SOP Versions", f"Could not delete version:\n{e}")
+
     def _update_profile_action_styles(self, theme: Dict[str, str] | None = None) -> None:
         try:
             if theme is None:
@@ -5373,6 +5983,8 @@ class SOPTab(_LegacySOPTab):
             self.save_btn.setEnabled(True)
             self.delete_btn.setEnabled(has_profile)
             self.delete_btn.setStyleSheet(button_style("eligible_danger" if has_profile else "muted", theme))
+            self.versions_btn.setEnabled(has_profile)
+            self.versions_btn.setStyleSheet(button_style("muted", theme))
             self.export_pdf_btn.setEnabled(True)
             self.export_pdf_btn.setStyleSheet(button_style("muted", theme))
             self.export_import_btn.setEnabled(True)
@@ -5561,7 +6173,6 @@ class SOPTab(_LegacySOPTab):
 
         cond_combo = _ConditionLevelsMultiCombo()
         initial_cond = self.manager._normalize_condition_levels((existing or {}).get("condition_levels") or "ALL")
-        cond_combo.set_normalized_value(initial_cond, emit=False)
         self._fit_combo_popup(cond_combo)
         self.actions_table.setCellWidget(row, self.COL_COND, cond_combo)
 
@@ -5666,6 +6277,16 @@ class SOPTab(_LegacySOPTab):
         idx_contact = contact_combo.findData(existing_contact)
         if idx_contact >= 0:
             contact_combo.setCurrentIndex(idx_contact)
+        resolved_group = group_combo.currentText().strip().upper()
+        if cat == self.CAT_HF and self._hf_group_uses_condition_levels(resolved_group):
+            cond_combo.set_normalized_value(initial_cond, emit=False)
+        else:
+            cond_combo.set_normalized_value("ALL", emit=False)
+        self._refresh_action_row_condition_widget(
+            category=cat,
+            group_name=resolved_group,
+            cond_widget=cond_combo,
+        )
 
         group_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
         group_combo.currentTextChanged.connect(lambda _=None, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
@@ -6143,6 +6764,18 @@ class SOPTab(_LegacySOPTab):
             return True
         if not manual_conflicts:
             return True
+        try:
+            # Manual-first UX while editing; force open only at Save when unresolved
+            # timing conflicts remain and user attention is needed.
+            self._set_conflict_workbench_expanded(True, refresh=False)
+            self._update_conflict_workbench(self._last_realtime_hf_analyses_cache, force=True)
+            status_label = getattr(self, "conflict_workbench_status_label", None)
+            if isinstance(status_label, QLabel):
+                status_label.setText(
+                    f"Save requires conflict resolution: {len(manual_conflicts)} row(s) still need timing changes."
+                )
+        except Exception:
+            pass
         return self._resolve_hf_conflicts_dialog(
             manual_conflicts,
             hf_peer_actions,
@@ -6446,6 +7079,16 @@ class SOPTab(_LegacySOPTab):
     def refresh_upcoming(self) -> None:
         self._upcoming_rows = []
 
+    def on_condition_levels_changed(self) -> None:
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        self._refresh_reference_data()
+        self._refresh_all_rows_dynamic_options()
+        self._refresh_inline_conflict_badges()
+        self._schedule_realtime_hf_conflict_check()
+
     def on_settings_saved(self) -> None:
         try:
             self.settings.reload()
@@ -6540,8 +7183,14 @@ class SOPTab(_LegacySOPTab):
                 )
             if hasattr(self, "conflict_workbench_hint_label"):
                 self.conflict_workbench_hint_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
+            if hasattr(self, "conflict_workbench_filter_label"):
+                self.conflict_workbench_filter_label.setStyleSheet(f"color: {theme.get('text_muted', '#888')};")
             if hasattr(self, "conflict_workbench_status_label"):
                 self.conflict_workbench_status_label.setStyleSheet(
+                    f"color: {theme.get('text', '#e5e7eb')}; font-weight: 600;"
+                )
+            if hasattr(self, "sop_workflow_status_label"):
+                self.sop_workflow_status_label.setStyleSheet(
                     f"color: {theme.get('text', '#e5e7eb')}; font-weight: 600;"
                 )
             for btn_name in (
@@ -6557,6 +7206,8 @@ class SOPTab(_LegacySOPTab):
             self._update_profile_action_styles(theme)
             self._apply_accessibility_width_guards()
             self._refresh_inline_conflict_badges()
+            self._apply_workflow_section_toggle_styles()
+            self._apply_conflict_workbench_filter_button_styles()
             self._update_conflict_workbench_batch_actions()
         except Exception:
             pass

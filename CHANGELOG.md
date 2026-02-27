@@ -10,6 +10,12 @@
 - Fixed: Clicking `QSY Now` from `ControlFreq` `Schedule Outlook` now forces a hero-frequency resync so the Frequency Control hero indicator reflects the active frequency after QSY.
 - Fixed: `ControlFreq` Frequency Control hero indicator now re-syncs when the scheduler changes to a new scheduled frequency, preventing stale hero frequency display after automatic schedule-driven QSY changes.
 - Fixed: `ControlFreq` top-row clock/time display now stays contained on narrower window widths by allowing shrink/eliding instead of forcing a large minimum width that could overflow the right edge.
+- Added: `SOP Builder` now includes a `Versions` menu (`Save Version`, `Load Version`, `Delete Version`) so operators can keep named HF/Local SOP snapshots and load them back into the builder as drafts.
+- Added: `SOP Builder` now provides a guided conflict workflow with collapsible `Activation Defaults` and `Conflict Workbench`, workbench filters, and clearer next-step/readiness guidance.
+- Changed: `SOP Builder` `Suggested Start` behavior now auto-computes timing suggestions for timing conflicts and explicitly shows `Not needed` for rows that do not require a timing adjustment.
+- Fixed: SOP action-row `Condition Levels` multi-select interaction and persistence were stabilized so saved condition-level edits reliably reload and render across tabs.
+- Changed: Main-tab condition-level edits now fan out through a lightweight debounced refresh path so SOP/FreqPlanner/ControlFreq updates are faster and automation-ready.
+- Changed: VarAC BBS archive behavior is now explicit and consistent: manual `Archive` moves files from `BBS Directory` to `BBS Archive`, and auto-archive runs on first Messages activation after startup and then periodically (daily).
 - Changed: In-app guide wording now clarifies `Resume Schedule`, FLDigi offset expectations (including Operating Group fallback), and `Prompt` vs `On Schedule Change` behavior.
 - Changed: App/documentation version references updated to `1.2.0`.
 

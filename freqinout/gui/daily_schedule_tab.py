@@ -1505,12 +1505,11 @@ class DailyScheduleTab(QWidget):
 
         for row in rows[:2]:
             profile_id = int(row.get("profile_id") or 0)
-            group_name = str(row.get("group_name") or "").strip() or str(row.get("profile_name") or "").strip() or "HF"
             active = bool(row.get("active"))
             status_txt = str(row.get("status") or "Inactive").strip()
             issue_summary = str(row.get("issue_summary") or "").strip()
 
-            btn = QPushButton(f"{group_name} SOP: {'Active' if active else 'Inactive'}")
+            btn = QPushButton(f"HF SOP: {'Active' if active else 'Inactive'}")
             if status_txt == "Conflict":
                 role = "eligible_warning"
             elif active:

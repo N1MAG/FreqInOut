@@ -149,6 +149,7 @@ class MainWindow(QMainWindow):
         ]
         self._screen_index_by_label = {label: idx for idx, (label, _w) in enumerate(self._screens)}
         self._condition_levels_signature: tuple[tuple[str, int], ...] = tuple()
+        self._condition_levels_refresh_pending = False
         self._scheduler_status_reason_lines_signature: tuple[str, ...] | None = None
         # Sidebar button order/text requested by user. Keep SOP accessible via in-app links,
         # but do not show it as a primary sidebar button.
@@ -438,6 +439,10 @@ class MainWindow(QMainWindow):
         self._status_timer.timeout.connect(self._refresh_condition_level_panel)
         self._status_timer.timeout.connect(self._check_timed_debug_expiry)
         self._status_timer.start()
+        self._condition_levels_refresh_timer = QTimer(self)
+        self._condition_levels_refresh_timer.setSingleShot(True)
+        self._condition_levels_refresh_timer.setInterval(90)
+        self._condition_levels_refresh_timer.timeout.connect(self._apply_condition_levels_changed)
 
         app = QApplication.instance()
         if app is not None:
@@ -2090,6 +2095,68 @@ class MainWindow(QMainWindow):
                 return widget
         return None
 
+    def _queue_condition_levels_changed(self) -> None:
+        self._condition_levels_refresh_pending = True
+        timer = getattr(self, "_condition_levels_refresh_timer", None)
+        if isinstance(timer, QTimer):
+            timer.start()
+            return
+        # Fallback path if timer initialization failed for any reason.
+        self._apply_condition_levels_changed()
+
+    def notify_condition_levels_changed(self) -> None:
+        self._queue_condition_levels_changed()
+
+    def _apply_condition_levels_changed(self) -> None:
+        if not bool(getattr(self, "_condition_levels_refresh_pending", False)):
+            return
+        self._condition_levels_refresh_pending = False
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        try:
+            self._refresh_condition_level_panel()
+        except Exception:
+            pass
+        try:
+            self._invalidate_sop_status_cache()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "scheduler"):
+                self.scheduler.force_refresh()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "sop_tab") and self.sop_tab is not None:
+                if hasattr(self.sop_tab, "on_condition_levels_changed"):
+                    self.sop_tab.on_condition_levels_changed()
+                elif hasattr(self.sop_tab, "on_settings_saved"):
+                    self.sop_tab.on_settings_saved()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "controlfreq_tab") and self.controlfreq_tab is not None:
+                if hasattr(self.controlfreq_tab, "on_condition_levels_changed"):
+                    self.controlfreq_tab.on_condition_levels_changed()
+                elif hasattr(self.controlfreq_tab, "on_sop_data_changed"):
+                    self.controlfreq_tab.on_sop_data_changed()
+        except Exception:
+            pass
+        try:
+            if self.freq_planner_tab is not None:
+                if hasattr(self.freq_planner_tab, "on_condition_levels_changed"):
+                    self.freq_planner_tab.on_condition_levels_changed()
+                elif self.freq_planner_tab.isVisible() and hasattr(self.freq_planner_tab, "on_settings_saved"):
+                    self.freq_planner_tab.on_settings_saved()
+        except Exception:
+            pass
+        try:
+            self._refresh_scheduler_status_panel()
+        except Exception:
+            pass
+
     def _on_settings_saved_for_lazy_tabs(self) -> None:
         try:
             if self.freq_planner_tab is not None:
@@ -2671,12 +2738,9 @@ class MainWindow(QMainWindow):
                         self.settings_tab._refresh_operating_groups_table()  # type: ignore[attr-defined]
             except Exception:
                 pass
-            try:
-                self.settings_tab.settings_saved.emit()
-            except Exception:
-                pass
             self._refresh_condition_level_panel()
             dlg.accept()
+            QTimer.singleShot(0, self._queue_condition_levels_changed)
 
         save_btn.clicked.connect(_save)
         cancel_btn.clicked.connect(dlg.reject)

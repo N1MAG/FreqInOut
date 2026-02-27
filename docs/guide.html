@@ -171,10 +171,19 @@
     <li><code>View</code>: opens selected message in viewer pane.</li>
     <li>Flag icon: cycles action-needed flag state.</li>
     <li><code>Delete</code>: deletes selected message/file record.</li>
-    <li><code>Archive</code>: shown for BBS file rows, archives file to configured BBS archive path.</li>
+    <li><code>Archive</code>: shown for BBS file rows. Moves that file out of <code>BBS Directory</code> into <code>BBS Archive</code>.</li>
     <li><code>+BBS</code>: shown for FLMsg/FLAmp/VarAC file rows when VarAC BBS path is configured; copies file to VarAC BBS folder with overwrite prompt if needed.</li>
   </ul>
   <p><code>Open Image</code> appears when selected content is an image-capable file and opens it externally.</p>
+
+  <h3 id="messages-bbs-archive">BBS Archive and Auto-Archive</h3>
+  <p>Use this to keep your BBS folder clean without deleting files.</p>
+  <ul class="section-list">
+    <li><strong>Manual archive</strong>: click <code>Archive</code> on a BBS row to move just that file now.</li>
+    <li><strong>Auto-archive timing</strong>: with <code>Enable Auto-Archive</code> on, checks run when you first open Messages after startup, then about once per day.</li>
+    <li><strong>Age rule</strong>: files older than <code>After &lt;days&gt; days</code> are moved.</li>
+    <li><strong>Required setup</strong>: <code>BBS Directory</code> and <code>BBS Archive</code> must both exist and be different folders.</li>
+  </ul>
 
   <h2 id="map">Map</h2>
   <p><strong>Purpose</strong>: map-based station, path, and propagation context.</p>
@@ -385,6 +394,7 @@
   <h2 id="sop-builder">SOP Builder</h2>
   <p><strong>Purpose</strong>: build and activate one HF SOP and one Local Comms SOP with conflict-aware HF activation.</p>
   <p><strong>Model</strong>: SOP action rows are daily by design (no periodic row mode in SOP Builder).</p>
+  <p><strong>If you are new</strong>: select SOP type, add rows, review conflicts, then click <code>Save</code>.</p>
 
   <h3 id="sop-builder-actions">Top-Level Actions</h3>
   <table>
@@ -396,11 +406,22 @@
       <tr><td><code>New SOP</code></td><td>Resets selected category profile for rebuilding.</td></tr>
       <tr><td><code>Save</code></td><td>Saves current SOP configuration and actions.</td></tr>
       <tr><td><code>Delete</code></td><td>Deletes current SOP actions/profile configuration.</td></tr>
+      <tr><td><code>Versions</code> (nested)</td><td><code>Save Version</code>, <code>Load Version</code>, <code>Delete Version</code> snapshots for the selected SOP category.</td></tr>
       <tr><td><code>Export PDF</code></td><td>Opens SOP export modal for single-file PDF output.</td></tr>
       <tr><td><code>Export/Import</code> (nested)</td><td><code>Export JSON</code> and <code>Import JSON</code>.</td></tr>
       <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed action times.</td></tr>
     </tbody>
   </table>
+
+  <h3 id="sop-builder-versions">Versions Menu (HF and Local Comms)</h3>
+  <p>Versions let you save named SOP drafts and switch between them safely.</p>
+  <ul class="section-list">
+    <li><strong>Save Version</strong>: save the current SOP as a named snapshot.</li>
+    <li><strong>Load Version</strong>: load a saved snapshot into the builder. Click <code>Save</code> to make it live.</li>
+    <li><strong>Delete Version</strong>: remove a saved snapshot you no longer need.</li>
+    <li><strong>HF vs Local</strong>: you only see versions for the SOP type currently selected.</li>
+    <li><strong>Safety prompt</strong>: if you have unsaved edits, loading a version asks for confirmation first.</li>
+  </ul>
 
   <h3 id="sop-builder-fields">SOP Profile Fields</h3>
   <ul class="section-list">
@@ -413,11 +434,23 @@
   <h3 id="sop-builder-table">Action Rows Table</h3>
   <p><strong>Columns</strong>: <code>Group</code>, <code>Condition Levels</code>, <code>Resource</code>, <code>Mode</code>, <code>Action</code>, <code>Band - Freq</code>, <code>Start (UTC)</code>, <code>End (UTC)</code>, <code>Duration</code>, <code>Interval</code>, <code>Contact Type</code>, <code>Contact Target</code>, <code>Description</code>, <code>Conflict</code>, <code>Remove</code>.</p>
   <ul class="section-list">
+    <li><strong>Condition Levels</strong>: choose where this HF row runs (<code>All</code> or any mix of <code>1</code>-<code>5</code>).</li>
     <li><strong>Conflict badge</strong>: updates in-line (<code>Pending</code>, <code>OK</code>, <code>Conflict</code>, <code>Local</code>).</li>
     <li><strong>Contact Target</strong>: typeahead lookup when rule supports callsigns; also supports typed values.</li>
     <li><strong>Interval format</strong>: supports presets and explicit HH:MM; phase patterns such as <code>03:00@30m</code> are supported where applicable.</li>
     <li><strong>Local Comms actions</strong>: local action set includes <code>NCS</code>, <code>Check-in</code>, <code>Message</code>, <code>Monitor</code>.</li>
     <li><strong>Conflict status</strong>: updates in real time while editing; Save re-validates before applying active state changes.</li>
+  </ul>
+
+  <h3 id="sop-builder-workflow">Guided Conflict Workflow (HF SOP)</h3>
+  <p>Recommended flow:</p>
+  <ul class="section-list">
+    <li><strong>1) Build rows</strong>: complete Group, Action, frequency, and time fields.</li>
+    <li><strong>2) Check workflow line</strong>: it tells you what is complete and what to do next.</li>
+    <li><strong>3) Open Conflict Workbench only when needed</strong>: it stays collapsed while you edit multiple rows.</li>
+    <li><strong>4) Resolve timing conflicts</strong>: use <code>Suggest</code> then <code>Apply</code>. If no timing change is needed, the row shows <code>Not needed</code>.</li>
+    <li><strong>5) Save</strong>: unresolved timing conflicts are blocked at save until fixed.</li>
+    <li><strong>Rule</strong>: same-frequency SOP overlaps are allowed and are not shown as conflicts.</li>
   </ul>
 
   <h3 id="sop-builder-conflicts">Conflict Resolution Prompts</h3>
@@ -513,6 +546,14 @@
     <li><strong>Condition levels</strong>: group-scoped; toggling one row applies to all rows for the same Group.</li>
   </ul>
 
+  <h3 id="settings-varac-details">VarAC Settings Details</h3>
+  <ul class="section-list">
+    <li><strong>BBS Directory</strong>: where incoming BBS files are read from.</li>
+    <li><strong>BBS Archive</strong>: where archived BBS files are moved to.</li>
+    <li><strong>Enable Auto-Archive</strong>: turns on background checks (first Messages open after startup, then about daily).</li>
+    <li><strong>After &lt;days&gt; days</strong>: older files are moved from <code>BBS Directory</code> to <code>BBS Archive</code>.</li>
+  </ul>
+
   <h3 id="settings-message-auth">Message Auth (Key/Hash) Details</h3>
   <ul class="section-list">
     <li><strong>Signature verification</strong>: <code>Verify FLAMP .k2s/.b2s signatures</code>.</li>
@@ -549,6 +590,7 @@
     <li>If schedule behavior is unexpected, check <code>Schedule Status</code> first (paused/off-schedule/manual mode reasons).</li>
     <li>If FLDigi offset returns unexpectedly, check <code>Settings &gt; FreqInOut Settings</code> for FLDigi enforcement mode (<code>On Schedule Change</code> vs <code>Prompt</code>) and confirm whether a new schedule row transition occurred.</li>
     <li>If message actions are missing (for example <code>+BBS</code>), verify required Settings paths are configured.</li>
+    <li>If BBS auto-archive does not run, turn on <code>Enable Auto-Archive</code>, confirm both BBS paths are valid and different, then open Messages once after startup.</li>
     <li>If signature/hash states are neutral, verify Message Auth settings and trusted key/hash entries.</li>
   </ul>
 

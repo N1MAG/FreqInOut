@@ -1609,6 +1609,14 @@ class FreqPlannerTab(QWidget):
         self._apply_theme()
         self.rebuild_table()
 
+    def on_condition_levels_changed(self) -> None:
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        if self.isVisible():
+            self.rebuild_table()
+
     def apply_theme(self):
         self._apply_theme()
 

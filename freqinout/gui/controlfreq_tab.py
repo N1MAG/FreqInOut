@@ -132,6 +132,7 @@ class ControlFreqTab(QWidget):
         self._sop_today_cache_ttl_sec = 30.0
         self._sop_tomorrow_cache_ttl_sec = 180.0
         self._sop_cache_epoch = 0
+        self._sop_outlook_refresh_pending = False
         self._prop_service = PropagationService(
             default_profiles=PROP_DEFAULT_PROFILES,
             profiles_path=None,
@@ -1125,6 +1126,7 @@ class ControlFreqTab(QWidget):
     def set_tab_active(self, active: bool) -> None:
         self._active = bool(active)
         if self._active:
+            self._reload_sop_manager_settings()
             if self._timer is None:
                 self._timer = QTimer(self)
                 self._timer.timeout.connect(self._on_periodic_refresh_tick)
@@ -1147,6 +1149,9 @@ class ControlFreqTab(QWidget):
             # Slightly delay status probing so first paint is not blocked.
             QTimer.singleShot(150, self._refresh_status_widgets)
             QTimer.singleShot(0, self._refresh_clock_display)
+            if self._sop_outlook_refresh_pending and bool(self._view_cards.get("schedule", True)):
+                self._sop_outlook_refresh_pending = False
+                QTimer.singleShot(0, self._refresh_schedule_outlook)
             return
         if self._timer:
             self._timer.stop()
@@ -1230,26 +1235,43 @@ class ControlFreqTab(QWidget):
             self._heavy_refresh_pending = False
 
     def on_settings_saved(self) -> None:
+        self._reload_sop_manager_settings()
         self._invalidate_sop_window_cache()
+        self._sop_outlook_refresh_pending = True
         self._apply_theme()
         if self._active:
             self._refresh_all()
+            self._sop_outlook_refresh_pending = False
             return
         # Keep inactive-path cheap; refresh on next activation.
         self._last_refresh_ts = 0.0
         self._last_secondary_refresh_ts = 0.0
         self._last_heavy_refresh_ts = 0.0
 
+    def on_condition_levels_changed(self) -> None:
+        self.on_sop_data_changed()
+
     def on_sop_data_changed(self) -> None:
         # SOP edits can happen while ControlFreq is inactive; invalidate refresh gates
         # so the next activation redraws immediately.
+        self._reload_sop_manager_settings()
         self._invalidate_sop_window_cache()
+        self._sop_outlook_refresh_pending = True
         self._last_refresh_ts = 0.0
         self._last_secondary_refresh_ts = 0.0
         self._last_heavy_refresh_ts = 0.0
         if self._active:
+            self._sop_outlook_refresh_pending = False
             QTimer.singleShot(0, self._refresh_schedule_outlook)
             QTimer.singleShot(0, self._refresh_scheduler_strip)
+
+    def _reload_sop_manager_settings(self) -> None:
+        try:
+            mgr_settings = getattr(self._sop_manager, "settings", None)
+            if mgr_settings is not None and hasattr(mgr_settings, "reload"):
+                mgr_settings.reload()
+        except Exception:
+            pass
 
     def _invalidate_sop_window_cache(self) -> None:
         self._sop_cache_epoch += 1
@@ -2843,6 +2865,7 @@ class ControlFreqTab(QWidget):
     def _refresh_schedule_outlook(self) -> None:
         if not bool(self._view_cards.get("schedule", True)):
             return
+        self._reload_sop_manager_settings()
         now_utc = dt.datetime.now(dt.timezone.utc)
         if self._show_local:
             # "Today" should respect local day boundaries in local display mode.

@@ -759,6 +759,40 @@ class SOPManager:
                 )
             except Exception as e:
                 log.debug("SOP: normalize net conflict policy skipped: %s", e)
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sop_profile_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    note TEXT,
+                    snapshot_json TEXT NOT NULL,
+                    created_utc TEXT NOT NULL,
+                    updated_utc TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute("PRAGMA table_info(sop_profile_versions)")
+            version_cols = {str(row[1] or "").strip().lower() for row in cur.fetchall()}
+            if "category" not in version_cols:
+                cur.execute("ALTER TABLE sop_profile_versions ADD COLUMN category TEXT NOT NULL DEFAULT 'HF'")
+            if "label" not in version_cols:
+                cur.execute("ALTER TABLE sop_profile_versions ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+            if "note" not in version_cols:
+                cur.execute("ALTER TABLE sop_profile_versions ADD COLUMN note TEXT")
+            if "snapshot_json" not in version_cols:
+                cur.execute("ALTER TABLE sop_profile_versions ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'")
+            if "created_utc" not in version_cols:
+                cur.execute("ALTER TABLE sop_profile_versions ADD COLUMN created_utc TEXT NOT NULL DEFAULT ''")
+            if "updated_utc" not in version_cols:
+                cur.execute("ALTER TABLE sop_profile_versions ADD COLUMN updated_utc TEXT NOT NULL DEFAULT ''")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sop_profile_versions_cat_created ON sop_profile_versions(category, created_utc)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sop_profile_versions_created ON sop_profile_versions(created_utc)"
+            )
             conn.commit()
         finally:
             conn.close()
@@ -792,6 +826,145 @@ class SOPManager:
                 }
                 for r in rows
             ]
+        finally:
+            conn.close()
+
+    @classmethod
+    def default_profile_version_label(cls, category: str) -> str:
+        cat = cls._normalize_category(category)
+        prefix = "HF SOP" if cat == cls.CATEGORY_HF else "Local Comms SOP"
+        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return f"{prefix} {stamp}"
+
+    def save_profile_version(
+        self,
+        *,
+        category: str,
+        snapshot: Dict[str, Any],
+        label: str = "",
+        note: str = "",
+    ) -> int:
+        if not isinstance(snapshot, dict):
+            raise ValueError("Version snapshot must be a JSON object.")
+        cat = self._normalize_category(category)
+        profile_obj = snapshot.get("profile")
+        if not isinstance(profile_obj, dict):
+            raise ValueError("Version snapshot must include a profile object.")
+        profile_obj["category"] = self._normalize_category(profile_obj.get("category") or cat)
+        cat = self._normalize_category(profile_obj.get("category") or cat)
+        label_txt = str(label or "").strip() or self.default_profile_version_label(cat)
+        note_txt = str(note or "").strip()
+        now_iso = _utc_now_iso()
+        payload = json.dumps(snapshot, sort_keys=True, default=str)
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO sop_profile_versions
+                        (category, label, note, snapshot_json, created_utc, updated_utc)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (cat, label_txt, note_txt, payload, now_iso, now_iso),
+                )
+                row = conn.execute("SELECT last_insert_rowid()").fetchone()
+                return int(row[0] or 0) if row else 0
+        finally:
+            conn.close()
+
+    def list_profile_versions(self, *, category: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+        try:
+            lim = max(1, min(1000, int(limit or 200)))
+        except Exception:
+            lim = 200
+        cat = self._normalize_category(category) if str(category or "").strip() else ""
+        conn = self._connect()
+        try:
+            if cat:
+                rows = conn.execute(
+                    """
+                    SELECT id, category, label, note, snapshot_json, created_utc, updated_utc
+                    FROM sop_profile_versions
+                    WHERE UPPER(COALESCE(category, 'HF')) = ?
+                    ORDER BY COALESCE(created_utc, updated_utc, '') DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (cat, lim),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, category, label, note, snapshot_json, created_utc, updated_utc
+                    FROM sop_profile_versions
+                    ORDER BY COALESCE(created_utc, updated_utc, '') DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (lim,),
+                ).fetchall()
+            out: List[Dict[str, Any]] = []
+            for row in rows:
+                try:
+                    parsed = json.loads(str(row[4] or "{}"))
+                except Exception:
+                    parsed = {}
+                actions = parsed.get("actions") if isinstance(parsed, dict) else []
+                action_count = len(actions) if isinstance(actions, list) else 0
+                out.append(
+                    {
+                        "id": int(row[0] or 0),
+                        "category": self._normalize_category(row[1]),
+                        "label": str(row[2] or "").strip(),
+                        "note": str(row[3] or "").strip(),
+                        "created_utc": str(row[5] or "").strip(),
+                        "updated_utc": str(row[6] or "").strip(),
+                        "action_count": int(action_count),
+                    }
+                )
+            return out
+        finally:
+            conn.close()
+
+    def get_profile_version(self, version_id: int) -> Optional[Dict[str, Any]]:
+        vid = int(version_id or 0)
+        if vid <= 0:
+            return None
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT id, category, label, note, snapshot_json, created_utc, updated_utc
+                FROM sop_profile_versions
+                WHERE id = ?
+                """,
+                (vid,),
+            ).fetchone()
+            if not row:
+                return None
+            try:
+                snapshot = json.loads(str(row[4] or "{}"))
+            except Exception:
+                snapshot = {}
+            return {
+                "id": int(row[0] or 0),
+                "category": self._normalize_category(row[1]),
+                "label": str(row[2] or "").strip(),
+                "note": str(row[3] or "").strip(),
+                "snapshot": snapshot if isinstance(snapshot, dict) else {},
+                "created_utc": str(row[5] or "").strip(),
+                "updated_utc": str(row[6] or "").strip(),
+            }
+        finally:
+            conn.close()
+
+    def delete_profile_version(self, version_id: int) -> bool:
+        vid = int(version_id or 0)
+        if vid <= 0:
+            return False
+        conn = self._connect()
+        try:
+            with conn:
+                cur = conn.execute("DELETE FROM sop_profile_versions WHERE id = ?", (vid,))
+            return int(cur.rowcount or 0) > 0
         finally:
             conn.close()
 
