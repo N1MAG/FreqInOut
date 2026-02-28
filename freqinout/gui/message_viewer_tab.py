@@ -1425,8 +1425,10 @@ class MessageTableModel(QAbstractTableModel):
             if col == 6:
                 return row.title
             if col == 7:
-                if isinstance(row.payload, FileRecord) and (row.payload.origin or "").lower() == "bbs":
+                if isinstance(row.payload, FileRecord) and (row.origin or "").strip().lower() == "bbs":
                     return "View | Archive | Delete"
+                if isinstance(row.payload, FileRecord) and (row.origin or "").strip().lower() == "bbs_archive":
+                    return "View | Delete"
                 if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage, SpotterMessage)):
                     return "View | Delete"
                 return "View"
@@ -1598,13 +1600,25 @@ class MessageActionDelegate(QStyledItemDelegate):
         self._flag_color_green = QColor("#2e7d32")
 
     @staticmethod
-    def _is_bbs_file_row(row: UnifiedMessage | None) -> bool:
+    def _is_live_bbs_file_row(row: UnifiedMessage | None) -> bool:
         return isinstance(getattr(row, "payload", None), FileRecord) and (
-            (row.payload.origin or "").strip().lower() == "bbs"
+            (getattr(row, "origin", "") or "").strip().lower() == "bbs"
         )
 
     @staticmethod
-    def _action_rects(rect: QRect, fm, bbs_row: bool, bbs_copy_row: bool) -> tuple[QRect, QRect, QRect, QRect]:
+    def _is_archived_bbs_file_row(row: UnifiedMessage | None) -> bool:
+        return isinstance(getattr(row, "payload", None), FileRecord) and (
+            (getattr(row, "origin", "") or "").strip().lower() == "bbs_archive"
+        )
+
+    @staticmethod
+    def _action_rects(
+        rect: QRect,
+        fm,
+        live_bbs_row: bool,
+        archived_bbs_row: bool,
+        bbs_copy_row: bool,
+    ) -> tuple[QRect, QRect, QRect, QRect]:
         view_text = "View"
         view_width = fm.horizontalAdvance(view_text)
         view_left = rect.left() + 6
@@ -1616,13 +1630,16 @@ class MessageActionDelegate(QStyledItemDelegate):
         del_left = del_right - del_width + 1
         del_rect = QRect(del_left, rect.y(), del_width, rect.height())
 
-        if bbs_row:
+        if live_bbs_row:
             arch_text = "Archive"
             arch_width = fm.horizontalAdvance(arch_text)
             arch_right = del_left - 12
             arch_left = arch_right - arch_width + 1
             aux_rect = QRect(arch_left, rect.y(), arch_width, rect.height())
             return view_rect, aux_rect, QRect(), del_rect
+
+        if archived_bbs_row:
+            return view_rect, QRect(), QRect(), del_rect
 
         bbs_rect = QRect()
         gap_right = del_left - 10
@@ -1656,8 +1673,12 @@ class MessageActionDelegate(QStyledItemDelegate):
         painter.setPen(link_color)
         fm = option.fontMetrics
         parent_widget = self.parent()
-        bbs_row = self._is_bbs_file_row(row)
+        live_bbs_row = self._is_live_bbs_file_row(row)
+        archived_bbs_row = self._is_archived_bbs_file_row(row)
         bbs_copy_row = bool(
+            (not archived_bbs_row)
+            and (not live_bbs_row)
+            and
             hasattr(parent_widget, "_can_copy_row_to_varac_bbs")
             and parent_widget._can_copy_row_to_varac_bbs(row)
         )
@@ -1668,11 +1689,22 @@ class MessageActionDelegate(QStyledItemDelegate):
                 or parent_widget._is_row_bbs_copy_action_enabled(row)
             )
         )
-        view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(rect, fm, bbs_row, bbs_copy_row)
+        view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(
+            rect,
+            fm,
+            live_bbs_row,
+            archived_bbs_row,
+            bbs_copy_row,
+        )
         painter.drawText(view_rect, Qt.AlignVCenter | Qt.AlignLeft, "View")
-        if bbs_row:
+        if live_bbs_row:
             painter.setPen(link_color)
             painter.drawText(aux_rect, Qt.AlignVCenter | Qt.AlignLeft, "Archive")
+            painter.setPen(self._danger)
+            painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
+            painter.restore()
+            return
+        if archived_bbs_row:
             painter.setPen(self._danger)
             painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
             painter.restore()
@@ -1718,8 +1750,12 @@ class MessageActionDelegate(QStyledItemDelegate):
         pos = event.position().toPoint()
         fm = option.fontMetrics
         parent_widget = self.parent()
-        bbs_row = self._is_bbs_file_row(row)
+        live_bbs_row = self._is_live_bbs_file_row(row)
+        archived_bbs_row = self._is_archived_bbs_file_row(row)
         bbs_copy_row = bool(
+            (not archived_bbs_row)
+            and (not live_bbs_row)
+            and
             hasattr(parent_widget, "_can_copy_row_to_varac_bbs")
             and parent_widget._can_copy_row_to_varac_bbs(row)
         )
@@ -1730,15 +1766,21 @@ class MessageActionDelegate(QStyledItemDelegate):
                 or parent_widget._is_row_bbs_copy_action_enabled(row)
             )
         )
-        _view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(rect, fm, bbs_row, bbs_copy_row)
+        _view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(
+            rect,
+            fm,
+            live_bbs_row,
+            archived_bbs_row,
+            bbs_copy_row,
+        )
         if isinstance(row.payload, FileRecord):
-            if bbs_row and aux_rect.contains(pos):
+            if live_bbs_row and aux_rect.contains(pos):
                 self.parent()._archive_file_record(row.payload)
             elif bbs_copy_row and bbs_rect.contains(pos):
                 if bbs_copy_enabled:
                     self.parent()._copy_row_to_varac_bbs(row)
                 return True
-            elif not bbs_row and aux_rect.contains(pos):
+            elif not live_bbs_row and not archived_bbs_row and aux_rect.contains(pos):
                 self.parent()._cycle_flag_state(row.payload)
             elif del_rect.contains(pos):
                 self.parent()._delete_file_record(row.payload)
@@ -3788,7 +3830,79 @@ class MessageViewerTab(QWidget):
             key = ("bbs", bbs_dir)
             if key not in seen:
                 out.append({"origin": "bbs", "path": bbs_dir})
+                seen.add(key)
+        archive_dir = (self.settings.get("varac_bbs_archive_dir", "") or "").strip()
+        if archive_dir:
+            key = ("bbs", archive_dir)
+            if key not in seen:
+                out.append({"origin": "bbs", "path": archive_dir})
+                seen.add(key)
         return out
+
+    @staticmethod
+    def _norm_scan_path(path: str | Path) -> str:
+        return os.path.normcase(os.path.normpath(str(path)))
+
+    def _bbs_archive_roots(self) -> set[str]:
+        archive_dir = (self.settings.get("varac_bbs_archive_dir", "") or "").strip()
+        if not archive_dir:
+            return set()
+        try:
+            archive_path = Path(archive_dir)
+            if not archive_path.exists() or not archive_path.is_dir():
+                return set()
+        except Exception:
+            return set()
+        return {self._norm_scan_path(archive_dir)}
+
+    def _is_bbs_archive_record(
+        self,
+        rec: FileRecord,
+        *,
+        archive_roots: Optional[set[str]] = None,
+    ) -> bool:
+        if not rec or (rec.origin or "").strip().lower() != "bbs":
+            return False
+        roots = archive_roots if archive_roots is not None else self._bbs_archive_roots()
+        if not roots:
+            return False
+        path_norm = self._norm_scan_path(rec.path)
+        for root_norm in roots:
+            if path_norm == root_norm or path_norm.startswith(root_norm + os.sep):
+                return True
+        return False
+
+    def _retag_bbs_archive_rows(self, rows: List[UnifiedMessage]) -> None:
+        archive_roots = self._bbs_archive_roots()
+        if not rows:
+            return
+        for row in rows:
+            payload = row.payload
+            if not isinstance(payload, FileRecord):
+                continue
+            if not self._is_bbs_archive_record(payload, archive_roots=archive_roots):
+                continue
+            row.origin = "bbs_archive"
+            base_title = str(row.title or payload.path.name or "").strip() or payload.path.name
+            if not base_title.startswith("[Archived] "):
+                row.title = f"[Archived] {base_title}"
+            row.search_text = " ".join(
+                [
+                    str(row.msg_type or ""),
+                    str(row.status or ""),
+                    str(row.from_call or ""),
+                    str(row.to_call or ""),
+                    str(row.rcv_display or ""),
+                    str(row.title or ""),
+                    "archived",
+                    "archive",
+                ]
+            ).lower()
+
+    def _file_origin_label(self, rec: FileRecord) -> str:
+        if self._is_bbs_archive_record(rec):
+            return "BBS ARCHIVE"
+        return str(rec.origin or "").strip().upper()
 
     def _refresh_files(self, force: bool = False):
         if self._is_shutting_down or self._refresh_files_inflight or self._bbs_auto_archive_inflight:
@@ -5010,6 +5124,7 @@ class MessageViewerTab(QWidget):
         rows = data.get("rows", [])
         if not isinstance(rows, list):
             rows = []
+        self._retag_bbs_archive_rows(rows)
         self._message_rows = rows
         sender_updates = data.get("sender_cache_updates", {})
         if isinstance(sender_updates, dict):
@@ -6865,6 +6980,9 @@ class MessageViewerTab(QWidget):
     def _archive_file_record(self, rec: FileRecord) -> None:
         if not rec or (rec.origin or "").strip().lower() != "bbs":
             return
+        if self._is_bbs_archive_record(rec):
+            QMessageBox.information(self, "Archive BBS File", "This file is already in the BBS Archive.")
+            return
         if not rec.path.exists():
             QMessageBox.warning(self, "Archive BBS File", "The selected file no longer exists.")
             return
@@ -6905,8 +7023,37 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Archive BBS File", f"Failed to archive file:\n{e}")
             return
+        old_key = self._read_state_key(rec.origin, rec)
+        prior_state = self._read_state_map.get(old_key)
+        try:
+            moved_stat = dst.stat()
+            moved_rec = FileRecord(
+                path=Path(dst),
+                origin="bbs",
+                size=int(moved_stat.st_size or 0),
+                mtime=float(moved_stat.st_mtime or 0.0),
+            )
+        except Exception:
+            moved_rec = FileRecord(path=Path(dst), origin="bbs", size=int(rec.size or 0), mtime=float(rec.mtime or 0.0))
         log.info("MessageViewer: archived BBS file %s -> %s", rec.path, dst)
         self._remove_file_record(rec)
+        if prior_state:
+            status, read_ts, flag_state = prior_state
+            moved_key = self._read_state_key(moved_rec.origin, moved_rec)
+            self._read_state_map[moved_key] = (
+                str(status or "").upper(),
+                float(read_ts or 0.0),
+                int(flag_state or 0),
+            )
+            self._persist_file_read_state(
+                moved_rec.origin,
+                str(moved_rec.path),
+                float(moved_rec.mtime),
+                int(moved_rec.size),
+                str(status or "").upper(),
+                float(read_ts or 0.0),
+                int(flag_state or 0),
+            )
         self._unfreeze_table()
         self._populate_messages_table(force=True)
 
@@ -7376,7 +7523,8 @@ class MessageViewerTab(QWidget):
             if self._is_image_file(rec.path):
                 ext = rec.path.suffix.lower()
                 self._set_open_external_path(rec.path, label="Open Image")
-                info = f"Image Received - {rec.path.name} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
+                image_label = "Archived BBS Image" if self._is_bbs_archive_record(rec) else "Image Received"
+                info = f"{image_label} - {rec.path.name} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
                 self.info_label.setText(self._compose_info_with_signature(rec, info))
                 if self._can_preview_image(rec.path) and rec.path.exists():
                     try:
@@ -7487,7 +7635,7 @@ class MessageViewerTab(QWidget):
                 except Exception:
                     content = data  # fallback to raw
 
-            info = f"{rec.path.name} - {rec.origin.upper()} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
+            info = f"{rec.path.name} - {self._file_origin_label(rec)} - {rec.size} bytes - {self._fmt_mtime(rec.mtime)}"
             self.info_label.setText(self._compose_info_with_signature(rec, info))
             if is_html:
                 self.viewer.setAcceptRichText(True)
