@@ -65,6 +65,8 @@ BAND_ORDER = [
 # Updated mode list
 MODES = ["Digi", "SSB", "USB", "LSB"]
 
+BUILTIN_NET_RESOURCES_SYNC_VERSION = 2
+
 # For band limits, JS8 and Tri behave like Digi ranges
 BAND_MODE_LIMITS = {
     ("20M", "Digi"): (14.000, 14.150),
@@ -3478,6 +3480,51 @@ class NetScheduleTab(QWidget):
         conn.execute(f"DELETE FROM net_resources WHERE id IN ({marks})", delete_ids)
         return len(delete_ids)
 
+    def _sync_builtin_resource_sets(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        force: bool = False,
+    ) -> int:
+        try:
+            current_version = int(self.settings.get("net_resources_builtin_sync_version", 0) or 0)
+        except Exception:
+            current_version = 0
+        if not force and current_version >= BUILTIN_NET_RESOURCES_SYNC_VERSION:
+            return 0
+
+        updated_sets = 0
+        for path, resource_set in self._builtin_resource_files():
+            if not path.exists():
+                continue
+            rows = self._parse_schedule_json(path)
+            if not rows:
+                continue
+            conn.execute(
+                """
+                DELETE FROM net_resources
+                 WHERE LOWER(TRIM(COALESCE(source_type, ''))) = 'builtin'
+                   AND TRIM(COALESCE(resource_set, '')) = TRIM(?)
+                """,
+                (resource_set,),
+            )
+            for row in rows:
+                self._upsert_resource_row(
+                    conn,
+                    row,
+                    resource_set=resource_set,
+                    source_type="builtin",
+                    source_ref=path.name,
+                    readonly=1,
+                    resource_id=None,
+                    update_existing=False,
+                )
+            updated_sets += 1
+
+        if updated_sets > 0:
+            self.settings.set("net_resources_builtin_sync_version", BUILTIN_NET_RESOURCES_SYNC_VERSION)
+        return updated_sets
+
     def _bootstrap_net_resources(self) -> None:
         db_path = self._db_path()
         conn = sqlite3.connect(db_path)
@@ -3491,22 +3538,9 @@ class NetScheduleTab(QWidget):
                 """
             )
             current_count = int(conn.execute("SELECT COUNT(*) FROM net_resources").fetchone()[0] or 0)
-            if current_count == 0:
-                for path, resource_set in self._builtin_resource_files():
-                    if not path.exists():
-                        continue
-                    rows = self._parse_schedule_json(path)
-                    for row in rows:
-                        self._upsert_resource_row(
-                            conn,
-                            row,
-                            resource_set=resource_set,
-                            source_type="builtin",
-                            source_ref=path.name,
-                            readonly=1,
-                            resource_id=None,
-                            update_existing=False,
-                        )
+            updated_builtin_sets = self._sync_builtin_resource_sets(conn, force=(current_count == 0))
+            if updated_builtin_sets:
+                log.info("NetSchedule: refreshed %d builtin net resource set(s)", updated_builtin_sets)
 
             migrated = bool(self.settings.get("net_resources_migrated_v1", False))
             if not migrated:

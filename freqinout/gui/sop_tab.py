@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 import html
 import json
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.logger import log
+from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
 from freqinout.gui.theme import resolve_theme, button_style
@@ -259,6 +261,7 @@ class _LegacySOPTab(QWidget):
 
     CONTACT_RULE_OPTIONS = [
         ("none", "None"),
+        ("group", "GROUP"),
         ("hub_or_hub_alt", "HUB OR HUB-ALT"),
         ("ncs_or_ancs", "NCS OR ANCS"),
         ("peer", "PEER"),
@@ -334,6 +337,14 @@ class _LegacySOPTab(QWidget):
         self._action_catalog_cache_value: Dict[str, List[Tuple[str, str]]] | None = None
         self._contact_lookup_cache: Dict[Tuple[str, str], Tuple[float, List[str]]] = {}
         self._contact_lookup_cache_ttl_sec = 2.0
+        self._hf_schedule_slots_cache_token: Tuple[str, float] | None = None
+        self._hf_schedule_slots_index: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
+        self._row_dynamic_refresh_timers: Dict[int, QTimer] = {}
+        self._sop_data_changed_emit_pending = False
+        self._sop_data_changed_emit_timer = QTimer(self)
+        self._sop_data_changed_emit_timer.setSingleShot(True)
+        self._sop_data_changed_emit_timer.setInterval(75)
+        self._sop_data_changed_emit_timer.timeout.connect(self._flush_sop_data_changed_emit)
 
         self._build_ui()
         self._set_save_dirty(False)
@@ -665,6 +676,8 @@ class _LegacySOPTab(QWidget):
         self._action_catalog_cache_key = None
         self._action_catalog_cache_value = None
         self._contact_lookup_cache.clear()
+        self._hf_schedule_slots_cache_token = None
+        self._hf_schedule_slots_index = {}
 
     def _load_local_net_profiles_from_data(self, data: Dict[str, Any]) -> None:
         local_profiles = data.get("local_net_profiles", [])
@@ -3478,6 +3491,17 @@ class _LegacySOPTab(QWidget):
             QMessageBox.warning(self, "SOP", f"Could not complete action: {e}")
 
     def _emit_sop_data_changed(self) -> None:
+        self._sop_data_changed_emit_pending = True
+        timer = getattr(self, "_sop_data_changed_emit_timer", None)
+        if isinstance(timer, QTimer):
+            timer.start()
+            return
+        self._flush_sop_data_changed_emit()
+
+    def _flush_sop_data_changed_emit(self) -> None:
+        if not bool(getattr(self, "_sop_data_changed_emit_pending", False)):
+            return
+        self._sop_data_changed_emit_pending = False
         try:
             self.sop_data_changed.emit()
         except Exception:
@@ -4697,7 +4721,7 @@ class SOPTab(_LegacySOPTab):
             if not suggested_utc:
                 return
 
-        start_edit = self.actions_table.cellWidget(target_row, self.COL_START)
+        start_edit = self._action_row_start_edit(target_row)
         end_edit = self.actions_table.cellWidget(target_row, self.COL_END)
         duration_combo = self.actions_table.cellWidget(target_row, self.COL_DURATION)
         if not isinstance(start_edit, QLineEdit):
@@ -4950,7 +4974,7 @@ class SOPTab(_LegacySOPTab):
         resource_combo = self.actions_table.cellWidget(row_index, self.COL_RESOURCE)
         action_combo = self.actions_table.cellWidget(row_index, self.COL_ACTION)
         bandfreq_combo = self.actions_table.cellWidget(row_index, self.COL_BANDFREQ)
-        start_edit = self.actions_table.cellWidget(row_index, self.COL_START)
+        start_edit = self._action_row_start_edit(row_index)
         duration_combo = self.actions_table.cellWidget(row_index, self.COL_DURATION)
         interval_combo = self.actions_table.cellWidget(row_index, self.COL_INTERVAL)
         contact_combo = self.actions_table.cellWidget(row_index, self.COL_CONTACT)
@@ -5270,27 +5294,33 @@ class SOPTab(_LegacySOPTab):
             return
         if getattr(self, "_suppress_realtime_conflict_checks", False):
             return
-        analyses = self._refresh_inline_conflict_badges()
-        if not analyses:
-            self._last_realtime_conflict_signature = None
-            return
-        conflict_signatures: List[Tuple[Any, ...]] = []
-        for row_index, action, diag, _peers in analyses:
-            if not bool(diag.get("has_conflict")):
-                continue
-            conflict_signatures.append(
-                (
-                    int(row_index),
-                    str(action.get("action_key") or ""),
-                    str(action.get("group_name") or ""),
-                    str(action.get("daily_start_utc") or ""),
-                    str(action.get("daily_end_utc") or ""),
-                    str(diag.get("daily_summary") or ""),
-                    str(diag.get("net_summary") or ""),
-                    str(diag.get("sop_summary") or ""),
+        with perf_span(
+            "sop.realtime_conflict_check",
+            settings=self.settings,
+            min_ms=10.0,
+            meta={"rows": int(self.actions_table.rowCount())},
+        ):
+            analyses = self._refresh_inline_conflict_badges()
+            if not analyses:
+                self._last_realtime_conflict_signature = None
+                return
+            conflict_signatures: List[Tuple[Any, ...]] = []
+            for row_index, action, diag, _peers in analyses:
+                if not bool(diag.get("has_conflict")):
+                    continue
+                conflict_signatures.append(
+                    (
+                        int(row_index),
+                        str(action.get("action_key") or ""),
+                        str(action.get("group_name") or ""),
+                        str(action.get("daily_start_utc") or ""),
+                        str(action.get("daily_end_utc") or ""),
+                        str(diag.get("daily_summary") or ""),
+                        str(diag.get("net_summary") or ""),
+                        str(diag.get("sop_summary") or ""),
+                    )
                 )
-            )
-        self._last_realtime_conflict_signature = tuple(conflict_signatures) if conflict_signatures else None
+            self._last_realtime_conflict_signature = tuple(conflict_signatures) if conflict_signatures else None
 
     def _apply_accessibility_width_guards(self) -> None:
         buttons = [
@@ -5360,7 +5390,7 @@ class SOPTab(_LegacySOPTab):
         self._show_local = not self._show_local
         self._update_clock_labels()
         for r in range(self.actions_table.rowCount()):
-            start_edit = self.actions_table.cellWidget(r, self.COL_START)
+            start_edit = self._action_row_start_edit(r)
             end_edit = self.actions_table.cellWidget(r, self.COL_END)
             if isinstance(start_edit, QLineEdit):
                 current = start_edit.text().strip()
@@ -5998,6 +6028,38 @@ class SOPTab(_LegacySOPTab):
         for r in range(self.actions_table.rowCount()):
             self._refresh_row_dynamic_options(r, preserve_current=True)
 
+    def _clear_row_dynamic_refresh_timers(self) -> None:
+        timers = dict(getattr(self, "_row_dynamic_refresh_timers", {}) or {})
+        for _row, timer in timers.items():
+            if isinstance(timer, QTimer):
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+                try:
+                    timer.deleteLater()
+                except Exception:
+                    pass
+        self._row_dynamic_refresh_timers = {}
+
+    def _schedule_row_dynamic_options_refresh(self, row: int, *, delay_ms: int = 90) -> None:
+        try:
+            target_row = int(row)
+        except Exception:
+            return
+        if target_row < 0:
+            return
+        timer = self._row_dynamic_refresh_timers.get(target_row)
+        if not isinstance(timer, QTimer):
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(
+                lambda r=target_row: self._refresh_row_dynamic_options(r, preserve_current=True)
+            )
+            self._row_dynamic_refresh_timers[target_row] = timer
+        timer.setInterval(max(20, int(delay_ms or 90)))
+        timer.start()
+
     def _combo_set_items(self, combo: QComboBox, values: List[str], current_text: str = "") -> None:
         combo.blockSignals(True)
         combo.clear()
@@ -6010,6 +6072,246 @@ class SOPTab(_LegacySOPTab):
         combo.setCurrentText(current_text)
         self._fit_combo_popup(combo)
         combo.blockSignals(False)
+
+    @staticmethod
+    def _safe_mtime(path: Path) -> float:
+        try:
+            return float(path.stat().st_mtime) if path.exists() else 0.0
+        except Exception:
+            return 0.0
+
+    def _clear_hf_schedule_slot_cache(self) -> None:
+        self._hf_schedule_slots_cache_token = None
+        self._hf_schedule_slots_index = {}
+
+    @staticmethod
+    def _schedule_day_sort_rank(day_utc: str) -> int:
+        order = {
+            "ALL": 0,
+            "MON": 1,
+            "TUE": 2,
+            "WED": 3,
+            "THU": 4,
+            "FRI": 5,
+            "SAT": 6,
+            "SUN": 7,
+        }
+        return int(order.get(str(day_utc or "").strip().upper(), 99))
+
+    def _load_hf_schedule_slot_index(self) -> Dict[Tuple[str, str], List[Dict[str, str]]]:
+        db_path = self.manager._settings_db_path()
+        token = (str(db_path), self._safe_mtime(db_path))
+        if self._hf_schedule_slots_cache_token == token and self._hf_schedule_slots_index:
+            return {
+                k: [dict(row) for row in rows]
+                for k, rows in dict(self._hf_schedule_slots_index).items()
+            }
+
+        index: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
+        with perf_span(
+            "sop.slots.index_load",
+            settings=self.settings,
+            min_ms=5.0,
+            meta={"db": str(db_path)},
+        ):
+            dedup: Dict[Tuple[str, str], Set[Tuple[str, str, str, str]]] = {}
+            if db_path.exists():
+                conn = sqlite3.connect(db_path)
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            COALESCE(day_utc, 'ALL'),
+                            COALESCE(start_utc, '00:00'),
+                            COALESCE(end_utc, '23:59'),
+                            COALESCE(group_name, ''),
+                            COALESCE(band, ''),
+                            COALESCE(frequency, '')
+                        FROM daily_schedule_tab
+                        """
+                    ).fetchall()
+                    for day_raw, start_raw, end_raw, group_raw, band_raw, freq_raw in rows:
+                        band = str(band_raw or "").strip().upper()
+                        freq = self.manager._normalize_frequency(freq_raw)
+                        if not band or not freq:
+                            continue
+                        slot_key = (band, freq)
+                        day_utc = self.manager._normalize_day_utc(day_raw)
+                        start_utc = self.manager._normalize_hhmm(start_raw or "00:00")
+                        end_utc = self.manager._normalize_hhmm(end_raw or "23:59")
+                        group_name = str(group_raw or "").strip().upper()
+                        dedup_key = (day_utc, start_utc, end_utc, group_name)
+                        bucket = dedup.setdefault(slot_key, set())
+                        if dedup_key in bucket:
+                            continue
+                        bucket.add(dedup_key)
+                        index.setdefault(slot_key, []).append(
+                            {
+                                "day_utc": day_utc,
+                                "start_utc": start_utc,
+                                "end_utc": end_utc,
+                                "group_name": group_name,
+                            }
+                        )
+                except Exception as e:
+                    log.debug("SOP Builder: failed loading HF schedule slots: %s", e)
+                    index = {}
+                finally:
+                    conn.close()
+
+            for key, rows in index.items():
+                rows.sort(
+                    key=lambda row: (
+                        self._schedule_day_sort_rank(str(row.get("day_utc") or "")),
+                        str(row.get("start_utc") or ""),
+                        str(row.get("end_utc") or ""),
+                        str(row.get("group_name") or ""),
+                    )
+                )
+                index[key] = rows[:50]
+
+        self._hf_schedule_slots_cache_token = token
+        self._hf_schedule_slots_index = {
+            k: [dict(row) for row in rows]
+            for k, rows in index.items()
+        }
+        return {
+            k: [dict(row) for row in rows]
+            for k, rows in index.items()
+        }
+
+    def _hf_schedule_slots_for_band_freq(self, band: str, freq: str) -> List[Dict[str, str]]:
+        band_uc = str(band or "").strip().upper()
+        freq_norm = self.manager._normalize_frequency(freq)
+        if not band_uc or not freq_norm:
+            return []
+        index = self._load_hf_schedule_slot_index()
+        return [dict(row) for row in list(index.get((band_uc, freq_norm), []))]
+
+    def _format_hf_schedule_slot_text(self, slot: Dict[str, Any]) -> str:
+        day_utc = str(slot.get("day_utc") or "ALL").strip().upper()
+        day_text = "Daily" if day_utc == "ALL" else day_utc
+        start_utc = self.manager._normalize_hhmm(slot.get("start_utc") or "00:00")
+        end_utc = self.manager._normalize_hhmm(slot.get("end_utc") or "23:59")
+        start_display = self._display_start_hhmm_from_utc(start_utc, show_local=self._show_local)
+        end_display = self._display_start_hhmm_from_utc(end_utc, show_local=self._show_local)
+        group_name = str(slot.get("group_name") or "").strip().upper() or "-"
+        return f"{day_text} {start_display}-{end_display} | {group_name}"
+
+    def _action_row_start_edit(self, row: int) -> QLineEdit | None:
+        widget = self.actions_table.cellWidget(int(row), self.COL_START)
+        if isinstance(widget, QLineEdit):
+            return widget
+        if isinstance(widget, QWidget):
+            named = widget.findChild(QLineEdit, "sop_action_start_edit")
+            if isinstance(named, QLineEdit):
+                return named
+            fallback = widget.findChild(QLineEdit)
+            if isinstance(fallback, QLineEdit):
+                return fallback
+        return None
+
+    def _action_row_start_slots_button(self, row: int) -> QToolButton | None:
+        widget = self.actions_table.cellWidget(int(row), self.COL_START)
+        if isinstance(widget, QWidget):
+            named = widget.findChild(QToolButton, "sop_action_start_slots_btn")
+            if isinstance(named, QToolButton):
+                return named
+            fallback = widget.findChild(QToolButton)
+            if isinstance(fallback, QToolButton):
+                return fallback
+        return None
+
+    def _row_for_start_slots_button(self, btn: QToolButton) -> int:
+        for row in range(self.actions_table.rowCount()):
+            if self._action_row_start_slots_button(row) is btn:
+                return int(row)
+        return -1
+
+    def _update_start_slots_button_for_row(self, row: int) -> None:
+        btn = self._action_row_start_slots_button(row)
+        if not isinstance(btn, QToolButton):
+            return
+        if self._current_category() != self.CAT_HF:
+            btn.setEnabled(False)
+            btn.setToolTip("HF schedule slot guidance applies to HF SOP rows.")
+            return
+        group_combo = self.actions_table.cellWidget(row, self.COL_GROUP)
+        bandfreq_combo = self.actions_table.cellWidget(row, self.COL_BANDFREQ)
+        group_name = group_combo.currentText().strip().upper() if isinstance(group_combo, QComboBox) else ""
+        bandfreq_val = bandfreq_combo.currentText().strip() if isinstance(bandfreq_combo, QComboBox) else ""
+        band, freq = self._split_band_freq(bandfreq_val)
+        if group_name and band and freq:
+            btn.setEnabled(True)
+            btn.setToolTip("Pick Start from existing HF Schedule rows on this frequency.")
+            return
+        btn.setEnabled(False)
+        btn.setToolTip("Select Group and Band-Freq to view HF Schedule time slots.")
+
+    def _apply_hf_schedule_slot_start(self, row: int, start_utc: str) -> None:
+        start_edit = self._action_row_start_edit(row)
+        if not isinstance(start_edit, QLineEdit):
+            return
+        suggested_utc = self.manager._normalize_hhmm(start_utc or "")
+        if not suggested_utc:
+            return
+        duration_combo = self.actions_table.cellWidget(row, self.COL_DURATION)
+        end_edit = self.actions_table.cellWidget(row, self.COL_END)
+        duration_minutes = 60
+        if isinstance(duration_combo, QComboBox):
+            try:
+                duration_minutes = int(duration_combo.currentData() or 60)
+            except Exception:
+                duration_minutes = 60
+        if duration_minutes not in {30, 60}:
+            duration_minutes = 60
+        end_utc = self._add_minutes_hhmm(suggested_utc, duration_minutes)
+        start_display = self._display_start_hhmm_from_utc(suggested_utc, show_local=self._show_local)
+        start_edit.setText(start_display)
+        if isinstance(end_edit, QLineEdit):
+            end_edit.setText(self._display_start_hhmm_from_utc(end_utc, show_local=self._show_local))
+
+    def _show_hf_schedule_slots_for_button(self, btn: QToolButton) -> None:
+        if not isinstance(btn, QToolButton):
+            return
+        row = self._row_for_start_slots_button(btn)
+        if row < 0:
+            return
+        if self._current_category() != self.CAT_HF:
+            return
+        group_combo = self.actions_table.cellWidget(row, self.COL_GROUP)
+        bandfreq_combo = self.actions_table.cellWidget(row, self.COL_BANDFREQ)
+        group_name = group_combo.currentText().strip().upper() if isinstance(group_combo, QComboBox) else ""
+        bandfreq_val = bandfreq_combo.currentText().strip() if isinstance(bandfreq_combo, QComboBox) else ""
+        band, freq = self._split_band_freq(bandfreq_val)
+        if not (group_name and band and freq):
+            return
+
+        slots = self._hf_schedule_slots_for_band_freq(band, freq)
+        menu = QMenu(btn)
+        if not slots:
+            empty_action = menu.addAction("No HF schedule slots on this frequency")
+            empty_action.setEnabled(False)
+        else:
+            primary = [slot for slot in slots if str(slot.get("group_name") or "").strip().upper() == group_name]
+            secondary = [slot for slot in slots if slot not in primary]
+            ordered_slots = list(primary) + list(secondary)
+            if secondary and primary:
+                top_note = menu.addAction("Selected group matches first")
+                top_note.setEnabled(False)
+                menu.addSeparator()
+            for slot in ordered_slots:
+                start_utc = self.manager._normalize_hhmm(slot.get("start_utc") or "")
+                if not start_utc:
+                    continue
+                label = self._format_hf_schedule_slot_text(slot)
+                action = menu.addAction(label)
+                action.triggered.connect(
+                    lambda _=False, target_row=int(row), start_val=str(start_utc): self._apply_hf_schedule_slot_start(
+                        target_row, start_val
+                    )
+                )
+        menu.popup(btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _lookup_callsigns_for_contact_rule(self, group: str, rule: str) -> List[str]:
         grp = str(group or "").strip().upper()
@@ -6030,6 +6332,8 @@ class SOPTab(_LegacySOPTab):
             resolved = list(contacts.get("ncs", []) or [])
         elif normalized_rule == "peer":
             resolved = list(contacts.get("peer", []) or [])
+        elif normalized_rule == "group":
+            resolved = self.manager.resolve_group_callsigns(grp, "")
         else:
             resolved = self.manager.resolve_group_callsigns(grp, "")
         self._contact_lookup_cache[cache_key] = (now, list(resolved))
@@ -6140,8 +6444,10 @@ class SOPTab(_LegacySOPTab):
         target_combo.setEditable(True)
         target_combo.setEnabled(target_enabled)
         self._apply_typeahead(target_combo)
+        self._update_start_slots_button_for_row(row)
 
     def _populate_actions(self, existing: List[Dict[str, Any]]) -> None:
+        self._clear_row_dynamic_refresh_timers()
         self.actions_table.setRowCount(0)
         rows = [r for r in (existing or []) if isinstance(r, dict)]
         rows.sort(key=lambda x: int(x.get("sort_order") or 0))
@@ -6197,7 +6503,18 @@ class SOPTab(_LegacySOPTab):
         end_edit = QLineEdit(self._display_start_hhmm_from_utc(end_utc, show_local=self._show_local))
         start_edit.setPlaceholderText("HH:MM")
         end_edit.setPlaceholderText("HH:MM")
-        self.actions_table.setCellWidget(row, self.COL_START, start_edit)
+        start_edit.setObjectName("sop_action_start_edit")
+        start_slots_btn = QToolButton()
+        start_slots_btn.setObjectName("sop_action_start_slots_btn")
+        start_slots_btn.setText("Slots")
+        start_slots_btn.clicked.connect(lambda _=False, b=start_slots_btn: self._show_hf_schedule_slots_for_button(b))
+        start_cell = QWidget()
+        start_layout = QHBoxLayout(start_cell)
+        start_layout.setContentsMargins(0, 0, 0, 0)
+        start_layout.setSpacing(4)
+        start_layout.addWidget(start_edit, stretch=1)
+        start_layout.addWidget(start_slots_btn)
+        self.actions_table.setCellWidget(row, self.COL_START, start_cell)
         self.actions_table.setCellWidget(row, self.COL_END, end_edit)
 
         duration_combo = QComboBox()
@@ -6255,7 +6572,9 @@ class SOPTab(_LegacySOPTab):
         existing_resource = str((existing or {}).get("software") or "").strip()
         existing_mode = str((existing or {}).get("mode") or "").strip()
         existing_action_key = str((existing or {}).get("action_key") or "").strip()
-        existing_contact = str((existing or {}).get("contact_rule") or "none").strip()
+        existing_contact = str((existing or {}).get("contact_rule") or "").strip()
+        if not existing_contact:
+            existing_contact = "group" if cat == self.CAT_HF else "none"
 
         self._refresh_row_dynamic_options(row, preserve_current=False)
         group_combo.setCurrentText(existing_group)
@@ -6289,11 +6608,14 @@ class SOPTab(_LegacySOPTab):
         )
 
         group_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
-        group_combo.currentTextChanged.connect(lambda _=None, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
+        group_combo.currentTextChanged.connect(lambda _=None, r=row: self._schedule_row_dynamic_options_refresh(r))
+        group_combo.currentTextChanged.connect(lambda _=None, r=row: self._update_start_slots_button_for_row(r))
         resource_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
-        resource_combo.currentTextChanged.connect(lambda _=None, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
+        resource_combo.currentTextChanged.connect(lambda _=None, r=row: self._schedule_row_dynamic_options_refresh(r))
         action_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
         contact_combo.currentIndexChanged.connect(lambda _=0, r=row: self._refresh_row_dynamic_options(r, preserve_current=True))
+        bandfreq_combo.currentIndexChanged.connect(lambda _=0, r=row: self._update_start_slots_button_for_row(r))
+        bandfreq_combo.currentTextChanged.connect(lambda _=None, r=row: self._update_start_slots_button_for_row(r))
 
         cond_combo.selectionChanged.connect(self._mark_dirty)
         cond_combo.selectionChanged.connect(self._schedule_realtime_hf_conflict_check)
@@ -6322,6 +6644,7 @@ class SOPTab(_LegacySOPTab):
                 widget.textChanged.connect(self._schedule_realtime_hf_conflict_check)
         self._autosize_actions_table()
         self._set_inline_conflict_badge(row, "pending")
+        self._update_start_slots_button_for_row(row)
         if mark_dirty:
             self._mark_dirty()
 
@@ -6329,6 +6652,7 @@ class SOPTab(_LegacySOPTab):
         for r in range(self.actions_table.rowCount()):
             if self.actions_table.cellWidget(r, self.COL_REMOVE) is btn:
                 self.actions_table.removeRow(r)
+                self._clear_row_dynamic_refresh_timers()
                 if self.actions_table.rowCount() == 0:
                     self._add_action_row(existing=None, mark_dirty=False)
                 self._autosize_actions_table()
@@ -6361,6 +6685,7 @@ class SOPTab(_LegacySOPTab):
                 self.COL_RESOURCE: 130,
                 self.COL_ACTION: 140,
                 self.COL_BANDFREQ: 180,
+                self.COL_START: 170,
                 self.COL_INTERVAL: 110,
                 self.COL_CONTACT_TARGET: 170,
                 self.COL_CONFLICT: 96,
@@ -6414,7 +6739,7 @@ class SOPTab(_LegacySOPTab):
             mode_combo = self.actions_table.cellWidget(r, self.COL_MODE)
             action_combo = self.actions_table.cellWidget(r, self.COL_ACTION)
             bandfreq_combo = self.actions_table.cellWidget(r, self.COL_BANDFREQ)
-            start_edit = self.actions_table.cellWidget(r, self.COL_START)
+            start_edit = self._action_row_start_edit(r)
             end_edit = self.actions_table.cellWidget(r, self.COL_END)
             duration_combo = self.actions_table.cellWidget(r, self.COL_DURATION)
             interval_combo = self.actions_table.cellWidget(r, self.COL_INTERVAL)
@@ -7088,6 +7413,9 @@ class SOPTab(_LegacySOPTab):
         self._refresh_all_rows_dynamic_options()
         self._refresh_inline_conflict_badges()
         self._schedule_realtime_hf_conflict_check()
+
+    def on_hf_schedule_saved(self) -> None:
+        self._clear_hf_schedule_slot_cache()
 
     def on_settings_saved(self) -> None:
         try:

@@ -4,6 +4,7 @@ import datetime as dt
 import json
 import math
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -221,6 +222,9 @@ class SOPManager:
         self.db_path = db_path or NETS_DB
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.settings = SettingsManager()
+        self._active_hf_conflicts_cache: Optional[List[Dict[str, Any]]] = None
+        self._active_hf_conflicts_cache_monotonic: float = 0.0
+        self._active_hf_conflicts_cache_ttl_seconds: float = 3.0
         self.ensure_tables()
         try:
             self.enforce_single_profile_per_category()
@@ -234,6 +238,10 @@ class SOPManager:
     CONFLICT_POLICY_DAILY = "DAILY_PRIORITY"
     NET_SOP_POLICY_SOP = "SOP_PRIORITY"
     NET_SOP_POLICY_NET = "NET_PRIORITY"
+
+    def _invalidate_active_hf_conflicts_cache(self) -> None:
+        self._active_hf_conflicts_cache = None
+        self._active_hf_conflicts_cache_monotonic = 0.0
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -1073,9 +1081,12 @@ class SOPManager:
                     (1 if active else 0, now_iso, pid),
                 )
             try:
-                return int(cur.rowcount or 0) > 0
+                updated = int(cur.rowcount or 0) > 0
             except Exception:
-                return True
+                updated = True
+            if updated:
+                self._invalidate_active_hf_conflicts_cache()
+            return updated
         finally:
             conn.close()
 
@@ -1162,6 +1173,7 @@ class SOPManager:
                             """,
                             (now_iso, stale_id),
                         )
+            self._invalidate_active_hf_conflicts_cache()
             return out
         finally:
             conn.close()
@@ -1563,6 +1575,7 @@ class SOPManager:
                     )
                 except Exception as e:
                     log.debug("SOP: Net/SOP conflict policy sync failed for profile %s: %s", profile_id, e)
+            self._invalidate_active_hf_conflicts_cache()
             return profile_id
         finally:
             conn.close()
@@ -1714,6 +1727,8 @@ class SOPManager:
                         ),
                     )
                     changed += 1
+            if changed > 0:
+                self._invalidate_active_hf_conflicts_cache()
             return changed
         finally:
             conn.close()
@@ -1726,6 +1741,7 @@ class SOPManager:
                 conn.execute("DELETE FROM sop_actions WHERE profile_id=?", (profile_id,))
                 conn.execute("DELETE FROM sop_schedule_layer WHERE profile_id=?", (profile_id,))
                 conn.execute("DELETE FROM sop_profiles WHERE id=?", (profile_id,))
+            self._invalidate_active_hf_conflicts_cache()
         finally:
             conn.close()
 
@@ -2499,7 +2515,13 @@ class SOPManager:
             "skipped_rows": int(skipped_rows),
         }
 
-    def collect_profile_conflicts(self, profile_id: int) -> List[Dict[str, Any]]:
+    def collect_profile_conflicts(
+        self,
+        profile_id: int,
+        *,
+        include_details: bool = False,
+        include_suggestions: bool = True,
+    ) -> List[Dict[str, Any]]:
         profile = self.get_profile(int(profile_id or 0))
         if not profile:
             return []
@@ -2517,6 +2539,7 @@ class SOPManager:
                 horizon_days=7,
                 check_all_groups=True,
                 peer_actions=peer_actions,
+                include_details=include_details,
             )
             out.append(
                 {
@@ -2533,18 +2556,36 @@ class SOPManager:
                     "sop_summary": str(diag.get("sop_summary") or ""),
                     "has_conflict": bool(diag.get("has_conflict")),
                     "first_occurrence_conflict": bool(diag.get("first_occurrence_conflict")),
-                    "suggested_start_utc": self.suggest_non_conflicting_start(
-                        action=action,
-                        operating_group=str(action.get("group_name") or operating_group).strip().upper(),
-                        check_all_groups=True,
-                        peer_actions=peer_actions,
+                    "suggested_start_utc": (
+                        self.suggest_non_conflicting_start(
+                            action=action,
+                            operating_group=str(action.get("group_name") or operating_group).strip().upper(),
+                            check_all_groups=True,
+                            peer_actions=peer_actions,
+                        )
+                        if include_suggestions
+                        else ""
                     ),
                     "conflict_policy": self._normalize_conflict_policy(action.get("conflict_policy")),
+                    "daily_details": list(diag.get("daily_details") or []),
+                    "net_details": list(diag.get("net_details") or []),
+                    "sop_details": list(diag.get("sop_details") or []),
                 }
             )
         return out
 
-    def collect_active_hf_conflicts(self) -> List[Dict[str, Any]]:
+    def collect_active_hf_conflicts(
+        self,
+        *,
+        force_refresh: bool = False,
+        include_details: bool = False,
+        include_suggestions: bool = True,
+    ) -> List[Dict[str, Any]]:
+        if not include_details and not force_refresh and self._active_hf_conflicts_cache is not None:
+            age_seconds = time.monotonic() - float(self._active_hf_conflicts_cache_monotonic or 0.0)
+            if 0.0 <= age_seconds <= float(self._active_hf_conflicts_cache_ttl_seconds or 0.0):
+                return [dict(row) for row in self._active_hf_conflicts_cache]
+
         out: List[Dict[str, Any]] = []
         for profile in self.list_profiles():
             if not bool(profile.get("active")):
@@ -2554,7 +2595,11 @@ class SOPManager:
             profile_id = int(profile.get("id") or 0)
             if profile_id <= 0:
                 continue
-            conflicts = self.collect_profile_conflicts(profile_id)
+            conflicts = self.collect_profile_conflicts(
+                profile_id,
+                include_details=include_details,
+                include_suggestions=include_suggestions,
+            )
             for item in conflicts:
                 if bool(item.get("has_conflict")):
                     out.append(
@@ -2564,7 +2609,10 @@ class SOPManager:
                             **item,
                         }
                     )
-        return out
+        if not include_details:
+            self._active_hf_conflicts_cache = [dict(row) for row in out]
+            self._active_hf_conflicts_cache_monotonic = time.monotonic()
+        return [dict(row) for row in out]
 
     def list_net_sop_conflict_policies(self, *, active_only: bool = True) -> List[Dict[str, Any]]:
         conn = self._connect()
@@ -2765,6 +2813,8 @@ class SOPManager:
                         ),
                     )
                     saved += 1
+            if saved > 0:
+                self._invalidate_active_hf_conflicts_cache()
             return saved
         except Exception as e:
             log.debug("SOP: save_net_sop_conflict_policies failed: %s", e)
@@ -2790,9 +2840,12 @@ class SOPManager:
                     (norm_policy, now_iso, pid),
                 )
             try:
-                return int(cur.rowcount or 0) > 0
+                updated = int(cur.rowcount or 0) > 0
             except Exception:
-                return True
+                updated = True
+            if updated:
+                self._invalidate_active_hf_conflicts_cache()
+            return updated
         except Exception as e:
             log.debug("SOP: update_net_sop_conflict_policy failed: %s", e)
             return False
@@ -2824,9 +2877,12 @@ class SOPManager:
                         (_utc_now_iso(),),
                     )
             try:
-                return int(cur.rowcount or 0)
+                cleared = int(cur.rowcount or 0)
             except Exception:
-                return 0
+                cleared = 0
+            if cleared > 0:
+                self._invalidate_active_hf_conflicts_cache()
+            return cleared
         except Exception as e:
             log.debug("SOP: clear_net_sop_conflict_policies failed: %s", e)
             return 0
@@ -3886,6 +3942,8 @@ class SOPManager:
                     targets = [selected_target] if selected_target and selected_target != "__ANY_ROLE__" else ["Any (Role Match)"]
                 elif rule in {"callsign", "peer", "local_profile", "local_group"}:
                     targets = [selected_target] if selected_target else []
+                elif rule == "group":
+                    targets = [selected_target] if selected_target else ["Any (Group Match)"]
 
                 rows.append(
                     {
@@ -3985,6 +4043,8 @@ class SOPManager:
             return " OR ".join(vals[:4]) if vals else "Any (Role Match)"
         if rule_val in {"callsign", "peer", "local_profile", "local_group"}:
             return tgt or "--"
+        if rule_val == "group":
+            return tgt or "Any (Group Match)"
         return "--"
 
     def build_profile_export_rows(

@@ -86,6 +86,24 @@ BAND_OPTIONS = [
 MODE_OPTIONS = ["Digi", "SSB"]
 
 
+class _SortKeyTableWidgetItem(QTableWidgetItem):
+    def __init__(self, text: str = "", *, sort_key: Any = None) -> None:
+        super().__init__(text)
+        if sort_key is not None:
+            self.setData(Qt.UserRole, sort_key)
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        if isinstance(other, QTableWidgetItem):
+            left_key = self.data(Qt.UserRole)
+            right_key = other.data(Qt.UserRole)
+            if left_key is not None and right_key is not None:
+                try:
+                    return left_key < right_key
+                except Exception:
+                    pass
+        return super().__lt__(other)
+
+
 # Radio program metadata (must match SettingsTab keys)
 PROGRAMS = {
     "FLRig": {
@@ -187,16 +205,23 @@ class DailyScheduleTab(QWidget):
         self._sop_profile_lookup: Dict[int, Dict[str, Any]] = {}
         self._sop_group_profile_choice: Dict[str, int] = {}
         self._hidden_sop_overlay_keys: Set[str] = set()
+        self._effective_projection_cache_token: Tuple[Any, ...] | None = None
+        self._effective_projection_cache_rows: List[Dict[str, Any]] = []
+        self._active_conflict_pairs_cache: List[Tuple[int, int, str]] | None = None
+        self._active_conflict_rows_cache: Set[int] | None = None
+        self._schedule_resource_view_token: Tuple[Any, ...] | None = None
+        self._has_active_hf_sop_profiles: bool = False
+        self._has_active_hf_sop_conflicts: bool = False
         self._sop_session_journal_cache: Dict[str, Any] | None = None
         self._sop_return_to_normal_prompt_active: bool = False
+        self._pending_table_conflict_refresh: bool = False
+        self._table_conflict_refresh_timer: Optional[QTimer] = None
 
         self._build_ui()
         self._refresh_qsy_options()
         self._load_schedule()
         self._setup_clock_timer()
         self._setup_sop_panel_timer()
-        self._refresh_sop_profiles_panel(force=True)
-        self._refresh_schedule_resources(force=True)
         self._suppress_autostart = False
 
     def _format_freq(self, val) -> str:
@@ -262,6 +287,12 @@ class DailyScheduleTab(QWidget):
         active_header = QHBoxLayout()
         active_header.addWidget(QLabel("<h3>Active Schedule</h3>"))
         active_header.addWidget(self.effective_source_label)
+        self.show_sop_overlay_chk = QCheckBox("Show Effective Schedule")
+        self.show_sop_overlay_chk.setToolTip(
+            "Show a read-only HF/SOP runtime projection for the next 7 days. This does not change scheduler behavior."
+        )
+        self.show_sop_overlay_chk.setEnabled(False)
+        active_header.addWidget(self.show_sop_overlay_chk)
         active_header.addStretch()
         layout.addLayout(active_header)
 
@@ -287,6 +318,46 @@ class DailyScheduleTab(QWidget):
             hv.setSectionResizeMode(col, QHeaderView.Stretch)
 
         layout.addWidget(self.table)
+
+        self.sop_overlay_box = QGroupBox("Effective Schedule (Read-Only)")
+        self.sop_overlay_box.setVisible(False)
+        sop_overlay_layout = QVBoxLayout(self.sop_overlay_box)
+        sop_overlay_layout.setContentsMargins(6, 6, 6, 6)
+        sop_overlay_layout.setSpacing(4)
+        self.sop_overlay_summary_label = QLabel("Projection hidden.")
+        self.sop_overlay_summary_label.setWordWrap(True)
+        sop_overlay_layout.addWidget(self.sop_overlay_summary_label)
+        self.sop_overlay_table = QTableWidget()
+        self.sop_overlay_table.setColumnCount(8)
+        self.sop_overlay_table.setHorizontalHeaderLabels(
+            [
+                "Source",
+                "Day",
+                "Group",
+                "Band",
+                "Freq (MHz)",
+                "Start",
+                "End",
+                "Detail",
+            ]
+        )
+        self.sop_overlay_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.sop_overlay_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.sop_overlay_table.setFocusPolicy(Qt.NoFocus)
+        self.sop_overlay_table.verticalHeader().setVisible(False)
+        self.sop_overlay_table.setSortingEnabled(True)
+        overlay_hv = self.sop_overlay_table.horizontalHeader()
+        overlay_hv.setSortIndicator(1, Qt.AscendingOrder)
+        overlay_hv.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        overlay_hv.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        overlay_hv.setSectionResizeMode(2, QHeaderView.Stretch)
+        overlay_hv.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        overlay_hv.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        overlay_hv.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        overlay_hv.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        overlay_hv.setSectionResizeMode(7, QHeaderView.Stretch)
+        sop_overlay_layout.addWidget(self.sop_overlay_table)
+        layout.addWidget(self.sop_overlay_box)
 
         # Buttons row
         btn_row = QHBoxLayout()
@@ -387,6 +458,7 @@ class DailyScheduleTab(QWidget):
         self.save_btn.clicked.connect(self._save_schedule)
         self.table.itemSelectionChanged.connect(self._update_delete_button_state)
         self.table.itemChanged.connect(self._on_table_item_changed)
+        self.show_sop_overlay_chk.toggled.connect(self._on_toggle_sop_overlay_visibility)
         self.resources_set_combo.currentIndexChanged.connect(self._populate_schedule_resources_table)
         self.resources_group_filter.textChanged.connect(self._populate_schedule_resources_table)
         self.resources_table.itemSelectionChanged.connect(self._update_resource_action_state)
@@ -399,11 +471,15 @@ class DailyScheduleTab(QWidget):
         self.import_hf_schedule_action.triggered.connect(self._import_schedule)
         self.export_hf_schedule_action.triggered.connect(self._export_schedule)
 
+        self._table_conflict_refresh_timer = QTimer(self)
+        self._table_conflict_refresh_timer.setSingleShot(True)
+        self._table_conflict_refresh_timer.timeout.connect(self._flush_table_conflict_refresh)
+
         # Initialize clock labels once
         self._update_clock_labels()
         self._update_effective_source_label()
         self._update_suspend_state()
-        self._apply_theme()
+        self._apply_theme(refresh_dynamic=False)
         self._update_delete_button_state()
         self._update_resource_action_state()
 
@@ -424,6 +500,7 @@ class DailyScheduleTab(QWidget):
         self._sop_panel_timer = QTimer(self)
         self._sop_panel_timer.timeout.connect(lambda: self._refresh_sop_profiles_panel(force=False))
         self._sop_panel_timer.timeout.connect(lambda: self._refresh_schedule_resources(force=False))
+        self._sop_panel_timer.timeout.connect(self._refresh_sop_overlay_rows_in_table)
         self._sop_panel_timer.start(30_000)
 
     def _refresh_group_band_cells(self):
@@ -848,19 +925,17 @@ class DailyScheduleTab(QWidget):
                 self._append_entry_row(self._entry_for_display(dict(entry)))
             if self.table.rowCount() == 0:
                 self._add_row()
-            self._append_sop_overlay_rows()
         finally:
             self._suspend_dirty_tracking = prev_suspend
         self.table.clearSelection()
         self._update_delete_button_state()
+        if self.table.rowCount() > 1:
+            self._sort_active_schedule_by_time(refresh_post_sort=False)
+        self._mark_dirty()
+        self._highlight_time_conflicts()
         self._refresh_schedule_resources(force=True)
         self._refresh_schedule_issues(force=True)
-        if self.table.rowCount() > 1:
-            self._sort_active_schedule_by_time()
-        else:
-            self._highlight_time_conflicts()
-            self._update_resource_action_state()
-        self._mark_dirty()
+        self._refresh_sop_overlay_rows_in_table()
 
     def _start_or_refresh_sop_session(self, profiles: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         active_profiles = profiles if isinstance(profiles, list) else self._active_hf_sop_profiles()
@@ -1101,11 +1176,21 @@ class DailyScheduleTab(QWidget):
             if current_sig and current_sig != post_sig:
                 return False, "HF schedule changed after auto-adjust; restore requires overwrite confirmation."
         self._replace_hf_rows_in_table(rows_before)
+        restore_rows = self._collect_current_hf_rows_utc()
+        saved, save_detail = self._persist_hf_schedule_rows(
+            restore_rows,
+            prompt_after_save=False,
+        )
+        if not saved:
+            return False, (
+                "HF rows were restored in the table, but the saved Daily schedule could not be updated.\n"
+                f"{save_detail}"
+            )
         hf_restore["available"] = False
         hf_restore["restored_utc"] = self._utc_now_iso()
         journal["hf_restore"] = hf_restore
         self._save_sop_session_journal(journal)
-        return True, f"Restored {len(rows_before)} HF row(s) from pre-auto-adjust snapshot."
+        return True, f"Restored and saved {len(restore_rows)} HF row(s) from pre-auto-adjust snapshot."
 
     def _revert_session_temp_net_sop_policies(
         self,
@@ -1408,48 +1493,78 @@ class DailyScheduleTab(QWidget):
             return f"{start_txt}-{end_txt}"
         return start_txt
 
-    def _build_hf_sop_status_rows(self) -> List[Dict[str, Any]]:
+    def _build_hf_sop_status_rows(self, *, force_conflict_refresh: bool = False) -> List[Dict[str, Any]]:
         profiles = [p for p in self._load_sop_profile_catalog() if self._is_hf_sop_profile(p)]
-        conflict_map: Dict[int, List[Tuple[datetime.datetime, datetime.datetime]]] = {}
+        conflict_map: Dict[int, List[Dict[str, Any]]] = {}
         if profiles:
             hf_profile_ids = {int(p.get("id") or 0) for p in profiles if int(p.get("id") or 0) > 0}
             try:
-                upcoming_rows = self._sop_manager.build_upcoming_actions(horizon_hours=24, only_active=True)
+                conflict_rows = self._sop_manager.collect_active_hf_conflicts(
+                    force_refresh=force_conflict_refresh,
+                    include_suggestions=False,
+                )
             except Exception as e:
                 log.debug("HF Schedule: failed loading SOP conflicts: %s", e)
-                upcoming_rows = []
-            for row in upcoming_rows:
+                conflict_rows = []
+            for row in conflict_rows:
                 profile_id = int(row.get("profile_id") or 0)
                 if profile_id <= 0 or profile_id not in hf_profile_ids:
                     continue
-                if bool(row.get("aligned", True)):
-                    continue
-                if str(row.get("contact_rule") or "").strip().lower() in {"local_profile", "local_group"}:
-                    continue
-                due_utc = row.get("next_due_utc")
-                if not isinstance(due_utc, datetime.datetime):
-                    continue
-                interval_minutes = max(1, int(row.get("interval_minutes") or 1))
-                end_utc = due_utc + datetime.timedelta(minutes=interval_minutes)
-                conflict_map.setdefault(profile_id, []).append((due_utc, end_utc))
+                conflict_map.setdefault(profile_id, []).append(dict(row))
 
         rows: List[Dict[str, Any]] = []
         for profile in profiles:
             profile_id = int(profile.get("id") or 0)
             active = bool(profile.get("active"))
-            conflicts = sorted(conflict_map.get(profile_id, []), key=lambda x: x[0])
-            if conflicts:
+            conflicts = sorted(
+                conflict_map.get(profile_id, []),
+                key=lambda x: (
+                    str(x.get("action_label") or "").upper(),
+                    str(x.get("band") or "").upper(),
+                    str(x.get("frequency") or ""),
+                    str(x.get("daily_summary") or "").upper(),
+                    str(x.get("net_summary") or "").upper(),
+                    str(x.get("sop_summary") or "").upper(),
+                ),
+            )
+            daily_conflicts = [
+                row
+                for row in conflicts
+                if bool(row.get("daily_conflicts")) or bool(str(row.get("daily_summary") or "").strip())
+            ]
+            net_conflicts = [
+                row
+                for row in conflicts
+                if bool(row.get("net_conflicts")) or bool(str(row.get("net_summary") or "").strip())
+            ]
+            sop_conflicts = [
+                row
+                for row in conflicts
+                if bool(row.get("sop_conflicts")) or bool(str(row.get("sop_summary") or "").strip())
+            ]
+            if active and daily_conflicts:
                 status = "Conflict"
-                first_span = self._format_conflict_span(conflicts[0][0], conflicts[0][1])
-                extra = len(conflicts) - 1
-                issue_summary = (
-                    f"Schedule Conflict: {first_span} (+{extra} more)"
-                    if extra > 0
-                    else f"Schedule Conflict: {first_span}"
-                )
+                issue_summary = f"HF conflict: {len(daily_conflicts)} action(s) still overlap Daily HF."
+                other_parts: List[str] = []
+                if net_conflicts:
+                    other_parts.append(f"Net: {len(net_conflicts)}")
+                if sop_conflicts:
+                    other_parts.append(f"SOP: {len(sop_conflicts)}")
+                if other_parts:
+                    issue_summary += " Remaining " + ", ".join(other_parts) + "."
+            elif active and (net_conflicts or sop_conflicts):
+                status = "Attention"
+                remaining_parts: List[str] = []
+                if net_conflicts:
+                    remaining_parts.append(f"Net: {len(net_conflicts)}")
+                if sop_conflicts:
+                    remaining_parts.append(f"SOP: {len(sop_conflicts)}")
+                issue_summary = "HF clear."
+                if remaining_parts:
+                    issue_summary += " Remaining " + ", ".join(remaining_parts) + "."
             elif active:
                 status = "Active"
-                issue_summary = "No overlaps in next 24h."
+                issue_summary = "No Daily/Net/SOP conflicts."
             else:
                 status = "Inactive"
                 issue_summary = "Inactive."
@@ -1461,9 +1576,12 @@ class DailyScheduleTab(QWidget):
                     "status": status,
                     "issue_summary": issue_summary,
                     "active": active,
+                    "daily_conflict_count": len(daily_conflicts),
+                    "net_conflict_count": len(net_conflicts),
+                    "sop_conflict_count": len(sop_conflicts),
                 }
             )
-        status_order = {"Conflict": 0, "Active": 1, "Inactive": 2}
+        status_order = {"Conflict": 0, "Attention": 1, "Active": 2, "Inactive": 3}
         rows.sort(
             key=lambda r: (
                 status_order.get(str(r.get("status") or ""), 9),
@@ -1480,13 +1598,17 @@ class DailyScheduleTab(QWidget):
         if not force and (now_ts - float(self._last_sop_panel_refresh_ts or 0.0)) < 10.0:
             return
         self._last_sop_panel_refresh_ts = now_ts
-        rows = self._build_hf_sop_status_rows()
+        rows = self._build_hf_sop_status_rows(force_conflict_refresh=force)
         conflict_count = sum(1 for r in rows if str(r.get("status") or "") == "Conflict")
+        attention_count = sum(1 for r in rows if str(r.get("status") or "") == "Attention")
+        self._has_active_hf_sop_conflicts = bool(conflict_count > 0)
         active_count = sum(1 for r in rows if bool(r.get("active")))
+        self._update_sop_overlay_control_state(active_count > 0)
         if rows:
-            self.sop_profile_summary_label.setText(
-                f"HF SOP Sets: {len(rows)} | Active: {active_count} | Conflict: {conflict_count}"
-            )
+            summary = f"HF SOP Sets: {len(rows)} | Active: {active_count} | HF Conflict: {conflict_count}"
+            if attention_count > 0:
+                summary += f" | Review: {attention_count}"
+            self.sop_profile_summary_label.setText(summary)
         else:
             self.sop_profile_summary_label.setText("HF SOP Sets: none configured")
         self.sop_profile_summary_label.setStyleSheet(f"color: {theme.get('text', '#111')}; font-weight: 600;")
@@ -1509,13 +1631,19 @@ class DailyScheduleTab(QWidget):
             status_txt = str(row.get("status") or "Inactive").strip()
             issue_summary = str(row.get("issue_summary") or "").strip()
 
-            btn = QPushButton(f"HF SOP: {'Active' if active else 'Inactive'}")
+            btn_label = "Inactive"
             if status_txt == "Conflict":
                 role = "eligible_warning"
+                btn_label = "Conflict"
+            elif status_txt == "Attention":
+                role = "eligible_warning"
+                btn_label = "Review"
             elif active:
                 role = "eligible_success"
+                btn_label = "Active"
             else:
                 role = "muted"
+            btn = QPushButton(f"HF SOP: {btn_label}")
             btn.setStyleSheet(button_style(role, theme))
             btn.setToolTip(issue_summary or "Toggle SOP active state.")
             btn.clicked.connect(lambda _=False, pid=profile_id, target=(not active): self._on_toggle_sop_profile_active(pid, target))
@@ -1753,9 +1881,20 @@ class DailyScheduleTab(QWidget):
             conn.close()
         return rows
 
-    def _load_sop_schedule_resource_rows(self, *, profiles: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    def _load_sop_schedule_resource_rows(
+        self,
+        *,
+        profiles: Optional[List[Dict[str, Any]]] = None,
+        apply_condition_filter: bool = False,
+    ) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         profiles = [dict(p) for p in (profiles or [p for p in self._load_sop_profile_catalog() if self._is_hf_sop_profile(p)])]
+        condition_levels: Dict[str, int] = {}
+        if apply_condition_filter:
+            try:
+                condition_levels = dict(getattr(self._sop_manager, "_condition_level_map")() or {})
+            except Exception:
+                condition_levels = {}
         for profile in profiles:
             pid = int(profile.get("id") or 0)
             if pid <= 0:
@@ -1771,8 +1910,21 @@ class DailyScheduleTab(QWidget):
                 if not bool(layer.get("enabled", True)):
                     continue
                 layer_id = int(layer.get("id") or 0)
-                recurrence = "Daily"
-                day_utc = "ALL"
+                recurrence = str(
+                    layer.get("recurrence")
+                    or ("Daily" if str(layer.get("day_utc") or "ALL").strip().upper() == "ALL" else "Weekly")
+                ).strip() or "Weekly"
+                day_utc = self._normalize_day(str(layer.get("day_utc") or "ALL"))
+                row_group_name = str(layer.get("group_name") or group_name).strip().upper()
+                if apply_condition_filter:
+                    group_level = condition_levels.get(row_group_name)
+                    cond_levels = str(layer.get("condition_levels") or "ALL")
+                    try:
+                        matches = bool(getattr(self._sop_manager, "_action_condition_match")(cond_levels, group_level))
+                    except Exception:
+                        matches = True
+                    if not matches:
+                        continue
                 band = str(layer.get("band") or "").strip().upper()
                 mode = str(layer.get("mode") or "").strip().upper()
                 vfo = str(layer.get("vfo") or "A").strip().upper() or "A"
@@ -1788,7 +1940,7 @@ class DailyScheduleTab(QWidget):
                         "source_key": f"sop:{pid}:{key_layer}",
                         "resource_set": f"SOP: {profile_name}",
                         "day_utc": day_utc,
-                        "group_name": group_name,
+                        "group_name": row_group_name,
                         "mode": mode,
                         "band": band,
                         "frequency": freq,
@@ -1797,8 +1949,8 @@ class DailyScheduleTab(QWidget):
                         "source": "sop_layer",
                         "updated_utc": str(layer.get("updated_utc") or profile.get("updated_utc") or "").strip(),
                         "recurrence": recurrence,
-                        "biweekly_offset_weeks": 0,
-                        "month_weeks": "",
+                        "biweekly_offset_weeks": int(layer.get("biweekly_offset_weeks") or 0),
+                        "month_weeks": str(layer.get("month_weeks") or "").strip(),
                         "vfo": vfo,
                         "sop_profile_id": pid,
                         "sop_profile_name": profile_name,
@@ -1961,6 +2113,7 @@ class DailyScheduleTab(QWidget):
         if force or self._schedule_resource_token != token:
             self._schedule_resource_rows = self._load_schedule_resource_rows()
             self._schedule_resource_token = token
+            self._schedule_resource_view_token = None
             self._refresh_resource_set_combo()
         self._populate_schedule_resources_table()
 
@@ -2031,6 +2184,15 @@ class DailyScheduleTab(QWidget):
     def _populate_schedule_resources_table(self) -> None:
         set_filter = str(self.resources_set_combo.currentData() or "All").strip()
         text_filter = str(self.resources_group_filter.text() or "").strip().upper()
+        view_token = (
+            self._schedule_resource_token,
+            set_filter,
+            text_filter,
+            bool(self._show_local),
+        )
+        if self._schedule_resource_view_token == view_token:
+            self._update_resource_action_state()
+            return
         rows: List[Dict[str, Any]] = []
         for row in self._schedule_resource_rows:
             resource_set = str(row.get("resource_set") or "Custom").strip() or "Custom"
@@ -2114,6 +2276,7 @@ class DailyScheduleTab(QWidget):
                     item.setData(Qt.UserRole, source_key)
                 self.resources_table.setItem(r, c, item)
         self.resources_table.setSortingEnabled(True)
+        self._schedule_resource_view_token = view_token
         self._update_resource_action_state()
 
     def _update_resource_action_state(
@@ -2130,9 +2293,11 @@ class DailyScheduleTab(QWidget):
         has_conflicts = any(bool(r.get("_has_conflict")) for r in conflict_scope)
         has_resource_conflicts = any(bool(r.get("_has_conflict")) for r in self._resource_view_rows)
         if active_conflicts_override is not None:
-            has_active_conflicts = bool(active_conflicts_override)
+            has_hf_conflicts = bool(active_conflicts_override)
         else:
-            has_active_conflicts = bool(self._collect_active_time_conflict_pairs())
+            has_hf_conflicts = bool(self._collect_active_time_conflict_pairs())
+        has_sop_conflicts = bool(getattr(self, "_has_active_hf_sop_conflicts", False))
+        has_active_conflicts = bool(has_hf_conflicts or has_sop_conflicts)
         deletable_scope = selected_rows if selected_rows else self._resource_view_rows
         has_deletable = any(self._resource_row_is_deletable(r) for r in deletable_scope)
         self.add_selected_resource_action.setEnabled(has_selected)
@@ -2159,7 +2324,7 @@ class DailyScheduleTab(QWidget):
         self.resources_resolve_btn.setEnabled(can_resolve)
         self.resources_resolve_btn.setStyleSheet(button_style("eligible_warning" if can_resolve else "muted", theme))
         self.resources_resolve_btn.setToolTip(
-            "Resolve active schedule time overlaps."
+            "Resolve active schedule overlaps (HF/HF or HF/SOP)."
             if has_active_conflicts
             else "Resolve duplicate HF Active schedule entries."
         )
@@ -2409,9 +2574,19 @@ class DailyScheduleTab(QWidget):
                 self._show_active_conflicts_summary(active_conflicts, selected_only=True)
                 return
 
+            sop_conflicts = self._collect_hf_sop_conflict_entries(selected_scope=active_selected)
+            if sop_conflicts:
+                self._show_hf_sop_conflicts_summary(sop_conflicts, selected_only=True)
+                return
+
             all_active_conflicts = self._collect_active_time_conflict_pairs()
             if all_active_conflicts:
                 self._show_active_conflicts_summary(all_active_conflicts, selected_only=False)
+                return
+
+            all_sop_conflicts = self._collect_hf_sop_conflict_entries()
+            if all_sop_conflicts:
+                self._show_hf_sop_conflicts_summary(all_sop_conflicts, selected_only=False)
                 return
 
             QMessageBox.information(
@@ -2424,6 +2599,11 @@ class DailyScheduleTab(QWidget):
         all_active_conflicts = self._collect_active_time_conflict_pairs()
         if all_active_conflicts:
             self._show_active_conflicts_summary(all_active_conflicts, selected_only=False)
+            return
+
+        all_sop_conflicts = self._collect_hf_sop_conflict_entries()
+        if all_sop_conflicts:
+            self._show_hf_sop_conflicts_summary(all_sop_conflicts, selected_only=False)
             return
 
         selected = self._selected_resource_rows()
@@ -2655,7 +2835,11 @@ class DailyScheduleTab(QWidget):
                         selected.add(int(idx.row()))
             except Exception:
                 pass
-        return sorted(int(r) for r in selected if int(r) >= 0)
+        return sorted(
+            int(r)
+            for r in selected
+            if int(r) >= 0 and not self._is_sop_overlay_row(int(r))
+        )
 
     def _active_row_summary_text(
         self,
@@ -2747,60 +2931,343 @@ class DailyScheduleTab(QWidget):
             end_txt = f"{(end_m % (24 * 60)) // 60:02d}:{(end_m % 60):02d}"
         return start_txt, end_txt
 
-    def _can_auto_adjust_hf_around_sop(self, conflicts: List[Tuple[int, int, str]]) -> bool:
-        for r1, r2, _day in conflicts:
-            is_sop_1 = self._is_sop_overlay_row(int(r1))
-            is_sop_2 = self._is_sop_overlay_row(int(r2))
-            if is_sop_1 == is_sop_2:
-                continue
-            hf_idx = int(r2) if is_sop_1 else int(r1)
-            sop_idx = int(r1) if is_sop_1 else int(r2)
-            hf_row = self._active_row_to_utc(hf_idx, include_sop_overlay=True) or {}
-            sop_row = self._active_row_to_utc(sop_idx, include_sop_overlay=True) or {}
-            hf_day = self._normalize_day(str(hf_row.get("day_utc") or "ALL"))
-            sop_day = self._normalize_day(str(sop_row.get("day_utc") or "ALL"))
-            if hf_day == sop_day or (hf_day == "ALL" and sop_day == "ALL"):
-                return True
-        return False
+    @staticmethod
+    def _row_index_or_default(value: Any, default: int = -1) -> int:
+        if value is None:
+            return int(default)
+        if isinstance(value, str) and not value.strip():
+            return int(default)
+        try:
+            return int(value)
+        except Exception:
+            return int(default)
 
-    def _auto_adjust_hf_around_sop(self, conflicts: List[Tuple[int, int, str]]) -> Tuple[bool, str]:
+    def _collect_hf_sop_conflict_entries(
+        self,
+        selected_scope: Optional[Set[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        selected_rows: Optional[Set[int]] = None
+        if selected_scope:
+            selected_rows = {int(r) for r in selected_scope}
+
+        hf_rows: List[Dict[str, Any]] = []
+        hf_rows_by_index: Dict[int, Dict[str, Any]] = {}
+        for r in range(self.table.rowCount()):
+            if selected_rows is not None and int(r) not in selected_rows:
+                continue
+            row = self._active_row_to_utc(r, include_sop_overlay=False)
+            if not row:
+                continue
+            day_utc = self._normalize_day(str(row.get("day_utc") or "ALL"))
+            start_utc = self._normalize_hhmm(str(row.get("start_utc") or ""))
+            end_utc = self._normalize_hhmm(str(row.get("end_utc") or ""))
+            band = str(row.get("band") or "").strip().upper()
+            freq = self._normalize_freq_text(str(row.get("frequency") or ""))
+            if not (day_utc and start_utc and end_utc and band and freq):
+                continue
+            expanded = {
+                "day_utc": day_utc,
+                "recurrence": "Daily" if day_utc == "ALL" else "Weekly",
+                "biweekly_offset_weeks": 0,
+                "month_weeks": "",
+                "group_name": str(row.get("group_name") or "").strip().upper(),
+                "mode": str(row.get("mode") or "").strip().upper(),
+                "band": band,
+                "frequency": freq,
+                "start_utc": start_utc,
+                "end_utc": end_utc,
+                "_hf_row_index": int(r),
+            }
+            hf_rows.append(expanded)
+            hf_rows_by_index[int(r)] = dict(row)
+        if not hf_rows:
+            return []
+
+        def _parse_iso_utc(value: Any) -> Optional[datetime.datetime]:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except Exception:
+                return None
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=datetime.timezone.utc)
+            return parsed.astimezone(datetime.timezone.utc)
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        window_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_end = window_start + datetime.timedelta(days=8)
+        try:
+            hf_windows = self._sop_manager._expand_schedule_rows_windows(
+                hf_rows,
+                window_start_utc=window_start,
+                window_end_utc=window_end,
+            )
+            active_conflicts = self._sop_manager.collect_active_hf_conflicts(
+                force_refresh=True,
+                include_details=True,
+            )
+        except Exception as e:
+            log.debug("HF Schedule: failed loading authoritative active HF/SOP conflicts: %s", e)
+            return []
+        if not hf_windows or not active_conflicts:
+            return []
+
+        def _overlap_day_segments(
+            start_utc: datetime.datetime,
+            end_utc: datetime.datetime,
+        ) -> List[Tuple[str, int, int]]:
+            out_segments: List[Tuple[str, int, int]] = []
+            cur = start_utc.astimezone(datetime.timezone.utc)
+            end = end_utc.astimezone(datetime.timezone.utc)
+            while cur < end:
+                day_start = cur.replace(hour=0, minute=0, second=0, microsecond=0)
+                day_end = day_start + datetime.timedelta(days=1)
+                seg_end = min(end, day_end)
+                day_name = cur.strftime("%A")
+                start_m = (cur.hour * 60) + cur.minute
+                end_m = (seg_end.hour * 60) + seg_end.minute
+                if seg_end == day_end:
+                    end_m = 24 * 60
+                if end_m > start_m:
+                    out_segments.append((day_name, int(start_m), int(end_m)))
+                cur = seg_end
+            return out_segments
+
+        authoritative_daily_overlaps: List[Dict[str, Any]] = []
+        for row in active_conflicts:
+            if not isinstance(row, dict):
+                continue
+            action_band = str(row.get("band") or "").strip().upper()
+            action_freq = self._normalize_freq_text(str(row.get("frequency") or ""))
+            action_label = str(row.get("action_label") or "").strip() or "Action"
+            profile_name = str(row.get("profile_name") or "").strip() or "HF SOP"
+            for detail in list(row.get("daily_details") or []):
+                if not isinstance(detail, dict):
+                    continue
+                overlap_start = _parse_iso_utc(detail.get("overlap_start_utc"))
+                overlap_end = _parse_iso_utc(detail.get("overlap_end_utc"))
+                if not isinstance(overlap_start, datetime.datetime) or not isinstance(overlap_end, datetime.datetime):
+                    continue
+                if overlap_end <= overlap_start:
+                    continue
+                hf_band = str(detail.get("other_band") or "").strip().upper()
+                hf_freq = self._normalize_freq_text(str(detail.get("other_frequency") or ""))
+                if not (hf_band and hf_freq):
+                    continue
+                authoritative_daily_overlaps.append(
+                    {
+                        "overlap_start": overlap_start,
+                        "overlap_end": overlap_end,
+                        "hf_band": hf_band,
+                        "hf_freq": hf_freq,
+                        "sop_profile_name": profile_name,
+                        "sop_group_name": str(row.get("operating_group") or "").strip().upper(),
+                        "sop_band": action_band,
+                        "sop_freq": action_freq,
+                        "sop_label": action_label,
+                    }
+                )
+        if not authoritative_daily_overlaps:
+            return []
+
+        out: List[Dict[str, Any]] = []
+        seen: Set[Tuple[int, str, str, int, int]] = set()
+        for hf_row in hf_windows:
+            hf_idx = self._row_index_or_default(hf_row.get("_hf_row_index"), -1)
+            hf_base = hf_rows_by_index.get(hf_idx)
+            if hf_idx < 0 or not isinstance(hf_base, dict):
+                continue
+            hf_band = str(hf_row.get("band") or "").strip().upper()
+            hf_freq = self._normalize_freq_text(str(hf_row.get("frequency") or ""))
+            hf_day = self._normalize_day(str(hf_base.get("day_utc") or "ALL"))
+            hf_start = hf_row.get("start_dt_utc")
+            hf_end = hf_row.get("end_dt_utc")
+            if not isinstance(hf_start, datetime.datetime) or not isinstance(hf_end, datetime.datetime):
+                continue
+            for detail in authoritative_daily_overlaps:
+                detail_band = str(detail.get("hf_band") or "").strip().upper()
+                detail_freq = self._normalize_freq_text(str(detail.get("hf_freq") or ""))
+                if hf_band != detail_band or hf_freq != detail_freq:
+                    continue
+                if not self._sop_manager._ranges_overlap(
+                    hf_start,
+                    hf_end,
+                    detail["overlap_start"],
+                    detail["overlap_end"],
+                ):
+                    continue
+                sop_band = str(detail.get("sop_band") or "").strip().upper()
+                sop_freq = self._normalize_freq_text(str(detail.get("sop_freq") or ""))
+                if hf_band and hf_freq and hf_band == sop_band and hf_freq == sop_freq:
+                    continue
+                overlap_start = max(
+                    hf_start.astimezone(datetime.timezone.utc),
+                    detail["overlap_start"].astimezone(datetime.timezone.utc),
+                )
+                overlap_end = min(
+                    hf_end.astimezone(datetime.timezone.utc),
+                    detail["overlap_end"].astimezone(datetime.timezone.utc),
+                )
+                if overlap_end <= overlap_start:
+                    continue
+                source_key = (
+                    f"sop:{str(detail.get('sop_profile_name') or '')}:"
+                    f"{str(detail.get('sop_label') or '')}:"
+                    f"{overlap_start.isoformat()}"
+                )
+                for day_name, start_m, end_m in _overlap_day_segments(overlap_start, overlap_end):
+                    seen_key = (int(hf_idx), source_key, str(day_name), int(start_m), int(end_m))
+                    if seen_key in seen:
+                        continue
+                    seen.add(seen_key)
+                    out.append(
+                        {
+                            "hf_row_index": int(hf_idx),
+                            "hf_row": dict(hf_base),
+                            "sop_row": {
+                                "_source_key": source_key,
+                                "_sop_profile_name": str(detail.get("sop_profile_name") or "").strip() or "HF SOP",
+                                "group_name": str(detail.get("sop_group_name") or "").strip().upper(),
+                                "day_utc": str(day_name),
+                                "band": sop_band,
+                                "frequency": sop_freq,
+                                "start_utc": self._normalize_hhmm(overlap_start.astimezone(datetime.timezone.utc).strftime("%H:%M")),
+                                "end_utc": self._normalize_hhmm(overlap_end.astimezone(datetime.timezone.utc).strftime("%H:%M")),
+                                "action_label": str(detail.get("sop_label") or "").strip(),
+                            },
+                            "day_name": str(day_name),
+                            "auto_adjust_eligible": bool(hf_day == "ALL" or hf_day == str(day_name)),
+                            "blocker_start_min": int(start_m),
+                            "blocker_end_min": int(end_m),
+                            "overlap_start_utc": overlap_start.replace(microsecond=0).isoformat(),
+                        }
+                    )
+        out.sort(
+            key=lambda row: (
+                int(row.get("hf_row_index") or 0),
+                str(row.get("day_name") or ""),
+                int(row.get("blocker_start_min") or 0),
+                str((row.get("sop_row") or {}).get("_source_key") or ""),
+            )
+        )
+        return out
+
+    def _can_auto_adjust_hf_around_sop_conflicts(self, conflicts: List[Dict[str, Any]]) -> bool:
+        return any(bool(row.get("auto_adjust_eligible")) for row in (conflicts or []))
+
+    def _group_hf_sop_conflicts_for_display(self, conflicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        grouped: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        for row in conflicts or []:
+            if not isinstance(row, dict):
+                continue
+            hf_idx = self._row_index_or_default(row.get("hf_row_index"), -1)
+            hf_row = dict(row.get("hf_row") or {})
+            sop_row = dict(row.get("sop_row") or {})
+            sop_profile = str(sop_row.get("_sop_profile_name") or "HF SOP").strip() or "HF SOP"
+            sop_group = str(sop_row.get("group_name") or "").strip().upper()
+            sop_band = str(sop_row.get("band") or "").strip().upper()
+            sop_freq = self._normalize_freq_text(str(sop_row.get("frequency") or ""))
+            sop_start = self._normalize_hhmm(str(sop_row.get("start_utc") or ""))
+            sop_end = self._normalize_hhmm(str(sop_row.get("end_utc") or ""))
+            day_name = self._normalize_day(str(row.get("day_name") or "ALL"))
+            key = (
+                int(hf_idx),
+                sop_profile,
+                sop_group,
+                sop_band,
+                sop_freq,
+                sop_start,
+                sop_end,
+            )
+            entry = grouped.get(key)
+            if entry is None:
+                grouped[key] = {
+                    "hf_row_index": int(hf_idx),
+                    "hf_row": hf_row,
+                    "sop_profile": sop_profile,
+                    "sop_group": sop_group,
+                    "sop_band": sop_band,
+                    "sop_freq": sop_freq,
+                    "sop_start": sop_start,
+                    "sop_end": sop_end,
+                    "days": {day_name},
+                    "sort_day_rank": self._sort_day_rank(day_name),
+                    "sort_start_min": int(row.get("blocker_start_min") or 0),
+                }
+                continue
+            entry_days = entry.get("days")
+            if isinstance(entry_days, set):
+                entry_days.add(day_name)
+            entry["sort_day_rank"] = min(int(entry.get("sort_day_rank") or 99), self._sort_day_rank(day_name))
+            entry["sort_start_min"] = min(int(entry.get("sort_start_min") or 0), int(row.get("blocker_start_min") or 0))
+
+        out = list(grouped.values())
+        out.sort(
+            key=lambda item: (
+                int(item.get("hf_row_index") or -1),
+                int(item.get("sort_day_rank") or 99),
+                int(item.get("sort_start_min") or 0),
+                str(item.get("sop_profile") or "").upper(),
+                str(item.get("sop_group") or "").upper(),
+                str(item.get("sop_freq") or ""),
+            )
+        )
+        return out
+
+    def _auto_adjust_hf_around_sop_conflicts(self, conflicts: List[Dict[str, Any]]) -> Tuple[bool, str]:
         row_map: Dict[int, Dict[str, Any]] = {}
         for r in range(self.table.rowCount()):
             entry, _sort_key = self._snapshot_active_entry_for_sort(r)
+            row_utc = self._active_row_to_utc(r, include_sop_overlay=True)
+            if isinstance(row_utc, dict):
+                # Keep adjustment math in UTC; convert to display only when re-rendering rows.
+                entry.update(
+                    {
+                        "day_utc": self._normalize_day(str(row_utc.get("day_utc") or "ALL")),
+                        "group_name": str(row_utc.get("group_name") or "").strip(),
+                        "mode": str(row_utc.get("mode") or "").strip().upper(),
+                        "band": str(row_utc.get("band") or "").strip().upper(),
+                        "frequency": self._normalize_freq_text(str(row_utc.get("frequency") or "")),
+                        "start_utc": self._normalize_hhmm(str(row_utc.get("start_utc") or "")),
+                        "end_utc": self._normalize_hhmm(str(row_utc.get("end_utc") or "")),
+                        "auto_tune": bool(row_utc.get("auto_tune", False)),
+                    }
+                )
             row_map[int(r)] = {
                 "row_index": int(r),
                 "entry": dict(entry),
-                "is_sop": bool(self._is_sop_overlay_row(r)),
             }
 
-        blockers_by_hf: Dict[int, List[Tuple[int, int]]] = {}
+        blockers_by_hf_day: Dict[int, Dict[str, List[Tuple[int, int]]]] = {}
         skipped_pairs = 0
-        for r1, r2, _day in conflicts:
-            a = row_map.get(int(r1))
-            b = row_map.get(int(r2))
-            if not a or not b:
-                continue
-            if bool(a["is_sop"]) == bool(b["is_sop"]):
+        for row in conflicts:
+            if not isinstance(row, dict):
                 skipped_pairs += 1
                 continue
-            hf = b if bool(a["is_sop"]) else a
-            sop = a if bool(a["is_sop"]) else b
-            hf_day = self._normalize_day(str(hf["entry"].get("day_utc") or "ALL"))
-            sop_day = self._normalize_day(str(sop["entry"].get("day_utc") or "ALL"))
-            if not (hf_day == sop_day or (hf_day == "ALL" and sop_day == "ALL")):
+            hf_idx = self._row_index_or_default(row.get("hf_row_index"), -1)
+            hf_item = row_map.get(hf_idx)
+            if hf_item is None:
                 skipped_pairs += 1
                 continue
-            sop_segments = self._interval_segments_from_hhmm(
-                str(sop["entry"].get("start_utc") or ""),
-                str(sop["entry"].get("end_utc") or ""),
-            )
-            if not sop_segments:
+            day_name = self._normalize_day(str(row.get("day_name") or "ALL"))
+            try:
+                block_start = int(row.get("blocker_start_min"))
+                block_end = int(row.get("blocker_end_min"))
+            except Exception:
                 skipped_pairs += 1
                 continue
-            hf_idx = int(hf["row_index"])
-            blockers_by_hf.setdefault(hf_idx, []).extend(sop_segments)
+            if block_end <= block_start:
+                skipped_pairs += 1
+                continue
+            hf_day = self._normalize_day(str((hf_item.get("entry") or {}).get("day_utc") or "ALL"))
+            if hf_day != "ALL" and hf_day != day_name:
+                skipped_pairs += 1
+                continue
+            blockers_by_hf_day.setdefault(hf_idx, {}).setdefault(day_name, []).append((block_start, block_end))
 
-        if not blockers_by_hf:
+        if not blockers_by_hf_day:
             return False, "No eligible HF/SOP overlap pairs were available for auto-adjust."
 
         new_items: List[Dict[str, Any]] = []
@@ -2811,37 +3278,98 @@ class DailyScheduleTab(QWidget):
             item = row_map.get(int(r))
             if not item:
                 continue
-            if bool(item["is_sop"]) or int(r) not in blockers_by_hf:
+            if int(r) not in blockers_by_hf_day:
                 new_items.append(dict(item["entry"]))
                 continue
 
             hf_entry = dict(item["entry"])
+            hf_day = self._normalize_day(str(hf_entry.get("day_utc") or "ALL"))
             base_segments = self._interval_segments_from_hhmm(
                 str(hf_entry.get("start_utc") or ""),
                 str(hf_entry.get("end_utc") or ""),
             )
-            blockers = list(blockers_by_hf.get(int(r), []))
-            if not base_segments or not blockers:
+            if not base_segments:
                 new_items.append(hf_entry)
                 continue
-            remaining = self._subtract_segments(base_segments, blockers)
-            if remaining == base_segments:
+            blockers_for_row = blockers_by_hf_day.get(int(r), {})
+            if hf_day != "ALL":
+                blockers = list(blockers_for_row.get(hf_day, []))
+                if not blockers:
+                    new_items.append(hf_entry)
+                    continue
+                remaining = self._subtract_segments(base_segments, blockers)
+                if remaining == base_segments:
+                    new_items.append(hf_entry)
+                    continue
+                changed_rows += 1
+                if not remaining:
+                    removed_rows += 1
+                    continue
+                first = True
+                for seg in remaining:
+                    seg_start, seg_end = self._segment_to_hhmm(seg)
+                    e = dict(hf_entry)
+                    e["start_utc"] = seg_start
+                    e["end_utc"] = seg_end
+                    new_items.append(e)
+                    if not first:
+                        split_rows += 1
+                    first = False
+                continue
+
+            # Row spans ALL days; only explode to day-specific rows when the adjusted
+            # segments differ by day. If the same result applies every day, preserve ALL.
+            per_day_remaining: Dict[str, List[Tuple[int, int]]] = {}
+            day_changed = False
+            for day_name in DAY_CANON:
+                blockers = list(blockers_for_row.get(day_name, []))
+                if blockers:
+                    remaining = self._subtract_segments(base_segments, blockers)
+                    if remaining != base_segments:
+                        day_changed = True
+                else:
+                    remaining = list(base_segments)
+                per_day_remaining[day_name] = list(remaining)
+            if not day_changed:
                 new_items.append(hf_entry)
                 continue
+            normalized_by_day = [
+                tuple((int(seg[0]), int(seg[1])) for seg in per_day_remaining.get(day_name, []))
+                for day_name in DAY_CANON
+            ]
+            uniform_segments = normalized_by_day[0] if normalized_by_day else tuple()
+            if all(day_segments == uniform_segments for day_segments in normalized_by_day[1:]):
+                changed_rows += 1
+                if not uniform_segments:
+                    removed_rows += 1
+                    continue
+                first = True
+                for seg in uniform_segments:
+                    seg_start, seg_end = self._segment_to_hhmm(seg)
+                    e = dict(hf_entry)
+                    e["day_utc"] = "ALL"
+                    e["start_utc"] = seg_start
+                    e["end_utc"] = seg_end
+                    new_items.append(e)
+                    if not first:
+                        split_rows += 1
+                    first = False
+                continue
+            per_day_rows: List[Dict[str, Any]] = []
+            for day_name in DAY_CANON:
+                for seg in per_day_remaining.get(day_name, []):
+                    seg_start, seg_end = self._segment_to_hhmm(seg)
+                    e = dict(hf_entry)
+                    e["day_utc"] = day_name
+                    e["start_utc"] = seg_start
+                    e["end_utc"] = seg_end
+                    per_day_rows.append(e)
             changed_rows += 1
-            if not remaining:
+            if not per_day_rows:
                 removed_rows += 1
                 continue
-            first = True
-            for seg in remaining:
-                seg_start, seg_end = self._segment_to_hhmm(seg)
-                e = dict(hf_entry)
-                e["start_utc"] = seg_start
-                e["end_utc"] = seg_end
-                new_items.append(e)
-                if not first:
-                    split_rows += 1
-                first = False
+            split_rows += max(0, len(per_day_rows) - 1)
+            new_items.extend(per_day_rows)
 
         if changed_rows <= 0:
             return False, "No HF rows changed during auto-adjust."
@@ -2856,14 +3384,22 @@ class DailyScheduleTab(QWidget):
         try:
             self.table.setRowCount(0)
             for entry in new_items:
-                self._append_entry_row(entry)
+                self._append_entry_row(self._entry_for_display(entry))
         finally:
             self._suspend_dirty_tracking = prev_suspend
         self.table.clearSelection()
         self._update_delete_button_state()
+        self._invalidate_active_schedule_views()
+        if self.table.rowCount() > 1:
+            self._sort_active_schedule_by_time(refresh_post_sort=False)
         self._highlight_time_conflicts()
         self._update_resource_action_state()
         self._set_dirty(True)
+        current_hf_rows = self._collect_current_hf_rows_utc()
+        auto_saved, auto_save_detail = self._persist_hf_schedule_rows(
+            current_hf_rows,
+            prompt_after_save=False,
+        )
         try:
             self._record_sop_auto_adjust_snapshot_after()
         except Exception as e:
@@ -2872,10 +3408,74 @@ class DailyScheduleTab(QWidget):
         detail = (
             f"Auto-adjust complete. Updated {changed_rows} HF row(s), removed {removed_rows}, created {split_rows} split row(s)."
         )
+        if auto_saved:
+            detail += "\nHF schedule was auto-saved and active HF conflicts were rechecked."
+        else:
+            detail += "\nAuto-save failed; review the adjusted rows and save manually."
+            detail += f"\n{auto_save_detail}"
         detail += "\nA pre-adjust HF snapshot was saved and can be restored when SOP is deactivated."
         if skipped_pairs > 0:
             detail += f"\n{skipped_pairs} conflict pair(s) require manual resolution."
         return True, detail
+
+    def _show_hf_sop_conflicts_summary(
+        self,
+        conflicts: List[Dict[str, Any]],
+        *,
+        selected_only: bool,
+    ) -> None:
+        grouped_conflicts = self._group_hf_sop_conflicts_for_display(conflicts)
+        lines: List[str] = []
+        shown = 0
+        for row in grouped_conflicts:
+            if shown >= 18:
+                break
+            hf_idx = self._row_index_or_default(row.get("hf_row_index"), -1)
+            day_scope = self._format_conflict_day_scope(set(row.get("days") or set()))
+            hf_line = self._active_row_summary_text(hf_idx, row=dict(row.get("hf_row") or {}), include_day=False)
+            sop_profile = str(row.get("sop_profile") or "HF SOP").strip()
+            sop_group = str(row.get("sop_group") or "").strip().upper()
+            sop_band = str(row.get("sop_band") or "").strip().upper()
+            sop_freq = self._normalize_freq_text(str(row.get("sop_freq") or ""))
+            sop_start = self._normalize_hhmm(str(row.get("sop_start") or ""))
+            sop_end = self._normalize_hhmm(str(row.get("sop_end") or ""))
+            lines.append(f"{shown + 1}. {hf_line}")
+            sop_line = f"   SOP {sop_profile}: {sop_group} {sop_band} {sop_freq} {sop_start}-{sop_end}"
+            if day_scope and day_scope != "All days":
+                sop_line += f" [{day_scope}]"
+            elif day_scope == "All days":
+                sop_line += " [All days]"
+            lines.append(sop_line)
+            shown += 1
+        if len(grouped_conflicts) > shown:
+            lines.append(f"... and {len(grouped_conflicts) - shown} more HF/SOP conflict pair(s).")
+
+        summary = (
+            "Selected HF rows overlap active SOP windows on different frequencies."
+            if selected_only
+            else "Active HF rows overlap active SOP windows on different frequencies."
+        )
+        body = (
+            summary
+            + "\n"
+            + "Adjust HF Start/End manually, or use Auto-Adjust to split/remove conflicting HF windows.\n\n"
+            + "\n".join(lines)
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle("HF/SOP Conflicts")
+        box.setText(body)
+        auto_btn = None
+        if self._can_auto_adjust_hf_around_sop_conflicts(conflicts):
+            auto_btn = box.addButton("Auto-Adjust HF Around SOP (Reversible)", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if auto_btn is not None and box.clickedButton() is auto_btn:
+            changed, detail = self._auto_adjust_hf_around_sop_conflicts(conflicts)
+            title = "Auto-Adjust HF"
+            if changed:
+                QMessageBox.information(self, title, detail)
+            else:
+                QMessageBox.information(self, title, f"Auto-adjust skipped.\n\n{detail}")
 
     def _show_active_conflicts_summary(
         self,
@@ -2915,21 +3515,7 @@ class DailyScheduleTab(QWidget):
             + "Resolve by editing Start/End, moving one row to Schedule Resources, or deleting one row.\n\n"
             + "\n".join(lines)
         )
-        box = QMessageBox(self)
-        box.setWindowTitle("HF Conflicts")
-        box.setText(body)
-        auto_btn = None
-        if self._can_auto_adjust_hf_around_sop(conflicts):
-            auto_btn = box.addButton("Auto-Adjust HF Around SOP (Reversible)", QMessageBox.ActionRole)
-        box.addButton(QMessageBox.Ok)
-        box.exec()
-        if auto_btn is not None and box.clickedButton() is auto_btn:
-            changed, detail = self._auto_adjust_hf_around_sop(conflicts)
-            title = "Auto-Adjust HF"
-            if changed:
-                QMessageBox.information(self, title, detail)
-            else:
-                QMessageBox.information(self, title, f"Auto-adjust skipped.\n\n{detail}")
+        QMessageBox.information(self, "HF Conflicts", body)
 
     def _compute_active_conflict_state(
         self,
@@ -2945,10 +3531,17 @@ class DailyScheduleTab(QWidget):
             if selected_scope:
                 selected_rows = {int(r) for r in selected_scope}
             day_intervals: Dict[str, List[Tuple[int, int, int, bool]]] = {d: [] for d in DAY_CANON}
+            row_frequency_key: Dict[int, Tuple[str, str]] = {}
             for r in range(self.table.rowCount()):
-                row = self._active_row_to_utc(r, include_sop_overlay=True)
+                if self._is_sop_overlay_row(r):
+                    continue
+                row = self._active_row_to_utc(r, include_sop_overlay=False)
                 if not row:
                     continue
+                row_frequency_key[r] = (
+                    str(row.get("band") or "").strip().upper(),
+                    self._normalize_freq_text(str(row.get("frequency") or "")),
+                )
                 start_m = self._time_to_minutes(str(row.get("start_utc") or ""))
                 end_m = self._time_to_minutes(str(row.get("end_utc") or ""))
                 if start_m is None or end_m is None:
@@ -2969,6 +3562,16 @@ class DailyScheduleTab(QWidget):
             out: List[Tuple[int, int, str]] = []
             seen: Set[Tuple[int, int, str]] = set()
             conflict_rows: Set[int] = set()
+
+            def _is_same_frequency_pair(left_row: int, right_row: int) -> bool:
+                left = row_frequency_key.get(int(left_row))
+                right = row_frequency_key.get(int(right_row))
+                if not left or not right:
+                    return False
+                left_band, left_freq = left
+                right_band, right_freq = right
+                return bool(left_band and left_freq and left_band == right_band and left_freq == right_freq)
+
             for day_name, spans in day_intervals.items():
                 spans_sorted = sorted(spans, key=lambda x: (x[1], x[2], x[0], int(x[3])))
                 active_all: List[Tuple[int, int, bool]] = []
@@ -2981,6 +3584,8 @@ class DailyScheduleTab(QWidget):
 
                     if selected_rows is None or is_selected:
                         for other_row, _other_end, _other_selected in active_all:
+                            if _is_same_frequency_pair(row_idx, other_row):
+                                continue
                             pair_key = (min(row_idx, other_row), max(row_idx, other_row), day_name)
                             if pair_key in seen:
                                 continue
@@ -2990,6 +3595,8 @@ class DailyScheduleTab(QWidget):
                             conflict_rows.add(pair_key[1])
                     else:
                         for other_row, _other_end in active_selected:
+                            if _is_same_frequency_pair(row_idx, other_row):
+                                continue
                             pair_key = (min(row_idx, other_row), max(row_idx, other_row), day_name)
                             if pair_key in seen:
                                 continue
@@ -3007,7 +3614,10 @@ class DailyScheduleTab(QWidget):
         self,
         selected_scope: Optional[Set[int]] = None,
     ) -> List[Tuple[int, int, str]]:
-        out, _conflict_rows = self._compute_active_conflict_state(selected_scope=selected_scope)
+        if selected_scope is None:
+            out, _conflict_rows = self._get_active_conflict_state()
+        else:
+            out, _conflict_rows = self._compute_active_conflict_state(selected_scope=selected_scope)
         return out
 
     def _upsert_schedule_resource_row(
@@ -3501,6 +4111,56 @@ class DailyScheduleTab(QWidget):
         finally:
             conn.close()
 
+    def _persist_hf_schedule_rows(
+        self,
+        hf_rows: List[Dict[str, Any]],
+        *,
+        prompt_after_save: bool = False,
+    ) -> Tuple[bool, str]:
+        try:
+            if hasattr(self.settings, "set"):
+                self.settings.set("hf_schedule", hf_rows)
+                self.settings.set("daily_schedule", hf_rows)
+                if hasattr(self.settings, "save"):
+                    self.settings.save()
+            else:
+                data = self.settings.all()
+                data["hf_schedule"] = hf_rows
+                data["daily_schedule"] = hf_rows
+                if hasattr(self.settings, "_data"):
+                    self.settings._data = data  # type: ignore[attr-defined]
+                if hasattr(self.settings, "save"):
+                    self.settings.save()
+        except Exception as e:
+            log.error("HF Frequency Schedule save failed: %s", e)
+            return False, f"Could not save HF schedule:\n{e}"
+
+        try:
+            self._save_schedule_to_db(hf_rows)
+        except Exception as e:
+            log.error("HF Frequency Schedule DB save failed: %s", e)
+            return False, f"HF schedule saved to settings, but DB save failed:\n{e}"
+
+        self._raw_schedule = [dict(row) for row in hf_rows]
+        self._saved_rows_signature = self._rows_signature(self._collect_rows_for_signature())
+        self._set_dirty(False)
+        self._effective_projection_cache_token = None
+        self._effective_projection_cache_rows = []
+        self._refresh_freq_planner()
+        self._refresh_schedule_resources(force=True)
+        self._refresh_schedule_issues(force=True)
+        self._refresh_sop_overlay_rows_in_table()
+        self._update_effective_source_label()
+        try:
+            win = self.window()
+            if hasattr(win, "scheduler"):
+                win.scheduler.force_refresh()
+        except Exception:
+            pass
+        if prompt_after_save:
+            self._prompt_active_sop_conflicts_after_schedule_change()
+        return True, f"HF rows saved: {len(hf_rows)}."
+
     def _load_schedule(self):
         hf_sched = self._load_schedule_from_db()
         loaded_from_db = bool(hf_sched)
@@ -3527,7 +4187,6 @@ class DailyScheduleTab(QWidget):
             if self.table.rowCount() == 0:
                 # Add a single empty row to start with
                 self._add_row()
-            self._append_sop_overlay_rows()
         finally:
             self._suspend_dirty_tracking = False
 
@@ -3537,16 +4196,16 @@ class DailyScheduleTab(QWidget):
         self._update_clock_labels()
         self._saved_rows_signature = self._rows_signature(self._raw_schedule)
         self._set_dirty(False)
-        self._refresh_schedule_resources(force=True)
-        self._refresh_schedule_issues(force=True)
         self._saved_rows_signature = self._rows_signature(self._collect_rows_for_signature())
         self.table.clearSelection()
         self._set_dirty(False)
+        self._invalidate_active_schedule_views()
         if self.table.rowCount() > 1:
-            self._sort_active_schedule_by_time()
-        else:
-            self._highlight_time_conflicts()
-            self._update_resource_action_state()
+            self._sort_active_schedule_by_time(refresh_post_sort=False)
+        self._highlight_time_conflicts()
+        self._refresh_schedule_resources(force=True)
+        self._refresh_schedule_issues(force=True)
+        self._refresh_sop_overlay_rows_in_table()
 
     def _load_active_sop_overlay_rows(self) -> List[Dict[str, Any]]:
         """
@@ -3557,7 +4216,7 @@ class DailyScheduleTab(QWidget):
             return []
         rows: List[Dict[str, Any]] = []
         try:
-            sop_rows = self._load_sop_schedule_resource_rows(profiles=profiles)
+            sop_rows = self._load_sop_schedule_resource_rows(profiles=profiles, apply_condition_filter=True)
             active_keys = {str(r.get("source_key") or "").strip() for r in sop_rows if str(r.get("source_key") or "").strip()}
             if active_keys:
                 self._hidden_sop_overlay_keys.intersection_update(active_keys)
@@ -3613,27 +4272,403 @@ class DailyScheduleTab(QWidget):
         )
         return rows
 
+    def _on_toggle_sop_overlay_visibility(self, checked: bool) -> None:
+        self._refresh_sop_overlay_rows_in_table()
+
+    def _invalidate_active_schedule_views(self, *, invalidate_resource_table: bool = True) -> None:
+        self._active_conflict_pairs_cache = None
+        self._active_conflict_rows_cache = None
+        if invalidate_resource_table:
+            self._schedule_resource_view_token = None
+
+    def _cache_active_conflict_state(
+        self,
+        conflict_pairs: List[Tuple[int, int, str]],
+        conflict_rows: Set[int],
+    ) -> None:
+        self._active_conflict_pairs_cache = [tuple(row) for row in (conflict_pairs or [])]
+        self._active_conflict_rows_cache = {int(r) for r in (conflict_rows or set())}
+
+    def _get_active_conflict_state(self, *, force_refresh: bool = False) -> Tuple[List[Tuple[int, int, str]], Set[int]]:
+        if (
+            not force_refresh
+            and self._active_conflict_pairs_cache is not None
+            and self._active_conflict_rows_cache is not None
+        ):
+            return [tuple(row) for row in self._active_conflict_pairs_cache], set(self._active_conflict_rows_cache)
+        conflict_pairs, conflict_rows = self._compute_active_conflict_state()
+        self._cache_active_conflict_state(conflict_pairs, conflict_rows)
+        return [tuple(row) for row in conflict_pairs], set(conflict_rows)
+
+    def _update_sop_overlay_control_state(self, has_active_hf_sop: bool) -> None:
+        self._has_active_hf_sop_profiles = bool(has_active_hf_sop)
+        chk = getattr(self, "show_sop_overlay_chk", None)
+        if not isinstance(chk, QCheckBox):
+            return
+        chk.setEnabled(self._has_active_hf_sop_profiles)
+        if self._has_active_hf_sop_profiles:
+            chk.setToolTip(
+                "Show a read-only HF/SOP runtime projection for the next 7 days. This does not change scheduler behavior."
+            )
+            return
+        chk.setToolTip("Available only while an HF SOP profile is active.")
+        if chk.isChecked():
+            chk.setChecked(False)
+        else:
+            self._refresh_sop_overlay_rows_in_table()
+
+    def _resolve_projection_operating_group(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        group_name = str(entry.get("group_name") or entry.get("group") or "").strip().upper()
+        band = str(entry.get("band") or "").strip().upper()
+        mode = str(entry.get("mode") or "").strip()
+        freq = self._normalize_freq_text(str(entry.get("frequency") or ""))
+        if not group_name:
+            return None
+
+        candidates: List[Tuple[str, str, str, Dict[str, Any]]] = []
+        for group in self.operating_groups:
+            g_name = str(group.get("group") or "").strip().upper()
+            if g_name != group_name:
+                continue
+            g_band = str(group.get("band") or "").strip().upper()
+            g_mode = str(group.get("mode") or "").strip()
+            g_freq = self._normalize_freq_text(str(group.get("frequency") or ""))
+            candidates.append((g_band, g_mode, g_freq, group))
+        if not candidates:
+            return None
+
+        for g_band, g_mode, _g_freq, group in candidates:
+            if g_band == band and g_mode == mode and g_mode:
+                return group
+        for g_band, _g_mode, g_freq, group in candidates:
+            if g_band == band and g_freq == freq and g_freq:
+                return group
+        for g_band, _g_mode, _g_freq, group in candidates:
+            if g_band == band:
+                return group
+        for _g_band, g_mode, _g_freq, group in candidates:
+            if g_mode == mode and g_mode:
+                return group
+        for _g_band, _g_mode, g_freq, group in candidates:
+            if g_freq == freq and g_freq:
+                return group
+        return candidates[0][3]
+
+    def _apply_projection_runtime_overrides(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        effective = dict(entry or {})
+        group = self._resolve_projection_operating_group(effective)
+        if not isinstance(group, dict):
+            return effective
+
+        band = str(group.get("band") or "").strip().upper()
+        mode = str(group.get("mode") or "").strip()
+        freq = self._normalize_freq_text(str(group.get("frequency") or ""))
+        if band:
+            effective["band"] = band
+        if mode:
+            effective["mode"] = mode
+        if freq:
+            effective["frequency"] = freq
+        if "auto_tune" in group:
+            effective["auto_tune"] = bool(group.get("auto_tune"))
+        return effective
+
+    @staticmethod
+    def _projection_windows_overlap(
+        window: Dict[str, Any],
+        start_utc: datetime.datetime,
+        end_utc: datetime.datetime,
+    ) -> bool:
+        begin = window.get("start_dt_utc")
+        finish = window.get("end_dt_utc")
+        if not isinstance(begin, datetime.datetime) or not isinstance(finish, datetime.datetime):
+            return False
+        return begin < end_utc and start_utc < finish
+
+    @staticmethod
+    def _projection_sop_rank(window: Dict[str, Any]) -> Tuple[Any, ...]:
+        try:
+            priority = int(window.get("sop_priority") or 100)
+        except Exception:
+            priority = 100
+        try:
+            updated_text = str(window.get("sop_profile_updated_utc") or "").strip().replace("Z", "+00:00")
+            if updated_text:
+                updated_dt = datetime.datetime.fromisoformat(updated_text)
+                if updated_dt.tzinfo is None:
+                    updated_dt = updated_dt.replace(tzinfo=datetime.timezone.utc)
+                updated_epoch = float(updated_dt.astimezone(datetime.timezone.utc).timestamp())
+            else:
+                updated_epoch = 0.0
+        except Exception:
+            updated_epoch = 0.0
+        start_dt = window.get("start_dt_utc")
+        start_epoch = (
+            float(start_dt.astimezone(datetime.timezone.utc).timestamp())
+            if isinstance(start_dt, datetime.datetime)
+            else 0.0
+        )
+        try:
+            profile_id = int(window.get("sop_profile_id") or 0)
+        except Exception:
+            profile_id = 0
+        try:
+            sort_order = int(window.get("sort_order") or 0)
+        except Exception:
+            sort_order = 0
+        try:
+            layer_id = int(window.get("id") or window.get("sop_layer_id") or 0)
+        except Exception:
+            layer_id = 0
+        return (priority, -updated_epoch, -start_epoch, profile_id, sort_order, layer_id)
+
+    def _effective_projection_token(self, profiles: List[Dict[str, Any]]) -> Tuple[Any, ...]:
+        profile_sig = tuple(
+            sorted(
+                (
+                    int(p.get("id") or 0),
+                    bool(p.get("active")),
+                    int(p.get("priority") or 100),
+                    str(p.get("updated_utc") or ""),
+                )
+                for p in profiles
+                if int(p.get("id") or 0) > 0
+            )
+        )
+        return (
+            self._safe_mtime(self._db_path()),
+            self._rows_signature(self._collect_rows_for_signature()),
+            self._operating_groups_sig,
+            profile_sig,
+        )
+
+    def _build_effective_schedule_projection_rows(self) -> List[Dict[str, Any]]:
+        profiles = [p for p in self._load_sop_profile_catalog() if self._is_hf_sop_profile(p) and bool(p.get("active"))]
+        token = self._effective_projection_token(profiles)
+        if self._effective_projection_cache_token == token:
+            return [dict(row) for row in self._effective_projection_cache_rows]
+
+        window_start = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        window_end = window_start + datetime.timedelta(days=7)
+        profile_lookup = {int(p.get("id") or 0): dict(p) for p in profiles if int(p.get("id") or 0) > 0}
+        hf_rows = self._collect_current_hf_rows_utc()
+        sop_rows = self._load_sop_schedule_resource_rows(profiles=profiles, apply_condition_filter=True)
+
+        for idx, row in enumerate(sop_rows):
+            profile = profile_lookup.get(int(row.get("sop_profile_id") or 0), {})
+            try:
+                row["sop_priority"] = int(profile.get("priority") or 100)
+            except Exception:
+                row["sop_priority"] = 100
+            row["sop_profile_updated_utc"] = str(profile.get("updated_utc") or "").strip()
+            row["sort_order"] = int(row.get("sort_order") or idx)
+
+        try:
+            hf_windows = self._sop_manager._expand_schedule_rows_windows(
+                hf_rows,
+                window_start_utc=window_start,
+                window_end_utc=window_end,
+            )
+            sop_windows = self._sop_manager._expand_schedule_rows_windows(
+                sop_rows,
+                window_start_utc=window_start,
+                window_end_utc=window_end,
+            )
+        except Exception as e:
+            log.debug("HF Schedule: failed building effective schedule projection: %s", e)
+            self._effective_projection_cache_token = token
+            self._effective_projection_cache_rows = []
+            return []
+
+        projection: List[Dict[str, Any]] = []
+        horizon_days = max(0, int((window_end - window_start).days))
+        for day_offset in range(horizon_days):
+            day_start = window_start + datetime.timedelta(days=day_offset)
+            day_end = day_start + datetime.timedelta(days=1)
+            boundaries: Set[datetime.datetime] = {day_start, day_end}
+            day_hf_windows = [w for w in hf_windows if self._projection_windows_overlap(w, day_start, day_end)]
+            day_sop_windows = [w for w in sop_windows if self._projection_windows_overlap(w, day_start, day_end)]
+            if not day_hf_windows and not day_sop_windows:
+                continue
+
+            for window in day_hf_windows + day_sop_windows:
+                begin = window.get("start_dt_utc")
+                finish = window.get("end_dt_utc")
+                if not isinstance(begin, datetime.datetime) or not isinstance(finish, datetime.datetime):
+                    continue
+                boundaries.add(max(begin, day_start))
+                boundaries.add(min(finish, day_end))
+
+            ordered = sorted(boundaries)
+            for idx in range(len(ordered) - 1):
+                seg_start = ordered[idx]
+                seg_end = ordered[idx + 1]
+                if seg_end <= seg_start:
+                    continue
+                probe_utc = seg_start + ((seg_end - seg_start) / 2)
+                active_hf = [
+                    w
+                    for w in day_hf_windows
+                    if self._projection_windows_overlap(w, seg_start, seg_end)
+                    and isinstance(w.get("start_dt_utc"), datetime.datetime)
+                    and isinstance(w.get("end_dt_utc"), datetime.datetime)
+                    and w["start_dt_utc"] <= probe_utc < w["end_dt_utc"]
+                ]
+                active_sop = [
+                    w
+                    for w in day_sop_windows
+                    if self._projection_windows_overlap(w, seg_start, seg_end)
+                    and isinstance(w.get("start_dt_utc"), datetime.datetime)
+                    and isinstance(w.get("end_dt_utc"), datetime.datetime)
+                    and w["start_dt_utc"] <= probe_utc < w["end_dt_utc"]
+                ]
+                chosen_hf = None
+                if active_hf:
+                    chosen_hf = max(active_hf, key=lambda w: w["start_dt_utc"])
+                chosen_sop = None
+                if active_sop:
+                    chosen_sop = min(active_sop, key=self._projection_sop_rank)
+
+                source = ""
+                chosen = None
+                detail = ""
+                if isinstance(chosen_sop, dict):
+                    source = "SOP"
+                    chosen = chosen_sop
+                    detail = str(chosen_sop.get("sop_profile_name") or "").strip() or "Active HF SOP"
+                elif isinstance(chosen_hf, dict):
+                    source = "HF"
+                    chosen = chosen_hf
+                    prev = projection[-1] if projection else None
+                    same_day_resume = bool(
+                        isinstance(prev, dict)
+                        and str(prev.get("day_utc") or "") == day_start.strftime("%A")
+                        and str(prev.get("source") or "") == "SOP"
+                    )
+                    detail = "HF resume" if same_day_resume else "Baseline HF"
+                if not isinstance(chosen, dict):
+                    continue
+
+                effective = self._apply_projection_runtime_overrides(chosen)
+                entry = {
+                    "source": source,
+                    "day_utc": day_start.strftime("%A"),
+                    "group_name": str(effective.get("group_name") or chosen.get("group_name") or "").strip().upper(),
+                    "band": str(effective.get("band") or chosen.get("band") or "").strip().upper(),
+                    "frequency": self._normalize_freq_text(str(effective.get("frequency") or chosen.get("frequency") or "")),
+                    "start_utc": seg_start.astimezone(datetime.timezone.utc).strftime("%H:%M"),
+                    "end_utc": seg_end.astimezone(datetime.timezone.utc).strftime("%H:%M"),
+                    "detail": detail,
+                }
+                if not (entry["group_name"] and entry["band"] and entry["frequency"]):
+                    continue
+
+                if projection:
+                    prev = projection[-1]
+                    if (
+                        str(prev.get("day_utc") or "") == str(entry.get("day_utc") or "")
+                        and str(prev.get("source") or "") == str(entry.get("source") or "")
+                        and str(prev.get("group_name") or "") == str(entry.get("group_name") or "")
+                        and str(prev.get("band") or "") == str(entry.get("band") or "")
+                        and str(prev.get("frequency") or "") == str(entry.get("frequency") or "")
+                        and str(prev.get("end_utc") or "") == str(entry.get("start_utc") or "")
+                        and (
+                            str(prev.get("source") or "") != "SOP"
+                            or str(prev.get("detail") or "") == str(entry.get("detail") or "")
+                        )
+                    ):
+                        prev["end_utc"] = str(entry.get("end_utc") or "")
+                        continue
+                projection.append(entry)
+
+        self._effective_projection_cache_token = token
+        self._effective_projection_cache_rows = [dict(row) for row in projection]
+        return [dict(row) for row in projection]
+
+    def _populate_sop_overlay_panel(self) -> None:
+        has_active_hf_sop = bool(getattr(self, "_has_active_hf_sop_profiles", False))
+        if (
+            not has_active_hf_sop
+            or not getattr(self, "show_sop_overlay_chk", None)
+            or not self.show_sop_overlay_chk.isChecked()
+        ):
+            self.sop_overlay_box.setVisible(False)
+            if hasattr(self, "sop_overlay_table"):
+                self.sop_overlay_table.setRowCount(0)
+            if hasattr(self, "sop_overlay_summary_label"):
+                self.sop_overlay_summary_label.setText(
+                    "Projection unavailable until an HF SOP is active."
+                    if not has_active_hf_sop
+                    else "Projection hidden."
+                )
+            return
+
+        self.sop_overlay_box.setVisible(True)
+        rows = self._build_effective_schedule_projection_rows()
+        if not rows:
+            self.sop_overlay_summary_label.setText("No projected HF/SOP runtime segments for the next 7 days.")
+            self.sop_overlay_table.setRowCount(0)
+            return
+
+        plural = "s" if len(rows) != 1 else ""
+        self.sop_overlay_summary_label.setText(
+            f"Showing {len(rows)} projected HF/SOP runtime segment{plural} for the next 7 days. Read-only."
+        )
+        sort_header = self.sop_overlay_table.horizontalHeader()
+        sort_section = int(sort_header.sortIndicatorSection())
+        if not (0 <= sort_section < self.sop_overlay_table.columnCount()):
+            sort_section = 1
+        sort_order = sort_header.sortIndicatorOrder()
+        self.sop_overlay_table.setSortingEnabled(False)
+        self.sop_overlay_table.setRowCount(0)
+        for row in rows:
+            r = self.sop_overlay_table.rowCount()
+            self.sop_overlay_table.insertRow(r)
+            day_txt, start_txt, end_txt = self._display_resource_day_time(
+                str(row.get("day_utc") or "ALL"),
+                str(row.get("start_utc") or ""),
+                str(row.get("end_utc") or ""),
+            )
+            values = [
+                str(row.get("source") or ""),
+                day_txt,
+                str(row.get("group_name") or ""),
+                str(row.get("band") or ""),
+                str(row.get("frequency") or ""),
+                start_txt,
+                end_txt,
+                str(row.get("detail") or ""),
+            ]
+            day_sort = -1 if day_txt == "ALL" else int(DAY_INDEX.get(day_txt, 99))
+            start_sort = self._time_to_minutes(start_txt)
+            end_sort = self._time_to_minutes(end_txt)
+            freq_sort = self._parse_frequency_sort_key(str(row.get("frequency") or ""))
+            source_txt = str(row.get("source") or "")
+            group_txt = str(row.get("group_name") or "")
+            sort_keys = [
+                (str(source_txt).upper(), day_sort, start_sort if start_sort is not None else -1, group_txt.upper(), freq_sort),
+                (day_sort, start_sort if start_sort is not None else -1, end_sort if end_sort is not None else -1, str(source_txt).upper(), group_txt.upper(), freq_sort),
+                (group_txt.upper(), day_sort, start_sort if start_sort is not None else -1, freq_sort),
+                (str(row.get("band") or "").upper(), freq_sort, day_sort, start_sort if start_sort is not None else -1),
+                (freq_sort, str(row.get("frequency") or ""), day_sort, start_sort if start_sort is not None else -1),
+                (start_sort if start_sort is not None else -1, day_sort, end_sort if end_sort is not None else -1, str(source_txt).upper(), group_txt.upper()),
+                (end_sort if end_sort is not None else -1, day_sort, start_sort if start_sort is not None else -1, str(source_txt).upper(), group_txt.upper()),
+                (str(row.get("detail") or "").upper(), day_sort, start_sort if start_sort is not None else -1, group_txt.upper()),
+            ]
+            for col, val in enumerate(values):
+                item = _SortKeyTableWidgetItem(val, sort_key=sort_keys[col])
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.sop_overlay_table.setItem(r, col, item)
+        self.sop_overlay_table.setSortingEnabled(True)
+        self.sop_overlay_table.sortItems(sort_section, sort_order)
+
     def _append_sop_overlay_rows(self) -> None:
-        overlays = self._load_active_sop_overlay_rows()
-        for entry in overlays:
-            self._append_entry_row(self._entry_for_display(entry))
+        # Retained as a no-op. Effective Schedule is now shown in a read-only panel
+        # instead of adding synthetic rows into the editable HF table.
+        return
 
     def _refresh_sop_overlay_rows_in_table(self) -> None:
-        prev_suspend = self._suspend_dirty_tracking
-        self._suspend_dirty_tracking = True
-        try:
-            for r in range(self.table.rowCount() - 1, -1, -1):
-                if self._is_sop_overlay_row(r):
-                    self.table.removeRow(r)
-            self._append_sop_overlay_rows()
-        finally:
-            self._suspend_dirty_tracking = prev_suspend
-        self._update_delete_button_state()
-        if self.table.rowCount() > 1:
-            self._sort_active_schedule_by_time()
-        else:
-            self._highlight_time_conflicts()
-            self._update_resource_action_state()
+        self._populate_sop_overlay_panel()
 
     def _is_sop_overlay_row(self, row_index: int) -> bool:
         wrap = self.table.cellWidget(row_index, self.COL_SELECT)
@@ -3666,6 +4701,13 @@ class DailyScheduleTab(QWidget):
         return None
 
     @staticmethod
+    def _parse_frequency_sort_key(value: str) -> float:
+        try:
+            return float(str(value or "").strip())
+        except Exception:
+            return -1.0
+
+    @staticmethod
     def _overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
         return max(a_start, b_start) < min(a_end, b_end)
 
@@ -3683,7 +4725,7 @@ class DailyScheduleTab(QWidget):
             prev_block = self.table.blockSignals(True)
             try:
                 if conflict_rows_override is None:
-                    _pairs, conflict_rows = self._compute_active_conflict_state()
+                    _pairs, conflict_rows = self._get_active_conflict_state()
                 else:
                     conflict_rows = set(conflict_rows_override)
 
@@ -3719,6 +4761,9 @@ class DailyScheduleTab(QWidget):
 
         for r in range(self.table.rowCount()):
             is_sop = self._is_sop_overlay_row(r)
+            if is_sop:
+                # Inline SOP rows are display-only and never persisted from Daily.
+                continue
             day = self._get_combo_value(r, self.COL_DAY, default="ALL")
             group_name = self._get_combo_value(r, self.COL_GROUP, default="")
             mode = self._get_combo_value(r, self.COL_MODE, default="Digi")
@@ -3748,45 +4793,6 @@ class DailyScheduleTab(QWidget):
                 day_utc = day
                 start_utc = start_val
                 end_utc = end_val
-
-            if is_sop:
-                sel_wrap = self.table.cellWidget(r, self.COL_SELECT)
-                profile_id = 0
-                layer_id = 0
-                recurrence = "Daily"
-                biweekly = 0
-                month_weeks = ""
-                vfo = "A"
-                if isinstance(sel_wrap, QWidget):
-                    try:
-                        profile_id = int(sel_wrap.property("sop_overlay_profile_id") or 0)
-                    except Exception:
-                        profile_id = 0
-                    try:
-                        layer_id = int(sel_wrap.property("sop_overlay_layer_id") or 0)
-                    except Exception:
-                        layer_id = 0
-                    vfo = str(sel_wrap.property("sop_overlay_vfo") or "A").strip().upper() or "A"
-                if profile_id <= 0:
-                    save_warnings.append(f"Row {r+1}: SOP row missing profile mapping; skipped.")
-                    continue
-                sop_updates.setdefault(profile_id, []).append(
-                    {
-                        "id": layer_id,
-                        "day_utc": "ALL",
-                        "recurrence": recurrence,
-                        "biweekly_offset_weeks": biweekly,
-                        "month_weeks": month_weeks,
-                        "band": str(band).strip().upper(),
-                        "mode": str(mode).strip().upper(),
-                        "vfo": vfo,
-                        "frequency": freq_text,
-                        "start_utc": start_utc,
-                        "end_utc": end_utc,
-                        "enabled": True,
-                    }
-                )
-                continue
 
             hf_rows.append(
                 {
@@ -3821,40 +4827,9 @@ class DailyScheduleTab(QWidget):
                 "Some rows were skipped:\n" + "\n".join(save_warnings),
             )
 
-        # Persist via SettingsManager
-        try:
-            if hasattr(self.settings, "set"):
-                self.settings.set("hf_schedule", hf_rows)
-                self.settings.set("daily_schedule", hf_rows)  # keep legacy key in sync
-                if hasattr(self.settings, "save"):
-                    self.settings.save()
-            else:
-                data = self.settings.all()
-                data["hf_schedule"] = hf_rows
-                data["daily_schedule"] = hf_rows
-                if hasattr(self.settings, "_data"):
-                    self.settings._data = data  # type: ignore[attr-defined]
-                if hasattr(self.settings, "save"):
-                    self.settings.save()
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Save Failed",
-                f"Could not save HF schedule:\n{e}",
-            )
-            log.error("HF Frequency Schedule save failed: %s", e)
-            return
-
-        # Mirror to SQLite for scheduler_engine
-        try:
-            self._save_schedule_to_db(hf_rows)
-        except Exception as e:
-            log.error("HF Frequency Schedule DB save failed: %s", e)
-            QMessageBox.warning(
-                self,
-                "DB Save Error",
-                f"HF schedule saved to settings, but DB save failed:\n{e}",
-            )
+        saved, save_detail = self._persist_hf_schedule_rows(hf_rows, prompt_after_save=False)
+        if not saved:
+            QMessageBox.critical(self, "Save Failed", save_detail)
             return
 
         sop_changed = 0
@@ -3878,13 +4853,10 @@ class DailyScheduleTab(QWidget):
         if self.table.rowCount() > 1:
             self._sort_active_schedule_by_time()
 
-        log.info("HF Frequency Schedule saved: %d HF rows, %d SOP rows updated", len(hf_rows), sop_changed)
-        self._raw_schedule = hf_rows
+        self._raw_schedule = self._collect_current_hf_rows_utc()
         self._saved_rows_signature = self._rows_signature(self._collect_rows_for_signature())
         self._set_dirty(False)
-        self._refresh_freq_planner()
-        self._refresh_schedule_resources(force=True)
-        self._refresh_schedule_issues(force=True)
+        log.info("HF Frequency Schedule saved: %d HF rows, %d SOP rows updated", len(hf_rows), sop_changed)
         QMessageBox.information(
             self,
             "Saved",
@@ -3894,7 +4866,7 @@ class DailyScheduleTab(QWidget):
 
     def _prompt_active_sop_conflicts_after_schedule_change(self) -> None:
         try:
-            conflicts = self._sop_manager.collect_active_hf_conflicts()
+            conflicts = self._sop_manager.collect_active_hf_conflicts(force_refresh=True)
         except Exception as e:
             log.debug("HF Schedule: active SOP conflict scan failed: %s", e)
             return
@@ -4136,18 +5108,18 @@ class DailyScheduleTab(QWidget):
                 self._append_entry_row(self._entry_for_display(entry))
             if self.table.rowCount() == 0:
                 self._add_row()
-            self._append_sop_overlay_rows()
         finally:
             self._suspend_dirty_tracking = False
         self._set_headers()
         self._update_clock_labels()
         self.table.clearSelection()
-        self._mark_dirty()
+        self._invalidate_active_schedule_views()
         if self.table.rowCount() > 1:
-            self._sort_active_schedule_by_time()
-        else:
-            self._highlight_time_conflicts()
-            self._update_resource_action_state()
+            self._sort_active_schedule_by_time(refresh_post_sort=False)
+        self._mark_dirty()
+        self._highlight_time_conflicts()
+        self._update_resource_action_state()
+        self._refresh_sop_overlay_rows_in_table()
 
     def _toggle_time_view(self):
         self._show_local = not self._show_local
@@ -4310,7 +5282,7 @@ class DailyScheduleTab(QWidget):
             self._set_suspend_button(True, remaining_sec=remaining)
             QMessageBox.information(self, "QSY Applied", "Frequency changed and scheduling paused for 30 minutes.")
 
-    def _apply_theme(self) -> None:
+    def _apply_theme(self, *, refresh_dynamic: bool = True) -> None:
         theme = resolve_theme(self.settings)
         self._update_time_toggle_style(theme)
         self._update_effective_source_label(theme)
@@ -4323,8 +5295,9 @@ class DailyScheduleTab(QWidget):
         self.resources_refresh_btn.setStyleSheet(button_style("muted", theme))
         self._update_suspend_state()
         self._update_delete_button_state()
-        self._refresh_sop_profiles_panel(force=True, theme=theme)
-        self._populate_schedule_resources_table()
+        if refresh_dynamic:
+            self._refresh_sop_profiles_panel(force=True, theme=theme)
+            self._populate_schedule_resources_table()
 
     def apply_theme(self) -> None:
         self._apply_theme()
@@ -4352,13 +5325,15 @@ class DailyScheduleTab(QWidget):
         rows: List[Dict[str, object]] = []
         for r in range(self.table.rowCount()):
             is_sop = self._is_sop_overlay_row(r)
+            if is_sop:
+                continue
             row = self._active_row_to_utc(r, include_sop_overlay=True)
             if row is None:
                 continue
             rows.append(
                 {
-                    "source": "SOP" if is_sop else "HF",
-                    "source_key": self._sop_overlay_source_key(r) if is_sop else "",
+                    "source": "HF",
+                    "source_key": "",
                     "day_utc": str(row.get("day_utc") or ""),
                     "group_name": str(row.get("group_name") or ""),
                     "mode": str(row.get("mode") or ""),
@@ -4384,13 +5359,34 @@ class DailyScheduleTab(QWidget):
     def _mark_dirty(self, *_args) -> None:
         if self._suspend_dirty_tracking:
             return
+        self._invalidate_active_schedule_views()
         try:
             current_sig = self._rows_signature(self._collect_rows_for_signature())
             self._set_dirty(current_sig != self._saved_rows_signature)
         except Exception:
             self._set_dirty(True)
 
+    def _queue_table_conflict_refresh(self) -> None:
+        if self._suspend_dirty_tracking:
+            return
+        self._pending_table_conflict_refresh = True
+        if self._table_conflict_refresh_timer is not None:
+            self._table_conflict_refresh_timer.start(25)
+        else:
+            self._flush_table_conflict_refresh()
+
+    def _flush_table_conflict_refresh(self) -> None:
+        if self._suspend_dirty_tracking or not self._pending_table_conflict_refresh:
+            return
+        self._pending_table_conflict_refresh = False
+        conflict_pairs, conflict_rows = self._compute_active_conflict_state()
+        self._cache_active_conflict_state(conflict_pairs, conflict_rows)
+        self._highlight_time_conflicts(conflict_rows_override=conflict_rows)
+        self._update_resource_action_state(active_conflicts_override=conflict_pairs)
+
     def _on_table_item_changed(self, _item: QTableWidgetItem) -> None:
+        if self._suspend_dirty_tracking:
+            return
         with perf_span(
             "daily_schedule.item_changed_conflicts",
             settings=self.settings,
@@ -4398,9 +5394,7 @@ class DailyScheduleTab(QWidget):
             min_ms=5.0,
         ):
             self._mark_dirty()
-            conflict_pairs, conflict_rows = self._compute_active_conflict_state()
-            self._highlight_time_conflicts(conflict_rows_override=conflict_rows)
-            self._update_resource_action_state(active_conflicts_override=conflict_pairs)
+            self._queue_table_conflict_refresh()
 
     def _has_delete_selection(self) -> bool:
         for r in range(self.table.rowCount()):
@@ -4413,7 +5407,9 @@ class DailyScheduleTab(QWidget):
                     return True
         try:
             sel_model = self.table.selectionModel()
-            return bool(sel_model and sel_model.selectedRows())
+            if not sel_model:
+                return False
+            return any(not self._is_sop_overlay_row(int(idx.row())) for idx in sel_model.selectedRows())
         except Exception:
             return False
 
@@ -4434,7 +5430,7 @@ class DailyScheduleTab(QWidget):
         is_sop_overlay = bool(entry.get("_sop_overlay"))
         overlay_profile = str(entry.get("_sop_profile_name") or "").strip()
         overlay_tip = (
-            "SOP layer entry. Edit in Active Schedule and Save to update SOP schedule."
+            "Active SOP overlay row. Read-only for timeline visibility; scheduler still uses the SOP layer directly."
             if is_sop_overlay
             else ""
         )
@@ -4442,7 +5438,7 @@ class DailyScheduleTab(QWidget):
         # Select checkbox
         sel_chk = QCheckBox()
         sel_chk.stateChanged.connect(self._update_delete_button_state)
-        sel_chk.setEnabled(True)
+        sel_chk.setEnabled(not is_sop_overlay)
         sel_wrap = QWidget()
         sel_layout = QHBoxLayout(sel_wrap)
         sel_layout.setContentsMargins(0, 0, 0, 0)
@@ -4479,8 +5475,9 @@ class DailyScheduleTab(QWidget):
         if day_val not in DAY_OPTIONS:
             day_val = "ALL"
         day_combo.setCurrentText(day_val)
-        day_combo.setEnabled(True)
-        day_combo.currentTextChanged.connect(self._mark_dirty)
+        day_combo.setEnabled(not is_sop_overlay)
+        if not is_sop_overlay:
+            day_combo.currentTextChanged.connect(self._mark_dirty)
         if overlay_tip:
             day_combo.setToolTip(overlay_tip)
         self.table.setCellWidget(row, self.COL_DAY, day_combo)
@@ -4537,14 +5534,20 @@ class DailyScheduleTab(QWidget):
 
         # Start / End
         st_item = QTableWidgetItem(entry.get("start_utc", ""))
-        self._make_editable(st_item)
+        if is_sop_overlay:
+            st_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        else:
+            self._make_editable(st_item)
         if overlay_tip:
             st_item.setToolTip(overlay_tip)
         st_item.setData(Qt.UserRole, st_item.toolTip())
         self.table.setItem(row, self.COL_START, st_item)
 
         en_item = QTableWidgetItem(entry.get("end_utc", ""))
-        self._make_editable(en_item)
+        if is_sop_overlay:
+            en_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        else:
+            self._make_editable(en_item)
         if overlay_tip:
             en_item.setToolTip(overlay_tip)
         en_item.setData(Qt.UserRole, en_item.toolTip())
@@ -4607,14 +5610,14 @@ class DailyScheduleTab(QWidget):
         # Fallback to selected cells if no checkboxes are ticked
         if not selected:
             for idx in self.table.selectedIndexes():
-                selected.add(idx.row())
+                row_idx = int(idx.row())
+                if self._is_sop_overlay_row(row_idx):
+                    continue
+                selected.add(row_idx)
         for r in sorted(selected, reverse=True):
             if self._is_sop_overlay_row(r):
-                source_key = self._sop_overlay_source_key(r)
-                if source_key:
-                    self._hidden_sop_overlay_keys.add(source_key)
-            else:
-                removed_hf += 1
+                continue
+            removed_hf += 1
             self.table.removeRow(r)
         self._update_delete_button_state()
         if removed_hf > 0:
@@ -4699,7 +5702,7 @@ class DailyScheduleTab(QWidget):
         )
         return entry, sort_key
 
-    def _sort_active_schedule_by_time(self) -> None:
+    def _sort_active_schedule_by_time(self, *, refresh_post_sort: bool = True) -> None:
         if self.table.rowCount() <= 1:
             return
         rows_for_sort: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
@@ -4719,8 +5722,10 @@ class DailyScheduleTab(QWidget):
 
         self.table.clearSelection()
         self._update_delete_button_state()
-        self._highlight_time_conflicts()
-        self._update_resource_action_state()
+        self._invalidate_active_schedule_views(invalidate_resource_table=False)
+        if refresh_post_sort:
+            self._highlight_time_conflicts()
+            self._update_resource_action_state()
         self._set_dirty(was_dirty)
 
     # ---------------- Cell access helpers ---------------- #

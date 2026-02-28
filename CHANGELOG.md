@@ -1,6 +1,8 @@
 # Changelog
 
 ## [1.2.0]
+- Fixed: Bundled `Net Resources` SitRep seasonal sets were corrected from verified source data; shipped `Winter` and `Summer` resource files now contain the updated schedules, and `Fall` stays aligned with corrected `Winter` as the current fallback set.
+- Changed: Existing installs now perform a one-time builtin `Net Resources` refresh during Net Schedule bootstrap so corrected bundled `Winter`/`Summer` rows replace stale builtin rows while preserving user-added/manual resource entries.
 - Added: `Settings -> JS8Call Settings` now includes configurable `TCP Host` (`js8_host`) with default `127.0.0.1`, and JS8 status/control/net/map integrations now use the configured hostname/IP instead of assuming localhost.
 - Changed: `Settings -> JS8Call Settings -> Load JS8 Traffic` now shows an in-process indicator (button busy state + progress/status text) during manual JS8 traffic rebuilds so long reloads provide immediate UI feedback.
 - Fixed: On Windows, launching with `python -m freqinout.main` now sets a FreqInOut-specific app identity/icon early so the taskbar button shows the FreqInOut icon instead of the default Python icon.

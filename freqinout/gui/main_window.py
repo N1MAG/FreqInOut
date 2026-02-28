@@ -116,6 +116,11 @@ class MainWindow(QMainWindow):
         self.peer_sched_tab = PeerSchedTab(self)
         self.help_tab = HelpTab(self)
         self.controlfreq_tab = ControlFreqTab(self)
+        self._sop_data_refresh_pending = False
+        self._sop_data_refresh_timer = QTimer(self)
+        self._sop_data_refresh_timer.setSingleShot(True)
+        self._sop_data_refresh_timer.setInterval(90)
+        self._sop_data_refresh_timer.timeout.connect(self._flush_sop_data_changed)
 
         self.freq_planner_tab = None
         self.message_viewer_tab = None
@@ -525,6 +530,8 @@ class MainWindow(QMainWindow):
             pass
         self.hf_schedule_tab.schedule_saved.connect(self._refresh_freq_planner_if_loaded)
         self.hf_schedule_tab.schedule_saved.connect(self.scheduler.force_refresh)
+        if hasattr(self.sop_tab, "on_hf_schedule_saved"):
+            self.hf_schedule_tab.schedule_saved.connect(self.sop_tab.on_hf_schedule_saved)
         self.net_tab.schedule_saved.connect(self._refresh_freq_planner_if_loaded)
         self.net_tab.schedule_saved.connect(self.scheduler.force_refresh)
 
@@ -1412,40 +1419,57 @@ class MainWindow(QMainWindow):
         self._sop_next_due_minutes = None
 
     def _on_sop_data_changed(self) -> None:
+        self._sop_data_refresh_pending = True
+        timer = getattr(self, "_sop_data_refresh_timer", None)
+        if isinstance(timer, QTimer):
+            timer.start()
+            return
+        self._flush_sop_data_changed()
+
+    def _flush_sop_data_changed(self) -> None:
+        if not bool(getattr(self, "_sop_data_refresh_pending", False)):
+            return
+        self._sop_data_refresh_pending = False
         self._invalidate_sop_status_cache()
-        try:
-            if hasattr(self, "scheduler"):
-                self.scheduler.force_refresh()
-        except Exception:
-            pass
-        try:
-            if hasattr(self, "hf_schedule_tab") and hasattr(self.hf_schedule_tab, "on_sop_data_changed"):
-                self.hf_schedule_tab.on_sop_data_changed()
-        except Exception:
-            pass
-        try:
-            if hasattr(self, "controlfreq_tab") and hasattr(self.controlfreq_tab, "on_sop_data_changed"):
-                self.controlfreq_tab.on_sop_data_changed()
-        except Exception:
-            pass
-        try:
-            if hasattr(self, "net_tab") and hasattr(self.net_tab, "on_sop_data_changed"):
-                self.net_tab.on_sop_data_changed()
-        except Exception:
-            pass
-        try:
-            self._refresh_freq_planner_if_loaded()
-        except Exception:
-            pass
-        try:
-            self._refresh_scheduler_status_panel()
-        except Exception:
-            pass
+        with perf_span("main.sop_data_changed.flush", settings=self.settings, min_ms=8.0):
+            try:
+                if hasattr(self, "scheduler"):
+                    self.scheduler.force_refresh()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "hf_schedule_tab") and hasattr(self.hf_schedule_tab, "on_sop_data_changed"):
+                    self.hf_schedule_tab.on_sop_data_changed()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "controlfreq_tab") and hasattr(self.controlfreq_tab, "on_sop_data_changed"):
+                    self.controlfreq_tab.on_sop_data_changed()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "net_tab") and hasattr(self.net_tab, "on_sop_data_changed"):
+                    self.net_tab.on_sop_data_changed()
+            except Exception:
+                pass
+            try:
+                self._refresh_freq_planner_if_loaded()
+            except Exception:
+                pass
+            try:
+                self._refresh_scheduler_status_panel()
+            except Exception:
+                pass
 
     def _on_app_about_to_quit(self):
         if self._shutting_down:
             return
         self._shutting_down = True
+        try:
+            if hasattr(self, "_sop_data_refresh_timer"):
+                self._sop_data_refresh_timer.stop()
+        except Exception:
+            pass
         try:
             if self.stack.currentWidget() is self.stations_map_tab:
                 self.stack.setCurrentWidget(self.settings_tab)

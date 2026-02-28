@@ -3225,6 +3225,8 @@ class ControlFreqTab(QWidget):
                             targets = [selected_target]
                         else:
                             targets = ["Any (Role Match)"]
+                    elif rule == "group":
+                        targets = [selected_target] if selected_target else ["Any (Group Match)"]
                     elif rule in {"callsign", "peer", "local_profile", "local_group"}:
                         targets = [selected_target] if selected_target else []
                     action_band = (action.get("band") or "").strip().upper()
