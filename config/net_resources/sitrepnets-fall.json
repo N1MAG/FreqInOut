@@ -1,10 +1,10 @@
 {
   "callsign": "N1MAG",
   "resource_set": "Winter",
-  "created_utc": "2026-02-17T20:42:54",
+  "created_utc": "2026-02-27T21:57:18",
   "rows": [
     {
-      "day_utc": "Monday",
+      "day_utc": "Tuesday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -24,7 +24,7 @@
       "fldigi_offset": "1000"
     },
     {
-      "day_utc": "Monday",
+      "day_utc": "Tuesday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -84,7 +84,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Tuesday",
+      "day_utc": "Wednesday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -124,7 +124,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Tuesday",
+      "day_utc": "Wednesday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -144,7 +144,7 @@
       "fldigi_offset": "1000"
     },
     {
-      "day_utc": "Tuesday",
+      "day_utc": "Wednesday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "1,3",
@@ -164,7 +164,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Tuesday",
+      "day_utc": "Wednesday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "1,3",
@@ -184,7 +184,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Tuesday",
+      "day_utc": "Wednesday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "1,3",
@@ -204,7 +204,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Tuesday",
+      "day_utc": "Wednesday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "1,3",
@@ -224,7 +224,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Tuesday",
+      "day_utc": "Wednesday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "2,4,5",
@@ -244,7 +244,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Wednesday",
+      "day_utc": "Thursday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "1,3,5",
@@ -264,7 +264,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Wednesday",
+      "day_utc": "Thursday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "2,4",
@@ -284,7 +284,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Wednesday",
+      "day_utc": "Thursday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -304,7 +304,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Thursday",
+      "day_utc": "Friday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -324,7 +324,7 @@
       "fldigi_offset": ""
     },
     {
-      "day_utc": "Thursday",
+      "day_utc": "Friday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "2,4,5",
@@ -344,7 +344,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Thursday",
+      "day_utc": "Friday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -364,7 +364,7 @@
       "fldigi_offset": "800"
     },
     {
-      "day_utc": "Thursday",
+      "day_utc": "Friday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -384,7 +384,7 @@
       "fldigi_offset": ""
     },
     {
-      "day_utc": "Thursday",
+      "day_utc": "Friday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -404,7 +404,7 @@
       "fldigi_offset": ""
     },
     {
-      "day_utc": "Thursday",
+      "day_utc": "Friday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "2,4,5",
@@ -424,7 +424,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Friday",
+      "day_utc": "Saturday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -444,7 +444,7 @@
       "fldigi_offset": "1000"
     },
     {
-      "day_utc": "Friday",
+      "day_utc": "Saturday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "3",
@@ -464,7 +464,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Friday",
+      "day_utc": "Saturday",
       "recurrence": "Periodic",
       "biweekly_offset_weeks": 0,
       "month_weeks": "1,2,4,5",
@@ -484,7 +484,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Saturday",
+      "day_utc": "Sunday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -504,7 +504,7 @@
       "fldigi_offset": "1200"
     },
     {
-      "day_utc": "Saturday",
+      "day_utc": "Sunday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -529,7 +529,7 @@
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
       "group_name": "S2 Underground",
-      "band": "40M",
+      "band": "20M",
       "mode": "Digi",
       "frequency": "14.107",
       "start_utc": "08:00",
@@ -549,7 +549,7 @@
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
       "group_name": "S2 Underground",
-      "band": "40M",
+      "band": "20M",
       "mode": "Digi",
       "frequency": "14.107",
       "start_utc": "20:00",
@@ -564,7 +564,7 @@
       "fldigi_offset": ""
     },
     {
-      "day_utc": "Saturday",
+      "day_utc": "Sunday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -584,7 +584,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Sunday",
+      "day_utc": "Monday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
@@ -604,7 +604,7 @@
       "fldigi_offset": "900"
     },
     {
-      "day_utc": "Sunday",
+      "day_utc": "Monday",
       "recurrence": "Weekly",
       "biweekly_offset_weeks": 0,
       "month_weeks": "",
