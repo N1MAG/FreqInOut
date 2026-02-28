@@ -130,16 +130,13 @@ def emit_span(
     if details:
         payload["meta"] = details
     line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    wrote = False
     if _logger_can_emit(level):
         try:
             writer = getattr(log, str(level).lower(), log.info)
             writer("PERF|%s", line)
-            wrote = True
         except Exception:
-            wrote = False
-    if not wrote:
-        _append_perf_line(line)
+            pass
+    _append_perf_line(line)
 
 
 class PerfSpan(ContextDecorator):

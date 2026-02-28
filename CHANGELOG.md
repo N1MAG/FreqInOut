@@ -23,6 +23,9 @@
 - Fixed: VarAC custom launch-command mode now hardens launch context by normalizing user/env path tokens and preferring `VarAC Install Folder` as working directory, reducing Linux profile/config drift between desktop-launch and Launch Control.
 - Changed: `VarAC Launch Command` UI wording now marks it as an advanced override and recommends leaving it blank unless default auto-launch fails.
 - Changed: In-app guide wording now clarifies `Resume Schedule`, FLDigi offset expectations (including Operating Group fallback), and `Prompt` vs `On Schedule Change` behavior.
+- Changed: `docs/guide.html` now provides a fuller step-by-step SOP workflow covering `SOP Builder`, `HF Daily` conflict handling, `HF Nets` policy review, `Show Effective Schedule`, and `Return to Normal`.
+- Changed: Release perf guidance now explicitly covers the `FreqPlanner`, `HF Daily`, `HF Nets`, and `SOP Builder` paths, and the perf benchmark helper now defaults to dedicated `perf_metrics.log` files instead of mixing in normal app logs.
+- Changed: `release_builder.py` now runs `python -m compileall freqinout` by default so the release helper matches the required verification baseline.
 - Changed: App/documentation version references updated to `1.2.0`.
 
 ## [1.1.9]

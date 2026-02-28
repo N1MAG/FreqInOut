@@ -33,20 +33,46 @@ Run:
 
 ```bash
 python tools/release_preflight.py
+python -m compileall freqinout
 ```
 
 Fix any reported ERROR items before release.
 
-## 5) Repo hygiene
+## 5) Performance smoke
+
+- Clear the dedicated perf log:
+
+```bash
+python tools/perf_benchmark.py reset-log
+```
+
+- Do one cold and one warm workflow pass that includes:
+  - `FreqPlanner`
+  - `HF Daily`
+  - `HF Nets`
+  - `SOP Builder`
+  - one `SOP Builder -> Save` action that triggers SOP data fanout
+  - one `HF Daily -> Resolve Conflicts` review
+  - one `HF Nets -> Manage Net/SOP Policies` review
+
+- Summarize the result:
+
+```bash
+python tools/perf_benchmark.py summarize --name "^(main_window|messages|map|operators|controlfreq|freqplanner|daily_schedule|net_schedule|sop\\.|settings|digi_ncs|js8_ncs)" --sort p95 --limit 80
+```
+
+## 6) Repo hygiene
 
 - Confirm no local-only artifacts are staged (`dist/`, `build/`, DB files, logs).
 - Confirm no placeholder/stub docs remain unintentionally.
 - Confirm no mojibake text appears in docs/changelog.
 
-## 6) Final release flow
+## 7) Final release flow
 
 1. Run preflight.
-2. Build and smoke-test app.
-3. Commit release changes.
-4. Tag release.
-5. Publish release notes from `CHANGELOG.md`.
+2. Run compile verification and SOP-focused perf smoke.
+3. Build and smoke-test app.
+4. Confirm the SOP workflow docs in `docs/guide.html` match the shipped behavior.
+5. Commit release changes.
+6. Tag release.
+7. Publish release notes from `CHANGELOG.md`.

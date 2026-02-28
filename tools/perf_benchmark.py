@@ -5,30 +5,24 @@ import json
 import os
 import re
 import statistics
-import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from freqinout.core import logger as fio_logger
-from freqinout.core.config_paths import get_config_dir
-from freqinout.core.perf_metrics import summarize_samples
-
 
 def _candidate_log_files() -> List[Path]:
     candidates: List[Path] = []
-    try:
-        candidates.append(Path(fio_logger._get_log_file()))
-    except Exception:
-        pass
-    try:
-        candidates.append(get_config_dir() / "perf_metrics.log")
-    except Exception:
-        pass
+    home = Path.home()
+    env_cfg = Path(os.environ.get("FREQINOUT_CONFIG_DIR", "")) if os.environ.get("FREQINOUT_CONFIG_DIR") else None
+    if env_cfg is not None:
+        candidates.append(env_cfg / "freqinout.log")
+        candidates.append(env_cfg / "perf_metrics.log")
+    candidates.append(home / ".freqinout" / "freqinout.log")
+    candidates.append(home / ".freqinout" / "perf_metrics.log")
+    candidates.append(home / "AppData" / "Roaming" / "FreqInOut" / "freqinout.log")
+    candidates.append(home / "AppData" / "Local" / "FreqInOut" / "freqinout.log")
+    candidates.append(home / "AppData" / "Roaming" / "FreqInOut" / "perf_metrics.log")
+    candidates.append(home / "AppData" / "Local" / "FreqInOut" / "perf_metrics.log")
     appdata = Path(os.environ.get("APPDATA", "")) if os.environ.get("APPDATA") else None
     localapp = Path(os.environ.get("LOCALAPPDATA", "")) if os.environ.get("LOCALAPPDATA") else None
     if appdata is not None:
@@ -37,11 +31,6 @@ def _candidate_log_files() -> List[Path]:
     if localapp is not None:
         candidates.append(localapp / "FreqInOut" / "freqinout.log")
         candidates.append(localapp / "FreqInOut" / "perf_metrics.log")
-    home = Path.home()
-    candidates.append(home / "AppData" / "Roaming" / "FreqInOut" / "freqinout.log")
-    candidates.append(home / "AppData" / "Local" / "FreqInOut" / "freqinout.log")
-    candidates.append(home / "AppData" / "Roaming" / "FreqInOut" / "perf_metrics.log")
-    candidates.append(home / "AppData" / "Local" / "FreqInOut" / "perf_metrics.log")
     # Deduplicate while preserving order.
     seen = set()
     out: List[Path] = []
@@ -54,26 +43,62 @@ def _candidate_log_files() -> List[Path]:
     return out
 
 
+def _split_candidate_logs() -> Tuple[List[Path], List[Path]]:
+    perf_logs: List[Path] = []
+    app_logs: List[Path] = []
+    for path in _candidate_log_files():
+        if path.name.lower() == "perf_metrics.log":
+            perf_logs.append(path)
+        else:
+            app_logs.append(path)
+    return perf_logs, app_logs
+
+
+def _first_existing(candidates: Iterable[Path]) -> Path | None:
+    existing = [path.resolve() for path in candidates if path.exists()]
+    if not existing:
+        return None
+    existing.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return existing[0]
+
+
+def _primary_summary_log_paths() -> List[Path]:
+    perf_candidates, _app_candidates = _split_candidate_logs()
+    primary_perf = _first_existing(perf_candidates)
+    if primary_perf is not None:
+        return [primary_perf]
+    if perf_candidates:
+        return [perf_candidates[0].resolve()]
+    return [_resolve_log_path("auto")]
+
+
+def _primary_reset_log_paths() -> List[Path]:
+    perf_candidates, _app_candidates = _split_candidate_logs()
+    primary_perf = _first_existing(perf_candidates)
+    if primary_perf is not None:
+        return [primary_perf]
+    if perf_candidates:
+        return [perf_candidates[0].resolve()]
+    return [_resolve_log_path("auto")]
+
+
 def _resolve_log_path(raw: str) -> Path:
     if raw and raw.lower() != "auto":
         return Path(raw).resolve()
-    existing = [p for p in _candidate_log_files() if p.exists()]
-    if existing:
-        existing.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return existing[0].resolve()
-    candidates = _candidate_log_files()
-    if candidates:
-        return candidates[0].resolve()
+    perf_candidates, app_candidates = _split_candidate_logs()
+    existing_perf = [p for p in perf_candidates if p.exists()]
+    if existing_perf:
+        existing_perf.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return existing_perf[0].resolve()
+    existing_app = [p for p in app_candidates if p.exists()]
+    if existing_app:
+        existing_app.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return existing_app[0].resolve()
+    if perf_candidates:
+        return perf_candidates[0].resolve()
+    if app_candidates:
+        return app_candidates[0].resolve()
     return (Path.cwd() / "freqinout.log").resolve()
-
-
-def _resolve_log_paths(raw: str) -> List[Path]:
-    if raw and raw.lower() != "auto":
-        return [Path(raw).resolve()]
-    existing = [p.resolve() for p in _candidate_log_files() if p.exists()]
-    if existing:
-        return existing
-    return [_resolve_log_path("auto")]
 
 
 def _load_perf_events(log_path: Path) -> List[Dict]:
@@ -103,6 +128,46 @@ def _load_perf_events(log_path: Path) -> List[Dict]:
                 continue
             events.append(data)
     return events
+
+
+def _percentile(samples: Iterable[float], pct: float) -> float:
+    values = sorted(float(v) for v in samples)
+    if not values:
+        return 0.0
+    if pct <= 0:
+        return values[0]
+    if pct >= 100:
+        return values[-1]
+    index = (len(values) - 1) * (pct / 100.0)
+    lo = int(index)
+    hi = min(lo + 1, len(values) - 1)
+    if lo == hi:
+        return values[lo]
+    frac = index - lo
+    return values[lo] + (values[hi] - values[lo]) * frac
+
+
+def summarize_samples(samples: Iterable[float]) -> Dict[str, float]:
+    values = [float(v) for v in samples]
+    if not values:
+        return {
+            "count": 0.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0,
+            "mean": 0.0,
+        }
+    return {
+        "count": float(len(values)),
+        "min": min(values),
+        "p50": _percentile(values, 50),
+        "p95": _percentile(values, 95),
+        "p99": _percentile(values, 99),
+        "max": max(values),
+        "mean": sum(values) / len(values),
+    }
 
 
 def _filter_events(events: Iterable[Dict], name_filter: str | None) -> List[Dict]:
@@ -156,7 +221,10 @@ def _markdown_summary(rows: List[Tuple[str, Dict[str, float]]]) -> str:
 
 
 def summarize_command(args: argparse.Namespace) -> int:
-    log_paths = _resolve_log_paths(args.log)
+    if args.log and str(args.log).lower() != "auto":
+        log_paths = [Path(args.log).resolve()]
+    else:
+        log_paths = _primary_summary_log_paths()
     all_events: List[Dict] = []
     for path in log_paths:
         all_events.extend(_load_perf_events(path))
@@ -205,7 +273,10 @@ def summarize_command(args: argparse.Namespace) -> int:
 
 
 def reset_command(args: argparse.Namespace) -> int:
-    log_paths = _resolve_log_paths(args.log)
+    if args.log and str(args.log).lower() != "auto":
+        log_paths = [Path(args.log).resolve()]
+    else:
+        log_paths = _primary_reset_log_paths()
     for log_path in log_paths:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("", encoding="utf-8")
@@ -218,15 +289,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     summary = sub.add_parser("summarize", help="Summarize PERF spans from log")
-    summary.add_argument("--log", default="auto", help="Path to freqinout.log (or 'auto')")
+    summary.add_argument("--log", default="auto", help="Path to perf_metrics.log (or 'auto')")
     summary.add_argument("--name", default=None, help="Regex filter for span name")
     summary.add_argument("--sort", default="p95", choices=["mean", "max", "p50", "p95", "p99", "count"], help="Sort column")
     summary.add_argument("--limit", type=int, default=50, help="Max rows to print")
     summary.add_argument("--markdown", default="", help="Optional markdown output path")
     summary.set_defaults(func=summarize_command)
 
-    reset = sub.add_parser("reset-log", help="Clear freqinout.log")
-    reset.add_argument("--log", default="auto", help="Path to freqinout.log (or 'auto')")
+    reset = sub.add_parser("reset-log", help="Clear perf log")
+    reset.add_argument("--log", default="auto", help="Path to perf_metrics.log (or 'auto')")
     reset.set_defaults(func=reset_command)
 
     return parser

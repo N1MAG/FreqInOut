@@ -474,9 +474,15 @@ class NetScheduleTab(QWidget):
         self._schedule_net_sop_conflict_refresh(force=True)
 
     def on_tab_activated(self) -> None:
-        if self._pending_sop_conflict_refresh:
-            self._pending_sop_conflict_refresh = False
-            self._schedule_net_sop_conflict_refresh(force=True)
+        with perf_span(
+            "net_schedule.on_tab_activated",
+            settings=self.settings,
+            meta={"rows": int(self.table.rowCount())},
+            min_ms=0.0,
+        ):
+            if self._pending_sop_conflict_refresh:
+                self._pending_sop_conflict_refresh = False
+                self._schedule_net_sop_conflict_refresh(force=True)
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)

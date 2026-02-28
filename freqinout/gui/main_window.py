@@ -2209,7 +2209,10 @@ class MainWindow(QMainWindow):
     def _refresh_freq_planner_if_loaded(self) -> None:
         try:
             if self.freq_planner_tab is not None:
-                self.freq_planner_tab.rebuild_table()
+                if self.stack.currentWidget() is self.freq_planner_tab:
+                    self.freq_planner_tab.rebuild_table()
+                elif hasattr(self.freq_planner_tab, "mark_schedule_dirty"):
+                    self.freq_planner_tab.mark_schedule_dirty()
         except Exception:
             pass
 

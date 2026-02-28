@@ -3525,7 +3525,7 @@ class DailyScheduleTab(QWidget):
             "daily_schedule.active_conflict_state",
             settings=self.settings,
             meta={"rows": int(self.table.rowCount()), "selected_scope": bool(selected_scope)},
-            min_ms=5.0,
+            min_ms=1.0,
         ):
             selected_rows: Optional[Set[int]] = None
             if selected_scope:
@@ -4720,7 +4720,7 @@ class DailyScheduleTab(QWidget):
             "daily_schedule.highlight_time_conflicts",
             settings=self.settings,
             meta={"rows": int(self.table.rowCount()), "reuse": bool(conflict_rows_override is not None)},
-            min_ms=5.0,
+            min_ms=1.0,
         ):
             prev_block = self.table.blockSignals(True)
             try:
@@ -5258,11 +5258,17 @@ class DailyScheduleTab(QWidget):
         self._refresh_schedule_resources(force=True)
 
     def on_tab_activated(self) -> None:
-        self._refresh_sop_overlay_rows_in_table()
-        self._refresh_sop_profiles_panel(force=True)
-        self._update_effective_source_label()
-        self._update_suspend_state()
-        self._refresh_schedule_resources(force=True)
+        with perf_span(
+            "daily_schedule.on_tab_activated",
+            settings=self.settings,
+            meta={"rows": int(self.table.rowCount())},
+            min_ms=5.0,
+        ):
+            self._refresh_sop_overlay_rows_in_table()
+            self._refresh_sop_profiles_panel(force=True)
+            self._update_effective_source_label()
+            self._update_suspend_state()
+            self._refresh_schedule_resources(force=False)
 
     def _on_suspend_clicked(self):
         if self._suspend_active():

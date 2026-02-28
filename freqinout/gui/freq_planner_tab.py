@@ -24,6 +24,7 @@ from pathlib import Path
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.perf_metrics import emit_span
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.theme import resolve_theme, button_style, band_cell_colors, qcolor, BAND_COLORS_LIGHT, BAND_COLORS_DARK
 
@@ -77,6 +78,7 @@ class FreqPlannerTab(QWidget):
         self._clock_timer: QTimer | None = None
         self._last_snapshot: str = ""
         self._last_rebuild_check_ts: float = 0.0
+        self._pending_rebuild: bool = False
         self._build_ui()
         self._apply_theme()
         self.rebuild_table()
@@ -864,12 +866,22 @@ class FreqPlannerTab(QWidget):
         start_date = (now_local - datetime.timedelta(days=days_to_sunday)).date()
         return datetime.datetime.combine(start_date, datetime.time(0, 0)).replace(tzinfo=tz)
 
+    def mark_schedule_dirty(self) -> None:
+        self._pending_rebuild = True
+
+    def on_tab_activated(self) -> None:
+        if not self._pending_rebuild:
+            return
+        self._pending_rebuild = False
+        self.rebuild_table()
+
     # ------------- core rebuild ------------- #
 
     def rebuild_table(self):
         """
         Recompute the table based on current hf_schedule and net_schedule in config.
         """
+        perf_start = time.perf_counter()
         try:
             self.settings.reload()
         except Exception:
@@ -1316,6 +1328,13 @@ class FreqPlannerTab(QWidget):
         self._update_clock_labels()
         self._visible_bands = sorted(visible_bands)
         self._render_band_legend()
+        emit_span(
+            "freqplanner.rebuild_table",
+            (time.perf_counter() - perf_start) * 1000.0,
+            settings=self.settings,
+            meta={"show_local": bool(self._show_local), "show_band": bool(self._show_band)},
+            min_ms=5.0,
+        )
         log.info("FreqPlanner table rebuilt.")
 
     def _snapshot(

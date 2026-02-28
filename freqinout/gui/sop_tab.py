@@ -7923,7 +7923,13 @@ class SOPTab(_LegacySOPTab):
         self._refresh_all_rows_dynamic_options()
 
     def on_tab_activated(self) -> None:
-        self._update_clock_labels()
+        with perf_span(
+            "sop.on_tab_activated",
+            settings=self.settings,
+            meta={"rows": int(self.actions_table.rowCount())},
+            min_ms=0.0,
+        ):
+            self._update_clock_labels()
 
     def on_sop_profiles_updated(self) -> None:
         self._reload_profiles(select_id=int(self._selected_profile_id or 0))

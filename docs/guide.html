@@ -183,6 +183,7 @@
     <li><strong>Auto-archive timing</strong>: with <code>Enable Auto-Archive</code> on, checks run when you first open Messages after startup, then about once per day.</li>
     <li><strong>Age rule</strong>: files older than <code>After &lt;days&gt; days</code> are moved.</li>
     <li><strong>Required setup</strong>: <code>BBS Directory</code> and <code>BBS Archive</code> must both exist and be different folders.</li>
+    <li><strong>Archived rows</strong>: archived BBS files stay visible in Messages with an <code>[Archived]</code> title prefix so you can still <code>View</code> or <code>Delete</code> them from the archive folder.</li>
   </ul>
 
   <h2 id="map">Map</h2>
@@ -276,6 +277,7 @@
       <tr><td><code>Delete Selected</code></td><td>Removes selected active rows.</td></tr>
       <tr><td><code>Move Selected to Resources</code></td><td>Moves selected active rows into Schedule Resources.</td></tr>
       <tr><td><code>Resolve Conflicts</code></td><td>Shows conflict summary/actions when overlaps are detected (button appears only when conflicts exist).</td></tr>
+      <tr><td><code>Show Effective Schedule</code></td><td>Read-only derived view that appears only while an HF SOP is active. It shows the actual HF/SOP runtime segments the scheduler will follow.</td></tr>
       <tr><td><code>Import/Export</code> (nested)</td><td><code>Import HF Schedule</code> and <code>Export HF Schedule</code>.</td></tr>
       <tr><td><code>Save HF Schedule</code></td><td>Persists active HF rows.</td></tr>
     </tbody>
@@ -299,6 +301,25 @@
 
   <h3 id="hf-daily-sop-status">SOP Schedule Status (HF)</h3>
   <p>This section summarizes active/inactive HF SOP status and conflict indicators, including quick SOP activation/deactivation buttons by group.</p>
+  <ul class="section-list">
+    <li><strong>Active</strong>: no blocking HF, Net, or SOP conflicts are currently detected.</li>
+    <li><strong>Attention</strong>: HF conflicts are clear, but Net or SOP review items still exist.</li>
+    <li><strong>Conflict</strong>: blocking HF overlap still exists and should be resolved before trusting the active plan.</li>
+  </ul>
+
+  <h3 id="hf-daily-sop-workflow">Step-by-Step: HF SOP Review in HF Daily</h3>
+  <ol class="section-list">
+    <li><strong>1) Open HF Daily after saving or activating an HF SOP</strong>: use this tab to verify how the baseline HF plan and the active HF SOP interact.</li>
+    <li><strong>2) Read the SOP Schedule Status section first</strong>: if it shows <code>Conflict</code>, there is still a blocking HF overlap to fix. If it shows <code>Attention</code>, HF is clear but Net or SOP review is still needed.</li>
+    <li><strong>3) Click <code>Resolve Conflicts</code> when available</strong>: the dialog summarizes only the blocking HF/SOP overlap pairs that still need action.</li>
+    <li><strong>4) Use <code>Auto-Adjust HF Around SOP (Reversible)</code> when you want FreqInOut to split or trim the HF rows for you</strong>: this now saves the adjusted HF rows immediately so the status can refresh right away.</li>
+    <li><strong>5) Turn on <code>Show Effective Schedule</code> to confirm the actual runtime timeline</strong>: this view is read-only and shows the exact HF/SOP sequence the scheduler will follow, including the return to the baseline HF row after an SOP window ends.</li>
+    <li><strong>6) If you later deactivate the HF SOP, use <code>Return to Normal</code> when prompted</strong>: this restores the pre-SOP HF baseline from the saved reversible snapshot and writes that restored baseline back to the daily schedule.</li>
+    <li><strong>7) Re-check the status color after restore</strong>: once the SOP is deactivated and the baseline is restored, the HF-specific conflict state should return to the normal non-conflict state unless a separate schedule issue still exists.</li>
+  </ol>
+  <div class="callout">
+    Tip: <code>Show Effective Schedule</code> is only available while an HF SOP is active. It is a verification view, not an editable schedule.
+  </div>
 
   <h2 id="hf-nets">Schedules: HF Nets</h2>
   <p><strong>Purpose</strong>: manage net schedule rows and the net resource catalog.</p>
@@ -340,6 +361,15 @@
   <p><strong>Columns</strong>: <code>Start (UTC)</code>, <code>End (UTC)</code>, <code>SOP</code>, <code>Net</code>, <code>Policy</code>, <code>State</code>, <code>Updated</code>.</p>
   <p><strong>Actions</strong>: <code>Refresh</code>, <code>Set Selected: SOP Priority</code>, <code>Set Selected: Net Priority</code>, <code>Clear Selected</code>, <code>Clear All</code>, <code>Close</code>.</p>
   <p><strong>When policy prompts appear</strong>: adding or saving a net that overlaps active SOP windows prompts priority selection. If you close/cancel without selecting required Net priority for that overlap, the conflicting add/save is blocked.</p>
+
+  <h3 id="hf-nets-sop-workflow">Step-by-Step: Net/SOP Conflict Review</h3>
+  <ol class="section-list">
+    <li><strong>1) Save or activate the HF SOP first</strong>: Net policy prompts only matter when there is an active HF SOP window that overlaps a Net row.</li>
+    <li><strong>2) Add or edit the Net row as usual</strong>: if the Net overlaps an active SOP window, FreqInOut will require a priority decision.</li>
+    <li><strong>3) Choose the correct policy at the prompt</strong>: select <code>SOP Priority</code> if the SOP should suppress the Net in that overlap, or <code>Net Priority</code> if the Net should stay in control.</li>
+    <li><strong>4) Use <code>Manage Net/SOP Policies</code> to review saved decisions</strong>: this is the cleanup and audit screen for previously resolved overlap windows.</li>
+    <li><strong>5) Re-open HF Daily if you want the whole picture</strong>: HF Daily shows whether HF is clear, while Net Schedule focuses only on the Net-vs-SOP priority decision for overlapping windows.</li>
+  </ol>
 
   <h2 id="hf-peers">Schedules: HF Peers</h2>
   <p><strong>Purpose</strong>: import and review peer HF schedules with overlap visibility.</p>
@@ -394,7 +424,7 @@
   <h2 id="sop-builder">SOP Builder</h2>
   <p><strong>Purpose</strong>: build and activate one HF SOP and one Local Comms SOP with conflict-aware HF activation.</p>
   <p><strong>Model</strong>: SOP action rows are daily by design (no periodic row mode in SOP Builder).</p>
-  <p><strong>If you are new</strong>: select SOP type, add rows, review conflicts, then click <code>Save</code>.</p>
+  <p><strong>If you are new</strong>: build the SOP here first, then use HF Daily and HF Nets to confirm the runtime schedule and any priority decisions.</p>
 
   <h3 id="sop-builder-actions">Top-Level Actions</h3>
   <table>
@@ -427,31 +457,36 @@
   <ul class="section-list">
     <li><strong>Name</strong>: SOP profile name.</li>
     <li><strong>Category</strong>: <code>HF SOP</code> or <code>Local Comms SOP</code>.</li>
-    <li><strong>Active</strong>: enables the profile after validations pass.</li>
+    <li><strong>Active</strong>: enables the profile after validations and required conflict handling pass.</li>
     <li><strong>Add Action Row</strong>: appends a new action row.</li>
   </ul>
 
   <h3 id="sop-builder-table">Action Rows Table</h3>
   <p><strong>Columns</strong>: <code>Group</code>, <code>Condition Levels</code>, <code>Resource</code>, <code>Mode</code>, <code>Action</code>, <code>Band - Freq</code>, <code>Start (UTC)</code>, <code>End (UTC)</code>, <code>Duration</code>, <code>Interval</code>, <code>Contact Type</code>, <code>Contact Target</code>, <code>Description</code>, <code>Conflict</code>, <code>Remove</code>.</p>
   <ul class="section-list">
-    <li><strong>Condition Levels</strong>: choose where this HF row runs (<code>All</code> or any mix of <code>1</code>-<code>5</code>).</li>
+    <li><strong>Condition Levels</strong>: choose where this HF row runs (<code>All</code> or any mix of <code>1</code>-<code>5</code>). This is only relevant when the selected HF operating group is configured to use condition levels.</li>
     <li><strong>Conflict badge</strong>: updates in-line (<code>Pending</code>, <code>OK</code>, <code>Conflict</code>, <code>Local</code>).</li>
     <li><strong>Contact Target</strong>: typeahead lookup when rule supports callsigns; also supports typed values.</li>
     <li><strong>Interval format</strong>: supports presets and explicit HH:MM; phase patterns such as <code>03:00@30m</code> are supported where applicable.</li>
+    <li><strong>Contact Type default</strong>: new HF rows default to <code>GROUP</code> so the most common HF workflow is pre-selected.</li>
     <li><strong>Local Comms actions</strong>: local action set includes <code>NCS</code>, <code>Check-in</code>, <code>Message</code>, <code>Monitor</code>.</li>
     <li><strong>Conflict status</strong>: updates in real time while editing; Save re-validates before applying active state changes.</li>
   </ul>
 
-  <h3 id="sop-builder-workflow">Guided Conflict Workflow (HF SOP)</h3>
-  <p>Recommended flow:</p>
-  <ul class="section-list">
-    <li><strong>1) Build rows</strong>: complete Group, Action, frequency, and time fields.</li>
-    <li><strong>2) Check workflow line</strong>: it tells you what is complete and what to do next.</li>
-    <li><strong>3) Open Conflict Workbench only when needed</strong>: it stays collapsed while you edit multiple rows.</li>
-    <li><strong>4) Resolve timing conflicts</strong>: use <code>Suggest</code> then <code>Apply</code>. If no timing change is needed, the row shows <code>Not needed</code>.</li>
-    <li><strong>5) Save</strong>: unresolved timing conflicts are blocked at save until fixed.</li>
-    <li><strong>Rule</strong>: same-frequency SOP overlaps are allowed and are not shown as conflicts.</li>
-  </ul>
+  <h3 id="sop-builder-workflow">Step-by-Step: Recommended HF SOP Workflow</h3>
+  <ol class="section-list">
+    <li><strong>1) Confirm the baseline first</strong>: make sure your normal <code>HF Daily</code> and <code>HF Nets</code> schedules are already in the state you want before you start building the SOP.</li>
+    <li><strong>2) Select <code>HF SOP</code> in the SOP selector</strong>: this keeps you in the HF-only workflow. Use <code>Local Comms SOP</code> only for local profiles and reminders.</li>
+    <li><strong>3) Fill in the profile header</strong>: confirm the name and decide whether you want the profile to be saved as active right away.</li>
+    <li><strong>4) Add all needed action rows before opening the workbench</strong>: complete Group, Resource, Action, Band/Freq, Start, End, and any contact details. The workbench is designed to stay collapsed while you make several row edits.</li>
+    <li><strong>5) Use the in-line conflict badges while editing</strong>: <code>OK</code> means the row is currently clear, <code>Conflict</code> means the row still needs review, and <code>Local</code> identifies local-only rows that do not participate in the HF conflict flow.</li>
+    <li><strong>6) Expand the Conflict Workbench only after the rows are mostly complete</strong>: this keeps the builder stable while you make multiple edits and reduces context switching.</li>
+    <li><strong>7) For timing conflicts, use <code>Suggest</code> first</strong>: if a timing shift is possible, the suggested start will be precomputed for you. If the conflict is not time-based, the field stays neutral so it does not imply a missing required value.</li>
+    <li><strong>8) Apply per-conflict priority only when needed</strong>: use the workbench buttons to choose SOP, Net, or Daily priority for the selected conflict row, or use the builder defaults when that matches your plan.</li>
+    <li><strong>9) Save the SOP</strong>: Save re-runs the validations, applies required policy decisions, and updates the active-state logic.</li>
+    <li><strong>10) Switch to <code>HF Daily</code> immediately after saving an active HF SOP</strong>: this is where you confirm the actual runtime sequence, run <code>Resolve Conflicts</code> if HF overlap still exists, and verify the final effective timeline.</li>
+    <li><strong>Rule</strong>: same-frequency SOP overlaps are allowed and are not shown as conflicts because they do not require a frequency change.</li>
+  </ol>
 
   <h3 id="sop-builder-conflicts">Conflict Resolution Prompts</h3>
   <p>When HF actions conflict, SOP Builder prompts for a policy:</p>
@@ -460,7 +495,15 @@
     <li><code>Net Priority on Conflicts</code></li>
     <li><code>Daily Schedule Priority on Conflicts</code></li>
   </ol>
-  <p>If required, a start-time adjustment prompt appears with suggested non-conflicting time.</p>
+  <p>If required, a start-time adjustment prompt appears with a suggested non-conflicting time. Saving is blocked until required timing or priority conflicts are resolved.</p>
+
+  <h3 id="sop-builder-after-save">After You Save an Active HF SOP</h3>
+  <ol class="section-list">
+    <li><strong>1) Review <code>HF Daily</code></strong>: use <code>Resolve Conflicts</code> if the SOP still overlaps the baseline HF schedule on a different frequency.</li>
+    <li><strong>2) Review <code>HF Nets</code></strong>: if a Net overlaps the active SOP window, confirm the Net/SOP priority decision.</li>
+    <li><strong>3) Use <code>Show Effective Schedule</code> in HF Daily</strong>: this confirms exactly what the scheduler will do after all priorities and auto-adjust changes are applied.</li>
+    <li><strong>4) When the SOP event ends, deactivate the HF SOP and accept <code>Return to Normal</code></strong>: this restores the saved pre-SOP HF baseline in one step.</li>
+  </ol>
 
   <h3 id="sop-builder-export-pdf">Export PDF Modal (Nested Workflow)</h3>
   <table>
@@ -503,6 +546,10 @@
       <tr>
         <td>Local Comms Groups</td>
         <td><code>Add Profile</code>, <code>Edit Selected</code>, <code>Delete Selected</code>; table columns: <code>Selected</code>, <code>Group</code>, <code>Resource</code>, <code>Mode</code>, <code>Target</code>, <code>Notes</code></td>
+      </tr>
+      <tr>
+        <td>SOP Export</td>
+        <td><code>Preamble</code> and <code>Postamble</code> text blocks used to enrich SOP PDF exports; supports simple placeholders such as <code>{{operator_callsign}}</code>, <code>{{as_of_local}}</code>, <code>{{as_of_utc}}</code>, <code>{{scope}}</code>, and <code>{{timezone}}</code></td>
       </tr>
       <tr>
         <td>JS8Call Settings</td>

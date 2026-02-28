@@ -16,9 +16,14 @@ def run(cmd: list[str]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run release preflight checks and optional EXE build."
+        description="Run release verification checks and optional EXE build."
     )
     parser.add_argument("--skip-preflight", action="store_true", help="Skip release preflight checks.")
+    parser.add_argument(
+        "--skip-compileall",
+        action="store_true",
+        help="Skip 'python -m compileall freqinout' verification.",
+    )
     parser.add_argument("--build-exe", action="store_true", help="Run PyInstaller build after preflight.")
     args = parser.parse_args()
 
@@ -26,6 +31,12 @@ def main() -> int:
         rc = run([sys.executable, "tools/release_preflight.py"])
         if rc != 0:
             print("[release_builder] ERROR: preflight checks failed.")
+            return rc
+
+    if not args.skip_compileall:
+        rc = run([sys.executable, "-m", "compileall", "freqinout"])
+        if rc != 0:
+            print("[release_builder] ERROR: compileall verification failed.")
             return rc
 
     if args.build_exe:
