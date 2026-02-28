@@ -10,8 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPageLayout, QPageSize, QTextDocument, QStandardItem, QStandardItemModel
-from PySide6.QtPrintSupport import QPrinter
+from PySide6.QtGui import QColor, QFontMetrics, QPageLayout, QPageSize, QTextDocument, QStandardItem, QStandardItemModel, QPdfWriter
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -43,6 +42,7 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
+from freqinout.gui.freq_planner_tab import FreqPlannerTab
 from freqinout.gui.theme import resolve_theme, button_style
 from freqinout.utils.timezones import get_timezone
 
@@ -2994,6 +2994,420 @@ class _LegacySOPTab(QWidget):
         out.append("</tbody></table>")
         return "".join(out)
 
+    def _format_pdf_condition_levels(self, value: Any) -> str:
+        try:
+            normalized = self.manager._normalize_condition_levels(value)
+        except Exception:
+            normalized = str(value or "").strip().upper() or "ALL"
+        return normalized or "ALL"
+
+    def _format_pdf_contact_rule(self, action: Dict[str, Any]) -> str:
+        rule = str(action.get("contact_rule") or "none").strip().lower()
+        target = str(action.get("contact_target") or "").strip()
+        labels = {
+            "none": "None",
+            "hub_or_hub_alt": "HUB / HUB-ALT",
+            "ncs_or_ancs": "NCS / ANCS",
+            "callsign": "Callsign",
+            "peer": "Peer",
+            "local_group": "Local Group",
+            "local_profile": "Local Profile",
+        }
+        label = labels.get(rule, rule.upper() if rule else "None")
+        if target:
+            return f"{label}: {target}"
+        return label
+
+    def _build_pdf_text_block_html(self, text: str, *, placeholders: Dict[str, str]) -> str:
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not raw:
+            return ""
+        rendered = raw
+        for token, value in placeholders.items():
+            rendered = rendered.replace(token, str(value or ""))
+        paragraphs: List[str] = []
+        current: List[str] = []
+        for line in rendered.split("\n"):
+            if line.strip():
+                current.append(html.escape(line))
+                continue
+            if current:
+                paragraphs.append(f"<p>{'<br>'.join(current)}</p>")
+                current = []
+        if current:
+            paragraphs.append(f"<p>{'<br>'.join(current)}</p>")
+        return "".join(paragraphs)
+
+    def _build_pdf_profile_summary_html(self, profiles: List[Dict[str, Any]]) -> str:
+        if not profiles:
+            return "<p class='empty'>No SOP profiles were selected for export.</p>"
+        out = [
+            "<table>",
+            "<thead><tr>"
+            "<th style='width: 19%;'>Profile</th>"
+            "<th style='width: 10%;'>Category</th>"
+            "<th style='width: 15%;'>Operating Group</th>"
+            "<th style='width: 15%;'>Secondary Group</th>"
+            "<th style='width: 9%;'>Priority</th>"
+            "<th style='width: 9%;'>Window</th>"
+            "<th style='width: 9%;'>Status</th>"
+            "<th style='width: 14%;'>Start (UTC)</th>"
+            "</tr></thead><tbody>",
+        ]
+        for section in profiles:
+            profile = section.get("profile") or {}
+            window_hours = str(profile.get("window_hours") or "").strip()
+            window_label = f"{window_hours} hr" if window_hours else "--"
+            out.append(
+                "<tr>"
+                f"<td>{html.escape(str(profile.get('name') or ''))}</td>"
+                f"<td>{html.escape(str(profile.get('category') or 'HF'))}</td>"
+                f"<td>{html.escape(str(profile.get('operating_group') or '--'))}</td>"
+                f"<td>{html.escape(str(profile.get('secondary_group') or '--'))}</td>"
+                f"<td>{html.escape(str(profile.get('priority') or ''))}</td>"
+                f"<td>{html.escape(window_label)}</td>"
+                f"<td>{'Active' if bool(profile.get('active')) else 'Inactive'}</td>"
+                f"<td>{html.escape(str(profile.get('sop_start_utc') or '--'))}</td>"
+                "</tr>"
+            )
+        out.append("</tbody></table>")
+        return "".join(out)
+
+    def _collect_pdf_operating_group_scope(
+        self,
+        profiles: List[Dict[str, Any]],
+    ) -> Tuple[Set[str], Set[Tuple[str, str]], Set[Tuple[str, str, str]]]:
+        group_refs: Set[str] = set()
+        group_band_refs: Set[Tuple[str, str]] = set()
+        group_band_freq_refs: Set[Tuple[str, str, str]] = set()
+
+        def _track(group_value: Any, band_value: Any = "", freq_value: Any = "") -> None:
+            group_name = str(group_value or "").strip().upper()
+            if not group_name:
+                return
+            group_refs.add(group_name)
+            band_name = str(band_value or "").strip().upper()
+            freq_text = str(freq_value or "").strip()
+            if band_name and freq_text:
+                group_band_freq_refs.add((group_name, band_name, freq_text))
+                return
+            if band_name:
+                group_band_refs.add((group_name, band_name))
+
+        for section in profiles:
+            profile = section.get("profile") or {}
+            _track(profile.get("operating_group"))
+            _track(profile.get("secondary_group"))
+            for row in list(profile.get("schedule_layer") or []):
+                if not isinstance(row, dict):
+                    continue
+                _track(row.get("group_name"), row.get("band"), row.get("frequency"))
+            for row in list(profile.get("actions") or []):
+                if not isinstance(row, dict):
+                    continue
+                _track(row.get("group_name"), row.get("band"), row.get("frequency"))
+        return group_refs, group_band_refs, group_band_freq_refs
+
+    def _filter_pdf_operating_groups(
+        self,
+        rows: List[Dict[str, Any]],
+        *,
+        profiles: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        valid_rows = [row for row in rows if isinstance(row, dict)]
+        if not valid_rows:
+            return []
+        group_refs, group_band_refs, group_band_freq_refs = self._collect_pdf_operating_group_scope(profiles)
+        if not group_refs:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in valid_rows:
+            group_name = str(row.get("group") or "").strip().upper()
+            if not group_name or group_name not in group_refs:
+                continue
+            band_name = str(row.get("band") or "").strip().upper()
+            freq_text = str(row.get("frequency") or "").strip()
+            if (group_name, band_name, freq_text) in group_band_freq_refs:
+                out.append(row)
+                continue
+            if (group_name, band_name) in group_band_refs:
+                out.append(row)
+                continue
+            has_specific_refs = any(ref_group == group_name for ref_group, _ in group_band_refs) or any(
+                ref_group == group_name for ref_group, _, _ in group_band_freq_refs
+            )
+            if not has_specific_refs:
+                out.append(row)
+        return out
+
+    def _build_pdf_operating_groups_html(self, rows: List[Dict[str, Any]]) -> str:
+        valid_rows = [row for row in rows if isinstance(row, dict)]
+        if not valid_rows:
+            return "<p class='empty'>No referenced operating-group rows were found for the exported SOP scope.</p>"
+        sorted_rows = sorted(
+            valid_rows,
+            key=lambda row: (
+                str(row.get("group") or "").upper(),
+                str(row.get("band") or "").upper(),
+                str(row.get("frequency") or ""),
+            ),
+        )
+        out = [
+            "<table>",
+            "<thead><tr>"
+            "<th style='width: 16%;'>Group</th>"
+            "<th style='width: 9%;'>Band</th>"
+            "<th style='width: 12%;'>Frequency</th>"
+            "<th style='width: 10%;'>Mode</th>"
+            "<th style='width: 8%;'>VFO</th>"
+            "<th style='width: 16%;'>FLDigi Mode</th>"
+            "<th style='width: 12%;'>Start Offset</th>"
+            "<th style='width: 8%;'>Auto-Tune</th>"
+            "<th style='width: 9%;'>Levels</th>"
+            "</tr></thead><tbody>",
+        ]
+        for row in sorted_rows:
+            levels = "On" if bool(row.get("use_condition_levels", False)) else "Off"
+            out.append(
+                "<tr>"
+                f"<td>{html.escape(str(row.get('group') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('band') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('frequency') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('mode') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('vfo') or 'A'))}</td>"
+                f"<td>{html.escape(str(row.get('fldigi_mode') or '--'))}</td>"
+                f"<td>{html.escape(str(row.get('fldigi_offset') or '--'))}</td>"
+                f"<td>{'Yes' if bool(row.get('auto_tune', False)) else 'No'}</td>"
+                f"<td>{levels}</td>"
+                "</tr>"
+            )
+        out.append("</tbody></table>")
+        return "".join(out)
+
+    def _build_pdf_schedule_layer_html(self, profiles: List[Dict[str, Any]]) -> str:
+        rows: List[Tuple[str, Dict[str, Any]]] = []
+        for section in profiles:
+            profile = section.get("profile") or {}
+            profile_name = str(profile.get("name") or "").strip()
+            for row in list(profile.get("schedule_layer") or []):
+                if isinstance(row, dict):
+                    rows.append((profile_name, row))
+        if not rows:
+            return "<p class='empty'>No SOP schedule rows found.</p>"
+        rows.sort(
+            key=lambda item: (
+                item[0].upper(),
+                int(item[1].get("sort_order") or 0),
+                int(item[1].get("id") or 0),
+            )
+        )
+        out = [
+            "<table>",
+            "<thead><tr>"
+            "<th style='width: 16%;'>Profile</th>"
+            "<th style='width: 10%;'>Day (UTC)</th>"
+            "<th style='width: 9%;'>Repeat</th>"
+            "<th style='width: 9%;'>Weeks</th>"
+            "<th style='width: 10%;'>Levels</th>"
+            "<th style='width: 14%;'>Group</th>"
+            "<th style='width: 8%;'>Band</th>"
+            "<th style='width: 11%;'>Frequency</th>"
+            "<th style='width: 7%;'>Mode</th>"
+            "<th style='width: 6%;'>VFO</th>"
+            "<th style='width: 10%;'>Start-End</th>"
+            "</tr></thead><tbody>",
+        ]
+        for profile_name, row in rows:
+            weeks = ",".join(str(v) for v in list(row.get("month_weeks") or [])) or "--"
+            start_end = f"{str(row.get('start_utc') or '--')}-{str(row.get('end_utc') or '--')}"
+            out.append(
+                "<tr>"
+                f"<td>{html.escape(profile_name)}</td>"
+                f"<td>{html.escape(str(row.get('day_utc') or 'ALL'))}</td>"
+                f"<td>{html.escape(str(row.get('recurrence') or 'weekly'))}</td>"
+                f"<td>{html.escape(weeks)}</td>"
+                f"<td>{html.escape(self._format_pdf_condition_levels(row.get('condition_levels')))}</td>"
+                f"<td>{html.escape(str(row.get('group_name') or '--'))}</td>"
+                f"<td>{html.escape(str(row.get('band') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('frequency') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('mode') or '--'))}</td>"
+                f"<td>{html.escape(str(row.get('vfo') or '--'))}</td>"
+                f"<td>{html.escape(start_end)}</td>"
+                "</tr>"
+            )
+        out.append("</tbody></table>")
+        return "".join(out)
+
+    def _build_pdf_actions_html(self, profiles: List[Dict[str, Any]]) -> str:
+        rows: List[Tuple[str, Dict[str, Any]]] = []
+        for section in profiles:
+            profile = section.get("profile") or {}
+            profile_name = str(profile.get("name") or "").strip()
+            for row in list(profile.get("actions") or []):
+                if isinstance(row, dict):
+                    rows.append((profile_name, row))
+        if not rows:
+            return "<p class='empty'>No SOP action rows found.</p>"
+        rows.sort(
+            key=lambda item: (
+                item[0].upper(),
+                str(item[1].get("software") or "").upper(),
+                int(item[1].get("sort_order") or 0),
+                int(item[1].get("id") or 0),
+            )
+        )
+        out = [
+            "<table>",
+            "<thead><tr>"
+            "<th style='width: 12%;'>Profile</th>"
+            "<th style='width: 11%;'>Group</th>"
+            "<th style='width: 8%;'>Levels</th>"
+            "<th style='width: 11%;'>Software</th>"
+            "<th style='width: 8%;'>Mode</th>"
+            "<th style='width: 12%;'>Action</th>"
+            "<th style='width: 14%;'>Contact</th>"
+            "<th style='width: 11%;'>Band/Freq</th>"
+            "<th style='width: 8%;'>Time (UTC)</th>"
+            "<th style='width: 5%;'>Int</th>"
+            "</tr></thead><tbody>",
+        ]
+        for profile_name, row in rows:
+            band = str(row.get("band") or "").strip()
+            freq = str(row.get("frequency") or "").strip()
+            band_freq = band if not freq else f"{band} {freq}".strip()
+            interval_hours = int(row.get("interval_hours") or 0)
+            interval_minutes = int(row.get("interval_minutes") or 0)
+            interval_label = f"{interval_hours}h" if interval_hours > 0 else (f"{interval_minutes}m" if interval_minutes > 0 else "--")
+            time_label = f"{str(row.get('daily_start_utc') or '--')}-{str(row.get('daily_end_utc') or '--')}"
+            out.append(
+                "<tr>"
+                f"<td>{html.escape(profile_name)}</td>"
+                f"<td>{html.escape(str(row.get('group_name') or '--'))}</td>"
+                f"<td>{html.escape(self._format_pdf_condition_levels(row.get('condition_levels')))}</td>"
+                f"<td>{html.escape(str(row.get('software') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('mode') or '--'))}</td>"
+                f"<td>{html.escape(str(row.get('action_label') or ''))}</td>"
+                f"<td>{html.escape(self._format_pdf_contact_rule(row))}</td>"
+                f"<td>{html.escape(band_freq or '--')}</td>"
+                f"<td>{html.escape(time_label)}</td>"
+                f"<td>{html.escape(interval_label)}</td>"
+                "</tr>"
+            )
+            description = str(row.get("description") or "").strip()
+            if description:
+                out.append(
+                    "<tr>"
+                    "<td></td><td colspan='9'>"
+                    f"<b>Notes:</b> {html.escape(description)}"
+                    "</td></tr>"
+                )
+        out.append("</tbody></table>")
+        return "".join(out)
+
+    def _planner_export_sop_rows(self, planner: FreqPlannerTab, profiles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        cond_map = planner._condition_level_map()
+        for section in profiles:
+            profile = section.get("profile") or {}
+            profile_id = int(profile.get("id") or 0)
+            default_group = (
+                str(profile.get("operating_group") or "").strip()
+                or str(profile.get("secondary_group") or "").strip()
+                or str(profile.get("name") or "").strip()
+            )
+            profile_name = str(profile.get("name") or "").strip()
+            for row in list(profile.get("schedule_layer") or []):
+                if not isinstance(row, dict):
+                    continue
+                if not bool(row.get("enabled", True)):
+                    continue
+                band = str(row.get("band") or "").strip()
+                frequency = str(row.get("frequency") or "").strip()
+                if not band and not frequency:
+                    continue
+                group_name = str(row.get("group_name") or "").strip() or default_group
+                normalized_group = group_name.upper()
+                group_level = cond_map.get(normalized_group)
+                if not planner._condition_level_match(str(row.get("condition_levels") or "ALL"), group_level):
+                    continue
+                out.append(
+                    {
+                        "id": int(row.get("id") or 0),
+                        "sop_layer_id": int(row.get("id") or 0),
+                        "sop_profile_id": profile_id,
+                        "day_utc": str(row.get("day_utc") or "ALL"),
+                        "recurrence": str(row.get("recurrence") or "Weekly"),
+                        "biweekly_offset_weeks": int(row.get("biweekly_offset_weeks") or 0),
+                        "month_weeks": str(row.get("month_weeks") or ""),
+                        "condition_levels": planner._normalize_condition_levels(row.get("condition_levels")),
+                        "band": band,
+                        "mode": str(row.get("mode") or ""),
+                        "vfo": str(row.get("vfo") or "A").strip().upper() or "A",
+                        "frequency": frequency,
+                        "start_utc": str(row.get("start_utc") or ""),
+                        "end_utc": str(row.get("end_utc") or ""),
+                        "group_name": normalized_group,
+                        "profile_name": profile_name,
+                    }
+                )
+        return out
+
+    def _build_pdf_freq_planner_html(self, profiles: List[Dict[str, Any]]) -> str:
+        planner: FreqPlannerTab | None = None
+        try:
+            planner = FreqPlannerTab(self)
+            try:
+                planner.set_tab_active(False)
+            except Exception:
+                pass
+            if getattr(planner, "_clock_timer", None) is not None:
+                try:
+                    planner._clock_timer.stop()
+                except Exception:
+                    pass
+            hf_sched, net_sched, _existing_sop_sched, policy_rows = planner._load_schedules()
+            scoped_sop = self._planner_export_sop_rows(planner, profiles)
+            planner._load_schedules = lambda: (hf_sched, net_sched, scoped_sop, policy_rows)  # type: ignore[method-assign]
+            planner._show_local = False
+            planner._show_band = False
+            planner._last_snapshot = ""
+            planner.rebuild_table()
+
+            header_cells: List[str] = []
+            for col in range(planner.table.columnCount()):
+                item = planner.table.horizontalHeaderItem(col)
+                header_cells.append(html.escape(item.text() if item else ""))
+            out = [
+                "<table class='planner-grid'>",
+                "<thead><tr>",
+            ]
+            for label in header_cells:
+                out.append(f"<th>{label}</th>")
+            out.append("</tr></thead><tbody>")
+            for row in range(planner.table.rowCount()):
+                out.append("<tr>")
+                for col in range(planner.table.columnCount()):
+                    item = planner.table.item(row, col)
+                    cell_text = item.text() if item else ""
+                    out.append(f"<td>{html.escape(cell_text)}</td>")
+                out.append("</tr>")
+            out.append("</tbody></table>")
+            return "".join(out)
+        except Exception as e:
+            log.debug("SOP: FreqPlanner export snapshot failed: %s", e)
+            return "<p class='empty'>FreqPlanner snapshot unavailable for this export.</p>"
+        finally:
+            if planner is not None:
+                try:
+                    if getattr(planner, "_clock_timer", None) is not None:
+                        planner._clock_timer.stop()
+                except Exception:
+                    pass
+                try:
+                    planner.deleteLater()
+                except Exception:
+                    pass
+
     def _build_pdf_html(
         self,
         *,
@@ -3004,8 +3418,16 @@ class _LegacySOPTab(QWidget):
         tz_name = self.settings.get("timezone", "UTC") or "UTC"
         tz = get_timezone(tz_name)
         as_of_local = now_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+        as_of_utc = now_utc.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
         scope_label = "Selected SOP" if options.get("scope") == "selected" else "All Active SOPs"
         time_label = "UTC" if str(options.get("time_mode") or "Local") == "UTC" else f"Local ({tz_name})"
+        placeholders = {
+            "{{operator_callsign}}": self._operator_callsign(),
+            "{{as_of_local}}": as_of_local,
+            "{{as_of_utc}}": as_of_utc,
+            "{{scope}}": scope_label,
+            "{{timezone}}": tz_name,
+        }
         parts = [
             "<html><head><meta charset='utf-8'>",
             "<style>"
@@ -3016,9 +3438,12 @@ class _LegacySOPTab(QWidget):
             ".meta { font-size: 9.5pt; color: #333; margin: 0 0 3pt 0; }"
             ".section { margin-top: 8pt; }"
             ".page-break { page-break-before: always; }"
+            "p { margin: 5pt 0 8pt 0; }"
             "table { width: 100%; border-collapse: collapse; table-layout: fixed; margin: 6pt 0 14pt 0; }"
             "th, td { border: 1px solid #6f7682; padding: 5px 6px; vertical-align: top; word-wrap: break-word; }"
             "th { background: #edf1f5; font-weight: 700; }"
+            ".planner-grid { font-size: 7.4pt; }"
+            ".planner-grid th, .planner-grid td { padding: 2px 3px; }"
             ".empty { font-style: italic; color: #444; margin: 6pt 0 10pt 0; }"
             "</style></head><body>",
             "<h1>SOP Export</h1>",
@@ -3029,6 +3454,58 @@ class _LegacySOPTab(QWidget):
         callsign = self._operator_callsign()
         if callsign:
             parts.append(f"<div class='meta'><b>Operator:</b> {html.escape(callsign)}</div>")
+        preamble_html = self._build_pdf_text_block_html(
+            str(self.settings.get("sop_export_preamble", "") or ""),
+            placeholders=placeholders,
+        )
+        if preamble_html:
+            parts.append("<div class='section'>")
+            parts.append("<h2>Preamble</h2>")
+            parts.append(preamble_html)
+            parts.append("</div>")
+
+        operating_groups = self.settings.get("operating_groups", [])
+        if not isinstance(operating_groups, list):
+            operating_groups = []
+        operating_groups = self._filter_pdf_operating_groups(operating_groups, profiles=profiles)
+
+        parts.append("<div class='section'>")
+        parts.append("<h2>SOP Profiles</h2>")
+        parts.append(self._build_pdf_profile_summary_html(profiles))
+        parts.append("</div>")
+
+        parts.append("<div class='page-break'>")
+        parts.append("<h2>SOP Schedule Layer</h2>")
+        parts.append(
+            "<div class='meta'><b>Columns:</b> Profile, Day (UTC), Repeat, Weeks, Condition Levels, Group, Band, Frequency, Mode, VFO, Start-End (UTC)</div>"
+        )
+        parts.append(self._build_pdf_schedule_layer_html(profiles))
+        parts.append("</div>")
+
+        parts.append("<div class='page-break'>")
+        parts.append("<h2>SOP Actions</h2>")
+        parts.append(
+            "<div class='meta'><b>Columns:</b> Profile, Group, Condition Levels, Software, Mode, Action, Contact, Band/Freq, Time (UTC), Interval</div>"
+        )
+        parts.append(self._build_pdf_actions_html(profiles))
+        parts.append("</div>")
+
+        parts.append("<div class='page-break'>")
+        parts.append("<h2>Referenced Operating Groups</h2>")
+        parts.append("<div class='meta'><b>Scope:</b> Only rows referenced by the exported SOP profile(s).</div>")
+        parts.append(
+            "<div class='meta'><b>Columns:</b> Group, Band, Frequency, Mode, VFO, FLDigi Mode, Start Offset, Auto-Tune, Condition Levels</div>"
+        )
+        parts.append(self._build_pdf_operating_groups_html(operating_groups))
+        parts.append("</div>")
+
+        parts.append("<div class='page-break'>")
+        parts.append("<h2>FreqPlanner Snapshot</h2>")
+        parts.append(
+            "<div class='meta'><b>View:</b> UTC primary with Local conversion column; current HF and Net schedules plus the exported SOP profile(s).</div>"
+        )
+        parts.append(self._build_pdf_freq_planner_html(profiles))
+        parts.append("</div>")
 
         time_mode = str(options.get("time_mode") or "Local")
         day_start_utc, day_end_utc, day_label = self._daily_export_window_utc(time_mode=time_mode, now_utc=now_utc)
@@ -3105,7 +3582,7 @@ class _LegacySOPTab(QWidget):
         )
 
         parts.append("<div class='section'>")
-        parts.append("<h2>Daily Action Plan</h2>")
+        parts.append("<h2>Derived Daily Action Plan</h2>")
         parts.append(f"<div class='meta'><b>Day:</b> {html.escape(day_label)}</div>")
         parts.append(
             "<div class='meta'><b>Columns:</b> Time, Resource, Action, Band/Freq, Contact, Description</div>"
@@ -3115,7 +3592,7 @@ class _LegacySOPTab(QWidget):
 
         if periodic_unique:
             parts.append("<div class='page-break'>")
-            parts.append("<h2>Periodic Actions</h2>")
+            parts.append("<h2>Derived Periodic Actions</h2>")
             parts.append("<div class='meta'><b>Columns:</b> Week(s) of Month, Day of Week, Resource, Action, Band/Freq, Contact, Description</div>")
             parts.append(self._build_periodic_action_plan_html(periodic_unique))
             parts.append("</div>")
@@ -3170,6 +3647,16 @@ class _LegacySOPTab(QWidget):
                 parts.append(self._build_local_operators_html(local_rows))
                 parts.append("</div>")
 
+        postamble_html = self._build_pdf_text_block_html(
+            str(self.settings.get("sop_export_postamble", "") or ""),
+            placeholders=placeholders,
+        )
+        if postamble_html:
+            parts.append("<div class='page-break'>")
+            parts.append("<h2>Postamble</h2>")
+            parts.append(postamble_html)
+            parts.append("</div>")
+
         parts.append("</body></html>")
         return "".join(parts)
 
@@ -3192,14 +3679,13 @@ class _LegacySOPTab(QWidget):
             doc.setDocumentMargin(18.0)
             doc.setHtml(self._build_pdf_html(profiles=profiles, options=options, now_utc=now_utc))
 
-            printer = QPrinter(QPrinter.HighResolution)
-            printer.setOutputFormat(QPrinter.PdfFormat)
-            printer.setOutputFileName(out)
-            page_layout = printer.pageLayout()
+            pdf = QPdfWriter(out)
+            pdf.setResolution(300)
+            page_layout = QPageLayout()
             page_layout.setPageSize(QPageSize(QPageSize.Letter))
-            page_layout.setUnits(QPageLayout.Inch)
-            printer.setPageLayout(page_layout)
-            doc.print_(printer)
+            page_layout.setOrientation(QPageLayout.Portrait)
+            pdf.setPageLayout(page_layout)
+            doc.print_(pdf)
             QMessageBox.information(self, "Export SOP to PDF", f"SOP PDF exported to:\n{out}")
         except Exception as e:
             QMessageBox.warning(self, "Export SOP to PDF", str(e))

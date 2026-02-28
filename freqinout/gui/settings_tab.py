@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QPlainTextEdit,
     QProgressBar,
     QHeaderView,
     QSizePolicy,
@@ -1451,6 +1452,48 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(launch_group, self._summary_launch_control)
         launch_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(launch_group)
+
+        # SOP Export
+        sop_export_v = QVBoxLayout()
+        sop_export_v.setSpacing(6)
+        sop_export_hint = QLabel(
+            "Optional text is inserted before and after SOP PDF export tables. "
+            "Supported placeholders: {{operator_callsign}}, {{as_of_local}}, {{as_of_utc}}, {{scope}}, {{timezone}}."
+        )
+        sop_export_hint.setWordWrap(True)
+        sop_export_v.addWidget(sop_export_hint)
+
+        sop_preamble_label = QLabel("Preamble")
+        self.sop_export_preamble_edit = QPlainTextEdit()
+        self.sop_export_preamble_edit.setPlaceholderText(
+            "Optional introduction for SOP PDF exports.\n\n"
+            "Example:\n"
+            "This SOP is effective as of {{as_of_local}} for {{operator_callsign}}."
+        )
+        self.sop_export_preamble_edit.setTabChangesFocus(True)
+        self.sop_export_preamble_edit.setMinimumHeight(110)
+        sop_export_v.addWidget(sop_preamble_label)
+        sop_export_v.addWidget(self.sop_export_preamble_edit)
+
+        sop_postamble_label = QLabel("Postamble")
+        self.sop_export_postamble_edit = QPlainTextEdit()
+        self.sop_export_postamble_edit.setPlaceholderText(
+            "Optional closing notes, reminders, or document handling instructions."
+        )
+        self.sop_export_postamble_edit.setTabChangesFocus(True)
+        self.sop_export_postamble_edit.setMinimumHeight(110)
+        sop_export_v.addWidget(sop_postamble_label)
+        sop_export_v.addWidget(self.sop_export_postamble_edit)
+
+        self.sop_export_preamble_edit.textChanged.connect(self._on_sop_export_text_changed)
+        self.sop_export_postamble_edit.textChanged.connect(self._on_sop_export_text_changed)
+
+        sop_export_container = QWidget()
+        sop_export_container.setLayout(sop_export_v)
+        sop_export_group = self._make_collapsible_group("SOP Export", sop_export_container, checked=True, fit_content=True)
+        self._register_collapsible_group(sop_export_group, self._summary_sop_export)
+        sop_export_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(sop_export_group)
         self._add_settings_section(logging_section)
 
         # bottom save
@@ -1778,6 +1821,20 @@ class SettingsTab(QWidget):
         launch_all = bool(hasattr(self, "launch_all_with_startup_chk") and self.launch_all_with_startup_chk.isChecked())
         return f"{enabled}/{total} enabled, {startup} startup, launch-all {'on' if launch_all else 'off'}"
 
+    def _summary_sop_export(self) -> str:
+        preamble_set = bool(
+            hasattr(self, "sop_export_preamble_edit")
+            and self.sop_export_preamble_edit.toPlainText().strip()
+        )
+        postamble_set = bool(
+            hasattr(self, "sop_export_postamble_edit")
+            and self.sop_export_postamble_edit.toPlainText().strip()
+        )
+        return (
+            f"Preamble {'set' if preamble_set else 'blank'}, "
+            f"Postamble {'set' if postamble_set else 'blank'}"
+        )
+
     def _disable_prompt_hint_item(self, combo: QComboBox) -> None:
         try:
             model = combo.model()
@@ -1972,6 +2029,10 @@ class SettingsTab(QWidget):
             if day_val not in allowed_days:
                 day_val = "14"
             self.varac_bbs_archive_days_combo.setCurrentText(day_val)
+        if hasattr(self, "sop_export_preamble_edit"):
+            self.sop_export_preamble_edit.setPlainText(str(data.get("sop_export_preamble", "") or ""))
+        if hasattr(self, "sop_export_postamble_edit"):
+            self.sop_export_postamble_edit.setPlainText(str(data.get("sop_export_postamble", "") or ""))
         fldigi_log_path = (data.get("fldigi_log_path", "") or "").strip()
         if hasattr(self, "fldigi_log_path_edit"):
             self.fldigi_log_path_edit.setText(fldigi_log_path)
@@ -2226,6 +2287,12 @@ class SettingsTab(QWidget):
             self.varac_bbs_auto_archive_chk.isChecked() if hasattr(self, "varac_bbs_auto_archive_chk") else False
         )
         data["varac_bbs_auto_archive_days"] = int(days_text)
+        data["sop_export_preamble"] = (
+            self.sop_export_preamble_edit.toPlainText() if hasattr(self, "sop_export_preamble_edit") else ""
+        )
+        data["sop_export_postamble"] = (
+            self.sop_export_postamble_edit.toPlainText() if hasattr(self, "sop_export_postamble_edit") else ""
+        )
         if data["varac_bbs_auto_archive_enabled"]:
             bbs_dir_txt = data["varac_bbs_dir"]
             bbs_archive_txt = data["varac_bbs_archive_dir"]
@@ -2372,6 +2439,8 @@ class SettingsTab(QWidget):
                 "varac_bbs_archive_dir": data.get("varac_bbs_archive_dir", ""),
                 "varac_bbs_auto_archive_enabled": data.get("varac_bbs_auto_archive_enabled", False),
                 "varac_bbs_auto_archive_days": data.get("varac_bbs_auto_archive_days", 14),
+                "sop_export_preamble": data.get("sop_export_preamble", ""),
+                "sop_export_postamble": data.get("sop_export_postamble", ""),
                 "fldigi_log_path": data.get("fldigi_log_path", ""),
                 "fldigi_checkin_dir": data.get("fldigi_checkin_dir", ""),
                 "launch_control_items": data.get("launch_control_items", []),
@@ -2431,6 +2500,8 @@ class SettingsTab(QWidget):
             self.settings.set("varac_bbs_archive_dir", data.get("varac_bbs_archive_dir", ""))
             self.settings.set("varac_bbs_auto_archive_enabled", data.get("varac_bbs_auto_archive_enabled", False))
             self.settings.set("varac_bbs_auto_archive_days", data.get("varac_bbs_auto_archive_days", 14))
+            self.settings.set("sop_export_preamble", data.get("sop_export_preamble", ""))
+            self.settings.set("sop_export_postamble", data.get("sop_export_postamble", ""))
             self.settings.set("fldigi_log_path", data.get("fldigi_log_path", ""))
             self.settings.set("fldigi_checkin_dir", data.get("fldigi_checkin_dir", ""))
             self.settings.set("launch_control_items", data.get("launch_control_items", []))
@@ -2935,6 +3006,12 @@ class SettingsTab(QWidget):
         if not self._settings_dirty:
             self._settings_dirty = True
             self._set_save_button_state("info")
+
+    def _on_sop_export_text_changed(self) -> None:
+        self._mark_settings_dirty()
+        if self._loading_settings:
+            return
+        self._refresh_section_titles()
 
     def _set_save_button_state(self, role: str) -> None:
         theme = resolve_theme(self.settings)
