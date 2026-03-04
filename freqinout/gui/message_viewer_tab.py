@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
     QStyle,
     QStyleOptionButton,
+    QMenu,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -1932,6 +1933,10 @@ class MessageViewerTab(QWidget):
         self._time_mode_override: str | None = None
         self._show_local_time = default_mode != "UTC"
         cfg = self.settings.get("message_viewer", {}) or {}
+        self._excluded_msg_types: set[str] = self._normalize_excluded_msg_types(
+            cfg.get("excluded_msg_types", [])
+        )
+        self._available_type_filters: List[str] = []
         msg_paths = self.settings.get("message_paths", {}) or {}
         self.watch_dirs: List[Dict] = []
         for origin in ["js8", "varac", "flmsg", "flamp"]:
@@ -3435,6 +3440,16 @@ class MessageViewerTab(QWidget):
         self.clear_filters_btn.setFont(self.pending_count.font())
         self.clear_filters_btn.clicked.connect(self._clear_filters)
         self.clear_filters_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
+        self.exclude_types_btn = QPushButton("Hide Types")
+        self.exclude_types_btn.setMinimumWidth(130)
+        self.exclude_types_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.exclude_types_btn.setFont(self.pending_count.font())
+        self._exclude_types_menu = QMenu(self.exclude_types_btn)
+        self._exclude_types_menu.aboutToShow.connect(
+            lambda: self._rebuild_excluded_types_menu(self._available_type_filters)
+        )
+        self.exclude_types_btn.setMenu(self._exclude_types_menu)
+        self._update_excluded_types_button_state()
         self.type_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.status_filter.currentIndexChanged.connect(self._on_filter_changed)
         self.from_filter.currentIndexChanged.connect(self._on_filter_changed)
@@ -3448,6 +3463,116 @@ class MessageViewerTab(QWidget):
         self._apply_accessibility_width_guards()
         QTimer.singleShot(0, self._set_initial_splitter_sizes)
         self._messages_model.dataChanged.connect(self._update_bulk_delete_buttons)
+
+    @staticmethod
+    def _normalize_excluded_msg_types(values) -> set[str]:
+        out: set[str] = set()
+        if not isinstance(values, (list, tuple, set)):
+            return out
+        for value in values:
+            label = str(value or "").strip()
+            if label and label != "MSG Type...":
+                out.add(label)
+        return out
+
+    @staticmethod
+    def _row_matches_type_filter(row: UnifiedMessage, type_sel: str) -> bool:
+        type_sel = str(type_sel or "").strip()
+        if type_sel in ("", "MSG Type..."):
+            return True
+        if type_sel == "Spotter":
+            return bool((row.msg_type or "").startswith("F!"))
+        if type_sel == "SitRep":
+            return row.msg_type == "SitRep"
+        if type_sel.startswith("SitRep/"):
+            subtype = type_sel.split("/", 1)[1].strip().upper()
+            if row.msg_type != "SitRep":
+                return False
+            row_subtype = str(getattr(row.payload, "subtype", "") or "").strip().upper()
+            return row_subtype == subtype
+        return row.msg_type == type_sel
+
+    def _row_matches_excluded_type(self, row: UnifiedMessage) -> bool:
+        for label in self._excluded_msg_types:
+            if self._row_matches_type_filter(row, label):
+                return True
+        return False
+
+    def _rebuild_excluded_types_menu(self, type_vals: List[str]) -> None:
+        if not hasattr(self, "_exclude_types_menu") or self._exclude_types_menu is None:
+            return
+        self._available_type_filters = [str(v).strip() for v in (type_vals or []) if str(v).strip()]
+        ordered: List[str] = []
+        seen: set[str] = set()
+        for label in self._available_type_filters + sorted(self._excluded_msg_types):
+            if not label or label == "MSG Type..." or label in seen:
+                continue
+            seen.add(label)
+            ordered.append(label)
+        menu = self._exclude_types_menu
+        menu.clear()
+        if self._excluded_msg_types:
+            clear_action = menu.addAction("Show All Hidden Types")
+            clear_action.triggered.connect(self._clear_excluded_types)
+            menu.addSeparator()
+        if not ordered:
+            empty_action = menu.addAction("No message types available")
+            empty_action.setEnabled(False)
+            self._update_excluded_types_button_state()
+            return
+        for label in ordered:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(label in self._excluded_msg_types)
+            action.toggled.connect(lambda checked, key=label: self._on_excluded_type_toggled(key, checked))
+        self._update_excluded_types_button_state()
+
+    def _on_excluded_type_toggled(self, label: str, checked: bool) -> None:
+        key = str(label or "").strip()
+        if not key:
+            return
+        changed = False
+        if checked:
+            if key not in self._excluded_msg_types:
+                self._excluded_msg_types.add(key)
+                changed = True
+        else:
+            if key in self._excluded_msg_types:
+                self._excluded_msg_types.discard(key)
+                changed = True
+        if not changed:
+            return
+        self._save_settings()
+        self._update_excluded_types_button_state()
+        self._apply_message_filters_preserve_scroll()
+
+    def _clear_excluded_types(self) -> None:
+        if not self._excluded_msg_types:
+            return
+        self._excluded_msg_types.clear()
+        self._save_settings()
+        self._update_excluded_types_button_state()
+        self._apply_message_filters_preserve_scroll()
+
+    def _update_excluded_types_button_state(self) -> None:
+        if not hasattr(self, "exclude_types_btn"):
+            return
+        hidden_count = len(self._excluded_msg_types)
+        self.exclude_types_btn.setText(f"Hide Types ({hidden_count})" if hidden_count else "Hide Types")
+        theme = resolve_theme(self.settings)
+        role = "eligible_warning" if hidden_count else "muted"
+        self.exclude_types_btn.setStyleSheet(button_style(role, theme))
+        if not hidden_count:
+            self.exclude_types_btn.setToolTip("Hide selected message types from the default view.")
+            return
+        hidden_labels = ", ".join(sorted(self._excluded_msg_types))
+        current_type = self.type_filter.currentText() if hasattr(self, "type_filter") else "MSG Type..."
+        if current_type not in ("", "MSG Type..."):
+            self.exclude_types_btn.setToolTip(
+                f"Hidden by default: {hidden_labels}. Current MSG Type selection overrides hidden types."
+            )
+        else:
+            self.exclude_types_btn.setToolTip(f"Hidden by default: {hidden_labels}")
 
     # ---------- Timer ----------
 
@@ -5182,6 +5307,7 @@ class MessageViewerTab(QWidget):
         if any(getattr(r.payload, "flag_state", 0) == 1 for r in rows):
             if "Action Needed" not in status_vals:
                 status_vals.append("Action Needed")
+        self._rebuild_excluded_types_menu(type_vals)
 
         current_type = self.type_filter.currentText() if hasattr(self, "type_filter") else "ALL"
         current_status = self.status_filter.currentText() if hasattr(self, "status_filter") else "ALL"
@@ -5238,6 +5364,7 @@ class MessageViewerTab(QWidget):
         self._fit_filter_combo_popup(self.status_filter)
         self._fit_filter_combo_popup(self.from_filter)
         self._fit_filter_combo_popup(self.to_filter)
+        self._update_excluded_types_button_state()
 
     def _apply_message_filters(self) -> None:
         rows = self._message_rows
@@ -5246,23 +5373,13 @@ class MessageViewerTab(QWidget):
         from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
         to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
         rcv_query = (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip().lower()
+        apply_hidden_types = type_sel in ("", "MSG Type...")
 
         filtered = []
         for row in rows:
-            if type_sel == "Spotter":
-                if not (row.msg_type or "").startswith("F!"):
-                    continue
-            elif type_sel == "SitRep":
-                if row.msg_type != "SitRep":
-                    continue
-            elif type_sel.startswith("SitRep/"):
-                subtype = type_sel.split("/", 1)[1].strip().upper()
-                if row.msg_type != "SitRep":
-                    continue
-                row_subtype = str(getattr(row.payload, "subtype", "") or "").strip().upper()
-                if row_subtype != subtype:
-                    continue
-            elif type_sel != "MSG Type..." and row.msg_type != type_sel:
+            if not self._row_matches_type_filter(row, type_sel):
+                continue
+            if apply_hidden_types and self._excluded_msg_types and self._row_matches_excluded_type(row):
                 continue
             if status_sel != "Status...":
                 if status_sel == "Action Needed":
@@ -5303,8 +5420,9 @@ class MessageViewerTab(QWidget):
         self._update_clear_filters_style()
         self._update_mark_all_read_style()
         log.debug(
-            "MessageViewer: filters type=%s status=%s from=%s to=%s rcv=%s => %d rows",
+            "MessageViewer: filters type=%s hidden=%d status=%s from=%s to=%s rcv=%s => %d rows",
             type_sel,
+            len(self._excluded_msg_types) if apply_hidden_types else 0,
             status_sel,
             from_sel,
             to_sel,
@@ -5436,6 +5554,7 @@ class MessageViewerTab(QWidget):
 
     def _on_filter_changed(self) -> None:
         self._unfreeze_table()
+        self._update_excluded_types_button_state()
         self._apply_message_filters()
 
     def _render_messages_table(self, rows: List[UnifiedMessage]) -> None:
@@ -5878,6 +5997,7 @@ class MessageViewerTab(QWidget):
         clear_layout = QHBoxLayout(clear_wrap)
         clear_layout.setContentsMargins(2, 2, 2, 2)
         clear_layout.addStretch()
+        clear_layout.addWidget(self.exclude_types_btn)
         clear_layout.addWidget(self.clear_filters_btn)
         clear_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         clear_layout.setAlignment(self.clear_filters_btn, Qt.AlignRight | Qt.AlignVCenter)
@@ -5992,6 +6112,7 @@ class MessageViewerTab(QWidget):
             getattr(self, "delete_selected_btn", None),
             getattr(self, "mark_all_read_btn", None),
             getattr(self, "time_toggle_btn", None),
+            getattr(self, "exclude_types_btn", None),
             getattr(self, "clear_filters_btn", None),
             getattr(self, "open_external_btn", None),
         ]
@@ -8898,6 +9019,7 @@ class MessageViewerTab(QWidget):
             data = self.settings.get("message_viewer", {}) or {}
             # Persist only legacy scan interval; paths now come from Settings tab
             data["scan_minutes"] = self.scan_minutes
+            data["excluded_msg_types"] = sorted(self._excluded_msg_types)
             if hasattr(self.settings, "set"):
                 self.settings.set("message_viewer", data)
                 if hasattr(self.settings, "save"):
