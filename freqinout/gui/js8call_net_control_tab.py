@@ -40,13 +40,23 @@ from freqinout.gui.qsy_helper import (
     snapshot_operating_groups as qsy_snapshot_operating_groups,
     build_qsy_options,
     refresh_qsy_combo,
+    refresh_hold_duration_combo,
     selected_qsy_meta,
+    selected_hold_duration,
+    set_hold_duration_default,
+    notify_hold_duration_default_changed,
     current_scheduler_freq,
     perform_qsy,
+    perform_qsy_with_hold,
     get_suspend_until,
     set_suspend_until,
+    suspend_snapshot,
     suspend_active,
     scheduler_enabled,
+    resume_schedule_hold,
+    active_hold_button_role,
+    active_hold_button_text,
+    active_hold_status_text,
 )
 from freqinout.core.config_paths import get_config_dir
 from freqinout.gui.theme import resolve_theme, button_style
@@ -266,7 +276,11 @@ class JS8CallNetControlTab(QWidget):
         self.qsy_combo = QComboBox()
         self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
         gs_row.addWidget(self.qsy_combo)
-        self.suspend_btn = QPushButton("QSY")
+        self.hold_duration_combo = QComboBox()
+        self.hold_duration_combo.setToolTip("Temporary schedule hold duration after QSY.")
+        self.hold_duration_combo.currentIndexChanged.connect(self._on_hold_duration_changed)
+        gs_row.addWidget(self.hold_duration_combo)
+        self.suspend_btn = QPushButton("QSY + Hold")
         gs_row.addWidget(self.suspend_btn)
         self.ad_hoc_btn = QPushButton("Ad Hoc Net")
         gs_row.addWidget(self.ad_hoc_btn)
@@ -493,7 +507,6 @@ class JS8CallNetControlTab(QWidget):
 
     def _tick_clock(self):
         self._update_clock_labels()
-        self._update_suspend_state()
 
     def _setup_js8_rx_timer(self):
         if self._js8_rx_hub is None:
@@ -544,7 +557,6 @@ class JS8CallNetControlTab(QWidget):
         self.local_label.setText(
             now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {abbr}")
         )
-        self._update_suspend_state()
 
     # --------- Suspend (shared across tabs) --------- #
 
@@ -568,18 +580,22 @@ class JS8CallNetControlTab(QWidget):
     def _set_suspend_button(self, active: bool, remaining_sec: Optional[float] = None):
         theme = resolve_theme(self.settings)
         if active:
-            mins = 0
-            if remaining_sec is not None:
-                mins = max(0, int((remaining_sec + 59) // 60))
-            label = f"Sched. Paused: {mins} min" if mins else "Sched. Paused"
-            self.suspend_btn.setText(label)
-            self.suspend_btn.setStyleSheet(button_style("info", theme))
+            self.suspend_btn.setText(active_hold_button_text(remaining_sec))
+            self.suspend_btn.setToolTip(active_hold_status_text(remaining_sec))
+            self.suspend_btn.setStyleSheet(button_style(active_hold_button_role(remaining_sec), theme))
         else:
-            self.suspend_btn.setText("QSY")
+            mins = self._selected_hold_minutes()
+            self.suspend_btn.setText("QSY + Hold")
+            self.suspend_btn.setToolTip(f"QSY now and pause schedule control for {mins} minutes.")
             self.suspend_btn.setStyleSheet(button_style("warning", theme))
         self._update_qsy_button_enabled()
 
-    def _update_suspend_state(self):
+    def _update_suspend_state(self, snapshot: Optional[Dict[str, object]] = None):
+        try:
+            if not self.hold_duration_combo.view().isVisible() and not self.hold_duration_combo.hasFocus():
+                refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
+        except Exception:
+            pass
         enabled = self._scheduler_enabled()
         self.suspend_btn.setEnabled(enabled)
         if not enabled:
@@ -587,19 +603,22 @@ class JS8CallNetControlTab(QWidget):
             self._update_qsy_button_enabled()
             return
 
-        dt = self._get_suspend_until()
-        if dt and datetime.datetime.now(datetime.timezone.utc) < dt:
-            remaining = (dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
-            self._set_suspend_button(True, remaining_sec=remaining)
+        if not isinstance(snapshot, dict):
+            snapshot = suspend_snapshot(self.settings)
+        if snapshot.get("active"):
+            self._set_suspend_button(True, remaining_sec=snapshot.get("remaining_sec"))
         else:
-            if dt:
-                self._set_suspend_until(None)
+            if snapshot.get("until"):
+                resume_schedule_hold(self.window(), self.settings)
             self._set_suspend_button(False)
         self._update_qsy_button_enabled()
 
+    def on_hold_state_changed(self, snapshot: Optional[Dict[str, object]] = None) -> None:
+        self._update_suspend_state(snapshot=snapshot)
+
     def _on_suspend_clicked(self):
         if self._suspend_active():
-            self._set_suspend_until(None)
+            resume_schedule_hold(self.window(), self.settings)
             self._set_suspend_button(False)
             QMessageBox.information(self, "Scheduling", "Scheduling resumed.")
         else:
@@ -607,13 +626,16 @@ class JS8CallNetControlTab(QWidget):
             if not meta:
                 QMessageBox.warning(self, "QSY", "Select a frequency to QSY to.")
                 return
-            if not self._perform_qsy(meta):
+            mins = perform_qsy_with_hold(self.window(), self.settings, meta, self._selected_hold_minutes())
+            if mins <= 0:
                 return
-            new_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
-            self._set_suspend_until(new_until)
-            remaining = (new_until - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
-            self._set_suspend_button(True, remaining_sec=remaining)
-            QMessageBox.information(self, "QSY Applied", "Frequency changed and scheduling paused for 30 minutes.")
+            snapshot = suspend_snapshot(self.settings)
+            self._set_suspend_button(True, remaining_sec=snapshot.get("remaining_sec"))
+            QMessageBox.information(
+                self,
+                "QSY Applied",
+                f"Frequency changed and scheduling paused for {mins} minutes.",
+            )
 
     def _refresh_operator_history_views(self) -> None:
         try:
@@ -695,10 +717,20 @@ class JS8CallNetControlTab(QWidget):
         self._opgroups_sig = self._snapshot_operating_groups(ops)
         self._qsy_options = build_qsy_options(ops)
         refresh_qsy_combo(self.qsy_combo, self._qsy_options)
+        refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
         self._update_qsy_button_enabled()
 
     def _selected_qsy_meta(self) -> Optional[Dict]:
         return selected_qsy_meta(self.qsy_combo)
+
+    def _selected_hold_minutes(self) -> int:
+        return selected_hold_duration(self.hold_duration_combo, self.settings)
+
+    def _on_hold_duration_changed(self) -> None:
+        mins = self._selected_hold_minutes()
+        set_hold_duration_default(self.settings, mins)
+        notify_hold_duration_default_changed(self.window())
+        self._update_suspend_state()
 
     def _current_scheduler_freq(self) -> Optional[float]:
         return current_scheduler_freq(self.window())

@@ -43,7 +43,17 @@ from freqinout.gui.qsy_helper import (
     load_operating_groups,
     selected_qsy_meta,
     perform_qsy,
+    perform_qsy_with_hold,
     current_scheduler_freq,
+    refresh_hold_duration_combo,
+    selected_hold_duration,
+    set_hold_duration_default,
+    notify_hold_duration_default_changed,
+    suspend_snapshot,
+    resume_schedule_hold,
+    active_hold_button_role,
+    active_hold_button_text,
+    active_hold_status_text,
 )
 from freqinout.gui.stations_map_tab import (
     FEMA_REGIONS,
@@ -92,6 +102,7 @@ class ControlFreqTab(QWidget):
         self._hero_combo_font_px = 18
         self._primary_freq_action_mode = "none"
         self._freq_action_busy_reason_label: Optional[str] = None
+        self._hold_state_snapshot: Optional[Dict[str, object]] = None
         self._freq_combo_cache_key: Tuple[Tuple[str, str, float, str, str, bool], ...] = ()
         self._last_hero_sched_freq_mhz: Optional[float] = None
         self._current_time_full_text = "--"
@@ -155,6 +166,7 @@ class ControlFreqTab(QWidget):
         self._heavy_refresh_interval_sec = 120.0
         self._last_heavy_refresh_ts = 0.0
         self._build_ui()
+        refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
         self._restore_ui_state()
         self._apply_theme()
         self._refresh_all()
@@ -378,7 +390,13 @@ class ControlFreqTab(QWidget):
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(8)
         btn_row.addWidget(self.freq_state_badge)
-        self.freq_action_btn = QPushButton("QSY Now")
+        self.hold_duration_combo = QComboBox()
+        self.hold_duration_combo.setMinimumWidth(88)
+        self.hold_duration_combo.setMaximumWidth(104)
+        self.hold_duration_combo.setToolTip("Temporary schedule hold duration after QSY.")
+        self.hold_duration_combo.currentIndexChanged.connect(self._on_hold_duration_changed)
+        btn_row.addWidget(self.hold_duration_combo)
+        self.freq_action_btn = QPushButton("QSY + Hold")
         self.freq_action_btn.clicked.connect(self._on_primary_freq_action_clicked)
         self.freq_action_btn.setMinimumHeight(26)
         self.freq_action_btn.setMinimumWidth(132)
@@ -512,7 +530,7 @@ class ControlFreqTab(QWidget):
         self.shortcut_resume_schedule = QShortcut(QKeySequence("Ctrl+Shift+R"), self)
         self.shortcut_resume_schedule.activated.connect(self._on_resume_schedule_clicked)
         self.refresh_btn.setToolTip("Refresh (Ctrl+R)")
-        self.freq_action_btn.setToolTip("QSY Now (Ctrl+Enter) or Resume Schedule (Ctrl+Shift+R)")
+        self.freq_action_btn.setToolTip("QSY now and pause schedule control for the selected duration (Ctrl+Enter)")
 
     @staticmethod
     def _setup_table_defaults(table: QTableWidget) -> None:
@@ -2108,11 +2126,16 @@ class ControlFreqTab(QWidget):
     def _refresh_frequency_control(self, include_intersections: bool = True) -> None:
         # Avoid clobbering selection while user is interacting
         try:
-            if self.freq_combo.view().isVisible():
+            if (
+                self.freq_combo.view().isVisible()
+                or self.hold_duration_combo.view().isVisible()
+                or self.hold_duration_combo.hasFocus()
+            ):
                 return
         except Exception:
             pass
         og_list = load_operating_groups(self.settings)
+        refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
         current = selected_qsy_meta(self.freq_combo)
         current_freq = None
         try:
@@ -2741,6 +2764,19 @@ class ControlFreqTab(QWidget):
             scheduled = current_scheduler_freq(self.window())
         if active is None:
             active = self._get_active_frequency_mhz()
+        hold_snapshot = self._hold_state_snapshot if isinstance(self._hold_state_snapshot, dict) else None
+        if not isinstance(hold_snapshot, dict):
+            hold_snapshot = suspend_snapshot(self.settings)
+        if hold_snapshot.get("active"):
+            remaining_sec = hold_snapshot.get("remaining_sec")
+            self._primary_freq_action_mode = "resume"
+            self.freq_action_btn.setText(active_hold_button_text(remaining_sec))
+            self.freq_action_btn.setToolTip(active_hold_status_text(remaining_sec))
+            self.freq_action_btn.setEnabled(True)
+            self.freq_action_btn.setStyleSheet(button_style(active_hold_button_role(remaining_sec), theme))
+            if self._freq_action_busy_reason_label:
+                self._apply_frequency_action_busy_override(self._freq_action_busy_reason_label)
+            return
         mismatch = (
             scheduled is not None
             and active is not None
@@ -2756,8 +2792,9 @@ class ControlFreqTab(QWidget):
                 qsy_pending = True
         if qsy_pending:
             self._primary_freq_action_mode = "qsy"
-            self.freq_action_btn.setText("QSY Now")
-            self.freq_action_btn.setToolTip("QSY Now (Ctrl+Enter)")
+            mins = self._selected_hold_minutes()
+            self.freq_action_btn.setText("QSY + Hold")
+            self.freq_action_btn.setToolTip(f"QSY now and pause schedule control for {mins} minutes (Ctrl+Enter)")
             self.freq_action_btn.setEnabled(True)
             self.freq_action_btn.setStyleSheet(button_style("warning", theme))
             if self._freq_action_busy_reason_label:
@@ -2773,8 +2810,9 @@ class ControlFreqTab(QWidget):
                 self._apply_frequency_action_busy_override(self._freq_action_busy_reason_label)
             return
         self._primary_freq_action_mode = "none"
-        self.freq_action_btn.setText("QSY Now")
-        self.freq_action_btn.setToolTip("QSY Now (Ctrl+Enter)")
+        mins = self._selected_hold_minutes()
+        self.freq_action_btn.setText("QSY + Hold")
+        self.freq_action_btn.setToolTip(f"QSY now and pause schedule control for {mins} minutes (Ctrl+Enter)")
         self.freq_action_btn.setEnabled(False)
         self.freq_action_btn.setStyleSheet(button_style("muted", theme))
         if self._freq_action_busy_reason_label:
@@ -2786,6 +2824,27 @@ class ControlFreqTab(QWidget):
             self._on_resume_schedule_clicked()
             return
         self._on_freq_set_clicked()
+
+    def _selected_hold_minutes(self) -> int:
+        return selected_hold_duration(self.hold_duration_combo, self.settings)
+
+    def _on_hold_duration_changed(self) -> None:
+        mins = self._selected_hold_minutes()
+        set_hold_duration_default(self.settings, mins)
+        notify_hold_duration_default_changed(self.window())
+        self._update_frequency_action_styles()
+
+    def on_hold_state_changed(self, snapshot: Optional[Dict[str, object]] = None) -> None:
+        self._hold_state_snapshot = snapshot if isinstance(snapshot, dict) else suspend_snapshot(self.settings)
+        try:
+            if (
+                not self.hold_duration_combo.view().isVisible()
+                and not self.hold_duration_combo.hasFocus()
+            ):
+                refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
+        except Exception:
+            pass
+        self._update_frequency_action_styles()
 
     def _update_active_label_style(
         self, scheduled: Optional[float], active: Optional[float]
@@ -2814,7 +2873,8 @@ class ControlFreqTab(QWidget):
         if not meta:
             QMessageBox.warning(self, "Frequency Control", "Select a frequency first.")
             return
-        ok = perform_qsy(self.window(), meta)
+        mins = perform_qsy_with_hold(self.window(), self.settings, meta, self._selected_hold_minutes())
+        ok = mins > 0
         try:
             theme = resolve_theme(self.settings)
         except Exception:
@@ -2825,6 +2885,11 @@ class ControlFreqTab(QWidget):
             )
         self._refresh_frequency_control()
         if ok:
+            QMessageBox.information(
+                self,
+                "QSY Applied",
+                f"Frequency changed and scheduling paused for {mins} minutes.",
+            )
             QTimer.singleShot(800, self._refresh_frequency_control)
 
     def _on_freq_selection_changed(self, *_args) -> None:
@@ -2835,7 +2900,7 @@ class ControlFreqTab(QWidget):
         try:
             sched = getattr(self.window(), "scheduler", None)
             if sched and hasattr(sched, "resume_schedule"):
-                sched.resume_schedule()
+                resume_schedule_hold(self.window(), self.settings)
                 resumed = True
             elif sched:
                 sched.apply_current_entry(force=True, ignore_wait_prompt=True, ignore_suspend=True)
@@ -3017,7 +3082,7 @@ class ControlFreqTab(QWidget):
     def _schedule_action_tooltip(action_kind: str) -> str:
         kind = (action_kind or "").strip().lower()
         if kind == "qsy":
-            return "Tune radio to this scheduled frequency now."
+            return "Tune radio now and pause schedule control for the selected hold duration."
         if kind == "open_net":
             return "Open Net Schedule tab."
         if kind == "open_sop":
@@ -3082,10 +3147,16 @@ class ControlFreqTab(QWidget):
         if not meta:
             QMessageBox.warning(self, "Frequency Control", "No matching operating-group frequency is configured.")
             return
-        ok = perform_qsy(self.window(), meta)
+        mins = perform_qsy_with_hold(self.window(), self.settings, meta, self._selected_hold_minutes())
+        ok = mins > 0
         if ok:
             self._force_hero_resync = True
             self._refresh_frequency_control()
+            QMessageBox.information(
+                self,
+                "QSY Applied",
+                f"Frequency changed and scheduling paused for {mins} minutes.",
+            )
 
             def _refresh_qsy_hero() -> None:
                 self._force_hero_resync = True
@@ -3455,7 +3526,7 @@ class ControlFreqTab(QWidget):
                     "band_freq": f"{band} {freq_txt}".strip(),
                     "band": band,
                     "freq_mhz": freq_mhz,
-                    "action": "QSY Now" if isinstance(freq_mhz, float) else "",
+                    "action": "QSY + Hold" if isinstance(freq_mhz, float) else "",
                     "action_kind": "qsy" if isinstance(freq_mhz, float) else "",
                 }
             )

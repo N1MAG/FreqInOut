@@ -510,10 +510,34 @@ class SchedulerEngine(QObject):
         try:
             ts = float(self.settings.get("schedule_suspend_until", 0) or 0)
             if ts > 0:
-                return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+                dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+                if datetime.datetime.now(datetime.timezone.utc) >= dt:
+                    try:
+                        if hasattr(self.settings, "set"):
+                            self.settings.set("schedule_suspend_until", 0)
+                    except Exception:
+                        pass
+                    self._manual_qsy_active = False
+                    self._manual_qsy_entry_key = None
+                    return None
+                return dt
         except Exception:
             return None
         return None
+
+    @staticmethod
+    def _normalize_hold_minutes(value: object) -> int:
+        try:
+            mins = int(value)
+        except Exception:
+            mins = 30
+        return mins if mins in {30, 60, 90, 120} else 30
+
+    def _default_hold_minutes(self) -> int:
+        try:
+            return self._normalize_hold_minutes(self.settings.get("schedule_hold_minutes_default", 30))
+        except Exception:
+            return 30
 
     def _scheduling_suspended(self, now_utc: datetime.datetime) -> bool:
         dt = self._suspend_until_dt()
@@ -1040,7 +1064,7 @@ class SchedulerEngine(QObject):
             apply_fldigi=apply_fldigi,
         )
 
-    def resolve_varac_wait(self, action: str) -> None:
+    def resolve_varac_wait(self, action: str, minutes: Optional[int] = None) -> None:
         self._varac_wait_prompt_active = False
         self._varac_wait_prompt_entry_key = None
         self.varac_wait_cleared.emit()
@@ -1052,7 +1076,7 @@ class SchedulerEngine(QObject):
                 ignore_fldigi_busy=True,
             )
         elif action == "suspend":
-            self._suspend_for_minutes(30)
+            self._suspend_for_minutes(self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()))
 
     def resume_schedule(self) -> None:
         try:
@@ -1126,17 +1150,13 @@ class SchedulerEngine(QObject):
         self._net_resume_apply_once = False
         self._schedule_forced_retry()
 
-    def suspend_schedule(self, minutes: int = 30) -> None:
+    def suspend_schedule(self, minutes: Optional[int] = None) -> None:
         """
         Suspend schedule-driven corrections for the requested duration.
 
         This is intended for user-invoked temporary holds from global UI controls.
         """
-        try:
-            mins = int(minutes)
-        except Exception:
-            mins = 30
-        mins = max(1, mins)
+        mins = self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes())
         self._prompt_active = False
         self._prompt_items = []
         self._prompt_entry_key = None
@@ -1544,7 +1564,12 @@ class SchedulerEngine(QObject):
         self._last_fldigi_offset_prompt_sig = fldigi_offset_prompt_sig if bool(flags.get("fldigi_offset")) else None
         self._last_off_schedule_flags = dict(flags)
 
-    def resolve_off_schedule(self, action: str, items: Optional[List[str]] = None) -> None:
+    def resolve_off_schedule(
+        self,
+        action: str,
+        items: Optional[List[str]] = None,
+        minutes: Optional[int] = None,
+    ) -> None:
         self._prompt_active = False
         self._prompt_items = []
         fldigi_items = {"Mode", "FLDigi Mode", "FLDigi Offset"}
@@ -1552,7 +1577,7 @@ class SchedulerEngine(QObject):
             if items and any(item in fldigi_items for item in items):
                 self._fldigi_force_apply_once = False
             self._reset_prompt_timers(items=items)
-            self._suspend_for_minutes(30)
+            self._suspend_for_minutes(self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()))
             return
         if action == "ignore":
             if items and any(item in fldigi_items for item in items):

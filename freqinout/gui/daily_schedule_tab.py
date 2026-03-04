@@ -45,13 +45,23 @@ from freqinout.gui.qsy_helper import (
     snapshot_operating_groups as qsy_snapshot_operating_groups,
     build_qsy_options,
     refresh_qsy_combo,
+    refresh_hold_duration_combo,
     selected_qsy_meta,
+    selected_hold_duration,
+    set_hold_duration_default,
+    notify_hold_duration_default_changed,
     current_scheduler_freq,
     perform_qsy,
+    perform_qsy_with_hold,
     get_suspend_until,
     set_suspend_until,
+    suspend_snapshot,
     suspend_active,
     scheduler_enabled,
+    resume_schedule_hold,
+    active_hold_button_role,
+    active_hold_button_text,
+    active_hold_status_text,
 )
 
 
@@ -259,7 +269,11 @@ class DailyScheduleTab(QWidget):
         self.qsy_combo = QComboBox()
         self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
         qsy_row.addWidget(self.qsy_combo)
-        self.suspend_btn = QPushButton("QSY")
+        self.hold_duration_combo = QComboBox()
+        self.hold_duration_combo.setToolTip("Temporary schedule hold duration after QSY.")
+        self.hold_duration_combo.currentIndexChanged.connect(self._on_hold_duration_changed)
+        qsy_row.addWidget(self.hold_duration_combo)
+        self.suspend_btn = QPushButton("QSY + Hold")
         self.suspend_btn.clicked.connect(self._on_suspend_clicked)
         qsy_row.addWidget(self.suspend_btn)
         layout.addLayout(qsy_row)
@@ -493,7 +507,7 @@ class DailyScheduleTab(QWidget):
 
     def _setup_clock_timer(self):
         self._clock_timer = QTimer(self)
-        self._clock_timer.timeout.connect(lambda: (self._update_clock_labels(), self._update_suspend_state()))
+        self._clock_timer.timeout.connect(self._update_clock_labels)
         self._clock_timer.start(1000)
 
     def _setup_sop_panel_timer(self) -> None:
@@ -5150,14 +5164,13 @@ class DailyScheduleTab(QWidget):
     def _set_suspend_button(self, active: bool, remaining_sec: Optional[float] = None):
         theme = resolve_theme(self.settings)
         if active:
-            mins = 0
-            if remaining_sec is not None:
-                mins = max(0, int((remaining_sec + 59) // 60))
-            label = f"Sched. Paused: {mins} min" if mins else "Sched. Paused"
-            self.suspend_btn.setText(label)
-            self.suspend_btn.setStyleSheet(button_style("info", theme))
+            self.suspend_btn.setText(active_hold_button_text(remaining_sec))
+            self.suspend_btn.setToolTip(active_hold_status_text(remaining_sec))
+            self.suspend_btn.setStyleSheet(button_style(active_hold_button_role(remaining_sec), theme))
         else:
-            self.suspend_btn.setText("QSY")
+            mins = self._selected_hold_minutes()
+            self.suspend_btn.setText("QSY + Hold")
+            self.suspend_btn.setToolTip(f"QSY now and pause schedule control for {mins} minutes.")
             self.suspend_btn.setStyleSheet(button_style("warning", theme))
         self._update_qsy_button_enabled()
 
@@ -5168,10 +5181,20 @@ class DailyScheduleTab(QWidget):
         ops = self._load_operating_groups()
         self._qsy_options = build_qsy_options(ops)
         refresh_qsy_combo(self.qsy_combo, self._qsy_options)
+        refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
         self._update_qsy_button_enabled()
 
     def _selected_qsy_meta(self) -> Optional[Dict]:
         return selected_qsy_meta(self.qsy_combo)
+
+    def _selected_hold_minutes(self) -> int:
+        return selected_hold_duration(self.hold_duration_combo, self.settings)
+
+    def _on_hold_duration_changed(self) -> None:
+        mins = self._selected_hold_minutes()
+        set_hold_duration_default(self.settings, mins)
+        notify_hold_duration_default_changed(self.window())
+        self._update_suspend_state()
 
     def _current_scheduler_freq(self) -> Optional[float]:
         return current_scheduler_freq(self.window())
@@ -5195,22 +5218,30 @@ class DailyScheduleTab(QWidget):
         win = self.window()
         return perform_qsy(win, meta)
 
-    def _update_suspend_state(self):
+    def _update_suspend_state(self, snapshot: Optional[Dict[str, object]] = None):
+        try:
+            if not self.hold_duration_combo.view().isVisible() and not self.hold_duration_combo.hasFocus():
+                refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
+        except Exception:
+            pass
         enabled = self._scheduler_enabled()
         self.suspend_btn.setEnabled(enabled)
         if not enabled:
             self._set_suspend_button(False)
             return
 
-        dt = self._get_suspend_until()
-        if dt and datetime.datetime.now(datetime.timezone.utc) < dt:
-            remaining = (dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
-            self._set_suspend_button(True, remaining_sec=remaining)
+        if not isinstance(snapshot, dict):
+            snapshot = suspend_snapshot(self.settings)
+        if snapshot.get("active"):
+            self._set_suspend_button(True, remaining_sec=snapshot.get("remaining_sec"))
         else:
-            if dt:
-                self._set_suspend_until(None)
+            if snapshot.get("until"):
+                resume_schedule_hold(self.window(), self.settings)
             self._set_suspend_button(False)
         self._update_qsy_button_enabled()
+
+    def on_hold_state_changed(self, snapshot: Optional[Dict[str, object]] = None) -> None:
+        self._update_suspend_state(snapshot=snapshot)
 
     def _refresh_freq_planner(self) -> None:
         """
@@ -5272,7 +5303,7 @@ class DailyScheduleTab(QWidget):
 
     def _on_suspend_clicked(self):
         if self._suspend_active():
-            self._set_suspend_until(None)
+            resume_schedule_hold(self.window(), self.settings)
             self._set_suspend_button(False)
             QMessageBox.information(self, "Scheduling", "Scheduling resumed.")
         else:
@@ -5280,13 +5311,16 @@ class DailyScheduleTab(QWidget):
             if not meta:
                 QMessageBox.warning(self, "QSY", "Select a frequency to QSY to.")
                 return
-            if not self._perform_qsy(meta):
+            mins = perform_qsy_with_hold(self.window(), self.settings, meta, self._selected_hold_minutes())
+            if mins <= 0:
                 return
-            new_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
-            self._set_suspend_until(new_until)
-            remaining = (new_until - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
-            self._set_suspend_button(True, remaining_sec=remaining)
-            QMessageBox.information(self, "QSY Applied", "Frequency changed and scheduling paused for 30 minutes.")
+            snapshot = suspend_snapshot(self.settings)
+            self._set_suspend_button(True, remaining_sec=snapshot.get("remaining_sec"))
+            QMessageBox.information(
+                self,
+                "QSY Applied",
+                f"Frequency changed and scheduling paused for {mins} minutes.",
+            )
 
     def _apply_theme(self, *, refresh_dynamic: bool = True) -> None:
         theme = resolve_theme(self.settings)

@@ -66,6 +66,18 @@ from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.peer_sched_tab import PeerSchedTab
 from freqinout.gui.help_tab import HelpTab
 from freqinout.gui.controlfreq_tab import ControlFreqTab
+from freqinout.gui.qsy_helper import (
+    refresh_hold_duration_combo,
+    selected_hold_duration,
+    suspend_snapshot,
+    suspend_schedule_hold,
+    resume_schedule_hold,
+    set_hold_duration_default,
+    set_suspend_until,
+    active_hold_button_role,
+    active_hold_button_text,
+    active_hold_status_text,
+)
 from freqinout.gui.theme import resolve_theme, resolve_ui_text_scale, apply_app_theme, button_style
 
 
@@ -156,6 +168,8 @@ class MainWindow(QMainWindow):
         self._condition_levels_signature: tuple[tuple[str, int], ...] = tuple()
         self._condition_levels_refresh_pending = False
         self._scheduler_status_reason_lines_signature: tuple[str, ...] | None = None
+        self._hold_state_snapshot: dict[str, object] | None = None
+        self._hold_state_signature: tuple[object, ...] | None = None
         # Sidebar button order/text requested by user. Keep SOP accessible via in-app links,
         # but do not show it as a primary sidebar button.
         self._nav_specs = [
@@ -291,9 +305,15 @@ class MainWindow(QMainWindow):
         self.resume_schedule_btn = QPushButton("Resume Schedule")
         self.resume_schedule_btn.setFixedWidth(140)
         self.resume_schedule_btn.clicked.connect(self._on_resume_schedule_clicked)
-        self.suspend_schedule_btn = QPushButton("Suspend Schedule")
+        self.suspend_schedule_btn = QPushButton("Suspend")
         self.suspend_schedule_btn.setFixedWidth(140)
         self.suspend_schedule_btn.clicked.connect(self._on_suspend_schedule_clicked)
+        self.suspend_duration_combo = QComboBox()
+        self.suspend_duration_combo.setMinimumWidth(96)
+        self.suspend_duration_combo.setMaximumWidth(112)
+        self.suspend_duration_combo.setToolTip("Temporary schedule hold duration.")
+        self.suspend_duration_combo.currentIndexChanged.connect(self._on_sidebar_hold_duration_changed)
+        refresh_hold_duration_combo(self.suspend_duration_combo, self.settings)
         self.logs_active_btn = QPushButton("Logs Active")
         self.logs_active_btn.setFixedWidth(140)
         self.logs_active_btn.clicked.connect(self._open_logs_window)
@@ -307,6 +327,15 @@ class MainWindow(QMainWindow):
             pass
         status_layout.addWidget(self.scheduler_status_header)
         status_layout.addWidget(self.scheduler_status_reasons)
+        hold_row = QHBoxLayout()
+        hold_row.setContentsMargins(0, 0, 0, 0)
+        hold_row.setSpacing(6)
+        hold_row.addStretch()
+        self.suspend_duration_label = QLabel("Hold")
+        hold_row.addWidget(self.suspend_duration_label)
+        hold_row.addWidget(self.suspend_duration_combo)
+        hold_row.addStretch()
+        status_layout.addLayout(hold_row)
         status_layout.addWidget(self.suspend_schedule_btn, alignment=Qt.AlignCenter)
         status_layout.addWidget(self.resume_schedule_btn, alignment=Qt.AlignCenter)
         status_layout.addWidget(self.logs_active_btn, alignment=Qt.AlignCenter)
@@ -448,10 +477,15 @@ class MainWindow(QMainWindow):
         self._condition_levels_refresh_timer.setSingleShot(True)
         self._condition_levels_refresh_timer.setInterval(90)
         self._condition_levels_refresh_timer.timeout.connect(self._apply_condition_levels_changed)
+        self._hold_state_timer = QTimer(self)
+        self._hold_state_timer.setInterval(1000)
+        self._hold_state_timer.timeout.connect(self._on_hold_state_tick)
 
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._on_app_about_to_quit)
+
+        self.on_hold_state_changed(force_reload=True)
 
         # Wire settings_saved signal
         try:
@@ -1113,11 +1147,12 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "scheduler"):
                 if hasattr(self.scheduler, "resume_schedule"):
-                    self.scheduler.resume_schedule()
+                    resume_schedule_hold(self, self.settings)
                     resumed = True
                 else:
                     try:
-                        self.scheduler.settings.set("schedule_suspend_until", 0)
+                        set_suspend_until(self.scheduler.settings, None)
+                        self.on_hold_state_changed(force_reload=False)
                     except Exception:
                         pass
                     self.scheduler.apply_current_entry(
@@ -1150,22 +1185,176 @@ class MainWindow(QMainWindow):
         try:
             if not hasattr(self, "scheduler"):
                 return
-            status = self.scheduler.get_status_summary() if hasattr(self.scheduler, "get_status_summary") else {}
-            suspended_until = status.get("suspended_until") if isinstance(status, dict) else None
-            if suspended_until:
+            hold_snapshot = suspend_snapshot(self.settings)
+            if hold_snapshot.get("active"):
                 self._on_resume_schedule_clicked()
                 return
-            if hasattr(self.scheduler, "suspend_schedule"):
-                self.scheduler.suspend_schedule(30)
-            else:
-                try:
-                    until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
-                    self.scheduler.settings.set("schedule_suspend_until", until.timestamp())
-                except Exception:
-                    pass
+            suspend_schedule_hold(self, self.settings, self._selected_sidebar_hold_minutes())
         except Exception:
             pass
         self._refresh_scheduler_status_panel()
+
+    def _selected_sidebar_hold_minutes(self) -> int:
+        return selected_hold_duration(getattr(self, "suspend_duration_combo", None), self.settings)
+
+    def _on_sidebar_hold_duration_changed(self) -> None:
+        mins = self._selected_sidebar_hold_minutes()
+        set_hold_duration_default(self.settings, mins)
+        self.on_hold_duration_default_changed()
+
+    def _hold_state_targets(self) -> list[object]:
+        return [
+            getattr(self, "controlfreq_tab", None),
+            getattr(self, "hf_schedule_tab", None),
+            getattr(self, "fldigi_tab", None),
+            getattr(self, "js8_tab", None),
+        ]
+
+    def _hold_duration_combos(self) -> list[QComboBox]:
+        combos: list[QComboBox] = []
+        for combo in (
+            getattr(self, "suspend_duration_combo", None),
+            getattr(getattr(self, "controlfreq_tab", None), "hold_duration_combo", None),
+            getattr(getattr(self, "hf_schedule_tab", None), "hold_duration_combo", None),
+            getattr(getattr(self, "fldigi_tab", None), "hold_duration_combo", None),
+            getattr(getattr(self, "js8_tab", None), "hold_duration_combo", None),
+        ):
+            if isinstance(combo, QComboBox):
+                combos.append(combo)
+        return combos
+
+    @staticmethod
+    def _hold_snapshot_signature(snapshot: dict[str, object] | None) -> tuple[object, ...]:
+        snap = snapshot if isinstance(snapshot, dict) else {}
+        return (
+            bool(snap.get("active")),
+            int(snap.get("remaining_minutes") or 0),
+            str(snap.get("severity") or "idle"),
+            int(bool(snap.get("about_to_resume"))),
+        )
+
+    def _sync_hold_duration_combos(self) -> None:
+        for combo in self._hold_duration_combos():
+            try:
+                if combo.view().isVisible() or combo.hasFocus():
+                    continue
+            except Exception:
+                pass
+            try:
+                refresh_hold_duration_combo(combo, self.settings)
+            except Exception:
+                continue
+
+    def _broadcast_hold_state(self, snapshot: dict[str, object]) -> None:
+        for tab in self._hold_state_targets():
+            if tab is None or not hasattr(tab, "on_hold_state_changed"):
+                continue
+            try:
+                tab.on_hold_state_changed(snapshot=snapshot)
+            except Exception:
+                continue
+
+    def _apply_active_hold_status_panel(self, hold_snapshot: dict[str, object]) -> None:
+        suspended_until = hold_snapshot.get("until")
+        if not isinstance(suspended_until, datetime.datetime):
+            return
+        local_dt = suspended_until.astimezone()
+        remaining_sec = hold_snapshot.get("remaining_sec")
+        remaining_min = hold_snapshot.get("remaining_minutes") or 0
+        severity_role = active_hold_button_role(remaining_sec)
+        self.scheduler_status_header.setText(
+            "Resuming Soon" if hold_snapshot.get("about_to_resume") else "Schedule Paused"
+        )
+        self._set_scheduler_reasons(
+            [
+                f"Auto resume in {remaining_min} min",
+                f"At {local_dt:%Y-%m-%d %H:%M}",
+            ]
+        )
+        self.resume_schedule_btn.setVisible(False)
+        self.suspend_duration_label.setVisible(True)
+        self.suspend_duration_combo.setVisible(True)
+        self.suspend_schedule_btn.setVisible(True)
+        self.suspend_schedule_btn.setText(active_hold_button_text(remaining_sec))
+        self.suspend_schedule_btn.setToolTip(active_hold_status_text(remaining_sec))
+        try:
+            theme = resolve_theme(self.settings)
+            self.suspend_schedule_btn.setStyleSheet(button_style(severity_role, theme))
+            highlight = theme.get("surface_alt", theme.get("surface", "#FFFFFF"))
+            border = theme.get(
+                "danger" if severity_role == "danger" else "warning",
+                theme.get("border", "#CCCCCC"),
+            )
+            self.scheduler_status_container.setStyleSheet(
+                "QGroupBox { background-color: %s; border: 1px solid %s; border-radius: 6px; }"
+                "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 4px; }"
+                % (highlight, border)
+            )
+        except Exception:
+            pass
+        try:
+            self._update_scheduler_action_button_widths()
+            self.scheduler_status_container.adjustSize()
+        except Exception:
+            pass
+        self._auto_collapse_inactive_nav_groups()
+
+    def _dispatch_hold_snapshot(
+        self,
+        snapshot: dict[str, object],
+        *,
+        force: bool = False,
+        sync_combos: bool = False,
+    ) -> None:
+        previous_snapshot = self._hold_state_snapshot if isinstance(self._hold_state_snapshot, dict) else {}
+        was_active = bool(previous_snapshot.get("active"))
+        signature = self._hold_snapshot_signature(snapshot)
+        signature_changed = force or signature != self._hold_state_signature
+        self._hold_state_snapshot = snapshot
+        self._hold_state_signature = signature
+        if sync_combos:
+            self._sync_hold_duration_combos()
+        if snapshot.get("active"):
+            try:
+                if not self._hold_state_timer.isActive():
+                    self._hold_state_timer.start()
+            except Exception:
+                pass
+            if signature_changed:
+                self._broadcast_hold_state(snapshot)
+                self._apply_active_hold_status_panel(snapshot)
+            return
+        try:
+            if self._hold_state_timer.isActive():
+                self._hold_state_timer.stop()
+        except Exception:
+            pass
+        if signature_changed or was_active:
+            self._broadcast_hold_state(snapshot)
+            self._refresh_scheduler_status_panel()
+
+    def on_hold_state_changed(self, force_reload: bool = False) -> None:
+        snapshot = suspend_snapshot(self.settings, allow_reload=bool(force_reload))
+        if snapshot.get("until") and not snapshot.get("active"):
+            resume_schedule_hold(self, self.settings)
+            return
+        self._dispatch_hold_snapshot(snapshot, force=bool(force_reload))
+
+    def _on_hold_state_tick(self) -> None:
+        snapshot = suspend_snapshot(self.settings, allow_reload=False)
+        if snapshot.get("until") and not snapshot.get("active"):
+            resume_schedule_hold(self, self.settings)
+            return
+        self._dispatch_hold_snapshot(snapshot)
+
+    def on_hold_duration_default_changed(self) -> None:
+        snapshot = self._hold_state_snapshot if isinstance(self._hold_state_snapshot, dict) else None
+        if not isinstance(snapshot, dict):
+            snapshot = suspend_snapshot(self.settings)
+            if snapshot.get("until") and not snapshot.get("active"):
+                resume_schedule_hold(self, self.settings)
+                return
+        self._dispatch_hold_snapshot(snapshot, force=True, sync_combos=True)
 
     def _set_scheduler_reasons(self, lines: list[str]) -> None:
         if not hasattr(self, "scheduler_status_reasons_layout"):
@@ -1195,10 +1384,28 @@ class MainWindow(QMainWindow):
             status = self.scheduler.get_status_summary()
         except Exception:
             return
+        if getattr(self, "suspend_duration_combo", None) is not None:
+            try:
+                if (
+                    not self.suspend_duration_combo.view().isVisible()
+                    and not self.suspend_duration_combo.hasFocus()
+                ):
+                    refresh_hold_duration_combo(self.suspend_duration_combo, self.settings)
+            except Exception:
+                pass
         control_mode = status.get("control_mode")
         use_scheduler = bool(status.get("use_scheduler", True))
         freq_label = status.get("freq_label") or ""
-        suspended_until = status.get("suspended_until")
+        hold_snapshot = self._hold_state_snapshot if isinstance(self._hold_state_snapshot, dict) else None
+        if not isinstance(hold_snapshot, dict):
+            hold_snapshot = suspend_snapshot(self.settings)
+        if hold_snapshot.get("until") and not hold_snapshot.get("active"):
+            try:
+                resume_schedule_hold(self, self.settings)
+            except Exception:
+                pass
+            hold_snapshot = suspend_snapshot(self.settings)
+        suspended_until = hold_snapshot.get("until") if hold_snapshot.get("active") else None
         off_schedule = bool(status.get("off_schedule"))
         varac_waiting = bool(status.get("varac_waiting"))
         ptt_active = bool(status.get("ptt_active"))
@@ -1235,6 +1442,8 @@ class MainWindow(QMainWindow):
             self._set_scheduler_reasons([freq_label or "--"])
             self.resume_schedule_btn.setVisible(False)
             self.suspend_schedule_btn.setVisible(False)
+            self.suspend_duration_label.setVisible(False)
+            self.suspend_duration_combo.setVisible(False)
             try:
                 self.scheduler_status_container.adjustSize()
             except Exception:
@@ -1243,22 +1452,7 @@ class MainWindow(QMainWindow):
             return
 
         if suspended_until:
-            local_dt = suspended_until.astimezone()
-            self.scheduler_status_header.setText("Suspended until")
-            self._set_scheduler_reasons([f"{local_dt:%Y-%m-%d %H:%M}"])
-            self.resume_schedule_btn.setVisible(False)
-            self.suspend_schedule_btn.setVisible(True)
-            self.suspend_schedule_btn.setText("Resume Schedule")
-            try:
-                theme = resolve_theme(self.settings)
-                self.suspend_schedule_btn.setStyleSheet(button_style("info", theme))
-            except Exception:
-                pass
-            try:
-                self.scheduler_status_container.adjustSize()
-            except Exception:
-                pass
-            self._auto_collapse_inactive_nav_groups()
+            self._apply_active_hold_status_panel(hold_snapshot)
             return
 
         reasons = []
@@ -1327,13 +1521,18 @@ class MainWindow(QMainWindow):
             self.scheduler_status_header.setStyleSheet("font-weight: bold; color: #C62828;")
             self._set_scheduler_reasons(reasons or [""])
             self.resume_schedule_btn.setVisible(True)
+            self.suspend_duration_label.setVisible(True)
+            self.suspend_duration_combo.setVisible(True)
             try:
                 theme = resolve_theme(self.settings)
                 self.resume_schedule_btn.setStyleSheet(button_style("info", theme))
             except Exception:
                 pass
             self.suspend_schedule_btn.setVisible(True)
-            self.suspend_schedule_btn.setText("Suspend Schedule")
+            self.suspend_schedule_btn.setText("Suspend")
+            self.suspend_schedule_btn.setToolTip(
+                f"Pause schedule control for {self._selected_sidebar_hold_minutes()} minutes."
+            )
             try:
                 theme = resolve_theme(self.settings)
                 self.suspend_schedule_btn.setStyleSheet(button_style("warning", theme))
@@ -1371,8 +1570,13 @@ class MainWindow(QMainWindow):
                     reason_lines.append("SOP Contention")
             self._set_scheduler_reasons(reason_lines)
             self.resume_schedule_btn.setVisible(False)
+            self.suspend_duration_label.setVisible(True)
+            self.suspend_duration_combo.setVisible(True)
             self.suspend_schedule_btn.setVisible(True)
-            self.suspend_schedule_btn.setText("Suspend Schedule")
+            self.suspend_schedule_btn.setText("Suspend")
+            self.suspend_schedule_btn.setToolTip(
+                f"Pause schedule control for {self._selected_sidebar_hold_minutes()} minutes."
+            )
             try:
                 theme = resolve_theme(self.settings)
                 self.suspend_schedule_btn.setStyleSheet(button_style("warning", theme))
@@ -1384,6 +1588,7 @@ class MainWindow(QMainWindow):
                 )
             except Exception:
                 pass
+        self._update_scheduler_action_button_widths()
         try:
             self.scheduler_status_container.adjustSize()
         except Exception:
@@ -1468,6 +1673,11 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "_sop_data_refresh_timer"):
                 self._sop_data_refresh_timer.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_hold_state_timer"):
+                self._hold_state_timer.stop()
         except Exception:
             pass
         try:
@@ -1710,6 +1920,25 @@ class MainWindow(QMainWindow):
                 pass
             self._varac_wait_prompt = None
 
+    def _build_prompt_hold_duration_combo(self, parent) -> QComboBox:
+        combo = QComboBox(parent)
+        combo.setToolTip("Temporary schedule hold duration.")
+        refresh_hold_duration_combo(combo, self.settings)
+        return combo
+
+    def _attach_prompt_hold_duration_row(self, msg: QMessageBox, combo: QComboBox) -> None:
+        try:
+            row = QWidget(msg)
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+            layout.addWidget(QLabel("Pause for"))
+            layout.addWidget(combo)
+            layout.addStretch(1)
+            msg.layout().addWidget(row, msg.layout().rowCount(), 0, 1, msg.layout().columnCount())
+        except Exception:
+            pass
+
     def _on_off_schedule_detected(self, payload: dict) -> None:
         if self._shutting_down:
             return
@@ -1729,7 +1958,9 @@ class MainWindow(QMainWindow):
         msg.setText(text)
         apply_btn = msg.addButton("Resume Sched.", QMessageBox.AcceptRole)
         ignore_btn = msg.addButton("Skip Once", QMessageBox.RejectRole)
-        suspend_btn = msg.addButton("Pause Sched. 30 Min", QMessageBox.DestructiveRole)
+        suspend_btn = msg.addButton("Pause Schedule", QMessageBox.DestructiveRole)
+        hold_combo = self._build_prompt_hold_duration_combo(msg)
+        self._attach_prompt_hold_duration_row(msg, hold_combo)
         self._off_schedule_prompt = msg
         auto_applied = {"done": False}
 
@@ -1772,7 +2003,11 @@ class MainWindow(QMainWindow):
                 pass
         elif clicked == suspend_btn:
             try:
-                self.scheduler.resolve_off_schedule("suspend", items=items)
+                mins = selected_hold_duration(hold_combo, self.settings)
+                set_hold_duration_default(self.settings, mins)
+                self._sync_hold_duration_combos()
+                self.scheduler.resolve_off_schedule("suspend", items=items, minutes=mins)
+                self.on_hold_state_changed(force_reload=True)
             except Exception:
                 pass
         self._off_schedule_prompt = None
@@ -1786,7 +2021,9 @@ class MainWindow(QMainWindow):
         msg.setText("VarAC is waiting for frequency to clear.\nChange frequency now?")
         apply_btn = msg.addButton("Resume Sched.", QMessageBox.AcceptRole)
         ignore_btn = msg.addButton("Skip Once", QMessageBox.RejectRole)
-        suspend_btn = msg.addButton("Pause Sched. 30 Min", QMessageBox.DestructiveRole)
+        suspend_btn = msg.addButton("Pause Schedule", QMessageBox.DestructiveRole)
+        hold_combo = self._build_prompt_hold_duration_combo(msg)
+        self._attach_prompt_hold_duration_row(msg, hold_combo)
         self._varac_wait_prompt = msg
         msg.exec()
         clicked = msg.clickedButton()
@@ -1797,7 +2034,11 @@ class MainWindow(QMainWindow):
                 pass
         elif clicked == suspend_btn:
             try:
-                self.scheduler.resolve_varac_wait("suspend")
+                mins = selected_hold_duration(hold_combo, self.settings)
+                set_hold_duration_default(self.settings, mins)
+                self._sync_hold_duration_combos()
+                self.scheduler.resolve_varac_wait("suspend", minutes=mins)
+                self.on_hold_state_changed(force_reload=True)
             except Exception:
                 pass
         else:
