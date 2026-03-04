@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1]
+- Added: Temporary schedule hold controls now use shared `30` / `60` / `90` / `120` minute presets across sidebar `Schedule Status`, `ControlFreq`, `HF Daily`, `FLDigi / SSB`, `JS8Call`, and prompt-based pause actions, with live countdowns and synchronized near-real-time updates across tabs.
+- Fixed: Changing the hold duration in one QSY/Suspend surface now updates the other hold selectors immediately in-process instead of waiting for a delayed settings reload.
+- Added: `Messages` now includes a persistent `Hide Types` filter so multiple message types can be hidden from the default view while explicit `MSG Type...` selections still show that type for the current view.
+- Changed: `Clear Filters` in `Messages` now resets only the temporary filter row/search controls and intentionally leaves the persistent hidden-type list in place.
+- Changed: App/documentation version references updated to `1.2.1`.
+
 ## [1.2.0]
 - Fixed: Bundled `Net Resources` SitRep seasonal sets were corrected from verified source data; shipped `Winter` and `Summer` resource files now contain the updated schedules, and `Fall` stays aligned with corrected `Winter` as the current fallback set.
 - Changed: Existing installs now perform a one-time builtin `Net Resources` refresh during Net Schedule bootstrap so corrected bundled `Winter`/`Summer` rows replace stale builtin rows while preserving user-added/manual resource entries.

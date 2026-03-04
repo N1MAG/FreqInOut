@@ -27,7 +27,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.2.0</p>
+  <p><strong>Current version</strong>: 1.2.1</p>
   <p>This guide is a complete reference for the current FreqInOut interface. It documents each main-menu area, tab, button, table, and nested action so both new and advanced operators can move quickly and confidently.</p>
   <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
 
@@ -71,7 +71,7 @@
       <tr>
         <td><strong>Schedule Status</strong></td>
         <td>Current schedule state and reason details (on schedule, off schedule, paused, etc.).</td>
-        <td><code>Suspend Schedule</code>, <code>Resume Schedule</code>, and <code>Logs Active</code> (shown when logging is enabled).</td>
+        <td><code>Hold</code> duration selector, <code>Suspend</code>/<code>Resume</code>, and <code>Logs Active</code> (shown when logging is enabled).</td>
       </tr>
       <tr>
         <td><strong>Condition Level</strong></td>
@@ -81,6 +81,12 @@
     </tbody>
   </table>
   <p><strong>Resume Schedule note</strong>: <code>Resume Schedule</code> clears a temporary schedule suspension and returns control to the scheduler. It does not act as a blanket "force reset" for every off-schedule item; FLDigi and JS8 corrections still follow the configured enforcement mode.</p>
+  <ol class="section-list">
+    <li><strong>Temporary hold workflow</strong>: choose a <code>Hold</code> duration (`30`, `60`, `90`, or `120` minutes) before using <code>Suspend</code> or any <code>QSY + Hold</code> action.</li>
+    <li><strong>While paused</strong>: the button changes to a live countdown-style <code>Resume</code> control and the card shows when schedule control will return automatically.</li>
+    <li><strong>When nearly done</strong>: the hold display shifts into warning colors as automatic resume approaches.</li>
+    <li><strong>To end it early</strong>: click <code>Resume</code>. Otherwise, allow the timer to expire and the scheduler resumes on its own.</li>
+  </ol>
 
   <h2 id="controlfreq">ControlFreq</h2>
   <p><strong>Purpose</strong>: primary operating dashboard for station state, schedule actions, and near-term decision support.</p>
@@ -98,10 +104,11 @@
       <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed time labels.</td></tr>
       <tr><td><code>Focus Mode: Off/On</code></td><td>Toggles focus display behavior for tighter operating context.</td></tr>
       <tr><td>Frequency dropdown</td><td>Selects a target operating frequency profile.</td></tr>
-      <tr><td>Primary frequency action button</td><td>Contextual action: <code>QSY Now</code>, <code>Resume Schedule</code>, or a temporary disabled busy state (for example <code>Busy: JS8Call</code>, <code>Busy: FLDigi</code>). <code>Resume Schedule</code> resumes scheduler control; it does not override prompt-mode behavior.</td></tr>
+      <tr><td>Hold dropdown</td><td>Selects the temporary hold duration (`30`, `60`, `90`, or `120` minutes) used by <code>QSY + Hold</code>.</td></tr>
+      <tr><td>Primary frequency action button</td><td>Contextual action: <code>QSY + Hold</code>, <code>Resume</code> with a live countdown, or a temporary disabled busy state (for example <code>Busy: JS8Call</code>, <code>Busy: FLDigi</code>). <code>Resume</code> returns scheduler control; it does not override prompt-mode behavior.</td></tr>
       <tr><td>Schedule state badge</td><td>Shows current state such as <code>On Schedule</code>, <code>Off Schedule</code>, or suspended/manual state.</td></tr>
       <tr><td>View chips</td><td>Toggle visibility of <code>Activity</code>, <code>Intersections</code>, <code>Schedule</code>, and <code>Propagation</code> sections.</td></tr>
-      <tr><td>Schedule Outlook row action</td><td>Per row button in <em>Actions</em> column (for example QSY, open Net Schedule, open SOP Builder).</td></tr>
+      <tr><td>Schedule Outlook row action</td><td>Per row button in <em>Actions</em> column (for example <code>QSY + Hold</code>, open Net Schedule, open SOP Builder).</td></tr>
       <tr><td>Schedule Outlook right-click</td><td>Context menu repeats the same row action from the Actions column.</td></tr>
       <tr><td>Propagation Target controls</td><td>Choose <code>Region</code>, <code>State</code>, or <code>Operator</code> and value, then review forecast zones.</td></tr>
     </tbody>
@@ -151,6 +158,7 @@
       <tr><td><code>Export to PDF</code></td><td>Exports current message view/report.</td></tr>
       <tr><td><code>Delete Selected</code></td><td>Deletes checked rows from supported sources.</td></tr>
       <tr><td><code>Mark All as Read</code></td><td>Marks currently filtered messages as read.</td></tr>
+      <tr><td><code>Hide Types</code></td><td>Opens a multi-select menu for message types that should stay hidden in the default view until you explicitly choose that type in <code>MSG Type...</code>.</td></tr>
       <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed receive-time labels.</td></tr>
     </tbody>
   </table>
@@ -165,7 +173,7 @@
 
   <h3 id="messages-main-table">Messages Table</h3>
   <p><strong>Columns</strong>: select checkbox, <code>MSG Type</code>, <code>Status</code>, <code>From</code>, <code>To</code>, <code>RCV_DT</code>, <code>Message Title</code>, actions.</p>
-  <p><strong>Filter row controls</strong>: <code>MSG Type...</code>, <code>Status...</code>, searchable <code>From</code>, searchable <code>To</code>, <code>Search...</code>, <code>Clear Filters</code>.</p>
+  <p><strong>Filter row controls</strong>: <code>MSG Type...</code>, <code>Status...</code>, searchable <code>From</code>, searchable <code>To</code>, <code>Search...</code>, <code>Hide Types</code>, <code>Clear Filters</code>.</p>
   <p><strong>Nested row actions</strong> in Actions column:</p>
   <ul class="section-list">
     <li><code>View</code>: opens selected message in viewer pane.</li>
@@ -175,6 +183,12 @@
     <li><code>+BBS</code>: shown for FLMsg/FLAmp/VarAC file rows when VarAC BBS path is configured; copies file to VarAC BBS folder with overwrite prompt if needed.</li>
   </ul>
   <p><code>Open Image</code> appears when selected content is an image-capable file and opens it externally.</p>
+  <ol class="section-list">
+    <li><strong>1) Use <code>Hide Types</code> to hide noisy traffic from the default view</strong>: check one or more message types you do not want to see every time you open Messages.</li>
+    <li><strong>2) Leave <code>MSG Type...</code> unselected for the normal default view</strong>: hidden message types stay out of the list while all other filters continue to work normally.</li>
+    <li><strong>3) Select a specific <code>MSG Type...</code> when you need to review a hidden type</strong>: that explicit selection overrides the hidden-type rule for the current view.</li>
+    <li><strong>4) Use <code>Clear Filters</code> only to reset the temporary filters</strong>: it clears the filter row and search box, but intentionally leaves your hidden-type choices in place for the next session.</li>
+  </ol>
 
   <h3 id="messages-bbs-archive">BBS Archive and Auto-Archive</h3>
   <p>Use this to keep your BBS folder clean without deleting files.</p>
@@ -222,7 +236,7 @@
       <tr><th>Area</th><th>Actions</th></tr>
     </thead>
     <tbody>
-      <tr><td>Session setup</td><td><code>Role</code> (NCS/ANCS/JOINER), Net Name selector, QSY dropdown, <code>QSY</code>, <code>Ad Hoc Net</code>.</td></tr>
+      <tr><td>Session setup</td><td><code>Role</code> (NCS/ANCS/JOINER), Net Name selector, QSY dropdown, <code>Hold</code> selector, <code>QSY + Hold</code>, <code>Ad Hoc Net</code>.</td></tr>
       <tr><td>Operator lookup</td><td><code>Add to Main</code>, <code>Add to New/Late</code>, <code>Compare NCS Lists</code>.</td></tr>
       <tr><td>Check-in logs</td><td>Main and New/Late text panels, each with <code>Copy</code>.</td></tr>
       <tr><td>Net lifecycle</td><td><code>Start Net</code>, <code>Save Check-ins</code>, <code>Merge Check-ins</code>, <code>End Net</code>.</td></tr>
@@ -238,7 +252,7 @@
       <tr><th>Area</th><th>Actions</th></tr>
     </thead>
     <tbody>
-      <tr><td>Session setup</td><td><code>Role</code> (NCS/ANCS), Net Name, refresh interval, Group target, expected query form, QSY dropdown, <code>QSY</code>, <code>Ad Hoc Net</code>.</td></tr>
+      <tr><td>Session setup</td><td><code>Role</code> (NCS/ANCS), Net Name, refresh interval, Group target, expected query form, QSY dropdown, <code>Hold</code> selector, <code>QSY + Hold</code>, <code>Ad Hoc Net</code>.</td></tr>
       <tr><td>Check-ins</td><td>Filter selector (<code>F!103 / F!104</code>, <code>Any Spotter</code>, <code>All Callsigns</code>), table actions by row selection.</td></tr>
       <tr><td>Net lifecycle/actions</td><td><code>Start Net</code>, <code>ACK GROUP</code>, <code>ACK CALLSIGN</code>, <code>E? GROUP</code>, <code>E? Callsign</code>, <code>Save Checkins</code>, <code>End Net</code>.</td></tr>
     </tbody>
@@ -272,7 +286,7 @@
     </thead>
     <tbody>
       <tr><td><code>Showing: Local/UTC</code></td><td>Toggles display timezone for Day/Start/End columns.</td></tr>
-      <tr><td>QSY dropdown + <code>QSY</code></td><td>Manual tune helper from schedule context.</td></tr>
+      <tr><td>QSY dropdown + <code>Hold</code> + <code>QSY + Hold</code></td><td>Manual tune helper from schedule context with a temporary scheduler hold.</td></tr>
       <tr><td><code>Add Row</code></td><td>Adds a new editable active schedule row.</td></tr>
       <tr><td><code>Delete Selected</code></td><td>Removes selected active rows.</td></tr>
       <tr><td><code>Move Selected to Resources</code></td><td>Moves selected active rows into Schedule Resources.</td></tr>

@@ -29,30 +29,13 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
-## What's New in v1.2.0
+## What's New in v1.2.1
 
-- Added configurable `JS8 Host` (`Settings` -> `JS8Call Settings`) with default `127.0.0.1`; JS8 status/control/net/map integrations now honor custom JS8Call TCP hostname/IP settings instead of assuming localhost
-- Improved `Settings` -> `JS8Call Settings` -> `Load JS8 Traffic` with an in-process indicator (busy button + progress/status text) so long manual JS8 log rebuilds show immediate feedback
-- Fixed Windows `python -m freqinout.main` launches so the taskbar button uses the FreqInOut icon instead of the default Python icon
-- Improved `HF Schedule` save behavior: Active Schedule now re-sorts immediately after successful save, and save is blocked (no partial save) when row time formatting is invalid
-- Fixed `ControlFreq` top-row `Operating Status` LED container sizing so status LEDs/labels can expand cleanly with available width
-- Fixed `ControlFreq` `Schedule Outlook` `QSY Now` action so the Frequency Control hero indicator resyncs to the active frequency after QSY
-- Fixed `ControlFreq` Frequency Control hero indicator so scheduler-driven frequency changes also resync the hero display (prevents stale frequency display after automatic schedule changes)
-- Fixed `ControlFreq` top-row time display overflow on narrower windows by allowing the clock label to shrink/elide instead of spilling off the right edge
-- Clarified in-app guide wording for `Resume Schedule`, FLDigi offset expectations (including Operating Group fallback), and `Prompt` vs `On Schedule Change` behavior
-- ControlFreq Frequency Control now keeps the schedule-state badge focused on `On Schedule` / `Off Schedule` / `Unknown`, and moves busy gating to the QSY action button as `Busy: {reason}` (`PTT active`, `JS8Call`, `VarAC`, `FLDigi`)
-- Scheduler FLDigi off-schedule notifications now distinguish `FLDigi Mode` vs `FLDigi Offset`, and FLDigi offset drift remains visible as off-schedule without being treated as a mode mismatch
-- FLDigi `Prompt` enforcement no longer immediately re-applies offset-only drift; offset drift now notifies first as expected before user-driven resolution
-- FLDigi offset drift (manual or signal-driven) is no longer immediately re-enforced by same-entry resume/retry paths and can remain off-schedule until prompt/apply or a real schedule change
-- FLDigi `On Schedule Change` now re-applies FLDigi mode/offset only on real scheduler row changes (not internal resume/retry key differences), and changed FLDigi offset drift values start a new Prompt cycle
-- `Resume Schedule` responsiveness improved in ControlFreq and the sidebar `Schedule Status` panel by reducing duplicate resume refresh work and repeated FLDigi status polling during convergence
-- Added `Local Operators` and `NCS-Local` tabs for local net workflows
-- Added Net Resources catalog actions and JSON import flow for schedule resource management
-- Expanded contextual action-highlighting consistency across tabs and themes
-- Improved map first-open stability and reduced first-use window flash behavior
-- Added local-net and local-operator data model updates including SitRep and notes workflows
-- Continued performance and reliability hardening across tab activation and render paths
-- Added GPG/PGP and Hash signature verification to messages center
+- Added shared temporary hold presets (`30`, `60`, `90`, `120` minutes) for `Suspend` / `QSY + Hold` across `Schedule Status`, `ControlFreq`, `HF Daily`, `FLDigi / SSB`, `JS8Call`, and prompt-based pause actions
+- Added synchronized live hold countdown behavior so active hold timers stay aligned across tabs and the left rail
+- Fixed hold-duration selection syncing so changing the duration in one hold-aware tab updates the other hold selectors immediately
+- Added `Messages -> Hide Types` for persistent multi-select message-type suppression in the default view
+- Explicit `MSG Type...` selections in `Messages` now override hidden-type suppression for the current view, while `Clear Filters` still clears only the temporary filter row/search controls
 
 ## Quick Start
 
