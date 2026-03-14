@@ -304,6 +304,7 @@ class SchedulerEngine(QObject):
         self._next_transition_utc: Optional[datetime.datetime] = None
         self._next_transition_note: str = ""
         self._next_source_change: bool = False
+        self._next_freq_label: str = ""
         self._last_scheduler_selection_sig: Optional[Tuple] = None
 
         self.timer = QTimer(self)
@@ -1283,6 +1284,22 @@ class SchedulerEngine(QObject):
             return "hf_fallback", "No active Net/SOP layer row; baseline HF schedule is active."
         return "none", "No active schedule row."
 
+    def _entry_frequency_label(self, entry: Optional[Dict]) -> str:
+        row = entry or {}
+        if not row:
+            return ""
+        try:
+            effective_entry, _og = self._entry_with_operating_group_overrides(row)
+            freq_txt = self._normalize_sched_frequency(effective_entry.get("frequency"))
+            if freq_txt:
+                return freq_txt
+            freq_hz = self._parse_freq_hz((effective_entry.get("frequency") or "").strip())
+            if isinstance(freq_hz, (int, float)) and float(freq_hz) > 0:
+                return f"{float(freq_hz) / 1_000_000:.3f}"
+        except Exception:
+            pass
+        return ""
+
     def get_status_summary(self) -> Dict[str, object]:
         try:
             use_scheduler = bool(self.settings.get("use_scheduler", True))
@@ -1326,6 +1343,19 @@ class SchedulerEngine(QObject):
         freq_label = ""
         if isinstance(freq_hz, (int, float)) and freq_hz > 0:
             freq_label = f"{freq_hz / 1_000_000:.3f}"
+        manual_qsy_freq_label = ""
+        if self._manual_qsy_active:
+            try:
+                freq_hz_qsy = (
+                    float(self._manual_qsy_entry_key[1])
+                    if isinstance(self._manual_qsy_entry_key, tuple)
+                    and len(self._manual_qsy_entry_key) > 1
+                    else 0.0
+                )
+                if freq_hz_qsy > 0:
+                    manual_qsy_freq_label = f"{freq_hz_qsy / 1_000_000:.3f}"
+            except Exception:
+                manual_qsy_freq_label = ""
         source = self.current_source or "NONE"
         net_kind = self._source_net_kind(source, entry)
         # Reuse computed off-schedule flags to avoid duplicate FLDigi mode/offset polls
@@ -1362,6 +1392,9 @@ class SchedulerEngine(QObject):
             "next_transition_utc": self._next_transition_utc,
             "next_transition_note": str(self._next_transition_note or ""),
             "next_source_change": bool(self._next_source_change),
+            "next_freq_label": str(self._next_freq_label or ""),
+            "manual_qsy_active": bool(self._manual_qsy_active),
+            "manual_qsy_freq_label": manual_qsy_freq_label,
             "fldigi_mode_off": fldigi_mode_off,
             "fldigi_offset_off": fldigi_offset_off,
         }
@@ -2615,6 +2648,7 @@ class SchedulerEngine(QObject):
         self._next_net_kind = self._source_net_kind(source, active_entry)
         self._next_transition_note = ""
         self._next_source_change = False
+        self._next_freq_label = ""
         if isinstance(self.next_change_utc, datetime.datetime):
             probe_utc = self.next_change_utc + datetime.timedelta(seconds=1)
             try:
@@ -2631,6 +2665,7 @@ class SchedulerEngine(QObject):
                 self._next_source = next_source
                 self._next_net_kind = self._source_net_kind(next_source, next_entry)
                 self._next_source_change = next_source != source
+                self._next_freq_label = self._entry_frequency_label(next_entry)
                 cur_sig = self._entry_transition_signature(active_entry)
                 next_sig = self._entry_transition_signature(next_entry)
                 if self._next_source_change:

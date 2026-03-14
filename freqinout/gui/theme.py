@@ -324,13 +324,50 @@ def led_style(state: str, theme: Dict[str, str]) -> str:
 
 
 def app_stylesheet(theme: Dict[str, str]) -> str:
+    popup_bg = _blend_hex(theme["surface"], theme["bg"], 0.92)
+    popup_border = _blend_hex(theme["accent"], theme["border"], 0.35)
+    popup_button_bg = _blend_hex(theme["surface_alt"], popup_bg, 0.72)
+    popup_button_hover = _blend_hex(theme["surface_alt"], popup_bg, 0.86)
+    popup_button_active = _blend_hex(theme["surface_alt"], popup_bg, 0.94)
+    popup_button_fg = _best_contrast_text(popup_button_bg, ("#111111", "#FFFFFF"))
+    popup_text = _best_contrast_text(popup_bg, ("#111111", "#FFFFFF"))
     return (
         "QWidget {"
         f" background-color: {theme['bg']};"
         f" color: {theme['text']};"
         "}"
-        "QMainWindow, QDialog {"
+        "QMainWindow {"
         f" background-color: {theme['bg']};"
+        "}"
+        "QDialog, QMessageBox {"
+        f" background-color: {popup_bg};"
+        f" color: {popup_text};"
+        f" border: 1px solid {popup_border};"
+        " border-radius: 8px;"
+        "}"
+        "QDialog QLabel, QMessageBox QLabel {"
+        " background-color: transparent;"
+        f" color: {popup_text};"
+        "}"
+        "QDialog QPushButton, QMessageBox QPushButton {"
+        f" background-color: {popup_button_bg};"
+        f" color: {popup_button_fg};"
+        f" border: 1px solid {popup_border};"
+        " border-radius: 6px;"
+        " min-width: 88px;"
+        " padding: 5px 12px;"
+        "}"
+        "QDialog QPushButton:hover, QMessageBox QPushButton:hover {"
+        f" background-color: {popup_button_hover};"
+        "}"
+        "QDialog QPushButton:pressed, QMessageBox QPushButton:pressed {"
+        f" background-color: {popup_button_active};"
+        "}"
+        "QDialog QPushButton:default, QMessageBox QPushButton:default {"
+        f" border: 2px solid {theme['accent']};"
+        "}"
+        "QDialog QDialogButtonBox, QMessageBox QDialogButtonBox {"
+        " background: transparent;"
         "}"
         "QGroupBox {"
         f" border: 1px solid {theme['border']};"

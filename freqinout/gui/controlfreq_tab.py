@@ -1501,6 +1501,7 @@ class ControlFreqTab(QWidget):
             next_net_kind = str(status.get("next_net_kind") or "").strip()
             next_source_change = bool(status.get("next_source_change"))
             next_transition_note = str(status.get("next_transition_note") or "").strip()
+            next_freq_label = str(status.get("next_freq_label") or "").strip()
             source_text = "Active Source: --"
             if source == "SOP":
                 source_text = f"Active Source: {net_kind or 'SOP Layer'}"
@@ -1554,8 +1555,10 @@ class ControlFreqTab(QWidget):
                 now_utc = dt.datetime.now(dt.timezone.utc)
                 mins = int(max(0.0, (next_change - now_utc).total_seconds()) // 60)
                 display_dt = next_change.astimezone(self._get_display_tz()) if self._show_local else next_change
-                sched_freq = current_scheduler_freq(self.window())
-                freq_txt = f"{sched_freq:.3f}" if isinstance(sched_freq, (int, float)) else "--"
+                freq_txt = next_freq_label
+                if not freq_txt:
+                    sched_freq = current_scheduler_freq(self.window())
+                    freq_txt = f"{sched_freq:.3f}" if isinstance(sched_freq, (int, float)) else "--"
                 next_text = f"Next Change: {freq_txt} {display_dt:%H:%M}"
                 if next_source_change and next_source and next_source != source:
                     next_label = next_net_kind or next_source
@@ -2129,7 +2132,7 @@ class ControlFreqTab(QWidget):
             if (
                 self.freq_combo.view().isVisible()
                 or self.hold_duration_combo.view().isVisible()
-                or self.hold_duration_combo.hasFocus()
+                or (self.hold_duration_combo.hasFocus() and not bool(self._force_hero_resync))
             ):
                 return
         except Exception:
@@ -2218,6 +2221,12 @@ class ControlFreqTab(QWidget):
                 status_snapshot = sched_obj.get_status_summary()
         except Exception:
             status_snapshot = None
+        manual_qsy_active = bool(status_snapshot.get("manual_qsy_active")) if isinstance(status_snapshot, dict) else False
+        manual_qsy_freq = (
+            self._parse_freq_label(str(status_snapshot.get("manual_qsy_freq_label") or ""))
+            if manual_qsy_active and isinstance(status_snapshot, dict)
+            else None
+        )
         sched_freq = current_scheduler_freq(self.window())
         scheduler_freq_changed = False
         prev_sched_freq = self._last_hero_sched_freq_mhz
@@ -2237,7 +2246,12 @@ class ControlFreqTab(QWidget):
         sched_group = self._get_scheduled_group_name()
         active_freq = self._get_active_frequency_mhz(status_snapshot)
         display_freq = active_freq if active_freq is not None else sched_freq
-        if scheduler_freq_changed and sched_freq is not None:
+        if manual_qsy_freq is not None:
+            if active_freq is None:
+                display_freq = manual_qsy_freq
+            elif sched_freq is not None and abs(float(active_freq) - float(sched_freq)) < 0.0005:
+                display_freq = manual_qsy_freq
+        if scheduler_freq_changed and sched_freq is not None and not manual_qsy_active:
             # On scheduler transitions, prefer the new scheduled target for the
             # hero selection so a briefly stale active-frequency poll does not
             # preserve the prior combo item indefinitely.
@@ -2883,6 +2897,7 @@ class ControlFreqTab(QWidget):
             self.freq_action_btn.setStyleSheet(
                 button_style("success" if ok else "warning", theme)
             )
+        self._force_hero_resync = True
         self._refresh_frequency_control()
         if ok:
             QMessageBox.information(
@@ -2890,7 +2905,12 @@ class ControlFreqTab(QWidget):
                 "QSY Applied",
                 f"Frequency changed and scheduling paused for {mins} minutes.",
             )
-            QTimer.singleShot(800, self._refresh_frequency_control)
+
+            def _post_qsy_refresh() -> None:
+                self._force_hero_resync = True
+                self._refresh_frequency_control()
+
+            QTimer.singleShot(800, _post_qsy_refresh)
 
     def _on_freq_selection_changed(self, *_args) -> None:
         self._update_frequency_action_styles()
