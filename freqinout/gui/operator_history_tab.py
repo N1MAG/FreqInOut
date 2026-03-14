@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.varac_ingest import ingest_varac
@@ -361,146 +362,9 @@ class OperatorHistoryTab(QWidget):
 
     def _ensure_schema(self, conn: sqlite3.Connection):
         """
-        Ensure operator_checkins has the unified columns.
+        Ensure operator_checkins has the unified columns using the shared core helper.
         """
-        cur = conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS operator_checkins (
-                callsign TEXT PRIMARY KEY,
-                name TEXT,
-                state TEXT,
-                grid TEXT,
-                group1 TEXT,
-                group2 TEXT,
-                group3 TEXT,
-                group_role TEXT,
-                first_seen_utc TEXT,
-                last_seen_utc TEXT,
-                last_net TEXT,
-                last_role TEXT,
-                checkin_count INTEGER DEFAULT 0,
-                groups_json TEXT,
-                trusted INTEGER DEFAULT 0
-            )
-            """
-        )
-
-        cur.execute("PRAGMA table_info(operator_checkins)")
-        cols = [row[1] for row in cur.fetchall()]
-        desired = {
-            "callsign",
-            "name",
-            "state",
-            "grid",
-            "group1",
-            "group2",
-            "group3",
-            "group_role",
-            "first_seen_utc",
-            "last_seen_utc",
-            "last_net",
-            "last_role",
-            "checkin_count",
-            "groups_json",
-            "trusted",
-        }
-        if not desired.issubset(set(cols)):
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operator_checkins_new (
-                    callsign TEXT PRIMARY KEY,
-                    name TEXT,
-                    state TEXT,
-                    grid TEXT,
-                    group1 TEXT,
-                    group2 TEXT,
-                    group3 TEXT,
-                    group_role TEXT,
-                    first_seen_utc TEXT,
-                    last_seen_utc TEXT,
-                    last_net TEXT,
-                    last_role TEXT,
-                    checkin_count INTEGER DEFAULT 0,
-                    groups_json TEXT,
-                    trusted INTEGER DEFAULT 0
-                )
-                """
-            )
-            try:
-                cur.execute(
-                    """
-                    INSERT OR REPLACE INTO operator_checkins_new
-                        (callsign, name, state, grid, group1, group2, group3, group_role,
-                         first_seen_utc, last_seen_utc, last_net, last_role,
-                         checkin_count, groups_json, trusted)
-                    SELECT
-                        callsign,
-                        IFNULL(name,''),
-                        IFNULL(state,''),
-                        IFNULL(grid,''),
-                        IFNULL(group1,''),
-                        IFNULL(group2,''),
-                        IFNULL(group3,''),
-                        IFNULL(group_role,''),
-                        COALESCE(first_seen_utc, last_seen_utc, date_added, ''),
-                        COALESCE(last_seen_utc,''),
-                        COALESCE(last_net,''),
-                        COALESCE(last_role,''),
-                        COALESCE(checkin_count,0),
-                        groups_json,
-                        COALESCE(trusted,0)
-                    FROM operator_checkins
-                    """
-                )
-            except Exception:
-                pass
-            cur.execute("DROP TABLE operator_checkins")
-            cur.execute("ALTER TABLE operator_checkins_new RENAME TO operator_checkins")
-            cur.execute("PRAGMA table_info(operator_checkins)")
-            cols = [row[1] for row in cur.fetchall()]
-
-        for missing_col, ddl in (
-            ("trusted", "INTEGER DEFAULT 0"),
-            ("groups_json", "TEXT"),
-            ("first_seen_utc", "TEXT"),
-            ("last_seen_utc", "TEXT"),
-            ("last_net", "TEXT"),
-            ("last_role", "TEXT"),
-        ):
-            if missing_col not in cols:
-                cur.execute(f"ALTER TABLE operator_checkins ADD COLUMN {missing_col} {ddl}")
-
-        # Backfill trusted to 0 and hydrate groups_json; also seed first_seen if missing.
-        cur.execute("UPDATE operator_checkins SET trusted=0 WHERE trusted IS NULL")
-        # Standardize group roles and clear unknown values.
-        cur.execute(
-            """
-            UPDATE operator_checkins
-               SET group_role = CASE
-                    WHEN TRIM(UPPER(COALESCE(group_role, ''))) IN ('HUB','HUB-ALT','NCS','ANCS','PEER')
-                        THEN TRIM(UPPER(COALESCE(group_role, '')))
-                    ELSE ''
-                  END
-            """
-        )
-        cur.execute(
-            "SELECT callsign, group1, group2, group3, groups_json, first_seen_utc, last_seen_utc FROM operator_checkins"
-        )
-        rows = cur.fetchall()
-        for cs, g1, g2, g3, gj, first_seen, last_seen in rows:
-            if not gj:
-                groups = self._normalize_groups_list([g1, g2, g3])
-                cur.execute(
-                    "UPDATE operator_checkins SET groups_json=? WHERE callsign=?",
-                    (json.dumps(groups) if groups else None, cs),
-                )
-            if (not first_seen) and last_seen:
-                cur.execute(
-                    "UPDATE operator_checkins SET first_seen_utc=? WHERE callsign=? AND (first_seen_utc IS NULL OR first_seen_utc='')",
-                    (last_seen, cs),
-                )
-        conn.commit()
+        ensure_operator_checkins_schema(conn)
 
     def _ensure_sitrep_status_schema(self, conn: sqlite3.Connection) -> None:
         cur = conn.cursor()

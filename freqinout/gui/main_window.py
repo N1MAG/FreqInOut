@@ -39,7 +39,7 @@ from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
-from freqinout.radio_interface.rigctl_client import FLRigClient
+from freqinout.radio_interface.rigctl_client import FLRigClient, flrig_client_from_settings
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
@@ -423,7 +423,7 @@ class MainWindow(QMainWindow):
         self._apply_callsign_to_tab_titles()
 
         # Start scheduler engine
-        self.rig_client = FLRigClient()
+        self.rig_client = flrig_client_from_settings(self.settings)
         self.js8_control = JS8ControlClient()
         self.varac_status = VarACStatusClient()
         self.fldigi_log_status = FldigiLogStatusClient()

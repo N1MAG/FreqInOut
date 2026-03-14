@@ -1,12 +1,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG_DIR = ROOT / "config"
+APP_NAME = "FreqInOut"
+
+
+def _runtime_app_root() -> Path:
+    env_cfg = os.environ.get("FREQINOUT_CONFIG_DIR")
+    if env_cfg:
+        return Path(env_cfg)
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or Path.home()) / APP_NAME
+    else:
+        base = Path.home() / f".{APP_NAME.lower()}"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+    except Exception:
+        fallback = ROOT / "freqinout_config"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+CONFIG_DIR = _runtime_app_root() / "config"
 SETTINGS_DB = CONFIG_DIR / "freqinout.db"
 NETS_DB = CONFIG_DIR / "freqinout_nets.db"
 
@@ -67,8 +88,13 @@ NETS_TABLES: Dict[str, TableDef] = {
             group2 TEXT,
             group3 TEXT,
             group_role TEXT,
-            date_added TEXT,
-            checkin_count INTEGER DEFAULT 0
+            first_seen_utc TEXT,
+            last_seen_utc TEXT,
+            last_net TEXT,
+            last_role TEXT,
+            checkin_count INTEGER DEFAULT 0,
+            groups_json TEXT,
+            trusted INTEGER DEFAULT 0
         )
         """,
     ),

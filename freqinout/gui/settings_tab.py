@@ -1029,6 +1029,39 @@ class SettingsTab(QWidget):
         fast_light_v.addLayout(flrig_port_row)
 
         fast_light_v.addWidget(build_prog_row("FLDigi", "FLDigi"))
+        fldigi_host_row = QHBoxLayout()
+        fldigi_host_row.setContentsMargins(0, 0, 0, 0)
+        fldigi_host_row.setSpacing(8)
+        fldigi_host_label = QLabel("FLDigi XMLRPC Host")
+        fldigi_host_label.setFixedWidth(msg_label_width)
+        fldigi_host_row.addWidget(fldigi_host_label)
+        self.fldigi_host_edit = QLineEdit()
+        self.fldigi_host_edit.setPlaceholderText("127.0.0.1")
+        self.fldigi_host_edit.setText("127.0.0.1")
+        self.fldigi_host_edit.setFixedWidth(220)
+        fldigi_host_row.addWidget(self.fldigi_host_edit)
+        fldigi_host_row.addStretch()
+        fldigi_host_spacer = QWidget()
+        fldigi_host_spacer.setFixedWidth(70)
+        fldigi_host_row.addWidget(fldigi_host_spacer)
+        fast_light_v.addLayout(fldigi_host_row)
+
+        fldigi_port_row = QHBoxLayout()
+        fldigi_port_row.setContentsMargins(0, 0, 0, 0)
+        fldigi_port_row.setSpacing(8)
+        fldigi_port_label = QLabel("FLDigi XMLRPC Port")
+        fldigi_port_label.setFixedWidth(msg_label_width)
+        fldigi_port_row.addWidget(fldigi_port_label)
+        self.fldigi_port_edit = QLineEdit()
+        self.fldigi_port_edit.setFixedWidth(80)
+        self.fldigi_port_edit.setText("7362")
+        fldigi_port_row.addWidget(self.fldigi_port_edit)
+        fldigi_port_row.addStretch()
+        fldigi_port_spacer = QWidget()
+        fldigi_port_spacer.setFixedWidth(70)
+        fldigi_port_row.addWidget(fldigi_port_spacer)
+        fast_light_v.addLayout(fldigi_port_row)
+
         self.fldigi_checkin_dir_edit = QLineEdit()
         self.fldigi_checkin_dir_edit.setPlaceholderText("Directory containing check-in files")
         self.fldigi_checkin_dir_edit.textChanged.connect(self._refresh_fldigi_checkin_file_labels)
@@ -1868,6 +1901,28 @@ class SettingsTab(QWidget):
 
     # ---------- LOAD/SAVE ---------- #
 
+    def _resolved_fldigi_host_value(self, data: Optional[Dict[str, object]] = None) -> str:
+        if isinstance(data, dict):
+            host_txt = str(data.get("fldigi_host", "") or "").strip()
+            if host_txt:
+                return host_txt
+            host_txt = str(data.get("flrig_host", "") or "").strip()
+            if host_txt:
+                return host_txt
+        try:
+            host_txt = str(self.settings.get("fldigi_host", "") or "").strip()
+            if host_txt:
+                return host_txt
+        except Exception:
+            pass
+        try:
+            host_txt = str(self.settings.get("flrig_host", "") or "").strip()
+            if host_txt:
+                return host_txt
+        except Exception:
+            pass
+        return "127.0.0.1"
+
     def _load_settings(self):
         _perf_t0 = time.perf_counter()
         self._loading_settings = True
@@ -1955,7 +2010,7 @@ class SettingsTab(QWidget):
         except Exception:
             offset_int = 0
         if offset_int <= 0:
-            offset_int = 1900 + (datetime.datetime.utcnow().hour % 7) * 50
+            offset_int = 1900 + (datetime.datetime.now(datetime.timezone.utc).hour % 7) * 50
             if hasattr(self.settings, "set"):
                 self.settings.set("js8_offset_hz", offset_int)
             else:
@@ -2047,6 +2102,10 @@ class SettingsTab(QWidget):
                     self.settings._data = data  # type: ignore[attr-defined]
         self.fldigi_checkin_dir_edit.setText(fldigi_dir)
         self._refresh_fldigi_checkin_file_labels()
+        fldigi_host_txt = self._resolved_fldigi_host_value(data)
+        self.fldigi_host_edit.setText(fldigi_host_txt)
+        fldigi_port_txt = str(data.get("fldigi_port", "7362") or "7362")
+        self.fldigi_port_edit.setText(fldigi_port_txt)
         flrig_port_txt = str(data.get("flrig_port", "12345") or "12345")
         self.flrig_port_edit.setText(flrig_port_txt)
 
@@ -2227,6 +2286,24 @@ class SettingsTab(QWidget):
             port_val = 2442
             self.js8_port_edit.setText("2442")
         data["js8_port"] = port_val
+        try:
+            flrig_port_val = int(self.flrig_port_edit.text().strip() or "12345")
+        except ValueError:
+            flrig_port_val = 12345
+            self.flrig_port_edit.setText("12345")
+        data["flrig_port"] = flrig_port_val
+        fldigi_host_val = self.fldigi_host_edit.text().strip() if hasattr(self, "fldigi_host_edit") else ""
+        if not fldigi_host_val:
+            fldigi_host_val = self._resolved_fldigi_host_value(data)
+            if hasattr(self, "fldigi_host_edit"):
+                self.fldigi_host_edit.setText(fldigi_host_val)
+        data["fldigi_host"] = fldigi_host_val
+        try:
+            fldigi_port_val = int(self.fldigi_port_edit.text().strip() or "7362")
+        except ValueError:
+            fldigi_port_val = 7362
+            self.fldigi_port_edit.setText("7362")
+        data["fldigi_port"] = fldigi_port_val
         try:
             offset_val = int(self.js8_offset_edit.text().strip() or "0")
         except ValueError:
@@ -2416,6 +2493,9 @@ class SettingsTab(QWidget):
                 "js8_enforcement_mode": data.get("js8_enforcement_mode", "On Schedule Change"),
                 "js8_prompt_interval": data.get("js8_prompt_interval", "Hourly"),
                 "ui_theme": data.get("ui_theme", "light"),
+                "flrig_port": data.get("flrig_port", 12345),
+                "fldigi_host": data.get("fldigi_host", self._resolved_fldigi_host_value(data)),
+                "fldigi_port": data.get("fldigi_port", 7362),
                 "js8_host": data.get("js8_host", "127.0.0.1"),
                 "js8_port": data["js8_port"],
                 "js8_offset_hz": data.get("js8_offset_hz", 0),
@@ -2474,6 +2554,9 @@ class SettingsTab(QWidget):
             self.settings.set("fldigi_prompt_interval", data.get("fldigi_prompt_interval", "Hourly"))
             self.settings.set("js8_enforcement_mode", data.get("js8_enforcement_mode", "On Schedule Change"))
             self.settings.set("js8_prompt_interval", data.get("js8_prompt_interval", "Hourly"))
+            self.settings.set("flrig_port", data.get("flrig_port", 12345))
+            self.settings.set("fldigi_host", data.get("fldigi_host", self._resolved_fldigi_host_value(data)))
+            self.settings.set("fldigi_port", data.get("fldigi_port", 7362))
             self.settings.set("js8_host", data.get("js8_host", "127.0.0.1"))
             self.settings.set("js8_port", data["js8_port"])
             self.settings.set("js8_offset_hz", data.get("js8_offset_hz", 0))
@@ -2963,6 +3046,8 @@ class SettingsTab(QWidget):
             self.js8call_path_edit,
             self.js8spotter_path_edit,
             self.commstat_path_edit,
+            self.fldigi_host_edit,
+            self.fldigi_port_edit,
             self.fldigi_checkin_dir_edit,
             self.fldigi_log_path_edit,
             self.varac_bbs_dir_edit,
@@ -3493,6 +3578,9 @@ class SettingsTab(QWidget):
         _perf_t0 = time.perf_counter()
         theme = resolve_theme(self.settings)
         port_override: Optional[int] = None
+        flrig_port_override: Optional[int] = None
+        fldigi_host_override: Optional[str] = None
+        fldigi_port_override: Optional[int] = None
         try:
             host_txt = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
             host_override = host_txt or "127.0.0.1"
@@ -3503,7 +3591,28 @@ class SettingsTab(QWidget):
             port_override = int(txt) if txt else None
         except Exception:
             port_override = None
-        snapshot = self._status_service.status_snapshot(port_override=port_override, host_override=host_override)
+        try:
+            txt = self.flrig_port_edit.text().strip() if hasattr(self, "flrig_port_edit") else ""
+            flrig_port_override = int(txt) if txt else None
+        except Exception:
+            flrig_port_override = None
+        try:
+            host_txt = self.fldigi_host_edit.text().strip() if hasattr(self, "fldigi_host_edit") else ""
+            fldigi_host_override = host_txt or self._resolved_fldigi_host_value()
+        except Exception:
+            fldigi_host_override = self._resolved_fldigi_host_value()
+        try:
+            txt = self.fldigi_port_edit.text().strip() if hasattr(self, "fldigi_port_edit") else ""
+            fldigi_port_override = int(txt) if txt else None
+        except Exception:
+            fldigi_port_override = None
+        snapshot = self._status_service.status_snapshot(
+            port_override=port_override,
+            host_override=host_override,
+            flrig_port_override=flrig_port_override,
+            fldigi_host_override=fldigi_host_override,
+            fldigi_port_override=fldigi_port_override,
+        )
         for program_name, lbl in self.status_labels.items():
             info = snapshot.get(program_name, {})
             state = str(info.get("state", "idle"))

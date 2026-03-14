@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import threading
 import time
-from typing import Optional
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Callable, Dict, Optional
 
 from PySide6.QtCore import QObject, QTimer
 
@@ -14,7 +16,6 @@ from freqinout.core.sitrep_fusion import fuse_sitreps
 from freqinout.core.sitrep_ingest import ingest_sitreps
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
-from freqinout.core.config_paths import get_config_dir
 
 
 class BackgroundIngestController(QObject):
@@ -25,19 +26,22 @@ class BackgroundIngestController(QObject):
     def __init__(self, settings: SettingsManager):
         super().__init__()
         self.settings = settings
-        self._msg_ingest = MessageIngestor(settings)
         self._js8_links_timer: Optional[QTimer] = None
         self._messages_timer: Optional[QTimer] = None
         self._varac_timer: Optional[QTimer] = None
         self._sitrep_timer: Optional[QTimer] = None
         self._prop_outcome_timer: Optional[QTimer] = None
         self._peer_sched_timer: Optional[QTimer] = None
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._executor_lock = threading.RLock()
+        self._job_futures: Dict[str, Future] = {}
         self._running = False
 
-    def start(self) -> None:
+    def start(self, *, initial_stagger: bool = True) -> None:
         if self._running:
             return
         self._running = True
+        self._ensure_executor()
         # JS8 links/background ingest: low cadence
         self._js8_links_timer = QTimer(self)
         self._js8_links_timer.setInterval(5 * 60 * 1000)  # 5 minutes
@@ -75,12 +79,13 @@ class BackgroundIngestController(QObject):
         self._peer_sched_timer.start()
 
         # Initial staggered ingest
-        QTimer.singleShot(2000, self._ingest_js8_links)
-        QTimer.singleShot(4000, self._ingest_messages)
-        QTimer.singleShot(6000, self._ingest_varac)
-        QTimer.singleShot(7000, self._ingest_sitreps)
-        QTimer.singleShot(8000, self._ingest_prop_outcomes)
-        QTimer.singleShot(9000, self._infer_peer_schedules)
+        if initial_stagger:
+            QTimer.singleShot(2000, self._ingest_js8_links)
+            QTimer.singleShot(4000, self._ingest_messages)
+            QTimer.singleShot(6000, self._ingest_varac)
+            QTimer.singleShot(7000, self._ingest_sitreps)
+            QTimer.singleShot(8000, self._ingest_prop_outcomes)
+            QTimer.singleShot(9000, self._infer_peer_schedules)
 
     def stop(self) -> None:
         self._running = False
@@ -94,16 +99,87 @@ class BackgroundIngestController(QObject):
         ):
             if t:
                 t.stop()
+        self._shutdown_executor()
+
+    def _ensure_executor(self) -> ThreadPoolExecutor:
+        with self._executor_lock:
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="freqinout-ingest",
+                )
+            return self._executor
+
+    def _shutdown_executor(self) -> None:
+        with self._executor_lock:
+            futures = list(self._job_futures.values())
+            self._job_futures.clear()
+            executor = self._executor
+            self._executor = None
+        for future in futures:
+            try:
+                future.cancel()
+            except Exception:
+                pass
+        if executor is None:
+            return
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            executor.shutdown(wait=False)
+        except Exception as e:
+            log.debug("BackgroundIngest: executor shutdown failed: %s", e)
+
+    def _new_worker_settings(self) -> SettingsManager:
+        return SettingsManager()
+
+    def _submit_job(self, job_name: str, job_func: Callable[[], None]) -> None:
+        if not self._running:
+            return
+        with self._executor_lock:
+            future = self._job_futures.get(job_name)
+            if future is not None and not future.done():
+                log.debug("BackgroundIngest: job already running, skipping trigger: %s", job_name)
+                return
+            executor = self._ensure_executor()
+            future = executor.submit(self._run_job, job_name, job_func)
+            self._job_futures[job_name] = future
+        future.add_done_callback(lambda done, name=job_name: self._on_job_done(name, done))
+
+    def _run_job(self, job_name: str, job_func: Callable[[], None]) -> None:
+        started_at = time.time()
+        try:
+            job_func()
+        except Exception as e:
+            log.debug("BackgroundIngest: %s worker failed: %s", job_name, e)
+        finally:
+            elapsed = time.time() - started_at
+            if elapsed >= 1.0:
+                log.debug("BackgroundIngest: %s completed in %.2fs", job_name, elapsed)
+
+    def _on_job_done(self, job_name: str, future: Future) -> None:
+        with self._executor_lock:
+            current = self._job_futures.get(job_name)
+            if current is future:
+                self._job_futures.pop(job_name, None)
+        try:
+            future.result()
+        except Exception as e:
+            log.debug("BackgroundIngest: %s future failed: %s", job_name, e)
 
     def _ingest_js8_links(self) -> None:
+        self._submit_job("js8_links", self._run_js8_links_job)
+
+    def _run_js8_links_job(self) -> None:
+        worker_settings = self._new_worker_settings()
         try:
-            db_path = get_config_dir() / "config" / "freqinout_nets.db"
-            indexer = JS8LogLinkIndexer(self.settings, db_path)
-            last_ts = float(self.settings.get("js8_links_last_load_utc", 0) or 0)
+            db_path = worker_settings.config_dir / "freqinout_nets.db"
+            indexer = JS8LogLinkIndexer(worker_settings, db_path)
+            last_ts = float(worker_settings.get("js8_links_last_load_utc", 0) or 0)
             count = indexer.update(since_ts=last_ts if last_ts > 0 else None)
             latest_ts = max(indexer._ensure_latest_ts(last_default=time.time()), time.time())
             try:
-                self.settings.set("js8_links_last_load_utc", latest_ts)
+                worker_settings.set("js8_links_last_load_utc", latest_ts)
             except Exception:
                 pass
             if count:
@@ -112,24 +188,37 @@ class BackgroundIngestController(QObject):
             log.debug("BackgroundIngest: js8_links ingest failed: %s", e)
 
     def _ingest_messages(self) -> None:
+        self._submit_job("messages", self._run_messages_job)
+
+    def _run_messages_job(self) -> None:
+        worker_settings = self._new_worker_settings()
+        msg_ingest = MessageIngestor(worker_settings)
         try:
-            self._msg_ingest.ingest_js8_messages()
+            msg_ingest.ingest_js8_messages()
         except Exception as e:
             log.debug("BackgroundIngest: JS8 inbox ingest failed: %s", e)
         try:
-            self._msg_ingest.ingest_spotter_from_directed()
+            msg_ingest.ingest_spotter_from_directed()
         except Exception as e:
             log.debug("BackgroundIngest: spotter ingest failed: %s", e)
 
     def _ingest_varac(self) -> None:
+        self._submit_job("varac", self._run_varac_job)
+
+    def _run_varac_job(self) -> None:
+        worker_settings = self._new_worker_settings()
         try:
-            ingest_varac(self.settings)
+            ingest_varac(worker_settings)
         except Exception as e:
             log.debug("BackgroundIngest: VarAC ingest failed: %s", e)
 
     def _ingest_sitreps(self) -> None:
+        self._submit_job("sitreps", self._run_sitreps_job)
+
+    def _run_sitreps_job(self) -> None:
+        worker_settings = self._new_worker_settings()
         try:
-            stats = ingest_sitreps(self.settings, max_rows_per_source=500)
+            stats = ingest_sitreps(worker_settings, max_rows_per_source=500)
             if int(stats.get("events_inserted", 0)) > 0:
                 log.debug(
                     "BackgroundIngest: sitrep ingest scanned=%s inserted=%s errors=%s",
@@ -137,7 +226,7 @@ class BackgroundIngestController(QObject):
                     stats.get("events_inserted", 0),
                     stats.get("errors", 0),
                 )
-            fused = fuse_sitreps(self.settings, max_rows=1000)
+            fused = fuse_sitreps(worker_settings, max_rows=1000)
             if int(fused.get("events_upserted", 0)) > 0 or int(fused.get("latest_updated", 0)) > 0:
                 log.debug(
                     "BackgroundIngest: sitrep fusion scanned=%s upserted=%s latest=%s errors=%s",
@@ -150,8 +239,12 @@ class BackgroundIngestController(QObject):
             log.debug("BackgroundIngest: sitrep ingest failed: %s", e)
 
     def _ingest_prop_outcomes(self) -> None:
+        self._submit_job("prop_outcomes", self._run_prop_outcomes_job)
+
+    def _run_prop_outcomes_job(self) -> None:
+        worker_settings = self._new_worker_settings()
         try:
-            stats = ingest_propagation_outcomes(self.settings, max_rows_per_source=500)
+            stats = ingest_propagation_outcomes(worker_settings, max_rows_per_source=500)
             if int(stats.get("events_inserted", 0)) > 0:
                 log.debug(
                     "BackgroundIngest: propagation outcomes scanned=%s inserted=%s stats=%s",
@@ -163,8 +256,12 @@ class BackgroundIngestController(QObject):
             log.debug("BackgroundIngest: propagation outcome ingest failed: %s", e)
 
     def _infer_peer_schedules(self) -> None:
+        self._submit_job("peer_schedules", self._run_peer_schedule_job)
+
+    def _run_peer_schedule_job(self) -> None:
+        worker_settings = self._new_worker_settings()
         try:
-            stats = infer_peer_schedules(self.settings, lookback_days=56, bucket_minutes=15)
+            stats = infer_peer_schedules(worker_settings, lookback_days=56, bucket_minutes=15)
             if int(stats.get("rows_inferred", 0)) > 0:
                 log.debug(
                     "BackgroundIngest: peer schedule inference scanned=%s inferred=%s callsigns=%s",

@@ -9,8 +9,10 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, Set
 
+from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.varac_ingest import ensure_varac_local_tables
 
 # Base config directory (user-writable)
 CONFIG_DIR = get_config_dir() / "config"
@@ -39,100 +41,10 @@ def _ensure_settings_db() -> None:
 
 def _ensure_operator_checkins(conn: sqlite3.Connection) -> None:
     """
-    Ensure operator_checkins has the unified columns used throughout the app.
+    Ensure operator_checkins has the unified schema and one-time data repairs
+    before any UI path touches it.
     """
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS operator_checkins (
-            callsign TEXT PRIMARY KEY,
-            name TEXT,
-            state TEXT,
-            grid TEXT,
-            group1 TEXT,
-            group2 TEXT,
-            group3 TEXT,
-            group_role TEXT,
-            first_seen_utc TEXT,
-            last_seen_utc TEXT,
-            last_net TEXT,
-            last_role TEXT,
-            checkin_count INTEGER DEFAULT 0,
-            groups_json TEXT,
-            trusted INTEGER DEFAULT 0
-        )
-        """
-    )
-    cur.execute("PRAGMA table_info(operator_checkins)")
-    cols: Set[str] = {row[1] for row in cur.fetchall()}
-    desired = {
-        "callsign",
-        "name",
-        "state",
-        "grid",
-        "group1",
-        "group2",
-        "group3",
-        "group_role",
-        "first_seen_utc",
-        "last_seen_utc",
-        "last_net",
-        "last_role",
-        "checkin_count",
-        "groups_json",
-        "trusted",
-    }
-    if not desired.issubset(cols):
-        # Recreate with the full schema and copy rows forward
-        cur.execute("DROP TABLE IF EXISTS operator_checkins_new")
-        cur.execute(
-            """
-            CREATE TABLE operator_checkins_new (
-                callsign TEXT PRIMARY KEY,
-                name TEXT,
-                state TEXT,
-                grid TEXT,
-                group1 TEXT,
-                group2 TEXT,
-                group3 TEXT,
-                group_role TEXT,
-                first_seen_utc TEXT,
-                last_seen_utc TEXT,
-                last_net TEXT,
-                last_role TEXT,
-                checkin_count INTEGER DEFAULT 0,
-                groups_json TEXT,
-                trusted INTEGER DEFAULT 0
-            )
-            """
-        )
-        cur.execute(
-            """
-            INSERT OR REPLACE INTO operator_checkins_new
-                (callsign, name, state, grid, group1, group2, group3, group_role,
-                 first_seen_utc, last_seen_utc, last_net, last_role,
-                 checkin_count, groups_json, trusted)
-            SELECT
-                callsign,
-                name,
-                state,
-                grid,
-                group1,
-                group2,
-                group3,
-                group_role,
-                first_seen_utc,
-                last_seen_utc,
-                last_net,
-                last_role,
-                checkin_count,
-                groups_json,
-                trusted
-            FROM operator_checkins
-            """
-        )
-        cur.execute("DROP TABLE operator_checkins")
-        cur.execute("ALTER TABLE operator_checkins_new RENAME TO operator_checkins")
+    ensure_operator_checkins_schema(conn, repair_data=True)
 
 
 def _ensure_local_operator_tables(conn: sqlite3.Connection) -> None:
@@ -1286,6 +1198,7 @@ def _ensure_nets_db() -> None:
         _ensure_operator_checkins(conn)
         _ensure_local_operator_tables(conn)
         _ensure_js8_links(conn)
+        ensure_varac_local_tables(conn)
 
         conn.commit()
     finally:
