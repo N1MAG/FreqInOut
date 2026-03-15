@@ -36,9 +36,10 @@ class JS8StatusClient:
     for status checks.
     """
 
-    def __init__(self, host: Optional[str] = None):
-        self.settings = SettingsManager()
+    def __init__(self, host: Optional[str] = None, port: Optional[int] = None, settings: Optional[object] = None):
+        self.settings = settings if settings is not None else SettingsManager()
         self.host = self._resolve_host(host)
+        self._port_override = int(port) if port not in (None, "") else None
 
     def _resolve_host(self, host: Optional[str]) -> str:
         host_txt = str(host or "").strip()
@@ -55,6 +56,8 @@ class JS8StatusClient:
         Prefer the UI key "js8_port" (Settings tab), fall back to the legacy
         "js8_tcp_port". Default to 2442.
         """
+        if self._port_override is not None:
+            return int(self._port_override)
         for key in ("js8_port", "js8_tcp_port"):
             try:
                 val = self.settings.get(key, None)
@@ -74,7 +77,7 @@ class JS8StatusClient:
           - On any failure, assume not busy (but log at debug level).
         """
         try:
-            hub = JS8RxHub.instance()
+            hub = JS8RxHub.instance(self.host, self._get_port())
             if not hub.start(self.host, self._get_port()):
                 return False
             now_ts = time.time()
@@ -95,11 +98,13 @@ class JS8ControlClient(JS8StatusClient):
     Call set_frequency() from your rig-control path when control_via == 'JS8Call'.
     """
 
-    def __init__(self, host: Optional[str] = None):
-        super().__init__(host=host)
+    def __init__(self, host: Optional[str] = None, port: Optional[int] = None, settings: Optional[object] = None):
+        super().__init__(host=host, port=port, settings=settings)
         self._net_started = False
 
     def _get_port(self) -> int:
+        if self._port_override is not None:
+            return int(self._port_override)
         # Prefer settings_tab key, fall back to legacy key
         for key in ("js8_port", "js8_tcp_port"):
             try:
@@ -223,8 +228,8 @@ class JS8ControlClient(JS8StatusClient):
 class VarACStatusClient:
     """VarAC busy check using VarAC traffic/main logs in the install folder."""
 
-    def __init__(self) -> None:
-        self.settings = SettingsManager()
+    def __init__(self, settings: Optional[object] = None) -> None:
+        self.settings = settings if settings is not None else SettingsManager()
         self._last_status: Dict[str, object] = {}
 
     def _operator_callsign(self) -> str:

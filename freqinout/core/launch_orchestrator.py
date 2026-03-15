@@ -105,6 +105,8 @@ class LaunchOrchestrator(QObject):
         self._current_cmd: Optional[List[str]] = None
         self._current_started_monotonic = 0.0
         self._wait_timeout_sec = 30
+        self._runtime_launch_enabled_override: Optional[bool] = None
+        self._runtime_launch_block_reason = ""
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(500)
         self._poll_timer.timeout.connect(self._poll_current_readiness)
@@ -119,6 +121,17 @@ class LaunchOrchestrator(QObject):
         if isinstance(val, str):
             return val.strip().lower() in {"1", "true", "yes", "on"}
         return False
+
+    def set_runtime_launch_enabled(self, enabled: Optional[bool], *, reason: str = "") -> None:
+        self._runtime_launch_enabled_override = None if enabled is None else bool(enabled)
+        self._runtime_launch_block_reason = str(reason or "").strip()
+
+    def launch_allowed(self) -> bool:
+        override = self._runtime_launch_enabled_override
+        return True if override is None else bool(override)
+
+    def launch_block_reason(self) -> str:
+        return self._runtime_launch_block_reason
 
     def build_default_items(self, existing: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         existing_map: Dict[str, Dict[str, Any]] = {}
@@ -189,6 +202,8 @@ class LaunchOrchestrator(QObject):
     def start_startup_sequence(self) -> bool:
         if self._active:
             return False
+        if not self.launch_allowed():
+            return False
         launch_all = self.is_truthy(self.settings.get("launch_control_enabled", True))
         if not launch_all:
             return False
@@ -200,6 +215,8 @@ class LaunchOrchestrator(QObject):
 
     def start_manual_sequence(self, items: Optional[List[Dict[str, Any]]] = None) -> bool:
         if self._active:
+            return False
+        if not self.launch_allowed():
             return False
         base_items = self.build_default_items(items) if items is not None else self.get_launch_items()
         queue = self._build_queue(base_items, startup_only=False)

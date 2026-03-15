@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import re
+import socket
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 
 from xmlrpc.client import ServerProxy, Transport
 
@@ -31,6 +33,21 @@ def _settings_int(settings: object, key: str, default: int) -> int:
     except Exception:
         pass
     return int(default)
+
+
+@runtime_checkable
+class RigControlClient(Protocol):
+    def is_available(self) -> bool:
+        ...
+
+    def get_ptt(self) -> bool:
+        ...
+
+    def get_vfo_frequency(self) -> Optional[int]:
+        ...
+
+    def set_frequency(self, cmd: "FrequencyCommand") -> bool:
+        ...
 
 
 @dataclass
@@ -433,6 +450,180 @@ class FLRigClient:
             return False
 
 
+class RigctldClient:
+    """
+    Minimal Hamlib rigctld TCP client.
+
+    Uses single-command request/response exchanges with short timeouts so an
+    unavailable endpoint fails safely without blocking the UI for long periods.
+    """
+
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 4532,
+        timeout: float = 0.8,
+    ) -> None:
+        self.host = host
+        self.port = int(port)
+        self.timeout = float(timeout)
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _normalize_rig_mode(mode: Optional[str], band: Optional[str]) -> Optional[str]:
+        txt = str(mode or "").strip()
+        if not txt:
+            return None
+        up = txt.upper()
+        if up in {"USB", "LSB", "CW", "FM", "AM", "RTTY"}:
+            return up
+        if up in {"SSB", "VOICE"}:
+            return voice_sideband_for_band(band)
+        if up in {"DIGI", "DIGITAL", "DATA", "DATA-U", "DATAU", "PKTUSB"}:
+            return "PKTUSB"
+        if up in {"DATA-L", "DATAL", "PKTLSB"}:
+            return "PKTLSB"
+        return up
+
+    def _request_lines_locked(self, command: str) -> list[str]:
+        cmd_txt = str(command or "").strip()
+        if not cmd_txt:
+            raise ValueError("rigctld command cannot be empty")
+        payload = (cmd_txt + "\n").encode("utf-8", errors="ignore")
+        chunks: list[bytes] = []
+        with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
+            sock.settimeout(self.timeout)
+            sock.sendall(payload)
+            try:
+                sock.shutdown(socket.SHUT_WR)
+            except Exception:
+                pass
+            while True:
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        raw = b"".join(chunks).decode("utf-8", errors="ignore")
+        return [line.strip() for line in raw.splitlines() if line.strip()]
+
+    @staticmethod
+    def _rprt_code(lines: list[str]) -> Optional[int]:
+        for line in reversed(lines):
+            txt = str(line or "").strip()
+            if not txt.upper().startswith("RPRT"):
+                continue
+            parts = txt.split()
+            if len(parts) < 2:
+                return None
+            try:
+                return int(parts[1])
+            except Exception:
+                return None
+        return None
+
+    def _command_ok_locked(self, command: str, *, label: str) -> bool:
+        lines = self._request_lines_locked(command)
+        rprt = self._rprt_code(lines)
+        if rprt is not None:
+            if rprt == 0:
+                return True
+            log.debug("rigctld %s failed with RPRT %s", label, rprt)
+            return False
+        return bool(lines)
+
+    def _scalar_response_locked(self, command: str, *, label: str) -> Optional[str]:
+        lines = self._request_lines_locked(command)
+        rprt = self._rprt_code(lines)
+        if rprt not in (None, 0):
+            log.debug("rigctld %s failed with RPRT %s", label, rprt)
+            return None
+        for line in lines:
+            txt = str(line or "").strip()
+            if txt and not txt.upper().startswith("RPRT"):
+                return txt
+        return None
+
+    @staticmethod
+    def _parse_first_int(text: Optional[str]) -> Optional[int]:
+        txt = str(text or "").strip()
+        if not txt:
+            return None
+        match = re.search(r"(-?\d+(?:\.\d+)?)", txt)
+        if not match:
+            return None
+        try:
+            return int(round(float(match.group(1))))
+        except Exception:
+            return None
+
+    def is_available(self) -> bool:
+        try:
+            return self.get_vfo_frequency() is not None
+        except Exception:
+            return False
+
+    def get_ptt(self) -> bool:
+        with self._lock:
+            try:
+                raw = self._scalar_response_locked("t", label="get_ptt")
+                return bool(int(str(raw or "0").strip() or "0"))
+            except Exception as e:
+                log.debug("Failed to get PTT from rigctld: %s", e)
+                return False
+
+    def get_vfo_frequency(self) -> Optional[int]:
+        with self._lock:
+            try:
+                raw = self._scalar_response_locked("f", label="get_frequency")
+                return self._parse_first_int(raw)
+            except Exception as e:
+                log.debug("Failed to get VFO frequency from rigctld: %s", e)
+                return None
+
+    def _set_vfo_locked(self, vfo: Optional[str]) -> bool:
+        target = str(vfo or "").strip().upper()
+        if target not in {"A", "B"}:
+            return True
+        hamlib_vfo = "VFOA" if target == "A" else "VFOB"
+        return self._command_ok_locked(f"V {hamlib_vfo}", label="set_vfo")
+
+    def _set_mode_locked(self, mode: Optional[str], band: Optional[str]) -> bool:
+        mode_cmd = self._normalize_rig_mode(mode, band)
+        if not mode_cmd:
+            return True
+        return self._command_ok_locked(f"M {mode_cmd} 0", label="set_mode")
+
+    def set_frequency(self, cmd: FrequencyCommand) -> bool:
+        freq_hz = cmd.hz
+        with self._lock:
+            try:
+                if not self._set_vfo_locked(cmd.vfo):
+                    log.warning("rigctld VFO select failed for target=%s", cmd.vfo)
+                    return False
+                if not self._set_mode_locked(cmd.mode, cmd.band):
+                    log.warning("rigctld mode apply failed for mode=%s band=%s", cmd.mode, cmd.band)
+                if not self._command_ok_locked(f"F {int(freq_hz)}", label="set_frequency"):
+                    return False
+                verify_hz = self._parse_first_int(self._scalar_response_locked("f", label="verify_frequency"))
+                if verify_hz is None:
+                    log.warning("rigctld frequency verify readback failed after set.")
+                    return False
+                if abs(int(verify_hz) - int(freq_hz)) > 20:
+                    log.warning(
+                        "rigctld frequency verify mismatch: target=%dHz readback=%dHz",
+                        freq_hz,
+                        verify_hz,
+                    )
+                    return False
+                return True
+            except Exception as e:
+                log.error("Failed to set frequency via rigctld: %s", e)
+                return False
+
+
 def flrig_client_from_settings(settings: object) -> FLRigClient:
     """
     Build an FLRig client from persisted settings.
@@ -445,3 +636,18 @@ def flrig_client_from_settings(settings: object) -> FLRigClient:
     fldigi_port = _settings_int(settings, "fldigi_port", 7362)
     fldigi_host = _settings_text(settings, "fldigi_host", "") or None
     return FLRigClient(host=host, port=port, fldigi_port=fldigi_port, fldigi_host=fldigi_host)
+
+
+def rigctld_client_from_settings(settings: object) -> RigctldClient:
+    host = _settings_text(settings, "rig_host", "127.0.0.1") or "127.0.0.1"
+    port = _settings_int(settings, "rig_port", 4532)
+    return RigctldClient(host=host, port=port)
+
+
+def rig_control_client_from_settings(settings: object) -> Optional[RigControlClient]:
+    backend = _settings_text(settings, "control_via", "FLRig").upper()
+    if backend == "FLRIG":
+        return flrig_client_from_settings(settings)
+    if backend == "RIGCTLD":
+        return rigctld_client_from_settings(settings)
+    return None

@@ -7,6 +7,11 @@ from typing import Any, Dict, Optional
 
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.multi_radio_store import (
+    ensure_default_multi_radio_records,
+    ensure_multi_radio_settings_schema,
+    mirror_legacy_settings_into_runtime_active_device,
+)
 
 APP_NAME = "FreqInOut"
 
@@ -32,6 +37,8 @@ class SettingsManager:
         self._maybe_migrate_from_json()
         self.reload()
         self._purge_legacy_autoquery_keys()
+        ensure_default_multi_radio_records(self._conn, self._data)
+        mirror_legacy_settings_into_runtime_active_device(self._conn, self._data)
 
     # ---------- internal I/O ---------- #
 
@@ -45,6 +52,7 @@ class SettingsManager:
             )
             """
         )
+        ensure_multi_radio_settings_schema(self._conn)
         self._conn.commit()
 
     def _maybe_migrate_from_json(self) -> None:
@@ -129,6 +137,7 @@ class SettingsManager:
                     "INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)",
                     (key, json.dumps(value)),
                 )
+            mirror_legacy_settings_into_runtime_active_device(self._conn, self._data)
         except Exception as e:
             log.error("SettingsManager: failed to write key %s: %s", key, e)
             raise
@@ -144,6 +153,7 @@ class SettingsManager:
                 self._conn.executemany(
                     "INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)", payload
                 )
+            mirror_legacy_settings_into_runtime_active_device(self._conn, self._data)
         except Exception as e:
             log.error("SettingsManager: failed to batch write: %s", e)
             raise

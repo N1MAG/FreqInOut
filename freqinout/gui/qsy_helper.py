@@ -13,6 +13,7 @@ DEFAULT_HOLD_DURATION_MIN = 30
 HOLD_WARNING_SECONDS = 10 * 60
 HOLD_CRITICAL_SECONDS = 2 * 60
 _HOLD_DURATION_DEFAULT_CACHE: Dict[str, Optional[int]] = {"minutes": None}
+_SCHEDULER_ENABLED_OVERRIDE: Dict[str, Optional[bool]] = {"enabled": None}
 
 
 def load_operating_groups(settings) -> List[Dict]:
@@ -371,7 +372,14 @@ def suspend_active(settings) -> bool:
     return dt is not None and datetime.datetime.now(datetime.timezone.utc) < dt
 
 
+def set_scheduler_enabled_override(enabled: Optional[bool]) -> None:
+    _SCHEDULER_ENABLED_OVERRIDE["enabled"] = None if enabled is None else bool(enabled)
+
+
 def scheduler_enabled(settings) -> bool:
+    override = _SCHEDULER_ENABLED_OVERRIDE.get("enabled")
+    if override is not None:
+        return bool(override)
     try:
         return bool(settings.get("use_scheduler", True))
     except Exception:

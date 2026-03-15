@@ -12,6 +12,7 @@ import psutil
 
 PROGRAM_TOKENS: Dict[str, Sequence[str]] = {
     "FLRig": ("flrig", "flrig.exe"),
+    "RigCtlD": ("rigctld", "rigctld.exe"),
     "FLDigi": ("fldigi", "fldigi.exe"),
     "FLMsg": ("flmsg", "flmsg.exe"),
     "FLAmp": ("flamp", "flamp.exe"),
@@ -34,6 +35,7 @@ PROGRAM_PATH_KEYS: Dict[str, str] = {
 STATUS_KEYS: Sequence[str] = (
     "JS8Call_API",
     "FLRig",
+    "RigCtlD",
     "FLDigi",
     "FLMsg",
     "FLAmp",
@@ -46,6 +48,8 @@ JS8_DEFAULT_HOST = "127.0.0.1"
 JS8_DEFAULT_PORT = 2442
 FLRIG_DEFAULT_HOST = "127.0.0.1"
 FLRIG_DEFAULT_PORT = 12345
+RIGCTLD_DEFAULT_HOST = "127.0.0.1"
+RIGCTLD_DEFAULT_PORT = 4532
 FLDIGI_DEFAULT_HOST = "127.0.0.1"
 FLDIGI_DEFAULT_PORT = 7362
 
@@ -281,7 +285,7 @@ class SoftwareStatusService:
             try:
                 from freqinout.radio_interface.js8_status import JS8ControlClient
 
-                client = JS8ControlClient(host=primary_host)
+                client = JS8ControlClient(host=primary_host, port=port, settings=self.settings)
                 reachable = client.get_frequency() is not None
             except Exception:
                 reachable = False
@@ -336,6 +340,24 @@ class SoftwareStatusService:
 
         return self._cached_service_probe("FLDIGI", host, port, force=force, probe=_probe)
 
+    def rigctld_api_reachable(
+        self,
+        *,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        host = (host_override or "").strip() or self._settings_text("rig_host", RIGCTLD_DEFAULT_HOST) or RIGCTLD_DEFAULT_HOST
+        port = int(port_override) if port_override is not None else self._settings_int("rig_port", RIGCTLD_DEFAULT_PORT)
+
+        def _probe() -> bool:
+            from freqinout.radio_interface.rigctl_client import RigctldClient
+
+            client = RigctldClient(host=host, port=port, timeout=0.35)
+            return bool(client.is_available())
+
+        return self._cached_service_probe("RIGCTLD", host, port, force=force, probe=_probe)
+
     def _endpoint_status(
         self,
         *,
@@ -381,10 +403,13 @@ class SoftwareStatusService:
     def status_snapshot(
         self,
         *,
+        force: bool = False,
         port_override: Optional[int] = None,
         host_override: Optional[str] = None,
         flrig_port_override: Optional[int] = None,
         flrig_host_override: Optional[str] = None,
+        rigctld_port_override: Optional[int] = None,
+        rigctld_host_override: Optional[str] = None,
         fldigi_port_override: Optional[int] = None,
         fldigi_host_override: Optional[str] = None,
     ) -> Dict[str, Dict[str, object]]:
@@ -395,6 +420,7 @@ class SoftwareStatusService:
             port_override=port_override,
             host_override=host_override,
             allow_fallback=False,
+            force=force,
         )
         running_flrig = self.program_is_running("FLRig")
         flrig_host = (flrig_host_override or "").strip() or self._settings_text("flrig_host", FLRIG_DEFAULT_HOST) or FLRIG_DEFAULT_HOST
@@ -406,6 +432,29 @@ class SoftwareStatusService:
         flrig_api_ok = self.flrig_api_reachable(
             port_override=flrig_port_override,
             host_override=flrig_host_override,
+            force=force,
+        )
+        active_control_via = self._settings_text("control_via", "FLRig").strip().upper()
+        rigctld_active = active_control_via == "RIGCTLD" or rigctld_host_override is not None or rigctld_port_override is not None
+        running_rigctld = self.program_is_running("RigCtlD")
+        rigctld_host = (
+            (rigctld_host_override or "").strip()
+            or self._settings_text("rig_host", RIGCTLD_DEFAULT_HOST)
+            or RIGCTLD_DEFAULT_HOST
+        )
+        rigctld_port = (
+            int(rigctld_port_override)
+            if rigctld_port_override is not None
+            else self._settings_int("rig_port", RIGCTLD_DEFAULT_PORT)
+        )
+        rigctld_api_ok = (
+            self.rigctld_api_reachable(
+                port_override=rigctld_port_override,
+                host_override=rigctld_host_override,
+                force=force,
+            )
+            if rigctld_active
+            else False
         )
         running_fldigi = self.program_is_running("FLDigi")
         fldigi_host = self._resolved_fldigi_host(fldigi_host_override)
@@ -417,6 +466,7 @@ class SoftwareStatusService:
         fldigi_api_ok = self.fldigi_api_reachable(
             port_override=fldigi_port_override,
             host_override=fldigi_host_override,
+            force=force,
         )
 
         out: Dict[str, Dict[str, object]] = {}
@@ -441,6 +491,23 @@ class SoftwareStatusService:
                     reachable=flrig_api_ok,
                     process_running=running_flrig,
                 )
+                continue
+            if key == "RigCtlD":
+                if not rigctld_active:
+                    out[key] = {
+                        "state": "idle",
+                        "tooltip": "Inactive backend",
+                        "running": False,
+                        "reachable": False,
+                    }
+                else:
+                    out[key] = self._endpoint_status(
+                        endpoint_label="TCP",
+                        host=rigctld_host,
+                        port=rigctld_port,
+                        reachable=rigctld_api_ok,
+                        process_running=running_rigctld,
+                    )
                 continue
             if key == "FLDigi":
                 out[key] = self._endpoint_status(

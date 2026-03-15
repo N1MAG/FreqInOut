@@ -8442,3 +8442,735 @@ Mitigations:
 Rollback:
 - Each implementation phase should be independently revertible while preserving the migrated default single-radio profile layout.
 - The single-radio default runtime must remain available as the fallback operating mode until multi-device runtime is proven stable.
+
+### 1.147 Addendum (2026-03-14): Multi-Radio Phase A Implementation (Settings-DB Foundation)
+
+Problem:
+- The design addendum defines the multi-radio model, but there is no persistent schema or migration path yet.
+- Current runtime code still assumes one flat settings store and one implicit station context.
+- Before any multi-runtime UI or scheduler work can happen safely, the settings DB needs a backward-compatible foundation for:
+  - `device_profiles`
+  - `operating_profiles`
+  - current assignment state
+  - future coordination/cluster metadata
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: implementation proceeds without a constrained Phase A scope and accidentally drifts into UI/runtime behavior changes.
+- `freqinout/core/settings_manager.py`
+  - Failure mode: schema is not created or default migration is not seeded consistently when the settings DB is first opened.
+- `freqinout/core/db_initializer.py`
+  - Failure mode: startup DB initialization creates only the legacy `kv` table and tooling/runtime drift reappears.
+- `tools/db_schema.py`
+  - Failure mode: DB tools do not know about the new settings-side multi-radio tables.
+- new multi-radio store/helper module
+  - Failure mode: future code keeps reading/writing ad-hoc flat keys instead of using the structured Phase A model.
+
+Scope:
+- Implement Phase A only:
+  - add settings-DB tables for multi-radio entities
+  - seed one default `device_profile`, one default `operating_profile`, and one active assignment from existing single-radio settings
+  - expose a small core helper/store API for listing/loading the default migrated records
+  - align settings DB tooling metadata with the new tables
+  - add targeted tests for schema creation and default migration
+
+Out of scope:
+- Multi-device runtime manager
+- Scheduler changes
+- UI changes for device/operating profile editing
+- Status badge redesign
+- Coordination-rule execution
+
+Constraints:
+- No user-visible behavior change for current single-radio operation.
+- Existing flat `kv` settings remain the runtime source of truth for current features during Phase A.
+- The migration must be idempotent and safe to run on every startup.
+- The seeded default profile names/fields should be stable and deterministic.
+
+Acceptance criteria:
+- Opening/initializing `freqinout.db` creates the Phase A multi-radio tables alongside `kv`.
+- Existing installs are seeded with:
+  - one default `device_profile`
+  - one default `operating_profile`
+  - one active assignment
+- Seeded records reflect current single-radio control settings closely enough for later phases to migrate behavior safely.
+- Running the migration multiple times does not create duplicate default records.
+- DB tooling can inspect the new settings-side tables.
+- Verification baseline passes:
+  - `python -m pytest tests/test_multi_radio_phase_a.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\tools\freqinout-db.ps1 status`
+
+Rollback:
+- Revert the Phase A schema/helper changes together so the app returns to the previous flat-settings-only behavior without partial structured-schema leftovers in active code paths.
+
+### 1.148 Addendum (2026-03-14): Multi-Radio Phase B Slice 1 (Runtime-Active Device Projection)
+
+Problem:
+- Phase A created the structured multi-radio tables, but there is still no safe runtime concept of "which device profile is the current single-radio compatibility device."
+- Current runtime code still reads legacy flat settings, so structured device rows can drift out of sync as soon as operators edit Settings.
+- Remote endpoint and `minimal` deployment metadata can be stored already, but there is no controlled path to switch the active runtime device without partial/unsafe behavior.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: Phase B work drifts into unsupported multi-runtime or `rigctld` control behavior without a constrained compatibility slice.
+- `freqinout/core/multi_radio_store.py`
+  - Failure mode: device profiles have no deterministic runtime-active state, no safe active-device switching path, and no projection into legacy settings for current runtime code.
+- `freqinout/core/settings_manager.py`
+  - Failure mode: edits to flat settings continue to drift away from the active structured device profile, making later phases unreliable.
+- `tests/test_multi_radio_phase_a.py`
+  - Failure mode: regressions in active-device seeding/projection are not covered while the app still depends on flat settings.
+
+Scope:
+- Resume Phase B with the smallest backward-compatible compatibility slice only:
+  - add a structured `runtime_active` state for `device_profiles`
+  - expose core store APIs to load/save device profiles and set the one runtime-active device
+  - project the runtime-active device profile into the existing legacy flat settings keys used by the current runtime
+  - mirror legacy flat-settings edits back into the runtime-active device profile so Phase B data does not drift
+  - allow persisted remote endpoint and `deployment_mode` metadata on device profiles
+  - block activation of unsupported runtime backends (currently `rigctld`) until scheduler/control support exists
+
+Out of scope:
+- Multi-device runtime manager
+- Settings-tab device profile CRUD UI
+- Scheduler/control implementation for `rigctld`
+- Minimal-mode feature suppression across tabs
+- Operating-profile assignment UI or policy execution
+
+Constraints:
+- Preserve current single-radio runtime behavior and flat-settings compatibility.
+- Keep one and only one runtime-active device profile in normal operation.
+- Do not allow a profile to become runtime-active if the current runtime cannot safely honor its control backend.
+- Keep migration/idempotency safe on every startup.
+
+Acceptance criteria:
+- Existing installs keep one default device profile marked runtime-active.
+- Store APIs can create/update device profiles and deterministically switch the runtime-active profile for supported backends.
+- Switching the runtime-active device updates the legacy settings keys used by the current runtime (`control_via`, host/port fields, and related endpoint settings).
+- Editing legacy flat settings updates the runtime-active device profile so structured Phase B data stays aligned with current behavior.
+- Attempting to activate a `rigctld` device profile fails safely without partially switching the runtime-active device.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_a.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Rollback:
+- Revert the runtime-active device projection/mirroring changes together so the app returns to the prior Phase A foundation without mixed active-device semantics.
+
+### 1.149 Addendum (2026-03-14): Multi-Radio Phase B Slice 2 (Settings Device Profile Management)
+
+Problem:
+- Phase B Slice 1 established runtime-active device projection in core code, but operators still have no Settings UI to inspect, create, edit, activate, or delete device profiles.
+- Without a dedicated UI, remote endpoint metadata and `minimal` deployment intent remain effectively hidden, and Phase B cannot be exercised safely end-to-end.
+- Reusing the legacy flat-settings fields alone is not sufficient because multi-device editing needs explicit structured CRUD without breaking the current single-runtime compatibility path.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: UI work lands without a constrained compatibility scope and accidentally drifts into unsupported multi-runtime or `rigctld` runtime-control behavior.
+- `freqinout/core/multi_radio_store.py`
+  - Failure mode: Settings UI cannot safely persist/delete/switch device profiles, or unsupported activation leaves partial runtime-active state behind.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: operators cannot manage device profiles from the app, or activating a profile fails to refresh the legacy-compatible settings fields shown elsewhere in Settings.
+  - Failure mode: device-profile CRUD is blocked by unrelated full-settings validation instead of persisting independently.
+- `tests/test_multi_radio_phase_a.py`
+  - Failure mode: core CRUD/activation regressions are not covered after adding UI-driven workflows.
+- new targeted Settings UI regression test file
+  - Failure mode: panel wiring/activation flow regresses without automated coverage.
+
+Scope:
+- Add a new `Device Profiles` Settings section that:
+  - lists current structured device profiles
+  - shows which profile is runtime-active
+  - supports add/edit/delete for device profiles
+  - supports explicit `Set Active` for supported runtime backends
+- Persist device-profile CRUD directly through `MultiRadioStore` so this workflow is not blocked by unrelated full-settings validation.
+- Refresh the existing legacy-compatible Settings controls after active-device changes so operators immediately see the active profile’s projected control/backend endpoint values.
+- Allow persisted editing of:
+  - `name`
+  - `control_backend`
+  - `deployment_mode`
+  - `rig_host` / `rig_port`
+  - `flrig_host` / `flrig_port`
+  - `fldigi_host` / `fldigi_port`
+  - `js8_host` / `js8_port`
+  - `launch_enabled` / `launch_path`
+  - `notes`
+- Allow storing `rigctld` and `minimal` metadata, but keep activation/runtime behavior constrained to the currently supported backends from Slice 1.
+
+Out of scope:
+- Full multi-device runtime manager
+- Per-tab feature suppression for `minimal` devices
+- Scheduler/control implementation for `rigctld`
+- Operating-profile assignment UI
+- Sidebar/device dashboard redesign
+
+Constraints:
+- Preserve current single-runtime behavior; one profile remains runtime-active at a time.
+- Device-profile CRUD must not require saving unrelated Settings sections first.
+- Unsupported runtime activation attempts must fail clearly and leave the current runtime-active device unchanged.
+- Prevent destructive deletes of the currently runtime-active profile.
+
+Acceptance criteria:
+- Settings shows a `Device Profiles` section with a table and actions to add, edit, delete, and activate profiles.
+- Creating/editing device profiles persists through app restart.
+- Activating a supported profile refreshes the visible legacy Settings controls (`control_via`, endpoint fields currently shown in Settings, launch flags) to the selected profile.
+- Attempting to activate an unsupported backend (currently `rigctld`) shows a clear warning and does not switch the runtime-active profile.
+- Attempting to delete the runtime-active profile is blocked with a clear warning.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_a.py tests/test_multi_radio_phase_b_slice2.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\tools\freqinout-db.ps1 status`
+
+Rollback:
+- Revert the Settings device-profile UI and supporting store/test updates together so Phase B returns to the Slice 1 core-only compatibility state.
+
+### 1.150 Addendum (2026-03-14): Multi-Radio Phase B Slice 3 (rigctld Runtime Support)
+
+Problem:
+- Phase B Slice 2 made `rigctld` device profiles visible and editable, but activation is still blocked because the current runtime only knows how to drive FLRig and JS8Call.
+- That leaves the multi-radio device model incomplete for the most important remote-control backend in Phase B: operators can describe a remote rig endpoint, but they still cannot run it as the active compatibility device.
+- The current startup/runtime wiring is also still FLRig-specific: the main window always builds an FLRig client, scheduler status paths assume FLRig-only rig polling, and software status surfaces have no `rigctld` endpoint awareness.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: `rigctld` support lands partially and operators can activate profiles that the runtime only half honors.
+- `freqinout/radio_interface/rigctl_client.py`
+  - Failure mode: there is no real `rigctld` client/factory, so active-device projection can switch `control_via` without a usable backend implementation.
+- `freqinout/core/scheduler_engine.py`
+  - Failure mode: scheduler/readback/PTT logic remains FLRig-specific and either refuses `rigctld` outright or treats it as a broken FLRig runtime.
+- `freqinout/core/software_status_service.py`
+  - Failure mode: status LEDs continue to imply only FLRig/JS8/FLDigi endpoint truth, leaving `rigctld` operators without endpoint-aware diagnostics.
+- `freqinout/gui/main_window.py`
+  - Failure mode: runtime client construction remains pinned to FLRig even after Settings activates a `rigctld` profile.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: Settings still labels `rigctld` as stored-only and continues to coerce/erase a projected `RIGCTLD` active backend in the legacy controls.
+- targeted tests
+  - Failure mode: activation/runtime/status regressions for `rigctld` are not covered.
+
+Scope:
+- Add real single-runtime compatibility support for `rigctld`:
+  - implement a lightweight TCP `rigctld` client with frequency read/set, PTT read, availability probe, and best-effort mode/VFO handling
+  - add a runtime rig-backend factory that selects FLRig or `rigctld` from current settings
+  - allow `rigctld` device profiles to become runtime-active
+  - extend scheduler control/readback/PTT paths so `rigctld` behaves like a supported rig backend in the existing compatibility model
+  - rebuild the active rig backend in the main window when Settings changes relevant runtime endpoint/backend values
+  - extend software status probing with endpoint-aware `rigctld` status
+  - update current Settings/ControlFreq UI surfaces so active `RIGCTLD` state is visible and no longer rewritten back to `FLRig`
+
+Out of scope:
+- Phase C multi-device runtime manager
+- Per-device concurrent schedulers
+- Per-device JS8 receive hub refactor
+- Full device-card status/dashboard redesign
+- Per-device launch-plan separation
+
+Constraints:
+- Preserve current single-runtime behavior for FLRig, JS8Call, and Manual operators.
+- `rigctld` support must fail safe on endpoint loss and must not cause surprise QSY/transmit behavior.
+- Keep endpoint probes/control calls short and cached enough to avoid UI-freeze-like behavior.
+- Do not require a local `rigctld` process for remote endpoint support; endpoint reachability is the truth signal.
+
+Acceptance criteria:
+- A `rigctld` device profile can be activated from Settings and projects `control_via=RIGCTLD` plus the configured host/port into legacy settings.
+- Main-window runtime construction switches to a real `rigctld` backend when the active profile/backend requires it.
+- Scheduler control/readback/PTT paths treat `RIGCTLD` as a supported rig backend and remain stable when the endpoint is absent.
+- Software status exposes endpoint-aware `rigctld` state on the current status surfaces.
+- Settings no longer rewrites an active `RIGCTLD` backend back to `FLRig` on load/save.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_a.py tests/test_multi_radio_phase_b_slice2.py tests/test_multi_radio_phase_b_slice3.py tests/test_scheduler_deferral.py tests/test_software_status_phase4.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Rollback:
+- Revert the `rigctld` client/factory, scheduler/status/main-window wiring, Settings/runtime-activation changes, and related tests together so Phase B returns to the Slice 2 state cleanly.
+
+### 1.151 Addendum (2026-03-14): Multi-Radio Phase B Slice 4 (Minimal Deployment Mode Enforcement)
+
+Problem:
+- Phase B Slice 2 added `deployment_mode` editing and Slice 3 makes remote backends operational, but `minimal` devices still behave like full desktop installs.
+- That breaks the intent of Phase B for field and temporary systems: operators can mark a device as `minimal`, but the app still starts heavy background ingest, prewarms web-heavy surfaces, exposes irrelevant views, and behaves like a full station console.
+- Without explicit UI/runtime enforcement, `minimal` mode is metadata only and does not improve performance or operational clarity.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: `minimal` mode remains declarative only and operators cannot trust its behavior.
+- `freqinout/gui/main_window.py`
+  - Failure mode: heavy views remain navigable, background tasks keep running, and startup still performs full-mode warmup/launch behavior for `minimal` devices.
+- `freqinout/core/background_ingest.py`
+  - Failure mode: there is no clean observable runtime contract for start/stop state when deployment mode changes.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: operators do not get clear feedback about what `minimal` mode suppresses once active.
+- targeted tests
+  - Failure mode: deployment-mode enforcement regresses silently.
+
+Scope:
+- Enforce active-device `deployment_mode` in the current single-runtime app shell:
+  - treat the runtime-active device profile as authoritative for current deployment mode
+  - when `deployment_mode=minimal`, suppress heavy/non-essential surfaces in the current UI:
+    - `Map`
+    - `Messages`
+    - `FreqPlanner`
+  - redirect attempts to open suppressed views back to a safe operational surface
+  - stop background ingest while `minimal` mode is active
+  - skip startup lazy prewarm, WebEngine prewarm, and launch-control startup sequence while `minimal` mode is active
+  - show a persistent runtime banner/hint so operators can see that the active device is intentionally running in `minimal` mode
+  - restore the suppressed behavior when switching back to a `full` active device
+
+Out of scope:
+- Phase C operating-profile feature matrices
+- True per-device UI multiplexing
+- Re-architecting Map from eager construction to a brand-new lazy/runtime-managed surface
+- Removing non-essential tabs from the codebase entirely
+
+Constraints:
+- Preserve current full-mode behavior exactly when the active device is not `minimal`.
+- Switching deployment mode must not freeze the UI or require app restart.
+- If the operator is currently on a now-suppressed screen, redirect predictably instead of leaving a dead view active.
+- Minimal mode is intentionally conservative: prefer disabling/suppressing heavy work over partial best-effort execution.
+
+Acceptance criteria:
+- Activating a `minimal` device profile suppresses `Map`, `Messages`, and `FreqPlanner` from the primary navigation and blocks programmatic navigation to those screens.
+- Background ingest is not running while a `minimal` device is active, and resumes when switching back to `full`.
+- Startup does not perform launch-control startup or UI prewarm work while a `minimal` device is active.
+- The main window shows a persistent indicator that the active device is running in `minimal` mode.
+- Settings device-profile messaging reflects the actual runtime effects of `minimal` mode instead of describing it as future metadata only.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_b_slice4.py tests/test_background_ingest_phase2.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\tools\freqinout-db.ps1 status`
+
+Rollback:
+- Revert the main-window deployment-mode enforcement, Settings messaging updates, background-ingest runtime-state helper, and related tests together so `minimal` mode returns to metadata-only behavior.
+
+### 1.152 Addendum (2026-03-14): Multi-Radio Phase C Slice 1 (Multiple Runtime-Active Devices with One Primary Compatibility Device)
+
+Problem:
+- Phase B still hard-limits the station to one runtime-active device profile even though the settings DB and Settings UI can already describe multiple devices.
+- That mismatch is now visible to operators during testing: additional device profiles can be stored, but only one can actually be marked active.
+- The current runtime still depends on one projected flat-settings view, so Phase C needs a safe bridge from "many active devices" to "one primary compatibility device" instead of a breaking all-at-once rewrite.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: runtime work drifts into schedule-targeting or per-tab role redesign before the compatibility boundary is explicit.
+- `freqinout/core/multi_radio_store.py`
+  - Failure mode: multiple active profiles are not normalized safely, no single primary compatibility device exists, or legacy flat settings drift away from the selected primary device.
+- `freqinout/core/settings_manager.py`
+  - Failure mode: flat-settings writes mirror into the wrong device row once multiple devices can be active.
+- targeted tests
+  - Failure mode: multi-active semantics regress and the app silently falls back to last-write-wins primary selection.
+
+Scope:
+- Complete the Phase C store transition in the smallest safe compatibility slice:
+  - allow multiple `device_profiles` to be `runtime_active=1`
+  - add and normalize one `runtime_primary=1` device among the active set
+  - keep legacy flat-settings projection and mirror behavior bound to the primary device only
+  - expose store APIs to:
+    - list runtime-active profiles
+    - set/unset runtime-active state per profile
+    - set the runtime-primary profile
+  - preserve automatic seeding/normalization so existing installs still land on one deterministic primary device
+
+Out of scope:
+- Per-device concurrent schedulers
+- Operating-profile assignment editing
+- Station overview/dashboard UI
+- Per-device launch plans
+
+Constraints:
+- There must always be exactly one primary device among the active set whenever at least one active device exists.
+- At least one runtime-active device must remain enabled.
+- Existing callers that ask for the "runtime-active device" remain backward-compatible and receive the primary compatibility device.
+- Legacy flat settings remain the truth source for current single-runtime tabs and scheduler behavior until later Phase C slices finish.
+
+Acceptance criteria:
+- Operators can persist more than one `runtime_active` device profile.
+- One and only one active device is marked `runtime_primary`.
+- Making a device primary also projects its endpoint/backend values into the legacy flat settings used by current runtime code.
+- Deactivating the primary device is blocked until another device is made primary first.
+- Legacy settings writes continue to mirror into the primary device row only.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_a.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Rollback:
+- Revert the multi-active store/schema changes together so the app returns to the Phase B single-active compatibility model without mixed semantics.
+
+### 1.153 Addendum (2026-03-14): Multi-Radio Phase C Slice 2 (StationRuntimeManager and Per-Device Runtime Snapshots)
+
+Problem:
+- After Slice 1, the store can represent multiple active devices, but the running app still has no object that owns or reports multi-device runtime state.
+- `main_window.py` still assumes one active profile, one runtime backend selection, and one set of status/control objects.
+- Advanced operators need a station-level runtime model that can track every active device without forcing a premature rewrite of schedule-targeting and tab ownership.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: Phase C runtime work over-promises full per-device scheduler/tab multiplexing before the current UI can safely support it.
+- new station runtime manager module
+  - Failure mode: there is no durable place to own device-scoped runtime/status objects or provide a stable snapshot API to the UI.
+- `freqinout/gui/main_window.py`
+  - Failure mode: the app keeps rebuilding only one backend directly from flat settings and ignores the rest of the active station.
+- `freqinout/radio_interface/js8_rx_hub.py`
+  - Failure mode: JS8 receive state remains pinned to one global endpoint, so primary-device changes or station-level monitoring become stale/brittle.
+- `freqinout/radio_interface/js8_status.py`
+  - Failure mode: JS8 status/control clients cannot be constructed against explicit device endpoints.
+- `freqinout/core/software_status_service.py`
+  - Failure mode: per-device snapshots still fall back to the wrong endpoint when probing JS8.
+- targeted tests
+  - Failure mode: runtime-manager refresh, primary rebinding, and endpoint-keyed JS8 behavior regress silently.
+
+Scope:
+- Add a `StationRuntimeManager` with one `DeviceRuntime` per runtime-active device profile.
+- Add per-device settings proxies so status/control clients can be created from device rows instead of the global `SettingsManager`.
+- Expose a device snapshot model for the UI with, at minimum:
+  - device identity and backend
+  - active/primary flags
+  - deployment mode
+  - assigned operating-profile summary
+  - endpoint summary
+  - control readiness / overall state
+  - per-service status snapshot payload
+- Keep the current scheduler, launch orchestrator, and existing control tabs primary-device scoped in Phase C:
+  - the primary runtime remains the compatibility owner for current tabs
+  - secondary active devices are runtime-managed and monitored, but not yet schedule-targeted
+- Finish the JS8 endpoint-keying work needed for Phase C safety:
+  - `JS8RxHub` instances keyed by host/port
+  - JS8 clients/status checks accept explicit host/port settings
+  - primary-device endpoint changes fully tear down stale JS8 hubs
+
+Out of scope:
+- Operating-profile-targeted schedulers
+- Multiple concurrent `JS8Call Net Control` or `Map` tab contexts
+- Per-device launch orchestration and startup sequencing
+- Full cluster-aware VarAC runtime management
+
+Constraints:
+- Existing tabs remain bound to the primary compatibility device until a later phase adds role/device selectors.
+- The runtime manager must fail safe if a configured backend is absent or unreachable.
+- JS8 monitoring/control remains primary-tab scoped where the current UI depends on global workflow assumptions; Phase C should expose and manage endpoint identity cleanly without pretending the existing JS8 tabs are already device-multiplexed.
+- The app must still start cleanly with no radio software running.
+
+Acceptance criteria:
+- The app constructs a station runtime manager from all runtime-active device profiles.
+- The main window rebinds its current scheduler/runtime clients to the primary device after profile changes.
+- Station-level runtime snapshots are available for every active device and include endpoint-aware service state.
+- JS8 hub/client teardown occurs when the primary JS8 endpoint changes so stale receive state is not reused across devices.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_c.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Rollback:
+- Revert the station runtime manager, primary rebinding, JS8 endpoint-keying adjustments, and related tests together so the app returns to the Phase B primary-only runtime wiring.
+
+### 1.154 Addendum (2026-03-14): Multi-Radio Phase C Slice 3 (Settings Multi-Active Controls and Station Overview UI)
+
+Problem:
+- Even with Slice 1 and Slice 2 in place, operators still need an in-app way to activate multiple devices, choose the primary device explicitly, and see the current station runtime at a glance.
+- The current `Device Profiles` panel still presents one-active-device behavior, and there is no dedicated station-level runtime view for advanced operators.
+- Without a first-class overview, multi-device runtime exists only in the store/core and is too opaque for reliable live operating use.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: UI work lands without a clear boundary and starts implying schedule-targeted per-device workflows that do not exist yet.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: operators cannot activate/deactivate multiple devices or choose the primary device safely.
+  - Failure mode: primary-device projection into current Settings controls happens for the wrong device or not at all.
+- new `Station Overview` UI module
+  - Failure mode: active-device state is hidden or too low-signal for operators managing a multi-rig station.
+- `freqinout/gui/main_window.py`
+  - Failure mode: the app has no station-level view and does not refresh UI state after runtime-profile changes.
+- targeted tests
+  - Failure mode: Settings and overview wiring regress without coverage.
+
+Scope:
+- Update the existing Settings `Device Profiles` section to support true Phase C semantics:
+  - show both `Active` and `Primary`
+  - allow activating one or more selected profiles
+  - allow deactivating selected non-primary active profiles
+  - allow choosing exactly one primary profile
+  - keep add/edit/delete behavior
+- Ensure primary changes still refresh the visible legacy Settings controls so current single-runtime tabs stay aligned.
+- Add a new `Station Overview` surface using the current app design language:
+  - one runtime card per active device
+  - clear primary badge/state
+  - control backend and endpoint summary
+  - deployment mode and assigned operating profile summary
+  - compact service-state indicators derived from the runtime manager snapshots
+  - explicit note when a device is monitored but not the current primary compatibility owner
+- Refresh the overview and runtime state live after Settings profile changes and normal periodic status refresh.
+
+Out of scope:
+- Per-device schedule editing or targeting
+- Per-device duplicate control tabs
+- Device-specific launch/start-stop buttons in the overview
+- A separate station-coordination policy UI
+
+Constraints:
+- The UI must preserve the current look and interaction style; this is an extension of the existing desktop app, not a redesign.
+- Existing primary-device workflows must continue to work exactly as before once a primary is selected.
+- Multi-select activation/deactivation must fail clearly and leave the store/runtime in a normalized state.
+- The overview should stay lightweight and readable on both large and modest desktop window sizes.
+
+Acceptance criteria:
+- Settings allows multiple device profiles to be active at once and lets the operator select one primary device explicitly.
+- The current flat Settings controls reload from the chosen primary device after a primary change.
+- The app shows a `Station Overview` view with one card per active device and live runtime state.
+- The main window updates the overview and primary compatibility runtime after device-profile changes without restart.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_b_slice2.py tests/test_multi_radio_phase_c.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Rollback:
+- Revert the Settings multi-active/primary UI, station overview UI, main-window integration, and related tests together so the app returns to the Phase B device-profile panel and primary-only shell.
+
+### 1.155 Addendum (2026-03-14): Multi-Radio Phase D Slice 1 (Operating Profile CRUD and Effective Assignment APIs)
+
+Problem:
+- Phase C made multiple devices runtime-active and operator-visible, but operating profiles still exist only as seeded rows with no supported CRUD or reassignment path.
+- `StationRuntimeManager` can read assignment rows, but there is no store API to manage one effective operating profile per device safely.
+- Advanced operators need explicit operating-role state without mutating device endpoint definitions just to change station behavior.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: Phase D lands as ad-hoc UI writes directly against tables without a clear runtime contract.
+- `freqinout/core/multi_radio_store.py`
+  - Failure mode: multiple effective assignments can exist for one device, deletes disable live profiles unsafely, or temporary overrides overwrite history without normalization.
+- `freqinout/core/station_runtime_manager.py`
+  - Failure mode: runtime snapshots continue to consume stale or ambiguous assignment rows.
+- targeted tests
+  - Failure mode: assignment normalization and operating-profile persistence regress silently.
+
+Scope:
+- Add store support for Phase D operating-role management:
+  - operating-profile CRUD APIs
+  - one effective assignment per device
+  - assignment change APIs that preserve superseded history rows instead of rewriting in place
+  - support explicit `temporary_override` effective assignments as operator-applied metadata/state
+  - expose helpers for listing the current effective assignments cleanly
+- Keep scheduled start/end activation out of runtime execution for this slice:
+  - `starts_utc` / `ends_utc` remain stored metadata
+  - no automatic timed activation/expiry yet
+
+Out of scope:
+- Schedule table target scopes
+- Per-device concurrent schedulers
+- Coordination policy execution
+- Automatic timed assignment transitions
+
+Constraints:
+- Each device must have at most one effective assignment at a time.
+- The default operating profile must remain available as the fallback compatibility profile.
+- Disabling or deleting an operating profile that is currently assigned to any device must fail clearly.
+- Existing Phase C runtime behavior must remain unchanged when all devices use the seeded default operating profile.
+
+Acceptance criteria:
+- Operators can create, edit, and delete non-active operating profiles through supported store APIs.
+- Reassigning a device to a different operating profile creates a new effective assignment row and retires the previous effective row.
+- `temporary_override` can be stored as the current effective assignment state for a device.
+- `StationRuntimeManager` can obtain one normalized effective assignment per device without ambiguous last-row wins behavior.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_d.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Rollback:
+- Revert the operating-profile CRUD and assignment store/runtime changes together so the app returns to seeded-profile, read-only Phase C behavior.
+
+### 1.156 Addendum (2026-03-14): Multi-Radio Phase D Slice 2 (Settings Operating Profiles and Assignment UI)
+
+Problem:
+- Even with store support, operators still have no UI to edit operating profiles or apply them to device profiles.
+- Station Overview currently shows only the assigned operating-profile name and does not surface the effective assignment state or capability matrix clearly.
+- Without an explicit assignment workflow, advanced station configuration remains too opaque for live use.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: UI work implies schedule-targeting or automatic override expiry that does not exist yet.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: operators cannot manage operating profiles safely, or assignment changes drift away from runtime state.
+- `freqinout/gui/station_overview_tab.py`
+  - Failure mode: active-device runtime cards omit the assignment state and effective operating-policy summary operators need.
+- targeted tests
+  - Failure mode: Settings CRUD/assignment workflows regress without coverage.
+
+Scope:
+- Extend Settings using the current app design language:
+  - add an `Operating Profiles` section with CRUD
+  - add a `Device Assignments` section that shows the effective operating profile for each device
+  - allow operators to assign or temporarily override one or more selected devices from Settings
+  - allow restoring selected devices to the default operating profile
+- Enrich Station Overview cards with:
+  - effective assignment state
+  - scheduler on/off summary
+  - suppressed feature summary from the assigned operating profile
+
+Out of scope:
+- Separate schedule-target editing UI
+- Automatic time-based assignment transitions
+- Per-device duplicate tabs
+- Coordination prompts or swap wizards
+
+Constraints:
+- The UI must remain lightweight and consistent with the existing Settings/overview patterns.
+- Assignment actions must be explicit and reversible.
+- Temporary override messaging must state clearly that expiry is manual in this slice.
+- Existing device-profile editing and Phase C station overview behavior must remain intact.
+
+Acceptance criteria:
+- Settings supports operating-profile CRUD and current-assignment management without direct DB editing.
+- Operators can assign an operating profile or temporary override to one or more devices from Settings.
+- Station Overview shows assignment state and an operator-readable operating-policy summary per active device.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_d.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Rollback:
+- Revert the Settings operating-profile/assignment UI and overview-summary updates together so the app returns to the Phase C device-only workflow.
+
+### 1.157 Addendum (2026-03-14): Multi-Radio Phase D Slice 3 (Primary Runtime Operating-Profile Enforcement)
+
+Problem:
+- Phase D operating profiles are not useful enough if the primary compatibility runtime ignores them.
+- The current shell only enforces device `deployment_mode`; it does not react to the assigned operating profile's scheduler or feature-matrix flags.
+- The architecture still uses one compatibility scheduler and one app shell, so the highest-value Phase D step is to make the primary assigned operating profile drive that shell safely.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: enforcement work overreaches into full schedule-target scope instead of the current compatibility shell.
+- `freqinout/core/station_runtime_manager.py`
+  - Failure mode: the main window has no normalized policy view for the primary assigned operating profile.
+- `freqinout/core/scheduler_engine.py`
+  - Failure mode: scheduler automation keeps reading only the flat settings default and ignores the active operating profile.
+- `freqinout/core/launch_orchestrator.py`
+  - Failure mode: launch automation still runs when the primary operating profile disallows it.
+- `freqinout/gui/main_window.py`
+  - Failure mode: suppressed tabs/background work do not follow the primary operating profile, or changes require restart.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: Launch Control actions fail opaquely when the primary operating profile blocks them.
+- targeted tests
+  - Failure mode: runtime policy enforcement regresses without coverage.
+
+Scope:
+- Add a normalized primary-runtime operating-policy view derived from the assigned operating profile.
+- Enforce that policy in the current compatibility shell only:
+  - `scheduler_enabled` disables current scheduler automation/status ownership
+  - `use_map`, `use_messages`, and `use_net_control_tabs` suppress those primary-shell views
+  - `use_background_ingest` controls background ingest
+  - `use_launch_control` suppresses startup launch automation and manual launch-control actions
+- Combine operating-profile policy with device `deployment_mode` conservatively:
+  - `minimal` remains the strongest suppression mode
+  - operating-profile flags can suppress additional surfaces/work while the device remains `full`
+
+Out of scope:
+- Schedule table `target_scope`
+- One scheduler per device or per operating profile
+- Automatic swap orchestration or conflict policy handling
+- Full per-device launch orchestration
+
+Constraints:
+- Existing single-runtime behavior must remain unchanged when the primary device uses the default operating profile.
+- Enforcement must switch live when the primary assignment changes; no restart required.
+- The app must remain safe when software is absent or when multiple devices are active but only one is primary.
+- This slice must not pretend that secondary active devices already have independent schedulers.
+
+Acceptance criteria:
+- The primary assigned operating profile can disable scheduler automation in the current compatibility runtime.
+- The app shell suppresses the relevant views/background work/launch automation when the primary operating profile disables them.
+- Temporary override assignment changes applied to the primary device take effect immediately in the current shell.
+- Settings explains when Launch Control is blocked by the primary operating profile.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_d.py tests/test_multi_radio_phase_b_slice4.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred Phase D boundary:
+- Schedule `target_scope` for HF/Net/SOP tables remains a follow-on step after these slices.
+- That work requires schedule schema, precedence, and editor changes that are broader than the current compatibility-shell enforcement slice.
+
+Rollback:
+- Revert the primary-runtime operating-policy enforcement, launch/scheduler overrides, and related UI/runtime tests together so the app returns to Phase C device-only shell behavior plus Phase D persisted metadata.
+
+### 1.158 Addendum (2026-03-14): Multi-Radio Phase D Slice 4 (HF/Net Schedule Target Scope for the Primary Compatibility Runtime)
+
+Problem:
+- Phase D operating-profile enforcement gives the primary compatibility runtime a richer policy model, but HF and Net schedule rows are still global.
+- Advanced operators need to stage schedules for different devices or operating profiles without cloning databases or hand-editing rows before each role swap.
+- The runtime is still a single primary compatibility scheduler, so schedule targeting must constrain eligibility cleanly instead of pretending that secondary devices already own independent schedulers.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: the implementation implies full per-device schedulers or SOP retargeting that do not exist yet.
+- `freqinout/core/scheduler_engine.py`
+  - Failure mode: target-specific rows are still evaluated globally, or primary-device / assignment changes do not invalidate cached schedule views.
+- `freqinout/gui/daily_schedule_tab.py`
+  - Failure mode: HF rows cannot persist target metadata safely, or conflict highlighting keeps treating mutually exclusive device-targeted rows as collisions.
+- `freqinout/gui/net_schedule_tab.py`
+  - Failure mode: Net rows lose target metadata in save/export paths, or duplicate/conflict policies collide across different targets.
+- `freqinout/core/sop_manager.py`
+  - Failure mode: Net/SOP policy signatures are ambiguous when two otherwise identical Net rows differ only by target scope.
+- `freqinout/core/db_initializer.py`
+- `tools/db_schema.py`
+  - Failure mode: database creation or drift repair omits the new target columns, causing runtime/UI mismatch.
+- targeted tests
+  - Failure mode: primary-target filtering and row persistence regress silently.
+
+Scope:
+- Extend HF and Net schedule rows with persisted target metadata:
+  - `target_scope` in `{station, device_profile, operating_profile}`
+  - `target_device_profile_id`
+  - `target_operating_profile_id`
+- Default all legacy rows to `station`.
+- Extend the HF and Net editors using the current table-driven UI:
+  - append compact `Target Scope` and `Target` controls to each editable row
+  - allow targeting a device profile or operating profile by persisted row id
+  - preserve stale/missing ids visibly instead of dropping them silently
+- Make the primary compatibility scheduler honor only rows whose target matches the current runtime context:
+  - `station` rows always match
+  - `device_profile` rows match the current primary device profile id
+  - `operating_profile` rows match the current effective operating-profile assignment on the current primary device
+- Keep schedule precedence unchanged after filtering:
+  - Net still wins over HF unless an existing Net/SOP policy override selects SOP
+- Fold target metadata into Net/SOP policy row signatures so otherwise identical rows for different targets do not collide.
+- Reduce obvious false-positive HF/Net duplicate/conflict checks:
+  - rows targeted to different device profiles do not conflict with each other
+  - rows targeted to different operating profiles do not conflict with each other
+  - mixed device-profile vs operating-profile rows remain conservatively overlapping because assignments are dynamic
+
+Out of scope:
+- Separate per-device scheduler instances
+- Secondary-device runtime schedule ownership
+- SOP schedule-layer target scope UI or schema
+- Automatic retargeting when device or operating profiles are deleted
+- Timed operating-profile assignment activation/expiry
+
+Constraints:
+- Existing single-station rows must continue to behave exactly as before with no manual migration.
+- Invalid or stale target references must not crash load, save, export, or scheduler evaluation.
+- The runtime must react to primary-device or primary-assignment changes without restart.
+- The UI must preserve the current app design language; this is an extension of the existing schedule tables, not a redesign.
+
+Acceptance criteria:
+- HF and Net schedule rows can be saved, loaded, and exported with `target_scope` metadata.
+- The primary compatibility scheduler ignores rows whose target does not match the current primary device or its effective operating profile.
+- Switching the primary device or the primary device's operating-profile assignment changes schedule eligibility live.
+- Identical Net rows that differ only by target metadata no longer share the same Net/SOP policy signature.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_d_target_scope.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- SOP schedule-layer target scopes remain deferred because SOP already has its own profile/layer arbitration model and requires a separate UI/runtime design.
+- The scheduler remains primary-runtime only; target scope limits which rows the compatibility scheduler sees, it does not create concurrent schedulers.
+
+Rollback:
+- Revert the HF/Net schedule-target schema, editor, scheduler-filtering, and signature/test changes together so schedule behavior returns to Phase D Slice 3 global-row semantics.

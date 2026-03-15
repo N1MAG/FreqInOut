@@ -36,6 +36,16 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QRegularExpressionValidator, QAction, QColor
 
+from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.schedule_targeting import (
+    TARGET_SCOPE_DEVICE_PROFILE,
+    TARGET_SCOPE_OPERATING_PROFILE,
+    TARGET_SCOPE_STATION,
+    normalize_schedule_target,
+    normalize_schedule_target_fields,
+    normalize_target_scope,
+    schedule_targets_may_overlap,
+)
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.sop_manager import SOPManager
@@ -109,6 +119,11 @@ DAY_NAMES = [
     "Saturday",
 ]
 DAY_OPTIONS = ["ALL"] + DAY_NAMES
+SCHEDULE_TARGET_SCOPE_ITEMS = [
+    ("Station", TARGET_SCOPE_STATION),
+    ("Device Profile", TARGET_SCOPE_DEVICE_PROFILE),
+    ("Operating Profile", TARGET_SCOPE_OPERATING_PROFILE),
+]
 
 _FLDIGI_MODE_OPTIONS_FALLBACK = [
     "Cont-4/250",
@@ -194,6 +209,8 @@ class NetScheduleTab(QWidget):
     COL_FLDIGI_OFFSET = 12
     COL_NETNAME = 13
     COL_AUTOTUNE = 14
+    COL_TARGET_SCOPE = 15
+    COL_TARGET = 16
 
     RES_COL_SOURCE = 0
     RES_COL_SET = 1
@@ -217,10 +234,13 @@ class NetScheduleTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self.multi_radio_store = MultiRadioStore()
         self._status_service = SoftwareStatusService(self.settings)
         self._sop_manager = SOPManager()
         self._net_name_history: List[str] = []
         self.operating_groups: List[Dict[str, str]] = []
+        self.device_profiles: List[Dict[str, Any]] = []
+        self.operating_profiles: List[Dict[str, Any]] = []
         self._clock_timer: QTimer | None = None
         self._suppress_autostart: bool = True  # avoid auto-start during initial load
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
@@ -243,9 +263,127 @@ class NetScheduleTab(QWidget):
         self._net_sop_conflict_cache_epoch: int = 0
 
         self._build_ui()
+        self._refresh_schedule_target_catalogs()
         self._load()
         self._setup_clock_timer()
         self._suppress_autostart = False
+
+    def _refresh_schedule_target_catalogs(self) -> None:
+        try:
+            self.device_profiles = list(self.multi_radio_store.list_device_profiles())
+        except Exception as e:
+            log.debug("Net Schedule: failed loading device profiles for target scopes: %s", e)
+            self.device_profiles = []
+        try:
+            self.operating_profiles = list(self.multi_radio_store.list_operating_profiles())
+        except Exception as e:
+            log.debug("Net Schedule: failed loading operating profiles for target scopes: %s", e)
+            self.operating_profiles = []
+
+    @staticmethod
+    def _target_scope_tooltip() -> str:
+        return (
+            "Station rows apply to any current primary runtime. "
+            "Device Profile rows apply only when that device is primary. "
+            "Operating Profile rows apply only when the current primary device carries that effective assignment."
+        )
+
+    def _device_target_label(self, profile: Dict[str, Any]) -> str:
+        name = str(profile.get("name") or "").strip() or f"Device {int(profile.get('id') or 0)}"
+        state_parts: List[str] = []
+        if not bool(profile.get("enabled", 1)):
+            state_parts.append("disabled")
+        if bool(profile.get("runtime_primary", 0)):
+            state_parts.append("primary")
+        elif bool(profile.get("runtime_active", 0)):
+            state_parts.append("active")
+        if state_parts:
+            return f"{name} ({', '.join(state_parts)})"
+        return name
+
+    def _operating_target_label(self, profile: Dict[str, Any]) -> str:
+        name = str(profile.get("name") or "").strip() or f"Operating Profile {int(profile.get('id') or 0)}"
+        if not bool(profile.get("enabled", 1)):
+            return f"{name} (disabled)"
+        return name
+
+    def _populate_target_value_combo(
+        self,
+        combo: QComboBox,
+        scope: str,
+        *,
+        target_device_profile_id: Optional[int] = None,
+        target_operating_profile_id: Optional[int] = None,
+    ) -> None:
+        prev_block = combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.setToolTip(self._target_scope_tooltip())
+            if scope == TARGET_SCOPE_STATION:
+                combo.addItem("Station-wide", None)
+                combo.setEnabled(False)
+                return
+            if scope == TARGET_SCOPE_DEVICE_PROFILE:
+                for row in self.device_profiles:
+                    combo.addItem(self._device_target_label(row), int(row.get("id", 0) or 0))
+                if target_device_profile_id is not None and combo.findData(int(target_device_profile_id)) < 0:
+                    combo.addItem(f"Missing device #{int(target_device_profile_id)}", int(target_device_profile_id))
+                if combo.count() <= 0:
+                    combo.addItem("No device profiles", None)
+                    combo.setEnabled(False)
+                    return
+                combo.setEnabled(True)
+                if target_device_profile_id is not None:
+                    idx = combo.findData(int(target_device_profile_id))
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+                return
+            for row in self.operating_profiles:
+                combo.addItem(self._operating_target_label(row), int(row.get("id", 0) or 0))
+            if target_operating_profile_id is not None and combo.findData(int(target_operating_profile_id)) < 0:
+                combo.addItem(
+                    f"Missing operating profile #{int(target_operating_profile_id)}",
+                    int(target_operating_profile_id),
+                )
+            if combo.count() <= 0:
+                combo.addItem("No operating profiles", None)
+                combo.setEnabled(False)
+                return
+            combo.setEnabled(True)
+            if target_operating_profile_id is not None:
+                idx = combo.findData(int(target_operating_profile_id))
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        finally:
+            combo.blockSignals(prev_block)
+
+    def _selected_schedule_target(self, row_index: int) -> Tuple[str, Optional[int], Optional[int]]:
+        scope_widget = self.table.cellWidget(row_index, self.COL_TARGET_SCOPE)
+        target_widget = self.table.cellWidget(row_index, self.COL_TARGET)
+        if not isinstance(scope_widget, QComboBox):
+            return TARGET_SCOPE_STATION, None, None
+        scope = normalize_target_scope(scope_widget.currentData())
+        target_id = target_widget.currentData() if isinstance(target_widget, QComboBox) else None
+        return normalize_schedule_target(
+            scope,
+            target_device_profile_id=target_id if scope == TARGET_SCOPE_DEVICE_PROFILE else None,
+            target_operating_profile_id=target_id if scope == TARGET_SCOPE_OPERATING_PROFILE else None,
+        )
+
+    def _refresh_schedule_target_widgets(self) -> None:
+        self._refresh_schedule_target_catalogs()
+        for row_index in range(self.table.rowCount()):
+            scope_widget = self.table.cellWidget(row_index, self.COL_TARGET_SCOPE)
+            target_widget = self.table.cellWidget(row_index, self.COL_TARGET)
+            if not isinstance(scope_widget, QComboBox) or not isinstance(target_widget, QComboBox):
+                continue
+            scope, target_device_profile_id, target_operating_profile_id = self._selected_schedule_target(row_index)
+            self._populate_target_value_combo(
+                target_widget,
+                scope,
+                target_device_profile_id=target_device_profile_id,
+                target_operating_profile_id=target_operating_profile_id,
+            )
 
     # --------- UI --------- #
 
@@ -267,9 +405,15 @@ class NetScheduleTab(QWidget):
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
 
+        self.schedule_target_hint = QLabel(
+            "Target Scope limits when a row is eligible: Station applies everywhere, Device Profile and Operating Profile apply only when that target owns the current primary runtime."
+        )
+        self.schedule_target_hint.setWordWrap(True)
+        layout.addWidget(self.schedule_target_hint)
+
         # table
         self.table = QTableWidget()
-        self.table.setColumnCount(15)
+        self.table.setColumnCount(self.COL_TARGET + 1)
         self._set_headers()
         self.table.setSortingEnabled(False)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
@@ -279,6 +423,7 @@ class NetScheduleTab(QWidget):
         hv = self.table.horizontalHeader()
         hv.setSectionResizeMode(QHeaderView.ResizeToContents)
         hv.setSectionResizeMode(self.COL_NETNAME, QHeaderView.Stretch)
+        hv.setSectionResizeMode(self.COL_TARGET, QHeaderView.Stretch)
         hv.setStretchLastSection(False)
         hv.setMinimumSectionSize(50)
         layout.addWidget(self.table)
@@ -480,6 +625,7 @@ class NetScheduleTab(QWidget):
             meta={"rows": int(self.table.rowCount())},
             min_ms=0.0,
         ):
+            self._refresh_schedule_target_widgets()
             if self._pending_sop_conflict_refresh:
                 self._pending_sop_conflict_refresh = False
                 self._schedule_net_sop_conflict_refresh(force=True)
@@ -506,7 +652,7 @@ class NetScheduleTab(QWidget):
     def _rows_signature(self, rows: List[Dict[str, Any]]) -> str:
         normalized: List[Dict[str, Any]] = []
         for raw in rows:
-            row = self._strip_internal_row(raw)
+            row = normalize_schedule_target_fields(self._strip_internal_row(raw))
             recurrence = str(row.get("recurrence") or "Weekly").strip()
             if recurrence == "Monthly":
                 recurrence = "Periodic"
@@ -531,6 +677,9 @@ class NetScheduleTab(QWidget):
                     "auto_tune": bool(row.get("auto_tune", False)),
                     "fldigi_mode": str(row.get("fldigi_mode") or "").strip(),
                     "fldigi_offset": str(row.get("fldigi_offset") or "").strip(),
+                    "target_scope": str(row.get("target_scope") or TARGET_SCOPE_STATION),
+                    "target_device_profile_id": row.get("target_device_profile_id"),
+                    "target_operating_profile_id": row.get("target_operating_profile_id"),
                 }
             )
         return json.dumps(normalized, sort_keys=True)
@@ -788,6 +937,8 @@ class NetScheduleTab(QWidget):
                 "FLDigi Offset",
                 "Net Name",
                 "Auto-Tune",
+                "Target Scope",
+                "Target",
             ]
         )
         self.time_toggle_btn.setText("Showing: Local" if self._show_local else "Showing: UTC")
@@ -886,6 +1037,7 @@ class NetScheduleTab(QWidget):
         finally:
             self._suspend_dirty_tracking = False
         self._update_clock_labels()
+        self._refresh_schedule_target_widgets()
         self._resize_table_columns()
         self._mark_dirty()
         self._schedule_net_sop_conflict_refresh(force=True)
@@ -894,6 +1046,7 @@ class NetScheduleTab(QWidget):
     # --------- row widgets --------- #
 
     def _add_row(self, row_data: Dict | None = None):
+        self._refresh_schedule_target_catalogs()
         r = self.table.rowCount()
         self.table.insertRow(r)
 
@@ -1045,6 +1198,37 @@ class NetScheduleTab(QWidget):
         auto_layout.setAlignment(Qt.AlignCenter)
         auto_layout.addWidget(auto_chk)
         self.table.setCellWidget(r, self.COL_AUTOTUNE, auto_wrap)
+
+        target_scope_combo = QComboBox()
+        target_scope_combo.setToolTip(self._target_scope_tooltip())
+        target_value_combo = QComboBox()
+        target_value_combo.setToolTip(self._target_scope_tooltip())
+        target_scope, target_device_profile_id, target_operating_profile_id = normalize_schedule_target(
+            row_data.get("target_scope"),
+            target_device_profile_id=row_data.get("target_device_profile_id"),
+            target_operating_profile_id=row_data.get("target_operating_profile_id"),
+        )
+        for label, value in SCHEDULE_TARGET_SCOPE_ITEMS:
+            target_scope_combo.addItem(label, value)
+        idx = target_scope_combo.findData(target_scope)
+        if idx >= 0:
+            target_scope_combo.setCurrentIndex(idx)
+        self._populate_target_value_combo(
+            target_value_combo,
+            target_scope,
+            target_device_profile_id=target_device_profile_id,
+            target_operating_profile_id=target_operating_profile_id,
+        )
+        target_scope_combo.currentIndexChanged.connect(
+            lambda _idx, scope_combo=target_scope_combo, value_combo=target_value_combo: self._populate_target_value_combo(
+                value_combo,
+                normalize_target_scope(scope_combo.currentData()),
+            )
+        )
+        target_scope_combo.currentTextChanged.connect(self._mark_dirty)
+        target_value_combo.currentTextChanged.connect(self._mark_dirty)
+        self.table.setCellWidget(r, self.COL_TARGET_SCOPE, target_scope_combo)
+        self.table.setCellWidget(r, self.COL_TARGET, target_value_combo)
 
         # Freq / times as QTableWidgetItem
         def set_item(col: int, value: str | None):
@@ -1649,24 +1833,35 @@ class NetScheduleTab(QWidget):
                 day, start_txt = self._convert_day_time(orig_day, start_txt, to_local=False)
                 _, end_txt = self._convert_day_time(orig_day, end_txt, to_local=False)
 
-            row = {
-                "day_utc": day,
-                "recurrence": recurrence,
-                "biweekly_offset_weeks": biweekly_offset,
-                "month_weeks": ",".join(str(w) for w in month_weeks) if month_weeks else "",
-                "group_name": group_name,
-                "band": band,
-                "mode": mode,
-                "vfo": "A",
-                "frequency": self._format_freq(freq_mhz),
-                "start_utc": start_txt,
-                "end_utc": end_txt,
-                "early_checkin": str(early_int),
-                "net_name": net_name,
-                "auto_tune": bool(auto_tune),
-                "fldigi_mode": fldigi_mode,
-                "fldigi_offset": fldigi_offset,
-            }
+            target_scope, target_device_profile_id, target_operating_profile_id = self._selected_schedule_target(r)
+            if target_scope == TARGET_SCOPE_DEVICE_PROFILE and target_device_profile_id is None:
+                raise ValueError(f"Row {r+1}: Device-targeted rows require a device profile.")
+            if target_scope == TARGET_SCOPE_OPERATING_PROFILE and target_operating_profile_id is None:
+                raise ValueError(f"Row {r+1}: Operating-profile-targeted rows require an operating profile.")
+
+            row = normalize_schedule_target_fields(
+                {
+                    "day_utc": day,
+                    "recurrence": recurrence,
+                    "biweekly_offset_weeks": biweekly_offset,
+                    "month_weeks": ",".join(str(w) for w in month_weeks) if month_weeks else "",
+                    "group_name": group_name,
+                    "band": band,
+                    "mode": mode,
+                    "vfo": "A",
+                    "frequency": self._format_freq(freq_mhz),
+                    "start_utc": start_txt,
+                    "end_utc": end_txt,
+                    "early_checkin": str(early_int),
+                    "net_name": net_name,
+                    "auto_tune": bool(auto_tune),
+                    "fldigi_mode": fldigi_mode,
+                    "fldigi_offset": fldigi_offset,
+                    "target_scope": target_scope,
+                    "target_device_profile_id": target_device_profile_id,
+                    "target_operating_profile_id": target_operating_profile_id,
+                }
+            )
             if resource_id is not None:
                 row["_resource_id"] = resource_id
             if resource_set:
@@ -1737,7 +1932,10 @@ class NetScheduleTab(QWidget):
                             group_name,
                             fldigi_mode,
                             fldigi_offset,
-                            resource_id
+                            resource_id,
+                            target_scope,
+                            target_device_profile_id,
+                            target_operating_profile_id
                         FROM net_schedule_tab
                         """
                     )
@@ -1761,29 +1959,37 @@ class NetScheduleTab(QWidget):
                         fldigi_mode,
                         fldigi_offset,
                         resource_id,
+                        target_scope,
+                        target_device_profile_id,
+                        target_operating_profile_id,
                     ) in cur.fetchall():
                         rows.append(
-                            {
-                                "day_utc": day_utc or "",
-                                "recurrence": "Periodic" if (recurrence or "Weekly") == "Monthly" else recurrence or "Weekly",
-                                "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
-                                "month_weeks": month_weeks or "",
-                                "band": band or "",
-                                "mode": mode or "",
-                                "vfo": (vfo or "A").strip().upper(),
-                                "frequency": str(freq or ""),
-                                "start_utc": start_utc or "",
-                                "end_utc": end_utc or "",
-                                "early_checkin": str(early if early is not None else 0),
-                                "auto_tune": bool(auto_tune),
-                                "primary_js8call_group": group or "",
-                                "comment": comment or "",
-                                "net_name": net_name or "",
-                                "group_name": group_name or "",
-                                "fldigi_mode": fldigi_mode or "",
-                                "fldigi_offset": fldigi_offset or "",
-                                "_resource_id": int(resource_id) if resource_id not in (None, "") else None,
-                            }
+                            normalize_schedule_target_fields(
+                                {
+                                    "day_utc": day_utc or "",
+                                    "recurrence": "Periodic" if (recurrence or "Weekly") == "Monthly" else recurrence or "Weekly",
+                                    "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
+                                    "month_weeks": month_weeks or "",
+                                    "band": band or "",
+                                    "mode": mode or "",
+                                    "vfo": (vfo or "A").strip().upper(),
+                                    "frequency": str(freq or ""),
+                                    "start_utc": start_utc or "",
+                                    "end_utc": end_utc or "",
+                                    "early_checkin": str(early if early is not None else 0),
+                                    "auto_tune": bool(auto_tune),
+                                    "primary_js8call_group": group or "",
+                                    "comment": comment or "",
+                                    "net_name": net_name or "",
+                                    "group_name": group_name or "",
+                                    "fldigi_mode": fldigi_mode or "",
+                                    "fldigi_offset": fldigi_offset or "",
+                                    "_resource_id": int(resource_id) if resource_id not in (None, "") else None,
+                                    "target_scope": target_scope,
+                                    "target_device_profile_id": target_device_profile_id,
+                                    "target_operating_profile_id": target_operating_profile_id,
+                                }
+                            )
                         )
                     return rows
                 except Exception:
@@ -1863,26 +2069,28 @@ class NetScheduleTab(QWidget):
                             fldigi_mode = ""
                             fldigi_offset = ""
                         rows.append(
-                            {
-                                "day_utc": day_utc or "",
-                                "recurrence": "Weekly",
-                                "biweekly_offset_weeks": 0,
-                                "month_weeks": "",
-                                "band": band or "",
-                                "mode": mode or "",
-                                "vfo": (vfo or "A").strip().upper(),
-                                "frequency": str(freq or ""),
-                                "start_utc": start_utc or "",
-                                "end_utc": end_utc or "",
-                                "early_checkin": str(early if early is not None else 0),
-                                "auto_tune": False,
-                                "primary_js8call_group": group or "",
-                                "comment": comment or "",
-                                "net_name": net_name or "",
-                                "group_name": "",
-                                "fldigi_mode": fldigi_mode or "",
-                                "fldigi_offset": fldigi_offset or "",
-                            }
+                            normalize_schedule_target_fields(
+                                {
+                                    "day_utc": day_utc or "",
+                                    "recurrence": "Weekly",
+                                    "biweekly_offset_weeks": 0,
+                                    "month_weeks": "",
+                                    "band": band or "",
+                                    "mode": mode or "",
+                                    "vfo": (vfo or "A").strip().upper(),
+                                    "frequency": str(freq or ""),
+                                    "start_utc": start_utc or "",
+                                    "end_utc": end_utc or "",
+                                    "early_checkin": str(early if early is not None else 0),
+                                    "auto_tune": False,
+                                    "primary_js8call_group": group or "",
+                                    "comment": comment or "",
+                                    "net_name": net_name or "",
+                                    "group_name": "",
+                                    "fldigi_mode": fldigi_mode or "",
+                                    "fldigi_offset": fldigi_offset or "",
+                                }
+                            )
                         )
                     return rows
 
@@ -1907,7 +2115,10 @@ class NetScheduleTab(QWidget):
                             net_name,
                             group_name,
                             fldigi_mode,
-                            fldigi_offset
+                            fldigi_offset,
+                            target_scope,
+                            target_device_profile_id,
+                            target_operating_profile_id
                         FROM net_schedule
                         """
                     )
@@ -1929,28 +2140,36 @@ class NetScheduleTab(QWidget):
                         group_name,
                         fldigi_mode,
                         fldigi_offset,
+                        target_scope,
+                        target_device_profile_id,
+                        target_operating_profile_id,
                     ) in cur.fetchall():
                         rows.append(
-                            {
-                                "day_utc": day_utc or "",
-                                "recurrence": "Periodic" if (recurrence or "Weekly") == "Monthly" else recurrence or "Weekly",
-                                "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
-                                "month_weeks": month_weeks or "",
-                                "band": band or "",
-                                "mode": mode or "",
-                                "vfo": "A",
-                                "frequency": str(freq or ""),
-                                "start_utc": start_utc or "",
-                                "end_utc": end_utc or "",
-                                "early_checkin": str(early if early is not None else 0),
-                                "auto_tune": bool(auto_tune),
-                                "primary_js8call_group": group or "",
-                                "comment": comment or "",
-                                "net_name": net_name or "",
-                                "group_name": group_name or "",
-                                "fldigi_mode": fldigi_mode or "",
-                                "fldigi_offset": fldigi_offset or "",
-                            }
+                            normalize_schedule_target_fields(
+                                {
+                                    "day_utc": day_utc or "",
+                                    "recurrence": "Periodic" if (recurrence or "Weekly") == "Monthly" else recurrence or "Weekly",
+                                    "biweekly_offset_weeks": int(biweekly_offset_weeks or 0),
+                                    "month_weeks": month_weeks or "",
+                                    "band": band or "",
+                                    "mode": mode or "",
+                                    "vfo": "A",
+                                    "frequency": str(freq or ""),
+                                    "start_utc": start_utc or "",
+                                    "end_utc": end_utc or "",
+                                    "early_checkin": str(early if early is not None else 0),
+                                    "auto_tune": bool(auto_tune),
+                                    "primary_js8call_group": group or "",
+                                    "comment": comment or "",
+                                    "net_name": net_name or "",
+                                    "group_name": group_name or "",
+                                    "fldigi_mode": fldigi_mode or "",
+                                    "fldigi_offset": fldigi_offset or "",
+                                    "target_scope": target_scope,
+                                    "target_device_profile_id": target_device_profile_id,
+                                    "target_operating_profile_id": target_operating_profile_id,
+                                }
+                            )
                         )
                     return rows
                 except Exception:
@@ -2026,26 +2245,28 @@ class NetScheduleTab(QWidget):
                             fldigi_mode = ""
                             fldigi_offset = ""
                         rows.append(
-                            {
-                                "day_utc": day_utc or "",
-                                "recurrence": "Weekly",
-                                "biweekly_offset_weeks": 0,
-                                "month_weeks": "",
-                                "band": band or "",
-                                "mode": mode or "",
-                                "vfo": "A",
-                                "frequency": str(freq or ""),
-                                "start_utc": start_utc or "",
-                                "end_utc": end_utc or "",
-                                "early_checkin": str(early if early is not None else 0),
-                                "auto_tune": False,
-                                "primary_js8call_group": group or "",
-                                "comment": comment or "",
-                                "net_name": net_name or "",
-                                "group_name": "",
-                                "fldigi_mode": fldigi_mode or "",
-                                "fldigi_offset": fldigi_offset or "",
-                            }
+                            normalize_schedule_target_fields(
+                                {
+                                    "day_utc": day_utc or "",
+                                    "recurrence": "Weekly",
+                                    "biweekly_offset_weeks": 0,
+                                    "month_weeks": "",
+                                    "band": band or "",
+                                    "mode": mode or "",
+                                    "vfo": "A",
+                                    "frequency": str(freq or ""),
+                                    "start_utc": start_utc or "",
+                                    "end_utc": end_utc or "",
+                                    "early_checkin": str(early if early is not None else 0),
+                                    "auto_tune": False,
+                                    "primary_js8call_group": group or "",
+                                    "comment": comment or "",
+                                    "net_name": net_name or "",
+                                    "group_name": "",
+                                    "fldigi_mode": fldigi_mode or "",
+                                    "fldigi_offset": fldigi_offset or "",
+                                }
+                            )
                         )
                     return rows
             return rows
@@ -2065,6 +2286,7 @@ class NetScheduleTab(QWidget):
                 self.settings.reload()
             except Exception:
                 pass
+            self._refresh_schedule_target_catalogs()
             self._load_operating_groups()
             data = self._load_from_db()
             loaded_from_db = bool(data)
@@ -2072,7 +2294,7 @@ class NetScheduleTab(QWidget):
                 data = self.settings.get("net_schedule", [])
                 if not isinstance(data, list):
                     data = []
-            self._raw_rows = data
+            self._raw_rows = [normalize_schedule_target_fields(row) for row in data if isinstance(row, dict)]
             for row in self._raw_rows:
                 self._add_row(self._to_view_row(row))
             self._net_name_history = sorted(
@@ -2083,6 +2305,7 @@ class NetScheduleTab(QWidget):
             self._refresh_resource_set_combo()
             self._refresh_resources_table()
             self._update_clock_labels()
+            self._refresh_schedule_target_widgets()
             self._resize_table_columns()
             src = "DB" if loaded_from_db else "settings"
             log.info("Net schedule loaded from %s: %d rows", src, len(data))
@@ -2687,25 +2910,31 @@ class NetScheduleTab(QWidget):
                 "rows": [],
             }
             for r in rows:
+                normalized = normalize_schedule_target_fields(r)
                 payload["rows"].append(
                     {
-                        "day_utc": r.get("day_utc", ""),
-                        "recurrence": "Periodic" if r.get("recurrence", "Weekly") == "Monthly" else r.get("recurrence", "Weekly"),
-                        "biweekly_offset_weeks": int(r.get("biweekly_offset_weeks", 0) or 0),
-                        "month_weeks": r.get("month_weeks", ""),
-                        "group_name": r.get("group_name", ""),
-                        "band": r.get("band", ""),
-                        "mode": r.get("mode", ""),
-                        "frequency": r.get("frequency", ""),
-                        "start_utc": r.get("start_utc", ""),
-                        "end_utc": r.get("end_utc", ""),
-                        "early_checkin": r.get("early_checkin", 0),
+                        "day_utc": normalized.get("day_utc", ""),
+                        "recurrence": "Periodic"
+                        if normalized.get("recurrence", "Weekly") == "Monthly"
+                        else normalized.get("recurrence", "Weekly"),
+                        "biweekly_offset_weeks": int(normalized.get("biweekly_offset_weeks", 0) or 0),
+                        "month_weeks": normalized.get("month_weeks", ""),
+                        "group_name": normalized.get("group_name", ""),
+                        "band": normalized.get("band", ""),
+                        "mode": normalized.get("mode", ""),
+                        "frequency": normalized.get("frequency", ""),
+                        "start_utc": normalized.get("start_utc", ""),
+                        "end_utc": normalized.get("end_utc", ""),
+                        "early_checkin": normalized.get("early_checkin", 0),
                         "auto_tune": None,
-                        "primary_js8call_group": r.get("primary_js8call_group", ""),
-                        "comment": r.get("comment", ""),
-                        "net_name": r.get("net_name", ""),
-                        "fldigi_mode": r.get("fldigi_mode", ""),
-                        "fldigi_offset": r.get("fldigi_offset", ""),
+                        "primary_js8call_group": normalized.get("primary_js8call_group", ""),
+                        "comment": normalized.get("comment", ""),
+                        "net_name": normalized.get("net_name", ""),
+                        "fldigi_mode": normalized.get("fldigi_mode", ""),
+                        "fldigi_offset": normalized.get("fldigi_offset", ""),
+                        "target_scope": normalized.get("target_scope", TARGET_SCOPE_STATION),
+                        "target_device_profile_id": normalized.get("target_device_profile_id"),
+                        "target_operating_profile_id": normalized.get("target_operating_profile_id"),
                     }
                 )
             Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -2775,7 +3004,10 @@ class NetScheduleTab(QWidget):
                 group_name TEXT,
                 fldigi_mode TEXT,
                 fldigi_offset TEXT,
-                resource_id INTEGER
+                resource_id INTEGER,
+                target_scope TEXT NOT NULL DEFAULT 'station',
+                target_device_profile_id INTEGER,
+                target_operating_profile_id INTEGER
             )
             """
         )
@@ -2799,7 +3031,10 @@ class NetScheduleTab(QWidget):
                 net_name TEXT,
                 group_name TEXT,
                 fldigi_mode TEXT,
-                fldigi_offset TEXT
+                fldigi_offset TEXT,
+                target_scope TEXT NOT NULL DEFAULT 'station',
+                target_device_profile_id INTEGER,
+                target_operating_profile_id INTEGER
             )
             """
         )
@@ -2859,6 +3094,9 @@ class NetScheduleTab(QWidget):
                     "fldigi_mode": "TEXT",
                     "fldigi_offset": "TEXT",
                     "resource_id": "INTEGER",
+                    "target_scope": "TEXT NOT NULL DEFAULT 'station'",
+                    "target_device_profile_id": "INTEGER",
+                    "target_operating_profile_id": "INTEGER",
                 },
             )
             self._ensure_db_columns(
@@ -2872,6 +3110,9 @@ class NetScheduleTab(QWidget):
                     "auto_tune": "INTEGER DEFAULT 0",
                     "fldigi_mode": "TEXT",
                     "fldigi_offset": "TEXT",
+                    "target_scope": "TEXT NOT NULL DEFAULT 'station'",
+                    "target_device_profile_id": "INTEGER",
+                    "target_operating_profile_id": "INTEGER",
                 },
             )
             self._ensure_db_columns(
@@ -2918,6 +3159,9 @@ class NetScheduleTab(QWidget):
                     "fldigi_mode": "TEXT",
                     "fldigi_offset": "TEXT",
                     "resource_id": "INTEGER",
+                    "target_scope": "TEXT NOT NULL DEFAULT 'station'",
+                    "target_device_profile_id": "INTEGER",
+                    "target_operating_profile_id": "INTEGER",
                 },
             )
             self._ensure_db_columns(
@@ -2931,6 +3175,9 @@ class NetScheduleTab(QWidget):
                     "auto_tune": "INTEGER DEFAULT 0",
                     "fldigi_mode": "TEXT",
                     "fldigi_offset": "TEXT",
+                    "target_scope": "TEXT NOT NULL DEFAULT 'station'",
+                    "target_device_profile_id": "INTEGER",
+                    "target_operating_profile_id": "INTEGER",
                 },
             )
             self._ensure_db_columns(
@@ -2979,60 +3226,69 @@ class NetScheduleTab(QWidget):
 
     def _insert_rows_inner(self, conn: sqlite3.Connection, rows: List[Dict]) -> None:
         for row in rows:
+            normalized = normalize_schedule_target_fields(row)
             conn.execute(
                 """
                 INSERT INTO net_schedule_tab
                   (day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, vfo, frequency, start_utc, end_utc,
-                   early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name, fldigi_mode, fldigi_offset, resource_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name, fldigi_mode, fldigi_offset,
+                   resource_id, target_scope, target_device_profile_id, target_operating_profile_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    row.get("day_utc"),
-                    row.get("recurrence", "Weekly"),
-                    int(row.get("biweekly_offset_weeks", 0) or 0),
-                    row.get("month_weeks", ""),
-                    row.get("band"),
-                    row.get("mode"),
-                    row.get("vfo"),
-                    row.get("frequency"),
-                    row.get("start_utc"),
-                    row.get("end_utc"),
-                    int(row.get("early_checkin", "0") or 0),
-                    1 if row.get("auto_tune") else 0,
-                    row.get("primary_js8call_group"),
-                    row.get("comment"),
-                    row.get("net_name"),
-                    row.get("group_name"),
-                    row.get("fldigi_mode", ""),
-                    row.get("fldigi_offset", ""),
-                    row.get("_resource_id"),
+                    normalized.get("day_utc"),
+                    normalized.get("recurrence", "Weekly"),
+                    int(normalized.get("biweekly_offset_weeks", 0) or 0),
+                    normalized.get("month_weeks", ""),
+                    normalized.get("band"),
+                    normalized.get("mode"),
+                    normalized.get("vfo"),
+                    normalized.get("frequency"),
+                    normalized.get("start_utc"),
+                    normalized.get("end_utc"),
+                    int(normalized.get("early_checkin", "0") or 0),
+                    1 if normalized.get("auto_tune") else 0,
+                    normalized.get("primary_js8call_group"),
+                    normalized.get("comment"),
+                    normalized.get("net_name"),
+                    normalized.get("group_name"),
+                    normalized.get("fldigi_mode", ""),
+                    normalized.get("fldigi_offset", ""),
+                    normalized.get("_resource_id"),
+                    normalized.get("target_scope"),
+                    normalized.get("target_device_profile_id"),
+                    normalized.get("target_operating_profile_id"),
                 ),
             )
             conn.execute(
                 """
                 INSERT INTO net_schedule
                   (day_utc, recurrence, biweekly_offset_weeks, month_weeks, band, mode, frequency, start_utc, end_utc,
-                   early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name, fldigi_mode, fldigi_offset)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   early_checkin, auto_tune, primary_js8call_group, comment, net_name, group_name, fldigi_mode, fldigi_offset,
+                   target_scope, target_device_profile_id, target_operating_profile_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    row.get("day_utc"),
-                    row.get("recurrence", "Weekly"),
-                    int(row.get("biweekly_offset_weeks", 0) or 0),
-                    row.get("month_weeks", ""),
-                    row.get("band"),
-                    row.get("mode"),
-                    row.get("frequency"),
-                    row.get("start_utc"),
-                    row.get("end_utc"),
-                    int(row.get("early_checkin", "0") or 0),
-                    1 if row.get("auto_tune") else 0,
-                    row.get("primary_js8call_group"),
-                    row.get("comment"),
-                    row.get("net_name"),
-                    row.get("group_name"),
-                    row.get("fldigi_mode", ""),
-                    row.get("fldigi_offset", ""),
+                    normalized.get("day_utc"),
+                    normalized.get("recurrence", "Weekly"),
+                    int(normalized.get("biweekly_offset_weeks", 0) or 0),
+                    normalized.get("month_weeks", ""),
+                    normalized.get("band"),
+                    normalized.get("mode"),
+                    normalized.get("frequency"),
+                    normalized.get("start_utc"),
+                    normalized.get("end_utc"),
+                    int(normalized.get("early_checkin", "0") or 0),
+                    1 if normalized.get("auto_tune") else 0,
+                    normalized.get("primary_js8call_group"),
+                    normalized.get("comment"),
+                    normalized.get("net_name"),
+                    normalized.get("group_name"),
+                    normalized.get("fldigi_mode", ""),
+                    normalized.get("fldigi_offset", ""),
+                    normalized.get("target_scope"),
+                    normalized.get("target_device_profile_id"),
+                    normalized.get("target_operating_profile_id"),
                 ),
             )
 
@@ -4130,20 +4386,25 @@ class NetScheduleTab(QWidget):
         active_rows: List[Dict[str, Any]],
         candidates: List[Dict[str, Any]],
     ) -> List[str]:
-        active_map: Dict[Tuple[str, str, str, str, str, str], Dict[str, Any]] = {}
+        active_map: Dict[Tuple[str, str, str, str, str, str], List[Dict[str, Any]]] = {}
         for row in active_rows:
-            active_map[self._schedule_dup_key(row)] = row
+            key = self._schedule_dup_key(row)
+            active_map.setdefault(key, []).append(normalize_schedule_target_fields(row))
         conflicts: List[str] = []
         for row in candidates:
             key = self._schedule_dup_key(row)
             if key not in active_map:
                 continue
-            existing = active_map[key]
-            label = (
-                f"{key[0]} {key[1]}-{key[2]} {key[3]} {key[4]} {key[5]} "
-                f"(existing: {existing.get('net_name','') or '<unnamed>'}, incoming: {row.get('net_name','') or '<unnamed>'})"
-            )
-            conflicts.append(label)
+            candidate = normalize_schedule_target_fields(row)
+            for existing in active_map[key]:
+                if not schedule_targets_may_overlap(existing, candidate):
+                    continue
+                label = (
+                    f"{key[0]} {key[1]}-{key[2]} {key[3]} {key[4]} {key[5]} "
+                    f"(existing: {existing.get('net_name','') or '<unnamed>'}, incoming: {candidate.get('net_name','') or '<unnamed>'})"
+                )
+                conflicts.append(label)
+                break
         return conflicts
 
     def _add_resources_to_schedule(self, resources: List[Dict[str, Any]], *, origin: str) -> None:

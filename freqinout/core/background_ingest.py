@@ -167,6 +167,9 @@ class BackgroundIngestController(QObject):
         except Exception as e:
             log.debug("BackgroundIngest: %s future failed: %s", job_name, e)
 
+    def is_running(self) -> bool:
+        return bool(self._running)
+
     def _ingest_js8_links(self) -> None:
         self._submit_job("js8_links", self._run_js8_links_job)
 

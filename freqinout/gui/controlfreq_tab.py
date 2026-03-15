@@ -221,6 +221,7 @@ class ControlFreqTab(QWidget):
         theme = resolve_theme(self.settings)
         status_items = [
             ("FLRig", "FLRig"),
+            ("RigCtlD", "RigCtlD"),
             ("FLDigi", "FLDigi"),
             ("FLMsg", "FLMsg"),
             ("FLAmp", "FLAmp"),
@@ -2876,11 +2877,11 @@ class ControlFreqTab(QWidget):
 
     def _on_freq_set_clicked(self) -> None:
         control_via = (self.settings.get("control_via", "") or "").strip()
-        if control_via not in {"FLRig", "JS8Call"}:
+        if control_via not in {"FLRig", "RIGCTLD", "JS8Call"}:
             QMessageBox.information(
                 self,
                 "Frequency Control",
-                "Frequency control is available when Control Via is FLRig or JS8Call.",
+                "Frequency control is available when Control Via is FLRig, RIGCTLD, or JS8Call.",
             )
             return
         meta = selected_qsy_meta(self.freq_combo)

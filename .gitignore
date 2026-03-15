@@ -76,6 +76,13 @@ tests/*
 !tests/test_operator_checkins_schema_phase3.py
 !tests/test_software_status_phase4.py
 !tests/test_varac_schema_phase5.py
+!tests/test_multi_radio_phase_a.py
+!tests/test_multi_radio_phase_b_slice2.py
+!tests/test_multi_radio_phase_b_slice3.py
+!tests/test_multi_radio_phase_b_slice4.py
+!tests/test_multi_radio_phase_c.py
+!tests/test_multi_radio_phase_d.py
+!tests/test_multi_radio_phase_d_target_scope.py
 
 # Local benchmark/smoke artifacts
 .benchmarks/

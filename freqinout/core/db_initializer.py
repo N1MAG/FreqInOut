@@ -12,6 +12,7 @@ from typing import Dict, Set
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
 from freqinout.core.varac_ingest import ensure_varac_local_tables
 
 # Base config directory (user-writable)
@@ -34,6 +35,7 @@ def _ensure_settings_db() -> None:
             )
             """
         )
+        ensure_multi_radio_settings_schema(conn)
         conn.commit()
     finally:
         conn.close()
@@ -693,7 +695,10 @@ def _ensure_nets_db() -> None:
                 start_utc TEXT NOT NULL,
                 end_utc TEXT NOT NULL,
                 group_name TEXT,
-                auto_tune INTEGER DEFAULT 0
+                auto_tune INTEGER DEFAULT 0,
+                target_scope TEXT NOT NULL DEFAULT 'station',
+                target_device_profile_id INTEGER,
+                target_operating_profile_id INTEGER
             )
             """
         )
@@ -710,6 +715,9 @@ def _ensure_nets_db() -> None:
                 "end_utc": "TEXT",
                 "group_name": "TEXT",
                 "auto_tune": "INTEGER DEFAULT 0",
+                "target_scope": "TEXT NOT NULL DEFAULT 'station'",
+                "target_device_profile_id": "INTEGER",
+                "target_operating_profile_id": "INTEGER",
             },
         )
         cur.execute(
@@ -731,9 +739,13 @@ def _ensure_nets_db() -> None:
                 primary_js8call_group TEXT,
                 comment TEXT,
                 net_name TEXT,
+                group_name TEXT,
                 fldigi_mode TEXT,
                 fldigi_offset TEXT,
-                resource_id INTEGER
+                resource_id INTEGER,
+                target_scope TEXT NOT NULL DEFAULT 'station',
+                target_device_profile_id INTEGER,
+                target_operating_profile_id INTEGER
             )
             """
         )
@@ -756,9 +768,13 @@ def _ensure_nets_db() -> None:
                 "primary_js8call_group": "TEXT",
                 "comment": "TEXT",
                 "net_name": "TEXT",
+                "group_name": "TEXT",
                 "fldigi_mode": "TEXT",
                 "fldigi_offset": "TEXT",
                 "resource_id": "INTEGER",
+                "target_scope": "TEXT NOT NULL DEFAULT 'station'",
+                "target_device_profile_id": "INTEGER",
+                "target_operating_profile_id": "INTEGER",
             },
         )
         cur.execute(
@@ -779,8 +795,12 @@ def _ensure_nets_db() -> None:
                 primary_js8call_group TEXT,
                 comment TEXT,
                 net_name TEXT,
+                group_name TEXT,
                 fldigi_mode TEXT,
-                fldigi_offset TEXT
+                fldigi_offset TEXT,
+                target_scope TEXT NOT NULL DEFAULT 'station',
+                target_device_profile_id INTEGER,
+                target_operating_profile_id INTEGER
             )
             """
         )
@@ -802,8 +822,12 @@ def _ensure_nets_db() -> None:
                 "primary_js8call_group": "TEXT",
                 "comment": "TEXT",
                 "net_name": "TEXT",
+                "group_name": "TEXT",
                 "fldigi_mode": "TEXT",
                 "fldigi_offset": "TEXT",
+                "target_scope": "TEXT NOT NULL DEFAULT 'station'",
+                "target_device_profile_id": "INTEGER",
+                "target_operating_profile_id": "INTEGER",
             },
         )
         cur.execute(
