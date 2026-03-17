@@ -50,8 +50,12 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+except Exception:
+    letter = None
+    canvas = None
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.message_ingest import MessageIngestor
@@ -2032,6 +2036,7 @@ class MessageViewerTab(QWidget):
         self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
         self._filters_initialized = False
+        self._station_context = None
         self._has_active_view = False
         self._default_sort_column = 5
         self._default_sort_order = Qt.DescendingOrder
@@ -2125,6 +2130,27 @@ class MessageViewerTab(QWidget):
         self._setup_timer()
         self._setup_js8_timer()
         self._setup_pending_timer()
+
+    def set_station_context(self, context: object) -> None:
+        if self._station_context is context:
+            return
+        if self._station_context is not None:
+            try:
+                self._station_context.snapshots_changed.disconnect(self._on_station_context_snapshots_changed)
+            except Exception:
+                pass
+            try:
+                self._station_context.selection_changed.disconnect(self._on_station_context_selection_changed)
+            except Exception:
+                pass
+        self._station_context = context
+        if self._station_context is not None:
+            try:
+                self._station_context.snapshots_changed.connect(self._on_station_context_snapshots_changed)
+                self._station_context.selection_changed.connect(self._on_station_context_selection_changed)
+            except Exception:
+                pass
+        self._refresh_station_context_filters()
 
     # ---------- DB helpers ----------
 
@@ -3369,6 +3395,9 @@ class MessageViewerTab(QWidget):
 
         self.export_btn = QPushButton("Export to PDF")
         self.export_btn.clicked.connect(self._export_pdf)
+        if canvas is None or letter is None:
+            self.export_btn.setEnabled(False)
+            self.export_btn.setToolTip("PDF export requires the optional reportlab package.")
         header.addWidget(self.export_btn)
 
         self.delete_selected_btn = QPushButton("Delete Selected")
@@ -3424,6 +3453,22 @@ class MessageViewerTab(QWidget):
 
         messages_box = QGroupBox("Messages")
         messages_layout = QVBoxLayout()
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(QLabel("Radio:"))
+        self.radio_filter = QComboBox()
+        self.radio_filter.setMinimumWidth(180)
+        self.radio_filter.currentIndexChanged.connect(self._on_filter_changed)
+        scope_row.addWidget(self.radio_filter)
+        scope_row.addWidget(QLabel("Source:"))
+        self.source_filter = QComboBox()
+        self.source_filter.setMinimumWidth(220)
+        self.source_filter.currentIndexChanged.connect(self._on_filter_changed)
+        scope_row.addWidget(self.source_filter)
+        scope_row.addStretch()
+        self.scope_summary_label = QLabel("Unified station inbox with receive-rig/source badges in message titles.")
+        self.scope_summary_label.setStyleSheet("color: #888;")
+        scope_row.addWidget(self.scope_summary_label)
+        messages_layout.addLayout(scope_row)
         self.messages_header = QWidget()
         self.messages_header_layout = QHBoxLayout(self.messages_header)
         self.messages_header_layout.setContentsMargins(0, 0, 0, 4)
@@ -5371,11 +5416,154 @@ class MessageViewerTab(QWidget):
         self._start_signature_verification(force=bool(data.get("force", False)))
         log.debug("MessageViewer: built %d unified messages", len(rows))
 
+    def _station_radio_rows(self) -> List[tuple[str, int]]:
+        context = self._station_context
+        if context is None or not hasattr(context, "active_txrx_snapshots"):
+            return []
+        try:
+            return [
+                (snapshot.name or f"Device {snapshot.device_profile_id}", int(snapshot.device_profile_id))
+                for snapshot in context.active_txrx_snapshots()
+            ]
+        except Exception:
+            return []
+
+    def _selected_station_snapshot(self) -> object | None:
+        context = self._station_context
+        if context is None or not hasattr(context, "selected_snapshot"):
+            return None
+        try:
+            return context.selected_snapshot()
+        except Exception:
+            return None
+
+    def _selected_station_device_profile_id(self) -> Optional[int]:
+        snapshot = self._selected_station_snapshot()
+        if snapshot is None:
+            return None
+        try:
+            return int(getattr(snapshot, "device_profile_id", 0) or 0) or None
+        except Exception:
+            return None
+
+    def _message_source_identity(self, row: UnifiedMessage) -> str:
+        payload = row.payload
+        if isinstance(payload, (JS8Message, SpotterMessage)):
+            return _js8_message_source_label(payload)
+        if isinstance(payload, VarACMessage):
+            return _varac_message_source_label(payload)
+        if isinstance(payload, SitrepMessage):
+            return "SitRep"
+        if isinstance(payload, FileRecord):
+            return self._file_origin_label(payload)
+        return ""
+
+    def _message_device_profile_id(self, row: UnifiedMessage) -> Optional[int]:
+        payload = row.payload
+        device_profile_id = getattr(payload, "device_profile_id", None)
+        if device_profile_id not in (None, ""):
+            try:
+                return int(device_profile_id)
+            except Exception:
+                return None
+        ingest_source_key = str(getattr(payload, "ingest_source_key", "") or "").strip()
+        if ingest_source_key.startswith("device:"):
+            try:
+                return int(ingest_source_key.split(":", 1)[1])
+            except Exception:
+                return None
+        return None
+
+    def _refresh_station_context_filters(self) -> None:
+        if not hasattr(self, "radio_filter"):
+            return
+        current_radio = self.radio_filter.currentData() if self.radio_filter.count() > 0 else "__all__"
+        selected_snapshot = self._selected_station_snapshot()
+        selected_name = ""
+        if selected_snapshot is not None:
+            try:
+                selected_name = str(getattr(selected_snapshot, "name", "") or "").strip()
+            except Exception:
+                selected_name = ""
+        self.radio_filter.blockSignals(True)
+        try:
+            self.radio_filter.clear()
+            self.radio_filter.addItem("All Radios", "__all__")
+            self.radio_filter.addItem(
+                f"Selected Radio ({selected_name})" if selected_name else "Selected Radio",
+                "__selected__",
+            )
+            for label, device_profile_id in self._station_radio_rows():
+                self.radio_filter.addItem(label, f"device:{int(device_profile_id)}")
+            idx = self.radio_filter.findData(current_radio)
+            if idx < 0:
+                idx = 0
+            self.radio_filter.setCurrentIndex(idx)
+        finally:
+            self.radio_filter.blockSignals(False)
+        if hasattr(self, "scope_summary_label"):
+            selected_txt = selected_name or "Station Default"
+            self.scope_summary_label.setText(
+                f"Unified station inbox. Selected radio: {selected_txt}. "
+                "Filter by radio or source without splitting the inbox."
+            )
+
+    def _refresh_source_scope_filter(self, rows: List[UnifiedMessage]) -> None:
+        if not hasattr(self, "source_filter"):
+            return
+        current_source = self.source_filter.currentData() if self.source_filter.count() > 0 else "__all__"
+        sources = sorted({self._message_source_identity(row) for row in rows if self._message_source_identity(row)})
+        self.source_filter.blockSignals(True)
+        try:
+            self.source_filter.clear()
+            self.source_filter.addItem("All Sources", "__all__")
+            for label in sources:
+                self.source_filter.addItem(label, label)
+            idx = self.source_filter.findData(current_source)
+            if idx < 0:
+                idx = 0
+            self.source_filter.setCurrentIndex(idx)
+        finally:
+            self.source_filter.blockSignals(False)
+
+    def _row_matches_radio_filter(self, row: UnifiedMessage, radio_sel: str) -> bool:
+        key = str(radio_sel or "__all__").strip()
+        if key in ("", "__all__"):
+            return True
+        row_device_profile_id = self._message_device_profile_id(row)
+        source_identity = self._message_source_identity(row).strip().lower()
+        if key == "__selected__":
+            selected_snapshot = self._selected_station_snapshot()
+            selected_id = self._selected_station_device_profile_id()
+            selected_name = str(getattr(selected_snapshot, "name", "") or "").strip().lower() if selected_snapshot is not None else ""
+            if selected_id is not None and row_device_profile_id is not None:
+                return int(selected_id) == int(row_device_profile_id)
+            return bool(selected_name and source_identity and selected_name in source_identity)
+        if key.startswith("device:"):
+            try:
+                target_device_profile_id = int(key.split(":", 1)[1])
+            except Exception:
+                return True
+            if row_device_profile_id is not None:
+                return int(target_device_profile_id) == int(row_device_profile_id)
+            idx = self.radio_filter.findData(key) if hasattr(self, "radio_filter") else -1
+            label = self.radio_filter.itemText(idx).strip().lower() if idx >= 0 else ""
+            return bool(label and source_identity and label in source_identity)
+        return True
+
+    def _row_matches_source_filter(self, row: UnifiedMessage, source_sel: str) -> bool:
+        key = str(source_sel or "__all__").strip()
+        if key in ("", "__all__"):
+            return True
+        return self._message_source_identity(row).strip() == key
+
     def _refresh_message_filters(self, rows: List[UnifiedMessage]) -> None:
         type_vals = sorted({r.msg_type for r in rows if r.msg_type})
         status_vals = sorted({r.status for r in rows if r.status})
         from_vals = sorted({r.from_call for r in rows if r.from_call})
         to_vals = sorted({r.to_call for r in rows if r.to_call})
+        self._refresh_station_context_filters()
+        self._refresh_source_scope_filter(rows)
         spotter_forms = sorted({t for t in type_vals if re.match(r"^F!\d+$", t)})
         base_types = sorted([t for t in type_vals if t not in spotter_forms])
         sitrep_subtypes = sorted(
@@ -5456,6 +5644,8 @@ class MessageViewerTab(QWidget):
         self._filters_initialized = True
         self._fit_filter_combo_popup(self.type_filter)
         self._fit_filter_combo_popup(self.status_filter)
+        self._fit_filter_combo_popup(self.radio_filter)
+        self._fit_filter_combo_popup(self.source_filter)
         self._fit_filter_combo_popup(self.from_filter)
         self._fit_filter_combo_popup(self.to_filter)
         self._update_excluded_types_button_state()
@@ -5466,6 +5656,8 @@ class MessageViewerTab(QWidget):
         status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
         from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
         to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
+        radio_sel = self.radio_filter.currentData() if hasattr(self, "radio_filter") else "__all__"
+        source_sel = self.source_filter.currentData() if hasattr(self, "source_filter") else "__all__"
         rcv_query = (self.rcv_search.text() if hasattr(self, "rcv_search") else "").strip().lower()
         apply_hidden_types = type_sel in ("", "MSG Type...")
 
@@ -5481,6 +5673,10 @@ class MessageViewerTab(QWidget):
                         continue
                 elif row.status != status_sel:
                     continue
+            if not self._row_matches_radio_filter(row, str(radio_sel or "__all__")):
+                continue
+            if not self._row_matches_source_filter(row, str(source_sel or "__all__")):
+                continue
             if from_sel and row.from_call != from_sel:
                 continue
             if to_sel and row.to_call != to_sel:
@@ -5514,10 +5710,12 @@ class MessageViewerTab(QWidget):
         self._update_clear_filters_style()
         self._update_mark_all_read_style()
         log.debug(
-            "MessageViewer: filters type=%s hidden=%d status=%s from=%s to=%s rcv=%s => %d rows",
+            "MessageViewer: filters type=%s hidden=%d status=%s radio=%s source=%s from=%s to=%s rcv=%s => %d rows",
             type_sel,
             len(self._excluded_msg_types) if apply_hidden_types else 0,
             status_sel,
+            radio_sel or "ALL",
+            source_sel or "ALL",
             from_sel,
             to_sel,
             rcv_query or "ALL",
@@ -5529,9 +5727,15 @@ class MessageViewerTab(QWidget):
         status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
         from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
         to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
+        radio_sel = self.radio_filter.currentData() if hasattr(self, "radio_filter") else "__all__"
+        source_sel = self.source_filter.currentData() if hasattr(self, "source_filter") else "__all__"
         if type_sel not in ("", "MSG Type..."):
             return True
         if status_sel not in ("", "Status..."):
+            return True
+        if radio_sel not in ("", "__all__"):
+            return True
+        if source_sel not in ("", "__all__"):
             return True
         if from_sel:
             return True
@@ -5564,9 +5768,15 @@ class MessageViewerTab(QWidget):
         status_sel = self.status_filter.currentText() if hasattr(self, "status_filter") else "Status..."
         from_sel = self.from_filter.currentText() if hasattr(self, "from_filter") else ""
         to_sel = self.to_filter.currentText() if hasattr(self, "to_filter") else ""
+        radio_sel = self.radio_filter.currentData() if hasattr(self, "radio_filter") else "__all__"
+        source_sel = self.source_filter.currentData() if hasattr(self, "source_filter") else "__all__"
         if type_sel not in ("", "MSG Type..."):
             return True
         if status_sel not in ("", "Status..."):
+            return True
+        if radio_sel not in ("", "__all__"):
+            return True
+        if source_sel not in ("", "__all__"):
             return True
         if from_sel:
             return True
@@ -5624,6 +5834,8 @@ class MessageViewerTab(QWidget):
         if (
             self.type_filter.currentText() in ("", "MSG Type...")
             and self.status_filter.currentText() in ("", "Status...")
+            and self.radio_filter.currentData() in ("", "__all__")
+            and self.source_filter.currentData() in ("", "__all__")
             and self.from_filter.currentText() in ("",)
             and self.to_filter.currentText() in ("",)
             and not self.rcv_search.text().strip()
@@ -5631,16 +5843,22 @@ class MessageViewerTab(QWidget):
             return
         self.type_filter.blockSignals(True)
         self.status_filter.blockSignals(True)
+        self.radio_filter.blockSignals(True)
+        self.source_filter.blockSignals(True)
         self.from_filter.blockSignals(True)
         self.to_filter.blockSignals(True)
         self.rcv_search.blockSignals(True)
         self.type_filter.setCurrentText("MSG Type...")
         self.status_filter.setCurrentText("Status...")
+        self.radio_filter.setCurrentIndex(max(self.radio_filter.findData("__all__"), 0))
+        self.source_filter.setCurrentIndex(max(self.source_filter.findData("__all__"), 0))
         self.from_filter.setCurrentText("")
         self.to_filter.setCurrentText("")
         self.rcv_search.clear()
         self.type_filter.blockSignals(False)
         self.status_filter.blockSignals(False)
+        self.radio_filter.blockSignals(False)
+        self.source_filter.blockSignals(False)
         self.from_filter.blockSignals(False)
         self.to_filter.blockSignals(False)
         self.rcv_search.blockSignals(False)
@@ -5650,6 +5868,15 @@ class MessageViewerTab(QWidget):
         self._unfreeze_table()
         self._update_excluded_types_button_state()
         self._apply_message_filters()
+
+    def _on_station_context_snapshots_changed(self, _snapshots: object) -> None:
+        self._refresh_station_context_filters()
+        self._apply_message_filters_preserve_scroll()
+
+    def _on_station_context_selection_changed(self, _snapshot: object) -> None:
+        self._refresh_station_context_filters()
+        if str(self.radio_filter.currentData() or "__all__") == "__selected__":
+            self._apply_message_filters_preserve_scroll()
 
     def _render_messages_table(self, rows: List[UnifiedMessage]) -> None:
         self.messages_table.setUpdatesEnabled(False)
@@ -6363,6 +6590,8 @@ class MessageViewerTab(QWidget):
         return (
             self.type_filter.currentText() not in ("", "MSG Type...")
             or self.status_filter.currentText() not in ("", "Status...")
+            or str(self.radio_filter.currentData() or "__all__") not in ("", "__all__")
+            or str(self.source_filter.currentData() or "__all__") not in ("", "__all__")
             or self.from_filter.currentText() not in ("",)
             or self.to_filter.currentText() not in ("",)
             or bool(self.rcv_search.text().strip())
@@ -9150,6 +9379,13 @@ class MessageViewerTab(QWidget):
             return
         text = self.viewer.toPlainText()
         if not text.strip():
+            return
+        if canvas is None or letter is None:
+            QMessageBox.warning(
+                self,
+                "PDF Export Unavailable",
+                "Install the optional reportlab package to enable PDF export.",
+            )
             return
         fn, _ = QFileDialog.getSaveFileName(self, "Export to PDF", self.current_record.path.stem + ".pdf", "PDF Files (*.pdf)")
         if not fn:

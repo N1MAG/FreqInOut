@@ -122,14 +122,20 @@ def test_station_runtime_manager_exposes_varac_cluster_summary(monkeypatch, tmp_
     shared_db.parent.mkdir(parents=True, exist_ok=True)
     shared_db.write_text("")
 
+    varac_node = store.save_varac_node(
+        {
+            "name": "Home VarAC",
+            "install_path": "C:/VarAC/Main",
+            "db_path": "C:/VarAC/Main/VarAC.db",
+            "ini_path": "C:/VarAC/Main/VarAC.ini",
+            "launch_cmd": "C:/VarAC/Main/VarAC.exe",
+        }
+    )
     store.save_device_profile(
         {
             "id": primary["id"],
             "name": primary["name"],
-            "varac_install_path": "C:/VarAC/Main",
-            "varac_db_path": "C:/VarAC/Main/VarAC.db",
-            "varac_ini_path": "C:/VarAC/Main/VarAC.ini",
-            "launch_cmd": "C:/VarAC/Main/VarAC.exe",
+            "varac_node_id": int(varac_node["id"]),
         }
     )
     cluster = store.save_varac_cluster(

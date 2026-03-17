@@ -14,7 +14,13 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from freqinout.core.logger import log
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
 from freqinout.core.multi_radio_store import MultiRadioStore
-from freqinout.core.schedule_targeting import normalize_schedule_target_fields, schedule_row_matches_runtime_target
+from freqinout.core.schedule_targeting import (
+    SCHEDULE_KIND_HF,
+    SCHEDULE_KIND_NET,
+    load_schedule_default_target,
+    normalize_schedule_target_fields,
+    schedule_row_matches_runtime_target,
+)
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.rigctl_client import FrequencyCommand, RigControlClient
 from freqinout.radio_interface.js8_status import JS8ControlClient
@@ -453,10 +459,14 @@ class SchedulerEngine(QObject):
             log.debug("SchedulerEngine: failed loading runtime schedule target context: %s", e)
             return None, None
 
-    def _filter_schedule_rows_for_runtime(self, rows: List[Dict]) -> List[Dict]:
+    def _filter_schedule_rows_for_runtime(self, rows: List[Dict], *, schedule_kind: str) -> List[Dict]:
         if not rows:
             return []
         primary_device_profile_id, primary_operating_profile_id = self._runtime_schedule_target_context()
+        default_scope, default_device_profile_id, default_operating_profile_id = load_schedule_default_target(
+            self.settings,
+            schedule_kind,
+        )
         filtered: List[Dict] = []
         for raw in rows:
             if not isinstance(raw, dict):
@@ -466,6 +476,9 @@ class SchedulerEngine(QObject):
                 row,
                 primary_device_profile_id=primary_device_profile_id,
                 primary_operating_profile_id=primary_operating_profile_id,
+                default_target_scope=default_scope,
+                default_target_device_profile_id=default_device_profile_id,
+                default_target_operating_profile_id=default_operating_profile_id,
             ):
                 filtered.append(row)
         return filtered
@@ -2730,8 +2743,8 @@ class SchedulerEngine(QObject):
         if not isinstance(policies, list):
             policies = []
 
-        hf = self._filter_schedule_rows_for_runtime(hf)
-        net = self._filter_schedule_rows_for_runtime(net)
+        hf = self._filter_schedule_rows_for_runtime(hf, schedule_kind=SCHEDULE_KIND_HF)
+        net = self._filter_schedule_rows_for_runtime(net, schedule_kind=SCHEDULE_KIND_NET)
 
         self._schedule_cache = {"mtimes": mtimes, "data": (hf, net, sop_layer, policies)}
         return hf, net, sop_layer, policies

@@ -70,6 +70,7 @@ from freqinout.gui.help_tab import HelpTab
 from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.station_overview_tab import StationOverviewTab
 from freqinout.gui.async_status_broker import AsyncStatusBroker
+from freqinout.gui.selected_radio_context import SelectedRadioContext
 from freqinout.gui.qsy_helper import (
     refresh_hold_duration_combo,
     selected_hold_duration,
@@ -109,6 +110,8 @@ class MainWindow(QMainWindow):
         self.multi_radio_store = MultiRadioStore()
         self.station_runtime_manager = StationRuntimeManager(store=self.multi_radio_store, settings=self.settings)
         self.ui_status_broker = AsyncStatusBroker(self)
+        self.selected_radio_context = SelectedRadioContext(self.station_runtime_manager, self)
+        self._station_context_guard = False
         self.station_runtime_manager.sync_with_store()
         self._runtime_client_signature: tuple[object, ...] | None = None
         self._runtime_profile_signature: tuple[object, ...] | None = None
@@ -144,9 +147,25 @@ class MainWindow(QMainWindow):
         self.help_tab = HelpTab(self)
         self.controlfreq_tab = ControlFreqTab(self)
         self.station_overview_tab = StationOverviewTab(self)
-        self.controlfreq_tab.set_status_broker(self.ui_status_broker)
-        self.station_overview_tab.set_status_broker(self.ui_status_broker)
-        self.station_overview_tab.set_runtime_manager(self.station_runtime_manager)
+        if hasattr(self.controlfreq_tab, "set_status_broker"):
+            self.controlfreq_tab.set_status_broker(self.ui_status_broker)
+        if hasattr(self.station_overview_tab, "set_status_broker"):
+            self.station_overview_tab.set_status_broker(self.ui_status_broker)
+        if hasattr(self.station_overview_tab, "set_runtime_manager"):
+            self.station_overview_tab.set_runtime_manager(self.station_runtime_manager)
+        if hasattr(self.controlfreq_tab, "set_station_context"):
+            self.controlfreq_tab.set_station_context(self.selected_radio_context)
+        if hasattr(self.station_overview_tab, "set_station_context"):
+            self.station_overview_tab.set_station_context(self.selected_radio_context)
+        for tab in (
+            self.hf_schedule_tab,
+            self.net_tab,
+            self.fldigi_tab,
+            self.js8_tab,
+            self.local_ncs_tab,
+        ):
+            if hasattr(tab, "set_station_context"):
+                tab.set_station_context(self.selected_radio_context)
         self._sop_data_refresh_pending = False
         self._sop_data_refresh_timer = QTimer(self)
         self._sop_data_refresh_timer.setSingleShot(True)
@@ -412,6 +431,31 @@ class MainWindow(QMainWindow):
         self.runtime_mode_label.setWordWrap(True)
         banner_layout.addWidget(self.runtime_mode_label)
         right_layout.addWidget(self.runtime_mode_banner, 0)
+        self.station_header = QFrame(right_container)
+        self.station_header.setVisible(False)
+        station_header_layout = QVBoxLayout(self.station_header)
+        station_header_layout.setContentsMargins(10, 8, 10, 8)
+        station_header_layout.setSpacing(6)
+        station_header_top = QHBoxLayout()
+        station_header_top.setContentsMargins(0, 0, 0, 0)
+        station_header_top.setSpacing(8)
+        self.station_header_title = QLabel("Station Context")
+        self.station_header_title.setStyleSheet("font-weight: 700;")
+        station_header_top.addWidget(self.station_header_title)
+        station_header_top.addStretch(1)
+        self.station_header_summary = QLabel("")
+        self.station_header_summary.setWordWrap(True)
+        self.station_header_summary.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        station_header_top.addWidget(self.station_header_summary, 1)
+        station_header_layout.addLayout(station_header_top)
+        self.station_header_device_row = QWidget(self.station_header)
+        self.station_header_device_layout = QHBoxLayout(self.station_header_device_row)
+        self.station_header_device_layout.setContentsMargins(0, 0, 0, 0)
+        self.station_header_device_layout.setSpacing(6)
+        self.station_header_device_layout.addStretch(1)
+        station_header_layout.addWidget(self.station_header_device_row)
+        self._station_header_buttons: dict[int, QToolButton] = {}
+        right_layout.addWidget(self.station_header, 0)
         right_layout.addWidget(self.stack, stretch=1)
 
         # Layout composition
@@ -643,6 +687,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self.selected_radio_context.snapshots_changed.connect(self._refresh_station_header)
+            self.selected_radio_context.selection_changed.connect(self._on_selected_radio_context_changed)
+        except Exception:
+            pass
+        try:
             self.settings_tab.settings_saved.connect(self._update_log_indicator)
         except Exception:
             pass
@@ -682,6 +731,7 @@ class MainWindow(QMainWindow):
             pass
         self._rebuild_runtime_clients(force=True)
         self._apply_runtime_profile_state(force=True)
+        self._sync_selected_radio_context(force=True)
         QTimer.singleShot(1200, self._start_launch_control_startup)
 
     def refresh_operator_history_views(self):
@@ -912,6 +962,78 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.debug("MainWindow: station overview refresh failed: %s", e)
 
+    def _sync_selected_radio_context(self, *, force: bool = False) -> None:
+        if not hasattr(self, "selected_radio_context") or self.selected_radio_context is None:
+            return
+        self._station_context_guard = True
+        try:
+            self.selected_radio_context.sync(force=force)
+        finally:
+            self._station_context_guard = False
+
+    def _refresh_station_header(self, snapshots: object = None) -> None:
+        if not hasattr(self, "selected_radio_context"):
+            return
+        rows = list(snapshots or self.selected_radio_context.snapshots())
+        radios = [snapshot for snapshot in rows if snapshot.device_class != "observer"]
+        observers = [snapshot for snapshot in rows if snapshot.device_class == "observer"]
+        selected_snapshot = self.selected_radio_context.selected_snapshot()
+        self.station_header.setVisible(len(radios) > 1 or bool(observers))
+        self.station_header_summary.setText(
+            f"{len(radios)} active radio{'s' if len(radios) != 1 else ''}"
+            + (f" | {len(observers)} observer{'s' if len(observers) != 1 else ''}" if observers else "")
+        )
+        while self.station_header_device_layout.count() > 1:
+            item = self.station_header_device_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._station_header_buttons = {}
+        theme = resolve_theme(self.settings)
+        for snapshot in radios + observers:
+            btn = QToolButton(self.station_header_device_row)
+            btn.setCheckable(True)
+            btn.setAutoRaise(False)
+            title = snapshot.name or f"Device {snapshot.device_profile_id}"
+            role_suffix = "Observer" if snapshot.device_class == "observer" else "Selected"
+            btn.setText(title)
+            btn.setToolTip(
+                f"{title}\n"
+                f"Backend: {snapshot.control_backend.upper()}\n"
+                f"Endpoint: {snapshot.endpoint_summary or 'Unavailable'}\n"
+                f"Operating Profile: {snapshot.assigned_operating_profile_name or 'Unassigned'}\n"
+                f"Status: {snapshot.status_summary or 'Unavailable'}"
+            )
+            if snapshot.device_class == "observer":
+                btn.setStyleSheet(button_style("muted", theme))
+            elif selected_snapshot is not None and int(snapshot.device_profile_id) == int(selected_snapshot.device_profile_id):
+                btn.setChecked(True)
+                btn.setStyleSheet(button_style("eligible_primary", theme))
+            else:
+                btn.setStyleSheet(button_style("primary", theme))
+            if snapshot.device_class != "observer":
+                btn.clicked.connect(
+                    lambda checked=False, device_profile_id=int(snapshot.device_profile_id): self.selected_radio_context.set_selected_device_profile(
+                        device_profile_id
+                    )
+                )
+            else:
+                btn.setEnabled(False)
+            self.station_header_device_layout.insertWidget(self.station_header_device_layout.count() - 1, btn)
+            self._station_header_buttons[int(snapshot.device_profile_id)] = btn
+
+    def _on_selected_radio_context_changed(self, _snapshot: object) -> None:
+        if self._station_context_guard:
+            return
+        self._refresh_station_header()
+        self._rebuild_runtime_clients(force=True)
+        self._apply_runtime_profile_state(force=True)
+        try:
+            if hasattr(self, "scheduler") and self.scheduler is not None:
+                self.scheduler.force_refresh()
+        except Exception:
+            pass
+
     def _rebuild_runtime_clients(self, *, force: bool = False) -> None:
         old_signature = self._runtime_client_signature
         try:
@@ -1065,6 +1187,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_runtime_settings_saved(self) -> None:
+        self._sync_selected_radio_context(force=True)
         self._rebuild_runtime_clients()
         self._apply_runtime_profile_state()
         try:
@@ -1074,6 +1197,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_runtime_device_profiles_changed(self) -> None:
+        self._sync_selected_radio_context(force=True)
         self._rebuild_runtime_clients()
         self._apply_runtime_profile_state()
         try:
@@ -2857,6 +2981,8 @@ class MainWindow(QMainWindow):
             min_ms=5.0,
         ):
             self.freq_planner_tab = FreqPlannerTab(self)
+            if hasattr(self.freq_planner_tab, "set_station_context"):
+                self.freq_planner_tab.set_station_context(self.selected_radio_context)
             try:
                 self.settings_tab.settings_saved.connect(self.freq_planner_tab.on_settings_saved)
             except Exception:
@@ -2870,6 +2996,8 @@ class MainWindow(QMainWindow):
             min_ms=5.0,
         ):
             self.message_viewer_tab = MessageViewerTab(self)
+            if hasattr(self.message_viewer_tab, "set_station_context"):
+                self.message_viewer_tab.set_station_context(self.selected_radio_context)
             try:
                 self.settings_tab.settings_saved.connect(self.message_viewer_tab.on_settings_saved)
             except Exception:

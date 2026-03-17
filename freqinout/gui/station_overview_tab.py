@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -41,6 +42,8 @@ class StationOverviewTab(QWidget):
         self.settings = SettingsManager()
         self._runtime_manager: Optional[StationRuntimeManager] = None
         self._status_broker: Optional[AsyncStatusBroker] = None
+        self._station_context = None
+        self._station_context_syncing = False
         self._tab_active = False
         self._refresh_dirty = False
         self._last_render_signature: tuple[object, ...] = tuple()
@@ -62,6 +65,28 @@ class StationOverviewTab(QWidget):
         if self._status_broker is not None:
             self._status_broker.station_snapshots_ready.connect(self._on_async_station_snapshots_ready)
             self._status_broker.station_snapshots_failed.connect(self._on_async_station_snapshots_failed)
+
+    def set_station_context(self, context: object) -> None:
+        if self._station_context is context:
+            return
+        if self._station_context is not None:
+            try:
+                self._station_context.snapshots_changed.disconnect(self._on_station_context_snapshots_changed)
+            except Exception:
+                pass
+            try:
+                self._station_context.selection_changed.disconnect(self._on_station_context_selection_changed)
+            except Exception:
+                pass
+        self._station_context = context
+        if self._station_context is not None:
+            try:
+                self._station_context.snapshots_changed.connect(self._on_station_context_snapshots_changed)
+                self._station_context.selection_changed.connect(self._on_station_context_selection_changed)
+            except Exception:
+                pass
+        self._refresh_dirty = True
+        self.refresh_from_manager(force=True)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -171,7 +196,7 @@ class StationOverviewTab(QWidget):
         attention_count = len(attention_lines)
         self.summary_label.setText(
             f"{len(snaps)} active device profile{'s' if len(snaps) != 1 else ''}. "
-            f"Primary compatibility device: {primary_name}. "
+            f"Station default: {primary_name}. "
             f"Observer profiles: {observer_count}. "
             f"VarAC cluster members: {varac_cluster_members}. "
             f"Attention items: {attention_count}."
@@ -319,12 +344,33 @@ class StationOverviewTab(QWidget):
         title.setStyleSheet("font-size: 15px; font-weight: 700;")
         header.addWidget(title, 1)
         if snapshot.runtime_primary:
-            badge = QLabel("Primary")
+            badge = QLabel("Station Default")
             badge.setStyleSheet(_state_badge_style("ok", theme))
+            header.addWidget(badge, 0, Qt.AlignRight)
+        selected_snapshot = None
+        if self._station_context is not None and hasattr(self._station_context, "selected_snapshot"):
+            try:
+                selected_snapshot = self._station_context.selected_snapshot()
+            except Exception:
+                selected_snapshot = None
+        if (
+            selected_snapshot is not None
+            and int(getattr(selected_snapshot, "device_profile_id", 0) or 0) == int(snapshot.device_profile_id or 0)
+            and snapshot.device_class != "observer"
+        ):
+            badge = QLabel("Selected Radio")
+            badge.setStyleSheet(_state_badge_style("warn", theme))
             header.addWidget(badge, 0, Qt.AlignRight)
         active_badge = QLabel("Active")
         active_badge.setStyleSheet(_state_badge_style(snapshot.overall_state, theme))
         header.addWidget(active_badge, 0, Qt.AlignRight)
+        if snapshot.device_class != "observer" and self._station_context is not None:
+            select_btn = QPushButton("Select")
+            select_btn.setCursor(Qt.PointingHandCursor)
+            select_btn.clicked.connect(
+                lambda _checked=False, device_profile_id=int(snapshot.device_profile_id): self._select_radio(device_profile_id)
+            )
+            header.addWidget(select_btn, 0, Qt.AlignRight)
         layout.addLayout(header)
 
         meta = QLabel(
@@ -425,3 +471,21 @@ class StationOverviewTab(QWidget):
         chips.addStretch(1)
         layout.addLayout(chips)
         return card
+
+    def _select_radio(self, device_profile_id: int) -> None:
+        if self._station_context is None:
+            return
+        try:
+            self._station_context.set_selected_device_profile(int(device_profile_id))
+        except Exception:
+            pass
+
+    def _on_station_context_snapshots_changed(self, _snapshots: object) -> None:
+        self._refresh_dirty = True
+        if self._tab_active:
+            self.refresh_from_manager(force=True)
+
+    def _on_station_context_selection_changed(self, _snapshot: object) -> None:
+        self._refresh_dirty = True
+        if self._tab_active:
+            self.refresh_from_manager(force=True)

@@ -141,6 +141,8 @@ class ControlFreqTab(QWidget):
         self._status_checked_at: Dict[str, str] = {}
         self._status_service = SoftwareStatusService(self.settings)
         self._status_broker: Optional[AsyncStatusBroker] = None
+        self._station_context = None
+        self._station_context_syncing = False
         self._last_status_snapshot: Dict[str, Dict[str, object]] = {}
         self._sop_window_cache: Dict[Tuple[Any, ...], Tuple[float, List[Dict[str, Any]]]] = {}
         self._sop_today_cache_ttl_sec = 30.0
@@ -191,6 +193,27 @@ class ControlFreqTab(QWidget):
             self._status_broker.control_snapshot_ready.connect(self._on_async_control_snapshot_ready)
             self._status_broker.control_snapshot_failed.connect(self._on_async_control_snapshot_failed)
 
+    def set_station_context(self, context: object) -> None:
+        if self._station_context is context:
+            return
+        if self._station_context is not None:
+            try:
+                self._station_context.snapshots_changed.disconnect(self._on_station_context_snapshots_changed)
+            except Exception:
+                pass
+            try:
+                self._station_context.selection_changed.disconnect(self._on_station_context_selection_changed)
+            except Exception:
+                pass
+        self._station_context = context
+        if self._station_context is not None:
+            try:
+                self._station_context.snapshots_changed.connect(self._on_station_context_snapshots_changed)
+                self._station_context.selection_changed.connect(self._on_station_context_selection_changed)
+            except Exception:
+                pass
+        self._refresh_selected_radio_context_ui()
+
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -199,6 +222,16 @@ class ControlFreqTab(QWidget):
         header = QHBoxLayout()
         title = QLabel("<h3>ControlFreq</h3>")
         header.addWidget(title)
+
+        self.selected_radio_label = QLabel("Selected Radio: Station Default")
+        self.selected_radio_label.setStyleSheet("font-weight: 600;")
+        header.addWidget(self.selected_radio_label)
+
+        self.selected_radio_combo = QComboBox()
+        self.selected_radio_combo.setMinimumWidth(220)
+        self.selected_radio_combo.currentIndexChanged.connect(self._on_selected_radio_combo_changed)
+        self.selected_radio_combo.setVisible(False)
+        header.addWidget(self.selected_radio_combo)
 
         header.addStretch(1)
 
@@ -232,9 +265,14 @@ class ControlFreqTab(QWidget):
 
         root.addLayout(header)
 
+        self.selected_radio_summary_label = QLabel("Runs On: Station Default")
+        self.selected_radio_summary_label.setWordWrap(True)
+        self.selected_radio_summary_label.setStyleSheet("font-size: 12px; color: #888;")
+        root.addWidget(self.selected_radio_summary_label)
+
         updated_row = QHBoxLayout()
 
-        self.status_group = QGroupBox("Operating Status")
+        self.status_group = QGroupBox("Selected Radio Status")
         self.status_group.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         status_layout = QHBoxLayout()
         self.status_group.setLayout(status_layout)
@@ -334,7 +372,7 @@ class ControlFreqTab(QWidget):
         inter_header.setSectionResizeMode(2, QHeaderView.Stretch)
         intersection_layout.addWidget(self.intersection_table)
 
-        self.inbox_box = QGroupBox("Message Summary")
+        self.inbox_box = QGroupBox("Station Message Summary")
         inbox_layout = QVBoxLayout(self.inbox_box)
         self.inbox_table = QTableWidget(0, 3)
         self.inbox_table.setHorizontalHeaderLabels(["Type", "Count", "Details / BBS Aging Out"])
@@ -1478,6 +1516,60 @@ class ControlFreqTab(QWidget):
     def _refresh_status_widgets(self) -> None:
         self._refresh_running_status()
         self._refresh_scheduler_strip()
+
+    def _refresh_selected_radio_context_ui(self) -> None:
+        context = self._station_context
+        if context is None:
+            self.selected_radio_combo.setVisible(False)
+            self.selected_radio_label.setText("Selected Radio: Station Default")
+            self.selected_radio_summary_label.setText("Runs On: Station Default")
+            return
+        snapshots = list(getattr(context, "active_txrx_snapshots", lambda: [])())
+        selected = getattr(context, "selected_snapshot", lambda: None)()
+        self._station_context_syncing = True
+        try:
+            self.selected_radio_combo.blockSignals(True)
+            self.selected_radio_combo.clear()
+            for snapshot in snapshots:
+                label = snapshot.name or f"Device {snapshot.device_profile_id}"
+                self.selected_radio_combo.addItem(label, int(snapshot.device_profile_id))
+            if selected is not None:
+                idx = self.selected_radio_combo.findData(int(selected.device_profile_id))
+                if idx >= 0:
+                    self.selected_radio_combo.setCurrentIndex(idx)
+            self.selected_radio_combo.setVisible(len(snapshots) > 1)
+        finally:
+            self.selected_radio_combo.blockSignals(False)
+            self._station_context_syncing = False
+        if selected is None:
+            self.selected_radio_label.setText("Selected Radio: Station Default")
+            self.selected_radio_summary_label.setText("Runs On: Station Default")
+            return
+        device_name = selected.name or f"Device {selected.device_profile_id}"
+        self.selected_radio_label.setText(f"Selected Radio: {device_name}")
+        self.selected_radio_summary_label.setText(
+            f"Runs On: {device_name} | Backend: {selected.control_backend.upper()} | "
+            f"Endpoint: {selected.endpoint_summary or 'Unavailable'} | "
+            f"Operating Profile: {selected.assigned_operating_profile_name or 'Unassigned'}"
+        )
+
+    def _on_selected_radio_combo_changed(self, _index: int) -> None:
+        if self._station_context is None or self._station_context_syncing:
+            return
+        device_profile_id = int(self.selected_radio_combo.currentData() or 0)
+        if device_profile_id <= 0:
+            return
+        try:
+            self._station_context.set_selected_device_profile(device_profile_id)
+        except Exception as exc:
+            log.debug("ControlFreq: failed changing selected radio: %s", exc)
+
+    def _on_station_context_snapshots_changed(self, _snapshots: object) -> None:
+        self._refresh_selected_radio_context_ui()
+
+    def _on_station_context_selection_changed(self, _snapshot: object) -> None:
+        self._refresh_selected_radio_context_ui()
+        self._refresh_all(include_secondary=False, include_heavy=False, include_status=True)
 
     def _refresh_running_status(self) -> None:
         if self._status_broker is not None:

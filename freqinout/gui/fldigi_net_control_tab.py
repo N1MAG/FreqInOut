@@ -95,6 +95,9 @@ class FldigiNetControlTab(QWidget):
         self._known_op_autofill_consumed: bool = False
         self._known_op_tab_stage: int = 0
         self._known_op_pending_focus: Optional[str] = None
+        self._station_context = None
+        self._station_context_syncing = False
+        self._session_device_profile_id: Optional[int] = None
 
         self._build_ui()
         self._apply_theme()
@@ -103,6 +106,27 @@ class FldigiNetControlTab(QWidget):
         self._setup_timers()
         self._refresh_qsy_options()
         self._set_net_button_styles(active=False)
+
+    def set_station_context(self, context: object) -> None:
+        if self._station_context is context:
+            return
+        if self._station_context is not None:
+            try:
+                self._station_context.snapshots_changed.disconnect(self._on_station_context_snapshots_changed)
+            except Exception:
+                pass
+            try:
+                self._station_context.selection_changed.disconnect(self._on_station_context_selection_changed)
+            except Exception:
+                pass
+        self._station_context = context
+        if self._station_context is not None:
+            try:
+                self._station_context.snapshots_changed.connect(self._on_station_context_snapshots_changed)
+                self._station_context.selection_changed.connect(self._on_station_context_selection_changed)
+            except Exception:
+                pass
+        self._refresh_station_context_ui()
 
     # ---------------- UI BUILD ---------------- #
 
@@ -118,6 +142,23 @@ class FldigiNetControlTab(QWidget):
         header.addWidget(self.utc_label)
         header.addWidget(self.local_label)
         layout.addLayout(header)
+
+        scope_row = QHBoxLayout()
+        self.selected_radio_label = QLabel("Run on: Station Default")
+        self.selected_radio_label.setStyleSheet("font-weight: 600;")
+        scope_row.addWidget(self.selected_radio_label)
+        self.selected_radio_combo = QComboBox()
+        self.selected_radio_combo.setMinimumWidth(220)
+        self.selected_radio_combo.currentIndexChanged.connect(self._on_selected_radio_combo_changed)
+        self.selected_radio_combo.setVisible(False)
+        scope_row.addWidget(self.selected_radio_combo)
+        scope_row.addStretch()
+        layout.addLayout(scope_row)
+
+        self.selected_radio_summary_label = QLabel("Selected radio drives FLDigi / SSB net-control actions.")
+        self.selected_radio_summary_label.setWordWrap(True)
+        self.selected_radio_summary_label.setStyleSheet("color: #888;")
+        layout.addWidget(self.selected_radio_summary_label)
 
         # Next scheduled frequency change display (bordered)
         self.next_change_label = QLabel("Next Scheduled Net: (unknown)")
@@ -1479,6 +1520,7 @@ class FldigiNetControlTab(QWidget):
         self._set_net_button_styles(active=True)
         log.info("FLDigi net started: %s (%s)", self.net_name_combo.currentText().strip(), self.role_combo.currentText())
         self._refresh_operator_history_views()
+        self._pin_session_radio()
 
     def _start_ad_hoc_net(self):
         """
@@ -1668,6 +1710,7 @@ class FldigiNetControlTab(QWidget):
             self.net_status_changed.emit("FLDIGI", False)
             self._set_net_button_styles(active=False)
             log.info("FLDigi net ended (no check-ins file content).")
+            self._clear_session_radio_pin()
             return
 
         now_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
@@ -1743,6 +1786,107 @@ class FldigiNetControlTab(QWidget):
         self.net_status_changed.emit("FLDIGI", False)
         self._set_net_button_styles(active=False)
         log.info("FLDigi net ended: %s (%s)", net_name, role)
+        self._clear_session_radio_pin()
+
+    def _pin_session_radio(self) -> None:
+        selected = None
+        if self._station_context is not None and hasattr(self._station_context, "selected_snapshot"):
+            try:
+                selected = self._station_context.selected_snapshot()
+            except Exception:
+                selected = None
+        if selected is not None:
+            try:
+                self._session_device_profile_id = int(selected.device_profile_id)
+            except Exception:
+                self._session_device_profile_id = None
+        self._refresh_station_context_ui()
+
+    def _clear_session_radio_pin(self) -> None:
+        self._session_device_profile_id = None
+        self._refresh_station_context_ui()
+
+    def _refresh_station_context_ui(self) -> None:
+        if not hasattr(self, "selected_radio_combo"):
+            return
+        context = self._station_context
+        if context is None:
+            self.selected_radio_combo.setVisible(False)
+            self.selected_radio_label.setText("Run on: Station Default")
+            self.selected_radio_summary_label.setText("Selected radio drives FLDigi / SSB net-control actions.")
+            return
+        snapshots = list(getattr(context, "active_txrx_snapshots", lambda: [])())
+        selected = getattr(context, "selected_snapshot", lambda: None)()
+        pinned_snapshot = None
+        if self._session_device_profile_id is not None:
+            pinned_snapshot = next(
+                (
+                    snapshot
+                    for snapshot in snapshots
+                    if int(snapshot.device_profile_id or 0) == int(self._session_device_profile_id)
+                ),
+                None,
+            )
+        self._station_context_syncing = True
+        try:
+            self.selected_radio_combo.blockSignals(True)
+            self.selected_radio_combo.clear()
+            for snapshot in snapshots:
+                self.selected_radio_combo.addItem(snapshot.name or f"Device {snapshot.device_profile_id}", int(snapshot.device_profile_id))
+            active_snapshot = pinned_snapshot or selected
+            if active_snapshot is not None:
+                idx = self.selected_radio_combo.findData(int(active_snapshot.device_profile_id))
+                if idx >= 0:
+                    self.selected_radio_combo.setCurrentIndex(idx)
+            self.selected_radio_combo.setVisible(len(snapshots) > 1)
+            self.selected_radio_combo.setEnabled(self._session_device_profile_id is None)
+        finally:
+            self.selected_radio_combo.blockSignals(False)
+            self._station_context_syncing = False
+        active_snapshot = pinned_snapshot or selected
+        if active_snapshot is None:
+            self.selected_radio_label.setText("Run on: Station Default")
+            self.selected_radio_summary_label.setText("Selected radio drives FLDigi / SSB net-control actions.")
+            return
+        name = active_snapshot.name or f"Device {active_snapshot.device_profile_id}"
+        prefix = "Run on (Pinned):" if pinned_snapshot is not None else "Run on:"
+        self.selected_radio_label.setText(f"{prefix} {name}")
+        summary = (
+            f"Backend: {active_snapshot.control_backend.upper()} | "
+            f"Endpoint: {active_snapshot.endpoint_summary or 'Unavailable'} | "
+            f"Schedule/Policy: {active_snapshot.assigned_operating_profile_name or 'Unassigned'}"
+        )
+        if pinned_snapshot is not None:
+            summary = f"Active session stays pinned to {name}. {summary}"
+        self.selected_radio_summary_label.setText(summary)
+
+    def _on_selected_radio_combo_changed(self, _index: int) -> None:
+        if self._station_context is None or self._station_context_syncing or self._session_device_profile_id is not None:
+            return
+        device_profile_id = int(self.selected_radio_combo.currentData() or 0)
+        if device_profile_id <= 0:
+            return
+        try:
+            self._station_context.set_selected_device_profile(device_profile_id)
+        except Exception as exc:
+            log.debug("FldigiNetControl: failed changing selected radio: %s", exc)
+
+    def _on_station_context_snapshots_changed(self, _snapshots: object) -> None:
+        self._refresh_station_context_ui()
+
+    def _on_station_context_selection_changed(self, _snapshot: object) -> None:
+        if self._session_device_profile_id is not None and self._station_context is not None:
+            selected = getattr(self._station_context, "selected_snapshot", lambda: None)()
+            if (
+                selected is None
+                or int(getattr(selected, "device_profile_id", 0) or 0) != int(self._session_device_profile_id)
+            ):
+                try:
+                    self._station_context.set_selected_device_profile(int(self._session_device_profile_id))
+                except Exception:
+                    pass
+                return
+        self._refresh_station_context_ui()
 
     # ---------------- INSERT KNOWN OPERATOR ---------------- #
 

@@ -10305,3 +10305,427 @@ Acceptance criteria:
 
 Rollback:
 - Revert the shared async status helper, Settings backfill/save-path changes, `ControlFreq` and `Station Overview` wiring, UI wording/test updates, and this spec addendum together.
+
+### 1.175 Addendum (2026-03-16): Multi-Radio Operating UX Simplification and Screen-by-Screen Implementation Plan
+
+Problem:
+- The current branch successfully adds multiple active device profiles, per-device software associations, station coordination, VarAC clusters, and multi-instance ingest, but the operator experience is still too close to the original single-radio mental model.
+- The result is avoidable ambiguity:
+  - `ControlFreq` still reads like a station-global control surface even though operators need a clear per-rig control target.
+  - `FreqPlanner` remains primary-device oriented and does not explain which rig or schedule target it is showing.
+  - `Messages` now ingest multiple sources, but the receive rig/source identity must be obvious at a glance.
+  - NCS actions are device-sensitive, but the UI does not consistently expose which rig a given NCS action will run on.
+  - Daily and Net schedules now need practical assignment at schedule level, not only row-by-row targeting.
+- The branch therefore needs a consistent multi-radio UX model that remains intuitive for:
+  - new users who are effectively operating one radio
+  - experienced operators running two or three radios plus an observer / SDR
+  - operators moving between simple and advanced stations without relearning the app
+
+Product direction:
+- FreqInOut should present a stable `station` model with two clear scopes:
+  - `station-wide` surfaces for shared awareness, unified traffic, conflicts, and readiness
+  - `device-scoped` surfaces for frequency control, planner focus, and NCS execution
+- The UI should be adaptive by active station configuration, but not structurally inconsistent:
+  - one active TX/RX radio should feel very close to `origin/main`
+  - two or more active TX/RX radios should reveal explicit device context selectors and station-wide summaries
+  - observer / SDR devices should be visible but should not pollute TX-control workflows by default
+
+UX principles:
+- Preserve the clean single-radio baseline whenever a station only has one active TX/RX device.
+- Make device scope explicit everywhere an action can affect only one rig.
+- Prefer `Selected Radio`, `Station Default`, `Runs On`, and `Inherited` over operator-facing use of `Primary`.
+- Use one persistent station-level context model instead of per-tab ad hoc selectors.
+- Keep heavy status and refresh work asynchronous and shared across visible surfaces.
+- Prefer progressive disclosure over large always-visible control walls.
+- Make per-rig identity persistent and easy to scan:
+  - operator-assigned device name
+  - optional short label / callsign suffix
+  - stable accent/badge color
+  - backend + role summary
+
+Impacted files and failure modes:
+- `freqinout/gui/main_window.py`
+  - Failure mode: the app shell lacks a single source of truth for selected-radio context, so each screen invents its own behavior.
+- `freqinout/gui/station_overview_tab.py`
+  - Failure mode: station-wide status remains useful, but it is not yet the canonical multi-rig at-a-glance surface.
+- `freqinout/gui/controlfreq_tab.py`
+  - Failure mode: operators cannot tell which rig is being controlled, which schedule is active for that rig, or whether displayed status is station-wide or device-specific.
+- `freqinout/gui/freq_planner_tab.py`
+  - Failure mode: planner data remains effectively bound to the compatibility device and gives no clear device/scope selection path.
+- `freqinout/gui/message_viewer_tab.py`
+  - Failure mode: unified traffic is useful, but receive-source identity is not prominent enough for fast operator judgment.
+- `freqinout/gui/fldigi_net_control_tab.py`
+  - Failure mode: FLDigi NCS actions can be executed without a clear device target model.
+- `freqinout/gui/js8call_net_control_tab.py`
+  - Failure mode: JS8 NCS actions remain implicitly tied to the compatibility device, which becomes ambiguous in multi-rig stations.
+- `freqinout/gui/local_ncs_tab.py`
+  - Failure mode: local net actions do not clearly express target device context.
+- `freqinout/gui/daily_schedule_tab.py`
+  - Failure mode: row-level targeting alone is too granular for common practice and makes schedule assignment noisy.
+- `freqinout/gui/net_schedule_tab.py`
+  - Failure mode: net schedules cannot be assigned cleanly to a default device/profile with selective overrides.
+- `freqinout/core/scheduler_engine.py`
+  - Failure mode: UI clarity improvements drift away from the actual runtime target-resolution logic.
+- `freqinout/core/station_runtime_manager.py`
+  - Failure mode: station/device summaries remain too implementation-oriented and do not expose the operator context needed by the new shell.
+- `freqinout/core/multi_radio_store.py`
+  - Failure mode: schedule/device association data grows in ad hoc ways instead of a consistent inheritance model.
+
+Terminology standard:
+- `Selected Radio`
+  - The currently focused TX/RX device for device-scoped operating surfaces.
+- `Station Default`
+  - The compatibility/runtime-default device currently projected into legacy singleton settings.
+- `Runs On`
+  - The effective device or operating-profile target for a schedule, net session, planner view, or action.
+- `Inherited`
+  - A row or action uses the target defined by the parent schedule/session rather than an explicit row override.
+- `Observer`
+  - A non-primary, non-default SDR/observer device that contributes visibility but is not selected by default for TX-control actions.
+
+Global UX model:
+
+1. App shell and station header
+- Add a persistent station header above the tab body and below the app title/navigation.
+- The station header should contain:
+  - compact chips/cards for each active TX/RX device
+  - optional observer / SDR chip(s) in a visually secondary treatment
+  - selected-radio highlight
+  - quick station alerts such as:
+    - shared PTT blocked
+    - RF conflict warning
+    - temporary profile swap active
+    - minimal mode active on station default
+  - a compact station-wide health summary
+- The station header becomes the canonical way to switch the selected radio.
+- Switching the selected radio must be fast, non-modal, and visible across tabs that honor device scope.
+
+2. Dynamic display rules
+- One active TX/RX device:
+  - hide or downplay selected-radio controls
+  - preserve the current single-radio flow wherever possible
+  - keep station header compact
+- Two or three active TX/RX devices:
+  - show persistent station header device chips
+  - show device-scoped context on affected tabs
+  - enable compare/multi-lane views where helpful, but keep one device selected by default
+- Observer / SDR active:
+  - show observer state in Station Overview and station header
+  - do not place observer devices into frequency-control or NCS selectors by default
+
+3. Shared UI rules for device-scoped surfaces
+- Any tab that acts on one rig must clearly show:
+  - `Selected Radio`
+  - `Runs On`
+  - backend / endpoint summary
+  - current schedule/profile context when relevant
+- If a tab supports station-wide aggregated content, the aggregation must be clearly labeled as such.
+
+Screen-by-screen UX specification:
+
+1. Station Overview
+- Purpose:
+  - canonical at-a-glance station dashboard
+  - replaces the old idea of global `Operating Status`
+- Required behavior:
+  - one card per active device
+  - compact station alert strip at top
+  - clear labels for:
+    - station default
+    - selected radio
+    - observer / gateway roles
+    - current schedule/profile assignment
+    - current band/frequency when available
+    - blocked / warning conditions
+- Interaction:
+  - clicking a TX/RX device card sets `Selected Radio`
+  - clicking an observer card should optionally focus observer detail, but should not silently change TX-control context
+- Notes:
+  - station summary stays station-wide
+  - service chips must remain deduplicated and readable
+
+2. ControlFreq
+- Purpose:
+  - primary workbench for live tuning/control on one radio at a time
+- Required behavior:
+  - top section should become `Selected Radio Control`
+  - explicit selected-radio switcher if more than one TX/RX device is active
+  - the old `Operating Status` block should be reduced to selected-radio status only
+  - a compact line must show:
+    - `Selected Radio`
+    - `Runs On`
+    - backend
+    - current band/frequency
+    - effective schedule source for that device
+- Message summary:
+  - remains station-wide
+  - label should make this explicit, for example `Station Message Summary`
+- Decision:
+  - `Station Overview` supersedes station-wide operating status
+  - `ControlFreq` remains useful, but only as a device-scoped control surface
+
+3. FreqPlanner
+- Purpose:
+  - planner and schedule-awareness view for frequencies/modes over time
+- Required behavior:
+  - default view follows `Selected Radio`
+  - view mode selector:
+    - `Selected Radio`
+    - `All Active Radios`
+    - `Compare`
+  - `Selected Radio` mode should preserve current planner simplicity
+  - `All Active Radios` should provide a compact station overview of planner/schedule occupancy
+  - `Compare` should use parallel lanes/cards only when two or more TX/RX devices are active
+- Notes:
+  - do not create separate permanent planner tabs per radio
+  - planner must always show which device/scope is being visualized
+
+4. Messages
+- Purpose:
+  - unified station traffic and operator message handling
+- Required behavior:
+  - continue using a unified inbox/history view
+  - every row must show receive/source identity clearly enough for rapid scanning:
+    - device profile name
+    - software source / instance
+    - optional band/frequency when useful and cheap to compute
+  - filter bar must support:
+    - all radios
+    - one selected radio
+    - one source/app
+  - detail pane/header must make the receive rig explicit
+- Notes:
+  - the operator should never need to infer receive rig from hidden metadata
+  - source labels should be compact badges, not oversized verbose columns
+
+5. NCS tabs (`FLDigi`, `JS8Call`, `Local`)
+- Purpose:
+  - conduct device-specific net-control actions safely
+- Required behavior:
+  - each NCS tab must include a required `Run on:` or `Selected Radio` target control
+  - when the active net/session matches a schedule target, the device target should default from that schedule
+  - once a session is active, the chosen radio should remain pinned and visible in the tab header
+  - the tab must show when a session/device choice differs from the schedule default
+- Safety rules:
+  - if an operator attempts an NCS action on a conflicting or unsupported device, the UI must explain why
+  - station coordination warnings must remain visible without overwhelming the operating surface
+
+6. Daily Schedule and Net Schedule
+- Purpose:
+  - schedule definition and operating-target assignment
+- Required behavior:
+  - each schedule should have a `Default Target`
+  - rows inherit that default target unless explicitly overridden
+  - row-level override remains available, but secondary to header-level assignment
+- Target options:
+  - `Station`
+  - `Operating Profile`
+  - `Device Profile`
+- UI behavior:
+  - inherited rows should visibly indicate `Inherited`
+  - overridden rows should visibly indicate the override target
+  - bulk editing should allow changing the schedule default without rewriting every row
+- Notes:
+  - the common use case is assigning the whole schedule to a rig/profile
+  - row-level targeting is an exception path, not the main workflow
+
+7. Settings
+- Purpose:
+  - define device identity cleanly enough that operating surfaces stay readable
+- Required behavior:
+  - device profiles should emphasize:
+    - operator-facing device name
+    - short label / optional shorthand
+    - class and role
+    - optional accent/badge identity
+  - software associations should stay in Settings, not leak raw technical fields into operating tabs
+- Notes:
+  - Settings remains the configuration authority
+  - operating tabs should select/target configured devices, not edit them
+
+Implementation plan:
+
+Phase H Slice 1: Selected-radio station shell
+- Files:
+  - `freqinout/gui/main_window.py`
+  - new shared selected-radio context helper in `freqinout/gui/` or `freqinout/core/`
+  - `freqinout/gui/station_overview_tab.py`
+  - `freqinout/core/station_runtime_manager.py`
+- Deliverables:
+  - persistent station header
+  - selected-radio context service
+  - device-chip switching
+  - clear station default vs selected-radio labeling
+- Acceptance:
+  - one-radio stations remain visually simple
+  - multi-radio stations can switch selected radio from the shell
+
+Phase H Slice 2: ControlFreq selected-radio redesign
+- Files:
+  - `freqinout/gui/controlfreq_tab.py`
+  - `freqinout/core/station_runtime_manager.py`
+  - `freqinout/gui/main_window.py`
+- Deliverables:
+  - selected-radio header in ControlFreq
+  - selected-radio operating status
+  - explicit station-wide label on message summary
+  - schedule/source context line for the selected radio
+- Acceptance:
+  - operators can always tell which rig ControlFreq is controlling
+  - ControlFreq no longer reads as a station-global operating-status page
+
+Phase H Slice 3: FreqPlanner multi-view model
+- Files:
+  - `freqinout/gui/freq_planner_tab.py`
+  - `freqinout/core/scheduler_engine.py`
+  - `freqinout/core/station_runtime_manager.py`
+- Deliverables:
+  - `Selected Radio`, `All Active Radios`, and `Compare` modes
+  - planner header showing effective target and current device scope
+- Acceptance:
+  - one-radio behavior remains simple
+  - multi-radio stations can inspect planner state by device without extra tabs
+
+Phase H Slice 4: Unified source-aware Messages and NCS targeting
+- Files:
+  - `freqinout/gui/message_viewer_tab.py`
+  - `freqinout/gui/fldigi_net_control_tab.py`
+  - `freqinout/gui/js8call_net_control_tab.py`
+  - `freqinout/gui/local_ncs_tab.py`
+  - supporting status/runtime files as needed
+- Deliverables:
+  - stronger per-row receive-rig/source identity in Messages
+  - per-tab `Run on:` / selected-radio controls in NCS tabs
+  - pinned device identity for active NCS sessions
+- Acceptance:
+  - operators can tell which rig received a message
+  - operators can tell which rig will execute each NCS action
+
+Phase H Slice 5: Schedule-level target inheritance and overrides
+- Files:
+  - `freqinout/gui/daily_schedule_tab.py`
+  - `freqinout/gui/net_schedule_tab.py`
+  - `freqinout/core/multi_radio_store.py`
+  - `freqinout/core/scheduler_engine.py`
+- Deliverables:
+  - schedule-level default target
+  - row inheritance indicators
+  - row override controls
+  - scheduler alignment with the new schedule target model
+- Acceptance:
+  - a whole schedule can be assigned to a device/profile
+  - row overrides remain available but are clearly exceptional
+
+Phase H Slice 6: Visual consistency, performance, and polish
+- Files:
+  - all touched UI surfaces above
+  - shared async/broker/context helpers
+- Deliverables:
+  - consistent badges, labels, and device identity treatment
+  - hidden-tab refresh discipline
+  - no blocking device/schedule context changes
+  - final terminology cleanup away from operator-facing `primary` language
+- Acceptance:
+  - multi-radio UX feels cohesive rather than bolted-on
+  - single-radio UX remains fast and recognizable
+
+Performance requirements:
+- No synchronous network/device probes on tab open, tab switch, or context selector change.
+- Selected-radio changes must reuse cached runtime state where possible and update only affected surfaces.
+- Device-scoped tabs should subscribe to selected-radio context changes rather than re-querying the world independently.
+- Hidden tabs must not perform heavy planner/status rebuilds simply because station context changed.
+- Compare and all-radios views must degrade gracefully with three TX/RX radios plus an observer.
+
+Out of scope for this addendum:
+- No redesign of the underlying radio-control backends beyond what is needed to support clear device targeting.
+- No attempt to expose every backend-specific configuration detail on operating tabs.
+- No new concurrent scheduler architecture beyond the existing station runtime/scheduler capabilities.
+- No change to the underlying ingest schemas beyond surfacing already-ingested source identity more clearly.
+
+Manual verification plan once implementation starts:
+- Start with one active TX/RX radio and verify the app still feels close to `origin/main`.
+- Activate a second TX/RX radio and verify selected-radio switching in the station header, ControlFreq, FreqPlanner, and NCS tabs.
+- Activate a third radio and verify layout density remains usable without overflowing the shell.
+- Add an observer / SDR device and verify it appears in station-wide views but not as the default TX-control target.
+- Confirm Messages clearly identify receive rig/source across JS8 and VarAC traffic.
+- Confirm schedule-level target inheritance and row overrides are visible and understandable.
+
+Acceptance criteria:
+- The app presents a stable station header with selected-radio context when more than one active TX/RX device exists.
+- ControlFreq, FreqPlanner, and NCS tabs all make device scope explicit and consistent.
+- Messages clearly identify which rig/source received each message while preserving a unified station view.
+- Daily and Net schedules support schedule-level target assignment with row inheritance and explicit overrides.
+- One-radio stations remain simple and close to the existing baseline.
+- Multi-radio stations become easier to understand rather than merely more configurable.
+
+Rollback:
+- Revert this addendum if the implementation direction changes materially before code work begins.
+
+### 1.176 Addendum (2026-03-16): Phase H Completion and GUI Performance Benchmark Harness
+
+Implemented:
+- `main_window.py`
+  - persistent station header with selected-radio chips and station summary
+  - shared `SelectedRadioContext` for device-scoped operating surfaces
+- `station_overview_tab.py`
+  - operator-facing `Station Default` terminology
+  - `Selected Radio` badge and direct per-card select action
+- `controlfreq_tab.py`
+  - selected-radio header and device-scoped status treatment
+- `freq_planner_tab.py`
+  - selected-radio context selector and multi-view header model
+- `message_viewer_tab.py`
+  - radio/source filters on the unified inbox
+  - selected-radio-aware scope summary
+  - optional `reportlab` dependency handling so the Messages tab still loads when PDF export support is absent
+- `js8call_net_control_tab.py`
+  - `Run on:` selector tied to selected-radio context
+  - active-session radio pinning
+- `fldigi_net_control_tab.py`
+  - `Run on:` selector tied to selected-radio context
+  - active-session radio pinning
+- `local_ncs_tab.py`
+  - `Run on:` selector tied to selected-radio context
+  - active-session radio pinning
+- `daily_schedule_tab.py`
+  - schedule-level default target editor
+  - row-level `Inherited` targeting
+  - persisted default-target state aligned with scheduler target resolution
+- `net_schedule_tab.py`
+  - schedule-level default target editor
+  - row-level `Inherited` targeting
+  - persisted default-target state aligned with scheduler target resolution
+
+Benchmark harness:
+- Added GUI benchmark-style tests for:
+  - selected-radio context sync cost
+  - unified Messages filter refresh/apply cost
+  - Net Schedule target-widget refresh cost
+- The benchmark tests are intentionally regression-oriented rather than micro-optimized:
+  - they run in normal `pytest`
+  - they assert broad upper bounds suitable for CI and local operator workstations
+  - they target responsiveness regressions rather than machine-specific absolute speed contests
+
+Benchmark-driven hardening:
+- Avoided reintroducing blocking imports in `Messages` by making PDF export support optional.
+- Fixed schedule-target widget refresh so changing the schedule default does not get reset by target-catalog refresh.
+- Preserved targeted widget refresh patterns instead of returning to full-tab rebuilds for these new UX paths.
+
+Verification focus:
+- Functional UI tests for:
+  - station overview selected-radio state
+  - message-viewer radio/source filtering
+  - local NCS radio pinning
+  - schedule default-target persistence and inherited rows
+- GUI performance regression tests for:
+  - selected-radio context sync
+  - Messages filtering
+  - schedule-target widget refresh
+
+Residual boundary:
+- `FreqPlanner` still uses one table view with labeled selected/all/compare modes rather than a fully parallel compare-lane renderer.
+- NCS schedule-derived auto-selection remains conservative: the `Run on:` model is explicit and pinned, but not yet a full schedule-to-session auto-routing engine.
+- The benchmark harness is CI-safe and useful for regressions, but it is not a replacement for occasional manual profiling on real operator stations.
+
+Rollback:
+- Revert the Phase H UI/context/schedule-editor changes together with the new benchmark tests if a different multi-radio operating model is chosen.

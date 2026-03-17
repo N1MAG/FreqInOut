@@ -134,7 +134,7 @@ def test_station_overview_skips_inactive_refresh_and_avoids_rebuild_on_same_snap
         tab.set_runtime_manager(manager)
         assert manager.calls == 1
         assert rebuild_count["value"] == 1
-        assert "Primary compatibility device: Primary." in tab.summary_label.text()
+        assert "Station default: Primary." in tab.summary_label.text()
         assert "Minimal mode" in tab.alerts_label.text()
         assert "Shared PTT" in tab.alerts_label.text()
 

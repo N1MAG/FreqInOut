@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QComboBox,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -25,6 +26,12 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.perf_metrics import emit_span
+from freqinout.core.schedule_targeting import (
+    SCHEDULE_KIND_HF,
+    SCHEDULE_KIND_NET,
+    load_schedule_default_target,
+    schedule_row_matches_target_context,
+)
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.theme import resolve_theme, button_style, band_cell_colors, qcolor, BAND_COLORS_LIGHT, BAND_COLORS_DARK
 
@@ -79,6 +86,9 @@ class FreqPlannerTab(QWidget):
         self._last_snapshot: str = ""
         self._last_rebuild_check_ts: float = 0.0
         self._pending_rebuild: bool = False
+        self._station_context = None
+        self._station_context_syncing = False
+        self._planner_view_mode = "selected"
         self._build_ui()
         self._apply_theme()
         self.rebuild_table()
@@ -90,6 +100,21 @@ class FreqPlannerTab(QWidget):
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>FreqPlanner</h3>"))
+        self.selected_radio_label = QLabel("Selected Radio: Station Default")
+        self.selected_radio_label.setStyleSheet("font-weight: 600;")
+        header.addWidget(self.selected_radio_label)
+        self.selected_radio_combo = QComboBox()
+        self.selected_radio_combo.setMinimumWidth(220)
+        self.selected_radio_combo.currentIndexChanged.connect(self._on_selected_radio_combo_changed)
+        self.selected_radio_combo.setVisible(False)
+        header.addWidget(self.selected_radio_combo)
+        header.addWidget(QLabel("View:"))
+        self.view_mode_combo = QComboBox()
+        self.view_mode_combo.addItem("Selected Radio", "selected")
+        self.view_mode_combo.addItem("All Active Radios", "all")
+        self.view_mode_combo.addItem("Compare", "compare")
+        self.view_mode_combo.currentIndexChanged.connect(self._on_view_mode_changed)
+        header.addWidget(self.view_mode_combo)
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
@@ -101,6 +126,10 @@ class FreqPlannerTab(QWidget):
         header.addWidget(self.local_label)
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
+        self.view_summary_label = QLabel("Viewing: Selected radio")
+        self.view_summary_label.setWordWrap(True)
+        self.view_summary_label.setStyleSheet("color: #888;")
+        layout.addWidget(self.view_summary_label)
 
         self.band_legend = QWidget()
         self.band_legend_layout = QHBoxLayout(self.band_legend)
@@ -144,6 +173,27 @@ class FreqPlannerTab(QWidget):
         self._setup_clock_timer()
         self._load_band_colors()
         self._render_band_legend()
+
+    def set_station_context(self, context: object) -> None:
+        if self._station_context is context:
+            return
+        if self._station_context is not None:
+            try:
+                self._station_context.snapshots_changed.disconnect(self._on_station_context_snapshots_changed)
+            except Exception:
+                pass
+            try:
+                self._station_context.selection_changed.disconnect(self._on_station_context_selection_changed)
+            except Exception:
+                pass
+        self._station_context = context
+        if self._station_context is not None:
+            try:
+                self._station_context.snapshots_changed.connect(self._on_station_context_snapshots_changed)
+                self._station_context.selection_changed.connect(self._on_station_context_selection_changed)
+            except Exception:
+                pass
+        self._refresh_station_context_ui()
 
     # ------------- helpers ------------- #
 
@@ -258,6 +308,33 @@ class FreqPlannerTab(QWidget):
         if not isinstance(policies, list):
             policies = []
         return hf, net, sop, policies
+
+    def _selected_target_context(self) -> Tuple[Optional[int], Optional[int]]:
+        if self._station_context is not None and hasattr(self._station_context, "selected_target_context"):
+            try:
+                return self._station_context.selected_target_context()
+            except Exception:
+                return None, None
+        return None, None
+
+    def _filter_rows_for_selected_radio(self, rows: List[Dict], *, schedule_kind: str) -> List[Dict]:
+        if self._planner_view_mode != "selected":
+            return list(rows)
+        device_profile_id, operating_profile_id = self._selected_target_context()
+        default_scope, default_device_id, default_operating_id = load_schedule_default_target(self.settings, schedule_kind)
+        return [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and schedule_row_matches_target_context(
+                row,
+                device_profile_id=device_profile_id,
+                operating_profile_id=operating_profile_id,
+                default_target_scope=default_scope,
+                default_target_device_profile_id=default_device_id,
+                default_target_operating_profile_id=default_operating_id,
+            )
+        ]
 
     @staticmethod
     def _policy_overlap(
@@ -915,6 +992,8 @@ class FreqPlannerTab(QWidget):
         self.table.setHorizontalHeaderLabels(headers)
 
         hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
+        hf_sched = self._filter_rows_for_selected_radio(hf_sched, schedule_kind=SCHEDULE_KIND_HF)
+        net_sched = self._filter_rows_for_selected_radio(net_sched, schedule_kind=SCHEDULE_KIND_NET)
         theme = resolve_theme(self.settings)
         self._last_snapshot = self._snapshot(hf_sched, net_sched, sop_sched, policy_rows)
         now_utc = datetime.datetime.utcnow()
@@ -1326,6 +1405,7 @@ class FreqPlannerTab(QWidget):
 
         # Update clock labels
         self._update_clock_labels()
+        self._refresh_station_context_ui()
         self._visible_bands = sorted(visible_bands)
         self._render_band_legend()
         emit_span(
@@ -1375,6 +1455,67 @@ class FreqPlannerTab(QWidget):
                 f"{p.get('net_row_signature','')}|{p.get('sop_row_signature','')}"
             )
         return ";".join(parts)
+
+    def _refresh_station_context_ui(self) -> None:
+        context = self._station_context
+        if context is None:
+            self.selected_radio_combo.setVisible(False)
+            self.selected_radio_label.setText("Selected Radio: Station Default")
+            self.view_summary_label.setText(
+                "Viewing: Selected radio schedule." if self._planner_view_mode == "selected" else "Viewing: Station aggregate."
+            )
+            return
+        snapshots = list(getattr(context, "active_txrx_snapshots", lambda: [])())
+        selected = getattr(context, "selected_snapshot", lambda: None)()
+        self._station_context_syncing = True
+        try:
+            self.selected_radio_combo.blockSignals(True)
+            self.selected_radio_combo.clear()
+            for snapshot in snapshots:
+                self.selected_radio_combo.addItem(snapshot.name or f"Device {snapshot.device_profile_id}", int(snapshot.device_profile_id))
+            if selected is not None:
+                idx = self.selected_radio_combo.findData(int(selected.device_profile_id))
+                if idx >= 0:
+                    self.selected_radio_combo.setCurrentIndex(idx)
+            self.selected_radio_combo.setVisible(len(snapshots) > 1)
+        finally:
+            self.selected_radio_combo.blockSignals(False)
+            self._station_context_syncing = False
+        if selected is None:
+            self.selected_radio_label.setText("Selected Radio: Station Default")
+        else:
+            self.selected_radio_label.setText(f"Selected Radio: {selected.name or f'Device {selected.device_profile_id}'}")
+        if self._planner_view_mode == "selected":
+            view_text = f"Viewing: planner for {selected.name if selected is not None else 'station default'}."
+        elif self._planner_view_mode == "compare":
+            view_text = "Viewing: station aggregate compare mode across active radios."
+        else:
+            view_text = "Viewing: station aggregate across all active radios."
+        self.view_summary_label.setText(view_text)
+
+    def _on_selected_radio_combo_changed(self, _index: int) -> None:
+        if self._station_context is None or self._station_context_syncing:
+            return
+        device_profile_id = int(self.selected_radio_combo.currentData() or 0)
+        if device_profile_id <= 0:
+            return
+        try:
+            self._station_context.set_selected_device_profile(device_profile_id)
+        except Exception as exc:
+            log.debug("FreqPlanner: failed changing selected radio: %s", exc)
+
+    def _on_view_mode_changed(self, _index: int) -> None:
+        self._planner_view_mode = str(self.view_mode_combo.currentData() or "selected")
+        self._refresh_station_context_ui()
+        self.rebuild_table()
+
+    def _on_station_context_snapshots_changed(self, _snapshots: object) -> None:
+        self._refresh_station_context_ui()
+
+    def _on_station_context_selection_changed(self, _snapshot: object) -> None:
+        self._refresh_station_context_ui()
+        if self._planner_view_mode == "selected":
+            self.rebuild_table()
 
     def _maybe_rebuild_if_changed(self):
         hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()

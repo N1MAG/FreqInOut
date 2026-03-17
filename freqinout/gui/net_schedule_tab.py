@@ -38,12 +38,16 @@ from PySide6.QtGui import QRegularExpressionValidator, QAction, QColor
 
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.schedule_targeting import (
+    SCHEDULE_KIND_NET,
     TARGET_SCOPE_DEVICE_PROFILE,
+    TARGET_SCOPE_INHERITED,
     TARGET_SCOPE_OPERATING_PROFILE,
     TARGET_SCOPE_STATION,
+    load_schedule_default_target,
     normalize_schedule_target,
     normalize_schedule_target_fields,
     normalize_target_scope,
+    save_schedule_default_target,
     schedule_targets_may_overlap,
 )
 from freqinout.core.settings_manager import SettingsManager
@@ -120,6 +124,7 @@ DAY_NAMES = [
 ]
 DAY_OPTIONS = ["ALL"] + DAY_NAMES
 SCHEDULE_TARGET_SCOPE_ITEMS = [
+    ("Inherited", TARGET_SCOPE_INHERITED),
     ("Station", TARGET_SCOPE_STATION),
     ("Device Profile", TARGET_SCOPE_DEVICE_PROFILE),
     ("Operating Profile", TARGET_SCOPE_OPERATING_PROFILE),
@@ -241,6 +246,9 @@ class NetScheduleTab(QWidget):
         self.operating_groups: List[Dict[str, str]] = []
         self.device_profiles: List[Dict[str, Any]] = []
         self.operating_profiles: List[Dict[str, Any]] = []
+        self._schedule_default_target_scope: str = TARGET_SCOPE_STATION
+        self._schedule_default_target_device_profile_id: Optional[int] = None
+        self._schedule_default_target_operating_profile_id: Optional[int] = None
         self._clock_timer: QTimer | None = None
         self._suppress_autostart: bool = True  # avoid auto-start during initial load
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
@@ -264,6 +272,7 @@ class NetScheduleTab(QWidget):
 
         self._build_ui()
         self._refresh_schedule_target_catalogs()
+        self._load_schedule_default_target_state()
         self._load()
         self._setup_clock_timer()
         self._suppress_autostart = False
@@ -279,14 +288,108 @@ class NetScheduleTab(QWidget):
         except Exception as e:
             log.debug("Net Schedule: failed loading operating profiles for target scopes: %s", e)
             self.operating_profiles = []
+        if hasattr(self, "default_target_value_combo"):
+            (
+                self._schedule_default_target_scope,
+                self._schedule_default_target_device_profile_id,
+                self._schedule_default_target_operating_profile_id,
+            ) = self._selected_schedule_default_target()
+            self._apply_schedule_default_target_widgets()
 
     @staticmethod
     def _target_scope_tooltip() -> str:
         return (
-            "Station rows apply to any current primary runtime. "
-            "Device Profile rows apply only when that device is primary. "
-            "Operating Profile rows apply only when the current primary device carries that effective assignment."
+            "Inherited rows use the Schedule Default target. "
+            "Station rows apply to any current station-default runtime. "
+            "Device Profile rows apply only when that device is the station default. "
+            "Operating Profile rows apply only when the current station-default device carries that effective assignment."
         )
+
+    def _load_schedule_default_target_state(self) -> None:
+        scope, device_profile_id, operating_profile_id = load_schedule_default_target(self.settings, SCHEDULE_KIND_NET)
+        self._schedule_default_target_scope = scope
+        self._schedule_default_target_device_profile_id = device_profile_id
+        self._schedule_default_target_operating_profile_id = operating_profile_id
+        self._apply_schedule_default_target_widgets()
+
+    def _selected_schedule_default_target(self) -> Tuple[str, Optional[int], Optional[int]]:
+        scope_widget = getattr(self, "default_target_scope_combo", None)
+        value_widget = getattr(self, "default_target_value_combo", None)
+        if not isinstance(scope_widget, QComboBox):
+            return (
+                self._schedule_default_target_scope,
+                self._schedule_default_target_device_profile_id,
+                self._schedule_default_target_operating_profile_id,
+            )
+        scope = normalize_target_scope(scope_widget.currentData(), allow_inherited=False)
+        target_id = value_widget.currentData() if isinstance(value_widget, QComboBox) else None
+        return normalize_schedule_target(
+            scope,
+            target_device_profile_id=target_id if scope == TARGET_SCOPE_DEVICE_PROFILE else None,
+            target_operating_profile_id=target_id if scope == TARGET_SCOPE_OPERATING_PROFILE else None,
+            allow_inherited=False,
+        )
+
+    def _refresh_schedule_default_target_summary(self) -> None:
+        if not hasattr(self, "default_target_summary_label"):
+            return
+        scope, target_device_profile_id, target_operating_profile_id = self._selected_schedule_default_target()
+        if scope == TARGET_SCOPE_DEVICE_PROFILE:
+            label = self.default_target_value_combo.currentText().strip() if isinstance(getattr(self, "default_target_value_combo", None), QComboBox) else ""
+            summary = f"Schedule Default: Device Profile - {label or f'Device #{int(target_device_profile_id or 0)}'}"
+        elif scope == TARGET_SCOPE_OPERATING_PROFILE:
+            label = self.default_target_value_combo.currentText().strip() if isinstance(getattr(self, "default_target_value_combo", None), QComboBox) else ""
+            summary = f"Schedule Default: Operating Profile - {label or f'Profile #{int(target_operating_profile_id or 0)}'}"
+        else:
+            summary = "Schedule Default: Station-wide"
+        self.default_target_summary_label.setText(summary)
+
+    def _apply_schedule_default_target_widgets(self) -> None:
+        if not hasattr(self, "default_target_scope_combo") or not hasattr(self, "default_target_value_combo"):
+            return
+        scope = self._schedule_default_target_scope
+        device_profile_id = self._schedule_default_target_device_profile_id
+        operating_profile_id = self._schedule_default_target_operating_profile_id
+        self.default_target_scope_combo.blockSignals(True)
+        try:
+            self.default_target_scope_combo.clear()
+            for label, value in SCHEDULE_TARGET_SCOPE_ITEMS:
+                if value == TARGET_SCOPE_INHERITED:
+                    continue
+                self.default_target_scope_combo.addItem(label, value)
+            idx = self.default_target_scope_combo.findData(scope)
+            if idx < 0:
+                idx = self.default_target_scope_combo.findData(TARGET_SCOPE_STATION)
+            self.default_target_scope_combo.setCurrentIndex(max(idx, 0))
+        finally:
+            self.default_target_scope_combo.blockSignals(False)
+        self._populate_target_value_combo(
+            self.default_target_value_combo,
+            scope,
+            target_device_profile_id=device_profile_id,
+            target_operating_profile_id=operating_profile_id,
+        )
+        self._refresh_schedule_default_target_summary()
+
+    def _on_schedule_default_target_scope_changed(self, _index: int) -> None:
+        scope = normalize_target_scope(self.default_target_scope_combo.currentData(), allow_inherited=False)
+        self._schedule_default_target_scope = scope
+        self._schedule_default_target_device_profile_id = None
+        self._schedule_default_target_operating_profile_id = None
+        self._populate_target_value_combo(self.default_target_value_combo, scope)
+        self._refresh_schedule_default_target_summary()
+        self._refresh_schedule_target_widgets()
+        self._mark_dirty()
+
+    def _on_schedule_default_target_value_changed(self, _index: int) -> None:
+        (
+            self._schedule_default_target_scope,
+            self._schedule_default_target_device_profile_id,
+            self._schedule_default_target_operating_profile_id,
+        ) = self._selected_schedule_default_target()
+        self._refresh_schedule_default_target_summary()
+        self._refresh_schedule_target_widgets()
+        self._mark_dirty()
 
     def _device_target_label(self, profile: Dict[str, Any]) -> str:
         name = str(profile.get("name") or "").strip() or f"Device {int(profile.get('id') or 0)}"
@@ -319,6 +422,10 @@ class NetScheduleTab(QWidget):
         try:
             combo.clear()
             combo.setToolTip(self._target_scope_tooltip())
+            if scope == TARGET_SCOPE_INHERITED:
+                combo.addItem("Inherited from Schedule Default", None)
+                combo.setEnabled(False)
+                return
             if scope == TARGET_SCOPE_STATION:
                 combo.addItem("Station-wide", None)
                 combo.setEnabled(False)
@@ -406,10 +513,28 @@ class NetScheduleTab(QWidget):
         layout.addLayout(header)
 
         self.schedule_target_hint = QLabel(
-            "Target Scope limits when a row is eligible: Station applies everywhere, Device Profile and Operating Profile apply only when that target owns the current primary runtime."
+            "Schedule Default sets the normal target for this schedule. Row Target Scope stays on Inherited unless a specific row needs an override."
         )
         self.schedule_target_hint.setWordWrap(True)
         layout.addWidget(self.schedule_target_hint)
+
+        default_target_row = QHBoxLayout()
+        default_target_row.addWidget(QLabel("Schedule Default Target:"))
+        self.default_target_scope_combo = QComboBox()
+        self.default_target_scope_combo.setToolTip(self._target_scope_tooltip())
+        self.default_target_scope_combo.currentIndexChanged.connect(self._on_schedule_default_target_scope_changed)
+        default_target_row.addWidget(self.default_target_scope_combo)
+        self.default_target_value_combo = QComboBox()
+        self.default_target_value_combo.setMinimumWidth(240)
+        self.default_target_value_combo.setToolTip(self._target_scope_tooltip())
+        self.default_target_value_combo.currentIndexChanged.connect(self._on_schedule_default_target_value_changed)
+        default_target_row.addWidget(self.default_target_value_combo)
+        default_target_row.addStretch()
+        layout.addLayout(default_target_row)
+        self.default_target_summary_label = QLabel("Schedule Default: Station-wide")
+        self.default_target_summary_label.setWordWrap(True)
+        self.default_target_summary_label.setStyleSheet("color: #888;")
+        layout.addWidget(self.default_target_summary_label)
 
         # table
         self.table = QTableWidget()
@@ -1203,8 +1328,11 @@ class NetScheduleTab(QWidget):
         target_scope_combo.setToolTip(self._target_scope_tooltip())
         target_value_combo = QComboBox()
         target_value_combo.setToolTip(self._target_scope_tooltip())
+        raw_target_scope = row_data.get("target_scope")
+        if not row_data:
+            raw_target_scope = TARGET_SCOPE_INHERITED
         target_scope, target_device_profile_id, target_operating_profile_id = normalize_schedule_target(
-            row_data.get("target_scope"),
+            raw_target_scope,
             target_device_profile_id=row_data.get("target_device_profile_id"),
             target_operating_profile_id=row_data.get("target_operating_profile_id"),
         )
@@ -2287,6 +2415,7 @@ class NetScheduleTab(QWidget):
             except Exception:
                 pass
             self._refresh_schedule_target_catalogs()
+            self._load_schedule_default_target_state()
             self._load_operating_groups()
             data = self._load_from_db()
             loaded_from_db = bool(data)
@@ -2321,6 +2450,23 @@ class NetScheduleTab(QWidget):
         except ValueError as e:
             QMessageBox.warning(self, "Invalid Net Schedule", str(e))
             return
+        default_target_scope, default_target_device_profile_id, default_target_operating_profile_id = (
+            self._selected_schedule_default_target()
+        )
+        if default_target_scope == TARGET_SCOPE_DEVICE_PROFILE and default_target_device_profile_id is None:
+            QMessageBox.warning(
+                self,
+                "Invalid Net Schedule",
+                "Schedule Default Target requires a device profile when Device Profile scope is selected.",
+            )
+            return
+        if default_target_scope == TARGET_SCOPE_OPERATING_PROFILE and default_target_operating_profile_id is None:
+            QMessageBox.warning(
+                self,
+                "Invalid Net Schedule",
+                "Schedule Default Target requires an operating profile when Operating Profile scope is selected.",
+            )
+            return
         clean_rows = [self._strip_internal_row(r) for r in rows]
         self._raw_rows = rows
         if not self._enforce_net_priority_for_conflicts(rows):
@@ -2328,6 +2474,16 @@ class NetScheduleTab(QWidget):
             return
 
         # Save to JSON config
+        save_schedule_default_target(
+            self.settings,
+            SCHEDULE_KIND_NET,
+            target_scope=default_target_scope,
+            target_device_profile_id=default_target_device_profile_id,
+            target_operating_profile_id=default_target_operating_profile_id,
+        )
+        self._schedule_default_target_scope = default_target_scope
+        self._schedule_default_target_device_profile_id = default_target_device_profile_id
+        self._schedule_default_target_operating_profile_id = default_target_operating_profile_id
         self.settings.set("net_schedule", clean_rows)
         self.settings.save()
         log.info("Net schedule saved to config: %d entries", len(clean_rows))
