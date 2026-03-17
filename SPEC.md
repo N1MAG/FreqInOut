@@ -9174,3 +9174,1134 @@ Deferred boundary after this slice:
 
 Rollback:
 - Revert the HF/Net schedule-target schema, editor, scheduler-filtering, and signature/test changes together so schedule behavior returns to Phase D Slice 3 global-row semantics.
+
+### 1.159 Addendum (2026-03-15): Multi-Radio Phase E Slice 1 (Shared-PTT Coordination Interlock)
+
+Problem:
+- Phase C and Phase D allow multiple devices to be runtime-active, but the app still has no enforced notion of which devices share a transmit/PTT domain.
+- Advanced operators can already model multiple rigs and assignments, yet a primary-device QSY or scheduler action can still proceed while another active device that shares the same PTT chain is transmitting.
+- The branch already stores `ptt_group` and `station_coordination_policies`, but that data is not operator-visible enough and does not currently influence runtime behavior.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: the slice over-promises full RF-conflict orchestration or prompt flows that belong to later Phase E work.
+- `freqinout/core/multi_radio_store.py`
+  - Failure mode: `ptt_group` remains effectively hidden, or shared-PTT policy rows drift from device-profile state.
+- `freqinout/core/station_runtime_manager.py`
+  - Failure mode: runtime snapshots cannot report which active device currently owns a shared PTT domain.
+- `freqinout/core/scheduler_engine.py`
+  - Failure mode: scheduled or manual QSY actions ignore another active device already transmitting on the same PTT group.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: operators cannot configure or review `ptt_group` safely from the existing device-profile UI.
+- `freqinout/gui/station_overview_tab.py`
+  - Failure mode: active shared-PTT contention is invisible in the current station-level view.
+- targeted tests
+  - Failure mode: shared-PTT lock enforcement regresses silently or only works for one action path.
+
+Scope:
+- Extend the existing `Device Profiles` workflow to expose `ptt_group` directly:
+  - editable in the existing Add/Edit Device Profile dialog
+  - visible in the existing Device Profiles table using the current table-driven design
+- Add store support for shared-PTT coordination state:
+  - list persisted station-coordination policies
+  - derive/synchronize `shared_ptt` policy rows from non-empty matching `ptt_group` values
+  - keep policy generation idempotent and automatic; no separate policy editor in this slice
+- Extend the station runtime manager to compute shared-PTT lock state for active devices:
+  - poll rig-backed active devices for live PTT state with lightweight caching
+  - identify when another runtime-active device in the same `ptt_group` currently owns the shared PTT domain
+  - expose that state in per-device runtime snapshots and a primary-device lock summary
+- Enforce the shared-PTT interlock in the primary compatibility scheduler:
+  - scheduled HF/Net/SOP applications must not queue a frequency/control action when another active device in the same `ptt_group` is keyed
+  - manual QSY must respect the same interlock
+  - the interlock should appear alongside the existing busy/PTT safety reasons instead of replacing them
+- Surface shared-PTT status in the current UI:
+  - `Station Overview` cards show `PTT Group` and whether the runtime is clear, keyed, or blocked by another active device
+  - current scheduler/frequency status surfaces expose a concise shared-PTT busy reason using the existing design language
+
+Out of scope:
+- A separate station-coordination policy management UI
+- Prompt-first operator resolution flows
+- Automatic profile swap or reassignment workflows
+- Full RF conflict logic across antenna/front-end/amplifier groups
+- Secondary-device duplicate control tabs or per-device schedulers
+
+Constraints:
+- Existing single-device installs with blank `ptt_group` values must behave exactly as before.
+- Shared-PTT evaluation must stay lightweight and must not add long blocking work to status refresh paths.
+- The first slice should be safety-first: block/hold unsafe scheduler/manual-QSY changes and surface the reason clearly, without adding prompt workflows yet.
+- Current primary-device control behavior must remain unchanged when no active shared-PTT conflict exists.
+
+Acceptance criteria:
+- Operators can configure `ptt_group` for a device profile from the existing Settings UI and see that value after save/reload.
+- The store derives stable `shared_ptt` coordination rows from device `ptt_group` membership without creating duplicate policy rows.
+- When another runtime-active device in the same `ptt_group` reports PTT active, the primary compatibility scheduler refuses the frequency/control action and reports a shared-PTT reason.
+- Manual QSY uses the same shared-PTT interlock path as scheduled actions.
+- `Station Overview` and the current frequency/scheduler status surfaces show which shared PTT group is in use and which device currently owns it.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_e.py tests/test_scheduler_deferral.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Prompt-first conflict handling remains Phase E Slice 2.
+- Antenna/front-end/amplifier conflict families remain deferred until after shared-PTT interlocks are proven.
+- The scheduler remains primary-runtime only; this slice blocks unsafe actions, it does not create concurrent transmitter arbitration.
+
+Rollback:
+- Revert the shared-PTT spec addendum, store/runtime coordination support, scheduler/status/UI changes, and targeted tests together so the branch returns to the Phase D target-scope state cleanly.
+
+### 1.160 Addendum (2026-03-15): Multi-Radio Phase E Slice 2 (Prompt-First RF Conflict Warnings)
+
+Problem:
+- Phase E Slice 1 added a hard shared-PTT interlock, but the station still lacks an operator-guided path for softer RF/resource conflicts.
+- Advanced operators need warning prompts before the primary compatibility runtime moves onto a band/frequency that overlaps another active device on a shared antenna, amplifier, or front-end path.
+- The current runtime either proceeds silently or blocks only on hard safety conditions; there is not yet a prompt-first coordination layer for likely-but-operator-manageable conflicts.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: Slice 2 overreaches into full auto-resolution or concurrent per-device scheduling.
+- `freqinout/core/multi_radio_store.py`
+  - Failure mode: `rf_conflict` policies are implied only in code and cannot be audited from persisted coordination rows.
+- `freqinout/core/station_runtime_manager.py`
+  - Failure mode: the runtime cannot evaluate active peer band/frequency/resource state for primary-device conflict prompts.
+- `freqinout/core/scheduler_engine.py`
+  - Failure mode: schedule-driven actions do not warn before entering a likely RF conflict, or prompt decisions do not apply cleanly.
+- `freqinout/gui/main_window.py`
+  - Failure mode: the operator is warned inconsistently, or the prompt flow diverges from the app’s existing scheduler prompt design.
+- `freqinout/gui/qsy_helper.py`
+  - Failure mode: manual QSY bypasses the conflict prompt path or double-prompts against the scheduler path.
+- `freqinout/gui/station_overview_tab.py`
+  - Failure mode: current peer tuning/resource context is still too opaque for advanced operators to reason about prompts.
+- targeted tests
+  - Failure mode: warning prompts, proceed-once behavior, and skip/pause decisions regress silently.
+
+Scope:
+- Add derived `rf_conflict` coordination policies from shared resource groups on enabled non-observer device profiles:
+  - `antenna_group`
+  - `amplifier_group`
+  - `frontend_group`
+- Persist those policies automatically and idempotently using the existing `station_coordination_policies` table:
+  - one derived `rf_conflict` row per device pair
+  - `trigger_json` records the shared resource groups
+  - `safety_mode='prompt'`
+- Extend active runtime snapshots with lightweight current tuning state for rig-backed devices:
+  - current frequency in Hz
+  - derived current band label
+  - normalized shared resource groups
+- Evaluate prompt-worthy RF conflicts for the current primary compatibility action against other active devices:
+  - compare the primary target band/frequency to each active peer’s current band/frequency
+  - prompt only when there is both:
+    - a shared resource relationship from derived `rf_conflict` policy state, and
+    - an overlap signal (`same frequency` or `same band`)
+- Keep this slice warning-based, not block-based:
+  - shared PTT remains a hard interlock from Slice 1
+  - RF conflict warnings prompt the operator with explicit choices
+- Add a scheduler-driven prompt flow using the existing `MainWindow` modal pattern:
+  - `Proceed Once`
+  - `Skip Once`
+  - `Pause Schedule`
+- Add the same prompt-first warning path for manual QSY:
+  - `Proceed QSY`
+  - `Cancel`
+- Surface concise RF conflict summary text in the existing station/scheduler UI so operators can see why a prompt appeared.
+
+Out of scope:
+- Auto-resolution or automatic retuning of other devices
+- A separate station-coordination policy editor
+- Prompt flows for every possible conflict family beyond shared antenna/amplifier/front-end overlaps
+- Full temporary profile swap workflow
+- Secondary-device schedulers or duplicate per-device control tabs
+
+Constraints:
+- Existing single-device and no-shared-resource installs must behave exactly as before.
+- Slice 2 must reuse the current scheduler prompt style instead of inventing a new coordination UI framework.
+- Warning prompts must default safe:
+  - no automatic proceed
+  - timeout or close behavior must not force an action
+- Frequency/band polling for secondary devices must stay lightweight and cached.
+
+Acceptance criteria:
+- The store derives stable `rf_conflict` coordination rows from shared resource groups without duplicating rows.
+- When the primary scheduler would move onto the same band or frequency as another active device that shares antenna/amplifier/front-end resources, the app prompts instead of silently proceeding.
+- `Proceed Once` applies the current schedule action without immediately re-prompting for the same conflict signature.
+- `Skip Once` suppresses the current conflict signature until the target/context changes.
+- Manual QSY uses the same conflict-evaluation logic and prompts before proceeding.
+- Existing shared-PTT hard-block behavior remains intact and takes precedence over warning-only RF conflict prompts.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_e.py tests/test_scheduler_deferral.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Temporary profile swap remains a later Phase E slice.
+- Auto-resolution and logged policy history remain deferred until prompt flows are proven in operator testing.
+- Conflict families that require more than shared resource group + current tuning context remain deferred.
+
+Rollback:
+- Revert the Slice 2 spec addendum, derived `rf_conflict` policy support, runtime conflict evaluation, prompt wiring, and targeted tests together so the branch returns to Phase E Slice 1 behavior cleanly.
+
+### 1.161 Addendum (2026-03-15): Multi-Radio Phase E Slice 3 (Temporary Profile Swap Workflow)
+
+Problem:
+- Phase E Slice 1 and Slice 2 added hard shared-PTT interlocks and prompt-first RF conflict warnings, but operators still lack a first-class workflow for temporarily shifting the primary compatibility runtime to another active device and then restoring it cleanly.
+- The current branch can manually make another device primary and can separately assign `temporary_override` operating profiles, but that sequence is not captured as one reversible station-coordination action.
+- Advanced operators need a safe “run from the other rig for now” workflow that does not rewrite endpoint definitions, does not lose the previous primary/profile context, and is explicit about what will be restored.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: Slice 3 overreaches into automatic coordination or concurrent per-device scheduler ownership.
+- `freqinout/core/multi_radio_store.py`
+  - Failure mode: swap state is transient/UI-only, cannot be restored reliably after restart, or loses prior primary/assignment context.
+- `freqinout/core/station_runtime_manager.py`
+  - Failure mode: runtime snapshots and primary-policy state do not explain when a temporary swap is active or which device/profile is temporary.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: operators must still compose primary changes and assignment overrides manually, or cannot restore a swap deterministically.
+- `freqinout/gui/main_window.py`
+  - Failure mode: the live shell does not make it obvious that the primary runtime is operating under a temporary swap state.
+- `freqinout/gui/station_overview_tab.py`
+  - Failure mode: station cards do not indicate which device is the swap target/source.
+- targeted tests
+  - Failure mode: swap apply/restore semantics regress silently, especially across primary-device changes and target assignment restore.
+
+Scope:
+- Add a persisted temporary swap workflow for the current primary compatibility runtime:
+  - one active swap at a time
+  - operator-applied only
+  - explicit restore path
+- Persist active swap state in `station_coordination_policies` using `policy_type='profile_swap'`:
+  - `enabled=1` means the swap is currently active
+  - `source_device_id` is the original primary device
+  - `target_device_id` is the temporary primary device
+  - `trigger_json` stores operator-facing swap metadata (`mode`, `reason`, optional `ends_utc`)
+  - `action_json` stores restore metadata for the target device assignment and original primary device
+- Add store APIs to:
+  - inspect the active temporary swap
+  - start a temporary swap
+  - restore the active temporary swap
+- Support two operator-safe swap modes:
+  - `use_target_profile`
+    - make another active device primary temporarily, using that device’s current effective operating profile
+  - `carry_primary_profile`
+    - make another active device primary temporarily and copy the current primary device’s effective operating profile onto the target as a `temporary_override`
+- Guard `carry_primary_profile` with the existing operating-profile coordination field:
+  - the carried effective operating profile must have `allow_profile_swap=1`
+- Restore semantics must be explicit and deterministic:
+  - restore the original primary device
+  - if the swap changed the target device’s effective operating-profile assignment, restore the target’s prior effective assignment
+  - do not rewrite endpoint/device settings
+- Add a Settings UI entry point in the existing `Device Assignments` section:
+  - `Temporary Swap...`
+  - `Restore Swap`
+- Surface the active swap in current UI/state:
+  - Device Assignments hint text
+  - main runtime banner/status text
+  - Station Overview device cards
+
+Out of scope:
+- Automatic timed expiry of swaps from `ends_utc`
+- Multi-step swap orchestration involving more than one target device
+- Auto-resolving RF conflicts as part of the swap
+- Full coordination policy CRUD/history UI
+- Phase F observer/SDR or VarAC cluster specialization
+
+Constraints:
+- Existing single-radio and no-swap installs must behave exactly as before.
+- Slice 3 must reuse the current effective-assignment/runtime-primary model; it must not introduce a second primary-runtime concept.
+- There can be at most one active temporary swap at a time in this compatibility architecture.
+- Restore must fail clearly rather than silently dropping previous primary/profile context.
+
+Acceptance criteria:
+- Operators can initiate a temporary swap from Settings for one selected active non-primary device.
+- `use_target_profile` temporarily makes the selected device primary and can be restored in one action.
+- `carry_primary_profile` temporarily makes the selected device primary and applies the prior primary operating profile to that target as a `temporary_override`, then restores the target’s previous effective assignment on restore.
+- Active swap state survives restart because it is persisted in store-backed coordination data.
+- MainWindow and Station Overview indicate when the primary runtime is operating under a temporary swap.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_e.py tests/test_scheduler_deferral.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Automatic expiry and scheduled swap windows remain future work.
+- Prompt-first coordination is not expanded into auto-resolution here.
+- Phase F specialization remains separate.
+
+Rollback:
+- Revert the Slice 3 spec addendum, store/runtime swap support, Settings/MainWindow/Station Overview swap UI, and targeted tests together so the branch returns to Phase E Slice 2 behavior cleanly.
+
+### 1.162 Addendum (2026-03-15): Multi-Radio Phase F Slice 1 (Observer/SDR Runtime and Follow Guidance)
+
+Problem:
+- The data model already persists `device_class`, `sdr_host`, and `sdr_port`, but `observer` profiles are not yet a real runtime class.
+- Current multi-radio behavior still treats every active device as if it were a possible primary compatibility radio, which is incorrect for receive-only observer/SDR roles.
+- There is also no visible follow/park guidance for active observer devices, even though the architecture explicitly calls for SDR follow rules.
+
+Goals:
+- Make `observer` a first-class active device role in the current compatibility architecture.
+- Keep observer devices out of primary-runtime ownership and swap flows.
+- Surface observer endpoint health and follow/park guidance in current UI without introducing a premature SDR tuning-control subsystem.
+
+Scope:
+- Settings `Device Profiles`:
+  - add explicit `Device Class` editing with operator-facing support for:
+    - `Transceiver`
+    - `Observer / SDR`
+    - `Gateway`
+  - add persisted `SDR Host` / `SDR Port` fields to the existing device-profile dialog.
+  - show observer identity clearly in the device table and guidance text.
+- Store/runtime rules:
+  - observer devices may be enabled and `runtime_active`.
+  - observer devices must not become the primary compatibility device.
+  - observer devices must not be valid temporary-swap targets.
+  - derive persisted `sdr_follow` coordination rows between enabled non-observer devices and enabled observer devices for auditability.
+- Runtime state:
+  - probe observer endpoint reachability from configured `sdr_host` / `sdr_port`.
+  - include observer service state in per-device snapshots.
+  - derive observer follow/park guidance from:
+    - the current primary runtime band/frequency when available
+    - the observer device’s effective operating profile preferred-band list when configured
+  - if an alternate preferred band exists, recommend parking the observer there; otherwise recommend following/monitoring the primary band.
+- UI/state surfaces:
+  - Station Overview cards show observer class, endpoint health, and current follow/park guidance.
+  - Settings hints explain that observer devices are active station members but never own the primary compatibility shell in this slice.
+
+Out of scope:
+- Direct SDR tuning/control commands
+- Waterfall or panadapter integration
+- A dedicated coordination-rules CRUD editor
+- Automatic observer retune when the primary radio changes band
+- VarAC cluster membership and gateway enforcement
+
+Constraints:
+- Existing single-radio and transceiver-only workflows must behave exactly as before.
+- The current scheduler, ControlFreq, and manual QSY flows remain primary-device workflows only.
+- Slice 1 must be advisory-first for observers: health and follow guidance are allowed; silent auto-retune is not.
+- `gateway` class may remain persisted-only in this slice; only `observer` gains new runtime behavior.
+
+Acceptance criteria:
+- Operators can create/edit device profiles with `Observer / SDR` class and SDR endpoint fields in Settings.
+- Observer profiles can be runtime-active but cannot be made primary and cannot be selected for Temporary Swap.
+- Station store derives stable `sdr_follow` coordination rows for enabled observer/non-observer pairs without duplicate rows.
+- Station runtime snapshots expose observer endpoint health and a readable follow/park summary.
+- Station Overview makes it obvious which active devices are observers and what they are advised to monitor.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_f_slice1.py`
+  - `python -m pytest tests/test_multi_radio_phase_d.py tests/test_multi_radio_phase_e.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Observer retune remains operator-guided only.
+- `observer_park` explicit policy rows remain future work; Slice 1 uses derived `sdr_follow` policy rows plus runtime advisory text.
+- VarAC cluster specialization remains Phase F follow-on work.
+
+Rollback:
+- Revert the Slice 1 spec addendum, observer store/runtime/status/UI changes, and targeted tests together so observer devices return to persisted-only behavior.
+
+### 1.163 Addendum (2026-03-15): Multi-Radio Phase F Slice 2 (VarAC Cluster CRUD, Membership, and Device-Scoped Runtime Visibility)
+
+Problem:
+- The structured settings schema already includes `varac_clusters` and `varac_cluster_members`, but there is no operator-facing way to create or manage them.
+- Current multi-radio runtime cards still treat `VarAC` largely as a global side signal instead of a per-device node plus optional shared-cluster resource.
+- Device profiles persist `varac_install_path`, `varac_db_path`, `varac_ini_path`, and `launch_cmd`, but the current multi-radio device editor does not expose those fields.
+
+Goals:
+- Make VarAC cluster definition and membership a first-class Settings workflow.
+- Surface per-device VarAC node identity and shared-cluster metadata in the current multi-radio runtime model.
+- Keep current single-radio behavior backward compatible by continuing to project the primary compatibility device into the existing flat VarAC settings.
+
+Scope:
+- Settings `Device Profiles`:
+  - expose device-local VarAC fields in the existing device-profile dialog:
+    - `VarAC Install Path`
+    - `VarAC DB Path`
+    - `VarAC INI Path`
+    - `VarAC Launch Command`
+  - keep these fields optional so non-VarAC devices remain simple.
+- Settings `VarAC Clusters`:
+  - add CRUD for cluster definitions with:
+    - name
+    - `cluster_id`
+    - shared DB path
+    - counters refresh interval
+    - PTT lock flag
+    - designated gateway handler device
+  - show member counts and current gateway handler in the table summary.
+- Settings `VarAC Memberships`:
+  - add create/update/remove workflows for per-device cluster membership.
+  - show:
+    - cluster
+    - device
+    - runtime state
+    - device class
+    - instance number
+    - enabled state
+    - gateway role
+- Store/runtime behavior:
+  - add joined CRUD APIs for `varac_clusters` and `varac_cluster_members`.
+  - keep `device_profiles.varac_cluster_member_enabled` synchronized with effective enabled membership state for compatibility/reporting.
+  - limit this phase to one enabled VarAC cluster membership per device profile.
+  - enrich active device runtime profiles with:
+    - cluster name
+    - cluster ID
+    - shared DB path
+    - instance number
+    - gateway-handler identity
+- Runtime/status surfaces:
+  - per-device VarAC node status must use that device profile’s own VarAC settings instead of relying only on the station-global process strip.
+  - add a distinct shared-cluster status surface per member device:
+    - shared DB configured/missing
+    - gateway handler identity
+    - member instance number
+  - Station Overview cards should show both node-local `VarAC` state and shared-cluster context when a device is a member.
+
+Out of scope:
+- Duplicate-process disambiguation beyond configured device-local VarAC paths/settings
+- VarAC message/cluster ingest deduplication changes
+- Gateway exclusivity enforcement beyond data capture and display
+- Automatic instance-number assignment
+
+Constraints:
+- Existing single-radio/global VarAC flows must remain unchanged for users who do not create clusters.
+- The primary compatibility runtime remains the only source projected into flat settings and current scheduler/control tabs.
+- Cluster metadata is additive; it must not break startup when VarAC is absent or unconfigured.
+- Slice 2 must preserve the current Settings UI design language and table/dialog patterns already used in multi-radio sections.
+
+Acceptance criteria:
+- Operators can create/edit/delete VarAC clusters in Settings.
+- Operators can assign a device profile to a VarAC cluster with an instance number and enabled state.
+- Device-profile editing exposes device-local VarAC path/DB/INI/launch fields and persists them through `MultiRadioStore`.
+- Runtime snapshots expose VarAC cluster membership metadata and a shared-cluster status summary per active member device.
+- Station Overview and Settings make cluster membership and gateway identity visible without requiring manual DB inspection.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_f_slice2.py`
+  - `python -m pytest tests/test_multi_radio_phase_f_slice1.py tests/test_multi_radio_phase_e.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Instance-number and gateway-handler hard enforcement remain Slice 3.
+- Shared-cluster data-source deduplication remains future work.
+- Current scheduler/control tabs still act only on the primary compatibility device.
+
+Rollback:
+- Revert the Slice 2 spec addendum, VarAC cluster store/runtime/UI changes, and targeted tests together so VarAC cluster tables return to schema-only status.
+
+### 1.164 Addendum (2026-03-15): Multi-Radio Phase F Slice 3 (VarAC Cluster Enforcement and Gateway Exclusivity)
+
+Problem:
+- Slice 2 makes VarAC clusters visible and editable, but operators still need hard guardrails for cluster membership integrity.
+- The architecture explicitly calls for unique instance numbers and one gateway handler per cluster, yet the current branch has no first-class enforcement or runtime annotation for those constraints.
+
+Goals:
+- Enforce cluster membership integrity in the store layer with explicit operator-facing validation errors.
+- Make gateway-handler responsibility visible in runtime and Settings surfaces.
+- Keep enforcement prompt-safe and additive without rewriting the primary compatibility control model.
+
+Scope:
+- Store validation:
+  - require enabled cluster memberships to reference an existing cluster and device.
+  - require positive `instance_number` values.
+  - enforce unique instance numbers per cluster with clear validation messages.
+  - enforce one enabled cluster membership per device in this phase.
+  - require `gateway_handler_device_id`, when set, to refer to an enabled member of that cluster.
+  - block deletion or disablement of the current gateway-handler membership until the handler is cleared or reassigned.
+- Derived coordination metadata:
+  - derive persisted `gateway_exclusive` coordination rows from cluster definitions for auditability and future coordinator work.
+- Runtime/UI annotations:
+  - Station Overview cards show whether a cluster member is:
+    - gateway handler
+    - non-handler member
+    - cluster member awaiting handler selection
+  - cluster-level warnings appear when:
+    - shared DB path is missing
+    - cluster membership is incomplete for the current gateway selection
+  - Settings hints and table summaries explain the enforcement state clearly.
+
+Out of scope:
+- Automatic gateway failover
+- Automatic instance renumbering
+- Full coordinator actions driven by `gateway_exclusive` policies
+- Multi-cluster membership per device
+
+Constraints:
+- Store enforcement must fail cleanly with actionable messages; raw `sqlite3.IntegrityError` should not leak to the operator.
+- Existing non-cluster VarAC workflows must remain unaffected.
+- Gateway exclusivity remains a configuration/runtime visibility rule in this phase, not a hidden background auto-action.
+
+Acceptance criteria:
+- Duplicate instance numbers in the same cluster are rejected with a clear validation message.
+- A device cannot hold more than one enabled VarAC cluster membership.
+- Gateway handler selection is limited to enabled members of the selected cluster.
+- Removing or disabling the gateway-handler membership is blocked until the cluster gateway handler is cleared or reassigned.
+- Runtime and Settings surfaces clearly show gateway role and missing-handler warnings.
+- Derived `gateway_exclusive` policies remain stable and duplicate-free.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_f_slice3.py`
+  - `python -m pytest tests/test_multi_radio_phase_f_slice2.py tests/test_multi_radio_phase_f_slice1.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Shared-cluster ingest deduplication and cluster-aware message routing remain future work.
+- Full coordinator/runtime actions driven by `gateway_exclusive` policies remain future work.
+- Control tabs and scheduler continue to act on the primary compatibility device only.
+
+Rollback:
+- Revert the Slice 3 spec addendum, cluster-enforcement store/runtime/UI changes, derived gateway policy support, and targeted tests together so the branch returns to Slice 2 behavior.
+
+### 1.165 Addendum (2026-03-15): Multi-Radio Phase G Slice 1 (Station Summary UX and Refresh-Path Hardening)
+
+Problem:
+- Phase A-F land the core multi-radio architecture, but the operator surfaces still make advanced station state harder to scan than it needs to be.
+- `Station Overview` currently rebuilds every device card on every timer refresh, even when the rendered runtime state has not changed.
+- `Settings` currently refreshes the multi-radio tables through chained reload paths, which causes duplicate table rebuilds and repeated store queries during load and common edit workflows.
+- `Station Overview` also reloads settings on each refresh tick just to resolve theme values, which is unnecessary after the app-wide theme has already been applied.
+
+Goals:
+- Give operators a compact station-level summary that highlights primary state, active device count, observer presence, VarAC cluster state, and pending operator attention items without forcing table-by-table inspection.
+- Keep the existing visual design language and table workflows while reducing unnecessary UI churn on periodic refresh.
+- Preserve the current compatibility runtime model and all current operator actions.
+
+Scope:
+- `Station Overview` UX:
+  - add a compact station alerts strip above the device cards.
+  - summarize high-value station state in plain language:
+    - active device count
+    - primary compatibility device
+    - observer count
+    - VarAC member count
+    - live attention items such as:
+      - primary `minimal` mode
+      - active temporary swap
+      - shared-PTT blocks
+      - runtime warnings
+  - keep the existing per-device card structure, but avoid rebuilding cards when the rendered snapshot data is unchanged.
+- `Station Overview` refresh hardening:
+  - stop reloading `SettingsManager` on every overview refresh tick.
+  - avoid polling/re-rendering the overview while the tab is inactive.
+  - cache the last rendered overview signature so repeated identical snapshots do not trigger card destruction/recreation.
+- `Settings` UX:
+  - add a compact `Station Summary` section above the structured multi-radio tables.
+  - surface the current station configuration in one read-only summary, including:
+    - active device count
+    - primary device identity
+    - operating-profile assignment coverage
+    - VarAC cluster/member counts
+    - pending configuration attention items
+  - keep the current table/dialog patterns; no new wizard-style workflow is introduced in this slice.
+- `Settings` refresh hardening:
+  - batch the structured multi-radio table refresh path so:
+    - `Device Profiles`
+    - `Operating Profiles`
+    - `Device Assignments`
+    - `VarAC Clusters`
+    - `VarAC Memberships`
+    refresh in a predictable order without duplicate cascaded reloads.
+  - reuse that batched path from Settings load and common multi-radio mutations.
+
+Out of scope:
+- New scheduler or coordinator behavior
+- Concurrent non-primary control-tab ownership
+- Cluster ingest deduplication or message-routing changes
+- Large-scale table virtualization or a custom model/view rewrite
+- Manual smoke-only UX polish that is not safely automatable in this slice
+
+Constraints:
+- Existing device/profile/assignment/cluster CRUD behavior must remain unchanged.
+- Refresh hardening must not hide real state changes; force refresh remains available for explicit reload paths.
+- The overview and Settings summaries must stay advisory-first and must not become another source of runtime truth separate from the existing store/runtime manager.
+- Multi-radio UI changes must preserve the current desktop design language and not introduce dense operator clutter.
+
+Acceptance criteria:
+- `Station Overview` shows both a compact station summary and a separate attention strip without removing existing per-device detail.
+- Repeated overview refreshes with unchanged runtime data do not rebuild all device cards.
+- Inactive overview tabs no longer poll/re-render on the normal timer path.
+- Settings shows a `Station Summary` section that makes primary state, assignment coverage, and VarAC cluster health easier to scan.
+- Multi-radio Settings refreshes run through a single ordered batch path instead of chained duplicate refresh cascades.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_g.py`
+  - `python -m pytest tests/test_multi_radio_phase_f_slice3.py tests/test_multi_radio_phase_f_slice2.py tests/test_multi_radio_phase_f_slice1.py tests/test_multi_radio_phase_e.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Shared-cluster ingest deduplication and cluster-aware data routing remain future follow-on work.
+- Runtime summaries remain card-based; this slice does not add a new dock, matrix view, or heatmap-style dashboard.
+- Manual desktop validation of the new summary text and spacing is still required after the automated pass.
+
+Rollback:
+- Revert the Phase G addendum, Station Overview summary/refresh changes, Settings summary/refresh batching changes, and targeted tests together so the branch returns to the prior multi-radio UI behavior.
+
+### 1.166 Addendum (2026-03-15): Multi-Radio Phase G Slice 2 (Cluster-Aware VarAC Ingest and Operator-Surface Deduplication)
+
+Problem:
+- Phase F made VarAC clusters visible and enforceable, but the actual ingest path still behaves like one station-global VarAC source.
+- `background_ingest.py` and all direct `ingest_varac(...)` callers still resolve only one legacy `varac_db_path` / install path, so:
+  - shared-cluster data is not treated as a first-class ingest source
+  - multiple active VarAC devices cannot ingest independently without collisions
+  - a shared cluster DB can be multiply represented downstream if multiple devices point at the same feed
+- `varac_messages` currently keys rows by `(source, id)` where `source` is only the VarAC table family (`qso`, `vmail`, `broadcast`), which is insufficient once more than one VarAC source exists.
+- Operator surfaces still cannot clearly tell whether VarAC traffic came from a shared cluster or a standalone device/runtime.
+
+Goals:
+- Make VarAC ingest source-aware across the current station model.
+- Deduplicate shared-cluster ingest so one shared VarAC DB/feed is ingested once, not once per member device.
+- Preserve existing single-instance VarAC behavior for operators who do not use clusters.
+- Surface source identity and shared-cluster ingest status in current operator views without rewriting the broader message architecture.
+
+Scope:
+- `freqinout/core/varac_ingest.py`
+  - add station-aware VarAC ingest source resolution using:
+    - active device profiles
+    - enabled VarAC cluster memberships
+    - shared cluster DB path when configured
+    - deterministic fallback to one device-local DB path when a cluster lacks a shared DB path
+  - treat each logical VarAC ingest source as:
+    - `legacy`
+    - standalone device
+    - shared cluster
+  - deduplicate ingest sources by resolved DB/feed path so shared-cluster data is not ingested multiple times.
+  - preserve backward compatibility by keeping single-instance legacy ingest available when no structured sources exist.
+  - add persisted source metadata to mirrored VarAC rows and sync-status rows so later consumers can distinguish:
+    - logical row type (`qso`, `vmail`, `broadcast`)
+    - ingest source identity
+    - source label
+    - cluster name / cluster public ID
+    - source DB path
+  - add per-source checkpointing so incremental watermarks do not collide across multiple VarAC sources.
+- `freqinout/core/background_ingest.py`
+  - run the cluster-aware/station-aware VarAC ingest path instead of assuming one global source.
+- `freqinout/gui/message_viewer_tab.py`
+  - read the new VarAC source metadata from local mirrored rows.
+  - keep message operations keyed to the local mirrored row identity while preserving the underlying VarAC table name needed for delete/update actions.
+  - show cluster/source identity cleanly in VarAC row titles and detail panes.
+  - avoid duplicate VarAC rows in operator views by relying on deduplicated ingest sources.
+- `freqinout/core/station_runtime_manager.py`
+  - load latest per-source VarAC ingest status from the local nets DB.
+  - annotate cluster-member snapshots with cluster ingest health/recency in addition to current membership metadata.
+  - reflect ingest failures or stale shared-cluster status in the existing `VarAC Cluster` service surface when warranted.
+- `freqinout/gui/controlfreq_tab.py`
+  - make the VarAC summary row source-aware so shared-cluster operation is represented as shared station state, not implied duplicate per-device state.
+  - keep counts accurate after source-aware ingest.
+- schema/tooling
+  - extend local VarAC mirror table definitions and DB-tool schema descriptions so tooling does not drift from runtime.
+
+Out of scope:
+- Full cluster-aware VarAC message-routing or send-path ownership
+- Automatic gateway failover or shared-cluster repair
+- Cross-device JS8 multi-instance traffic ingest
+- A new dedicated VarAC cluster dashboard
+- Per-device ControlFreq or Message Viewer contexts
+
+Constraints:
+- Existing single-instance/non-cluster VarAC workflows must remain unchanged unless the operator enables structured multi-radio VarAC sources.
+- Shared-cluster dedup must be deterministic and operator-auditable.
+- Row identity for local mirrored VarAC content must remain stable enough for read/flag/delete actions after the schema expansion.
+- Slice 2 must remain additive: existing local DBs should migrate in place without destructive resets.
+
+Acceptance criteria:
+- Cluster-aware source resolution ingests one shared VarAC cluster DB/feed once even when multiple active devices are members.
+- Standalone non-cluster VarAC devices still ingest normally alongside clustered devices.
+- Mirrored VarAC rows retain the underlying VarAC table family needed for delete/update actions while also exposing source/cluster identity.
+- Message Viewer shows cluster/source identity on VarAC rows and detail views without duplicate rows from shared clusters.
+- Station runtime snapshots include cluster-ingest status annotations beyond raw membership metadata alone.
+- ControlFreq VarAC summary counts remain accurate and show shared-cluster/source context when present.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_g_slice2.py`
+  - `python -m pytest tests/test_multi_radio_phase_g.py tests/test_multi_radio_phase_f_slice3.py tests/test_multi_radio_phase_f_slice2.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Cluster-aware VarAC send/ownership arbitration remains future work.
+- Shared-cluster ingest dedup lands here, but broader shared-data routing across all tabs still remains a later follow-on.
+- JS8 multi-instance traffic ingest still needs its own explicit addendum.
+
+Rollback:
+- Revert the Phase G Slice 2 addendum, VarAC source-aware ingest/schema changes, runtime/viewer/control summary updates, and targeted tests together so the branch returns to the prior single-source VarAC ingest behavior.
+
+### 1.167 Addendum (2026-03-15): Multi-Radio Phase G Slice 3 (JS8 Multi-Instance Ingest and Source-Aware Messages)
+
+Problem:
+- The current JS8 ingest path still assumes one station-global JS8Call instance.
+- `freqinout/core/message_ingest.py` ingests only one inbox DB and one `DIRECTED.TXT`, keyed by one legacy `js8_directed_path`.
+- `freqinout/gui/message_viewer_tab.py` duplicates that same single-source JS8 ingest/cache logic, so source assumptions are split across two code paths.
+- `freqinout/gui/stations_map_tab.py` and the background `js8_links` ingest path also assume one `DIRECTED.TXT` and one `ALL.TXT`.
+- In a real multi-rig station, each JS8Call instance has its own instance directory, `DIRECTED.TXT`, `ALL.TXT`, and inbox DB, and the operator needs to know which rig received a message in the Messages tab.
+
+Goals:
+- Make JS8 ingest source-aware across multiple active JS8Call device profiles without regressing single-instance behavior.
+- Preserve operator visibility by showing rig/source identity on JS8 and JS8 Spotter rows in Messages.
+- Keep performance high by using per-source checkpoints, deduplicated source discovery, and batched local DB writes instead of repeated full rescans.
+- Keep current primary-device compatibility behavior for JS8 control tabs; this slice is about ingest and operator visibility, not multi-context JS8 control.
+
+Scope:
+- Device/profile configuration:
+  - extend device profiles with explicit per-instance JS8 ingest paths:
+    - `js8_directed_path`
+    - optional `js8_inbox_path`
+  - keep `ALL.TXT` derived from the resolved `DIRECTED.TXT` directory unless a later slice needs its own explicit override.
+  - project the primary device's `js8_directed_path` back into the legacy flat settings key so current primary-only JS8 tabs keep working.
+- Shared JS8 source resolution:
+  - add one shared resolver for JS8 instance sources that:
+    - loads runtime-active device profiles
+    - resolves each device's JS8 inbox / `DIRECTED.TXT` / `ALL.TXT`
+    - falls back to legacy flat settings when structured device paths are absent
+    - deduplicates identical instance directories / files so the same source is not ingested twice
+    - emits a stable logical source key plus operator-facing source label
+- Local JS8 mirror/schema:
+  - replace the current single-source local mirror assumptions with source-aware v2 tables:
+    - `js8_messages_v2`
+    - `js8_inbox_state_v2`
+    - `js8_inbox_ingest_state_v2`
+    - `js8_spotter_ingest_state_v2`
+    - `js8_links_ingest_state_v2`
+  - preserve existing local data by migrating legacy single-source rows into the v2 tables in place when safe.
+  - store source metadata on mirrored JS8 rows, including:
+    - source key
+    - source scope (`legacy` or `device_profile`)
+    - source label
+    - device profile id when known
+    - resolved inbox / `DIRECTED.TXT` / `ALL.TXT` paths
+    - upstream JS8 inbox row id (`remote_id`)
+- `freqinout/core/message_ingest.py`
+  - ingest JS8 inbox rows from all resolved sources using per-source checkpoints instead of one global `MAX(id)`.
+  - ingest Spotter traffic from all resolved `DIRECTED.TXT` sources using dedicated per-source Spotter offsets instead of one global `spotter_directed_offset`.
+  - batch local inserts/updates per source instead of opening the local DB once per row.
+  - keep duplicate Spotter suppression source-aware so the same traffic can still be represented separately when it was received on different rigs.
+- `freqinout/core/background_ingest.py`
+  - continue to use `MessageIngestor`, which now becomes multi-source automatically.
+- `freqinout/gui/stations_map_tab.py`
+  - make `JS8LogLinkIndexer` use the same source resolver for multiple `DIRECTED.TXT` / `ALL.TXT` pairs.
+  - keep `js8_links` aggregated as a station-level view for now, but use dedicated per-source link offsets/checkpoints so multiple JS8 instance logs do not collide and do not interfere with Spotter ingest.
+- `freqinout/gui/message_viewer_tab.py`
+  - stop relying on the duplicated single-source JS8 ingest path for steady-state operation; ingest should route through the shared JS8 ingest implementation.
+  - load JS8 and Spotter rows from source-aware local mirrors.
+  - show source/rig identity on JS8 and Spotter rows in the current table/detail design rather than adding a new column-heavy layout.
+  - keep read, flag, and delete actions keyed by logical source plus remote JS8 row id so two instances can carry the same upstream row id safely.
+- Downstream consumers:
+  - update propagation-outcome ingest and any other local JS8 readers to consume the source-aware mirror rather than the old single-source mirror.
+- Schema/tooling/tests:
+  - extend DB init/tooling definitions for the new JS8 v2 tables and any new source-aware Spotter columns.
+  - add targeted automated coverage for:
+    - source resolution and deduplication
+    - multi-source JS8 inbox ingest
+    - multi-source Spotter ingest
+    - Messages provenance/read-delete behavior
+    - multi-source JS8 links ingest
+
+Out of scope:
+- Multiple concurrent JS8 net-control tabs or per-device JS8 control contexts
+- A new JS8 station dashboard
+- Per-device Map or Message Viewer instances
+- Automatic conflict handling driven by JS8 message provenance
+- Full operator-history or net-control refactors beyond preserving primary-device compatibility
+
+Constraints:
+- Existing single-instance JS8 behavior must continue to work with only legacy flat settings configured.
+- The Messages tab must not block on repeated full rescans of all configured JS8 sources.
+- Source-aware local mirrors must tolerate device renames and path updates without destructive resets.
+- Current primary-device legacy tabs that still read `js8_directed_path` must continue to follow the primary compatibility device.
+- Secondary-device JS8 ingest must remain additive and advisory; this slice does not transfer JS8 control ownership away from the primary device.
+
+Acceptance criteria:
+- Multiple active JS8 device profiles can each contribute inbox and Spotter traffic from their own JS8 instance directory.
+- Mirrored JS8 rows carry stable source identity so read/delete operations remain correct even when different sources reuse the same upstream inbox row id.
+- Messages clearly shows which rig/source received each JS8 and Spotter message without adding a new dense table layout.
+- Background ingest and manual/tab refresh paths use per-source checkpoints and do not rescan the full history of every configured JS8 instance on each poll.
+- JS8 link ingestion (`DIRECTED.TXT` / `ALL.TXT`) can ingest from multiple resolved JS8 sources without offset collisions.
+- Verification passes:
+  - `python -m pytest tests/test_js8_multi_instance_ingest.py`
+  - `python -m pytest tests/test_message_viewer_js8_multi_instance.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- JS8 control/net tabs remain primary-device scoped even though ingest becomes multi-source.
+- Station-level JS8 link views remain aggregated; this slice does not yet add per-rig link visualization.
+- Operator-history and net-control backfill paths can adopt the shared JS8 source resolver in later follow-on work.
+
+Rollback:
+- Revert the Phase G Slice 3 addendum, device-profile JS8 path additions, shared JS8 source-resolution helpers, source-aware JS8/Spotter schema and ingest changes, JS8 links multi-source updates, Message Viewer provenance changes, and targeted tests together so the branch returns to the prior single-source JS8 behavior.
+
+### 1.168 Addendum (2026-03-15): Device Profile Editor Progressive Disclosure and Monitor Fit
+
+Problem:
+- The `Settings -> Device Profiles -> Add/Edit Device Profile` dialog has grown into one long flat form.
+- On smaller displays and common laptop monitor heights, the dialog can exceed the visible screen and push the Save / Cancel controls out of reach.
+- The current all-at-once layout also overwhelms operators because advanced JS8, VarAC, SDR, launch, and RF-coordination fields are mixed together with the basic profile identity and backend fields.
+
+Goals:
+- Make the device-profile editor fit reliably on common monitors so Save / Cancel actions remain reachable.
+- Reduce operator overload with progressive disclosure while preserving all current device-profile fields and save semantics.
+- Reuse the app's existing collapsible-section design language instead of introducing a disconnected one-off editor style.
+
+Scope:
+- `freqinout/gui/settings_tab.py`
+  - Refactor the device-profile editor from one flat `QFormLayout` into a scrollable dialog with fixed footer actions.
+  - Group fields into manageable collapsible sections, with defaults optimized for the common editing path:
+    - `Profile Basics`
+    - `Endpoints`
+    - `JS8 Instance Files`
+    - `VarAC & Launch`
+    - `Coordination & Notes`
+  - Keep `Profile Basics` and `Endpoints` expanded by default.
+  - Collapse advanced sections by default unless the existing profile already contains meaningful values in that section.
+  - Keep Save / Cancel outside the scroll area so they remain reachable even when the content is taller than the viewport.
+  - Reduce vertical sprawl where practical, including pairing host/port fields within the same endpoint row.
+  - Preserve current backend-hint messaging, but make the hint work within the new grouped layout.
+- Tests:
+  - Add focused UI coverage for:
+    - presence of the scrollable editor shell
+    - existence of collapsible device-profile sections
+    - ability to expand a collapsed section and retain access to the Save action
+
+Out of scope:
+- Changing the device-profile data model
+- Removing any currently supported fields
+- Adding a wizard flow or multi-page modal
+- Reworking non-device dialogs in Settings
+
+Constraints:
+- All existing device-profile save/load behavior must remain backward compatible.
+- The redesign must not hide required core fields behind an initially collapsed advanced section.
+- The dialog must remain functional in offscreen Qt tests and on lower-height displays.
+
+Acceptance criteria:
+- The device-profile editor opens inside a scrollable container with Save / Cancel anchored in a fixed footer.
+- Operators can access Save / Cancel without needing the full dialog height to fit on screen.
+- Basic identity/runtime fields are immediately visible on open.
+- Advanced JS8, VarAC, and RF-coordination fields are organized into clearly labeled collapsible sections and are not all expanded by default for a new profile.
+- Existing profiles with JS8, VarAC, or coordination settings pre-populate and auto-expand the relevant sections so important configured values are not hidden.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_b_slice2.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Rollback:
+- Revert the device-profile editor restructuring, the new scrollable/collapsible dialog helpers, and the targeted UI tests together so the previous flat editor returns unchanged.
+
+### 1.169 Addendum (2026-03-16): Settings Status Refresh De-Janking and Device Profile Path Browsers
+
+Problem:
+- The Settings surface currently refreshes radio-software status by probing endpoints directly from the UI thread.
+- When configured device endpoints are unreachable, the 5-second Settings status timer and activation refresh can stall the entire Settings experience, including the Device Profiles area and the device editor dialog.
+- The device-profile editor now uses progressive disclosure, but several file and directory fields still require manual path entry even when the operator is selecting a local file or folder.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: this slice drifts into broader runtime-health architecture instead of fixing the Settings-specific UI stall and browse affordances.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: endpoint polling still blocks the GUI thread, refresh requests overlap and pile up, or browse controls add clutter without reducing operator effort.
+- `freqinout/core/software_status_service.py`
+  - Failure mode: existing probe logic is duplicated instead of being reused through a background helper.
+- `tests/test_software_status_phase4.py`
+  - Failure mode: unsaved endpoint overrides are no longer respected when a status refresh is requested from Settings.
+- `tests/test_multi_radio_phase_b_slice2.py`
+  - Failure mode: the device editor loses its monitor-fit behavior or browse affordances regress silently.
+
+Scope:
+- Keep the existing `SoftwareStatusService` probe logic, but move the Settings-tab `status_snapshot(...)` execution off the UI thread:
+  - use one background worker dedicated to Settings status refresh
+  - coalesce overlapping refresh requests so unreachable endpoints do not create a backlog
+  - continue using unsaved host/port values from the Settings form when building the request
+- Preserve current UI behavior for the status LEDs and tooltips:
+  - apply results back on the UI thread only
+  - keep activation refresh and 5-second timer behavior, but make those triggers lightweight
+- Add browse affordances in the device-profile editor for local file and directory fields:
+  - `JS8 Profile Dir`
+  - `JS8 DIRECTED.TXT`
+  - `JS8 Inbox DB`
+  - `Launch Path`
+  - `VarAC Install`
+  - `VarAC DB Path`
+  - `VarAC INI Path`
+- Keep the device editor compact:
+  - path rows stay inside the existing collapsible sections
+  - do not add extra modal steps for common file and folder selection
+
+Out of scope:
+- A full rewrite of status polling for other tabs
+- New station-health dashboards or richer probe detail
+- Automatic path discovery for every field
+- Browse affordances for free-form command strings such as `VarAC Launch Cmd`
+
+Constraints:
+- UI responsiveness is the priority: unreachable endpoints must no longer freeze Settings interactions.
+- The background refresh path must remain single-purpose and low-overhead; no overlapping probe storms.
+- The device editor must keep its fixed footer and scrollable body behavior from Addendum `1.168`.
+
+Acceptance criteria:
+- Opening or editing device profiles remains responsive while configured device endpoints are unreachable.
+- `_refresh_running_status()` no longer performs the blocking `status_snapshot(...)` call directly on the UI thread.
+- Unsaved FLRig, FLDigi, and JS8 endpoint edits are still reflected in the next Settings status refresh request.
+- Device-profile path fields listed in scope have working `Browse` controls for the appropriate file or directory type.
+- Verification passes:
+  - `python -m pytest tests/test_software_status_phase4.py tests/test_multi_radio_phase_b_slice2.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Deferred boundary after this slice:
+- Status polling for other tabs remains on their existing architecture.
+- No automatic path validation is introduced beyond existing save-time and runtime behavior.
+
+Rollback:
+- Revert the Settings status-refresh worker changes, the device-profile browse affordances, the targeted tests, and this spec addendum together so Settings returns to the previous synchronous-refresh behavior.
+
+### 1.170 Addendum (2026-03-16): Runtime Primary Device Persistence Must Survive Restart
+
+Problem:
+- Operators can make a different device profile primary during a session, but on restart the seeded legacy/default device may reclaim `runtime_primary`.
+- That makes the Device Profiles UI misleading and breaks the expected persistence contract for multi-radio primary selection.
+- The likely failure boundary is startup normalization, where default-record seeding and legacy-to-structured mirroring run again on every `SettingsManager` initialization.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: the fix drifts into broader runtime-ownership redesign instead of a persistence regression correction.
+- `freqinout/core/multi_radio_store.py`
+  - Failure mode: startup normalization still treats the default seeded device as preferred even when a valid non-default primary already exists.
+- `freqinout/core/settings_manager.py`
+  - Failure mode: initialization order continues to reassert the default primary indirectly through store helpers.
+- `tests/test_multi_radio_phase_c.py`
+  - Failure mode: restart persistence for non-default primary devices regresses silently.
+
+Scope:
+- Preserve the operator-selected `runtime_primary` device across restart.
+- Keep default-device seeding as a first-run fallback only:
+  - if no valid primary exists, normalization may still choose the default seeded device
+  - if a valid primary already exists, startup must not override it just because the default device also exists
+- Add regression coverage that simulates:
+  - initial seed
+  - creation/activation of a non-default device
+  - setting that device primary
+  - restart via fresh `SettingsManager` initialization
+  - verifying the chosen non-default device remains primary
+
+Out of scope:
+- Changing the single-primary compatibility architecture
+- Changing UI affordances for selecting the primary device
+- Adding new persistence tables or migration logic
+
+Constraints:
+- Existing first-run default-device creation behavior must remain intact.
+- Legacy projection must still follow the current runtime primary device.
+- The fix must be minimal and safe: no destructive migrations, no resets of operator data.
+
+Acceptance criteria:
+- After a non-default device is made primary and settings are reloaded through a fresh `SettingsManager`, that same device remains `runtime_primary`.
+- The default seeded device is used only when no valid primary exists.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_c.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Rollback:
+- Revert the startup-normalization change, the regression test, and this spec addendum together so persistence behavior returns to the prior state.
+
+### 1.171 Addendum (2026-03-16): Structured JS8, Fast Light, and VarAC Instance Records with Device-Profile Association
+
+Problem:
+- The app currently stores JS8Call, Fast Light, and VarAC configuration in two competing places:
+  - singleton base-tab settings under legacy flat keys
+  - per-device raw endpoint/path fields inside `device_profiles`
+- That creates configuration drift and an unclear ownership model. Operators can update a device profile and the base tab separately, with no single authoritative record for a reusable software instance.
+- In a multi-rig station, the right unit is not “one global JS8/FL/VarAC config” and not “copy-paste every endpoint/path into every device profile.” It is a reusable software-instance/config record that a device profile can reference.
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: the slice overreaches into full removal of legacy settings instead of establishing structured records with safe fallback.
+- `freqinout/core/multi_radio_store.py`
+  - Failure mode: there is no normalized store for reusable JS8/Fast Light/VarAC instance records, or device profiles cannot associate to them safely.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: operators still have only singleton forms or duplicated raw per-device fields instead of reusable configs plus association.
+- `freqinout/core/station_runtime_manager.py`
+  - Failure mode: runtime still ignores associated instance records and continues to rely only on raw device-profile fields.
+- `freqinout/core/launch_orchestrator.py`
+  - Failure mode: launch resolution still depends exclusively on legacy singleton paths instead of device-associated instance data.
+- `freqinout/core/js8_multi_source.py`
+  - Failure mode: multi-instance JS8 ingest ignores associated JS8 instance records.
+- `freqinout/core/varac_ingest.py`
+  - Failure mode: VarAC ingest ignores associated VarAC node records.
+- targeted tests
+  - Failure mode: the new association layer regresses silently and operators end up back in split-authority configuration.
+
+Scope:
+- Add structured reusable records for software instances/configs:
+  - `js8_instances`
+  - `fast_light_configs`
+  - `varac_nodes`
+- Add optional associations on `device_profiles`:
+  - `js8_instance_id`
+  - `fast_light_config_id`
+  - `varac_node_id`
+- Seed one default record for each new table from current legacy singleton settings so existing stations remain functional.
+- Update the base Settings areas to manage multiple structured records:
+  - `JS8Call Settings`
+    - keep station-wide JS8 preferences in place
+    - add CRUD for JS8 instance records
+  - `Fast Light Settings`
+    - keep station-wide FLMsg/FLAmp and message-path behavior in place for now
+    - add CRUD for reusable FLRig/FLDigi config records
+  - `VarAC Settings`
+    - keep station-wide BBS/archive policy in place for now
+    - add CRUD for reusable VarAC node records
+- Update the device-profile editor to select structured records:
+  - choose one JS8 instance
+  - choose one Fast Light config
+  - choose one VarAC node
+  - retain existing raw per-device fields only as legacy fallback when no associated record is selected
+- Update runtime/settings projection to prefer associated records over raw per-device fields when present.
+
+Out of scope:
+- Full removal of legacy singleton settings keys
+- Per-instance FLMsg or FLAmp management in this slice
+- Automatic conversion of every existing raw device profile into a structured record
+- Deep redesign of scheduler/control ownership
+
+Constraints:
+- Existing stations must keep working after upgrade with no manual migration required.
+- Legacy singleton settings remain as fallback/default compatibility in this slice.
+- New multi-instance work should prefer structured records and device-profile association over new raw duplication.
+- UI changes must stay incremental and recognizable inside the current Settings design system.
+
+Acceptance criteria:
+- Operators can create multiple JS8 instance records, Fast Light configs, and VarAC node records from the corresponding base Settings areas.
+- Device profiles can associate to those structured records instead of re-entering duplicate endpoint/path data.
+- Runtime projection and settings compatibility use the associated structured record when present.
+- Existing legacy-only installs continue to function through default seeded records and fallback behavior.
+- Verification passes:
+  - `python -m pytest tests/test_multi_radio_phase_a.py tests/test_multi_radio_phase_b_slice2.py tests/test_multi_radio_phase_c.py`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Deferred boundary after this slice:
+- FLMsg/FLAmp remain station-global.
+- Legacy singleton editors remain present as compatibility/default surfaces until a later cleanup slice removes or demotes them further.
+- Automatic one-click conversion of legacy raw per-device overrides into structured shared records remains future work.
+
+Rollback:
+- Revert the structured instance-record schema/store changes, Settings UI CRUD/association changes, runtime-resolution updates, targeted tests, and this spec addendum together so the app returns to the prior singleton-plus-raw-device-field model.
+
+### 1.172 Addendum (2026-03-16): JS8 Settings Accordion Layout for Default and Additional Instances
+
+Problem:
+- The JS8 Settings area currently presents the default compatibility fields inline, but additional JS8 instances are managed through a separate table and popup editor.
+- That makes the default instance feel structurally different from the others and adds friction for operators managing several JS8Call-improved instances.
+
+Scope:
+- Keep the existing JS8 compatibility behavior and settings keys unchanged.
+- Rework the JS8 Settings UI so the default compatibility record is presented as a collapsible `Default` instance card.
+- Present each additional managed JS8 instance as an inline collapsible card in the same section, using the instance name in the header.
+- Make the JS8 instance accordion single-open: expanding one instance collapses the others.
+- Replace popup-first editing for JS8 instances with inline editing and save/delete actions on the expanded card.
+- Keep `Load JS8 Traffic` and related JS8 operator tooling in the section.
+
+Out of scope:
+- No equivalent accordion rewrite for Fast Light or VarAC in this slice.
+- No changes to JS8 ingest/runtime semantics.
+- No migration of default JS8 save behavior away from the current singleton compatibility fields.
+
+Acceptance criteria:
+- In Settings, the JS8 section shows one default card and one card per additional JS8 instance.
+- Expanding one JS8 card collapses the other JS8 cards.
+- Adding a JS8 instance creates an inline card without opening a popup editor.
+- Editing and saving an inline JS8 instance updates the managed store and refreshes any primary-device compatibility projection when needed.
+- Automated tests cover the accordion rendering and single-open behavior.
+
+Rollback:
+- Revert the JS8 Settings layout changes and related tests together, leaving the structured instance store intact.
+
+### 1.173 Addendum (2026-03-16): JS8 Settings Responsiveness Hardening and Inline Accordion Geometry Fix
+
+Problem:
+- Operators report the JS8 Settings area becoming barely responsive when the configured JS8 endpoint is unavailable.
+- The Settings status worker is already asynchronous, but other JS8 control paths can still attempt a `js8net` attach from active application flows, which is unnecessary and potentially expensive when the configured TCP API is refusing connections.
+- The new inline JS8 accordion cards hide their content, but the enclosing card can retain its expanded height, leaving large dead space and making the section unusable on smaller displays.
+
+Scope:
+- Keep the Settings status polling path asynchronous.
+- Make JS8 API status probes prefer fast socket checks and avoid implicit `js8net` fallback unless a caller explicitly asks for it.
+- Harden `JS8ControlClient` so it preflights the configured JS8 endpoint before attempting `js8net.start_net(...)` and backs off briefly after a failed attach.
+- Update the inline/dialog collapsible helper so collapsed cards shrink to header height and release layout space immediately.
+- Cover both the JS8 attach hardening and accordion collapse behavior with targeted regression tests.
+
+Out of scope:
+- No redesign of scheduler ownership or JS8 control semantics.
+- No new background worker architecture beyond the existing Settings status worker.
+- No broader Fast Light or VarAC accordion rewrite in this slice.
+
+Acceptance criteria:
+- Visiting JS8 Settings does not synchronously invoke `js8net` through the Settings status path.
+- A refused JS8 TCP endpoint does not repeatedly drive slow `js8net.start_net(...)` attempts in active UI/control flows.
+- Collapsing a JS8 instance card reduces the card to header height so adjacent configuration remains visible.
+- Targeted automated tests cover the fast-fail JS8 attach behavior and the card-height collapse behavior.
+
+Rollback:
+- Revert the JS8 status hardening, collapsible-layout helper changes, targeted tests, and this spec addendum together.
+
+### 1.174 Addendum (2026-03-16): UI Responsiveness Hardening for Settings, ControlFreq, and Station Overview
+
+Problem:
+- Operators report that the UI becomes barely usable while configuring multi-radio settings, especially when endpoints are unavailable or JS8 data files are large.
+- The remaining performance issues are no longer centered on the Settings status worker itself. The main regressions are:
+  - JS8 geo backfill work still running from the UI path
+  - direct synchronous status/runtime snapshot work in `ControlFreq` and `Station Overview`
+  - broad `_load_settings()` reloads after local managed-record and primary-device changes
+  - duplicated JS8 labeling in `Station Overview` cards
+
+Impacted files and failure modes:
+- `SPEC.md`
+  - Failure mode: the slice drifts into large architecture changes instead of focused UI responsiveness hardening.
+- `freqinout/gui/settings_tab.py`
+  - Failure mode: JS8 geo backfill still blocks the GUI thread, and local device/JS8 edits still trigger full Settings reloads.
+- `freqinout/gui/controlfreq_tab.py`
+  - Failure mode: status refresh still calls `status_snapshot()` directly on the GUI thread.
+- `freqinout/gui/station_overview_tab.py`
+  - Failure mode: runtime snapshots still probe status synchronously on refresh, and cards repeat JS8 labeling in confusing ways.
+- `freqinout/gui/main_window.py`
+  - Failure mode: tabs do not share the new async status path and continue to refresh hidden runtime surfaces unnecessarily.
+- new shared GUI status helper
+  - Failure mode: each tab continues to solve async status separately, increasing duplication and regressions.
+- targeted tests
+  - Failure mode: UI-thread regressions return silently during later multi-radio work.
+
+Scope:
+- Move JS8 geo backfill scheduling in Settings to a one-shot background worker.
+- Introduce one shared async GUI status broker used by `ControlFreq` and `Station Overview`.
+- Keep `ControlFreq` and `Station Overview` functionally the same, but remove direct synchronous status/runtime probes from their normal refresh paths when the broker is available.
+- Replace full `_load_settings()` calls after local JS8 managed-record saves and primary-device projection changes with targeted widget/model refreshes.
+- Clean up `Station Overview` card wording so JS8 devices do not show duplicated JS8 identity indicators.
+
+Out of scope:
+- No redesign of scheduler behavior or station-runtime data model.
+- No broader refactor of all tab refresh paths.
+- No change to the underlying status semantics or device-profile store model.
+
+Constraints:
+- Existing visible behavior should remain stable aside from improved responsiveness and clearer station-card wording.
+- Runtime/device-profile changes must still propagate correctly to legacy compatibility widgets and other tabs.
+- Hidden tabs should avoid expensive refresh work where practical.
+
+Acceptance criteria:
+- Opening Settings or saving local device/JS8 changes does not run JS8 geo backfill on the GUI thread.
+- `ControlFreq` and `Station Overview` no longer perform direct synchronous status/runtime snapshot probes on their main refresh paths when the async broker is present.
+- Primary-device and managed-record changes update the relevant Settings widgets without forcing a full `_load_settings()` rebuild.
+- `Station Overview` no longer shows duplicated JS8 identification text for JS8-backed devices.
+- Automated tests cover:
+  - async broker dispatch usage in `ControlFreq` and `Station Overview`
+  - background JS8 geo backfill scheduling
+  - targeted Settings projection refresh without `_load_settings()` in the local save path
+  - cleaned-up station overview JS8 labeling
+
+Rollback:
+- Revert the shared async status helper, Settings backfill/save-path changes, `ControlFreq` and `Station Overview` wiring, UI wording/test updates, and this spec addendum together.

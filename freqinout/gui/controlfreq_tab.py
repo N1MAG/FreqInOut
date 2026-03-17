@@ -65,6 +65,7 @@ from freqinout.gui.stations_map_tab import (
     US_STATE_ABBR_FROM_NAME,
     maidenhead_to_latlon,
 )
+from freqinout.gui.async_status_broker import AsyncStatusBroker
 from freqinout.gui.theme import resolve_theme, button_style, led_style
 
 
@@ -139,6 +140,8 @@ class ControlFreqTab(QWidget):
         self.status_labels: Dict[str, QLabel] = {}
         self._status_checked_at: Dict[str, str] = {}
         self._status_service = SoftwareStatusService(self.settings)
+        self._status_broker: Optional[AsyncStatusBroker] = None
+        self._last_status_snapshot: Dict[str, Dict[str, object]] = {}
         self._sop_window_cache: Dict[Tuple[Any, ...], Tuple[float, List[Dict[str, Any]]]] = {}
         self._sop_today_cache_ttl_sec = 30.0
         self._sop_tomorrow_cache_ttl_sec = 180.0
@@ -170,6 +173,23 @@ class ControlFreqTab(QWidget):
         self._restore_ui_state()
         self._apply_theme()
         self._refresh_all()
+
+    def set_status_broker(self, broker: Optional[AsyncStatusBroker]) -> None:
+        if self._status_broker is broker:
+            return
+        if self._status_broker is not None:
+            try:
+                self._status_broker.control_snapshot_ready.disconnect(self._on_async_control_snapshot_ready)
+            except Exception:
+                pass
+            try:
+                self._status_broker.control_snapshot_failed.disconnect(self._on_async_control_snapshot_failed)
+            except Exception:
+                pass
+        self._status_broker = broker
+        if self._status_broker is not None:
+            self._status_broker.control_snapshot_ready.connect(self._on_async_control_snapshot_ready)
+            self._status_broker.control_snapshot_failed.connect(self._on_async_control_snapshot_failed)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -1460,11 +1480,18 @@ class ControlFreqTab(QWidget):
         self._refresh_scheduler_strip()
 
     def _refresh_running_status(self) -> None:
-        theme = resolve_theme(self.settings)
+        if self._status_broker is not None:
+            self._status_broker.request_control_snapshot(settings=self.settings)
+            return
         snapshot = self._status_service.status_snapshot()
+        self._apply_running_status_snapshot(snapshot)
+
+    def _apply_running_status_snapshot(self, snapshot: Dict[str, Dict[str, object]]) -> None:
+        theme = resolve_theme(self.settings)
+        self._last_status_snapshot = dict(snapshot or {})
         checked_at = dt.datetime.now().strftime("%H:%M:%S")
         for program_name, lbl in self.status_labels.items():
-            info = snapshot.get(program_name, {})
+            info = self._last_status_snapshot.get(program_name, {})
             state = str(info.get("state", "idle"))
             base_tooltip = str(info.get("tooltip", "Not running"))
             configured = ""
@@ -1477,6 +1504,15 @@ class ControlFreqTab(QWidget):
             lbl.setStyleSheet(led_style(state, theme))
             lbl.setToolTip("\n".join(lines))
             self._status_checked_at[program_name] = checked_at
+
+    def _on_async_control_snapshot_ready(self, snapshot: object) -> None:
+        try:
+            self._apply_running_status_snapshot(dict(snapshot or {}))
+        except Exception as exc:
+            log.debug("ControlFreq: async control snapshot apply failed: %s", exc)
+
+    def _on_async_control_snapshot_failed(self, error_text: str) -> None:
+        log.debug("ControlFreq: async control snapshot failed: %s", error_text)
 
     def _refresh_scheduler_strip(self, status: Optional[Dict[str, Any]] = None) -> None:
         try:
@@ -1591,6 +1627,14 @@ class ControlFreqTab(QWidget):
         try:
             if bool(status.get("ptt_active")):
                 return "PTT active"
+            if bool(status.get("shared_ptt_blocked")):
+                owner = str(status.get("shared_ptt_owner_name") or "").strip()
+                group = str(status.get("shared_ptt_group") or "").strip()
+                if owner and group:
+                    return f"Shared PTT ({group}: {owner})"
+                if group:
+                    return f"Shared PTT ({group})"
+                return "Shared PTT"
             if bool(status.get("js8_busy")):
                 return "JS8Call"
             if bool(status.get("varac_waiting")) or bool(status.get("varac_busy")):
@@ -3853,6 +3897,7 @@ class ControlFreqTab(QWidget):
             return [["No data", "0", "Messages DB unavailable"]]
         counts = {"JS8": 0, "Spotter": 0, "VarAC": 0}
         top_senders: Dict[str, Dict[str, int]] = {"JS8": {}, "Spotter": {}, "VarAC": {}}
+        varac_sources: Dict[str, int] = {}
         sitrep_counts = {"red": 0, "yellow": 0, "green": 0}
         group_filter = (self.group_combo.currentData() or "").strip().upper()
 
@@ -3891,33 +3936,56 @@ class ControlFreqTab(QWidget):
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute("SELECT from_call, state FROM js8_messages")
-            for cs, state in cur.fetchall():
-                if (state or "").upper() == "READ":
-                    continue
-                cs = (cs or "").strip().upper()
-                if search and search not in cs and search not in "JS8":
-                    continue
-                counts["JS8"] += 1
-                top_senders["JS8"][cs] = top_senders["JS8"].get(cs, 0) + 1
-            cur.execute("SELECT from_call, state FROM spotter_traffic")
-            for cs, state in cur.fetchall():
-                if (state or "").upper() == "READ":
-                    continue
-                cs = (cs or "").strip().upper()
-                if search and search not in cs and search not in "SPOTTER":
-                    continue
-                counts["Spotter"] += 1
-                top_senders["Spotter"][cs] = top_senders["Spotter"].get(cs, 0) + 1
-            cur.execute("SELECT from_call, read_status FROM varac_messages")
-            for cs, read_status in cur.fetchall():
-                if int(read_status or 0) != 0:
-                    continue
-                cs = (cs or "").strip().upper()
-                if search and search not in cs and search not in "VARAC":
-                    continue
-                counts["VarAC"] += 1
-                top_senders["VarAC"][cs] = top_senders["VarAC"].get(cs, 0) + 1
+            try:
+                cur.execute("SELECT from_call, state FROM js8_messages")
+                for cs, state in cur.fetchall():
+                    if (state or "").upper() == "READ":
+                        continue
+                    cs = (cs or "").strip().upper()
+                    if search and search not in cs and search not in "JS8":
+                        continue
+                    counts["JS8"] += 1
+                    top_senders["JS8"][cs] = top_senders["JS8"].get(cs, 0) + 1
+            except Exception:
+                pass
+            try:
+                cur.execute("SELECT from_call, state FROM spotter_traffic")
+                for cs, state in cur.fetchall():
+                    if (state or "").upper() == "READ":
+                        continue
+                    cs = (cs or "").strip().upper()
+                    if search and search not in cs and search not in "SPOTTER":
+                        continue
+                    counts["Spotter"] += 1
+                    top_senders["Spotter"][cs] = top_senders["Spotter"].get(cs, 0) + 1
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    """
+                    SELECT from_call, read_status,
+                           COALESCE(cluster_name, ''), COALESCE(cluster_public_id, ''),
+                           COALESCE(ingest_source_label, '')
+                      FROM varac_messages
+                    """
+                )
+                for cs, read_status, cluster_name, cluster_public_id, source_label in cur.fetchall():
+                    if int(read_status or 0) != 0:
+                        continue
+                    cs = (cs or "").strip().upper()
+                    source_text = str(source_label or "").strip()
+                    if cluster_name:
+                        source_text = str(cluster_name or "").strip()
+                        if str(cluster_public_id or "").strip():
+                            source_text = f"{source_text} [{str(cluster_public_id or '').strip()}]"
+                    if search and search not in cs and search not in "VARAC" and search not in source_text.upper():
+                        continue
+                    counts["VarAC"] += 1
+                    top_senders["VarAC"][cs] = top_senders["VarAC"].get(cs, 0) + 1
+                    if source_text:
+                        varac_sources[source_text] = varac_sources.get(source_text, 0) + 1
+            except Exception:
+                pass
             operator_groups: Dict[str, Set[str]] = {}
             if group_filter:
                 operator_groups = _load_operator_groups(cur)
@@ -3947,6 +4015,11 @@ class ControlFreqTab(QWidget):
                 continue
             senders = sorted(top_senders[key].items(), key=lambda kv: kv[1], reverse=True)[:3]
             sender_txt = ", ".join([f"{c}({n})" for c, n in senders]) or "-"
+            if key == "VarAC" and varac_sources:
+                source_parts = sorted(varac_sources.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:3]
+                source_txt = ", ".join([f"{label}({count})" for label, count in source_parts])
+                if source_txt:
+                    sender_txt = f"{sender_txt} | {source_txt}" if sender_txt != "-" else source_txt
             rows_out.append([key, str(counts[key]), sender_txt])
         sitrep_total = sitrep_counts["red"] + sitrep_counts["yellow"] + sitrep_counts["green"]
         sitrep_details = f"R:{sitrep_counts['red']}  Y:{sitrep_counts['yellow']}  G:{sitrep_counts['green']}"

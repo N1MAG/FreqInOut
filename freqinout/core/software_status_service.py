@@ -27,9 +27,14 @@ PROGRAM_PATH_KEYS: Dict[str, str] = {
     "FLDigi": "path_fldigi",
     "FLMsg": "path_flmsg",
     "FLAmp": "path_flamp",
+    "VarAC": "varac_path",
     "JS8Call": "path_js8call",
     "JS8Spotter": "path_js8spotter",
     "CommStat": "path_commstat",
+}
+
+PROGRAM_COMMAND_KEYS: Dict[str, str] = {
+    "VarAC": "varac_launch_cmd",
 }
 
 STATUS_KEYS: Sequence[str] = (
@@ -167,34 +172,48 @@ class SoftwareStatusService:
         self._proc_snapshot_ts = now
 
     def _configured_tokens(self, program_name: str) -> List[str]:
-        key = PROGRAM_PATH_KEYS.get(program_name)
-        if not key:
-            return []
-        try:
-            path_txt = (self.settings.get(key, "") or "").strip()
-        except Exception:
-            path_txt = ""
-        if not path_txt:
-            return []
         out: List[str] = []
         try:
-            p = Path(path_txt)
-            name = p.name.strip().lower()
-            if name:
-                out.append(name)
+            key = PROGRAM_PATH_KEYS.get(program_name)
+            path_txt = (self.settings.get(key, "") or "").strip() if key else ""
         except Exception:
-            pass
-        try:
-            parts = shlex.split(path_txt, posix=os.name != "nt")
-        except Exception:
-            parts = []
-        for part in parts[:6]:
+            path_txt = ""
+        if path_txt:
             try:
-                token = os.path.basename(str(part or "")).strip().lower()
+                p = Path(path_txt)
+                name = p.name.strip().lower()
+                if name:
+                    out.append(name)
             except Exception:
-                token = ""
-            if token:
-                out.append(token)
+                pass
+            try:
+                parts = shlex.split(path_txt, posix=os.name != "nt")
+            except Exception:
+                parts = []
+            for part in parts[:6]:
+                try:
+                    token = os.path.basename(str(part or "")).strip().lower()
+                except Exception:
+                    token = ""
+                if token:
+                    out.append(token)
+        try:
+            command_key = PROGRAM_COMMAND_KEYS.get(program_name)
+            command_txt = (self.settings.get(command_key, "") or "").strip() if command_key else ""
+        except Exception:
+            command_txt = ""
+        if command_txt:
+            try:
+                command_parts = shlex.split(command_txt, posix=os.name != "nt")
+            except Exception:
+                command_parts = []
+            for part in command_parts[:8]:
+                try:
+                    token = os.path.basename(str(part or "")).strip().lower()
+                except Exception:
+                    token = ""
+                if token:
+                    out.append(token)
         return list(dict.fromkeys(out))
 
     def _target_tokens(self, program_name: str) -> List[str]:
@@ -235,7 +254,7 @@ class SoftwareStatusService:
         *,
         port_override: Optional[int] = None,
         host_override: Optional[str] = None,
-        allow_fallback: bool = True,
+        allow_fallback: bool = False,
         force: bool = False,
     ) -> bool:
         if port_override is not None:
@@ -358,6 +377,25 @@ class SoftwareStatusService:
 
         return self._cached_service_probe("RIGCTLD", host, port, force=force, probe=_probe)
 
+    def tcp_endpoint_reachable(
+        self,
+        *,
+        service_name: str,
+        host: str,
+        port: int,
+        force: bool = False,
+    ) -> bool:
+        host_value = str(host or "").strip()
+        port_value = int(port or 0)
+        if not host_value or port_value <= 0:
+            return False
+
+        def _probe() -> bool:
+            with socket.create_connection((host_value, port_value), timeout=0.35):
+                return True
+
+        return self._cached_service_probe(service_name, host_value, port_value, force=force, probe=_probe)
+
     def _endpoint_status(
         self,
         *,
@@ -399,6 +437,39 @@ class SoftwareStatusService:
             "reachable": False,
             "endpoint": endpoint,
         }
+
+    def generic_endpoint_status(
+        self,
+        *,
+        service_name: str,
+        endpoint_label: str,
+        host: str,
+        port: int,
+        force: bool = False,
+    ) -> Dict[str, object]:
+        host_value = str(host or "").strip()
+        port_value = int(port or 0)
+        if not host_value or port_value <= 0:
+            return {
+                "state": "idle",
+                "tooltip": f"{endpoint_label} not configured",
+                "running": False,
+                "reachable": False,
+                "endpoint": "",
+            }
+        reachable = self.tcp_endpoint_reachable(
+            service_name=service_name,
+            host=host_value,
+            port=port_value,
+            force=force,
+        )
+        return self._endpoint_status(
+            endpoint_label=endpoint_label,
+            host=host_value,
+            port=port_value,
+            reachable=reachable,
+            process_running=False,
+        )
 
     def status_snapshot(
         self,

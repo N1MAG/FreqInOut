@@ -20,6 +20,7 @@ def test_ensure_varac_local_tables_creates_summary_tables():
         assert {"ts", "origin", "destination", "snr", "band", "freq_hz", "source"} == _table_columns(
             conn, "varac_links"
         )
+        assert {"ingest_source_key", "table_name", "last_id"} == _table_columns(conn, "varac_ingest_state_v2")
     finally:
         conn.close()
 
@@ -39,6 +40,17 @@ def test_db_initializer_ensures_varac_tables_on_cold_start(monkeypatch, tmp_path
         assert {"callsign", "last_seen_ts", "last_band", "last_freq_hz", "last_snr", "last_source"} == _table_columns(
             conn, "varac_callsign_stats"
         )
-        assert {"id", "guid", "source", "msg_type", "from_call", "to_call"} <= _table_columns(conn, "varac_messages")
+        assert {
+            "id",
+            "guid",
+            "source",
+            "table_name",
+            "ingest_source_key",
+            "ingest_source_label",
+            "cluster_name",
+            "msg_type",
+            "from_call",
+            "to_call",
+        } <= _table_columns(conn, "varac_messages")
     finally:
         conn.close()

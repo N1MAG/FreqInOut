@@ -184,6 +184,55 @@ def test_status_snapshot_marks_fldigi_ok_when_configured_endpoint_is_reachable(m
     assert "reachable" in str(info["tooltip"]).lower()
 
 
+def test_js8_api_reachable_does_not_fallback_to_js8net_by_default(monkeypatch):
+    import freqinout.core.software_status_service as status_mod
+    import freqinout.radio_interface.js8_status as js8_status_mod
+
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2442}))
+
+    def _raise_refused(*_args, **_kwargs):
+        raise ConnectionRefusedError("refused")
+
+    class FailIfConstructed:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("JS8ControlClient fallback should not be constructed")
+
+    monkeypatch.setattr(status_mod.socket, "create_connection", _raise_refused)
+    monkeypatch.setattr(js8_status_mod, "JS8ControlClient", FailIfConstructed)
+
+    assert service.js8_api_reachable(force=True) is False
+
+
+def test_js8_control_client_skips_js8net_start_when_endpoint_unreachable(monkeypatch):
+    import freqinout.radio_interface.js8_status as js8_status_mod
+
+    started: dict[str, object] = {}
+
+    class DummyJs8Net:
+        def start_net(self, *_args, **_kwargs):
+            started["called"] = True
+
+        def get_freq(self):
+            return {"dial": 7078000}
+
+    monkeypatch.setattr(js8_status_mod, "js8net", DummyJs8Net())
+    monkeypatch.setattr(js8_status_mod.JS8ControlClient, "_js8call_running", staticmethod(lambda: True))
+
+    attempts = {"count": 0}
+
+    def _raise_refused(*_args, **_kwargs):
+        attempts["count"] += 1
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(js8_status_mod.socket, "create_connection", _raise_refused)
+
+    client = js8_status_mod.JS8ControlClient(host="127.0.0.1", port=2442, settings=DummySettings())
+    assert client.get_frequency() is None
+    assert client.get_frequency() is None
+    assert started == {}
+    assert attempts["count"] == 1
+
+
 def test_settings_tab_refresh_running_status_uses_unsaved_flrig_port(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
@@ -197,11 +246,11 @@ def test_settings_tab_refresh_running_status_uses_unsaved_flrig_port(monkeypatch
     tab = SettingsTab()
     captured: dict[str, object] = {}
 
-    def fake_snapshot(**kwargs):
-        captured.update(kwargs)
-        return {}
-
-    monkeypatch.setattr(tab._status_service, "status_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        tab,
+        "_dispatch_status_refresh_request",
+        lambda request: captured.update(request),
+    )
 
     try:
         tab.flrig_port_edit.setText("24567")
@@ -226,11 +275,11 @@ def test_settings_tab_refresh_running_status_uses_unsaved_fldigi_endpoint(monkey
     tab = SettingsTab()
     captured: dict[str, object] = {}
 
-    def fake_snapshot(**kwargs):
-        captured.update(kwargs)
-        return {}
-
-    monkeypatch.setattr(tab._status_service, "status_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        tab,
+        "_dispatch_status_refresh_request",
+        lambda request: captured.update(request),
+    )
 
     try:
         tab.fldigi_host_edit.setText("10.1.1.7")
@@ -242,3 +291,39 @@ def test_settings_tab_refresh_running_status_uses_unsaved_fldigi_endpoint(monkey
 
     assert captured.get("fldigi_host_override") == "10.1.1.7"
     assert captured.get("fldigi_port_override") == 7364
+
+
+def test_settings_tab_refresh_running_status_dispatches_without_sync_snapshot(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+
+    tab = SettingsTab()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        tab,
+        "_dispatch_status_refresh_request",
+        lambda request: captured.update(request),
+    )
+    monkeypatch.setattr(
+        tab._status_service,
+        "status_snapshot",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("status_snapshot should not run on the UI thread")),
+    )
+
+    try:
+        tab.js8_host_edit.setText("10.2.2.20")
+        tab.js8_port_edit.setText("2542")
+        tab._refresh_running_status()
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+    assert captured.get("host_override") == "10.2.2.20"
+    assert captured.get("port_override") == 2542

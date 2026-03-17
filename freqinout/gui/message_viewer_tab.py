@@ -54,10 +54,16 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.message_ingest import MessageIngestor
+from freqinout.core.js8_multi_source import (
+    LEGACY_JS8_SOURCE_KEY,
+    LEGACY_JS8_SOURCE_LABEL,
+    ensure_js8_local_tables,
+)
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.utils.timezones import get_timezone
-from freqinout.core.varac_ingest import ingest_varac
+from freqinout.core.varac_ingest import format_varac_source_label, ingest_varac
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
     find_detached_signature,
@@ -139,6 +145,13 @@ class JS8Message:
     state: str  # UNREAD / READ
     read_ts: float = 0.0
     flag_state: int = 0
+    source_key: str = LEGACY_JS8_SOURCE_KEY
+    source_scope: str = "legacy"
+    source_label: str = LEGACY_JS8_SOURCE_LABEL
+    device_profile_id: Optional[int] = None
+    inbox_path: str = ""
+    directed_path: str = ""
+    all_path: str = ""
 
     def display_line(self) -> str:
         return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
@@ -158,9 +171,26 @@ class SpotterMessage:
     read_ts: float = 0.0
     relay_via: str = ""
     flag_state: int = 0
+    source_key: str = LEGACY_JS8_SOURCE_KEY
+    source_scope: str = "legacy"
+    source_label: str = LEGACY_JS8_SOURCE_LABEL
+    device_profile_id: Optional[int] = None
+    directed_path: str = ""
 
     def display_line(self) -> str:
         return f"{self.utc_str[:10]}  {self.msg_type}  {self.from_call} -> {self.to_call}"
+
+
+def _js8_message_source_label(msg: JS8Message | SpotterMessage) -> str:
+    label = str(getattr(msg, "source_label", "") or "").strip()
+    if label:
+        return label
+    source_key = str(getattr(msg, "source_key", "") or "").strip()
+    if source_key.startswith("device:"):
+        return f"Device {source_key.split(':', 1)[-1]}"
+    if source_key:
+        return source_key
+    return LEGACY_JS8_SOURCE_LABEL
 
 
 class _FileScanWorker(QObject):
@@ -1005,6 +1035,9 @@ class _RowsBuildWorker(QObject):
                 title = title[:57].rstrip() + "..."
             from_call = (msg.from_call or "").strip().upper()
             to_call = (msg.to_call or "").strip().upper()
+            source_label = _js8_message_source_label(msg)
+            if source_label:
+                title = f"{title} [{source_label}]"
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -1016,7 +1049,7 @@ class _RowsBuildWorker(QObject):
                     title=title,
                     origin="js8",
                     payload=msg,
-                    search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                    search_text=(self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title) + f" {source_label}".lower()),
                 )
             )
 
@@ -1039,6 +1072,9 @@ class _RowsBuildWorker(QObject):
                 title = title[:57].rstrip() + "..."
             from_call = (msg.from_call or "").strip().upper()
             to_call = (msg.to_call or "").strip().upper()
+            source_label = _js8_message_source_label(msg)
+            if source_label:
+                title = f"{title} [{source_label}]"
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -1050,7 +1086,7 @@ class _RowsBuildWorker(QObject):
                     title=title,
                     origin="spotter",
                     payload=msg,
-                    search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                    search_text=(self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title) + f" {source_label}".lower()),
                 )
             )
 
@@ -1059,15 +1095,12 @@ class _RowsBuildWorker(QObject):
             status = "NEW" if (msg.read_status == 0 and msg.msg_type.upper() != "QSO") else "READ"
             rcv_ts = float(msg.ts or 0.0)
             rcv_display = self._format_rcv_display(rcv_ts, None)
-            if (msg.msg_type or "").upper() == "VMAIL":
-                title_base = (msg.subject or "").strip()
-            else:
-                title_base = (msg.subject or msg.body or "").strip()
-            title = f"{msg.msg_type}: {title_base}" if title_base else (msg.msg_type or "VarAC")
+            title = _varac_message_title(msg)
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
             from_call = (msg.from_call or "").strip().upper()
             to_call = (msg.to_call or "").strip().upper()
+            source_label = _varac_message_source_label(msg)
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -1079,7 +1112,7 @@ class _RowsBuildWorker(QObject):
                     title=title,
                     origin="varac",
                     payload=msg,
-                    search_text=self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title),
+                    search_text=(self._compose_search_text(msg_type, status, from_call, to_call, rcv_display, title) + f" {source_label}".lower()),
                 )
             )
 
@@ -1332,6 +1365,34 @@ class VarACMessage:
     folder: str
     vmail_guid: str
     flag_state: int = 0
+    table_name: str = ""
+    ingest_source_key: str = ""
+    ingest_scope: str = ""
+    ingest_source_label: str = ""
+    cluster_name: str = ""
+    cluster_public_id: str = ""
+    ingest_db_path: str = ""
+
+
+def _varac_message_source_label(msg: VarACMessage) -> str:
+    return format_varac_source_label(
+        ingest_scope=msg.ingest_scope,
+        ingest_source_label=msg.ingest_source_label,
+        cluster_name=msg.cluster_name,
+        cluster_public_id=msg.cluster_public_id,
+    )
+
+
+def _varac_message_title(msg: VarACMessage) -> str:
+    if (msg.msg_type or "").upper() == "VMAIL":
+        title_base = (msg.subject or "").strip()
+    else:
+        title_base = (msg.subject or msg.body or "").strip()
+    title = f"{msg.msg_type}: {title_base}" if title_base else (msg.msg_type or "VarAC")
+    source_label = _varac_message_source_label(msg)
+    if source_label:
+        title = f"{title} [{source_label}]"
+    return title
 
 
 @dataclass
@@ -4176,12 +4237,13 @@ class MessageViewerTab(QWidget):
             )
             # First ingest any new messages into local cache, then load from local cache for display
             if should_ingest:
+                ingestor = MessageIngestor(self.settings)
                 try:
-                    self._ingest_js8_messages()
+                    ingestor.ingest_js8_messages()
                 except Exception as e:
                     log.debug("MessageViewer: JS8 ingest failed: %s", e)
                 try:
-                    self._ingest_spotter_from_directed()
+                    ingestor.ingest_spotter_from_directed()
                 except Exception as e:
                     log.debug("MessageViewer: spotter ingest failed: %s", e)
                 self._last_js8_ingest_ts = now
@@ -4285,7 +4347,7 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
         if isinstance(payload, JS8Message):
-            self._set_js8_flag(payload.msg_id, next_state)
+            self._set_js8_flag(payload, next_state)
         elif isinstance(payload, SpotterMessage):
             self._set_spotter_flag(payload.spotter_id, next_state)
         elif isinstance(payload, VarACMessage):
@@ -4294,14 +4356,17 @@ class MessageViewerTab(QWidget):
             self._set_file_flag(payload, next_state)
         self._populate_messages_table(force=True)
 
-    def _set_js8_flag(self, msg_id: int, flag_state: int) -> None:
+    def _set_js8_flag(self, msg: JS8Message, flag_state: int) -> None:
         db_path = self._local_js8_db()
         if not db_path or not Path(db_path).exists():
             return
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute("UPDATE js8_messages SET flag_state=? WHERE id=?", (int(flag_state), int(msg_id)))
+            cur.execute(
+                "UPDATE js8_messages_v2 SET flag_state=? WHERE source_key=? AND remote_id=?",
+                (int(flag_state), str(msg.source_key or LEGACY_JS8_SOURCE_KEY), int(msg.msg_id)),
+            )
             conn.commit()
             conn.close()
         except Exception as e:
@@ -4380,7 +4445,9 @@ class MessageViewerTab(QWidget):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT id, guid, source, msg_type, from_call, to_call, subject, body,
+                SELECT id, guid, source, table_name, ingest_source_key, ingest_scope, ingest_source_label,
+                       cluster_name, cluster_public_id, ingest_db_path,
+                       msg_type, from_call, to_call, subject, body,
                        ts, band, freq_hz, snr, read_status, folder, vmail_guid, is_deleted, flag_state
                 FROM varac_messages
                 WHERE COALESCE(is_deleted, 0) = 0
@@ -4393,26 +4460,37 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to load varac messages: %s", e)
             rows = []
         for r in rows:
-            msg_type = (r[3] or "")
+            msg_type = (r[10] or "")
             if msg_type.strip().upper() == "QSO":
                 continue
+            source = (r[2] or "")
+            table_name = (r[3] or "")
+            if not table_name and "|" in source:
+                table_name = source.rsplit("|", 1)[-1]
             msg = VarACMessage(
                 msg_id=int(r[0]),
                 guid=(r[1] or ""),
-                source=(r[2] or ""),
+                source=source,
                 msg_type=msg_type,
-                from_call=(r[4] or "").strip().upper(),
-                to_call=(r[5] or "").strip().upper(),
-                subject=(r[6] or ""),
-                body=(r[7] or ""),
-                ts=float(r[8] or 0.0),
-                band=(r[9] or ""),
-                freq_hz=float(r[10]) if r[10] not in (None, "") else None,
-                snr=float(r[11]) if r[11] not in (None, "") else None,
-                read_status=int(r[12] or 0),
-                folder=str(r[13] or ""),
-                vmail_guid=(r[14] or ""),
-                flag_state=int(r[16] or 0),
+                from_call=(r[11] or "").strip().upper(),
+                to_call=(r[12] or "").strip().upper(),
+                subject=(r[13] or ""),
+                body=(r[14] or ""),
+                ts=float(r[15] or 0.0),
+                band=(r[16] or ""),
+                freq_hz=float(r[17]) if r[17] not in (None, "") else None,
+                snr=float(r[18]) if r[18] not in (None, "") else None,
+                read_status=int(r[19] or 0),
+                folder=str(r[20] or ""),
+                vmail_guid=(r[21] or ""),
+                flag_state=int(r[23] or 0),
+                table_name=str(table_name or ""),
+                ingest_source_key=str(r[4] or ""),
+                ingest_scope=str(r[5] or ""),
+                ingest_source_label=str(r[6] or ""),
+                cluster_name=str(r[7] or ""),
+                cluster_public_id=str(r[8] or ""),
+                ingest_db_path=str(r[9] or ""),
             )
             msgs.append(msg)
         self.varac_messages = msgs
@@ -4800,8 +4878,15 @@ class MessageViewerTab(QWidget):
                     source, msg_id = payload
                     self._persist_varac_read(str(source), int(msg_id))
                 elif op == "js8_read":
-                    msg_id, utc_ts, read_ts, sync_flag = payload
-                    self._persist_js8_read(int(msg_id), float(utc_ts), float(read_ts), bool(sync_flag))
+                    source_key, msg_id, utc_ts, read_ts, sync_flag, inbox_path = payload
+                    self._persist_js8_read(
+                        str(source_key),
+                        int(msg_id),
+                        float(utc_ts),
+                        float(read_ts),
+                        bool(sync_flag),
+                        str(inbox_path),
+                    )
             except Exception as e:
                 log.debug("MessageViewer: deferred persist op failed (%s): %s", op, e)
 
@@ -4866,18 +4951,27 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
 
-    def _persist_js8_read(self, msg_id: int, utc_ts: float, read_ts: float, sync_flag: bool) -> None:
+    def _persist_js8_read(
+        self,
+        source_key: str,
+        msg_id: int,
+        utc_ts: float,
+        read_ts: float,
+        sync_flag: bool,
+        inbox_path: str,
+    ) -> None:
         try:
-            self._save_js8_state(msg_id, "READ", utc_ts, read_ts=read_ts)
-            self._update_local_read(msg_id, read_ts)
+            self._save_js8_state(source_key, msg_id, "READ", utc_ts, read_ts=read_ts)
+            self._update_local_read(source_key, msg_id, read_ts)
         except Exception as e:
             log.debug("MessageViewer: failed to persist JS8 READ state: %s", e)
         if sync_flag:
             try:
-                ok = self._mark_js8call_inbox_read_by_id(msg_id)
+                ok = self._mark_js8call_inbox_read_by_id(msg_id, inbox_path)
                 if not ok:
                     log.debug(
-                        "MessageViewer: JS8Call inbox mark READ failed (msg_id=%s)",
+                        "MessageViewer: JS8Call inbox mark READ failed (source=%s msg_id=%s)",
+                        source_key,
                         msg_id,
                     )
             except Exception:
@@ -5624,12 +5718,17 @@ class MessageViewerTab(QWidget):
                 if msg_id <= 0:
                     skipped += 1
                     continue
-                if not self._delete_js8_inbox_row(msg_id):
+                source_key = str(getattr(payload, "source_key", "") or LEGACY_JS8_SOURCE_KEY)
+                if not self._delete_js8_inbox_row(msg_id, str(getattr(payload, "inbox_path", "") or "")):
                     failed += 1
                     continue
-                self._delete_js8_local_row(msg_id)
-                self.js8_messages = [m for m in self.js8_messages if m.msg_id != msg_id]
-                if self.current_js8 and self.current_js8.msg_id == msg_id:
+                self._delete_js8_local_row(source_key, msg_id)
+                self.js8_messages = [
+                    m
+                    for m in self.js8_messages
+                    if not (m.msg_id == msg_id and str(m.source_key or LEGACY_JS8_SOURCE_KEY) == source_key)
+                ]
+                if self.current_js8 and self.current_js8.msg_id == msg_id and str(self.current_js8.source_key or LEGACY_JS8_SOURCE_KEY) == source_key:
                     self.current_js8 = None
                     self._has_active_view = False
                     self.info_label.setText("No message selected")
@@ -5735,17 +5834,20 @@ class MessageViewerTab(QWidget):
         return changed
 
     def _mark_js8_rows_read_bulk(self, msgs: List[JS8Message], read_ts: float) -> None:
-        dedup: Dict[int, JS8Message] = {}
+        dedup: Dict[Tuple[str, int], JS8Message] = {}
         for msg in msgs:
             if msg.msg_id > 0:
-                dedup[int(msg.msg_id)] = msg
+                dedup[(str(msg.source_key or LEGACY_JS8_SOURCE_KEY), int(msg.msg_id))] = msg
         if not dedup:
             return
-        pairs = [(mid, dedup[mid].utc_ts or 0.0) for mid in sorted(dedup.keys())]
+        pairs = [
+            (source_key, msg_id, dedup[(source_key, msg_id)].utc_ts or 0.0)
+            for source_key, msg_id in sorted(dedup.keys())
+        ]
         self._save_js8_state_bulk(pairs, read_ts)
         self._update_local_read_bulk(sorted(dedup.keys()), read_ts)
         if self.settings.get("js8_inbox_mark_retrieved_sync", False):
-            updated = self._mark_js8call_inbox_read_by_ids(sorted(dedup.keys()))
+            updated = self._mark_js8call_inbox_read_by_ids(list(dedup.values()))
             log.debug(
                 "MessageViewer: mark-all JS8 inbox sync updated %s/%s rows",
                 updated,
@@ -5842,7 +5944,7 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: bulk file read-state update failed: %s", e)
 
-    def _save_js8_state_bulk(self, rows: List[Tuple[int, float]], read_ts: float) -> None:
+    def _save_js8_state_bulk(self, rows: List[Tuple[str, int, float]], read_ts: float) -> None:
         db_path = self._local_js8_db()
         if not db_path:
             return
@@ -5851,40 +5953,51 @@ class MessageViewerTab(QWidget):
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
-            )
+            ensure_js8_local_tables(conn, settings=self.settings)
             cur.executemany(
-                "INSERT INTO js8_inbox_state (id, state, last_seen, read_ts) VALUES (?, 'READ', ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET state='READ', last_seen=excluded.last_seen, read_ts=excluded.read_ts",
-                [(int(msg_id), float(last_seen or 0.0), float(read_ts)) for msg_id, last_seen in rows],
+                """
+                INSERT INTO js8_inbox_state_v2 (source_key, remote_id, state, last_seen, read_ts)
+                VALUES (?, ?, 'READ', ?, ?)
+                ON CONFLICT(source_key, remote_id) DO UPDATE SET
+                    state='READ',
+                    last_seen=excluded.last_seen,
+                    read_ts=excluded.read_ts
+                """,
+                [
+                    (str(source_key or LEGACY_JS8_SOURCE_KEY), int(msg_id), float(last_seen or 0.0), float(read_ts))
+                    for source_key, msg_id, last_seen in rows
+                    if int(msg_id or 0) > 0
+                ],
             )
             conn.commit()
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: bulk js8 state save failed: %s", e)
 
-    def _update_local_read_bulk(self, msg_ids: List[int], read_ts: float) -> None:
+    def _update_local_read_bulk(self, rows: List[Tuple[str, int]], read_ts: float) -> None:
         db_path = self._local_js8_db()
         if not db_path or not Path(db_path).exists():
             return
-        ids = [int(i) for i in msg_ids if int(i) > 0]
-        if not ids:
+        pairs = [
+            (str(source_key or LEGACY_JS8_SOURCE_KEY), int(msg_id))
+            for source_key, msg_id in rows
+            if int(msg_id or 0) > 0
+        ]
+        if not pairs:
             return
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.executemany(
-                "UPDATE js8_messages SET state='READ', read_ts=? WHERE id=?",
-                [(float(read_ts), int(msg_id)) for msg_id in ids],
+                "UPDATE js8_messages_v2 SET state='READ', read_ts=? WHERE source_key=? AND remote_id=?",
+                [(float(read_ts), source_key, msg_id) for source_key, msg_id in pairs],
             )
             conn.commit()
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: bulk local js8 read update failed: %s", e)
 
-    def _mark_js8call_inbox_read_by_ids(self, row_ids: List[int]) -> int:
-        inbox_path = self._inbox_path()
+    def _mark_js8call_inbox_read_for_path_ids(self, inbox_path: Path, row_ids: List[int]) -> int:
         if not inbox_path or not inbox_path.exists():
             return 0
         pending = {int(rid) for rid in row_ids if int(rid) > 0}
@@ -5971,6 +6084,20 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: bulk JS8Call inbox mark READ failed: %s", e)
         return updated_count
+
+    def _mark_js8call_inbox_read_by_ids(self, msgs: List[JS8Message]) -> int:
+        grouped: Dict[str, List[int]] = {}
+        for msg in msgs:
+            inbox_path = str(msg.inbox_path or "").strip()
+            if not inbox_path:
+                continue
+            if int(msg.msg_id or 0) <= 0:
+                continue
+            grouped.setdefault(inbox_path, []).append(int(msg.msg_id))
+        updated_total = 0
+        for inbox_path, row_ids in grouped.items():
+            updated_total += self._mark_js8call_inbox_read_for_path_ids(Path(inbox_path), row_ids)
+        return updated_total
 
     def _build_messages_header(self) -> None:
         while self.messages_header_layout.count():
@@ -6393,6 +6520,9 @@ class MessageViewerTab(QWidget):
                 title = (msg.decoded_text or msg.raw_text or "").strip()
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
+            source_label = _js8_message_source_label(msg)
+            if source_label:
+                title = f"{title} [{source_label}]"
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -6404,6 +6534,7 @@ class MessageViewerTab(QWidget):
                     title=title,
                     origin="js8",
                     payload=msg,
+                    search_text=(" ".join([msg_type, status, (msg.from_call or "").strip().upper(), (msg.to_call or "").strip().upper(), rcv_display, title, source_label]).lower()),
                 )
             )
 
@@ -6424,6 +6555,9 @@ class MessageViewerTab(QWidget):
                 title = (msg.decoded_text or msg.raw_text or "").strip()
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
+            source_label = _js8_message_source_label(msg)
+            if source_label:
+                title = f"{title} [{source_label}]"
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -6435,6 +6569,7 @@ class MessageViewerTab(QWidget):
                     title=title,
                     origin="spotter",
                     payload=msg,
+                    search_text=(" ".join([msg_type, status, (msg.from_call or "").strip().upper(), (msg.to_call or "").strip().upper(), rcv_display, title, source_label]).lower()),
                 )
             )
 
@@ -6443,13 +6578,10 @@ class MessageViewerTab(QWidget):
             status = "NEW" if (msg.read_status == 0 and msg.msg_type.upper() != "QSO") else "READ"
             rcv_ts = msg.ts or 0.0
             rcv_display = self._format_rcv_display(rcv_ts, None)
-            if (msg.msg_type or "").upper() == "VMAIL":
-                title_base = (msg.subject or "").strip()
-            else:
-                title_base = (msg.subject or msg.body or "").strip()
-            title = f"{msg.msg_type}: {title_base}" if title_base else (msg.msg_type or "VarAC")
+            title = _varac_message_title(msg)
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
+            source_label = _varac_message_source_label(msg)
             rows.append(
                 UnifiedMessage(
                     msg_type=msg_type,
@@ -6461,6 +6593,7 @@ class MessageViewerTab(QWidget):
                     title=title,
                     origin="varac",
                     payload=msg,
+                    search_text=(" ".join([msg_type, status, (msg.from_call or "").strip().upper(), (msg.to_call or "").strip().upper(), rcv_display, title, source_label]).lower()),
                 )
             )
 
@@ -7312,13 +7445,17 @@ class MessageViewerTab(QWidget):
         msg_id = int(getattr(msg, "msg_id", 0) or 0)
         if msg_id <= 0:
             return
-        deleted = self._delete_js8_inbox_row(msg_id)
+        deleted = self._delete_js8_inbox_row(msg_id, str(msg.inbox_path or ""))
         if not deleted:
             QMessageBox.warning(self, "Delete Message", f"Failed to delete Message {msg_id}.")
             return
-        self._delete_js8_local_row(msg_id)
-        self.js8_messages = [m for m in self.js8_messages if m.msg_id != msg_id]
-        if self.current_js8 and self.current_js8.msg_id == msg_id:
+        self._delete_js8_local_row(str(msg.source_key or LEGACY_JS8_SOURCE_KEY), msg_id)
+        self.js8_messages = [
+            m
+            for m in self.js8_messages
+            if not (m.msg_id == msg_id and str(m.source_key or LEGACY_JS8_SOURCE_KEY) == str(msg.source_key or LEGACY_JS8_SOURCE_KEY))
+        ]
+        if self.current_js8 and self.current_js8.msg_id == msg_id and str(self.current_js8.source_key or LEGACY_JS8_SOURCE_KEY) == str(msg.source_key or LEGACY_JS8_SOURCE_KEY):
             self.current_js8 = None
             self._has_active_view = False
             self.info_label.setText("No message selected")
@@ -7397,10 +7534,12 @@ class MessageViewerTab(QWidget):
         return None
 
     def _soft_delete_varac_row(self, msg: VarACMessage) -> bool:
-        db_path = self._resolve_varac_db_path()
+        db_path = Path(str(msg.ingest_db_path or "").strip()) if str(msg.ingest_db_path or "").strip() else self._resolve_varac_db_path()
         if not db_path or not db_path.exists():
             return False
-        table = msg.source
+        table = str(msg.table_name or "").strip().lower()
+        if not table and "|" in str(msg.source or ""):
+            table = str(msg.source or "").rsplit("|", 1)[-1].strip().lower()
         if table not in {"qso", "vmail", "broadcast"}:
             return False
         try:
@@ -7450,8 +7589,8 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to delete spotter row %s: %s", msg_id, e)
             return False
 
-    def _delete_js8_inbox_row(self, msg_id: int) -> bool:
-        inbox_path = self._inbox_path()
+    def _delete_js8_inbox_row(self, msg_id: int, inbox_path_text: str = "") -> bool:
+        inbox_path = Path(inbox_path_text) if str(inbox_path_text or "").strip() else self._inbox_path()
         if not inbox_path or not inbox_path.exists():
             return False
         try:
@@ -7484,15 +7623,21 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to delete inbox row %s: %s", msg_id, e)
             return False
 
-    def _delete_js8_local_row(self, msg_id: int) -> None:
+    def _delete_js8_local_row(self, source_key: str, msg_id: int) -> None:
         db_path = self._local_js8_db()
         if not db_path or not Path(db_path).exists():
             return
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute("DELETE FROM js8_messages WHERE id=?", (int(msg_id),))
-            cur.execute("DELETE FROM js8_inbox_state WHERE id=?", (int(msg_id),))
+            cur.execute(
+                "DELETE FROM js8_messages_v2 WHERE source_key=? AND remote_id=?",
+                (str(source_key or LEGACY_JS8_SOURCE_KEY), int(msg_id)),
+            )
+            cur.execute(
+                "DELETE FROM js8_inbox_state_v2 WHERE source_key=? AND remote_id=?",
+                (str(source_key or LEGACY_JS8_SOURCE_KEY), int(msg_id)),
+            )
             conn.commit()
             conn.close()
         except Exception as e:
@@ -7786,18 +7931,23 @@ class MessageViewerTab(QWidget):
             meta={"msg_type": msg.msg_type},
             min_ms=2.0,
         ):
+            source_label = _varac_message_source_label(msg)
             header = [
                 f"TYPE: {msg.msg_type}",
                 f"FROM: {msg.from_call}",
                 f"TO:   {msg.to_call}",
                 f"TIME: {self._fmt_ts(msg.ts)}",
             ]
+            if source_label:
+                header.append(f"SOURCE: {source_label}")
             if msg.band:
                 header.append(f"BAND: {msg.band}")
             if msg.freq_hz:
                 header.append(f"FREQ: {float(msg.freq_hz) / 1_000_000.0:.3f}")
             if msg.snr is not None:
                 header.append(f"SNR:  {msg.snr}")
+            if msg.ingest_db_path:
+                header.append(f"DB:   {msg.ingest_db_path}")
             header.append("")
             if (msg.msg_type or "").upper() == "VMAIL":
                 body = msg.body or ""
@@ -7805,7 +7955,10 @@ class MessageViewerTab(QWidget):
                     body = msg.subject or ""
             else:
                 body = msg.body or msg.subject or ""
-            self.info_label.setText(f"VarAC {msg.msg_type} {msg.from_call} -> {msg.to_call}")
+            info_text = f"VarAC {msg.msg_type} {msg.from_call} -> {msg.to_call}"
+            if source_label:
+                info_text += f" | {source_label}"
+            self.info_label.setText(info_text)
             self.viewer.setAcceptRichText(False)
             self.viewer.setPlainText("\n".join(header + [body]))
             self._mark_varac_read(msg, row_ref=row_ref)
@@ -7917,11 +8070,18 @@ class MessageViewerTab(QWidget):
                 f"{label}:  {ts_display}",
                 "",
             ]
+            source_label = _js8_message_source_label(msg)
+            if source_label:
+                header.insert(3, f"SOURCE: {source_label}")
             relay_via = getattr(msg, "relay_via", "") or ""
             if relay_via:
-                header.insert(4, f"RELAY VIA: {relay_via}")
+                insert_idx = 5 if source_label else 4
+                header.insert(insert_idx, f"RELAY VIA: {relay_via}")
             body = msg.decoded_text or msg.raw_text
-            self.info_label.setText(f"{msg.msg_type} {msg.from_call} -> {msg.to_call}")
+            info_text = f"{msg.msg_type} {msg.from_call} -> {msg.to_call}"
+            if source_label:
+                info_text += f" | {source_label}"
+            self.info_label.setText(info_text)
             self.viewer.setAcceptRichText(False)
             self.viewer.setPlainText("\n".join(header + [body]))
 
@@ -8057,8 +8217,8 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: JS8Call inbox update failed: %s", e)
         return False
 
-    def _mark_js8call_inbox_read_by_id(self, row_id: int) -> bool:
-        inbox_path = self._inbox_path()
+    def _mark_js8call_inbox_read_by_id(self, row_id: int, inbox_path_text: str = "") -> bool:
+        inbox_path = Path(inbox_path_text) if str(inbox_path_text or "").strip() else self._inbox_path()
         if not inbox_path or not inbox_path.exists():
             return False
         if row_id is None:
@@ -8278,16 +8438,21 @@ class MessageViewerTab(QWidget):
         self._queue_persist_op(
             "js8_read",
             (
+                str(msg.source_key or LEGACY_JS8_SOURCE_KEY),
                 int(msg.msg_id),
                 float(msg.utc_ts or 0.0),
                 float(ts),
                 bool(self.settings.get("js8_inbox_mark_retrieved_sync", False)),
+                str(msg.inbox_path or ""),
             ),
         )
         msg.state = "READ"
         msg.read_ts = ts
         self._refresh_table_after_read(
-            lambda row: isinstance(row.payload, JS8Message) and row.payload.msg_id == msg.msg_id,
+            lambda row: isinstance(row.payload, JS8Message)
+            and row.payload.msg_id == msg.msg_id
+            and str(getattr(row.payload, "source_key", "") or LEGACY_JS8_SOURCE_KEY)
+            == str(msg.source_key or LEGACY_JS8_SOURCE_KEY),
             row_ref=row_ref,
         )
 
@@ -8405,38 +8570,57 @@ class MessageViewerTab(QWidget):
 
     # ---------- JS8 state persistence (local DB) ---------- #
 
-    def _load_js8_state_map(self) -> Dict[int, Tuple[str, float]]:
+    def _load_js8_state_map(self) -> Dict[Tuple[str, int], Tuple[str, float]]:
         db_path = self._local_js8_db()
         if not db_path or not db_path.exists():
             return {}
         try:
             conn = sqlite3.connect(db_path)
+            ensure_js8_local_tables(conn, settings=self.settings)
             cur = conn.cursor()
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
-            )
-            cur.execute("SELECT id, state, read_ts FROM js8_inbox_state")
+            cur.execute("SELECT source_key, remote_id, state, read_ts FROM js8_inbox_state_v2")
             rows = cur.fetchall()
             conn.close()
-            return {int(r[0]): ((r[1] or "").upper(), float(r[2] or 0.0)) for r in rows if r and r[0] is not None}
+            return {
+                (str(r[0] or LEGACY_JS8_SOURCE_KEY), int(r[1] or 0)): ((r[2] or "").upper(), float(r[3] or 0.0))
+                for r in rows
+                if r and int(r[1] or 0) > 0
+            }
         except Exception as e:
             log.debug("MessageViewer: failed to load js8 state map: %s", e)
             return {}
 
-    def _save_js8_state(self, msg_id: int, state: str, last_seen_ts: float = 0.0, read_ts: float = 0.0) -> None:
+    def _save_js8_state(
+        self,
+        source_key: str,
+        msg_id: int,
+        state: str,
+        last_seen_ts: float = 0.0,
+        read_ts: float = 0.0,
+    ) -> None:
         db_path = self._local_js8_db()
         if not db_path:
             return
         try:
             conn = sqlite3.connect(db_path)
+            ensure_js8_local_tables(conn, settings=self.settings)
             cur = conn.cursor()
             cur.execute(
-                "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
-            )
-            cur.execute(
-                "INSERT INTO js8_inbox_state (id, state, last_seen, read_ts) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET state=excluded.state, last_seen=excluded.last_seen, read_ts=excluded.read_ts",
-                (int(msg_id), state.upper(), float(last_seen_ts or 0.0), float(read_ts or 0.0)),
+                """
+                INSERT INTO js8_inbox_state_v2 (source_key, remote_id, state, last_seen, read_ts)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source_key, remote_id) DO UPDATE SET
+                    state=excluded.state,
+                    last_seen=excluded.last_seen,
+                    read_ts=excluded.read_ts
+                """,
+                (
+                    str(source_key or LEGACY_JS8_SOURCE_KEY),
+                    int(msg_id),
+                    state.upper(),
+                    float(last_seen_ts or 0.0),
+                    float(read_ts or 0.0),
+                ),
             )
             conn.commit()
             conn.close()
@@ -8450,44 +8634,7 @@ class MessageViewerTab(QWidget):
         if not db_path:
             return
         conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS js8_messages (
-                id INTEGER PRIMARY KEY,
-                from_call TEXT,
-                to_call TEXT,
-                msg_type TEXT,
-                utc_str TEXT,
-                utc_ts REAL,
-                raw_text TEXT,
-                decoded_text TEXT,
-                state TEXT,
-                read_ts REAL,
-                flag_state INTEGER DEFAULT 0
-            )
-            """
-        )
-        cur.execute(
-            "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
-        )
-        # Add columns if missing
-        try:
-            cur.execute("ALTER TABLE js8_messages ADD COLUMN read_ts REAL")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_messages ADD COLUMN flag_state INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN read_ts REAL")
-        except Exception:
-            pass
-        try:
-            cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN last_ingested_id INTEGER")
-        except Exception:
-            pass
+        ensure_js8_local_tables(conn, settings=self.settings)
         conn.commit()
         conn.close()
 
@@ -8536,27 +8683,33 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             log.debug("MessageViewer: failed to insert local js8 message: %s", e)
 
-    def _update_local_decoded(self, msg_id: int, decoded: str) -> None:
+    def _update_local_decoded(self, source_key: str, msg_id: int, decoded: str) -> None:
         db_path = self._local_js8_db()
         if not db_path or not Path(db_path).exists():
             return
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute("UPDATE js8_messages SET decoded_text=? WHERE id=?", (decoded, int(msg_id)))
+            cur.execute(
+                "UPDATE js8_messages_v2 SET decoded_text=? WHERE source_key=? AND remote_id=?",
+                (decoded, str(source_key or LEGACY_JS8_SOURCE_KEY), int(msg_id)),
+            )
             conn.commit()
             conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to update local decoded text: %s", e)
 
-    def _update_local_read(self, msg_id: int, read_ts: float) -> None:
+    def _update_local_read(self, source_key: str, msg_id: int, read_ts: float) -> None:
         db_path = self._local_js8_db()
         if not db_path or not Path(db_path).exists():
             return
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute("UPDATE js8_messages SET state='READ', read_ts=? WHERE id=?", (float(read_ts), int(msg_id)))
+            cur.execute(
+                "UPDATE js8_messages_v2 SET state='READ', read_ts=? WHERE source_key=? AND remote_id=?",
+                (float(read_ts), str(source_key or LEGACY_JS8_SOURCE_KEY), int(msg_id)),
+            )
             conn.commit()
             conn.close()
         except Exception as e:
@@ -8576,8 +8729,10 @@ class MessageViewerTab(QWidget):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT id, from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts, flag_state
-                FROM js8_messages
+                SELECT source_key, source_scope, source_label, device_profile_id, remote_id,
+                       inbox_path, directed_path, all_path,
+                       from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text, state, read_ts, flag_state
+                FROM js8_messages_v2
                 WHERE utc_ts IS NULL OR utc_ts >= ?
                 """,
                 (time.time() - JS8_MAX_AGE_SECONDS,),
@@ -8589,17 +8744,24 @@ class MessageViewerTab(QWidget):
             rows = []
         for r in rows:
             msg = JS8Message(
-                msg_id=int(r[0]),
-                from_call=(r[1] or ""),
-                to_call=(r[2] or ""),
-                msg_type=(r[3] or ""),
-                utc_str=(r[4] or ""),
-                utc_ts=float(r[5] or 0.0),
-                raw_text=(r[6] or ""),
-                decoded_text=(r[7] or ""),
-                state=(r[8] or "UNREAD").upper(),
-                read_ts=float(r[9] or 0.0),
-                flag_state=int(r[10] or 0),
+                msg_id=int(r[4]),
+                from_call=(r[8] or ""),
+                to_call=(r[9] or ""),
+                msg_type=(r[10] or ""),
+                utc_str=(r[11] or ""),
+                utc_ts=float(r[12] or 0.0),
+                raw_text=(r[13] or ""),
+                decoded_text=(r[14] or ""),
+                state=(r[15] or "UNREAD").upper(),
+                read_ts=float(r[16] or 0.0),
+                flag_state=int(r[17] or 0),
+                source_key=str(r[0] or LEGACY_JS8_SOURCE_KEY),
+                source_scope=str(r[1] or "legacy"),
+                source_label=str(r[2] or LEGACY_JS8_SOURCE_LABEL),
+                device_profile_id=int(r[3]) if r[3] not in (None, "") else None,
+                inbox_path=str(r[5] or ""),
+                directed_path=str(r[6] or ""),
+                all_path=str(r[7] or ""),
             )
             # If older than retention and read, skip
             now_ts = time.time()
@@ -8612,7 +8774,7 @@ class MessageViewerTab(QWidget):
                     new_decoded = self._decode_form(form_id, resp, comment, raw=msg.raw_text)
                     if new_decoded:
                         msg.decoded_text = new_decoded
-                        self._update_local_decoded(msg.msg_id, new_decoded)
+                        self._update_local_decoded(msg.source_key, msg.msg_id, new_decoded)
             msgs.append(msg)
         msgs.sort(key=lambda m: (m.state != "UNREAD", m.utc_ts))
         self.js8_messages = msgs
@@ -8633,7 +8795,8 @@ class MessageViewerTab(QWidget):
             cur.execute(
                 """
                 SELECT id, utc_str, utc_ts, from_call, to_call, form_id, spotter_token,
-                       raw_text, decoded_text, state, read_ts, flag_state, relay_via
+                       raw_text, decoded_text, state, read_ts, flag_state, relay_via,
+                       source_key, source_scope, source_label, device_profile_id, directed_path
                 FROM spotter_traffic
                 ORDER BY utc_ts DESC, id DESC
                 """
@@ -8657,6 +8820,11 @@ class MessageViewerTab(QWidget):
                 read_ts=float(r[10] or 0.0),
                 relay_via=(r[12] or "").strip().upper(),
                 flag_state=int(r[11] or 0),
+                source_key=str(r[13] or LEGACY_JS8_SOURCE_KEY),
+                source_scope=str(r[14] or "legacy"),
+                source_label=str(r[15] or LEGACY_JS8_SOURCE_LABEL),
+                device_profile_id=int(r[16]) if r[16] not in (None, "") else None,
+                directed_path=str(r[17] or ""),
             )
             msgs.append(msg)
         self.spotter_messages = msgs

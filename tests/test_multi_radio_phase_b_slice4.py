@@ -123,12 +123,22 @@ class StubScheduler(QObject):
     varac_wait_detected = Signal(dict)
     varac_wait_cleared = Signal()
 
-    def __init__(self, parent=None, rig=None, js8=None, varac=None, fldigi_log=None, poll_interval_ms=5000):
+    def __init__(
+        self,
+        parent=None,
+        rig=None,
+        js8=None,
+        varac=None,
+        fldigi_log=None,
+        station_runtime_manager=None,
+        poll_interval_ms=5000,
+    ):
         super().__init__(parent)
         self.rig = rig
         self.js8 = js8
         self.varac = varac
         self.fldigi_log = fldigi_log
+        self.station_runtime_manager = station_runtime_manager
         self.next_change_utc = None
         self.started = False
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
+import os
 import re
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Mapping, Optional
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
@@ -26,6 +29,22 @@ VMAIL_FOLDER_FALLBACK = {
 }
 
 
+@dataclass(frozen=True)
+class VaracIngestSource:
+    ingest_source_key: str
+    ingest_scope: str
+    source_label: str
+    db_path: Optional[Path]
+    cluster_name: str = ""
+    cluster_public_id: str = ""
+    device_profile_id: Optional[int] = None
+    cluster_db_id: Optional[int] = None
+
+    def message_source(self, table_name: str) -> str:
+        table = str(table_name or "").strip().lower() or "varac"
+        return f"{self.ingest_source_key}|{table}"
+
+
 def _local_db_path() -> Path:
     return get_config_dir() / "config" / "freqinout_nets.db"
 
@@ -41,21 +60,221 @@ def ensure_varac_local_tables(conn: sqlite3.Connection) -> None:
     _ensure_local_tables(conn)
 
 
+def _raw_to_varac_db_path(raw: object) -> Optional[Path]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        path = Path(text).expanduser()
+    except Exception:
+        return None
+    suffix = path.suffix.lower()
+    if path.exists():
+        try:
+            if path.is_dir():
+                return path / "VarAC.db"
+        except Exception:
+            pass
+        if suffix in {".exe", ".ini"}:
+            return path.parent / "VarAC.db"
+        return path
+    if suffix == ".db":
+        return path
+    if suffix in {".exe", ".ini"}:
+        return path.parent / "VarAC.db"
+    if suffix:
+        return path
+    return path / "VarAC.db"
+
+
 def _resolve_varac_db_path(settings) -> Optional[Path]:
     raw_db = (settings.get("varac_db_path", "") or "").strip()
     raw_install = (settings.get("varac_path", "") or "").strip()
     for raw in (raw_db, raw_install):
-        if not raw:
-            continue
-        try:
-            p = Path(raw)
-            if p.is_dir():
-                return p / "VarAC.db"
-            if p.is_file():
-                return p
-        except Exception:
-            continue
+        path = _raw_to_varac_db_path(raw)
+        if path is not None:
+            return path
     return None
+
+
+def _normalized_path_key(path: Optional[Path]) -> str:
+    if path is None:
+        return ""
+    try:
+        return os.path.normcase(os.path.normpath(str(path.expanduser().resolve(strict=False))))
+    except Exception:
+        return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _source_priority(source: VaracIngestSource) -> tuple[int, str, int]:
+    scope = str(source.ingest_scope or "").strip().lower()
+    order = {"cluster": 0, "device": 1, "legacy": 2}
+    return (
+        order.get(scope, 9),
+        str(source.source_label or "").strip().lower(),
+        int(source.device_profile_id or source.cluster_db_id or 0),
+    )
+
+
+def format_varac_source_label(
+    *,
+    ingest_scope: object = "",
+    ingest_source_label: object = "",
+    cluster_name: object = "",
+    cluster_public_id: object = "",
+) -> str:
+    cluster = str(cluster_name or "").strip()
+    cluster_id = str(cluster_public_id or "").strip()
+    label = str(ingest_source_label or "").strip()
+    if cluster:
+        if cluster_id:
+            return f"{cluster} [{cluster_id}]"
+        return cluster
+    if label:
+        return label
+    scope = str(ingest_scope or "").strip().lower()
+    if scope == "legacy":
+        return "Legacy VarAC"
+    if scope == "device":
+        return "VarAC Device"
+    if scope == "cluster":
+        return "VarAC Cluster"
+    return "VarAC"
+
+
+def _profile_varac_db_path(profile: Mapping[str, object]) -> Optional[Path]:
+    return _raw_to_varac_db_path(profile.get("varac_db_path")) or _raw_to_varac_db_path(profile.get("varac_install_path"))
+
+
+def resolve_varac_ingest_sources(
+    settings,
+    *,
+    store: Optional[object] = None,
+) -> List[VaracIngestSource]:
+    candidates: List[VaracIngestSource] = []
+    try:
+        if store is None:
+            from freqinout.core.multi_radio_store import MultiRadioStore
+
+            store = MultiRadioStore()
+        active_profiles = []
+        list_active = getattr(store, "list_runtime_active_device_profiles", None)
+        if callable(list_active):
+            active_profiles = [dict(row) for row in list_active() if isinstance(row, dict)]
+        if active_profiles:
+            active_by_id = {int(row.get("id", 0) or 0): dict(row) for row in active_profiles if int(row.get("id", 0) or 0) > 0}
+            memberships: List[Dict[str, object]] = []
+            list_members = getattr(store, "list_varac_cluster_members", None)
+            if callable(list_members):
+                memberships = [dict(row) for row in list_members() if isinstance(row, dict)]
+            clustered_device_ids: set[int] = set()
+            cluster_members: Dict[int, List[Dict[str, object]]] = {}
+            for membership in memberships:
+                if int(membership.get("enabled", 1) or 0) != 1:
+                    continue
+                device_id = int(membership.get("device_profile_id", 0) or 0)
+                if device_id not in active_by_id:
+                    continue
+                cluster_id = int(membership.get("cluster_db_id", 0) or membership.get("cluster_id", 0) or 0)
+                if cluster_id <= 0:
+                    continue
+                clustered_device_ids.add(device_id)
+                cluster_members.setdefault(cluster_id, []).append(dict(membership))
+
+            for cluster_id, rows in cluster_members.items():
+                rows.sort(
+                    key=lambda row: (
+                        int(row.get("instance_number", 0) or 0) if int(row.get("instance_number", 0) or 0) > 0 else 999999,
+                        str(row.get("device_name", "") or "").strip().lower(),
+                        int(row.get("device_profile_id", 0) or 0),
+                    )
+                )
+                first = rows[0]
+                cluster_name = str(first.get("cluster_name", "") or "").strip()
+                cluster_public_id = str(first.get("cluster_public_id", "") or "").strip()
+                shared_db_path = _raw_to_varac_db_path(first.get("shared_db_path"))
+                chosen_path = shared_db_path
+                chosen_device_id: Optional[int] = None
+                if chosen_path is None:
+                    for membership in rows:
+                        device_id = int(membership.get("device_profile_id", 0) or 0)
+                        profile = active_by_id.get(device_id)
+                        if not profile:
+                            continue
+                        chosen_path = _profile_varac_db_path(profile)
+                        if chosen_path is not None:
+                            chosen_device_id = device_id
+                            break
+                if chosen_path is not None:
+                    candidates.append(
+                        VaracIngestSource(
+                            ingest_source_key=f"cluster:{cluster_id}",
+                            ingest_scope="cluster",
+                            source_label=format_varac_source_label(
+                                ingest_scope="cluster",
+                                cluster_name=cluster_name,
+                                cluster_public_id=cluster_public_id,
+                            ),
+                            db_path=chosen_path,
+                            cluster_name=cluster_name,
+                            cluster_public_id=cluster_public_id,
+                            device_profile_id=chosen_device_id,
+                            cluster_db_id=cluster_id,
+                        )
+                    )
+
+            for device_id, profile in active_by_id.items():
+                if device_id in clustered_device_ids:
+                    continue
+                chosen_path = _profile_varac_db_path(profile)
+                if chosen_path is None:
+                    continue
+                candidates.append(
+                    VaracIngestSource(
+                        ingest_source_key=f"device:{device_id}",
+                        ingest_scope="device",
+                        source_label=format_varac_source_label(
+                            ingest_scope="device",
+                            ingest_source_label=str(profile.get("name", "") or "").strip() or f"Device {device_id}",
+                        ),
+                        db_path=chosen_path,
+                        device_profile_id=device_id,
+                    )
+                )
+    except Exception as exc:
+        log.debug("VarAC ingest: failed loading multi-radio sources, falling back to legacy settings: %s", exc)
+
+    deduped: List[VaracIngestSource] = []
+    seen_paths: Dict[str, VaracIngestSource] = {}
+    for source in sorted(candidates, key=_source_priority):
+        path_key = _normalized_path_key(source.db_path)
+        if not path_key:
+            continue
+        if path_key in seen_paths:
+            existing = seen_paths[path_key]
+            log.debug(
+                "VarAC ingest: deduplicating shared source path %s (%s kept, %s skipped)",
+                source.db_path,
+                existing.ingest_source_key,
+                source.ingest_source_key,
+            )
+            continue
+        seen_paths[path_key] = source
+        deduped.append(source)
+    if deduped:
+        return deduped
+
+    legacy_path = _resolve_varac_db_path(settings)
+    if legacy_path is None:
+        return []
+    return [
+        VaracIngestSource(
+            ingest_source_key="legacy",
+            ingest_scope="legacy",
+            source_label=format_varac_source_label(ingest_scope="legacy"),
+            db_path=legacy_path,
+        )
+    ]
 
 
 def _parse_dt(val) -> float:
@@ -144,10 +363,25 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS varac_ingest_state_v2 (
+            ingest_source_key TEXT,
+            table_name TEXT,
+            last_id INTEGER DEFAULT 0,
+            PRIMARY KEY (ingest_source_key, table_name)
+        )
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS varac_sync_status (
             run_started_ts REAL PRIMARY KEY,
             run_finished_ts REAL,
             varac_db_path TEXT,
+            ingest_source_key TEXT,
+            ingest_scope TEXT,
+            ingest_source_label TEXT,
+            cluster_name TEXT,
+            cluster_public_id TEXT,
             success INTEGER DEFAULT 0,
             rows_scanned INTEGER DEFAULT 0,
             rows_written INTEGER DEFAULT 0,
@@ -160,6 +394,8 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS varac_sync_table_counts (
             run_started_ts REAL,
             table_name TEXT,
+            ingest_source_key TEXT,
+            ingest_source_label TEXT,
             rows_scanned INTEGER DEFAULT 0,
             rows_written INTEGER DEFAULT 0,
             watermark_id INTEGER DEFAULT 0,
@@ -173,6 +409,13 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
             id INTEGER,
             guid TEXT,
             source TEXT,
+            table_name TEXT,
+            ingest_source_key TEXT,
+            ingest_scope TEXT,
+            ingest_source_label TEXT,
+            cluster_name TEXT,
+            cluster_public_id TEXT,
+            ingest_db_path TEXT,
             msg_type TEXT,
             from_call TEXT,
             to_call TEXT,
@@ -412,6 +655,10 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
     )
     cur.execute("PRAGMA table_info(varac_messages)")
     cols = {row[1] for row in cur.fetchall()}
+    cur.execute("PRAGMA table_info(varac_sync_status)")
+    sync_cols = {row[1] for row in cur.fetchall()}
+    cur.execute("PRAGMA table_info(varac_sync_table_counts)")
+    sync_count_cols = {row[1] for row in cur.fetchall()}
     if "flag_state" not in cols:
         cur.execute("ALTER TABLE varac_messages ADD COLUMN flag_state INTEGER DEFAULT 0")
     if "folder_label" not in cols:
@@ -422,10 +669,44 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE varac_messages ADD COLUMN has_attachment INTEGER DEFAULT 0")
     if "via_callsign" not in cols:
         cur.execute("ALTER TABLE varac_messages ADD COLUMN via_callsign TEXT")
+    if "table_name" not in cols:
+        cur.execute("ALTER TABLE varac_messages ADD COLUMN table_name TEXT")
+    if "ingest_source_key" not in cols:
+        cur.execute("ALTER TABLE varac_messages ADD COLUMN ingest_source_key TEXT")
+    if "ingest_scope" not in cols:
+        cur.execute("ALTER TABLE varac_messages ADD COLUMN ingest_scope TEXT")
+    if "ingest_source_label" not in cols:
+        cur.execute("ALTER TABLE varac_messages ADD COLUMN ingest_source_label TEXT")
+    if "cluster_name" not in cols:
+        cur.execute("ALTER TABLE varac_messages ADD COLUMN cluster_name TEXT")
+    if "cluster_public_id" not in cols:
+        cur.execute("ALTER TABLE varac_messages ADD COLUMN cluster_public_id TEXT")
+    if "ingest_db_path" not in cols:
+        cur.execute("ALTER TABLE varac_messages ADD COLUMN ingest_db_path TEXT")
+    if "ingest_source_key" not in sync_cols:
+        cur.execute("ALTER TABLE varac_sync_status ADD COLUMN ingest_source_key TEXT")
+    if "ingest_scope" not in sync_cols:
+        cur.execute("ALTER TABLE varac_sync_status ADD COLUMN ingest_scope TEXT")
+    if "ingest_source_label" not in sync_cols:
+        cur.execute("ALTER TABLE varac_sync_status ADD COLUMN ingest_source_label TEXT")
+    if "cluster_name" not in sync_cols:
+        cur.execute("ALTER TABLE varac_sync_status ADD COLUMN cluster_name TEXT")
+    if "cluster_public_id" not in sync_cols:
+        cur.execute("ALTER TABLE varac_sync_status ADD COLUMN cluster_public_id TEXT")
+    if "ingest_source_key" not in sync_count_cols:
+        cur.execute("ALTER TABLE varac_sync_table_counts ADD COLUMN ingest_source_key TEXT")
+    if "ingest_source_label" not in sync_count_cols:
+        cur.execute("ALTER TABLE varac_sync_table_counts ADD COLUMN ingest_source_label TEXT")
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_varac_messages_folder_label
         ON varac_messages(folder_label)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_varac_messages_ingest_source_ts
+        ON varac_messages(ingest_source_key, ts)
         """
     )
     conn.commit()
@@ -440,23 +721,55 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return cur.fetchone() is not None
 
 
-def _get_last_id(conn: sqlite3.Connection, table: str) -> int:
-    cur = conn.cursor()
-    cur.execute("SELECT last_id FROM varac_ingest_state WHERE table_name=?", (table,))
-    row = cur.fetchone()
-    return int(row[0]) if row and row[0] is not None else 0
+def _stable_local_event_id(ingest_source_key: str, table_name: str, remote_id: object) -> int:
+    try:
+        remote_id_int = int(remote_id)
+    except Exception:
+        remote_id_int = 0
+    payload = f"{ingest_source_key}|{table_name}|{remote_id_int}".encode("utf-8", errors="replace")
+    value = int.from_bytes(hashlib.sha1(payload).digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF
+    return value or 1
 
 
-def _set_last_id(conn: sqlite3.Connection, table: str, last_id: int) -> None:
+def _get_last_id(conn: sqlite3.Connection, table: str, *, ingest_source_key: str = "legacy") -> int:
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO varac_ingest_state (table_name, last_id)
-        VALUES (?, ?)
-        ON CONFLICT(table_name) DO UPDATE SET last_id=excluded.last_id
+        SELECT last_id
+          FROM varac_ingest_state_v2
+         WHERE ingest_source_key=? AND table_name=?
         """,
-        (table, int(last_id)),
+        (str(ingest_source_key or "legacy"), table),
     )
+    row = cur.fetchone()
+    if row and row[0] is not None:
+        return int(row[0])
+    if str(ingest_source_key or "legacy") == "legacy":
+        cur.execute("SELECT last_id FROM varac_ingest_state WHERE table_name=?", (table,))
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    return 0
+
+
+def _set_last_id(conn: sqlite3.Connection, table: str, last_id: int, *, ingest_source_key: str = "legacy") -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO varac_ingest_state_v2 (ingest_source_key, table_name, last_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(ingest_source_key, table_name) DO UPDATE SET last_id=excluded.last_id
+        """,
+        (str(ingest_source_key or "legacy"), table, int(last_id)),
+    )
+    if str(ingest_source_key or "legacy") == "legacy":
+        cur.execute(
+            """
+            INSERT INTO varac_ingest_state (table_name, last_id)
+            VALUES (?, ?)
+            ON CONFLICT(table_name) DO UPDATE SET last_id=excluded.last_id
+            """,
+            (table, int(last_id)),
+        )
 
 
 def _record_sync_status(
@@ -469,19 +782,33 @@ def _record_sync_status(
     rows_scanned: int,
     rows_written: int,
     table_counts: Dict[str, Dict[str, int]],
+    ingest_source_key: str = "legacy",
+    ingest_scope: str = "legacy",
+    ingest_source_label: str = "",
+    cluster_name: str = "",
+    cluster_public_id: str = "",
     error_text: str = "",
 ) -> None:
     cur = conn.cursor()
     cur.execute(
         """
         INSERT OR REPLACE INTO varac_sync_status
-            (run_started_ts, run_finished_ts, varac_db_path, success, rows_scanned, rows_written, error_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (
+                run_started_ts, run_finished_ts, varac_db_path, ingest_source_key, ingest_scope,
+                ingest_source_label, cluster_name, cluster_public_id,
+                success, rows_scanned, rows_written, error_text
+            )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             float(run_started_ts),
             float(run_finished_ts),
             str(varac_db_path or ""),
+            str(ingest_source_key or "legacy"),
+            str(ingest_scope or "legacy"),
+            str(ingest_source_label or ""),
+            str(cluster_name or ""),
+            str(cluster_public_id or ""),
             1 if success else 0,
             int(rows_scanned),
             int(rows_written),
@@ -492,17 +819,56 @@ def _record_sync_status(
         cur.execute(
             """
             INSERT OR REPLACE INTO varac_sync_table_counts
-                (run_started_ts, table_name, rows_scanned, rows_written, watermark_id)
-            VALUES (?, ?, ?, ?, ?)
+                (run_started_ts, table_name, ingest_source_key, ingest_source_label, rows_scanned, rows_written, watermark_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 float(run_started_ts),
                 table_name,
+                str(ingest_source_key or "legacy"),
+                str(ingest_source_label or ""),
                 int(counts.get("rows_scanned", 0)),
                 int(counts.get("rows_written", 0)),
                 int(counts.get("watermark_id", 0)),
             ),
         )
+
+
+def load_latest_varac_sync_status(*, db_path: Optional[Path] = None) -> Dict[str, Dict[str, object]]:
+    target_db = Path(db_path) if db_path is not None else _local_db_path()
+    if not target_db.exists():
+        return {}
+    conn = sqlite3.connect(target_db)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                run_started_ts,
+                run_finished_ts,
+                varac_db_path,
+                COALESCE(ingest_source_key, 'legacy') AS ingest_source_key,
+                COALESCE(ingest_scope, 'legacy') AS ingest_scope,
+                COALESCE(ingest_source_label, '') AS ingest_source_label,
+                COALESCE(cluster_name, '') AS cluster_name,
+                COALESCE(cluster_public_id, '') AS cluster_public_id,
+                success,
+                rows_scanned,
+                rows_written,
+                COALESCE(error_text, '') AS error_text
+              FROM varac_sync_status
+          ORDER BY COALESCE(run_finished_ts, run_started_ts) DESC, run_started_ts DESC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    latest: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        data = dict(row)
+        key = str(data.get("ingest_source_key", "legacy") or "legacy")
+        if key not in latest:
+            latest[key] = data
+    return latest
 
 
 def _update_stats(
@@ -561,21 +927,21 @@ def _update_traits(
     entry["last_updated_ts"] = time.time()
 
 
-def ingest_varac(settings, *, force: bool = False) -> bool:
-    global _LAST_RUN_MONO
-
-    varac_db = _resolve_varac_db_path(settings)
-    if not varac_db:
-        return False
-    if not varac_db.exists():
-        return False
-    now_mono = time.monotonic()
-    if not force and (now_mono - float(_LAST_RUN_MONO or 0.0) < _MIN_INGEST_INTERVAL_SECONDS):
-        return True
-    if not _INGEST_LOCK.acquire(blocking=False):
-        return False
-
-    run_started_ts = time.time()
+def _ingest_varac_source(
+    settings,
+    ingest_source: VaracIngestSource,
+    *,
+    force: bool = False,
+    run_started_ts: Optional[float] = None,
+) -> bool:
+    varac_db = ingest_source.db_path
+    source_label = format_varac_source_label(
+        ingest_scope=ingest_source.ingest_scope,
+        ingest_source_label=ingest_source.source_label,
+        cluster_name=ingest_source.cluster_name,
+        cluster_public_id=ingest_source.cluster_public_id,
+    )
+    started_ts = float(run_started_ts if run_started_ts is not None else time.time())
     table_counts: Dict[str, Dict[str, int]] = {}
     success = False
     error_text = ""
@@ -616,12 +982,19 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
         local_conn = sqlite3.connect(local_db)
         _ensure_local_tables(local_conn)
 
+        if varac_db is None:
+            error_text = "VarAC source path is not configured."
+            return False
+        if not varac_db.exists():
+            error_text = f"VarAC DB not found: {varac_db}"
+            return False
+
         try:
             uri = f"file:{varac_db.as_posix()}?mode=ro"
             varac_conn = sqlite3.connect(uri, uri=True)
         except Exception as e:
             error_text = f"failed opening VarAC DB: {e}"
-            log.debug("VarAC ingest: failed to open %s: %s", varac_db, e)
+            log.debug("VarAC ingest: failed to open %s for %s: %s", varac_db, ingest_source.ingest_source_key, e)
             return False
 
         cur_local = local_conn.cursor()
@@ -661,7 +1034,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             if not _table_exists(varac_conn, table):
                 _note_table(table)
                 return [], cols
-            last_id = 0 if force else _get_last_id(local_conn, table)
+            last_id = 0 if force else _get_last_id(local_conn, table, ingest_source_key=ingest_source.ingest_source_key)
             rows: list[tuple] = []
             used_cols = cols
             candidates = [cols]
@@ -682,7 +1055,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             if rows:
                 try:
                     last_seen = int(rows[-1][0])
-                    _set_last_id(local_conn, table, last_seen)
+                    _set_last_id(local_conn, table, last_seen, ingest_source_key=ingest_source.ingest_source_key)
                 except Exception:
                     pass
             _note_table(table, scanned=len(rows), watermark=last_seen)
@@ -758,7 +1131,8 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 snr_val = float(snr_received) if snr_received not in (None, "") else None
             except Exception:
                 snr_val = None
-            _update_stats(stats, callsign, ts_val, band_val, freq_hz, snr_val, "qso")
+            qso_source = ingest_source.message_source("qso")
+            _update_stats(stats, callsign, ts_val, band_val, freq_hz, snr_val, qso_source)
             freq_disp = f"{float(freq_hz) / 1_000_000.0:.3f}" if freq_hz else ""
             msg_body = (
                 f"QSO with {callsign}\n"
@@ -771,13 +1145,27 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             cur_local.execute(
                 """
                 INSERT OR REPLACE INTO varac_messages
-                    (id, guid, source, msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr, read_status, folder, file_path, vmail_guid, is_deleted, flag_state)
+                    (
+                        id, guid, source, table_name, ingest_source_key, ingest_scope, ingest_source_label,
+                        cluster_name, cluster_public_id, ingest_db_path,
+                        msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr,
+                        read_status, folder, file_path, vmail_guid, is_deleted, flag_state
+                    )
                 VALUES
-                    (?, ?, 'qso', 'QSO', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     int(rid),
                     guid or "",
+                    qso_source,
+                    "qso",
+                    ingest_source.ingest_source_key,
+                    ingest_source.ingest_scope,
+                    source_label,
+                    ingest_source.cluster_name,
+                    ingest_source.cluster_public_id,
+                    str(varac_db),
+                    "QSO",
                     callsign,
                     (my_cs or my_call or "").strip().upper(),
                     f"QSO {band_val}".strip(),
@@ -800,9 +1188,9 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 cur_local.execute(
                     """
                     INSERT INTO varac_links (ts, origin, destination, snr, band, freq_hz, source)
-                    VALUES (?, ?, ?, ?, ?, ?, 'qso')
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (ts_val, other, callsign, snr_val, band_val, freq_hz),
+                    (ts_val, other, callsign, snr_val, band_val, freq_hz, qso_source),
                 )
                 _note_table("qso", written=1)
 
@@ -848,18 +1236,34 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 snr_val = float(delivery_snr) if delivery_snr not in (None, "") else None
             except Exception:
                 snr_val = None
+            vmail_source = ingest_source.message_source("vmail")
             if from_call:
-                _update_stats(stats, from_call, ts_val, band_val, freq_hz, snr_val, "vmail")
+                _update_stats(stats, from_call, ts_val, band_val, freq_hz, snr_val, vmail_source)
             cur_local.execute(
                 """
                 INSERT OR REPLACE INTO varac_messages
-                    (id, guid, source, msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr, read_status, folder, file_path, vmail_guid, is_deleted, flag_state, folder_label, urgent, has_attachment, via_callsign)
+                    (
+                        id, guid, source, table_name, ingest_source_key, ingest_scope, ingest_source_label,
+                        cluster_name, cluster_public_id, ingest_db_path,
+                        msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr,
+                        read_status, folder, file_path, vmail_guid, is_deleted, flag_state, folder_label,
+                        urgent, has_attachment, via_callsign
+                    )
                 VALUES
-                    (?, ?, 'vmail', 'VMAIL', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     int(rid),
                     guid or "",
+                    vmail_source,
+                    "vmail",
+                    ingest_source.ingest_source_key,
+                    ingest_source.ingest_scope,
+                    source_label,
+                    ingest_source.cluster_name,
+                    ingest_source.cluster_public_id,
+                    str(varac_db),
+                    "VMAIL",
                     from_call,
                     to_call,
                     (subject or "").strip(),
@@ -926,8 +1330,9 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 snr_val = float(snr) if snr not in (None, "") else None
             except Exception:
                 snr_val = None
+            broadcast_source = ingest_source.message_source("broadcast")
             if from_call:
-                _update_stats(stats, from_call, ts_val, band_val, freq_hz, snr_val, "broadcast")
+                _update_stats(stats, from_call, ts_val, band_val, freq_hz, snr_val, broadcast_source)
             cur_local.execute(
                 """
                 INSERT OR REPLACE INTO varac_broadcast_events
@@ -936,7 +1341,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                     (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    int(rid),
+                    _stable_local_event_id(ingest_source.ingest_source_key, "broadcast_event", rid),
                     guid or "",
                     ts_val,
                     freq_hz,
@@ -955,13 +1360,27 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 cur_local.execute(
                     """
                     INSERT OR REPLACE INTO varac_messages
-                        (id, guid, source, msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr, read_status, folder, file_path, vmail_guid, is_deleted, flag_state, via_callsign)
+                        (
+                            id, guid, source, table_name, ingest_source_key, ingest_scope, ingest_source_label,
+                            cluster_name, cluster_public_id, ingest_db_path,
+                            msg_type, from_call, to_call, subject, body, ts, band, freq_hz, snr,
+                            read_status, folder, file_path, vmail_guid, is_deleted, flag_state, via_callsign
+                        )
                     VALUES
-                        (?, ?, 'broadcast', 'BROADCAST', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         int(rid),
                         guid or "",
+                        broadcast_source,
+                        "broadcast",
+                        ingest_source.ingest_source_key,
+                        ingest_source.ingest_scope,
+                        source_label,
+                        ingest_source.cluster_name,
+                        ingest_source.cluster_public_id,
+                        str(varac_db),
+                        "BROADCAST",
                         from_call,
                         to_call,
                         "Broadcast",
@@ -1034,8 +1453,9 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 snr_val = float(snr) if snr not in (None, "") else None
             except Exception:
                 snr_val = None
+            cqframe_source = ingest_source.message_source("cqframe")
             if from_call:
-                _update_stats(stats, from_call, ts_val, band_val, freq_hz, snr_val, "cqframe")
+                _update_stats(stats, from_call, ts_val, band_val, freq_hz, snr_val, cqframe_source)
                 if is_emcomm:
                     _update_traits(traits, from_call, is_emcomm=True)
             cur_local.execute(
@@ -1046,7 +1466,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                     (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    int(rid),
+                    _stable_local_event_id(ingest_source.ingest_source_key, "cqframe_event", rid),
                     guid or "",
                     ts_val,
                     int(cqframe_type_id or 0),
@@ -1081,7 +1501,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    int(rid),
+                    _stable_local_event_id(ingest_source.ingest_source_key, "qso_snr_report", rid),
                     guid or "",
                     qso_guid or "",
                     str(snr_direction or ""),
@@ -1108,7 +1528,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    int(rid),
+                    _stable_local_event_id(ingest_source.ingest_source_key, "relay_notification", rid),
                     guid or "",
                     ts_val,
                     from_call,
@@ -1140,7 +1560,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             freq_hz = float(frequency) if frequency not in (None, "") else None
             band_val = _hz_to_band(freq_hz)
             if from_call:
-                _update_stats(stats, from_call, ts_val, band_val, freq_hz, None, "alert")
+                _update_stats(stats, from_call, ts_val, band_val, freq_hz, None, ingest_source.message_source("alert"))
                 _update_traits(traits, from_call, alert_delta=1, alert_ts=ts_val)
 
         # Datastream stats
@@ -1161,7 +1581,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             cs = _clean_call(callsign)
             ts_val = _parse_dt(creation_time)
             if cs:
-                _update_stats(stats, cs, ts_val, "", None, None, "datastream")
+                _update_stats(stats, cs, ts_val, "", None, None, ingest_source.message_source("datastream"))
                 entry_txt = str(entry or "").upper()
                 if "BBS" in entry_txt or "MAILBOX" in entry_txt:
                     _update_traits(traits, cs, bbs_seen=True)
@@ -1251,7 +1671,7 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 local_conn.rollback()
         except Exception:
             pass
-        log.debug("VarAC ingest failed: %s", e)
+        log.debug("VarAC ingest failed for %s: %s", ingest_source.ingest_source_key, e)
     finally:
         run_finished_ts = time.time()
         rows_scanned = sum(int(v.get("rows_scanned", 0)) for v in table_counts.values())
@@ -1260,9 +1680,14 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
             if local_conn is not None:
                 _record_sync_status(
                     local_conn,
-                    run_started_ts=run_started_ts,
+                    run_started_ts=started_ts,
                     run_finished_ts=run_finished_ts,
-                    varac_db_path=str(varac_db),
+                    varac_db_path=str(varac_db or ""),
+                    ingest_source_key=ingest_source.ingest_source_key,
+                    ingest_scope=ingest_source.ingest_scope,
+                    ingest_source_label=source_label,
+                    cluster_name=ingest_source.cluster_name,
+                    cluster_public_id=ingest_source.cluster_public_id,
                     success=success,
                     rows_scanned=rows_scanned,
                     rows_written=rows_written,
@@ -1282,14 +1707,41 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 local_conn.close()
         except Exception:
             pass
-        _LAST_RUN_MONO = time.monotonic()
-        _INGEST_LOCK.release()
 
     if success and rows_written:
         log.debug(
-            "VarAC ingest: scanned=%s written=%s source_db=%s",
+            "VarAC ingest: scanned=%s written=%s source=%s source_db=%s",
             rows_scanned,
             rows_written,
+            ingest_source.ingest_source_key,
             varac_db,
         )
     return success
+
+
+def ingest_varac(settings, *, force: bool = False) -> bool:
+    global _LAST_RUN_MONO
+
+    sources = resolve_varac_ingest_sources(settings)
+    if not sources:
+        return False
+    now_mono = time.monotonic()
+    if not force and (now_mono - float(_LAST_RUN_MONO or 0.0) < _MIN_INGEST_INTERVAL_SECONDS):
+        return True
+    if not _INGEST_LOCK.acquire(blocking=False):
+        return False
+
+    any_success = False
+    try:
+        for index, source in enumerate(sources):
+            started_ts = time.time() + (index * 0.000001)
+            any_success = _ingest_varac_source(
+                settings,
+                source,
+                force=force,
+                run_started_ts=started_ts,
+            ) or any_success
+        _LAST_RUN_MONO = time.monotonic()
+        return any_success
+    finally:
+        _INGEST_LOCK.release()

@@ -62,6 +62,16 @@ def test_settings_manager_seeds_default_multi_radio_records(monkeypatch, tmp_pat
     assert assignments[0]["device_profile_id"] == devices[0]["id"]
     assert assignments[0]["operating_profile_id"] == operating[0]["id"]
 
+    js8_instances = store.list_js8_instances()
+    fast_light_configs = store.list_fast_light_configs()
+    varac_nodes = store.list_varac_nodes()
+    assert len(js8_instances) == 1
+    assert len(fast_light_configs) == 1
+    assert len(varac_nodes) == 1
+    assert devices[0]["js8_instance_id"] == js8_instances[0]["id"]
+    assert devices[0]["fast_light_config_id"] == fast_light_configs[0]["id"]
+    assert devices[0]["varac_node_id"] == varac_nodes[0]["id"]
+
 
 def test_default_multi_radio_seed_reflects_legacy_js8_control_settings(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
@@ -186,6 +196,7 @@ def test_store_switches_runtime_active_device_and_projects_legacy_settings(monke
             "fldigi_port": 7364,
             "js8_host": "10.0.0.10",
             "js8_port": 2542,
+            "js8_directed_path": "C:/JS8A/DIRECTED.TXT",
             "launch_enabled": False,
             "launch_path": "C:/Apps/FLRig.exe",
             "runtime_active": True,
@@ -203,6 +214,7 @@ def test_store_switches_runtime_active_device_and_projects_legacy_settings(monke
     assert settings.get("fldigi_port") == 7364
     assert settings.get("js8_host") == "10.0.0.10"
     assert settings.get("js8_port") == 2542
+    assert settings.get("js8_directed_path") == "C:/JS8A/DIRECTED.TXT"
     assert settings.get("launch_control_enabled") is False
     assert settings.get("path_flrig") == "C:/Apps/FLRig.exe"
     assert len([row for row in store.list_device_profiles() if int(row.get("runtime_active", 0) or 0) == 1]) == 1
@@ -222,6 +234,7 @@ def test_settings_manager_mirrors_flat_settings_into_runtime_active_device(monke
             "fldigi_port": 7368,
             "js8_host": "10.1.1.13",
             "js8_port": 2550,
+            "js8_directed_path": "C:/JS8Primary/DIRECTED.TXT",
             "launch_control_enabled": False,
             "path_js8call": "C:/Apps/JS8Call",
         }
@@ -238,8 +251,185 @@ def test_settings_manager_mirrors_flat_settings_into_runtime_active_device(monke
     assert active["fldigi_port"] == 7368
     assert active["js8_host"] == "10.1.1.13"
     assert active["js8_port"] == 2550
+    assert active["js8_directed_path"] == "C:/JS8Primary/DIRECTED.TXT"
     assert active["launch_enabled"] == 0
     assert active["launch_path"] == "C:/Apps/JS8Call"
+
+
+def test_store_projects_linked_software_records_to_legacy_settings(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    js8 = store.save_js8_instance(
+        {
+            "name": "Field JS8",
+            "host": "10.0.0.10",
+            "port": 2542,
+            "offset_hz": 2050,
+            "directed_path": "C:/JS8Field/DIRECTED.TXT",
+            "forms_path": "C:/JS8Field/forms",
+            "install_path": "C:/Apps/JS8Field",
+            "spotter_launch_path": "C:/Apps/JS8Spotter.exe",
+            "commstat_launch_path": "C:/Apps/CommStat.exe",
+        }
+    )
+    fast_light = store.save_fast_light_config(
+        {
+            "name": "Field FL",
+            "flrig_path": "C:/Apps/FLRig.exe",
+            "flrig_host": "10.0.0.8",
+            "flrig_port": 22345,
+            "fldigi_path": "C:/Apps/FLDigi.exe",
+            "fldigi_host": "10.0.0.9",
+            "fldigi_port": 7364,
+            "fldigi_checkin_dir": "C:/Logs/checkins",
+        }
+    )
+    varac = store.save_varac_node(
+        {
+            "name": "Field VarAC",
+            "install_path": "C:/Apps/VarAC",
+            "db_path": "C:/Apps/VarAC/VarAC.db",
+            "ini_path": "C:/Apps/VarAC/VarAC.ini",
+            "launch_cmd": "VarAC.exe",
+            "incoming_path": "C:/Apps/VarAC/incoming",
+        }
+    )
+
+    store.save_device_profile(
+        {
+            "name": "Linked Field Device",
+            "control_backend": "flrig",
+            "js8_instance_id": int(js8["id"]),
+            "fast_light_config_id": int(fast_light["id"]),
+            "varac_node_id": int(varac["id"]),
+            "runtime_active": True,
+        }
+    )
+
+    settings.reload()
+    assert settings.get("flrig_host") == "10.0.0.8"
+    assert settings.get("flrig_port") == 22345
+    assert settings.get("path_flrig") == "C:/Apps/FLRig.exe"
+    assert settings.get("path_fldigi") == "C:/Apps/FLDigi.exe"
+    assert settings.get("fldigi_checkin_dir") == "C:/Logs/checkins"
+    assert settings.get("js8_host") == "10.0.0.10"
+    assert settings.get("js8_port") == 2542
+    assert settings.get("js8_offset_hz") == 2050
+    assert settings.get("js8_directed_path") == "C:/JS8Field/DIRECTED.TXT"
+    assert settings.get("js8_forms_path") == "C:/JS8Field/forms"
+    assert settings.get("path_js8spotter") == "C:/Apps/JS8Spotter.exe"
+    assert settings.get("path_commstat") == "C:/Apps/CommStat.exe"
+    assert settings.get("varac_path") == "C:/Apps/VarAC"
+    assert settings.get("varac_db_path") == "C:/Apps/VarAC/VarAC.db"
+    assert settings.get("varac_ini_path") == "C:/Apps/VarAC/VarAC.ini"
+    assert settings.get("varac_launch_cmd") == "VarAC.exe"
+    assert settings.get("message_paths", {}).get("varac") == "C:/Apps/VarAC/incoming"
+
+
+def test_settings_manager_mirrors_flat_settings_into_linked_runtime_records(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    js8 = store.save_js8_instance({"name": "Bound JS8"})
+    fast_light = store.save_fast_light_config({"name": "Bound FL"})
+    varac = store.save_varac_node({"name": "Bound VarAC"})
+    linked = store.save_device_profile(
+        {
+            "name": "Linked Primary",
+            "control_backend": "js8call",
+            "js8_instance_id": int(js8["id"]),
+            "fast_light_config_id": int(fast_light["id"]),
+            "varac_node_id": int(varac["id"]),
+        }
+    )
+    store.set_runtime_active_device_profile(int(linked["id"]))
+
+    settings = SettingsManager()
+    settings.set_many(
+        {
+            "control_via": "JS8Call",
+            "flrig_host": "10.1.1.11",
+            "flrig_port": 12444,
+            "fldigi_host": "10.1.1.12",
+            "fldigi_port": 7368,
+            "fldigi_checkin_dir": "C:/Checkins",
+            "path_fldigi": "C:/Apps/FLDigi.exe",
+            "js8_host": "10.1.1.13",
+            "js8_port": 2550,
+            "js8_offset_hz": 2150,
+            "js8_directed_path": "C:/JS8Primary/DIRECTED.TXT",
+            "js8_forms_path": "C:/JS8Primary/forms",
+            "path_js8call": "C:/Apps/JS8Call",
+            "path_js8spotter": "C:/Apps/JS8Spotter.exe",
+            "path_commstat": "C:/Apps/CommStat.exe",
+            "varac_path": "C:/VarAC",
+            "varac_db_path": "C:/VarAC/VarAC.db",
+            "varac_ini_path": "C:/VarAC/VarAC.ini",
+            "varac_launch_cmd": "VarAC.exe",
+            "message_paths": {"varac": "C:/VarAC/incoming"},
+        }
+    )
+
+    js8_after = store.get_js8_instance(int(js8["id"]))
+    fast_light_after = store.get_fast_light_config(int(fast_light["id"]))
+    varac_after = store.get_varac_node(int(varac["id"]))
+    assert js8_after is not None
+    assert fast_light_after is not None
+    assert varac_after is not None
+    assert js8_after["host"] == "10.1.1.13"
+    assert js8_after["port"] == 2550
+    assert js8_after["offset_hz"] == 2150
+    assert js8_after["directed_path"] == "C:/JS8Primary/DIRECTED.TXT"
+    assert js8_after["forms_path"] == "C:/JS8Primary/forms"
+    assert js8_after["install_path"] == "C:/Apps/JS8Call"
+    assert js8_after["spotter_launch_path"] == "C:/Apps/JS8Spotter.exe"
+    assert fast_light_after["flrig_host"] == "10.1.1.11"
+    assert fast_light_after["flrig_port"] == 12444
+    assert fast_light_after["fldigi_path"] == "C:/Apps/FLDigi.exe"
+    assert fast_light_after["fldigi_checkin_dir"] == "C:/Checkins"
+    assert varac_after["install_path"] == "C:/VarAC"
+    assert varac_after["db_path"] == "C:/VarAC/VarAC.db"
+    assert varac_after["incoming_path"] == "C:/VarAC/incoming"
+
+
+def test_store_blocks_deleting_managed_records_that_are_still_assigned(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    js8 = store.save_js8_instance({"name": "Delete Guard JS8"})
+    fast_light = store.save_fast_light_config({"name": "Delete Guard FL"})
+    varac = store.save_varac_node({"name": "Delete Guard VarAC"})
+    store.save_device_profile(
+        {
+            "name": "Guarded Device",
+            "js8_instance_id": int(js8["id"]),
+            "fast_light_config_id": int(fast_light["id"]),
+            "varac_node_id": int(varac["id"]),
+        }
+    )
+
+    try:
+        store.delete_js8_instance(int(js8["id"]))
+        raise AssertionError("Expected JS8 delete guard.")
+    except ValueError:
+        pass
+    try:
+        store.delete_fast_light_config(int(fast_light["id"]))
+        raise AssertionError("Expected Fast Light delete guard.")
+    except ValueError:
+        pass
+    try:
+        store.delete_varac_node(int(varac["id"]))
+        raise AssertionError("Expected VarAC delete guard.")
+    except ValueError:
+        pass
 
 
 def test_store_allows_rigctld_runtime_activation(monkeypatch, tmp_path):

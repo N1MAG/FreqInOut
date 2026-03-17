@@ -83,6 +83,12 @@ tests/*
 !tests/test_multi_radio_phase_c.py
 !tests/test_multi_radio_phase_d.py
 !tests/test_multi_radio_phase_d_target_scope.py
+!tests/test_multi_radio_phase_e.py
+!tests/test_multi_radio_phase_f_slice1.py
+!tests/test_multi_radio_phase_f_slice2.py
+!tests/test_multi_radio_phase_f_slice3.py
+!tests/test_multi_radio_phase_g.py
+!tests/test_multi_radio_phase_g_slice2.py
 
 # Local benchmark/smoke artifacts
 .benchmarks/

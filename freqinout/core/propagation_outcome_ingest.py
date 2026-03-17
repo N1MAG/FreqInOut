@@ -208,11 +208,11 @@ def _ingest_js8_messages(
         source_key=SOURCE_JS8_MESSAGES,
         source_label="JS8",
         query="""
-            SELECT rowid AS rid, COALESCE(utc_ts, 0) AS ts_val, from_call, to_call, msg_type
-            FROM js8_messages
+            SELECT local_id AS rid, COALESCE(utc_ts, 0) AS ts_val, from_call, to_call, msg_type
+            FROM js8_messages_v2
             WHERE (COALESCE(utc_ts, 0) > ?)
-               OR (COALESCE(utc_ts, 0) = ? AND rowid > ?)
-            ORDER BY COALESCE(utc_ts, 0) ASC, rowid ASC
+               OR (COALESCE(utc_ts, 0) = ? AND local_id > ?)
+            ORDER BY COALESCE(utc_ts, 0) ASC, local_id ASC
             LIMIT ?
         """,
         params_builder=lambda cp_ts, cp_ref, limit: (cp_ts, cp_ts, cp_ref, limit),
@@ -574,7 +574,7 @@ def _table_exists_for_source(conn: sqlite3.Connection, source_key: str) -> bool:
     table_by_source = {
         SOURCE_JS8_LINKS: "js8_links",
         SOURCE_VARAC_LINKS: "varac_links",
-        SOURCE_JS8_MESSAGES: "js8_messages",
+        SOURCE_JS8_MESSAGES: "js8_messages_v2",
         SOURCE_VARAC_MESSAGES: "varac_messages",
         SOURCE_SPOTTER: "spotter_traffic",
     }

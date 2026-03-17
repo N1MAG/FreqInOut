@@ -69,6 +69,7 @@ from freqinout.gui.peer_sched_tab import PeerSchedTab
 from freqinout.gui.help_tab import HelpTab
 from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.station_overview_tab import StationOverviewTab
+from freqinout.gui.async_status_broker import AsyncStatusBroker
 from freqinout.gui.qsy_helper import (
     refresh_hold_duration_combo,
     selected_hold_duration,
@@ -107,6 +108,7 @@ class MainWindow(QMainWindow):
         self.settings = SettingsManager()
         self.multi_radio_store = MultiRadioStore()
         self.station_runtime_manager = StationRuntimeManager(store=self.multi_radio_store, settings=self.settings)
+        self.ui_status_broker = AsyncStatusBroker(self)
         self.station_runtime_manager.sync_with_store()
         self._runtime_client_signature: tuple[object, ...] | None = None
         self._runtime_profile_signature: tuple[object, ...] | None = None
@@ -142,6 +144,8 @@ class MainWindow(QMainWindow):
         self.help_tab = HelpTab(self)
         self.controlfreq_tab = ControlFreqTab(self)
         self.station_overview_tab = StationOverviewTab(self)
+        self.controlfreq_tab.set_status_broker(self.ui_status_broker)
+        self.station_overview_tab.set_status_broker(self.ui_status_broker)
         self.station_overview_tab.set_runtime_manager(self.station_runtime_manager)
         self._sop_data_refresh_pending = False
         self._sop_data_refresh_timer = QTimer(self)
@@ -482,6 +486,7 @@ class MainWindow(QMainWindow):
             js8=self.js8_control,
             varac=self.varac_status,
             fldigi_log=self.fldigi_log_status,
+            station_runtime_manager=self.station_runtime_manager,
         )
         try:
             if hasattr(self.scheduler, "set_runtime_scheduler_enabled"):
@@ -520,6 +525,14 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.scheduler.varac_wait_cleared.connect(self._dismiss_varac_wait_prompt)
+        except Exception:
+            pass
+        try:
+            self.scheduler.coordination_conflict_detected.connect(self._on_coordination_conflict_detected)
+        except Exception:
+            pass
+        try:
+            self.scheduler.coordination_conflict_cleared.connect(self._dismiss_coordination_conflict_prompt)
         except Exception:
             pass
         try:
@@ -751,6 +764,9 @@ class MainWindow(QMainWindow):
             MainWindow._runtime_policy_enabled(policy, "use_background_ingest", True),
             MainWindow._runtime_policy_enabled(policy, "use_launch_control", True),
             MainWindow._runtime_policy_enabled(policy, "use_net_control_tabs", True),
+            bool(policy.get("swap_active", False)),
+            str(policy.get("swap_mode", "") or "").strip().lower(),
+            str(policy.get("swap_summary", "") or "").strip(),
         )
 
     def _primary_runtime_policy(self) -> dict[str, object]:
@@ -772,6 +788,11 @@ class MainWindow(QMainWindow):
             "use_background_ingest": self._runtime_policy_enabled(data, "use_background_ingest", True),
             "use_launch_control": self._runtime_policy_enabled(data, "use_launch_control", True),
             "use_net_control_tabs": self._runtime_policy_enabled(data, "use_net_control_tabs", True),
+            "swap_active": bool(data.get("swap_active", False)),
+            "swap_mode": str(data.get("swap_mode", "") or "").strip().lower(),
+            "swap_summary": str(data.get("swap_summary", "") or "").strip(),
+            "swap_source_name": str(data.get("swap_source_name", "") or "").strip(),
+            "swap_target_name": str(data.get("swap_target_name", "") or "").strip(),
         }
 
     @staticmethod
@@ -809,13 +830,15 @@ class MainWindow(QMainWindow):
         backend = str(profile.get("control_backend", "") or "").strip().upper() if isinstance(profile, dict) else ""
         operating_name = str(policy.get("operating_profile_name", "") or "").strip() if isinstance(policy, dict) else ""
         assignment_state = str(policy.get("assignment_state", "") or "").strip().lower() if isinstance(policy, dict) else ""
+        swap_summary = str(policy.get("swap_summary", "") or "").strip() if isinstance(policy, dict) else ""
         profile_label = profile_name or "Primary device"
         backend_txt = f" via {backend}" if backend else ""
         if MainWindow._runtime_profile_deployment_mode(profile) == "minimal":
-            return (
+            text = (
                 f"{profile_label}{backend_txt} is running in Minimal mode. "
                 "Map, Messages, FreqPlanner, startup launch, and background ingest are suppressed."
             )
+            return f"{swap_summary} {text}".strip() if swap_summary else text
 
         restrictions: list[str] = []
         if not MainWindow._runtime_policy_enabled(policy, "scheduler_enabled", True):
@@ -831,10 +854,11 @@ class MainWindow(QMainWindow):
         if not MainWindow._runtime_policy_enabled(policy, "use_launch_control", True):
             restrictions.append("launch control off")
         if not restrictions:
-            return ""
+            return swap_summary
         operating_txt = operating_name or "assigned operating profile"
         state_txt = "temporary override" if assignment_state == "temporary_override" else "active policy"
-        return f"{profile_label}{backend_txt} is running under {operating_txt} ({state_txt}): {'; '.join(restrictions)}."
+        text = f"{profile_label}{backend_txt} is running under {operating_txt} ({state_txt}): {'; '.join(restrictions)}."
+        return f"{swap_summary} {text}".strip() if swap_summary else text
 
     def _runtime_client_signature_for_settings(self) -> tuple[object, ...]:
         manager = getattr(self, "station_runtime_manager", None)
@@ -950,6 +974,7 @@ class MainWindow(QMainWindow):
                 self.scheduler.js8 = self.js8_control
                 self.scheduler.varac = self.varac_status
                 self.scheduler.fldigi_log = self.fldigi_log_status
+                self.scheduler.station_runtime_manager = self.station_runtime_manager
             except Exception:
                 pass
         self._refresh_station_overview(force=True)
@@ -1853,6 +1878,12 @@ class MainWindow(QMainWindow):
         off_schedule = bool(status.get("off_schedule"))
         varac_waiting = bool(status.get("varac_waiting"))
         ptt_active = bool(status.get("ptt_active"))
+        shared_ptt_blocked = bool(status.get("shared_ptt_blocked"))
+        shared_ptt_reason = str(status.get("shared_ptt_reason") or "").strip()
+        shared_ptt_group = str(status.get("shared_ptt_group") or "").strip()
+        shared_ptt_owner_name = str(status.get("shared_ptt_owner_name") or "").strip()
+        rf_conflict_warning = bool(status.get("rf_conflict_warning"))
+        rf_conflict_summary = str(status.get("rf_conflict_summary") or "").strip()
         js8_busy = bool(status.get("js8_busy"))
         fldigi_busy = bool(status.get("fldigi_busy"))
         fldigi_busy_reason = (status.get("fldigi_busy_reason") or "").strip().lower()
@@ -1928,6 +1959,15 @@ class MainWindow(QMainWindow):
                 reasons.append("Waiting to Clear")
             if ptt_active:
                 reasons.append("Sending Traffic")
+            if shared_ptt_blocked:
+                if shared_ptt_owner_name and shared_ptt_group:
+                    reasons.append(f"Shared PTT {shared_ptt_group}: {shared_ptt_owner_name}")
+                elif shared_ptt_reason:
+                    reasons.append(shared_ptt_reason)
+                else:
+                    reasons.append("Shared PTT")
+            if rf_conflict_warning and rf_conflict_summary:
+                reasons.append(rf_conflict_summary)
             if js8_busy or varac_busy:
                 reasons.append("QSO")
             if busy_line and not net_kind:
@@ -1945,6 +1985,15 @@ class MainWindow(QMainWindow):
                 reasons.append("Waiting to Clear")
             if ptt_active:
                 reasons.append("Sending Traffic")
+            if shared_ptt_blocked:
+                if shared_ptt_owner_name and shared_ptt_group:
+                    reasons.append(f"Shared PTT {shared_ptt_group}: {shared_ptt_owner_name}")
+                elif shared_ptt_reason:
+                    reasons.append(shared_ptt_reason)
+                else:
+                    reasons.append("Shared PTT")
+            if rf_conflict_warning and rf_conflict_summary:
+                reasons.append(rf_conflict_summary)
             if js8_busy or varac_busy:
                 reasons.append("QSO")
             if net_kind:
@@ -2373,6 +2422,14 @@ class MainWindow(QMainWindow):
                 pass
             self._varac_wait_prompt = None
 
+    def _dismiss_coordination_conflict_prompt(self) -> None:
+        if hasattr(self, "_coordination_conflict_prompt") and self._coordination_conflict_prompt is not None:
+            try:
+                self._coordination_conflict_prompt.close()
+            except Exception:
+                pass
+            self._coordination_conflict_prompt = None
+
     def _build_prompt_hold_duration_combo(self, parent) -> QComboBox:
         combo = QComboBox(parent)
         combo.setToolTip("Temporary schedule hold duration.")
@@ -2500,6 +2557,46 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._varac_wait_prompt = None
+
+    def _on_coordination_conflict_detected(self, payload: dict) -> None:
+        if self._shutting_down:
+            return
+        self._dismiss_coordination_conflict_prompt()
+        summary = str((payload or {}).get("summary") or "").strip() or "RF conflict detected."
+        detail = str((payload or {}).get("detail") or "").strip()
+        msg = QMessageBox(self)
+        msg.setWindowTitle("RF Conflict Warning")
+        msg.setText(summary)
+        if detail:
+            msg.setInformativeText(detail)
+        apply_btn = msg.addButton("Proceed Once", QMessageBox.AcceptRole)
+        ignore_btn = msg.addButton("Skip Once", QMessageBox.RejectRole)
+        suspend_btn = msg.addButton("Pause Schedule", QMessageBox.DestructiveRole)
+        hold_combo = self._build_prompt_hold_duration_combo(msg)
+        self._attach_prompt_hold_duration_row(msg, hold_combo)
+        self._coordination_conflict_prompt = msg
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == apply_btn:
+            try:
+                self.scheduler.resolve_coordination_conflict("apply")
+            except Exception:
+                pass
+        elif clicked == suspend_btn:
+            try:
+                mins = selected_hold_duration(hold_combo, self.settings)
+                set_hold_duration_default(self.settings, mins)
+                self._sync_hold_duration_combos()
+                self.scheduler.resolve_coordination_conflict("suspend", minutes=mins)
+                self.on_hold_state_changed(force_reload=True)
+            except Exception:
+                pass
+        else:
+            try:
+                self.scheduler.resolve_coordination_conflict("ignore")
+            except Exception:
+                pass
+        self._coordination_conflict_prompt = None
 
     # ------------------------------------------------------------------ #
     # Helpers                                                            #

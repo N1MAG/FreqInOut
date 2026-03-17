@@ -13,6 +13,7 @@ from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
+from freqinout.core.js8_multi_source import ensure_js8_local_tables
 from freqinout.core.varac_ingest import ensure_varac_local_tables
 
 # Base config directory (user-writable)
@@ -1222,6 +1223,7 @@ def _ensure_nets_db() -> None:
         _ensure_operator_checkins(conn)
         _ensure_local_operator_tables(conn)
         _ensure_js8_links(conn)
+        ensure_js8_local_tables(conn)
         ensure_varac_local_tables(conn)
 
         conn.commit()

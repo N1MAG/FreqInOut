@@ -101,6 +101,8 @@ class JS8ControlClient(JS8StatusClient):
     def __init__(self, host: Optional[str] = None, port: Optional[int] = None, settings: Optional[object] = None):
         super().__init__(host=host, port=port, settings=settings)
         self._net_started = False
+        self._net_retry_after_ts = 0.0
+        self._net_retry_sec = 2.0
 
     def _get_port(self) -> int:
         if self._port_override is not None:
@@ -141,14 +143,29 @@ class JS8ControlClient(JS8StatusClient):
         if not self._js8call_running():
             log.info("JS8ControlClient: JS8Call not running; skipping js8net start.")
             return False
+        now = time.monotonic()
+        if not self._net_started and now < float(self._net_retry_after_ts or 0.0):
+            return False
         if not self._net_started:
+            port = self._get_port()
             try:
-                js8net.start_net(self.host, self._get_port())
+                # Fail fast when the configured JS8 TCP API is refusing connections
+                # so scheduler/UI callers do not block on js8net attach attempts.
+                with socket.create_connection((self.host, port), timeout=0.25):
+                    pass
+            except Exception as e:
+                log.debug("JS8ControlClient: JS8 endpoint unavailable at %s:%s: %s", self.host, port, e)
+                self._net_retry_after_ts = now + float(self._net_retry_sec)
+                return False
+            try:
+                js8net.start_net(self.host, port)
                 self._net_started = True
-                log.info("JS8ControlClient: js8net started on %s:%s", self.host, self._get_port())
+                self._net_retry_after_ts = 0.0
+                log.info("JS8ControlClient: js8net started on %s:%s", self.host, port)
             except Exception as e:
                 log.warning("JS8ControlClient: failed to start js8net: %s", e)
                 self._net_started = False
+                self._net_retry_after_ts = now + float(self._net_retry_sec)
                 return False
         return True
 
@@ -215,6 +232,7 @@ class JS8ControlClient(JS8StatusClient):
 
     def stop(self):
         if js8net is None or not self._net_started:
+            self._net_retry_after_ts = 0.0
             return
         try:
             sock = getattr(js8net, "s", None)
@@ -223,6 +241,7 @@ class JS8ControlClient(JS8StatusClient):
         except Exception:
             pass
         self._net_started = False
+        self._net_retry_after_ts = 0.0
 
 
 class VarACStatusClient:

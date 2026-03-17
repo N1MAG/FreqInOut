@@ -204,6 +204,8 @@ class SchedulerEngine(QObject):
     off_schedule_cleared = Signal()
     varac_wait_detected = Signal(dict)
     varac_wait_cleared = Signal()
+    coordination_conflict_detected = Signal(dict)
+    coordination_conflict_cleared = Signal()
 
     def __init__(
         self,
@@ -212,6 +214,7 @@ class SchedulerEngine(QObject):
         js8: Optional[JS8ControlClient] = None,
         varac: Optional[object] = None,
         fldigi_log: Optional[object] = None,
+        station_runtime_manager: Optional[object] = None,
         poll_interval_ms: int = 5_000,
     ) -> None:
         super().__init__(parent)
@@ -220,6 +223,7 @@ class SchedulerEngine(QObject):
         self.js8: Optional[JS8ControlClient] = js8
         self.varac: Optional[object] = varac
         self.fldigi_log: Optional[object] = fldigi_log
+        self.station_runtime_manager = station_runtime_manager
         self._runtime_scheduler_enabled_override: Optional[bool] = None
 
         # We keep a small cache of the last applied entry so we don't
@@ -249,6 +253,10 @@ class SchedulerEngine(QObject):
         self._last_fldigi_offset_prompt_sig: Optional[Tuple[Optional[int], Optional[int]]] = None
         self._varac_wait_prompt_active: bool = False
         self._varac_wait_prompt_entry_key: Optional[Tuple] = None
+        self._coordination_prompt_active: bool = False
+        self._coordination_prompt_signature: Optional[str] = None
+        self._coordination_prompt_payload: Optional[Dict[str, object]] = None
+        self._coordination_prompt_suppressed_signature: Optional[str] = None
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
         self._status_poll_ttl_s: float = 0.8
@@ -632,6 +640,7 @@ class SchedulerEngine(QObject):
         force: bool = False,
         ignore_suspend: bool = False,
         ignore_wait_prompt: bool = False,
+        ignore_coordination_prompt: bool = False,
         ignore_fldigi_busy: bool = False,
         apply_js8_offset: bool = True,
         apply_fldigi: bool = True,
@@ -643,6 +652,7 @@ class SchedulerEngine(QObject):
             "force": bool(force),
             "ignore_suspend": bool(ignore_suspend),
             "ignore_wait_prompt": bool(ignore_wait_prompt),
+            "ignore_coordination_prompt": bool(ignore_coordination_prompt),
             "ignore_fldigi_busy": bool(ignore_fldigi_busy),
             "apply_js8_offset": bool(apply_js8_offset),
             "apply_fldigi": bool(apply_fldigi),
@@ -667,6 +677,7 @@ class SchedulerEngine(QObject):
             force=bool(intent.get("force")),
             ignore_suspend=bool(intent.get("ignore_suspend")),
             ignore_wait_prompt=bool(intent.get("ignore_wait_prompt")),
+            ignore_coordination_prompt=bool(intent.get("ignore_coordination_prompt")),
             ignore_fldigi_busy=bool(intent.get("ignore_fldigi_busy")),
             apply_js8_offset=bool(intent.get("apply_js8_offset")),
             apply_fldigi=bool(intent.get("apply_fldigi")),
@@ -1099,6 +1110,7 @@ class SchedulerEngine(QObject):
         *,
         force: bool = False,
         ignore_wait_prompt: bool = False,
+        ignore_coordination_prompt: bool = False,
         ignore_suspend: bool = False,
         ignore_net_suppression: bool = False,
         ignore_fldigi_busy: bool = False,
@@ -1116,6 +1128,7 @@ class SchedulerEngine(QObject):
             now_utc=now,
             force=force,
             ignore_wait_prompt=ignore_wait_prompt,
+            ignore_coordination_prompt=ignore_coordination_prompt,
             ignore_suspend=ignore_suspend,
             ignore_net_suppression=ignore_net_suppression,
             ignore_fldigi_busy=ignore_fldigi_busy,
@@ -1137,6 +1150,34 @@ class SchedulerEngine(QObject):
         elif action == "suspend":
             self._suspend_for_minutes(self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()))
 
+    def _clear_coordination_prompt(self) -> None:
+        was_active = bool(self._coordination_prompt_active or self._coordination_prompt_signature or self._coordination_prompt_payload)
+        self._coordination_prompt_active = False
+        self._coordination_prompt_signature = None
+        self._coordination_prompt_payload = None
+        if was_active:
+            try:
+                self.coordination_conflict_cleared.emit()
+            except Exception:
+                pass
+
+    def resolve_coordination_conflict(self, action: str, minutes: Optional[int] = None) -> None:
+        signature = str(
+            (self._coordination_prompt_payload or {}).get("signature") or self._coordination_prompt_signature or ""
+        ).strip()
+        if action in {"apply", "ignore"} and signature:
+            self._coordination_prompt_suppressed_signature = signature
+        elif not signature:
+            self._coordination_prompt_suppressed_signature = None
+        self._clear_coordination_prompt()
+        if action == "apply":
+            self.apply_current_entry(
+                force=True,
+                ignore_coordination_prompt=True,
+            )
+        elif action == "suspend":
+            self._suspend_for_minutes(self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()))
+
     def resume_schedule(self) -> None:
         try:
             if hasattr(self.settings, "set"):
@@ -1148,6 +1189,7 @@ class SchedulerEngine(QObject):
         self._prompt_active = False
         self._prompt_items = []
         self._prompt_entry_key = None
+        self._clear_coordination_prompt()
         self._reset_prompt_timers()
         resume_skip_fldigi_apply = False
         entry = self.current_schedule_entry or {}
@@ -1221,6 +1263,7 @@ class SchedulerEngine(QObject):
         self._prompt_entry_key = None
         self._varac_wait_prompt_active = False
         self._varac_wait_prompt_entry_key = None
+        self._clear_coordination_prompt()
         self._reset_prompt_timers()
         try:
             self.off_schedule_cleared.emit()
@@ -1258,6 +1301,7 @@ class SchedulerEngine(QObject):
                 force=True,
                 ignore_wait_prompt=True,
                 ignore_suspend=True,
+                ignore_coordination_prompt=False,
             )
 
         delay_ms = 1000
@@ -1392,6 +1436,8 @@ class SchedulerEngine(QObject):
         ptt_active = False
         if control_mode in {"FLRIG", "RIGCTLD"}:
             ptt_active = self._status_poll_rig_ptt()
+        shared_ptt = self._shared_ptt_lock_status(force=False)
+        coordination_conflict = self._coordination_conflict_status(entry, source=self.current_source or "NONE", force=False)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         suspended_until = self._suspend_until_dt()
         auto_resume_utc, auto_resume_source = self._auto_resume_utc(now_utc, suspended_until, flags)
@@ -1428,6 +1474,15 @@ class SchedulerEngine(QObject):
             "fldigi_busy_reason": fldigi_busy_reason,
             "varac_busy": bool(varac_status.get("busy")),
             "ptt_active": ptt_active,
+            "shared_ptt_group": str(shared_ptt.get("ptt_group", "") or "").strip(),
+            "shared_ptt_blocked": bool(shared_ptt.get("blocked")),
+            "shared_ptt_owner_name": str(shared_ptt.get("owner_name", "") or "").strip(),
+            "shared_ptt_reason": str(shared_ptt.get("reason", "") or "").strip(),
+            "rf_conflict_warning": bool(coordination_conflict.get("warning")),
+            "rf_conflict_summary": str(coordination_conflict.get("summary", "") or "").strip(),
+            "rf_conflict_detail": str(coordination_conflict.get("detail", "") or "").strip(),
+            "rf_conflict_signature": str(coordination_conflict.get("signature", "") or "").strip(),
+            "rf_conflict_peer_name": str(coordination_conflict.get("peer_name", "") or "").strip(),
             "suspended_until": suspended_until,
             "auto_resume_utc": auto_resume_utc,
             "auto_resume_source": auto_resume_source,
@@ -2800,6 +2855,7 @@ class SchedulerEngine(QObject):
                 self.current_source = "NONE"
                 self.current_schedule_entry = {}
                 self.active_entry_changed.emit({}, "NONE")
+            self._clear_coordination_prompt()
             self._net_schedule_active = False
             self._net_fldigi_apply_allowed_once = False
             self._net_schedule_started_at = None
@@ -2846,7 +2902,7 @@ class SchedulerEngine(QObject):
             scheduler_transition=scheduler_transition,
         )
 
-    def apply_manual_qsy(self, entry: Dict) -> None:
+    def apply_manual_qsy(self, entry: Dict, *, ignore_coordination_prompt: bool = False) -> None:
         """
         Apply an immediate user-driven QSY, bypassing suspend and force-applying the change.
 
@@ -2873,6 +2929,7 @@ class SchedulerEngine(QObject):
             force=True,
             ignore_suspend=True,
             ignore_wait_prompt=True,
+            ignore_coordination_prompt=ignore_coordination_prompt,
             ignore_fldigi_busy=True,
         )
 
@@ -3211,6 +3268,102 @@ class SchedulerEngine(QObject):
             self._status_rig_retry_ts = now_ts + self._status_poll_retry_s
         return self._status_rig_ptt
 
+    def _shared_ptt_lock_status(self, *, force: bool = False) -> Dict[str, object]:
+        manager = getattr(self, "station_runtime_manager", None)
+        if manager is None or not hasattr(manager, "shared_ptt_lock_snapshot"):
+            return {
+                "ptt_group": "",
+                "blocked": False,
+                "owner_device_profile_id": None,
+                "owner_name": "",
+                "owner_backend": "",
+                "owner_ptt_active": False,
+                "target_ptt_active": False,
+                "reason": "",
+            }
+        try:
+            snapshot = manager.shared_ptt_lock_snapshot(force=force)
+        except Exception as exc:
+            log.debug("SchedulerEngine: shared PTT status lookup failed: %s", exc)
+            return {
+                "ptt_group": "",
+                "blocked": False,
+                "owner_device_profile_id": None,
+                "owner_name": "",
+                "owner_backend": "",
+                "owner_ptt_active": False,
+                "target_ptt_active": False,
+                "reason": "",
+            }
+        return {
+            "ptt_group": str(getattr(snapshot, "ptt_group", "") or "").strip(),
+            "blocked": bool(getattr(snapshot, "blocked", False)),
+            "owner_device_profile_id": getattr(snapshot, "owner_device_profile_id", None),
+            "owner_name": str(getattr(snapshot, "owner_name", "") or "").strip(),
+            "owner_backend": str(getattr(snapshot, "owner_backend", "") or "").strip().lower(),
+            "owner_ptt_active": bool(getattr(snapshot, "owner_ptt_active", False)),
+            "target_ptt_active": bool(getattr(snapshot, "target_ptt_active", False)),
+            "reason": str(getattr(snapshot, "reason", "") or "").strip(),
+        }
+
+    def _coordination_conflict_status(
+        self,
+        entry: Optional[Dict],
+        *,
+        source: str,
+        force: bool = False,
+    ) -> Dict[str, object]:
+        row = entry or {}
+        if not row:
+            return {}
+        manager = getattr(self, "station_runtime_manager", None)
+        if manager is None or not hasattr(manager, "evaluate_primary_rf_conflict"):
+            return {}
+        freq_hz = self._parse_freq_hz((row.get("frequency") or "").strip())
+        band = (row.get("band") or "").strip().upper()
+        if not band and freq_hz is None:
+            return {}
+        try:
+            snapshot = manager.evaluate_primary_rf_conflict(
+                target_band=band,
+                target_frequency_hz=freq_hz,
+                source=source,
+                force=force,
+            )
+        except Exception as exc:
+            log.debug("SchedulerEngine: RF conflict status lookup failed: %s", exc)
+            return {}
+        if snapshot is None:
+            return {}
+        return {
+            "warning": True,
+            "summary": str(getattr(snapshot, "summary", "") or "").strip(),
+            "detail": str(getattr(snapshot, "detail", "") or "").strip(),
+            "signature": str(getattr(snapshot, "signature", "") or "").strip(),
+            "peer_device_id": getattr(snapshot, "peer_device_profile_id", None),
+            "peer_name": str(getattr(snapshot, "peer_name", "") or "").strip(),
+            "peer_band": str(getattr(snapshot, "peer_band", "") or "").strip(),
+            "peer_frequency_hz": getattr(snapshot, "peer_frequency_hz", None),
+            "target_band": str(getattr(snapshot, "target_band", "") or "").strip(),
+            "target_frequency_hz": getattr(snapshot, "target_frequency_hz", None),
+            "same_band": bool(getattr(snapshot, "same_band", False)),
+            "same_frequency": bool(getattr(snapshot, "same_frequency", False)),
+            "peer_names": list(getattr(snapshot, "peer_names", []) or []),
+            "peer_device_ids": list(getattr(snapshot, "peer_device_ids", []) or []),
+            "shared_antenna_groups": list(getattr(snapshot, "shared_antenna_groups", []) or []),
+            "shared_amplifier_groups": list(getattr(snapshot, "shared_amplifier_groups", []) or []),
+            "shared_frontend_groups": list(getattr(snapshot, "shared_frontend_groups", []) or []),
+        }
+
+    def evaluate_coordination_conflict(
+        self,
+        entry: Dict,
+        *,
+        source: str = "HF",
+        force: bool = False,
+    ) -> Dict[str, object]:
+        return self._coordination_conflict_status(entry, source=source, force=force)
+
     def _current_rig_frequency(
         self,
         *,
@@ -3274,6 +3427,7 @@ class SchedulerEngine(QObject):
         force: bool = False,
         ignore_suspend: bool = False,
         ignore_wait_prompt: bool = False,
+        ignore_coordination_prompt: bool = False,
         ignore_net_suppression: bool = False,
         ignore_fldigi_busy: bool = False,
         apply_js8_offset: bool = True,
@@ -3305,6 +3459,7 @@ class SchedulerEngine(QObject):
         self.current_schedule_entry = effective_entry
         self._scheduled_vfo = vfo
         if source != "QSY" and self._manual_qsy_active:
+            self._clear_coordination_prompt()
             log.debug("SchedulerEngine: manual QSY active; skipping scheduled frequency change.")
             self.active_entry_changed.emit(effective_entry, source)
             return
@@ -3312,14 +3467,17 @@ class SchedulerEngine(QObject):
         control_mode = self._control_mode()
         # If we're not in JS8CALL mode and have no rig backend, just update UI state.
         if control_mode != "JS8CALL" and self.rig is None:
+            self._clear_coordination_prompt()
             self.active_entry_changed.emit(effective_entry, source)
             return
 
         if control_mode == "MANUAL":
+            self._clear_coordination_prompt()
             log.debug("SchedulerEngine: manual control selected; no frequency commands sent.")
             self.active_entry_changed.emit(effective_entry, source)
             return
         if control_mode == "NONE":
+            self._clear_coordination_prompt()
             log.debug(
                 "SchedulerEngine: control backend unavailable for mode=%s; not sending commands.",
                 self.settings.get("control_via", "FLRig"),
@@ -3328,6 +3486,7 @@ class SchedulerEngine(QObject):
             return
         # Respect temporary suspend timer (QSY/Suspend button)
         if not ignore_suspend and self._scheduling_suspended(now_utc or datetime.datetime.now(datetime.timezone.utc)):
+            self._clear_coordination_prompt()
             dt = self._suspend_until_dt()
             until_txt = dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ") if dt else ""
             log.debug("SchedulerEngine: scheduling suspended until %s; skipping frequency change.", until_txt)
@@ -3337,6 +3496,7 @@ class SchedulerEngine(QObject):
         # Scheduler master switch (from Settings tab)
         try:
             if not self._scheduler_enabled():
+                self._clear_coordination_prompt()
                 log.debug("SchedulerEngine: scheduler disabled in settings; no frequency changes sent.")
                 self.active_entry_changed.emit(effective_entry, source)
                 return
@@ -3365,6 +3525,7 @@ class SchedulerEngine(QObject):
             and bool(varac_status.get("waiting_for_frequency"))
             and not ignore_wait_prompt
         ):
+            self._clear_coordination_prompt()
             if (not self._varac_wait_prompt_active) or (self._varac_wait_prompt_entry_key != prompt_key):
                 self._varac_wait_prompt_active = True
                 self._varac_wait_prompt_entry_key = prompt_key
@@ -3385,6 +3546,9 @@ class SchedulerEngine(QObject):
                     busy_reasons.append(f"{control_mode} PTT is active")
             except Exception as e:
                 log.warning("SchedulerEngine: get_ptt() failed: %s", e)
+        shared_ptt = self._shared_ptt_lock_status(force=bool(force))
+        if bool(shared_ptt.get("blocked")):
+            busy_reasons.append(str(shared_ptt.get("reason", "") or "").strip() or "Shared PTT interlock is active")
 
         if source != "NET" and not self._js8_busy_ok():
             busy_reasons.append("JS8Call is busy (RX/TX)")
@@ -3403,11 +3567,42 @@ class SchedulerEngine(QObject):
             busy_reasons.append(reason)
 
         if busy_reasons:
+            self._clear_coordination_prompt()
             log.warning(
                 "SchedulerEngine: skipping frequency change for %s schedule due to activity: %s",
                 source,
                 "; ".join(busy_reasons),
             )
+            self.active_entry_changed.emit(effective_entry, source)
+            return
+
+        coordination_conflict = self._coordination_conflict_status(
+            effective_entry,
+            source=source,
+            force=bool(force),
+        )
+        coordination_signature = str(coordination_conflict.get("signature", "") or "").strip()
+        suppressed_signature = str(self._coordination_prompt_suppressed_signature or "").strip()
+        if suppressed_signature and suppressed_signature != coordination_signature:
+            self._coordination_prompt_suppressed_signature = None
+            suppressed_signature = ""
+        if not coordination_signature:
+            self._coordination_prompt_suppressed_signature = None
+        should_prompt_coordination = bool(
+            coordination_signature
+            and not ignore_coordination_prompt
+            and coordination_signature != suppressed_signature
+        )
+        if self._coordination_prompt_active:
+            active_signature = str(self._coordination_prompt_signature or "").strip()
+            if (not should_prompt_coordination) or active_signature != coordination_signature:
+                self._clear_coordination_prompt()
+        if should_prompt_coordination:
+            if (not self._coordination_prompt_active) or (self._coordination_prompt_signature != coordination_signature):
+                self._coordination_prompt_active = True
+                self._coordination_prompt_signature = coordination_signature
+                self._coordination_prompt_payload = dict(coordination_conflict)
+                self.coordination_conflict_detected.emit(dict(coordination_conflict))
             self.active_entry_changed.emit(effective_entry, source)
             return
 
@@ -3441,10 +3636,12 @@ class SchedulerEngine(QObject):
             if source == "NET" and self._last_entry_key != entry_key:
                 self._net_fldigi_apply_allowed_once = True
             if self._manual_net_fldigi_active or self._manual_net_js8_active:
+                self._clear_coordination_prompt()
                 log.debug("SchedulerEngine: net active; skipping schedule enforcement.")
                 self.active_entry_changed.emit(effective_entry, source)
                 return
             if self._last_entry_key == entry_key:
+                self._clear_coordination_prompt()
                 log.debug("SchedulerEngine: net schedule active; skipping corrections for current entry.")
                 self.active_entry_changed.emit(effective_entry, source)
                 return
@@ -3454,6 +3651,7 @@ class SchedulerEngine(QObject):
             # frequency-only actions) must not behave like schedule transitions.
             self._fldigi_force_apply_once = True
         if self._pending_entry_key == entry_key and not force:
+            self._clear_coordination_prompt()
             log.debug("SchedulerEngine: control action skipped (pending entry key).")
             self.active_entry_changed.emit(effective_entry, source)
             return
@@ -3461,6 +3659,7 @@ class SchedulerEngine(QObject):
             self._last_entry_key == entry_key and self._last_source == source
         )
         if not force and already_applied:
+            self._clear_coordination_prompt()
             log.debug("SchedulerEngine: schedule entry already applied; skipping re-apply.")
             self.active_entry_changed.emit(effective_entry, source)
             return
@@ -3495,6 +3694,7 @@ class SchedulerEngine(QObject):
                 force=force,
                 ignore_suspend=ignore_suspend,
                 ignore_wait_prompt=ignore_wait_prompt,
+                ignore_coordination_prompt=ignore_coordination_prompt,
                 ignore_fldigi_busy=ignore_fldigi_busy,
                 apply_js8_offset=apply_js8_offset,
                 apply_fldigi=apply_fldigi,

@@ -118,6 +118,42 @@ def current_scheduler_freq(window) -> Optional[float]:
         return None
 
 
+def _shared_ptt_block_reason(scheduler) -> str:
+    if scheduler is None or not hasattr(scheduler, "get_status_summary"):
+        return ""
+    try:
+        status = scheduler.get_status_summary()
+    except Exception:
+        return ""
+    if not isinstance(status, dict) or not bool(status.get("shared_ptt_blocked")):
+        return ""
+    reason = str(status.get("shared_ptt_reason") or "").strip()
+    if reason:
+        return reason
+    owner = str(status.get("shared_ptt_owner_name") or "").strip()
+    group = str(status.get("shared_ptt_group") or "").strip()
+    if owner and group:
+        return f"Shared PTT group {group} is in use by {owner}."
+    if group:
+        return f"Shared PTT group {group} is currently in use."
+    return "Shared PTT interlock is active."
+
+
+def _coordination_conflict_warning(scheduler, entry: Dict) -> Dict[str, object]:
+    if scheduler is None or not hasattr(scheduler, "evaluate_coordination_conflict"):
+        return {}
+    try:
+        payload = scheduler.evaluate_coordination_conflict(entry, source="QSY")
+    except TypeError:
+        try:
+            payload = scheduler.evaluate_coordination_conflict(entry)
+        except Exception:
+            return {}
+    except Exception:
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
 def perform_qsy(window, meta: Dict) -> bool:
     try:
         scheduler = getattr(window, "scheduler", None)
@@ -139,6 +175,28 @@ def perform_qsy(window, meta: Dict) -> bool:
         "group": (meta.get("group") or "").strip().upper(),
         "group_name": (meta.get("group") or "").strip().upper(),
     }
+    block_reason = _shared_ptt_block_reason(scheduler)
+    if block_reason:
+        QMessageBox.warning(window, "QSY Blocked", block_reason)
+        return False
+    conflict = _coordination_conflict_warning(scheduler, entry)
+    if bool(conflict.get("warning")):
+        msg = QMessageBox(window)
+        msg.setWindowTitle("RF Conflict Warning")
+        msg.setText(str(conflict.get("summary") or "RF conflict detected.").strip() or "RF conflict detected.")
+        detail = str(conflict.get("detail") or "").strip()
+        if detail:
+            msg.setInformativeText(detail)
+        proceed_btn = msg.addButton("Proceed QSY", QMessageBox.AcceptRole)
+        msg.addButton("Cancel", QMessageBox.RejectRole)
+        msg.exec()
+        if msg.clickedButton() != proceed_btn:
+            return False
+        try:
+            scheduler.apply_manual_qsy(entry, ignore_coordination_prompt=True)
+        except TypeError:
+            scheduler.apply_manual_qsy(entry)
+        return True
     scheduler.apply_manual_qsy(entry)
     return True
 

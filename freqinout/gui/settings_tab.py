@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
     QWidget,
@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QStackedWidget,
+    QScrollArea,
 )
 
 from freqinout.core.logger import log, set_log_level, get_log_level, _get_log_file
@@ -72,7 +73,6 @@ from freqinout.core.hash_tools import (
 from freqinout.core.mode_utils import normalize_operating_group_mode, voice_sideband_for_band
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
-from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 from freqinout.gui.theme import (
     resolve_theme,
     normalize_ui_text_size,
@@ -89,6 +89,53 @@ TIMEZONE_CHOICES = [
     "America/Denver",
     "America/Los_Angeles",
 ]
+
+
+class _StatusSnapshotWorker(QObject):
+    finished = Signal(int, object)
+    failed = Signal(int, str)
+
+    def __init__(self, settings: SettingsManager) -> None:
+        super().__init__()
+        self._service = SoftwareStatusService(settings)
+
+    @Slot(int, object)
+    def run_snapshot(self, generation: int, request: object) -> None:
+        try:
+            request_map = dict(request or {})
+            snapshot = self._service.status_snapshot(**request_map)
+        except Exception as exc:
+            self.failed.emit(int(generation), str(exc))
+            return
+        self.finished.emit(int(generation), snapshot)
+
+
+class _JS8GeoBackfillWorker(QObject):
+    finished = Signal(int)
+    failed = Signal(str)
+
+    @Slot(object)
+    def run_backfill(self, request: object) -> None:
+        try:
+            payload = dict(request or {})
+            settings_payload = payload.get("settings")
+            settings = _SettingsSnapshot(dict(settings_payload)) if isinstance(settings_payload, dict) else settings_payload
+            db_path = Path(str(payload.get("db_path", "") or ""))
+            indexer = JS8LogLinkIndexer(settings, db_path)
+            indexer._base_callsign = JS8LogLinkIndexer._base_callsign
+            scanned = int(indexer.backfill_geo_from_logs() or 0)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(scanned)
+
+
+class _SettingsSnapshot:
+    def __init__(self, data: Dict[str, Any]) -> None:
+        self._data = dict(data or {})
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data.get(key, default)
 
 FLDIGI_MODE_OPTIONS = [
     "Cont-4/250",
@@ -277,6 +324,12 @@ DEVICE_DEPLOYMENT_OPTIONS: List[Tuple[str, str]] = [
     ("Minimal", "minimal"),
 ]
 
+DEVICE_CLASS_OPTIONS: List[Tuple[str, str]] = [
+    ("Transceiver", "tx_rx"),
+    ("Observer / SDR", "observer"),
+    ("Gateway", "gateway"),
+]
+
 OPERATING_SCHEDULER_MODE_OPTIONS: List[Tuple[str, str]] = [
     ("Full", "full"),
     ("Simple", "simple"),
@@ -315,6 +368,8 @@ class SettingsTab(QWidget):
     local_net_profiles_changed = Signal()
     open_logs_requested = Signal()
     log_level_changed = Signal(str)
+    status_refresh_requested = Signal(int, object)
+    js8_geo_backfill_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -325,6 +380,15 @@ class SettingsTab(QWidget):
         self._op_group_rows_by_group: Dict[str, List[int]] = {}
         self.loading_label: QLabel | None = None
         self._status_service = SoftwareStatusService(self.settings)
+        self._status_thread: QThread | None = None
+        self._status_worker: _StatusSnapshotWorker | None = None
+        self._status_refresh_generation: int = 0
+        self._status_refresh_inflight: bool = False
+        self._pending_status_refresh_request: Dict[str, Any] | None = None
+        self._js8_geo_thread: QThread | None = None
+        self._js8_geo_worker: _JS8GeoBackfillWorker | None = None
+        self._js8_geo_backfill_inflight = False
+        self._last_status_snapshot: Dict[str, Dict[str, object]] = {}
         self.multi_radio_store = MultiRadioStore()
         self.launch_orchestrator = LaunchOrchestrator(self.settings, self)
 
@@ -345,8 +409,16 @@ class SettingsTab(QWidget):
         self.operating_groups: List[Dict[str, str]] = []
         self.local_net_profiles: List[Dict[str, str]] = []
         self.device_profiles: List[Dict[str, Any]] = []
+        self.js8_instances: List[Dict[str, Any]] = []
+        self.fast_light_configs: List[Dict[str, Any]] = []
+        self.varac_nodes: List[Dict[str, Any]] = []
         self.operating_profiles: List[Dict[str, Any]] = []
         self.device_assignments: List[Dict[str, Any]] = []
+        self.varac_clusters: List[Dict[str, Any]] = []
+        self.varac_cluster_members: List[Dict[str, Any]] = []
+        self.active_profile_swap: Optional[Dict[str, Any]] = None
+        self._js8_instance_header_buttons: Dict[object, QToolButton] = {}
+        self._js8_expanded_instance_id: object = "default"
         self._accordion_groups: List[QGroupBox] = []
         self._section_meta: Dict[QGroupBox, Dict[str, object]] = {}
         self._section_nav_items: Dict[QGroupBox, QListWidgetItem] = {}
@@ -354,8 +426,13 @@ class SettingsTab(QWidget):
         self._launch_visible_names: List[str] = []
         self._launch_table_loading = False
         self._device_profiles_table_loading = False
+        self._js8_instances_table_loading = False
+        self._fast_light_configs_table_loading = False
+        self._varac_nodes_table_loading = False
         self._operating_profiles_table_loading = False
         self._device_assignments_table_loading = False
+        self._varac_clusters_table_loading = False
+        self._varac_cluster_members_table_loading = False
         self._gpg_keys_table_loading = False
         self._gpg_keys_loaded = False
         self._gpg_keys_auto_probe_attempted = False
@@ -366,6 +443,8 @@ class SettingsTab(QWidget):
         self._last_activation_refresh_ts = 0.0
         self._activation_refresh_interval_sec = 30.0
 
+        self._setup_status_refresh_worker()
+        self._setup_js8_geo_backfill_worker()
         self._build_ui()
         self._load_settings()
 
@@ -373,6 +452,8 @@ class SettingsTab(QWidget):
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._save_settings_quiet)
+        self.destroyed.connect(lambda *_args: self._shutdown_status_refresh_worker())
+        self.destroyed.connect(lambda *_args: self._shutdown_js8_geo_backfill_worker())
 
         # time updater (UTC + detected timezone)
         self.time_timer = QTimer(self)
@@ -387,6 +468,160 @@ class SettingsTab(QWidget):
 
         self._update_clock_labels()
         QTimer.singleShot(0, self._maybe_backfill_js8_geo)
+
+    def _setup_status_refresh_worker(self) -> None:
+        if self._status_thread is not None:
+            return
+        self._status_thread = QThread(self)
+        self._status_worker = _StatusSnapshotWorker(self.settings)
+        self._status_worker.moveToThread(self._status_thread)
+        self.status_refresh_requested.connect(self._status_worker.run_snapshot)
+        self._status_worker.finished.connect(self._on_status_snapshot_finished)
+        self._status_worker.failed.connect(self._on_status_snapshot_failed)
+        self._status_thread.finished.connect(self._status_worker.deleteLater)
+        self._status_thread.start()
+
+    def _shutdown_status_refresh_worker(self) -> None:
+        thread = self._status_thread
+        if thread is None:
+            return
+        try:
+            thread.quit()
+            thread.wait(1000)
+        except Exception:
+            pass
+        self._status_thread = None
+        self._status_worker = None
+
+    def _setup_js8_geo_backfill_worker(self) -> None:
+        if self._js8_geo_thread is not None:
+            return
+        self._js8_geo_thread = QThread(self)
+        self._js8_geo_worker = _JS8GeoBackfillWorker()
+        self._js8_geo_worker.moveToThread(self._js8_geo_thread)
+        self.js8_geo_backfill_requested.connect(self._js8_geo_worker.run_backfill)
+        self._js8_geo_worker.finished.connect(self._on_js8_geo_backfill_finished)
+        self._js8_geo_worker.failed.connect(self._on_js8_geo_backfill_failed)
+        self._js8_geo_thread.finished.connect(self._js8_geo_worker.deleteLater)
+        self._js8_geo_thread.start()
+
+    def _shutdown_js8_geo_backfill_worker(self) -> None:
+        thread = self._js8_geo_thread
+        if thread is None:
+            return
+        try:
+            thread.quit()
+            thread.wait(1000)
+        except Exception:
+            pass
+        self._js8_geo_thread = None
+        self._js8_geo_worker = None
+        self._js8_geo_backfill_inflight = False
+
+    def _dispatch_js8_geo_backfill_request(self, request: Dict[str, Any]) -> None:
+        if self._js8_geo_thread is None or self._js8_geo_worker is None:
+            self._setup_js8_geo_backfill_worker()
+        if self._js8_geo_thread is None or self._js8_geo_worker is None:
+            raise RuntimeError("JS8 geo backfill worker is unavailable.")
+        self.js8_geo_backfill_requested.emit(dict(request))
+
+    @Slot(int)
+    def _on_js8_geo_backfill_finished(self, scanned: int) -> None:
+        self._js8_geo_backfill_inflight = False
+        try:
+            self.settings.set("js8_geo_backfill_v1_done", True)
+        except Exception as exc:
+            log.debug("SettingsTab: unable to persist JS8 geo backfill completion: %s", exc)
+        log.info("SettingsTab: JS8 geo backfill complete (lines=%s).", scanned)
+
+    @Slot(str)
+    def _on_js8_geo_backfill_failed(self, error_text: str) -> None:
+        self._js8_geo_backfill_inflight = False
+        log.debug("SettingsTab: JS8 geo backfill failed: %s", error_text)
+
+    def _collect_status_snapshot_request(self) -> Dict[str, Any]:
+        request: Dict[str, Any] = {
+            "port_override": None,
+            "host_override": "127.0.0.1",
+            "flrig_port_override": None,
+            "fldigi_host_override": self._resolved_fldigi_host_value(),
+            "fldigi_port_override": None,
+        }
+        try:
+            host_txt = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
+            request["host_override"] = host_txt or "127.0.0.1"
+        except Exception:
+            request["host_override"] = "127.0.0.1"
+        try:
+            txt = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
+            request["port_override"] = int(txt) if txt else None
+        except Exception:
+            request["port_override"] = None
+        try:
+            txt = self.flrig_port_edit.text().strip() if hasattr(self, "flrig_port_edit") else ""
+            request["flrig_port_override"] = int(txt) if txt else None
+        except Exception:
+            request["flrig_port_override"] = None
+        try:
+            host_txt = self.fldigi_host_edit.text().strip() if hasattr(self, "fldigi_host_edit") else ""
+            request["fldigi_host_override"] = host_txt or self._resolved_fldigi_host_value()
+        except Exception:
+            request["fldigi_host_override"] = self._resolved_fldigi_host_value()
+        try:
+            txt = self.fldigi_port_edit.text().strip() if hasattr(self, "fldigi_port_edit") else ""
+            request["fldigi_port_override"] = int(txt) if txt else None
+        except Exception:
+            request["fldigi_port_override"] = None
+        return request
+
+    def _dispatch_status_refresh_request(self, request: Dict[str, Any]) -> None:
+        if self._status_thread is None or self._status_worker is None:
+            self._setup_status_refresh_worker()
+        if self._status_thread is None or self._status_worker is None:
+            return
+        request_map = dict(request or {})
+        if self._status_refresh_inflight:
+            self._pending_status_refresh_request = request_map
+            return
+        self._status_refresh_inflight = True
+        self._status_refresh_generation += 1
+        self.status_refresh_requested.emit(self._status_refresh_generation, request_map)
+
+    def _apply_status_snapshot(self, snapshot: Dict[str, Dict[str, object]]) -> None:
+        theme = resolve_theme(self.settings)
+        self._last_status_snapshot = dict(snapshot or {})
+        for program_name, lbl in self.status_labels.items():
+            info = self._last_status_snapshot.get(program_name, {})
+            state = str(info.get("state", "idle"))
+            tooltip = str(info.get("tooltip", "Not running"))
+            lbl.setStyleSheet(led_style(state, theme))
+            lbl.setToolTip(tooltip)
+
+        if hasattr(self, "varac_path_edit"):
+            varac_info = self._last_status_snapshot.get("VarAC", {})
+            self.varac_path_edit.setToolTip(str(varac_info.get("tooltip", "Not running")))
+
+    @Slot(int, object)
+    def _on_status_snapshot_finished(self, generation: int, snapshot: object) -> None:
+        if int(generation) != int(self._status_refresh_generation):
+            return
+        self._status_refresh_inflight = False
+        self._apply_status_snapshot(dict(snapshot or {}))
+        pending = self._pending_status_refresh_request
+        self._pending_status_refresh_request = None
+        if pending:
+            self._dispatch_status_refresh_request(pending)
+
+    @Slot(int, str)
+    def _on_status_snapshot_failed(self, generation: int, error_text: str) -> None:
+        if int(generation) != int(self._status_refresh_generation):
+            return
+        self._status_refresh_inflight = False
+        log.debug("SettingsTab: async status snapshot failed: %s", error_text)
+        pending = self._pending_status_refresh_request
+        self._pending_status_refresh_request = None
+        if pending:
+            self._dispatch_status_refresh_request(pending)
 
     def set_tab_active(self, active: bool) -> None:
         self._active = bool(active)
@@ -707,6 +942,26 @@ class SettingsTab(QWidget):
         op_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(op_group)
 
+        station_summary_layout = QVBoxLayout()
+        station_summary_layout.setSpacing(6)
+        self.multi_radio_summary_label = QLabel()
+        self.multi_radio_summary_label.setWordWrap(True)
+        station_summary_layout.addWidget(self.multi_radio_summary_label)
+        self.multi_radio_attention_label = QLabel()
+        self.multi_radio_attention_label.setWordWrap(True)
+        station_summary_layout.addWidget(self.multi_radio_attention_label)
+        station_summary_container = QWidget()
+        station_summary_container.setLayout(station_summary_layout)
+        station_summary_group = self._make_collapsible_group(
+            "Station Summary",
+            station_summary_container,
+            checked=True,
+            fit_content=True,
+        )
+        self._register_collapsible_group(station_summary_group, self._summary_station_summary)
+        station_summary_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(station_summary_group)
+
         device_group = QGroupBox("Device Profiles")
         device_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         device_layout = QVBoxLayout()
@@ -736,7 +991,7 @@ class SettingsTab(QWidget):
         device_row.addWidget(self.set_active_device_profile_btn)
         device_row.addWidget(self.delete_device_profile_btn)
         device_layout.addLayout(device_row)
-        self.device_profiles_table = QTableWidget(0, 9)
+        self.device_profiles_table = QTableWidget(0, 11)
         self.device_profiles_table.setHorizontalHeaderLabels(
             [
                 "Selected",
@@ -747,6 +1002,8 @@ class SettingsTab(QWidget):
                 "Deploy",
                 "Endpoint",
                 "Launch",
+                "PTT",
+                "Class",
                 "Notes",
             ]
         )
@@ -765,7 +1022,9 @@ class SettingsTab(QWidget):
         device_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         device_header.setSectionResizeMode(6, QHeaderView.Stretch)
         device_header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
-        device_header.setSectionResizeMode(8, QHeaderView.Stretch)
+        device_header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(10, QHeaderView.Stretch)
         device_layout.addWidget(self.device_profiles_table)
         device_container = QWidget()
         device_container.setLayout(device_layout)
@@ -839,10 +1098,16 @@ class SettingsTab(QWidget):
         assignments_row = QHBoxLayout()
         self.assign_device_operating_profile_btn = QPushButton("Assign / Override...")
         self.assign_device_operating_profile_btn.clicked.connect(self._assign_operating_profile_to_selected_devices)
+        self.temporary_profile_swap_btn = QPushButton("Temporary Swap...")
+        self.temporary_profile_swap_btn.clicked.connect(self._start_temporary_profile_swap)
+        self.restore_profile_swap_btn = QPushButton("Restore Swap")
+        self.restore_profile_swap_btn.clicked.connect(self._restore_temporary_profile_swap)
         self.restore_device_operating_profile_btn = QPushButton("Restore Default")
         self.restore_device_operating_profile_btn.clicked.connect(self._restore_default_operating_profile_for_selected_devices)
         assignments_row.addStretch()
         assignments_row.addWidget(self.assign_device_operating_profile_btn)
+        assignments_row.addWidget(self.temporary_profile_swap_btn)
+        assignments_row.addWidget(self.restore_profile_swap_btn)
         assignments_row.addWidget(self.restore_device_operating_profile_btn)
         assignments_layout.addLayout(assignments_row)
         self.device_assignments_table = QTableWidget(0, 9)
@@ -882,6 +1147,115 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(assignments_group, self._summary_device_assignments)
         assignments_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(assignments_group)
+
+        varac_clusters_group = QGroupBox("VarAC Clusters")
+        varac_clusters_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        varac_clusters_layout = QVBoxLayout()
+        varac_clusters_layout.setSpacing(6)
+        varac_clusters_group.setLayout(varac_clusters_layout)
+        self.varac_clusters_hint_label = QLabel()
+        self.varac_clusters_hint_label.setWordWrap(True)
+        varac_clusters_layout.addWidget(self.varac_clusters_hint_label)
+        varac_clusters_row = QHBoxLayout()
+        self.add_varac_cluster_btn = QPushButton("Add Cluster")
+        self.add_varac_cluster_btn.clicked.connect(self._add_varac_cluster)
+        self.edit_varac_cluster_btn = QPushButton("Edit Selected")
+        self.edit_varac_cluster_btn.clicked.connect(self._edit_varac_cluster)
+        self.delete_varac_cluster_btn = QPushButton("Delete Selected")
+        self.delete_varac_cluster_btn.clicked.connect(self._delete_varac_clusters)
+        varac_clusters_row.addStretch()
+        varac_clusters_row.addWidget(self.add_varac_cluster_btn)
+        varac_clusters_row.addWidget(self.edit_varac_cluster_btn)
+        varac_clusters_row.addWidget(self.delete_varac_cluster_btn)
+        varac_clusters_layout.addLayout(varac_clusters_row)
+        self.varac_clusters_table = QTableWidget(0, 8)
+        self.varac_clusters_table.setHorizontalHeaderLabels(
+            [
+                "Selected",
+                "Name",
+                "Cluster ID",
+                "Shared DB",
+                "Members",
+                "Gateway",
+                "PTT Lock",
+                "Refresh",
+            ]
+        )
+        self.varac_clusters_table.verticalHeader().setVisible(False)
+        self.varac_clusters_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.varac_clusters_table.setSelectionMode(QTableWidget.NoSelection)
+        self.varac_clusters_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.varac_clusters_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.varac_clusters_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        varac_clusters_header = self.varac_clusters_table.horizontalHeader()
+        varac_clusters_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(3, QHeaderView.Stretch)
+        varac_clusters_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        varac_clusters_layout.addWidget(self.varac_clusters_table)
+        varac_clusters_container = QWidget()
+        varac_clusters_container.setLayout(varac_clusters_layout)
+        varac_clusters_group = self._make_collapsible_group("VarAC Clusters", varac_clusters_container, checked=True, fit_content=False)
+        self._register_collapsible_group(varac_clusters_group, self._summary_varac_clusters)
+        varac_clusters_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(varac_clusters_group)
+
+        varac_members_group = QGroupBox("VarAC Memberships")
+        varac_members_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        varac_members_layout = QVBoxLayout()
+        varac_members_layout.setSpacing(6)
+        varac_members_group.setLayout(varac_members_layout)
+        self.varac_members_hint_label = QLabel()
+        self.varac_members_hint_label.setWordWrap(True)
+        varac_members_layout.addWidget(self.varac_members_hint_label)
+        varac_members_row = QHBoxLayout()
+        self.add_varac_membership_btn = QPushButton("Add / Update...")
+        self.add_varac_membership_btn.clicked.connect(self._add_or_edit_varac_membership)
+        self.remove_varac_membership_btn = QPushButton("Remove Selected")
+        self.remove_varac_membership_btn.clicked.connect(self._remove_varac_memberships)
+        varac_members_row.addStretch()
+        varac_members_row.addWidget(self.add_varac_membership_btn)
+        varac_members_row.addWidget(self.remove_varac_membership_btn)
+        varac_members_layout.addLayout(varac_members_row)
+        self.varac_members_table = QTableWidget(0, 8)
+        self.varac_members_table.setHorizontalHeaderLabels(
+            [
+                "Selected",
+                "Cluster",
+                "Device",
+                "Runtime",
+                "Class",
+                "Instance",
+                "Enabled",
+                "Gateway",
+            ]
+        )
+        self.varac_members_table.verticalHeader().setVisible(False)
+        self.varac_members_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.varac_members_table.setSelectionMode(QTableWidget.NoSelection)
+        self.varac_members_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.varac_members_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.varac_members_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        varac_members_header = self.varac_members_table.horizontalHeader()
+        varac_members_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(7, QHeaderView.Stretch)
+        varac_members_layout.addWidget(self.varac_members_table)
+        varac_members_container = QWidget()
+        varac_members_container.setLayout(varac_members_layout)
+        varac_members_group = self._make_collapsible_group("VarAC Memberships", varac_members_container, checked=True, fit_content=False)
+        self._register_collapsible_group(varac_members_group, self._summary_varac_memberships)
+        varac_members_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(varac_members_group)
 
         logging_container = QWidget()
         logging_container_layout = QVBoxLayout()
@@ -1025,6 +1399,31 @@ class SettingsTab(QWidget):
         js8_group.setLayout(js8_v)
         js8_label_width = 170
 
+        js8_intro_label = QLabel(
+            "Each JS8 instance is edited inline. Expanding one card collapses the others so multi-instance "
+            "stations stay manageable."
+        )
+        js8_intro_label.setWordWrap(True)
+        js8_v.addWidget(js8_intro_label)
+
+        js8_instance_actions = QHBoxLayout()
+        self.add_js8_instance_btn = QPushButton("Add JS8 Instance")
+        self.add_js8_instance_btn.clicked.connect(self._add_js8_instance)
+        js8_instance_actions.addStretch()
+        js8_instance_actions.addWidget(self.add_js8_instance_btn)
+        js8_v.addLayout(js8_instance_actions)
+
+        default_js8_content = QWidget()
+        default_js8_layout = QVBoxLayout(default_js8_content)
+        default_js8_layout.setContentsMargins(0, 0, 0, 0)
+        default_js8_layout.setSpacing(6)
+        default_hint = QLabel(
+            "This default card drives the current JS8 compatibility settings and the primary-device projection."
+        )
+        default_hint.setWordWrap(True)
+        default_hint.setStyleSheet("color: #666;")
+        default_js8_layout.addWidget(default_hint)
+
         js8_host_row = QHBoxLayout()
         js8_host_row.setSpacing(8)
         js8_host_row.setContentsMargins(0, 0, 0, 0)
@@ -1037,7 +1436,7 @@ class SettingsTab(QWidget):
         self.js8_host_edit.setFixedWidth(220)
         js8_host_row.addWidget(self.js8_host_edit)
         js8_host_row.addStretch()
-        js8_v.addLayout(js8_host_row)
+        default_js8_layout.addLayout(js8_host_row)
 
         js8_port_row = QHBoxLayout()
         js8_port_row.setSpacing(8)
@@ -1067,7 +1466,7 @@ class SettingsTab(QWidget):
         )
         js8_port_row.addWidget(self.js8_mark_retrieved_chk)
         js8_port_row.addStretch()
-        js8_v.addLayout(js8_port_row)
+        default_js8_layout.addLayout(js8_port_row)
 
         def build_js8_path_row(label: str, edit: QLineEdit, browse_cb) -> QWidget:
             row = QHBoxLayout()
@@ -1088,27 +1487,27 @@ class SettingsTab(QWidget):
 
         directed_forms_row = QHBoxLayout()
         self.js8_directed_edit = QLineEdit()
-        js8_v.addWidget(
+        default_js8_layout.addWidget(
             build_js8_path_row("JS8Call DIRECTED.TXT:", self.js8_directed_edit, self._choose_js8_directed_path)
         )
 
         forms_row = QHBoxLayout()
         self.js8_forms_edit = QLineEdit()
-        js8_v.addWidget(
+        default_js8_layout.addWidget(
             build_js8_path_row("JS8Spotter forms:", self.js8_forms_edit, self._choose_js8_forms_path)
         )
 
         js8_exec_row = QHBoxLayout()
         self.js8call_path_edit = QLineEdit()
         self.js8call_path_edit.setPlaceholderText("Folder containing JS8Call")
-        js8_v.addWidget(
+        default_js8_layout.addWidget(
             build_js8_path_row("JS8Call Install Folder:", self.js8call_path_edit, self._choose_js8call_install_path)
         )
 
         js8spotter_exec_row = QHBoxLayout()
         self.js8spotter_path_edit = QLineEdit()
         self.js8spotter_path_edit.setPlaceholderText("Executable/script/.desktop path")
-        js8_v.addWidget(
+        default_js8_layout.addWidget(
             build_js8_path_row(
                 "JS8Spotter Launch Path:",
                 self.js8spotter_path_edit,
@@ -1119,7 +1518,7 @@ class SettingsTab(QWidget):
         commstat_exec_row = QHBoxLayout()
         self.commstat_path_edit = QLineEdit()
         self.commstat_path_edit.setPlaceholderText("Executable/script/.desktop path")
-        js8_v.addWidget(
+        default_js8_layout.addWidget(
             build_js8_path_row("CommStat Launch Path:", self.commstat_path_edit, self._choose_commstat_launch_path)
         )
 
@@ -1131,6 +1530,24 @@ class SettingsTab(QWidget):
         self.js8call_path_edit.textChanged.connect(self._on_launch_paths_changed)
         self.js8spotter_path_edit.textChanged.connect(self._on_launch_paths_changed)
         self.commstat_path_edit.textChanged.connect(self._on_launch_paths_changed)
+
+        default_group, self.js8_default_header_btn = self._make_dialog_collapsible_group(
+            "Primary JS8 (Default)",
+            default_js8_content,
+            checked=True,
+            object_name="js8DefaultCard",
+        )
+        self.js8_default_header_btn.toggled.connect(
+            lambda state: self._on_js8_instance_header_toggled("default", state)
+        )
+        js8_v.addWidget(default_group)
+
+        self.js8_instance_cards_wrap = QWidget()
+        self.js8_instance_cards_wrap.setObjectName("js8InstanceCardsWrap")
+        self.js8_instance_cards_layout = QVBoxLayout(self.js8_instance_cards_wrap)
+        self.js8_instance_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.js8_instance_cards_layout.setSpacing(6)
+        js8_v.addWidget(self.js8_instance_cards_wrap)
 
         load_links_row = QHBoxLayout()
         load_links_row.setSpacing(8)
@@ -1323,6 +1740,43 @@ class SettingsTab(QWidget):
         launch_row.addWidget(self.copy_late_btn)
         launch_row.addStretch()
         fast_light_v.addLayout(launch_row)
+
+        fast_light_hint = QLabel(
+            "The rows above remain the current primary compatibility controls. "
+            "Use managed Fast Light configs below for reusable FLRig/FLDigi combinations that device profiles can reference."
+        )
+        fast_light_hint.setWordWrap(True)
+        fast_light_v.addWidget(fast_light_hint)
+
+        fast_light_actions = QHBoxLayout()
+        self.add_fast_light_config_btn = QPushButton("Add Fast Light Config")
+        self.add_fast_light_config_btn.clicked.connect(self._add_fast_light_config)
+        self.edit_fast_light_config_btn = QPushButton("Edit Selected")
+        self.edit_fast_light_config_btn.clicked.connect(self._edit_fast_light_config)
+        self.delete_fast_light_config_btn = QPushButton("Delete Selected")
+        self.delete_fast_light_config_btn.clicked.connect(self._delete_fast_light_configs)
+        fast_light_actions.addStretch()
+        fast_light_actions.addWidget(self.add_fast_light_config_btn)
+        fast_light_actions.addWidget(self.edit_fast_light_config_btn)
+        fast_light_actions.addWidget(self.delete_fast_light_config_btn)
+        fast_light_v.addLayout(fast_light_actions)
+
+        self.fast_light_configs_table = QTableWidget(0, 6)
+        self.fast_light_configs_table.setHorizontalHeaderLabels(
+            ["Selected", "Default", "Name", "FLRig", "FLDigi", "Status"]
+        )
+        self.fast_light_configs_table.verticalHeader().setVisible(False)
+        self.fast_light_configs_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.fast_light_configs_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.fast_light_configs_table.setAlternatingRowColors(True)
+        fast_light_header = self.fast_light_configs_table.horizontalHeader()
+        fast_light_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        fast_light_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        fast_light_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        fast_light_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        fast_light_header.setSectionResizeMode(4, QHeaderView.Stretch)
+        fast_light_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        fast_light_v.addWidget(self.fast_light_configs_table)
 
         fast_light_container = QWidget()
         fast_light_container.setLayout(fast_light_v)
@@ -1623,6 +2077,43 @@ class SettingsTab(QWidget):
         policy_wrap.addLayout(hint_row)
         varac_v.addLayout(policy_wrap)
 
+        varac_node_hint = QLabel(
+            "The fields above remain the current primary compatibility controls. "
+            "Use managed VarAC nodes below for per-instance install, DB, INI, and incoming-path records that device profiles can bind."
+        )
+        varac_node_hint.setWordWrap(True)
+        varac_v.addWidget(varac_node_hint)
+
+        varac_node_actions = QHBoxLayout()
+        self.add_varac_node_btn = QPushButton("Add VarAC Node")
+        self.add_varac_node_btn.clicked.connect(self._add_varac_node)
+        self.edit_varac_node_btn = QPushButton("Edit Selected")
+        self.edit_varac_node_btn.clicked.connect(self._edit_varac_node)
+        self.delete_varac_node_btn = QPushButton("Delete Selected")
+        self.delete_varac_node_btn.clicked.connect(self._delete_varac_nodes)
+        varac_node_actions.addStretch()
+        varac_node_actions.addWidget(self.add_varac_node_btn)
+        varac_node_actions.addWidget(self.edit_varac_node_btn)
+        varac_node_actions.addWidget(self.delete_varac_node_btn)
+        varac_v.addLayout(varac_node_actions)
+
+        self.varac_nodes_table = QTableWidget(0, 6)
+        self.varac_nodes_table.setHorizontalHeaderLabels(
+            ["Selected", "Default", "Name", "Install", "Database / Incoming", "Status"]
+        )
+        self.varac_nodes_table.verticalHeader().setVisible(False)
+        self.varac_nodes_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.varac_nodes_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.varac_nodes_table.setAlternatingRowColors(True)
+        varac_nodes_header = self.varac_nodes_table.horizontalHeader()
+        varac_nodes_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        varac_nodes_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        varac_nodes_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        varac_nodes_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        varac_nodes_header.setSectionResizeMode(4, QHeaderView.Stretch)
+        varac_nodes_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        varac_v.addWidget(self.varac_nodes_table)
+
         varac_container = QWidget()
         varac_container.setLayout(varac_v)
         varac_group = self._make_collapsible_group("VarAC Settings", varac_container, checked=True, fit_content=True)
@@ -1799,6 +2290,104 @@ class SettingsTab(QWidget):
         self._apply_collapsed_state(group, content, checked)
         QTimer.singleShot(0, lambda g=group, w=content: self._apply_collapsed_state(g, w, header_btn.isChecked()))
         return group
+
+    def _make_dialog_collapsible_group(
+        self,
+        title: str,
+        content: QWidget,
+        *,
+        checked: bool,
+        object_name: str = "",
+    ) -> Tuple[QGroupBox, QToolButton]:
+        group = QGroupBox()
+        if object_name:
+            group.setObjectName(object_name)
+        group.setMinimumHeight(0)
+        content.setVisible(checked)
+        if object_name:
+            content.setObjectName(f"{object_name}Content")
+
+        header_btn = QToolButton()
+        if object_name:
+            header_btn.setObjectName(f"{object_name}Header")
+        header_btn.setCheckable(True)
+        header_btn.setChecked(checked)
+        header_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        header_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        header_btn.setText(title)
+        header_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        header_btn.setMinimumHeight(30)
+        header_btn.setStyleSheet("QToolButton { padding: 5px 6px; font-weight: 600; }")
+
+        def _toggle(state: bool) -> None:
+            self._apply_dialog_collapsible_state(group, content, header_btn, bool(state))
+
+        header_btn.toggled.connect(_toggle)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.addWidget(header_btn)
+        header_row.addStretch()
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+        layout.addLayout(header_row)
+        layout.addWidget(content)
+        group.setLayout(layout)
+        self._apply_dialog_collapsible_state(group, content, header_btn, checked)
+        QTimer.singleShot(
+            0,
+            lambda g=group, w=content, btn=header_btn: self._apply_dialog_collapsible_state(
+                g,
+                w,
+                btn,
+                btn.isChecked(),
+            ),
+        )
+        return group, header_btn
+
+    def _apply_dialog_collapsible_state(
+        self,
+        group: QGroupBox,
+        content: QWidget,
+        header_btn: QToolButton,
+        expanded: bool,
+    ) -> None:
+        try:
+            content_policy = content.sizePolicy()
+            content_policy.setRetainSizeWhenHidden(False)
+            content.setSizePolicy(content_policy)
+        except Exception:
+            pass
+        content.setVisible(expanded)
+        header_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        layout = group.layout()
+        margins = layout.contentsMargins() if layout is not None else None
+        header_height = max(30, header_btn.sizeHint().height())
+        extra = (margins.top() + margins.bottom()) if margins is not None else 0
+        collapsed_height = header_height + extra
+        if expanded:
+            group.setMinimumHeight(0)
+            group.setMaximumHeight(16777215)
+            group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        else:
+            group.setMinimumHeight(collapsed_height)
+            group.setMaximumHeight(collapsed_height)
+            group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        content.updateGeometry()
+        group.updateGeometry()
+        parent = group.parentWidget()
+        while parent is not None:
+            parent_layout = parent.layout()
+            if parent_layout is not None:
+                parent_layout.invalidate()
+                parent_layout.activate()
+            parent.updateGeometry()
+            parent = parent.parentWidget()
 
     def _register_collapsible_group(self, group: QGroupBox, summary_fn) -> None:
         self._accordion_groups.append(group)
@@ -1995,6 +2584,155 @@ class SettingsTab(QWidget):
         scheduler = "on" if (hasattr(self, "use_scheduler_chk") and self.use_scheduler_chk.isChecked()) else "off"
         return f"Control {ctrl}, Scheduler {scheduler}"
 
+    def _summary_station_summary(self) -> str:
+        active_rows = [
+            row
+            for row in self.device_profiles
+            if isinstance(row, dict) and int(row.get("runtime_active", 0) or 0) == 1
+        ]
+        primary_name = next(
+            (
+                str(row.get("name", "") or "").strip()
+                for row in self.device_profiles
+                if isinstance(row, dict) and int(row.get("runtime_primary", 0) or 0) == 1
+            ),
+            "",
+        )
+        attention_count = len(self._multi_radio_attention_items())
+        primary_txt = f", primary {primary_name}" if primary_name else ""
+        return (
+            f"{len(active_rows)} active device profile{'s' if len(active_rows) != 1 else ''}"
+            f"{primary_txt}, {attention_count} attention item{'s' if attention_count != 1 else ''}"
+        )
+
+    def _multi_radio_attention_items(self) -> list[str]:
+        primary = next(
+            (
+                row
+                for row in self.device_profiles
+                if isinstance(row, dict) and int(row.get("runtime_primary", 0) or 0) == 1
+            ),
+            None,
+        )
+        items: list[str] = []
+        if isinstance(self.active_profile_swap, dict) and self.active_profile_swap:
+            source_name = str(self.active_profile_swap.get("source_device_name", "") or "").strip() or "previous primary"
+            target_name = str(self.active_profile_swap.get("target_device_name", "") or "").strip() or "temporary target"
+            mode = str(self.active_profile_swap.get("mode", "") or "").strip().lower()
+            carried_name = str(self.active_profile_swap.get("applied_operating_profile_name", "") or "").strip()
+            if mode == "carry_primary_profile" and carried_name:
+                items.append(
+                    f"Temporary swap active: {source_name} -> {target_name}; carrying {carried_name}."
+                )
+            else:
+                items.append(f"Temporary swap active: {source_name} -> {target_name}.")
+        if isinstance(primary, dict) and str(primary.get("deployment_mode", "") or "").strip().lower() == "minimal":
+            primary_name = str(primary.get("name", "") or "").strip() or "Primary device"
+            items.append(
+                f"{primary_name} is primary in Minimal mode; Map, Messages, FreqPlanner, startup launch, and background ingest stay suppressed."
+            )
+        active_unassigned = [
+            row
+            for row in self.device_assignments
+            if isinstance(row, dict)
+            and int(row.get("runtime_active", 0) or 0) == 1
+            and row.get("operating_profile_id") in (None, "", 0)
+        ]
+        if active_unassigned:
+            preview = ", ".join(str(row.get("device_name", "") or "Device").strip() for row in active_unassigned[:3])
+            extra = "" if len(active_unassigned) <= 3 else f", +{len(active_unassigned) - 3} more"
+            items.append(
+                f"Active device profiles without an operating-profile assignment: {preview}{extra}."
+            )
+        missing_gateway = [
+            row
+            for row in self.varac_clusters
+            if isinstance(row, dict)
+            and int(row.get("enabled_member_count", 0) or 0) > 1
+            and row.get("gateway_handler_device_id") in (None, "", 0)
+        ]
+        if missing_gateway:
+            preview = ", ".join(str(row.get("name", "") or "Cluster").strip() for row in missing_gateway[:3])
+            extra = "" if len(missing_gateway) <= 3 else f", +{len(missing_gateway) - 3} more"
+            items.append(f"VarAC clusters awaiting gateway-handler selection: {preview}{extra}.")
+        missing_node_config = [
+            row
+            for row in self.varac_cluster_members
+            if isinstance(row, dict)
+            and int(row.get("enabled", 1) or 0) == 1
+            and not any(
+                str(device.get(key, "") or "").strip()
+                for device in self.device_profiles
+                if isinstance(device, dict) and int(device.get("id", 0) or 0) == int(row.get("device_profile_id", 0) or 0)
+                for key in ("varac_install_path", "varac_db_path", "varac_ini_path", "launch_cmd")
+            )
+        ]
+        if missing_node_config:
+            preview = ", ".join(str(row.get("device_name", "") or "Device").strip() for row in missing_node_config[:3])
+            extra = "" if len(missing_node_config) <= 3 else f", +{len(missing_node_config) - 3} more"
+            items.append(f"Enabled VarAC memberships without device-local node settings: {preview}{extra}.")
+        return items
+
+    def _update_multi_radio_station_summary(self) -> None:
+        summary_label = getattr(self, "multi_radio_summary_label", None)
+        attention_label = getattr(self, "multi_radio_attention_label", None)
+        if summary_label is None or attention_label is None:
+            return
+        active_rows = [
+            row
+            for row in self.device_profiles
+            if isinstance(row, dict) and int(row.get("runtime_active", 0) or 0) == 1
+        ]
+        observer_count = len(
+            [
+                row
+                for row in self.device_profiles
+                if isinstance(row, dict) and str(row.get("device_class", "") or "").strip().lower() == "observer"
+            ]
+        )
+        primary_name = next(
+            (
+                str(row.get("name", "") or "").strip()
+                for row in self.device_profiles
+                if isinstance(row, dict) and int(row.get("runtime_primary", 0) or 0) == 1
+            ),
+            "",
+        )
+        assigned_count = len(
+            [
+                row
+                for row in self.device_assignments
+                if isinstance(row, dict) and row.get("operating_profile_id") not in (None, "", 0)
+            ]
+        )
+        enabled_varac_members = len(
+            [
+                row
+                for row in self.varac_cluster_members
+                if isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1
+            ]
+        )
+        primary_txt = primary_name or "none"
+        summary_label.setText(
+            f"{len(active_rows)} active device profile{'s' if len(active_rows) != 1 else ''}; "
+            f"primary {primary_txt}; "
+            f"{observer_count} observer{'s' if observer_count != 1 else ''}; "
+            f"{assigned_count}/{len([row for row in self.device_assignments if isinstance(row, dict)])} devices assigned; "
+            f"{enabled_varac_members} enabled VarAC member{'s' if enabled_varac_members != 1 else ''} across "
+            f"{len([row for row in self.varac_clusters if isinstance(row, dict)])} cluster{'s' if len([row for row in self.varac_clusters if isinstance(row, dict)]) != 1 else ''}."
+        )
+        attention_items = self._multi_radio_attention_items()
+        theme = resolve_theme(self.settings)
+        summary_label.setStyleSheet(f"color: {theme.get('text_muted', theme.get('text', '#666666'))};")
+        if attention_items:
+            attention_label.setText("Attention: " + " ".join(attention_items))
+            attention_label.setStyleSheet(f"color: {theme.get('warning', theme.get('accent', '#C62828'))}; font-weight: 600;")
+        else:
+            attention_label.setText(
+                "Station coordination settings look consistent. Use Device Profiles, Assignments, and VarAC tables below for detailed edits."
+            )
+            attention_label.setStyleSheet(f"color: {theme.get('info', theme.get('accent', '#1E88E5'))};")
+
     def _summary_device_profiles(self) -> str:
         count = len([row for row in self.device_profiles if isinstance(row, dict)])
         active_count = len(
@@ -2002,6 +2740,13 @@ class SettingsTab(QWidget):
                 row
                 for row in self.device_profiles
                 if isinstance(row, dict) and int(row.get("runtime_active", 0) or 0) == 1
+            ]
+        )
+        observer_count = len(
+            [
+                row
+                for row in self.device_profiles
+                if isinstance(row, dict) and str(row.get("device_class", "") or "").strip().lower() == "observer"
             ]
         )
         primary = next(
@@ -2015,7 +2760,7 @@ class SettingsTab(QWidget):
         if primary:
             return (
                 f"{count} profile{'s' if count != 1 else ''}, "
-                f"{active_count} active, primary {primary}"
+                f"{active_count} active, {observer_count} observer{'s' if observer_count != 1 else ''}, primary {primary}"
             )
         return f"{count} profile{'s' if count != 1 else ''}"
 
@@ -2028,6 +2773,13 @@ class SettingsTab(QWidget):
                 row
                 for row in self.device_profiles
                 if isinstance(row, dict) and int(row.get("runtime_active", 0) or 0) == 1
+            ]
+        )
+        observer_count = len(
+            [
+                row
+                for row in self.device_profiles
+                if isinstance(row, dict) and str(row.get("device_class", "") or "").strip().lower() == "observer"
             ]
         )
         primary = next(
@@ -2048,9 +2800,32 @@ class SettingsTab(QWidget):
                 "Map, Messages, FreqPlanner, startup launch, and background ingest are intentionally suppressed."
             )
             return
+        if observer_count:
+            label.setText(
+                "Manage structured multi-radio device profiles here. Multiple devices can be active at once, "
+                "but Observer / SDR profiles never become the primary compatibility device in this slice. "
+                f"Configured observer profiles: {observer_count}."
+            )
+            return
+        ptt_groups = sorted(
+            {
+                str(row.get("ptt_group", "") or "").strip()
+                for row in self.device_profiles
+                if isinstance(row, dict) and str(row.get("ptt_group", "") or "").strip()
+            }
+        )
+        if ptt_groups:
+            label.setText(
+                "Manage structured multi-radio device profiles here. Multiple devices can be active at once, "
+                "and one active profile is the primary compatibility device that drives the current tabs. "
+                f"Configured PTT groups: {', '.join(ptt_groups[:5])}."
+            )
+            return
         label.setText(
             "Manage structured multi-radio device profiles here. Multiple devices can be active at once, "
-            "and one active profile is the primary compatibility device that drives the current tabs."
+            "and one active profile is the primary compatibility device that drives the current tabs. "
+            "Use PTT Group for hard shared-transmit interlocks, and antenna/front-end/amplifier groups for "
+            "prompt-first RF conflict warnings."
         )
 
     def _summary_operating_profiles(self) -> str:
@@ -2095,11 +2870,30 @@ class SettingsTab(QWidget):
                 if str(row.get("assignment_state", "") or "").strip().lower() == "temporary_override"
             ]
         )
-        return f"{assigned}/{len(rows)} assigned, {overrides} override{'s' if overrides != 1 else ''}"
+        swap_active = isinstance(self.active_profile_swap, dict) and bool(self.active_profile_swap)
+        swap_txt = ", swap active" if swap_active else ""
+        return f"{assigned}/{len(rows)} assigned, {overrides} override{'s' if overrides != 1 else ''}{swap_txt}"
 
     def _update_device_assignments_hint(self) -> None:
         label = getattr(self, "device_assignments_hint_label", None)
         if label is None:
+            return
+        active_swap = dict(self.active_profile_swap or {})
+        if active_swap:
+            source_name = str(active_swap.get("source_device_name", "") or "").strip() or "previous primary"
+            target_name = str(active_swap.get("target_device_name", "") or "").strip() or "target device"
+            mode = str(active_swap.get("mode", "") or "").strip().lower()
+            if mode == "carry_primary_profile":
+                carried_name = str(active_swap.get("applied_operating_profile_name", "") or "").strip() or "the previous primary operating profile"
+                label.setText(
+                    f"Temporary swap active: {source_name} -> {target_name}. "
+                    f"{carried_name} is temporarily applied on the target device. Restore Swap returns the previous primary and target assignment."
+                )
+            else:
+                label.setText(
+                    f"Temporary swap active: {source_name} -> {target_name}. "
+                    "Restore Swap returns the previous primary device without rewriting endpoint settings."
+                )
             return
         overrides = [
             row
@@ -2114,6 +2908,593 @@ class SettingsTab(QWidget):
         label.setText(
             "One effective operating profile is kept per device. Assignments can be prepared for inactive devices; they take effect in the live shell when that device is primary."
         )
+
+    def _summary_varac_clusters(self) -> str:
+        rows = [row for row in self.varac_clusters if isinstance(row, dict)]
+        count = len(rows)
+        members = sum(int(row.get("enabled_member_count", 0) or 0) for row in rows)
+        gateway_count = len([row for row in rows if row.get("gateway_handler_device_id") not in (None, "", 0)])
+        return (
+            f"{count} cluster{'s' if count != 1 else ''}, "
+            f"{members} member{'s' if members != 1 else ''}, "
+            f"{gateway_count} gateway"
+        )
+
+    def _update_varac_clusters_hint(self) -> None:
+        label = getattr(self, "varac_clusters_hint_label", None)
+        if label is None:
+            return
+        if not self.varac_clusters:
+            label.setText(
+                "Define shared VarAC clusters here. A cluster holds the shared DB identity, optional shared DB path, "
+                "and the designated gateway handler for its enabled members."
+            )
+            return
+        missing_gateway = [
+            row
+            for row in self.varac_clusters
+            if isinstance(row, dict)
+            and int(row.get("enabled_member_count", 0) or 0) > 1
+            and row.get("gateway_handler_device_id") in (None, "", 0)
+        ]
+        if missing_gateway:
+            names = ", ".join(str(row.get("name", "") or "Cluster").strip() for row in missing_gateway[:3])
+            label.setText(
+                f"Clusters with more than one enabled member should select one gateway handler. "
+                f"Pending handler selection: {names}."
+            )
+            return
+        label.setText(
+            "Define shared VarAC clusters here. Edit a cluster to choose its gateway handler from the enabled members already assigned to that cluster."
+        )
+
+    def _summary_varac_memberships(self) -> str:
+        rows = [row for row in self.varac_cluster_members if isinstance(row, dict)]
+        enabled_count = len([row for row in rows if int(row.get("enabled", 1) or 0) == 1])
+        gateway_count = len([row for row in rows if bool(row.get("is_gateway_handler"))])
+        return (
+            f"{enabled_count}/{len(rows)} enabled, "
+            f"{gateway_count} gateway handler{'s' if gateway_count != 1 else ''}"
+        )
+
+    def _update_varac_memberships_hint(self) -> None:
+        label = getattr(self, "varac_members_hint_label", None)
+        if label is None:
+            return
+        if not self.varac_cluster_members:
+            label.setText(
+                "Assign device profiles to VarAC clusters here. Each device may hold one enabled cluster membership in this phase."
+            )
+            return
+        missing_node_config = [
+            row
+            for row in self.varac_cluster_members
+            if isinstance(row, dict)
+            and int(row.get("enabled", 1) or 0) == 1
+            and not any(
+                str(device.get(key, "") or "").strip()
+                for device in self.device_profiles
+                if isinstance(device, dict) and int(device.get("id", 0) or 0) == int(row.get("device_profile_id", 0) or 0)
+                for key in ("varac_install_path", "varac_db_path", "varac_ini_path", "launch_cmd")
+            )
+        ]
+        if missing_node_config:
+            names = ", ".join(str(row.get("device_name", "") or "Device").strip() for row in missing_node_config[:3])
+            label.setText(
+                f"Enabled cluster memberships should also have device-local VarAC settings. Review: {names}."
+            )
+            return
+        label.setText(
+            "Assign device profiles to VarAC clusters here. Instance numbers must be unique within each cluster, and the gateway handler must be one of that cluster's enabled members."
+        )
+
+    def _refresh_multi_radio_tables(self) -> None:
+        self._refresh_device_profiles_table(
+            refresh_assignments=False,
+            refresh_varac_clusters=False,
+            refresh_section_titles=False,
+            refresh_station_summary=False,
+        )
+        self._refresh_operating_profiles_table(
+            refresh_assignments=False,
+            refresh_section_titles=False,
+            refresh_station_summary=False,
+        )
+        self._refresh_device_assignments_table(
+            refresh_section_titles=False,
+            refresh_station_summary=False,
+        )
+        self._refresh_varac_clusters_table(
+            refresh_memberships=False,
+            refresh_section_titles=False,
+            refresh_station_summary=False,
+        )
+        self._refresh_varac_memberships_table(
+            refresh_section_titles=False,
+            refresh_station_summary=False,
+        )
+        self._update_multi_radio_station_summary()
+        self._refresh_section_titles()
+
+    def _refresh_managed_software_tables(self, *, refresh_section_titles: bool = True) -> None:
+        self._refresh_js8_instances_table(refresh_section_titles=False)
+        self._refresh_fast_light_configs_table(refresh_section_titles=False)
+        self._refresh_varac_nodes_table(refresh_section_titles=False)
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    def _refresh_js8_instances_table(self, *, refresh_section_titles: bool = True) -> None:
+        container = getattr(self, "js8_instance_cards_layout", None)
+        default_header = getattr(self, "js8_default_header_btn", None)
+        if container is None or default_header is None:
+            return
+        try:
+            self.js8_instances = list(self.multi_radio_store.list_js8_instances())
+        except Exception:
+            log.exception("Failed loading JS8 instances from store.")
+            self.js8_instances = []
+        assignment_counts = self._js8_instance_assignment_counts()
+        default_record = next(
+            (
+                row
+                for row in self.js8_instances
+                if str(row.get("system_key", "") or "") == "default_js8_instance"
+            ),
+            None,
+        )
+        self._js8_instance_header_buttons = {"default": default_header}
+        if default_record is not None:
+            default_header.setText(self._js8_instance_card_title(default_record, default_record=True, assigned_count=assignment_counts.get(int(default_record.get("id", 0) or 0), 0)))
+        else:
+            default_header.setText("Primary JS8 (Default)")
+
+        while container.count():
+            item = container.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._js8_instances_table_loading = True
+        try:
+            for record in self.js8_instances:
+                if str(record.get("system_key", "") or "") == "default_js8_instance":
+                    continue
+                record_id = int(record.get("id", 0) or 0)
+                card = self._build_inline_js8_instance_card(
+                    record,
+                    assigned_count=assignment_counts.get(record_id, 0),
+                    expanded=bool(self._js8_expanded_instance_id == record_id),
+                )
+                container.addWidget(card)
+            container.addStretch(1)
+        finally:
+            self._js8_instances_table_loading = False
+        if self._js8_expanded_instance_id == "default":
+            if not default_header.isChecked():
+                default_header.setChecked(True)
+        elif default_header.isChecked():
+            default_header.setChecked(False)
+        self._update_js8_instance_action_buttons()
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    def _js8_instance_assignment_counts(self) -> Dict[int, int]:
+        counts: Dict[int, int] = {}
+        profiles = list(self.device_profiles)
+        if not profiles:
+            try:
+                profiles = list(self.multi_radio_store.list_device_profiles())
+            except Exception:
+                profiles = []
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            instance_id = profile.get("js8_instance_id")
+            if instance_id in (None, ""):
+                continue
+            try:
+                normalized = int(instance_id)
+            except Exception:
+                continue
+            counts[normalized] = counts.get(normalized, 0) + 1
+        return counts
+
+    def _js8_instance_card_title(
+        self,
+        record: Mapping[str, Any],
+        *,
+        default_record: bool = False,
+        assigned_count: int = 0,
+    ) -> str:
+        name = str(record.get("name", "") or "").strip() or ("Primary JS8" if default_record else "JS8 Instance")
+        tags: List[str] = []
+        if default_record:
+            tags.append("Default")
+        if assigned_count > 0:
+            tags.append(f"Assigned {assigned_count}")
+        if not bool(record.get("enabled", 1)):
+            tags.append("Disabled")
+        return f"{name} ({', '.join(tags)})" if tags else name
+
+    def _on_js8_instance_header_toggled(self, instance_key: object, state: bool) -> None:
+        if getattr(self, "_js8_header_toggle_sync", False):
+            return
+        if state:
+            self._js8_expanded_instance_id = instance_key
+            self._js8_header_toggle_sync = True
+            try:
+                for other_key, header in list(self._js8_instance_header_buttons.items()):
+                    if other_key == instance_key:
+                        continue
+                    if header.isChecked():
+                        header.setChecked(False)
+            finally:
+                self._js8_header_toggle_sync = False
+        elif self._js8_expanded_instance_id == instance_key:
+            self._js8_expanded_instance_id = None
+
+    def _build_inline_js8_instance_card(
+        self,
+        record: Mapping[str, Any],
+        *,
+        assigned_count: int,
+        expanded: bool,
+    ) -> QGroupBox:
+        record_id = int(record.get("id", 0) or 0)
+        object_name = f"js8InstanceCard{record_id}"
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(6)
+
+        summary_label = QLabel(
+            "Bind device profiles to this JS8 instance when they should use this endpoint and file set."
+        )
+        summary_label.setWordWrap(True)
+        summary_label.setStyleSheet("color: #666;")
+        content_layout.addWidget(summary_label)
+
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        content_layout.addLayout(form)
+
+        def _make_path_row(edit: QLineEdit, *, directory: bool, title: str, file_filter: str = "") -> QWidget:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            row_layout.addWidget(edit, 1)
+            browse_btn = QPushButton("Browse")
+            if directory:
+                browse_btn.clicked.connect(
+                    lambda: edit.setText(
+                        QFileDialog.getExistingDirectory(self, title, self._managed_record_workdir(edit.text()))
+                        or edit.text()
+                    )
+                )
+            else:
+                browse_btn.clicked.connect(
+                    lambda: edit.setText(
+                        QFileDialog.getOpenFileName(
+                            self,
+                            title,
+                            self._managed_record_workdir(edit.text()),
+                            file_filter or "All Files (*)",
+                        )[0]
+                        or edit.text()
+                    )
+                )
+            row_layout.addWidget(browse_btn, 0)
+            return row
+
+        name_edit = QLineEdit(str(record.get("name", "") or ""))
+        enabled_chk = QCheckBox("Enabled")
+        enabled_chk.setChecked(bool(record.get("enabled", 1)))
+        host_edit = QLineEdit(str(record.get("host", "") or "127.0.0.1"))
+        port_edit = QLineEdit(str(record.get("port", 2442) or 2442))
+        port_edit.setValidator(QIntValidator(1, 65535, port_edit))
+        offset_edit = QLineEdit(str(record.get("offset_hz", 0) or 0))
+        offset_edit.setValidator(QIntValidator(-5000, 5000, offset_edit))
+        profile_edit = QLineEdit(str(record.get("profile_path", "") or ""))
+        directed_edit = QLineEdit(str(record.get("directed_path", "") or ""))
+        inbox_edit = QLineEdit(str(record.get("inbox_path", "") or ""))
+        forms_edit = QLineEdit(str(record.get("forms_path", "") or ""))
+        install_edit = QLineEdit(str(record.get("install_path", "") or ""))
+        spotter_edit = QLineEdit(str(record.get("spotter_launch_path", "") or ""))
+        commstat_edit = QLineEdit(str(record.get("commstat_launch_path", "") or ""))
+
+        form.addRow("Name:", name_edit)
+        form.addRow("", enabled_chk)
+        endpoint_row = QWidget()
+        endpoint_layout = QHBoxLayout(endpoint_row)
+        endpoint_layout.setContentsMargins(0, 0, 0, 0)
+        endpoint_layout.setSpacing(8)
+        endpoint_layout.addWidget(host_edit, 1)
+        endpoint_layout.addWidget(QLabel("Port"))
+        endpoint_layout.addWidget(port_edit, 0)
+        endpoint_layout.addWidget(QLabel("Offset"))
+        endpoint_layout.addWidget(offset_edit, 0)
+        form.addRow("API:", endpoint_row)
+        form.addRow("Profile Dir:", _make_path_row(profile_edit, directory=True, title="Select JS8 instance directory"))
+        form.addRow(
+            "DIRECTED.TXT:",
+            _make_path_row(
+                directed_edit,
+                directory=False,
+                title="Select JS8 DIRECTED.TXT",
+                file_filter="Text Files (*.txt);;All Files (*)",
+            ),
+        )
+        form.addRow(
+            "Inbox DB:",
+            _make_path_row(
+                inbox_edit,
+                directory=False,
+                title="Select JS8 inbox database",
+                file_filter="Database Files (*.db *.db3 *.sqlite *.sqlite3);;All Files (*)",
+            ),
+        )
+        form.addRow("Forms Dir:", _make_path_row(forms_edit, directory=True, title="Select JS8 forms directory"))
+        form.addRow("Install Dir:", _make_path_row(install_edit, directory=True, title="Select JS8 install folder"))
+        form.addRow(
+            "Spotter Launch:",
+            _make_path_row(
+                spotter_edit,
+                directory=False,
+                title="Select JS8Spotter launch target",
+                file_filter="Programs (*.exe *.bat *.cmd *.lnk *.ps1 *.py);;All Files (*)",
+            ),
+        )
+        form.addRow(
+            "CommStat Launch:",
+            _make_path_row(
+                commstat_edit,
+                directory=False,
+                title="Select CommStat launch target",
+                file_filter="Programs (*.exe *.bat *.cmd *.lnk *.ps1 *.py);;All Files (*)",
+            ),
+        )
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        save_btn = QPushButton("Save")
+        delete_btn = QPushButton("Delete")
+        button_row.addWidget(save_btn)
+        button_row.addWidget(delete_btn)
+        content_layout.addLayout(button_row)
+
+        group, header_btn = self._make_dialog_collapsible_group(
+            self._js8_instance_card_title(record, assigned_count=assigned_count),
+            content,
+            checked=expanded,
+            object_name=object_name,
+        )
+        self._js8_instance_header_buttons[record_id] = header_btn
+        header_btn.toggled.connect(lambda state, key=record_id: self._on_js8_instance_header_toggled(key, state))
+
+        def _refresh_header_text() -> None:
+            header_btn.setText(
+                self._js8_instance_card_title(
+                    {
+                        **dict(record),
+                        "name": name_edit.text().strip(),
+                        "enabled": enabled_chk.isChecked(),
+                    },
+                    assigned_count=assigned_count,
+                )
+            )
+
+        name_edit.textChanged.connect(lambda _text: _refresh_header_text())
+        enabled_chk.stateChanged.connect(lambda _state: _refresh_header_text())
+
+        def _save_inline() -> None:
+            name = name_edit.text().strip()
+            if not name:
+                QMessageBox.warning(self, "JS8 Instances", "A JS8 instance name is required.")
+                return
+            try:
+                port = int(port_edit.text().strip() or "2442")
+                offset_hz = int(offset_edit.text().strip() or "0")
+            except Exception:
+                QMessageBox.warning(self, "JS8 Instances", "Port and offset must be valid integers.")
+                return
+            self._js8_expanded_instance_id = record_id
+            self._persist_js8_instance(
+                {
+                    "id": record_id,
+                    "system_key": record.get("system_key"),
+                    "name": name,
+                    "enabled": bool(enabled_chk.isChecked()),
+                    "host": host_edit.text().strip() or "127.0.0.1",
+                    "port": port,
+                    "offset_hz": offset_hz,
+                    "profile_path": profile_edit.text().strip(),
+                    "directed_path": directed_edit.text().strip(),
+                    "inbox_path": inbox_edit.text().strip(),
+                    "forms_path": forms_edit.text().strip(),
+                    "install_path": install_edit.text().strip(),
+                    "spotter_launch_path": spotter_edit.text().strip(),
+                    "commstat_launch_path": commstat_edit.text().strip(),
+                }
+            )
+
+        def _delete_inline() -> None:
+            choice = QMessageBox.question(
+                self,
+                "Delete JS8 Instance",
+                f"Delete JS8 instance '{name_edit.text().strip() or record.get('name', '')}'?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if choice != QMessageBox.Yes:
+                return
+            try:
+                self.multi_radio_store.delete_js8_instance(record_id)
+            except Exception as exc:
+                QMessageBox.warning(self, "Delete JS8 Instance", str(exc))
+                return
+            self._js8_expanded_instance_id = "default"
+            self._refresh_managed_software_tables(refresh_section_titles=False)
+
+        save_btn.clicked.connect(_save_inline)
+        delete_btn.clicked.connect(_delete_inline)
+        theme = resolve_theme(self.settings)
+        save_btn.setStyleSheet(button_style("primary", theme))
+        delete_btn.setStyleSheet(button_style("warning", theme))
+        return group
+
+    def _refresh_fast_light_configs_table(self, *, refresh_section_titles: bool = True) -> None:
+        table = getattr(self, "fast_light_configs_table", None)
+        if table is None:
+            return
+        try:
+            self.fast_light_configs = list(self.multi_radio_store.list_fast_light_configs())
+        except Exception:
+            log.exception("Failed loading Fast Light configs from store.")
+            self.fast_light_configs = []
+        self._fast_light_configs_table_loading = True
+        try:
+            table.setRowCount(0)
+            for record in self.fast_light_configs:
+                row = table.rowCount()
+                table.insertRow(row)
+                record_id = int(record.get("id", 0) or 0)
+                sel_chk = QCheckBox()
+                sel_chk.setFixedWidth(22)
+                sel_chk.setProperty("managed_record_id", record_id)
+                sel_chk.stateChanged.connect(self._update_fast_light_config_action_buttons)
+                sel_wrap = QWidget()
+                sel_layout = QHBoxLayout(sel_wrap)
+                sel_layout.setContentsMargins(0, 0, 0, 0)
+                sel_layout.setAlignment(Qt.AlignCenter)
+                sel_layout.addWidget(sel_chk)
+                table.setCellWidget(row, 0, sel_wrap)
+
+                default_item = QTableWidgetItem(
+                    "Yes" if str(record.get("system_key", "") or "") == "default_fast_light" else ""
+                )
+                default_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 1, default_item)
+
+                name_item = QTableWidgetItem(str(record.get("name", "") or ""))
+                name_item.setData(Qt.UserRole, record_id)
+                table.setItem(row, 2, name_item)
+                flrig_host = str(record.get("flrig_host", "") or "127.0.0.1").strip() or "127.0.0.1"
+                flrig_port = int(record.get("flrig_port", 12345) or 12345)
+                table.setItem(row, 3, QTableWidgetItem(f"{flrig_host}:{flrig_port}"))
+                fldigi_host = str(record.get("fldigi_host", "") or flrig_host).strip() or flrig_host
+                fldigi_port = int(record.get("fldigi_port", 7362) or 7362)
+                extras = []
+                if str(record.get("fldigi_log_path", "") or "").strip():
+                    extras.append("Logs")
+                if str(record.get("fldigi_checkin_dir", "") or "").strip():
+                    extras.append("Check-in")
+                extra_text = f" ({', '.join(extras)})" if extras else ""
+                table.setItem(row, 4, QTableWidgetItem(f"{fldigi_host}:{fldigi_port}{extra_text}"))
+                status_item = QTableWidgetItem("Enabled" if bool(record.get("enabled", 1)) else "Disabled")
+                status_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 5, status_item)
+        finally:
+            self._fast_light_configs_table_loading = False
+        self._update_fast_light_config_action_buttons()
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    def _refresh_varac_nodes_table(self, *, refresh_section_titles: bool = True) -> None:
+        table = getattr(self, "varac_nodes_table", None)
+        if table is None:
+            return
+        try:
+            self.varac_nodes = list(self.multi_radio_store.list_varac_nodes())
+        except Exception:
+            log.exception("Failed loading VarAC nodes from store.")
+            self.varac_nodes = []
+        self._varac_nodes_table_loading = True
+        try:
+            table.setRowCount(0)
+            for record in self.varac_nodes:
+                row = table.rowCount()
+                table.insertRow(row)
+                record_id = int(record.get("id", 0) or 0)
+                sel_chk = QCheckBox()
+                sel_chk.setFixedWidth(22)
+                sel_chk.setProperty("managed_record_id", record_id)
+                sel_chk.stateChanged.connect(self._update_varac_node_action_buttons)
+                sel_wrap = QWidget()
+                sel_layout = QHBoxLayout(sel_wrap)
+                sel_layout.setContentsMargins(0, 0, 0, 0)
+                sel_layout.setAlignment(Qt.AlignCenter)
+                sel_layout.addWidget(sel_chk)
+                table.setCellWidget(row, 0, sel_wrap)
+
+                default_item = QTableWidgetItem(
+                    "Yes" if str(record.get("system_key", "") or "") == "default_varac_node" else ""
+                )
+                default_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 1, default_item)
+
+                name_item = QTableWidgetItem(str(record.get("name", "") or ""))
+                name_item.setData(Qt.UserRole, record_id)
+                table.setItem(row, 2, name_item)
+                install_text = str(record.get("install_path", "") or "").strip() or "Not set"
+                table.setItem(row, 3, QTableWidgetItem(install_text))
+                db_text = str(record.get("db_path", "") or "").strip() or "DB missing"
+                incoming_text = str(record.get("incoming_path", "") or "").strip()
+                summary = db_text
+                if incoming_text:
+                    summary = f"{db_text} | Incoming"
+                table.setItem(row, 4, QTableWidgetItem(summary))
+                status_item = QTableWidgetItem("Enabled" if bool(record.get("enabled", 1)) else "Disabled")
+                status_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 5, status_item)
+        finally:
+            self._varac_nodes_table_loading = False
+        self._update_varac_node_action_buttons()
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    def _selected_records_from_checkbox_table(self, table: QTableWidget, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        selected_ids: List[int] = []
+        for row in range(table.rowCount()):
+            widget = table.cellWidget(row, 0)
+            chk = widget.findChild(QCheckBox) if widget is not None else None
+            if chk is None or not chk.isChecked():
+                continue
+            selected_ids.append(int(chk.property("managed_record_id") or 0))
+        wanted = {record_id for record_id in selected_ids if record_id > 0}
+        return [row for row in rows if int(row.get("id", 0) or 0) in wanted]
+
+    def _selected_js8_instances(self) -> List[Dict[str, Any]]:
+        return []
+
+    def _selected_fast_light_configs(self) -> List[Dict[str, Any]]:
+        return self._selected_records_from_checkbox_table(self.fast_light_configs_table, self.fast_light_configs)
+
+    def _selected_varac_nodes(self) -> List[Dict[str, Any]]:
+        return self._selected_records_from_checkbox_table(self.varac_nodes_table, self.varac_nodes)
+
+    def _update_js8_instance_action_buttons(self) -> None:
+        theme = resolve_theme(self.settings)
+        self.add_js8_instance_btn.setStyleSheet(button_style("primary", theme))
+
+    def _update_fast_light_config_action_buttons(self) -> None:
+        theme = resolve_theme(self.settings)
+        selected = self._selected_fast_light_configs() if hasattr(self, "fast_light_configs_table") else []
+        count = len(selected)
+        self.add_fast_light_config_btn.setStyleSheet(button_style("primary", theme))
+        self.edit_fast_light_config_btn.setEnabled(count == 1)
+        self.edit_fast_light_config_btn.setStyleSheet(button_style("info" if count == 1 else "muted", theme))
+        self.delete_fast_light_config_btn.setEnabled(count >= 1)
+        self.delete_fast_light_config_btn.setStyleSheet(button_style("warning" if count >= 1 else "muted", theme))
+
+    def _update_varac_node_action_buttons(self) -> None:
+        theme = resolve_theme(self.settings)
+        selected = self._selected_varac_nodes() if hasattr(self, "varac_nodes_table") else []
+        count = len(selected)
+        self.add_varac_node_btn.setStyleSheet(button_style("primary", theme))
+        self.edit_varac_node_btn.setEnabled(count == 1)
+        self.edit_varac_node_btn.setStyleSheet(button_style("info" if count == 1 else "muted", theme))
+        self.delete_varac_node_btn.setEnabled(count >= 1)
+        self.delete_varac_node_btn.setStyleSheet(button_style("warning" if count >= 1 else "muted", theme))
 
     def _summary_logging_settings(self) -> str:
         log_level = self.log_level_combo.currentText().strip() if hasattr(self, "log_level_combo") else "INFO"
@@ -2135,7 +3516,11 @@ class SettingsTab(QWidget):
         js8call = "set" if hasattr(self, "js8call_path_edit") and self.js8call_path_edit.text().strip() else "missing"
         spotter = "set" if hasattr(self, "js8spotter_path_edit") and self.js8spotter_path_edit.text().strip() else "missing"
         commstat = "set" if hasattr(self, "commstat_path_edit") and self.commstat_path_edit.text().strip() else "missing"
-        return f"JS8Call {js8call}, Spotter {spotter}, CommStat {commstat}, DIRECTED {directed}, Forms {forms}"
+        managed = len([row for row in self.js8_instances if isinstance(row, dict)])
+        return (
+            f"JS8Call {js8call}, Spotter {spotter}, CommStat {commstat}, "
+            f"DIRECTED {directed}, Forms {forms}, {managed} managed"
+        )
 
     def _summary_fast_light_settings(self) -> str:
         total = len(self.PROGRAMS)
@@ -2144,7 +3529,8 @@ class SettingsTab(QWidget):
             edit = self.path_edits.get(name)
             if edit and edit.text().strip():
                 set_count += 1
-        return f"{set_count}/{total} app paths set"
+        managed = len([row for row in self.fast_light_configs if isinstance(row, dict)])
+        return f"{set_count}/{total} app paths set, {managed} managed configs"
 
     def _summary_gpg_settings(self) -> str:
         enabled = bool(hasattr(self, "gpg_verify_enabled_chk") and self.gpg_verify_enabled_chk.isChecked())
@@ -2173,7 +3559,8 @@ class SettingsTab(QWidget):
             f"Launch {'override' if launch_cmd_set else 'auto'}, "
             f"Incoming {'set' if incoming_set else 'missing'}, "
             f"BBS {'set' if bbs_set else 'missing'}, "
-            f"Archive {'on' if archive_on else 'off'}"
+            f"Archive {'on' if archive_on else 'off'}, "
+            f"{len([row for row in self.varac_nodes if isinstance(row, dict)])} managed nodes"
         )
 
     def _summary_launch_control(self) -> str:
@@ -2251,6 +3638,108 @@ class SettingsTab(QWidget):
         except Exception:
             pass
         return "127.0.0.1"
+
+    def _apply_runtime_projection_widgets(self, data: Dict[str, Any]) -> None:
+        ctrl = data.get("control_via", "FLRig") or "FLRig"
+        allowed_ctrl = ["FLRig", "RIGCTLD", "JS8Call", "Manual"]
+        if ctrl not in allowed_ctrl:
+            ctrl = "FLRig"
+        self.control_combo.setCurrentText(ctrl)
+
+        self.js8_host_edit.setText(str(data.get("js8_host", "") or "").strip() or "127.0.0.1")
+        self.js8_port_edit.setText(str(data.get("js8_port", "2442") or "2442"))
+        try:
+            offset_int = int(data.get("js8_offset_hz", 0) or 0)
+        except Exception:
+            offset_int = 0
+        self.js8_offset_edit.setText(str(offset_int))
+        self.js8_directed_edit.setText(str(data.get("js8_directed_path", "") or ""))
+        self.js8_forms_edit.setText(str(data.get("js8_forms_path", "") or ""))
+        self.js8call_path_edit.setText((data.get("path_js8call", "") or "").strip())
+        self.js8spotter_path_edit.setText((data.get("path_js8spotter", "") or "").strip())
+        self.commstat_path_edit.setText((data.get("path_commstat", "") or "").strip())
+        self.js8_mark_retrieved_chk.setChecked(bool(data.get("js8_inbox_mark_retrieved_sync", False)))
+
+        msg_paths = data.get("message_paths", {})
+        if not isinstance(msg_paths, dict):
+            msg_paths = {}
+        for origin, edit in self.msg_paths_edits.items():
+            edit.setText(str(msg_paths.get(origin, "") or ""))
+
+        varac_path = (data.get("varac_path", "") or "").strip()
+        if not varac_path:
+            legacy_db = (data.get("varac_db_path", "") or "").strip()
+            if legacy_db:
+                try:
+                    legacy = Path(legacy_db)
+                    if legacy.is_file():
+                        varac_path = str(legacy.parent)
+                    elif legacy.is_dir():
+                        varac_path = str(legacy)
+                except Exception:
+                    varac_path = legacy_db
+        if hasattr(self, "varac_path_edit"):
+            self.varac_path_edit.setText(varac_path)
+        if hasattr(self, "varac_launch_cmd_edit"):
+            self.varac_launch_cmd_edit.setText((data.get("varac_launch_cmd", "") or "").strip())
+        if hasattr(self, "fldigi_log_path_edit"):
+            self.fldigi_log_path_edit.setText((data.get("fldigi_log_path", "") or "").strip())
+
+        fldigi_dir = (data.get("fldigi_checkin_dir", "") or "").strip()
+        if not fldigi_dir:
+            fldigi_dir = str(get_fldigi_checkin_dir())
+        self.fldigi_checkin_dir_edit.setText(fldigi_dir)
+        self._refresh_fldigi_checkin_file_labels()
+
+        self.fldigi_host_edit.setText(self._resolved_fldigi_host_value(data))
+        self.fldigi_port_edit.setText(str(data.get("fldigi_port", "7362") or "7362"))
+        self.flrig_port_edit.setText(str(data.get("flrig_port", "12345") or "12345"))
+
+        for prog_name, meta in self.PROGRAMS.items():
+            path_key = meta.get("setting_key")
+            edit = self.path_edits.get(prog_name)
+            if path_key and edit is not None:
+                edit.setText(data.get(path_key, "") or "")
+
+        self._launch_items_cache = self.launch_orchestrator.get_launch_items()
+        launch_all = bool(self.settings.get("launch_control_enabled", data.get("launch_control_enabled", True)))
+        self.launch_all_with_startup_chk.setChecked(launch_all)
+        self._refresh_launch_control_table()
+
+    def _refresh_runtime_projection_ui(
+        self,
+        *,
+        refresh_multi_radio: bool = False,
+        refresh_managed_software: bool = False,
+        emit_saved: bool = False,
+    ) -> None:
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        data = self.settings.all()
+        previous_loading = self._loading_settings
+        self._loading_settings = True
+        try:
+            self._apply_runtime_projection_widgets(data)
+        finally:
+            self._loading_settings = previous_loading
+        if refresh_multi_radio:
+            self._refresh_multi_radio_tables()
+        if refresh_managed_software:
+            self._refresh_managed_software_tables(refresh_section_titles=False)
+        self._update_launch_control_buttons()
+        self._update_launch_selected_state()
+        self._update_device_profile_action_buttons()
+        self._update_operating_profile_action_buttons()
+        self._update_device_assignment_action_buttons()
+        self._refresh_section_titles()
+        self._refresh_running_status()
+        if emit_saved:
+            try:
+                self.settings_saved.emit()
+            except Exception:
+                pass
 
     def _load_settings(self):
         _perf_t0 = time.perf_counter()
@@ -2497,8 +3986,8 @@ class SettingsTab(QWidget):
         except Exception:
             self.local_net_profiles = []
         self._refresh_local_net_profiles_table()
-        self._refresh_device_profiles_table()
-        self._refresh_operating_profiles_table()
+        self._refresh_multi_radio_tables()
+        self._refresh_managed_software_tables(refresh_section_titles=False)
 
         self.js8_directed_edit.setText(data.get("js8_directed_path", "") or "")
 
@@ -2940,6 +4429,7 @@ class SettingsTab(QWidget):
             self.settings._data = data  # type: ignore[attr-defined]
 
         log.info("SettingsTab: settings saved.")
+        self._refresh_managed_software_tables(refresh_section_titles=False)
         self._ensure_fldigi_checkin_files()
         if show_message:
             QMessageBox.information(self, "Settings", "Settings saved.")
@@ -3929,54 +5419,7 @@ class SettingsTab(QWidget):
 
     def _refresh_running_status(self):
         _perf_t0 = time.perf_counter()
-        theme = resolve_theme(self.settings)
-        port_override: Optional[int] = None
-        flrig_port_override: Optional[int] = None
-        fldigi_host_override: Optional[str] = None
-        fldigi_port_override: Optional[int] = None
-        try:
-            host_txt = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
-            host_override = host_txt or "127.0.0.1"
-        except Exception:
-            host_override = "127.0.0.1"
-        try:
-            txt = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
-            port_override = int(txt) if txt else None
-        except Exception:
-            port_override = None
-        try:
-            txt = self.flrig_port_edit.text().strip() if hasattr(self, "flrig_port_edit") else ""
-            flrig_port_override = int(txt) if txt else None
-        except Exception:
-            flrig_port_override = None
-        try:
-            host_txt = self.fldigi_host_edit.text().strip() if hasattr(self, "fldigi_host_edit") else ""
-            fldigi_host_override = host_txt or self._resolved_fldigi_host_value()
-        except Exception:
-            fldigi_host_override = self._resolved_fldigi_host_value()
-        try:
-            txt = self.fldigi_port_edit.text().strip() if hasattr(self, "fldigi_port_edit") else ""
-            fldigi_port_override = int(txt) if txt else None
-        except Exception:
-            fldigi_port_override = None
-        snapshot = self._status_service.status_snapshot(
-            port_override=port_override,
-            host_override=host_override,
-            flrig_port_override=flrig_port_override,
-            fldigi_host_override=fldigi_host_override,
-            fldigi_port_override=fldigi_port_override,
-        )
-        for program_name, lbl in self.status_labels.items():
-            info = snapshot.get(program_name, {})
-            state = str(info.get("state", "idle"))
-            tooltip = str(info.get("tooltip", "Not running"))
-            lbl.setStyleSheet(led_style(state, theme))
-            lbl.setToolTip(tooltip)
-
-        # Keep VarAC path tooltip in sync with runtime status.
-        if hasattr(self, "varac_path_edit"):
-            varac_info = snapshot.get("VarAC", {})
-            self.varac_path_edit.setToolTip(str(varac_info.get("tooltip", "Not running")))
+        self._dispatch_status_refresh_request(self._collect_status_snapshot_request())
         emit_span(
             "settings.refresh_running_status",
             (time.perf_counter() - _perf_t0) * 1000.0,
@@ -3995,11 +5438,14 @@ class SettingsTab(QWidget):
                     f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
                 )
                 self.loading_label.setVisible(False)
+            if self._last_status_snapshot:
+                self._apply_status_snapshot(self._last_status_snapshot)
             self._refresh_running_status()
             self._update_launch_selected_state()
             self._update_device_profile_action_buttons()
             self._update_op_group_action_buttons()
             self._update_local_net_action_buttons()
+            self._update_multi_radio_station_summary()
             self._set_save_button_state("info" if self._settings_dirty else "success")
             if hasattr(self, "open_logs_btn"):
                 self.open_logs_btn.setStyleSheet(button_style("primary", theme))
@@ -4056,7 +5502,13 @@ class SettingsTab(QWidget):
         except Exception:
             port_override = None
         try:
-            return bool(self._status_service.js8_api_reachable(port_override=port_override, host_override=host_override))
+            return bool(
+                self._status_service.js8_api_reachable(
+                    port_override=port_override,
+                    host_override=host_override,
+                    allow_fallback=False,
+                )
+            )
         except Exception:
             return False
 
@@ -5112,6 +6564,646 @@ class SettingsTab(QWidget):
             log.exception("Failed to persist Local Net Profile deletions; will remain in-memory only.")
         QMessageBox.information(self, "Delete Entries", f"Deleted {len(to_remove)} Local Net entr{'y' if len(to_remove) == 1 else 'ies'}.")
 
+    # ---------- Managed Software Records ---------- #
+
+    def _managed_record_workdir(self, raw_path: str) -> str:
+        text = str(raw_path or "").strip()
+        if text:
+            try:
+                candidate = Path(text)
+                if candidate.is_dir():
+                    return str(candidate)
+                if str(candidate.parent):
+                    return str(candidate.parent)
+            except Exception:
+                pass
+        try:
+            return str(Path.home())
+        except Exception:
+            return ""
+
+    def _refresh_after_managed_record_save(self, record_kind: str, record_id: int) -> None:
+        primary = self.multi_radio_store.get_runtime_primary_device_profile()
+        impacted = False
+        if isinstance(primary, dict):
+            key_map = {
+                "js8": "js8_instance_id",
+                "fast_light": "fast_light_config_id",
+                "varac": "varac_node_id",
+            }
+            key = key_map.get(record_kind, "")
+            if key and int(primary.get(key, 0) or 0) == int(record_id):
+                impacted = True
+        self._refresh_managed_software_tables(refresh_section_titles=False)
+        if impacted and isinstance(primary, dict):
+            try:
+                self.multi_radio_store.sync_runtime_active_device_to_legacy_settings(int(primary.get("id", 0) or 0))
+                self._refresh_runtime_projection_ui(refresh_managed_software=False)
+            except Exception:
+                log.exception("Failed refreshing primary compatibility settings after managed record save.")
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+        self._emit_device_profiles_changed()
+
+    def _open_js8_instance_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit JS8 Instance" if existing else "Add JS8 Instance")
+        dlg.resize(640, 520)
+        layout = QVBoxLayout(dlg)
+        intro = QLabel(
+            "Configure a reusable JS8Call / JS8Call-improved instance. Device profiles can bind to this record "
+            "instead of duplicating JS8 endpoint and file-path settings."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.addLayout(form)
+
+        def _browse_row(edit: QLineEdit, *, browse_cb) -> QWidget:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            row_layout.addWidget(edit, 1)
+            btn = QPushButton("Browse")
+            btn.clicked.connect(browse_cb)
+            row_layout.addWidget(btn, 0)
+            return row
+
+        name_edit = QLineEdit(str((existing or {}).get("name", "") or ""))
+        enabled_chk = QCheckBox("Enabled")
+        enabled_chk.setChecked(bool((existing or {}).get("enabled", 1)))
+        host_edit = QLineEdit(str((existing or {}).get("host", "") or "127.0.0.1"))
+        port_edit = QLineEdit(str((existing or {}).get("port", 2442) or 2442))
+        port_edit.setValidator(QIntValidator(1, 65535, port_edit))
+        offset_edit = QLineEdit(str((existing or {}).get("offset_hz", 0) or 0))
+        offset_edit.setValidator(QIntValidator(-5000, 5000, offset_edit))
+        profile_edit = QLineEdit(str((existing or {}).get("profile_path", "") or ""))
+        directed_edit = QLineEdit(str((existing or {}).get("directed_path", "") or ""))
+        inbox_edit = QLineEdit(str((existing or {}).get("inbox_path", "") or ""))
+        forms_edit = QLineEdit(str((existing or {}).get("forms_path", "") or ""))
+        install_edit = QLineEdit(str((existing or {}).get("install_path", "") or ""))
+        spotter_edit = QLineEdit(str((existing or {}).get("spotter_launch_path", "") or ""))
+        commstat_edit = QLineEdit(str((existing or {}).get("commstat_launch_path", "") or ""))
+
+        form.addRow("Name:", name_edit)
+        form.addRow("", enabled_chk)
+        api_row = QWidget()
+        api_layout = QHBoxLayout(api_row)
+        api_layout.setContentsMargins(0, 0, 0, 0)
+        api_layout.setSpacing(8)
+        api_layout.addWidget(host_edit, 1)
+        api_layout.addWidget(QLabel("Port"))
+        api_layout.addWidget(port_edit, 0)
+        api_layout.addWidget(QLabel("Offset"))
+        api_layout.addWidget(offset_edit, 0)
+        form.addRow("API:", api_row)
+        form.addRow(
+            "Profile Dir:",
+            _browse_row(
+                profile_edit,
+                browse_cb=lambda: profile_edit.setText(
+                    QFileDialog.getExistingDirectory(
+                        dlg,
+                        "Select JS8 instance directory",
+                        self._managed_record_workdir(profile_edit.text()),
+                    )
+                    or profile_edit.text()
+                ),
+            ),
+        )
+        form.addRow(
+            "DIRECTED.TXT:",
+            _browse_row(
+                directed_edit,
+                browse_cb=lambda: directed_edit.setText(
+                    QFileDialog.getOpenFileName(
+                        dlg,
+                        "Select JS8 DIRECTED.TXT",
+                        self._managed_record_workdir(directed_edit.text()),
+                        "Text Files (*.txt);;All Files (*)",
+                    )[0]
+                    or directed_edit.text()
+                ),
+            ),
+        )
+        form.addRow(
+            "Inbox DB:",
+            _browse_row(
+                inbox_edit,
+                browse_cb=lambda: inbox_edit.setText(
+                    QFileDialog.getOpenFileName(
+                        dlg,
+                        "Select JS8 inbox DB",
+                        self._managed_record_workdir(inbox_edit.text()),
+                        "Database Files (*.db *.db3 *.sqlite *.sqlite3);;All Files (*)",
+                    )[0]
+                    or inbox_edit.text()
+                ),
+            ),
+        )
+        form.addRow(
+            "Forms Dir:",
+            _browse_row(
+                forms_edit,
+                browse_cb=lambda: forms_edit.setText(
+                    QFileDialog.getExistingDirectory(
+                        dlg,
+                        "Select JS8 forms directory",
+                        self._managed_record_workdir(forms_edit.text()),
+                    )
+                    or forms_edit.text()
+                ),
+            ),
+        )
+        form.addRow(
+            "Install Path:",
+            _browse_row(
+                install_edit,
+                browse_cb=lambda: install_edit.setText(
+                    QFileDialog.getExistingDirectory(
+                        dlg,
+                        "Select JS8 install folder",
+                        self._managed_record_workdir(install_edit.text()),
+                    )
+                    or install_edit.text()
+                ),
+            ),
+        )
+        form.addRow(
+            "Spotter Launch:",
+            _browse_row(
+                spotter_edit,
+                browse_cb=lambda: spotter_edit.setText(
+                    QFileDialog.getOpenFileName(
+                        dlg,
+                        "Select JS8Spotter launch target",
+                        self._managed_record_workdir(spotter_edit.text()),
+                        "Programs (*.exe *.bat *.cmd *.lnk *.ps1 *.py);;All Files (*)",
+                    )[0]
+                    or spotter_edit.text()
+                ),
+            ),
+        )
+        form.addRow(
+            "CommStat Launch:",
+            _browse_row(
+                commstat_edit,
+                browse_cb=lambda: commstat_edit.setText(
+                    QFileDialog.getOpenFileName(
+                        dlg,
+                        "Select CommStat launch target",
+                        self._managed_record_workdir(commstat_edit.text()),
+                        "Programs (*.exe *.bat *.cmd *.lnk *.ps1 *.py);;All Files (*)",
+                    )[0]
+                    or commstat_edit.text()
+                ),
+            ),
+        )
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+        out: Dict[str, Any] = {}
+
+        def _accept() -> None:
+            name = name_edit.text().strip()
+            if not name:
+                QMessageBox.warning(self, "JS8 Instances", "A JS8 instance name is required.")
+                return
+            try:
+                port = int(port_edit.text().strip() or "2442")
+                offset_hz = int(offset_edit.text().strip() or "0")
+            except Exception:
+                QMessageBox.warning(self, "JS8 Instances", "Port and offset must be valid integers.")
+                return
+            out.update(
+                {
+                    "id": (existing or {}).get("id"),
+                    "system_key": (existing or {}).get("system_key"),
+                    "name": name,
+                    "enabled": bool(enabled_chk.isChecked()),
+                    "host": host_edit.text().strip() or "127.0.0.1",
+                    "port": port,
+                    "offset_hz": offset_hz,
+                    "profile_path": profile_edit.text().strip(),
+                    "directed_path": directed_edit.text().strip(),
+                    "inbox_path": inbox_edit.text().strip(),
+                    "forms_path": forms_edit.text().strip(),
+                    "install_path": install_edit.text().strip(),
+                    "spotter_launch_path": spotter_edit.text().strip(),
+                    "commstat_launch_path": commstat_edit.text().strip(),
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_accept)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _persist_js8_instance(self, values: Dict[str, Any]) -> None:
+        try:
+            saved = self.multi_radio_store.save_js8_instance(values)
+        except Exception:
+            log.exception("Failed saving JS8 instance.")
+            QMessageBox.warning(self, "JS8 Instances", "Unable to save the JS8 instance.")
+            return
+        self._refresh_after_managed_record_save("js8", int(saved.get("id", 0) or 0))
+
+    def _add_js8_instance(self) -> None:
+        existing_names = {
+            str(row.get("name", "") or "").strip().lower()
+            for row in self.js8_instances
+            if isinstance(row, dict) and str(row.get("name", "") or "").strip()
+        }
+        base_name = "JS8 Instance"
+        candidate = base_name
+        suffix = 2
+        while candidate.strip().lower() in existing_names:
+            candidate = f"{base_name} {suffix}"
+            suffix += 1
+        try:
+            created = self.multi_radio_store.save_js8_instance(
+                {
+                    "name": candidate,
+                    "enabled": True,
+                    "host": "127.0.0.1",
+                    "port": 2442,
+                    "offset_hz": 0,
+                }
+            )
+        except Exception:
+            log.exception("Failed creating JS8 instance.")
+            QMessageBox.warning(self, "JS8 Instances", "Unable to create a new JS8 instance.")
+            return
+        self._js8_expanded_instance_id = int(created.get("id", 0) or 0)
+        self._refresh_after_managed_record_save("js8", int(created.get("id", 0) or 0))
+
+    def _edit_js8_instance(self) -> None:
+        selected = self._selected_js8_instances()
+        if not selected:
+            QMessageBox.information(self, "Edit JS8 Instance", "Select one JS8 instance to edit.")
+            return
+        if len(selected) > 1:
+            QMessageBox.warning(self, "Edit JS8 Instance", "Please select only one JS8 instance.")
+            return
+        updated = self._open_js8_instance_dialog(existing=selected[0])
+        if updated:
+            self._persist_js8_instance(updated)
+
+    def _delete_js8_instances(self) -> None:
+        selected = self._selected_js8_instances()
+        if not selected:
+            QMessageBox.information(self, "Delete JS8 Instances", "Select one or more JS8 instances to delete.")
+            return
+        choice = QMessageBox.question(
+            self,
+            "Delete JS8 Instances",
+            f"Delete {len(selected)} selected JS8 instance(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.delete_js8_instance(int(row.get("id", 0) or 0))
+        except Exception as exc:
+            QMessageBox.warning(self, "Delete JS8 Instances", str(exc))
+            self._refresh_managed_software_tables(refresh_section_titles=False)
+            return
+        self._refresh_managed_software_tables(refresh_section_titles=False)
+
+    def _open_fast_light_config_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit Fast Light Config" if existing else "Add Fast Light Config")
+        dlg.resize(620, 420)
+        layout = QVBoxLayout(dlg)
+        intro = QLabel(
+            "Configure a reusable FLRig / FLDigi pair. Device profiles can bind to this config instead of "
+            "duplicating endpoint and log/check-in settings."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.addLayout(form)
+
+        def _browse_row(edit: QLineEdit, *, title: str, file_filter: str = "", directory: bool = False) -> QWidget:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            row_layout.addWidget(edit, 1)
+            btn = QPushButton("Browse")
+            if directory:
+                btn.clicked.connect(
+                    lambda: edit.setText(
+                        QFileDialog.getExistingDirectory(dlg, title, self._managed_record_workdir(edit.text()))
+                        or edit.text()
+                    )
+                )
+            else:
+                btn.clicked.connect(
+                    lambda: edit.setText(
+                        QFileDialog.getOpenFileName(
+                            dlg,
+                            title,
+                            self._managed_record_workdir(edit.text()),
+                            file_filter or "Programs (*.exe *.bat *.cmd *.lnk *.ps1 *.py);;All Files (*)",
+                        )[0]
+                        or edit.text()
+                    )
+                )
+            row_layout.addWidget(btn, 0)
+            return row
+
+        name_edit = QLineEdit(str((existing or {}).get("name", "") or ""))
+        enabled_chk = QCheckBox("Enabled")
+        enabled_chk.setChecked(bool((existing or {}).get("enabled", 1)))
+        flrig_path_edit = QLineEdit(str((existing or {}).get("flrig_path", "") or ""))
+        flrig_host_edit = QLineEdit(str((existing or {}).get("flrig_host", "") or "127.0.0.1"))
+        flrig_port_edit = QLineEdit(str((existing or {}).get("flrig_port", 12345) or 12345))
+        flrig_port_edit.setValidator(QIntValidator(1, 65535, flrig_port_edit))
+        fldigi_path_edit = QLineEdit(str((existing or {}).get("fldigi_path", "") or ""))
+        fldigi_host_edit = QLineEdit(
+            str((existing or {}).get("fldigi_host", "") or (existing or {}).get("flrig_host", "") or "127.0.0.1")
+        )
+        fldigi_port_edit = QLineEdit(str((existing or {}).get("fldigi_port", 7362) or 7362))
+        fldigi_port_edit.setValidator(QIntValidator(1, 65535, fldigi_port_edit))
+        fldigi_log_edit = QLineEdit(str((existing or {}).get("fldigi_log_path", "") or ""))
+        fldigi_checkin_edit = QLineEdit(str((existing or {}).get("fldigi_checkin_dir", "") or ""))
+
+        form.addRow("Name:", name_edit)
+        form.addRow("", enabled_chk)
+        form.addRow("FLRig Path:", _browse_row(flrig_path_edit, title="Select FLRig program or folder"))
+        flrig_row = QWidget()
+        flrig_layout = QHBoxLayout(flrig_row)
+        flrig_layout.setContentsMargins(0, 0, 0, 0)
+        flrig_layout.setSpacing(8)
+        flrig_layout.addWidget(flrig_host_edit, 1)
+        flrig_layout.addWidget(QLabel("Port"))
+        flrig_layout.addWidget(flrig_port_edit, 0)
+        form.addRow("FLRig Endpoint:", flrig_row)
+        form.addRow("FLDigi Path:", _browse_row(fldigi_path_edit, title="Select FLDigi program or folder"))
+        fldigi_row = QWidget()
+        fldigi_layout = QHBoxLayout(fldigi_row)
+        fldigi_layout.setContentsMargins(0, 0, 0, 0)
+        fldigi_layout.setSpacing(8)
+        fldigi_layout.addWidget(fldigi_host_edit, 1)
+        fldigi_layout.addWidget(QLabel("Port"))
+        fldigi_layout.addWidget(fldigi_port_edit, 0)
+        form.addRow("FLDigi Endpoint:", fldigi_row)
+        form.addRow("FLDigi Logs:", _browse_row(fldigi_log_edit, title="Select FLDigi log directory", directory=True))
+        form.addRow(
+            "Check-in Dir:",
+            _browse_row(fldigi_checkin_edit, title="Select FLDigi check-in directory", directory=True),
+        )
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+        out: Dict[str, Any] = {}
+
+        def _accept() -> None:
+            name = name_edit.text().strip()
+            if not name:
+                QMessageBox.warning(self, "Fast Light Configs", "A Fast Light config name is required.")
+                return
+            try:
+                flrig_port = int(flrig_port_edit.text().strip() or "12345")
+                fldigi_port = int(fldigi_port_edit.text().strip() or "7362")
+            except Exception:
+                QMessageBox.warning(self, "Fast Light Configs", "Endpoint ports must be valid integers.")
+                return
+            out.update(
+                {
+                    "id": (existing or {}).get("id"),
+                    "system_key": (existing or {}).get("system_key"),
+                    "name": name,
+                    "enabled": bool(enabled_chk.isChecked()),
+                    "flrig_path": flrig_path_edit.text().strip(),
+                    "flrig_host": flrig_host_edit.text().strip() or "127.0.0.1",
+                    "flrig_port": flrig_port,
+                    "fldigi_path": fldigi_path_edit.text().strip(),
+                    "fldigi_host": fldigi_host_edit.text().strip() or flrig_host_edit.text().strip() or "127.0.0.1",
+                    "fldigi_port": fldigi_port,
+                    "fldigi_log_path": fldigi_log_edit.text().strip(),
+                    "fldigi_checkin_dir": fldigi_checkin_edit.text().strip(),
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_accept)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _persist_fast_light_config(self, values: Dict[str, Any]) -> None:
+        try:
+            saved = self.multi_radio_store.save_fast_light_config(values)
+        except Exception:
+            log.exception("Failed saving Fast Light config.")
+            QMessageBox.warning(self, "Fast Light Configs", "Unable to save the Fast Light config.")
+            return
+        self._refresh_after_managed_record_save("fast_light", int(saved.get("id", 0) or 0))
+
+    def _add_fast_light_config(self) -> None:
+        created = self._open_fast_light_config_dialog(existing=None)
+        if created:
+            self._persist_fast_light_config(created)
+
+    def _edit_fast_light_config(self) -> None:
+        selected = self._selected_fast_light_configs()
+        if not selected:
+            QMessageBox.information(self, "Edit Fast Light Config", "Select one Fast Light config to edit.")
+            return
+        if len(selected) > 1:
+            QMessageBox.warning(self, "Edit Fast Light Config", "Please select only one Fast Light config.")
+            return
+        updated = self._open_fast_light_config_dialog(existing=selected[0])
+        if updated:
+            self._persist_fast_light_config(updated)
+
+    def _delete_fast_light_configs(self) -> None:
+        selected = self._selected_fast_light_configs()
+        if not selected:
+            QMessageBox.information(
+                self,
+                "Delete Fast Light Configs",
+                "Select one or more Fast Light configs to delete.",
+            )
+            return
+        choice = QMessageBox.question(
+            self,
+            "Delete Fast Light Configs",
+            f"Delete {len(selected)} selected Fast Light config(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.delete_fast_light_config(int(row.get("id", 0) or 0))
+        except Exception as exc:
+            QMessageBox.warning(self, "Delete Fast Light Configs", str(exc))
+            self._refresh_managed_software_tables(refresh_section_titles=False)
+            return
+        self._refresh_managed_software_tables(refresh_section_titles=False)
+
+    def _open_varac_node_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit VarAC Node" if existing else "Add VarAC Node")
+        dlg.resize(620, 380)
+        layout = QVBoxLayout(dlg)
+        intro = QLabel(
+            "Configure a reusable VarAC node record. Device profiles can bind to this record instead of "
+            "duplicating VarAC install, DB, INI, launch, and incoming-file settings."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.addLayout(form)
+
+        def _browse_row(edit: QLineEdit, *, title: str, file_filter: str = "", directory: bool = False) -> QWidget:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            row_layout.addWidget(edit, 1)
+            btn = QPushButton("Browse")
+            if directory:
+                btn.clicked.connect(
+                    lambda: edit.setText(
+                        QFileDialog.getExistingDirectory(dlg, title, self._managed_record_workdir(edit.text()))
+                        or edit.text()
+                    )
+                )
+            else:
+                btn.clicked.connect(
+                    lambda: edit.setText(
+                        QFileDialog.getOpenFileName(
+                            dlg,
+                            title,
+                            self._managed_record_workdir(edit.text()),
+                            file_filter or "All Files (*)",
+                        )[0]
+                        or edit.text()
+                    )
+                )
+            row_layout.addWidget(btn, 0)
+            return row
+
+        name_edit = QLineEdit(str((existing or {}).get("name", "") or ""))
+        enabled_chk = QCheckBox("Enabled")
+        enabled_chk.setChecked(bool((existing or {}).get("enabled", 1)))
+        install_edit = QLineEdit(str((existing or {}).get("install_path", "") or ""))
+        db_edit = QLineEdit(str((existing or {}).get("db_path", "") or ""))
+        ini_edit = QLineEdit(str((existing or {}).get("ini_path", "") or ""))
+        launch_cmd_edit = QLineEdit(str((existing or {}).get("launch_cmd", "") or ""))
+        incoming_edit = QLineEdit(str((existing or {}).get("incoming_path", "") or ""))
+
+        form.addRow("Name:", name_edit)
+        form.addRow("", enabled_chk)
+        form.addRow("Install Path:", _browse_row(install_edit, title="Select VarAC install folder", directory=True))
+        form.addRow(
+            "Database Path:",
+            _browse_row(
+                db_edit,
+                title="Select VarAC database",
+                file_filter="Database Files (*.db *.db3 *.sqlite *.sqlite3);;All Files (*)",
+            ),
+        )
+        form.addRow(
+            "INI Path:",
+            _browse_row(ini_edit, title="Select VarAC INI", file_filter="INI Files (*.ini);;All Files (*)"),
+        )
+        form.addRow("Launch Cmd:", launch_cmd_edit)
+        form.addRow("Incoming Dir:", _browse_row(incoming_edit, title="Select VarAC incoming directory", directory=True))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+        out: Dict[str, Any] = {}
+
+        def _accept() -> None:
+            name = name_edit.text().strip()
+            if not name:
+                QMessageBox.warning(self, "VarAC Nodes", "A VarAC node name is required.")
+                return
+            out.update(
+                {
+                    "id": (existing or {}).get("id"),
+                    "system_key": (existing or {}).get("system_key"),
+                    "name": name,
+                    "enabled": bool(enabled_chk.isChecked()),
+                    "install_path": install_edit.text().strip(),
+                    "db_path": db_edit.text().strip(),
+                    "ini_path": ini_edit.text().strip(),
+                    "launch_cmd": launch_cmd_edit.text().strip(),
+                    "incoming_path": incoming_edit.text().strip(),
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_accept)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _persist_varac_node(self, values: Dict[str, Any]) -> None:
+        try:
+            saved = self.multi_radio_store.save_varac_node(values)
+        except Exception:
+            log.exception("Failed saving VarAC node.")
+            QMessageBox.warning(self, "VarAC Nodes", "Unable to save the VarAC node.")
+            return
+        self._refresh_after_managed_record_save("varac", int(saved.get("id", 0) or 0))
+
+    def _add_varac_node(self) -> None:
+        created = self._open_varac_node_dialog(existing=None)
+        if created:
+            self._persist_varac_node(created)
+
+    def _edit_varac_node(self) -> None:
+        selected = self._selected_varac_nodes()
+        if not selected:
+            QMessageBox.information(self, "Edit VarAC Node", "Select one VarAC node to edit.")
+            return
+        if len(selected) > 1:
+            QMessageBox.warning(self, "Edit VarAC Node", "Please select only one VarAC node.")
+            return
+        updated = self._open_varac_node_dialog(existing=selected[0])
+        if updated:
+            self._persist_varac_node(updated)
+
+    def _delete_varac_nodes(self) -> None:
+        selected = self._selected_varac_nodes()
+        if not selected:
+            QMessageBox.information(self, "Delete VarAC Nodes", "Select one or more VarAC nodes to delete.")
+            return
+        choice = QMessageBox.question(
+            self,
+            "Delete VarAC Nodes",
+            f"Delete {len(selected)} selected VarAC node(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.delete_varac_node(int(row.get("id", 0) or 0))
+        except Exception as exc:
+            QMessageBox.warning(self, "Delete VarAC Nodes", str(exc))
+            self._refresh_managed_software_tables(refresh_section_titles=False)
+            return
+        self._refresh_managed_software_tables(refresh_section_titles=False)
+
     # ---------- Device Profiles ---------- #
 
     def _device_profile_by_id(self, device_profile_id: int) -> Optional[Dict[str, Any]]:
@@ -5134,6 +7226,14 @@ class SettingsTab(QWidget):
         return backend_key or "unknown"
 
     @staticmethod
+    def _device_class_label(device_class: str) -> str:
+        class_key = str(device_class or "").strip().lower()
+        for label, value in DEVICE_CLASS_OPTIONS:
+            if value == class_key:
+                return label
+        return class_key or "Transceiver"
+
+    @staticmethod
     def _device_deployment_label(mode: str) -> str:
         mode_key = str(mode or "").strip().lower()
         for label, value in DEVICE_DEPLOYMENT_OPTIONS:
@@ -5143,6 +7243,14 @@ class SettingsTab(QWidget):
 
     @staticmethod
     def _device_endpoint_summary(profile: Dict[str, Any]) -> str:
+        if str(profile.get("device_class", "") or "").strip().lower() == "observer":
+            host = str(profile.get("sdr_host", "") or "").strip()
+            port = profile.get("sdr_port")
+            if host and port not in (None, ""):
+                return f"Observer SDR {host}:{port}"
+            if host:
+                return f"Observer SDR {host}"
+            return "Observer / no endpoint"
         backend = str(profile.get("control_backend", "") or "").strip().lower()
         if backend == "flrig":
             host = str(profile.get("flrig_host", "") or "").strip() or "127.0.0.1"
@@ -5160,6 +7268,11 @@ class SettingsTab(QWidget):
         if host:
             return f"Manual via {host}"
         return "Manual / no endpoint"
+
+    @staticmethod
+    def _device_ptt_group_label(value: object) -> str:
+        txt = str(value or "").strip()
+        return txt or "--"
 
     def _operating_profile_by_id(self, operating_profile_id: int) -> Optional[Dict[str, Any]]:
         for row in self.operating_profiles:
@@ -5272,6 +7385,66 @@ class SettingsTab(QWidget):
             if isinstance(row, dict) and int(row.get("device_profile_id", 0) or 0) in selected_ids
         ]
 
+    def _selected_varac_cluster_ids(self) -> List[int]:
+        rows: List[int] = []
+        if not hasattr(self, "varac_clusters_table"):
+            return rows
+        for r in range(self.varac_clusters_table.rowCount()):
+            w = self.varac_clusters_table.cellWidget(r, 0)
+            chk: Optional[QCheckBox] = None
+            if isinstance(w, QCheckBox):
+                chk = w
+            elif isinstance(w, QWidget):
+                chk = w.findChild(QCheckBox)
+            if chk is None or not chk.isChecked():
+                continue
+            try:
+                rows.append(int(chk.property("varac_cluster_id")))
+            except Exception:
+                continue
+        return rows
+
+    def _selected_varac_clusters(self) -> List[Dict[str, Any]]:
+        selected_ids = set(self._selected_varac_cluster_ids())
+        return [
+            dict(row)
+            for row in self.varac_clusters
+            if isinstance(row, dict) and int(row.get("id", 0) or 0) in selected_ids
+        ]
+
+    def _selected_varac_memberships(self) -> List[Dict[str, Any]]:
+        selected_pairs: set[tuple[int, int]] = set()
+        if not hasattr(self, "varac_members_table"):
+            return []
+        for r in range(self.varac_members_table.rowCount()):
+            w = self.varac_members_table.cellWidget(r, 0)
+            chk: Optional[QCheckBox] = None
+            if isinstance(w, QCheckBox):
+                chk = w
+            elif isinstance(w, QWidget):
+                chk = w.findChild(QCheckBox)
+            if chk is None or not chk.isChecked():
+                continue
+            try:
+                selected_pairs.add(
+                    (
+                        int(chk.property("varac_cluster_id") or 0),
+                        int(chk.property("device_profile_id") or 0),
+                    )
+                )
+            except Exception:
+                continue
+        return [
+            dict(row)
+            for row in self.varac_cluster_members
+            if isinstance(row, dict)
+            and (
+                int(row.get("cluster_db_id", 0) or 0),
+                int(row.get("device_profile_id", 0) or 0),
+            )
+            in selected_pairs
+        ]
+
     def _selected_device_profile_ids(self) -> List[int]:
         rows: List[int] = []
         if not hasattr(self, "device_profiles_table"):
@@ -5327,8 +7500,10 @@ class SettingsTab(QWidget):
         if count == 1:
             row = selected[0]
             backend = str(row.get("control_backend", "") or "").strip().lower()
+            device_class = str(row.get("device_class", "") or "").strip().lower()
             can_make_primary = (
                 backend in SUPPORTED_RUNTIME_CONTROL_BACKENDS
+                and device_class != "observer"
                 and int(row.get("runtime_primary", 0) or 0) != 1
             )
         if count > 0:
@@ -5371,21 +7546,66 @@ class SettingsTab(QWidget):
         theme = resolve_theme(self.settings)
         selected = self._selected_assignment_rows()
         count = len(selected)
+        active_swap = dict(self.active_profile_swap or {})
+        swap_device_ids = {
+            int(active_swap.get("source_device_id", 0) or 0),
+            int(active_swap.get("target_device_id", 0) or 0),
+        }
+        swap_device_ids.discard(0)
+        selection_includes_swap_devices = any(int(row.get("device_profile_id", 0) or 0) in swap_device_ids for row in selected)
         has_enabled_operating_profile = any(
             isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1 for row in self.operating_profiles
         )
-        can_assign = count > 0 and has_enabled_operating_profile
-        can_restore = count > 0 and any(
+        can_assign = count > 0 and has_enabled_operating_profile and not selection_includes_swap_devices
+        can_restore = count > 0 and not selection_includes_swap_devices and any(
             str(row.get("assignment_state", "") or "").strip().lower() == "temporary_override"
             or str(row.get("operating_system_key", "") or "").strip() != "default_operating"
             for row in selected
         )
+        can_swap = (
+            not active_swap
+            and count == 1
+            and int(selected[0].get("runtime_active", 0) or 0) == 1
+            and int(selected[0].get("runtime_primary", 0) or 0) != 1
+            and str(selected[0].get("device_class", "") or "").strip().lower() != "observer"
+        )
+        can_restore_swap = bool(active_swap)
         self.assign_device_operating_profile_btn.setEnabled(can_assign)
         self.assign_device_operating_profile_btn.setStyleSheet(button_style("info" if can_assign else "muted", theme))
+        self.temporary_profile_swap_btn.setEnabled(can_swap)
+        self.temporary_profile_swap_btn.setStyleSheet(button_style("info" if can_swap else "muted", theme))
+        self.restore_profile_swap_btn.setEnabled(can_restore_swap)
+        self.restore_profile_swap_btn.setStyleSheet(button_style("warning" if can_restore_swap else "muted", theme))
         self.restore_device_operating_profile_btn.setEnabled(can_restore)
         self.restore_device_operating_profile_btn.setStyleSheet(button_style("warning" if can_restore else "muted", theme))
 
-    def _refresh_operating_profiles_table(self) -> None:
+    def _update_varac_cluster_action_buttons(self) -> None:
+        theme = resolve_theme(self.settings)
+        selected = self._selected_varac_clusters()
+        count = len(selected)
+        can_edit = count == 1
+        can_delete = count > 0
+        self.add_varac_cluster_btn.setStyleSheet(button_style("primary", theme))
+        self.edit_varac_cluster_btn.setEnabled(can_edit)
+        self.edit_varac_cluster_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
+        self.delete_varac_cluster_btn.setEnabled(can_delete)
+        self.delete_varac_cluster_btn.setStyleSheet(button_style("warning" if can_delete else "muted", theme))
+
+    def _update_varac_membership_action_buttons(self) -> None:
+        theme = resolve_theme(self.settings)
+        selected = self._selected_varac_memberships()
+        can_remove = len(selected) > 0
+        self.add_varac_membership_btn.setStyleSheet(button_style("primary", theme))
+        self.remove_varac_membership_btn.setEnabled(can_remove)
+        self.remove_varac_membership_btn.setStyleSheet(button_style("warning" if can_remove else "muted", theme))
+
+    def _refresh_operating_profiles_table(
+        self,
+        *,
+        refresh_assignments: bool = True,
+        refresh_section_titles: bool = True,
+        refresh_station_summary: bool = True,
+    ) -> None:
         table = self.operating_profiles_table
         try:
             self.operating_profiles = list(self.multi_radio_store.list_operating_profiles())
@@ -5428,11 +7648,22 @@ class SettingsTab(QWidget):
             self._operating_profiles_table_loading = False
         self._update_operating_profiles_hint()
         self._update_operating_profile_action_buttons()
-        if hasattr(self, "device_assignments_table"):
-            self._refresh_device_assignments_table()
-        self._refresh_section_titles()
+        if refresh_assignments and hasattr(self, "device_assignments_table"):
+            self._refresh_device_assignments_table(
+                refresh_section_titles=False,
+                refresh_station_summary=False,
+            )
+        if refresh_station_summary:
+            self._update_multi_radio_station_summary()
+        if refresh_section_titles:
+            self._refresh_section_titles()
 
-    def _refresh_device_assignments_table(self) -> None:
+    def _refresh_device_assignments_table(
+        self,
+        *,
+        refresh_section_titles: bool = True,
+        refresh_station_summary: bool = True,
+    ) -> None:
         table = self.device_assignments_table
         devices = list(self.device_profiles)
         if not devices:
@@ -5455,6 +7686,12 @@ class SettingsTab(QWidget):
         except Exception:
             log.exception("Failed loading device assignments from store.")
             effective_rows = []
+        try:
+            active_swap = self.multi_radio_store.get_active_profile_swap()
+        except Exception:
+            log.exception("Failed loading active profile swap from store.")
+            active_swap = None
+        self.active_profile_swap = dict(active_swap) if isinstance(active_swap, dict) else None
         assignments = {
             int(row.get("device_profile_id", 0) or 0): dict(row)
             for row in effective_rows
@@ -5474,6 +7711,7 @@ class SettingsTab(QWidget):
                 row_data = {
                     "device_profile_id": device_id,
                     "device_name": str(device.get("name", "") or ""),
+                    "device_class": str(device.get("device_class", "") or ""),
                     "runtime_active": int(device.get("runtime_active", 0) or 0),
                     "runtime_primary": int(device.get("runtime_primary", 0) or 0),
                     "operating_profile_id": (
@@ -5522,9 +7760,135 @@ class SettingsTab(QWidget):
         self._update_device_assignments_hint()
         self._update_device_assignment_action_buttons()
         self._update_operating_profiles_hint()
-        self._refresh_section_titles()
+        if refresh_station_summary:
+            self._update_multi_radio_station_summary()
+        if refresh_section_titles:
+            self._refresh_section_titles()
 
-    def _refresh_device_profiles_table(self) -> None:
+    def _refresh_varac_clusters_table(
+        self,
+        *,
+        refresh_memberships: bool = True,
+        refresh_section_titles: bool = True,
+        refresh_station_summary: bool = True,
+    ) -> None:
+        table = self.varac_clusters_table
+        try:
+            self.varac_clusters = list(self.multi_radio_store.list_varac_clusters())
+        except Exception:
+            log.exception("Failed loading VarAC clusters from store.")
+            self.varac_clusters = []
+        self._varac_clusters_table_loading = True
+        try:
+            table.setRowCount(0)
+            for cluster in self.varac_clusters:
+                row = table.rowCount()
+                table.insertRow(row)
+                cluster_id = int(cluster.get("id", 0) or 0)
+                sel_chk = QCheckBox()
+                sel_chk.setFixedWidth(22)
+                sel_chk.setProperty("varac_cluster_id", cluster_id)
+                sel_chk.stateChanged.connect(self._update_varac_cluster_action_buttons)
+                sel_wrap = QWidget()
+                sel_layout = QHBoxLayout(sel_wrap)
+                sel_layout.setContentsMargins(0, 0, 0, 0)
+                sel_layout.setAlignment(Qt.AlignCenter)
+                sel_layout.addWidget(sel_chk)
+                table.setCellWidget(row, 0, sel_wrap)
+
+                name_item = QTableWidgetItem(str(cluster.get("name", "") or ""))
+                name_item.setData(Qt.UserRole, cluster_id)
+                table.setItem(row, 1, name_item)
+                table.setItem(row, 2, QTableWidgetItem(str(cluster.get("cluster_id", "") or "")))
+                table.setItem(row, 3, QTableWidgetItem(str(cluster.get("shared_db_path", "") or "")))
+                table.setItem(
+                    row,
+                    4,
+                    QTableWidgetItem(
+                        f"{int(cluster.get('enabled_member_count', 0) or 0)}/{int(cluster.get('member_count', 0) or 0)}"
+                    ),
+                )
+                table.setItem(row, 5, QTableWidgetItem(str(cluster.get("gateway_handler_name", "") or "")))
+                table.setItem(row, 6, QTableWidgetItem("On" if int(cluster.get("ptt_lock_enabled", 0) or 0) == 1 else "Off"))
+                table.setItem(row, 7, QTableWidgetItem(f"{int(cluster.get('counters_refresh_sec', 30) or 30)}s"))
+        finally:
+            self._varac_clusters_table_loading = False
+        self._update_varac_clusters_hint()
+        self._update_varac_cluster_action_buttons()
+        if refresh_memberships and hasattr(self, "varac_members_table"):
+            self._refresh_varac_memberships_table(
+                refresh_section_titles=False,
+                refresh_station_summary=False,
+            )
+        if refresh_station_summary:
+            self._update_multi_radio_station_summary()
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    def _refresh_varac_memberships_table(
+        self,
+        *,
+        refresh_section_titles: bool = True,
+        refresh_station_summary: bool = True,
+    ) -> None:
+        table = self.varac_members_table
+        try:
+            self.varac_cluster_members = list(self.multi_radio_store.list_varac_cluster_members())
+        except Exception:
+            log.exception("Failed loading VarAC cluster memberships from store.")
+            self.varac_cluster_members = []
+        self._varac_cluster_members_table_loading = True
+        try:
+            table.setRowCount(0)
+            for membership in self.varac_cluster_members:
+                row = table.rowCount()
+                table.insertRow(row)
+                cluster_id = int(membership.get("cluster_db_id", 0) or 0)
+                device_id = int(membership.get("device_profile_id", 0) or 0)
+                sel_chk = QCheckBox()
+                sel_chk.setFixedWidth(22)
+                sel_chk.setProperty("varac_cluster_id", cluster_id)
+                sel_chk.setProperty("device_profile_id", device_id)
+                sel_chk.stateChanged.connect(self._update_varac_membership_action_buttons)
+                sel_wrap = QWidget()
+                sel_layout = QHBoxLayout(sel_wrap)
+                sel_layout.setContentsMargins(0, 0, 0, 0)
+                sel_layout.setAlignment(Qt.AlignCenter)
+                sel_layout.addWidget(sel_chk)
+                table.setCellWidget(row, 0, sel_wrap)
+
+                table.setItem(row, 1, QTableWidgetItem(str(membership.get("cluster_name", "") or "")))
+                table.setItem(row, 2, QTableWidgetItem(str(membership.get("device_name", "") or "")))
+                runtime_label = "Primary" if int(membership.get("runtime_primary", 0) or 0) == 1 else ("Active" if int(membership.get("runtime_active", 0) or 0) == 1 else "")
+                runtime_item = QTableWidgetItem(runtime_label)
+                runtime_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 3, runtime_item)
+                table.setItem(row, 4, QTableWidgetItem(self._device_class_label(str(membership.get("device_class", "") or ""))))
+                instance_item = QTableWidgetItem(str(int(membership.get("instance_number", 0) or 0)))
+                instance_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 5, instance_item)
+                enabled_item = QTableWidgetItem("Yes" if int(membership.get("enabled", 1) or 0) == 1 else "")
+                enabled_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 6, enabled_item)
+                table.setItem(row, 7, QTableWidgetItem("Handler" if bool(membership.get("is_gateway_handler")) else "Member"))
+        finally:
+            self._varac_cluster_members_table_loading = False
+        self._update_varac_memberships_hint()
+        self._update_varac_membership_action_buttons()
+        self._update_varac_clusters_hint()
+        if refresh_station_summary:
+            self._update_multi_radio_station_summary()
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    def _refresh_device_profiles_table(
+        self,
+        *,
+        refresh_assignments: bool = True,
+        refresh_varac_clusters: bool = True,
+        refresh_section_titles: bool = True,
+        refresh_station_summary: bool = True,
+    ) -> None:
         table = self.device_profiles_table
         try:
             self.device_profiles = list(self.multi_radio_store.list_device_profiles())
@@ -5570,33 +7934,223 @@ class SettingsTab(QWidget):
                 endpoint_item = QTableWidgetItem(self._device_endpoint_summary(profile))
                 table.setItem(row, 6, endpoint_item)
                 table.setItem(row, 7, QTableWidgetItem("Enabled" if bool(profile.get("launch_enabled", 1)) else "Off"))
+                ptt_item = QTableWidgetItem(self._device_ptt_group_label(profile.get("ptt_group", "")))
+                ptt_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 8, ptt_item)
+                table.setItem(row, 9, QTableWidgetItem(self._device_class_label(str(profile.get("device_class", "") or ""))))
                 notes_item = QTableWidgetItem(str(profile.get("notes", "") or ""))
-                table.setItem(row, 8, notes_item)
+                table.setItem(row, 10, notes_item)
         finally:
             self._device_profiles_table_loading = False
         self._update_device_profiles_hint()
         self._update_device_profile_action_buttons()
-        if hasattr(self, "device_assignments_table"):
-            self._refresh_device_assignments_table()
-        self._refresh_section_titles()
+        if refresh_assignments and hasattr(self, "device_assignments_table"):
+            self._refresh_device_assignments_table(
+                refresh_section_titles=False,
+                refresh_station_summary=False,
+            )
+        if refresh_varac_clusters and hasattr(self, "varac_clusters_table"):
+            self._refresh_varac_clusters_table(
+                refresh_memberships=True,
+                refresh_section_titles=False,
+                refresh_station_summary=False,
+            )
+        if refresh_station_summary:
+            self._update_multi_radio_station_summary()
+        if refresh_section_titles:
+            self._refresh_section_titles()
 
     def _open_device_profile_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         dlg = QDialog(self)
         dlg.setWindowTitle("Edit Device Profile" if existing else "Add Device Profile")
-        dlg.resize(620, 0)
+        dlg.setSizeGripEnabled(True)
+        screen = dlg.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            dlg.resize(
+                max(640, min(820, available.width() - 120)),
+                max(520, min(760, available.height() - 120)),
+            )
+            dlg.setMaximumSize(
+                max(640, available.width() - 32),
+                max(520, available.height() - 32),
+            )
+        else:
+            dlg.resize(760, 700)
         layout = QVBoxLayout(dlg)
-        form = QFormLayout()
-        layout.addLayout(form)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        intro_label = QLabel(
+            "Core profile fields stay visible. Expand JS8, VarAC, and coordination sections only when needed."
+        )
+        intro_label.setWordWrap(True)
+        layout.addWidget(intro_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll, 1)
+
+        scroll_container = QWidget()
+        scroll_layout = QVBoxLayout(scroll_container)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(8)
+        scroll.setWidget(scroll_container)
+
+        def _section_has_values(*keys: str) -> bool:
+            if not existing:
+                return False
+            for key in keys:
+                value = existing.get(key)
+                if isinstance(value, str):
+                    if value.strip():
+                        return True
+                elif value not in (None, "", 0, False):
+                    return True
+            return False
+
+        def _build_section(
+            title: str,
+            *,
+            checked: bool,
+            object_name: str,
+            description: str = "",
+        ) -> Tuple[QGroupBox, QToolButton, QFormLayout, QVBoxLayout]:
+            content = QWidget()
+            content_layout = QVBoxLayout(content)
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(8)
+            if description:
+                desc_label = QLabel(description)
+                desc_label.setWordWrap(True)
+                desc_label.setStyleSheet("color: #666;")
+                content_layout.addWidget(desc_label)
+            form = QFormLayout()
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setSpacing(8)
+            form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+            form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            content_layout.addLayout(form)
+            group, header_btn = self._make_dialog_collapsible_group(
+                title,
+                content,
+                checked=checked,
+                object_name=object_name,
+            )
+            scroll_layout.addWidget(group)
+            return group, header_btn, form, content_layout
+
+        def _make_host_port_row(
+            host_edit: QLineEdit,
+            port_edit: QLineEdit,
+            *,
+            host_placeholder: str,
+            port_placeholder: str,
+        ) -> QWidget:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            host_edit.setPlaceholderText(host_placeholder)
+            port_edit.setPlaceholderText(port_placeholder)
+            port_edit.setFixedWidth(96)
+            port_label = QLabel("Port")
+            port_label.setFixedWidth(28)
+            row_layout.addWidget(host_edit, 1)
+            row_layout.addWidget(port_label)
+            row_layout.addWidget(port_edit, 0)
+            return row
+
+        def _current_path_dir(path_text: str) -> str:
+            raw = str(path_text or "").strip()
+            if raw:
+                try:
+                    candidate = Path(raw)
+                    if candidate.is_dir():
+                        return str(candidate)
+                    parent = candidate.parent
+                    if str(parent):
+                        return str(parent)
+                except Exception:
+                    pass
+            try:
+                return str(Path.home())
+            except Exception:
+                return ""
+
+        def _choose_directory(edit: QLineEdit, title: str) -> None:
+            chosen = QFileDialog.getExistingDirectory(dlg, title, _current_path_dir(edit.text()))
+            if chosen:
+                edit.setText(chosen)
+
+        def _choose_file(edit: QLineEdit, title: str, file_filter: str = "All Files (*)") -> None:
+            chosen, _ = QFileDialog.getOpenFileName(dlg, title, _current_path_dir(edit.text()), file_filter)
+            if chosen:
+                edit.setText(chosen)
+
+        def _choose_launch_path(edit: QLineEdit) -> None:
+            current = edit.text().strip()
+            try:
+                current_path = Path(current) if current else None
+            except Exception:
+                current_path = None
+            if current_path is not None and current_path.is_dir():
+                chosen_dir = QFileDialog.getExistingDirectory(dlg, "Select device launch folder", str(current_path))
+                if chosen_dir:
+                    edit.setText(chosen_dir)
+                return
+            chosen, _ = QFileDialog.getOpenFileName(
+                dlg,
+                "Select device launch path",
+                _current_path_dir(current),
+                "Programs (*.exe *.bat *.cmd *.lnk *.ps1 *.py);;All Files (*)",
+            )
+            if chosen:
+                edit.setText(chosen)
+
+        def _make_browse_path_row(
+            edit: QLineEdit,
+            *,
+            browse_cb,
+            browse_object_name: str = "",
+            secondary_browse_cb=None,
+            secondary_label: str = "",
+            secondary_object_name: str = "",
+        ) -> QWidget:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            row_layout.addWidget(edit, 1)
+            if secondary_browse_cb and secondary_label:
+                secondary_btn = QPushButton(secondary_label)
+                if secondary_object_name:
+                    secondary_btn.setObjectName(secondary_object_name)
+                secondary_btn.setFixedWidth(68)
+                secondary_btn.clicked.connect(secondary_browse_cb)
+                row_layout.addWidget(secondary_btn, 0)
+            browse_btn = QPushButton("Browse")
+            if browse_object_name:
+                browse_btn.setObjectName(browse_object_name)
+            browse_btn.setFixedWidth(76)
+            browse_btn.clicked.connect(browse_cb)
+            row_layout.addWidget(browse_btn, 0)
+            return row
 
         name_edit = QLineEdit(str((existing or {}).get("name", "") or ""))
-        form.addRow("Name:", name_edit)
 
         enabled_chk = QCheckBox("Profile Enabled")
         enabled_chk.setChecked(bool((existing or {}).get("enabled", 1)))
         if existing and int((existing or {}).get("runtime_active", 0) or 0) == 1:
             enabled_chk.setEnabled(False)
             enabled_chk.setToolTip("The runtime-active device profile cannot be disabled.")
-        form.addRow("", enabled_chk)
+
+        device_class_combo = QComboBox()
+        for label, value in DEVICE_CLASS_OPTIONS:
+            device_class_combo.addItem(label, value)
+        current_class = str((existing or {}).get("device_class", "tx_rx") or "tx_rx").strip().lower() or "tx_rx"
+        class_idx = device_class_combo.findData(current_class)
+        device_class_combo.setCurrentIndex(class_idx if class_idx >= 0 else 0)
 
         backend_combo = QComboBox()
         for label, value in DEVICE_BACKEND_OPTIONS:
@@ -5604,7 +8158,6 @@ class SettingsTab(QWidget):
         current_backend = str((existing or {}).get("control_backend", "flrig") or "flrig").strip().lower()
         backend_idx = backend_combo.findData(current_backend)
         backend_combo.setCurrentIndex(backend_idx if backend_idx >= 0 else 0)
-        form.addRow("Backend:", backend_combo)
 
         deployment_combo = QComboBox()
         for label, value in DEVICE_DEPLOYMENT_OPTIONS:
@@ -5612,71 +8165,436 @@ class SettingsTab(QWidget):
         current_mode = str((existing or {}).get("deployment_mode", "full") or "full").strip().lower()
         mode_idx = deployment_combo.findData(current_mode)
         deployment_combo.setCurrentIndex(mode_idx if mode_idx >= 0 else 0)
-        form.addRow("Deployment:", deployment_combo)
 
         info_label = QLabel()
         info_label.setWordWrap(True)
-        form.addRow("", info_label)
+
+        try:
+            js8_binding_rows = list(self.multi_radio_store.list_js8_instances())
+        except Exception:
+            js8_binding_rows = []
+        try:
+            fast_light_binding_rows = list(self.multi_radio_store.list_fast_light_configs())
+        except Exception:
+            fast_light_binding_rows = []
+        try:
+            varac_binding_rows = list(self.multi_radio_store.list_varac_nodes())
+        except Exception:
+            varac_binding_rows = []
+
+        def _populate_binding_combo(combo: QComboBox, rows: List[Dict[str, Any]], current_id: Optional[int]) -> None:
+            combo.addItem("Custom / None", None)
+            chosen_index = 0
+            target_id = int(current_id) if current_id not in (None, "") else None
+            for row in rows:
+                row_id = int(row.get("id", 0) or 0)
+                label = str(row.get("name", "") or f"Record {row_id}")
+                if str(row.get("system_key", "") or "").startswith("default_"):
+                    label = f"{label} (Default)"
+                if not bool(row.get("enabled", 1)):
+                    label = f"{label} [Disabled]"
+                combo.addItem(label, row_id)
+                if target_id is not None and row_id == target_id:
+                    chosen_index = combo.count() - 1
+            combo.setCurrentIndex(chosen_index)
+
+        js8_instance_combo = QComboBox()
+        js8_instance_combo.setObjectName("deviceProfileJs8BindingCombo")
+        _populate_binding_combo(
+            js8_instance_combo,
+            js8_binding_rows,
+            (existing or {}).get("js8_instance_id"),
+        )
+        fast_light_config_combo = QComboBox()
+        fast_light_config_combo.setObjectName("deviceProfileFastLightBindingCombo")
+        _populate_binding_combo(
+            fast_light_config_combo,
+            fast_light_binding_rows,
+            (existing or {}).get("fast_light_config_id"),
+        )
+        varac_node_combo = QComboBox()
+        varac_node_combo.setObjectName("deviceProfileVaracBindingCombo")
+        _populate_binding_combo(
+            varac_node_combo,
+            varac_binding_rows,
+            (existing or {}).get("varac_node_id"),
+        )
+        binding_summary_label = QLabel()
+        binding_summary_label.setWordWrap(True)
 
         rig_host_edit = QLineEdit(str((existing or {}).get("rig_host", "") or ""))
         rig_port_edit = QLineEdit("" if (existing or {}).get("rig_port") in (None, "") else str((existing or {}).get("rig_port")))
         rig_port_edit.setValidator(QIntValidator(1, 65535, rig_port_edit))
-        form.addRow("rigctld Host:", rig_host_edit)
-        form.addRow("rigctld Port:", rig_port_edit)
 
         flrig_host_edit = QLineEdit(str((existing or {}).get("flrig_host", "") or "127.0.0.1"))
+        flrig_host_edit.setObjectName("deviceProfileFlrigHostEdit")
         flrig_port_edit = QLineEdit(str((existing or {}).get("flrig_port", 12345) or 12345))
         flrig_port_edit.setValidator(QIntValidator(1, 65535, flrig_port_edit))
-        form.addRow("FLRig Host:", flrig_host_edit)
-        form.addRow("FLRig Port:", flrig_port_edit)
 
         fldigi_host_edit = QLineEdit(str((existing or {}).get("fldigi_host", "") or ""))
         fldigi_port_edit = QLineEdit(str((existing or {}).get("fldigi_port", 7362) or 7362))
         fldigi_port_edit.setValidator(QIntValidator(1, 65535, fldigi_port_edit))
-        form.addRow("FLDigi Host:", fldigi_host_edit)
-        form.addRow("FLDigi Port:", fldigi_port_edit)
 
         js8_host_edit = QLineEdit(str((existing or {}).get("js8_host", "") or "127.0.0.1"))
+        js8_host_edit.setObjectName("deviceProfileJs8HostEdit")
         js8_port_edit = QLineEdit(str((existing or {}).get("js8_port", 2442) or 2442))
         js8_port_edit.setValidator(QIntValidator(1, 65535, js8_port_edit))
-        form.addRow("JS8Call Host:", js8_host_edit)
-        form.addRow("JS8Call Port:", js8_port_edit)
+
+        js8_profile_path_edit = QLineEdit(str((existing or {}).get("js8_profile_path", "") or ""))
+        js8_profile_path_edit.setObjectName("deviceProfileJs8ProfileEdit")
+        js8_profile_path_edit.setPlaceholderText("Optional JS8 instance directory or profile path")
+
+        js8_directed_path_edit = QLineEdit(str((existing or {}).get("js8_directed_path", "") or ""))
+        js8_directed_path_edit.setObjectName("deviceProfileJs8DirectedEdit")
+        js8_directed_path_edit.setPlaceholderText("Optional DIRECTED.TXT override")
+
+        js8_inbox_path_edit = QLineEdit(str((existing or {}).get("js8_inbox_path", "") or ""))
+        js8_inbox_path_edit.setObjectName("deviceProfileJs8InboxEdit")
+        js8_inbox_path_edit.setPlaceholderText("Optional inbox_v1 / inbox DB override")
+
+        varac_install_edit = QLineEdit(str((existing or {}).get("varac_install_path", "") or ""))
+        varac_install_edit.setObjectName("deviceProfileVaracInstallEdit")
+        varac_install_edit.setPlaceholderText("Optional VarAC install folder")
+
+        varac_db_edit = QLineEdit(str((existing or {}).get("varac_db_path", "") or ""))
+        varac_db_edit.setObjectName("deviceProfileVaracDbEdit")
+        varac_db_edit.setPlaceholderText("Optional VarAC.db path")
+
+        varac_ini_edit = QLineEdit(str((existing or {}).get("varac_ini_path", "") or ""))
+        varac_ini_edit.setObjectName("deviceProfileVaracIniEdit")
+        varac_ini_edit.setPlaceholderText("Optional VarAC.ini path")
+
+        varac_launch_cmd_edit = QLineEdit(str((existing or {}).get("launch_cmd", "") or ""))
+        varac_launch_cmd_edit.setPlaceholderText("Optional VarAC launch command override")
+
+        sdr_host_edit = QLineEdit(str((existing or {}).get("sdr_host", "") or ""))
+        sdr_port_edit = QLineEdit("" if (existing or {}).get("sdr_port") in (None, "") else str((existing or {}).get("sdr_port")))
+        sdr_port_edit.setValidator(QIntValidator(1, 65535, sdr_port_edit))
 
         launch_enabled_chk = QCheckBox("Launch Enabled")
         launch_enabled_chk.setChecked(bool((existing or {}).get("launch_enabled", 1)))
-        form.addRow("", launch_enabled_chk)
 
         launch_path_edit = QLineEdit(str((existing or {}).get("launch_path", "") or ""))
+        launch_path_edit.setObjectName("deviceProfileLaunchPathEdit")
         launch_path_edit.setPlaceholderText("Optional executable/folder path for this device")
-        form.addRow("Launch Path:", launch_path_edit)
+
+        ptt_group_edit = QLineEdit(str((existing or {}).get("ptt_group", "") or ""))
+        ptt_group_edit.setPlaceholderText("Optional shared transmit/PTT domain, e.g. AMP-A")
+
+        antenna_group_edit = QLineEdit(str((existing or {}).get("antenna_group", "") or ""))
+        antenna_group_edit.setPlaceholderText("Optional shared antenna path, e.g. ANT-1")
+
+        frontend_group_edit = QLineEdit(str((existing or {}).get("frontend_group", "") or ""))
+        frontend_group_edit.setPlaceholderText("Optional shared preselector/front-end path")
+
+        amplifier_group_edit = QLineEdit(str((existing or {}).get("amplifier_group", "") or ""))
+        amplifier_group_edit.setPlaceholderText("Optional shared amplifier path, e.g. AMP-160-10")
 
         notes_edit = QPlainTextEdit()
         notes_edit.setPlainText(str((existing or {}).get("notes", "") or ""))
         notes_edit.setFixedHeight(90)
-        form.addRow("Notes:", notes_edit)
+        notes_edit.setPlaceholderText("Optional operator notes, hardware details, or deployment reminders")
+
+        _, _, basics_form, basics_layout = _build_section(
+            "Profile Basics",
+            checked=True,
+            object_name="deviceProfileBasicsSection",
+            description="Required identity and runtime fields for this device profile.",
+        )
+        basics_form.addRow("Name:", name_edit)
+        basics_form.addRow("", enabled_chk)
+        basics_form.addRow("Device Class:", device_class_combo)
+        basics_form.addRow("Backend:", backend_combo)
+        basics_form.addRow("Deployment:", deployment_combo)
+        basics_layout.addWidget(info_label)
+
+        _, _, binding_form, binding_layout = _build_section(
+            "Software Associations",
+            checked=True,
+            object_name="deviceProfileBindingsSection",
+            description=(
+                "Bind this device profile to reusable JS8, Fast Light, or VarAC records. "
+                "When a binding is selected, the overlapping per-device fields become read-only compatibility values."
+            ),
+        )
+        binding_form.addRow("JS8 Instance:", js8_instance_combo)
+        binding_form.addRow("Fast Light Config:", fast_light_config_combo)
+        binding_form.addRow("VarAC Node:", varac_node_combo)
+        binding_layout.addWidget(binding_summary_label)
+
+        _, _, endpoints_form, _ = _build_section(
+            "Endpoints",
+            checked=True,
+            object_name="deviceProfileEndpointsSection",
+            description="Host and port settings used for control, status checks, and operator-facing software health.",
+        )
+        endpoints_form.addRow(
+            "FLRig Endpoint:",
+            _make_host_port_row(
+                flrig_host_edit,
+                flrig_port_edit,
+                host_placeholder="127.0.0.1",
+                port_placeholder="12345",
+            ),
+        )
+        endpoints_form.addRow(
+            "FLDigi Endpoint:",
+            _make_host_port_row(
+                fldigi_host_edit,
+                fldigi_port_edit,
+                host_placeholder="Defaults to FLRig host when blank",
+                port_placeholder="7362",
+            ),
+        )
+        endpoints_form.addRow(
+            "JS8Call API:",
+            _make_host_port_row(
+                js8_host_edit,
+                js8_port_edit,
+                host_placeholder="127.0.0.1",
+                port_placeholder="2442",
+            ),
+        )
+        endpoints_form.addRow(
+            "rigctld Endpoint:",
+            _make_host_port_row(
+                rig_host_edit,
+                rig_port_edit,
+                host_placeholder="Optional rigctld host",
+                port_placeholder="4532",
+            ),
+        )
+        endpoints_form.addRow(
+            "SDR Endpoint:",
+            _make_host_port_row(
+                sdr_host_edit,
+                sdr_port_edit,
+                host_placeholder="Optional SDR/observer host",
+                port_placeholder="Optional",
+            ),
+        )
+
+        _, js8_header_btn, js8_form, _ = _build_section(
+            "JS8 Instance Files",
+            checked=_section_has_values("js8_profile_path", "js8_directed_path", "js8_inbox_path"),
+            object_name="deviceProfileJs8Section",
+            description="Only needed when this device has its own JS8 instance directory or custom inbox/log file paths.",
+        )
+        js8_form.addRow(
+            "JS8 Profile Dir:",
+            _make_browse_path_row(
+                js8_profile_path_edit,
+                browse_cb=lambda: _choose_directory(js8_profile_path_edit, "Select JS8 instance directory"),
+                browse_object_name="deviceProfileJs8ProfileBrowse",
+            ),
+        )
+        js8_form.addRow(
+            "JS8 DIRECTED.TXT:",
+            _make_browse_path_row(
+                js8_directed_path_edit,
+                browse_cb=lambda: _choose_file(
+                    js8_directed_path_edit,
+                    "Select JS8 DIRECTED.TXT",
+                    "Text Files (*.txt);;All Files (*)",
+                ),
+                browse_object_name="deviceProfileJs8DirectedBrowse",
+            ),
+        )
+        js8_form.addRow(
+            "JS8 Inbox DB:",
+            _make_browse_path_row(
+                js8_inbox_path_edit,
+                browse_cb=lambda: _choose_file(
+                    js8_inbox_path_edit,
+                    "Select JS8 inbox database",
+                    "Database Files (*.db *.db3 *.sqlite *.sqlite3);;All Files (*)",
+                ),
+                browse_object_name="deviceProfileJs8InboxBrowse",
+            ),
+        )
+
+        _, _, varac_form, _ = _build_section(
+            "VarAC & Launch",
+            checked=_section_has_values(
+                "launch_path",
+                "launch_cmd",
+                "varac_install_path",
+                "varac_db_path",
+                "varac_ini_path",
+            ),
+            object_name="deviceProfileVaracLaunchSection",
+            description="Optional launch overrides and VarAC-specific file locations for this device.",
+        )
+        varac_form.addRow("", launch_enabled_chk)
+        varac_form.addRow(
+            "Launch Path:",
+            _make_browse_path_row(
+                launch_path_edit,
+                browse_cb=lambda: _choose_launch_path(launch_path_edit),
+                browse_object_name="deviceProfileLaunchPathBrowse",
+                secondary_browse_cb=lambda: _choose_directory(launch_path_edit, "Select device launch folder"),
+                secondary_label="Folder",
+                secondary_object_name="deviceProfileLaunchPathFolderBrowse",
+            ),
+        )
+        varac_form.addRow(
+            "VarAC Install:",
+            _make_browse_path_row(
+                varac_install_edit,
+                browse_cb=lambda: _choose_directory(varac_install_edit, "Select VarAC install folder"),
+                browse_object_name="deviceProfileVaracInstallBrowse",
+            ),
+        )
+        varac_form.addRow(
+            "VarAC DB Path:",
+            _make_browse_path_row(
+                varac_db_edit,
+                browse_cb=lambda: _choose_file(
+                    varac_db_edit,
+                    "Select VarAC database",
+                    "Database Files (*.db *.db3 *.sqlite *.sqlite3);;All Files (*)",
+                ),
+                browse_object_name="deviceProfileVaracDbBrowse",
+            ),
+        )
+        varac_form.addRow(
+            "VarAC INI Path:",
+            _make_browse_path_row(
+                varac_ini_edit,
+                browse_cb=lambda: _choose_file(
+                    varac_ini_edit,
+                    "Select VarAC INI file",
+                    "INI Files (*.ini);;All Files (*)",
+                ),
+                browse_object_name="deviceProfileVaracIniBrowse",
+            ),
+        )
+        varac_form.addRow("VarAC Launch Cmd:", varac_launch_cmd_edit)
+
+        _, _, coordination_form, _ = _build_section(
+            "Coordination & Notes",
+            checked=_section_has_values(
+                "ptt_group",
+                "antenna_group",
+                "frontend_group",
+                "amplifier_group",
+                "notes",
+            ),
+            object_name="deviceProfileCoordinationSection",
+            description="Shared RF resource groups drive interlocks and prompt-first conflict warnings across active devices.",
+        )
+        coordination_form.addRow("PTT Group:", ptt_group_edit)
+        coordination_form.addRow("Antenna Group:", antenna_group_edit)
+        coordination_form.addRow("Front-End Group:", frontend_group_edit)
+        coordination_form.addRow("Amplifier Group:", amplifier_group_edit)
+        coordination_form.addRow("Notes:", notes_edit)
+        scroll_layout.addStretch(1)
+
+        def _binding_name(combo: QComboBox) -> str:
+            idx = combo.currentIndex()
+            return combo.itemText(idx).strip() if idx >= 0 else ""
+
+        def _apply_binding_state() -> None:
+            js8_bound = js8_instance_combo.currentData() not in (None, "")
+            fast_light_bound = fast_light_config_combo.currentData() not in (None, "")
+            varac_bound = varac_node_combo.currentData() not in (None, "")
+
+            for widget in (js8_host_edit, js8_port_edit, js8_profile_path_edit, js8_directed_path_edit, js8_inbox_path_edit):
+                widget.setEnabled(not js8_bound)
+            for widget in (flrig_host_edit, flrig_port_edit, fldigi_host_edit, fldigi_port_edit):
+                widget.setEnabled(not fast_light_bound)
+            for widget in (varac_install_edit, varac_db_edit, varac_ini_edit, varac_launch_cmd_edit):
+                widget.setEnabled(not varac_bound)
+
+            backend = str(backend_combo.currentData() or "").strip().lower()
+            launch_path_edit.setEnabled(
+                not ((backend == "flrig" and fast_light_bound) or (backend == "js8call" and js8_bound))
+            )
+
+            bindings: List[str] = []
+            if fast_light_bound:
+                bindings.append(f"Fast Light: {_binding_name(fast_light_config_combo)}")
+            if js8_bound:
+                bindings.append(f"JS8: {_binding_name(js8_instance_combo)}")
+            if varac_bound:
+                bindings.append(f"VarAC: {_binding_name(varac_node_combo)}")
+            if bindings:
+                binding_summary_label.setText(
+                    "This device inherits linked software settings from: "
+                    + "; ".join(bindings)
+                    + ". Clear a binding to edit that software family directly on the device profile."
+                )
+            else:
+                binding_summary_label.setText(
+                    "No reusable software records are bound. This device profile will keep its own per-device software settings."
+                )
 
         def _update_backend_hint() -> None:
             backend = str(backend_combo.currentData() or "").strip().lower()
-            if backend == "rigctld":
+            device_class = str(device_class_combo.currentData() or "tx_rx").strip().lower()
+            if device_class == "observer":
+                info_label.setText(
+                    "Observer / SDR devices can be active and monitored, but they never become the primary "
+                    "compatibility device in this slice. Use SDR Host / Port for endpoint health and follow guidance."
+                )
+            elif backend == "rigctld":
                 info_label.setText(
                     "RIGCTLD profiles can be active, and making one primary binds the current tabs to its rigctld endpoint."
+                )
+            elif js8_directed_path_edit.text().strip() or js8_inbox_path_edit.text().strip() or js8_profile_path_edit.text().strip():
+                info_label.setText(
+                    "Per-device JS8 ingest paths let the app ingest messages and JS8 logs from multiple JS8Call "
+                    "instance directories while the current control tabs remain primary-device scoped."
                 )
             elif str(deployment_combo.currentData() or "").strip().lower() == "minimal":
                 info_label.setText(
                     "Minimal deployment affects the current app shell when this profile is primary: Map, Messages, "
                     "FreqPlanner, startup launch, and background ingest are suppressed."
                 )
+            elif ptt_group_edit.text().strip():
+                info_label.setText(
+                    "Devices that share the same PTT Group participate in the Phase E shared-transmit interlock. "
+                    "If another active device in that group is keyed, scheduler and QSY actions are blocked."
+                )
+            elif (
+                antenna_group_edit.text().strip()
+                or frontend_group_edit.text().strip()
+                or amplifier_group_edit.text().strip()
+            ):
+                info_label.setText(
+                    "Shared antenna, front-end, and amplifier groups participate in Phase E prompt-first RF conflict "
+                    "warnings when active devices overlap on the same band or frequency."
+                )
             else:
                 info_label.setText(
                     "Multiple device profiles can be active at once. One active profile is the primary "
-                    "compatibility device for the current tabs."
+                    "compatibility device for the current tabs. VarAC cluster membership is managed in the "
+                    "dedicated VarAC sections below."
                 )
+            if backend == "js8call" and not js8_header_btn.isChecked():
+                js8_header_btn.setChecked(True)
+            _apply_binding_state()
 
+        device_class_combo.currentIndexChanged.connect(_update_backend_hint)
         backend_combo.currentIndexChanged.connect(_update_backend_hint)
         deployment_combo.currentIndexChanged.connect(_update_backend_hint)
+        js8_instance_combo.currentIndexChanged.connect(_update_backend_hint)
+        fast_light_config_combo.currentIndexChanged.connect(_update_backend_hint)
+        varac_node_combo.currentIndexChanged.connect(_update_backend_hint)
+        js8_profile_path_edit.textChanged.connect(lambda _text: _update_backend_hint())
+        js8_directed_path_edit.textChanged.connect(lambda _text: _update_backend_hint())
+        js8_inbox_path_edit.textChanged.connect(lambda _text: _update_backend_hint())
+        ptt_group_edit.textChanged.connect(lambda _text: _update_backend_hint())
+        antenna_group_edit.textChanged.connect(lambda _text: _update_backend_hint())
+        frontend_group_edit.textChanged.connect(lambda _text: _update_backend_hint())
+        amplifier_group_edit.textChanged.connect(lambda _text: _update_backend_hint())
         _update_backend_hint()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        save_btn = buttons.button(QDialogButtonBox.Save)
+        if save_btn is not None:
+            save_btn.setDefault(True)
+            save_btn.setAutoDefault(True)
         layout.addWidget(buttons)
 
         out: Dict[str, Any] = {}
@@ -5688,6 +8606,7 @@ class SettingsTab(QWidget):
                 return
             backend = str(backend_combo.currentData() or "flrig").strip().lower() or "flrig"
             deployment = str(deployment_combo.currentData() or "full").strip().lower() or "full"
+            device_class = str(device_class_combo.currentData() or "tx_rx").strip().lower() or "tx_rx"
             flrig_host = flrig_host_edit.text().strip() or "127.0.0.1"
             fldigi_host = fldigi_host_edit.text().strip() or flrig_host or "127.0.0.1"
             js8_host = js8_host_edit.text().strip() or "127.0.0.1"
@@ -5695,11 +8614,13 @@ class SettingsTab(QWidget):
             flrig_port_txt = flrig_port_edit.text().strip() or "12345"
             fldigi_port_txt = fldigi_port_edit.text().strip() or "7362"
             js8_port_txt = js8_port_edit.text().strip() or "2442"
+            sdr_port_txt = sdr_port_edit.text().strip()
             try:
                 rig_port = int(rig_port_txt) if rig_port_txt else None
                 flrig_port = int(flrig_port_txt)
                 fldigi_port = int(fldigi_port_txt)
                 js8_port = int(js8_port_txt)
+                sdr_port = int(sdr_port_txt) if sdr_port_txt else None
             except Exception:
                 QMessageBox.warning(self, "Validation", "Port values must be valid integers.")
                 return
@@ -5709,6 +8630,7 @@ class SettingsTab(QWidget):
                     "system_key": (existing or {}).get("system_key"),
                     "name": name,
                     "enabled": bool(enabled_chk.isChecked()),
+                    "device_class": device_class,
                     "control_backend": backend,
                     "deployment_mode": deployment,
                     "rig_host": rig_host_edit.text().strip(),
@@ -5719,8 +8641,24 @@ class SettingsTab(QWidget):
                     "fldigi_port": fldigi_port,
                     "js8_host": js8_host,
                     "js8_port": js8_port,
+                    "js8_instance_id": js8_instance_combo.currentData(),
+                    "js8_profile_path": js8_profile_path_edit.text().strip(),
+                    "js8_directed_path": js8_directed_path_edit.text().strip(),
+                    "js8_inbox_path": js8_inbox_path_edit.text().strip(),
+                    "fast_light_config_id": fast_light_config_combo.currentData(),
+                    "varac_install_path": varac_install_edit.text().strip(),
+                    "varac_db_path": varac_db_edit.text().strip(),
+                    "varac_ini_path": varac_ini_edit.text().strip(),
+                    "varac_node_id": varac_node_combo.currentData(),
+                    "sdr_host": sdr_host_edit.text().strip(),
+                    "sdr_port": sdr_port,
                     "launch_enabled": bool(launch_enabled_chk.isChecked()),
                     "launch_path": launch_path_edit.text().strip(),
+                    "launch_cmd": varac_launch_cmd_edit.text().strip(),
+                    "ptt_group": ptt_group_edit.text().strip(),
+                    "antenna_group": antenna_group_edit.text().strip(),
+                    "frontend_group": frontend_group_edit.text().strip(),
+                    "amplifier_group": amplifier_group_edit.text().strip(),
                     "notes": notes_edit.toPlainText().strip(),
                 }
             )
@@ -5771,16 +8709,13 @@ class SettingsTab(QWidget):
             except ValueError as exc:
                 QMessageBox.warning(self, "Device Profiles", str(exc))
                 return
-            self.settings.reload()
-            self._load_settings()
-            self._refresh_running_status()
+            self._refresh_runtime_projection_ui(
+                refresh_multi_radio=True,
+                emit_saved=True,
+            )
             self._emit_device_profiles_changed()
-            try:
-                self.settings_saved.emit()
-            except Exception:
-                pass
         else:
-            self._refresh_device_profiles_table()
+            self._refresh_multi_radio_tables()
             self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
 
@@ -5822,20 +8757,17 @@ class SettingsTab(QWidget):
             self.multi_radio_store.set_runtime_primary_device_profile(int(target.get("id", 0) or 0))
         except ValueError as exc:
             QMessageBox.warning(self, "Make Primary Device", str(exc))
-            self._refresh_device_profiles_table()
+            self._refresh_multi_radio_tables()
             return
         except Exception:
             log.exception("Failed to make device profile primary.")
             QMessageBox.warning(self, "Make Primary Device", "Unable to update the selected device profile.")
             return
-        self.settings.reload()
-        self._load_settings()
-        self._refresh_running_status()
+        self._refresh_runtime_projection_ui(
+            refresh_multi_radio=True,
+            emit_saved=True,
+        )
         self._emit_device_profiles_changed()
-        try:
-            self.settings_saved.emit()
-        except Exception:
-            pass
         self._set_save_button_state("info" if self._settings_dirty else "success")
 
     def _activate_selected_device_profiles(self) -> None:
@@ -5856,13 +8788,13 @@ class SettingsTab(QWidget):
                 activated += 1
             except ValueError as exc:
                 QMessageBox.warning(self, "Activate Device Profiles", str(exc))
-                self._refresh_device_profiles_table()
+                self._refresh_multi_radio_tables()
                 return
             except Exception:
                 log.exception("Failed to activate device profiles.")
                 QMessageBox.warning(self, "Activate Device Profiles", "Unable to activate the selected device profiles.")
                 return
-        self._refresh_device_profiles_table()
+        self._refresh_multi_radio_tables()
         if activated:
             self._emit_device_profiles_changed()
         primary_after = next(
@@ -5870,13 +8802,10 @@ class SettingsTab(QWidget):
             0,
         )
         if activated and primary_after and primary_after != primary_before:
-            self.settings.reload()
-            self._load_settings()
-            self._refresh_running_status()
-            try:
-                self.settings_saved.emit()
-            except Exception:
-                pass
+            self._refresh_runtime_projection_ui(
+                refresh_multi_radio=True,
+                emit_saved=True,
+            )
         self._set_save_button_state("info" if self._settings_dirty else "success")
 
     def _deactivate_selected_device_profiles(self) -> None:
@@ -5893,7 +8822,7 @@ class SettingsTab(QWidget):
                 deactivated += 1
             except ValueError as exc:
                 QMessageBox.warning(self, "Deactivate Device Profiles", str(exc))
-                self._refresh_device_profiles_table()
+                self._refresh_multi_radio_tables()
                 return
             except Exception:
                 log.exception("Failed to deactivate device profiles.")
@@ -5903,7 +8832,7 @@ class SettingsTab(QWidget):
                     "Unable to deactivate the selected device profiles.",
                 )
                 return
-        self._refresh_device_profiles_table()
+        self._refresh_multi_radio_tables()
         if deactivated:
             self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
@@ -5939,7 +8868,7 @@ class SettingsTab(QWidget):
             log.exception("Failed deleting device profiles.")
             QMessageBox.warning(self, "Delete Device Profiles", "Unable to delete the selected device profiles.")
             return
-        self._refresh_device_profiles_table()
+        self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
         QMessageBox.information(
@@ -5947,6 +8876,352 @@ class SettingsTab(QWidget):
             "Delete Device Profiles",
             f"Deleted {len(selected)} device profile{'s' if len(selected) != 1 else ''}.",
         )
+
+    def _varac_cluster_by_id(self, cluster_id: int) -> Optional[Dict[str, Any]]:
+        return next(
+            (
+                dict(row)
+                for row in self.varac_clusters
+                if isinstance(row, dict) and int(row.get("id", 0) or 0) == int(cluster_id)
+            ),
+            None,
+        )
+
+    def _open_varac_cluster_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit VarAC Cluster" if existing else "Add VarAC Cluster")
+        dlg.resize(620, 0)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        name_edit = QLineEdit(str((existing or {}).get("name", "") or ""))
+        form.addRow("Name:", name_edit)
+
+        cluster_id_edit = QLineEdit(str((existing or {}).get("cluster_id", "") or ""))
+        cluster_id_edit.setPlaceholderText("Stable shared VarAC cluster ID")
+        form.addRow("Cluster ID:", cluster_id_edit)
+
+        shared_db_edit = QLineEdit(str((existing or {}).get("shared_db_path", "") or ""))
+        shared_db_edit.setPlaceholderText("Optional shared VarAC DB path")
+        form.addRow("Shared DB Path:", shared_db_edit)
+
+        refresh_edit = QLineEdit(str(int((existing or {}).get("counters_refresh_sec", 30) or 30)))
+        refresh_edit.setValidator(QIntValidator(5, 600, refresh_edit))
+        form.addRow("Refresh Sec:", refresh_edit)
+
+        ptt_lock_chk = QCheckBox("Enable cluster PTT lock metadata")
+        ptt_lock_chk.setChecked(bool((existing or {}).get("ptt_lock_enabled", 0)))
+        form.addRow("", ptt_lock_chk)
+
+        gateway_combo = QComboBox()
+        gateway_combo.addItem("No gateway handler selected", 0)
+        existing_cluster_id = int((existing or {}).get("id", 0) or 0)
+        enabled_members = [
+            row
+            for row in self.varac_cluster_members
+            if isinstance(row, dict)
+            and int(row.get("cluster_db_id", 0) or 0) == existing_cluster_id
+            and int(row.get("enabled", 1) or 0) == 1
+        ]
+        for row in enabled_members:
+            gateway_combo.addItem(
+                f"{str(row.get('device_name', '') or 'Device').strip()} (#{int(row.get('instance_number', 0) or 0)})",
+                int(row.get("device_profile_id", 0) or 0),
+            )
+        gateway_device_id = int((existing or {}).get("gateway_handler_device_id", 0) or 0)
+        gateway_index = gateway_combo.findData(gateway_device_id)
+        gateway_combo.setCurrentIndex(gateway_index if gateway_index >= 0 else 0)
+        form.addRow("Gateway Handler:", gateway_combo)
+
+        info_label = QLabel()
+        info_label.setWordWrap(True)
+        form.addRow("", info_label)
+
+        def _update_hint() -> None:
+            if existing_cluster_id <= 0:
+                info_label.setText(
+                    "Create the cluster first, then assign members in VarAC Memberships. Return here to choose the gateway handler after at least one member is enabled."
+                )
+                return
+            if not enabled_members:
+                info_label.setText(
+                    "This cluster has no enabled members yet. Assign one or more device profiles in VarAC Memberships before selecting the gateway handler."
+                )
+                return
+            if int(gateway_combo.currentData() or 0) > 0:
+                info_label.setText(
+                    "The selected gateway handler becomes the exclusive gateway role for this cluster in Phase F Slice 3."
+                )
+                return
+            info_label.setText(
+                "Leave Gateway Handler blank for now if the cluster is receive-only or not yet finalized. Multi-member clusters should generally designate one handler."
+            )
+
+        gateway_combo.currentIndexChanged.connect(_update_hint)
+        _update_hint()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        out: Dict[str, Any] = {}
+
+        def _save() -> None:
+            name = name_edit.text().strip()
+            if not name:
+                QMessageBox.warning(self, "Validation", "VarAC cluster name is required.")
+                return
+            refresh_text = refresh_edit.text().strip() or "30"
+            try:
+                refresh_value = int(refresh_text)
+            except Exception:
+                QMessageBox.warning(self, "Validation", "Refresh seconds must be a valid integer.")
+                return
+            out.update(
+                {
+                    "id": (existing or {}).get("id"),
+                    "name": name,
+                    "cluster_id": cluster_id_edit.text().strip(),
+                    "shared_db_path": shared_db_edit.text().strip(),
+                    "counters_refresh_sec": refresh_value,
+                    "ptt_lock_enabled": bool(ptt_lock_chk.isChecked()),
+                    "gateway_handler_device_id": int(gateway_combo.currentData() or 0) or None,
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _persist_varac_cluster(self, values: Dict[str, Any]) -> None:
+        try:
+            self.multi_radio_store.save_varac_cluster(values)
+        except ValueError as exc:
+            QMessageBox.warning(self, "VarAC Clusters", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed saving VarAC cluster.")
+            QMessageBox.warning(self, "VarAC Clusters", "Unable to save the VarAC cluster.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _add_varac_cluster(self) -> None:
+        created = self._open_varac_cluster_dialog(existing=None)
+        if created:
+            self._persist_varac_cluster(created)
+
+    def _edit_varac_cluster(self) -> None:
+        selected = self._selected_varac_clusters()
+        if not selected:
+            QMessageBox.information(self, "Edit VarAC Cluster", "Select one VarAC cluster to edit.")
+            return
+        if len(selected) > 1:
+            QMessageBox.warning(self, "Edit VarAC Cluster", "Please select only one VarAC cluster to edit.")
+            return
+        updated = self._open_varac_cluster_dialog(existing=selected[0])
+        if updated:
+            self._persist_varac_cluster(updated)
+
+    def _delete_varac_clusters(self) -> None:
+        selected = self._selected_varac_clusters()
+        if not selected:
+            QMessageBox.information(self, "Delete VarAC Clusters", "Select one or more VarAC clusters to delete.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete VarAC Clusters",
+            f"Delete {len(selected)} selected VarAC cluster(s) and their memberships?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.delete_varac_cluster(int(row.get("id", 0) or 0))
+        except Exception:
+            log.exception("Failed deleting VarAC clusters.")
+            QMessageBox.warning(self, "Delete VarAC Clusters", "Unable to delete the selected VarAC clusters.")
+            self._refresh_multi_radio_tables()
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _open_varac_membership_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        clusters = [row for row in self.varac_clusters if isinstance(row, dict)]
+        if not clusters:
+            QMessageBox.information(self, "VarAC Memberships", "Create a VarAC cluster before assigning device memberships.")
+            return None
+        devices = [
+            row
+            for row in self.device_profiles
+            if isinstance(row, dict) and str(row.get("device_class", "") or "").strip().lower() != "observer"
+        ]
+        if not devices:
+            QMessageBox.information(self, "VarAC Memberships", "Create a non-observer device profile before assigning VarAC memberships.")
+            return None
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit VarAC Membership" if existing else "Add VarAC Membership")
+        dlg.resize(560, 0)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        cluster_combo = QComboBox()
+        for row in clusters:
+            cluster_combo.addItem(
+                f"{str(row.get('name', '') or 'Cluster').strip()} [{str(row.get('cluster_id', '') or '').strip()}]",
+                int(row.get("id", 0) or 0),
+            )
+        cluster_index = cluster_combo.findData(int((existing or {}).get("cluster_db_id", 0) or 0))
+        cluster_combo.setCurrentIndex(cluster_index if cluster_index >= 0 else 0)
+        cluster_combo.setEnabled(existing is None)
+        form.addRow("Cluster:", cluster_combo)
+
+        device_combo = QComboBox()
+        for row in devices:
+            label = str(row.get("name", "") or "Device").strip()
+            device_combo.addItem(label, int(row.get("id", 0) or 0))
+        device_index = device_combo.findData(int((existing or {}).get("device_profile_id", 0) or 0))
+        device_combo.setCurrentIndex(device_index if device_index >= 0 else 0)
+        device_combo.setEnabled(existing is None)
+        form.addRow("Device:", device_combo)
+
+        instance_edit = QLineEdit(str(int((existing or {}).get("instance_number", 1) or 1)))
+        instance_edit.setValidator(QIntValidator(1, 9999, instance_edit))
+        form.addRow("Instance Number:", instance_edit)
+
+        enabled_chk = QCheckBox("Membership Enabled")
+        enabled_chk.setChecked(True if existing is None else bool((existing or {}).get("enabled", 1)))
+        form.addRow("", enabled_chk)
+
+        info_label = QLabel()
+        info_label.setWordWrap(True)
+        form.addRow("", info_label)
+
+        def _update_hint() -> None:
+            selected_cluster = self._varac_cluster_by_id(int(cluster_combo.currentData() or 0)) or {}
+            device_id = int(device_combo.currentData() or 0)
+            device_row = next(
+                (
+                    row
+                    for row in self.device_profiles
+                    if isinstance(row, dict) and int(row.get("id", 0) or 0) == device_id
+                ),
+                {},
+            )
+            node_ready = any(
+                str(device_row.get(key, "") or "").strip()
+                for key in ("varac_install_path", "varac_db_path", "varac_ini_path", "launch_cmd")
+            )
+            base = (
+                f"Instance numbers must be unique inside {str(selected_cluster.get('name', '') or 'the selected cluster').strip()}."
+            )
+            if not node_ready:
+                info_label.setText(base + " This device does not yet have device-local VarAC settings configured.")
+                return
+            info_label.setText(base + " The cluster gateway handler is chosen from the cluster editor.")
+
+        cluster_combo.currentIndexChanged.connect(_update_hint)
+        device_combo.currentIndexChanged.connect(_update_hint)
+        _update_hint()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        out: Dict[str, Any] = {}
+
+        def _save() -> None:
+            try:
+                instance_value = int(instance_edit.text().strip() or "0")
+            except Exception:
+                QMessageBox.warning(self, "Validation", "Instance number must be a valid integer.")
+                return
+            if instance_value <= 0:
+                QMessageBox.warning(self, "Validation", "Instance number must be greater than zero.")
+                return
+            out.update(
+                {
+                    "cluster_id": int(cluster_combo.currentData() or 0),
+                    "device_profile_id": int(device_combo.currentData() or 0),
+                    "instance_number": instance_value,
+                    "enabled": bool(enabled_chk.isChecked()),
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _add_or_edit_varac_membership(self) -> None:
+        selected = self._selected_varac_memberships()
+        if len(selected) > 1:
+            QMessageBox.warning(self, "VarAC Memberships", "Please select at most one existing membership to edit.")
+            return
+        values = self._open_varac_membership_dialog(existing=selected[0] if selected else None)
+        if not values:
+            return
+        try:
+            self.multi_radio_store.set_varac_cluster_member(
+                int(values.get("cluster_id", 0) or 0),
+                int(values.get("device_profile_id", 0) or 0),
+                instance_number=int(values.get("instance_number", 0) or 0),
+                enabled=bool(values.get("enabled", True)),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "VarAC Memberships", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed saving VarAC membership.")
+            QMessageBox.warning(self, "VarAC Memberships", "Unable to save the VarAC membership.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _remove_varac_memberships(self) -> None:
+        selected = self._selected_varac_memberships()
+        if not selected:
+            QMessageBox.information(self, "VarAC Memberships", "Select one or more VarAC memberships to remove.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Remove VarAC Memberships",
+            f"Remove {len(selected)} selected VarAC membership(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.remove_varac_cluster_member(
+                    int(row.get("cluster_db_id", 0) or 0),
+                    int(row.get("device_profile_id", 0) or 0),
+                )
+        except ValueError as exc:
+            QMessageBox.warning(self, "VarAC Memberships", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed removing VarAC memberships.")
+            QMessageBox.warning(self, "VarAC Memberships", "Unable to remove the selected VarAC memberships.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
 
     def _open_operating_profile_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         dlg = QDialog(self)
@@ -6135,7 +9410,7 @@ class SettingsTab(QWidget):
             log.exception("Failed to save operating profile.")
             QMessageBox.warning(self, "Operating Profiles", "Unable to save the operating profile.")
             return
-        self._refresh_operating_profiles_table()
+        self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
 
@@ -6177,13 +9452,13 @@ class SettingsTab(QWidget):
                 self.multi_radio_store.delete_operating_profile(int(row.get("id", 0) or 0))
         except ValueError as exc:
             QMessageBox.warning(self, "Delete Operating Profiles", str(exc))
-            self._refresh_operating_profiles_table()
+            self._refresh_multi_radio_tables()
             return
         except Exception:
             log.exception("Failed deleting operating profiles.")
             QMessageBox.warning(self, "Delete Operating Profiles", "Unable to delete the selected operating profiles.")
             return
-        self._refresh_operating_profiles_table()
+        self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
         QMessageBox.information(
@@ -6300,13 +9575,13 @@ class SettingsTab(QWidget):
                 )
         except ValueError as exc:
             QMessageBox.warning(self, "Device Assignments", str(exc))
-            self._refresh_operating_profiles_table()
+            self._refresh_multi_radio_tables()
             return
         except Exception:
             log.exception("Failed updating device assignments.")
             QMessageBox.warning(self, "Device Assignments", "Unable to update the selected device assignments.")
             return
-        self._refresh_operating_profiles_table()
+        self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
 
@@ -6320,13 +9595,183 @@ class SettingsTab(QWidget):
                 self.multi_radio_store.restore_default_operating_profile(int(row.get("device_profile_id", 0) or 0))
         except ValueError as exc:
             QMessageBox.warning(self, "Device Assignments", str(exc))
-            self._refresh_operating_profiles_table()
+            self._refresh_multi_radio_tables()
             return
         except Exception:
             log.exception("Failed restoring default operating profile.")
             QMessageBox.warning(self, "Device Assignments", "Unable to restore the default operating profile.")
             return
-        self._refresh_operating_profiles_table()
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _open_temporary_profile_swap_dialog(self, target_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        primary_row = next(
+            (
+                row
+                for row in self.device_assignments
+                if isinstance(row, dict) and int(row.get("runtime_primary", 0) or 0) == 1
+            ),
+            None,
+        )
+        if not isinstance(primary_row, dict):
+            QMessageBox.warning(self, "Temporary Swap", "The current primary device assignment could not be resolved.")
+            return None
+        primary_profile = self._operating_profile_by_id(int(primary_row.get("operating_profile_id", 0) or 0))
+        allow_carry = bool(primary_profile and int(primary_profile.get("allow_profile_swap", 0) or 0) == 1)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Temporary Profile Swap")
+        dlg.resize(560, 0)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        summary_label = QLabel(
+            f"Temporarily move the primary compatibility runtime from "
+            f"{str(primary_row.get('device_name', '') or 'current primary')} to "
+            f"{str(target_row.get('device_name', '') or 'selected target')}."
+        )
+        summary_label.setWordWrap(True)
+        form.addRow("", summary_label)
+
+        form.addRow("Current Primary:", QLabel(str(primary_row.get("device_name", "") or "")))
+        form.addRow("Primary Profile:", QLabel(str(primary_row.get("operating_profile_name", "") or "Unassigned")))
+        form.addRow("Target Device:", QLabel(str(target_row.get("device_name", "") or "")))
+        form.addRow("Target Profile:", QLabel(str(target_row.get("operating_profile_name", "") or "Unassigned")))
+
+        mode_combo = QComboBox()
+        mode_combo.addItem("Use target device profile (Recommended)", "use_target_profile")
+        if allow_carry:
+            mode_combo.addItem("Carry current primary profile", "carry_primary_profile")
+        form.addRow("Swap Mode:", mode_combo)
+
+        reason_edit = QLineEdit()
+        reason_edit.setPlaceholderText("Optional operator note")
+        reason_edit.setText(
+            f"Temporary swap {str(primary_row.get('device_name', '') or 'primary')} -> {str(target_row.get('device_name', '') or 'target')}"
+        )
+        form.addRow("Reason:", reason_edit)
+
+        ends_edit = QLineEdit()
+        ends_edit.setPlaceholderText("Optional UTC metadata only, no automatic expiry")
+        form.addRow("Ends UTC:", ends_edit)
+
+        info_label = QLabel()
+        info_label.setWordWrap(True)
+        form.addRow("", info_label)
+
+        def _update_hint() -> None:
+            mode = str(mode_combo.currentData() or "use_target_profile").strip().lower()
+            if mode == "carry_primary_profile":
+                carried_name = str((primary_profile or {}).get("name", "") or "Current Primary Profile")
+                info_label.setText(
+                    f"{carried_name} will be copied onto the target device as a temporary override. "
+                    "Restore Swap returns the target device to its prior effective assignment."
+                )
+            elif not allow_carry:
+                info_label.setText(
+                    "The current primary operating profile does not allow profile-swap carry, so this swap will use the target device's existing effective profile."
+                )
+            else:
+                info_label.setText(
+                    "This swap changes the primary device temporarily but leaves the target device's current effective profile in place."
+                )
+
+        mode_combo.currentIndexChanged.connect(_update_hint)
+        _update_hint()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        out: Dict[str, Any] = {}
+
+        def _save() -> None:
+            out.update(
+                {
+                    "mode": str(mode_combo.currentData() or "use_target_profile").strip().lower() or "use_target_profile",
+                    "reason": reason_edit.text().strip(),
+                    "ends_utc": ends_edit.text().strip(),
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _start_temporary_profile_swap(self) -> None:
+        if isinstance(self.active_profile_swap, dict) and self.active_profile_swap:
+            QMessageBox.information(self, "Temporary Swap", "A temporary swap is already active. Restore it before starting another.")
+            return
+        selected = self._selected_assignment_rows()
+        if not selected:
+            QMessageBox.information(self, "Temporary Swap", "Select one active non-primary device to use as the temporary swap target.")
+            return
+        if len(selected) != 1:
+            QMessageBox.warning(self, "Temporary Swap", "Please select exactly one active non-primary device as the temporary swap target.")
+            return
+        target_row = selected[0]
+        if int(target_row.get("runtime_primary", 0) or 0) == 1:
+            QMessageBox.information(self, "Temporary Swap", "The selected device is already the primary compatibility device.")
+            return
+        if str(target_row.get("device_class", "") or "").strip().lower() == "observer":
+            QMessageBox.warning(self, "Temporary Swap", "Observer / SDR device profiles cannot be used as temporary-swap targets.")
+            return
+        if int(target_row.get("runtime_active", 0) or 0) != 1:
+            QMessageBox.warning(self, "Temporary Swap", "The temporary swap target must already be runtime-active.")
+            return
+        values = self._open_temporary_profile_swap_dialog(target_row)
+        if not values:
+            return
+        try:
+            self.multi_radio_store.start_temporary_profile_swap(
+                int(target_row.get("device_profile_id", 0) or 0),
+                mode=str(values.get("mode", "use_target_profile") or "use_target_profile"),
+                reason=str(values.get("reason", "") or ""),
+                ends_utc=str(values.get("ends_utc", "") or ""),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Temporary Swap", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed starting temporary profile swap.")
+            QMessageBox.warning(self, "Temporary Swap", "Unable to start the temporary profile swap.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _restore_temporary_profile_swap(self) -> None:
+        active_swap = dict(self.active_profile_swap or {})
+        if not active_swap:
+            QMessageBox.information(self, "Restore Swap", "No temporary profile swap is currently active.")
+            return
+        source_name = str(active_swap.get("source_device_name", "") or "").strip() or "previous primary"
+        target_name = str(active_swap.get("target_device_name", "") or "").strip() or "temporary target"
+        confirm = QMessageBox.question(
+            self,
+            "Restore Swap",
+            f"Restore the primary compatibility runtime from {target_name} back to {source_name}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self.multi_radio_store.restore_temporary_profile_swap()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Restore Swap", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed restoring temporary profile swap.")
+            QMessageBox.warning(self, "Restore Swap", "Unable to restore the temporary profile swap.")
+            return
+        self._refresh_multi_radio_tables()
         self._emit_device_profiles_changed()
         self._set_save_button_state("info" if self._settings_dirty else "success")
 
@@ -7044,6 +10489,8 @@ class SettingsTab(QWidget):
     def _maybe_backfill_js8_geo(self) -> None:
         if self._loading_settings:
             return
+        if self._js8_geo_backfill_inflight:
+            return
         if self.settings.get("js8_geo_backfill_v1_done", False):
             return
         directed_path = (self.js8_directed_edit.text().strip() or self.settings.get("js8_directed_path", "") or "")
@@ -7055,11 +10502,14 @@ class SettingsTab(QWidget):
         try:
             from freqinout.core.config_paths import get_config_dir
 
-            db_path = get_config_dir() / "config" / "freqinout_nets.db"
-            indexer = JS8LogLinkIndexer(self.settings, db_path)
-            indexer._base_callsign = JS8LogLinkIndexer._base_callsign  # ensure suffix handling
-            scanned = indexer.backfill_geo_from_logs()
-            self.settings.set("js8_geo_backfill_v1_done", True)
-            log.info("SettingsTab: JS8 geo backfill complete (lines=%s).", scanned)
+            settings_snapshot = dict(self.settings.all())
+            settings_snapshot["js8_directed_path"] = str(path)
+            payload = {
+                "settings": settings_snapshot,
+                "db_path": str(get_config_dir() / "config" / "freqinout_nets.db"),
+            }
+            self._js8_geo_backfill_inflight = True
+            self._dispatch_js8_geo_backfill_request(payload)
         except Exception as e:
+            self._js8_geo_backfill_inflight = False
             log.debug("SettingsTab: JS8 geo backfill failed: %s", e)

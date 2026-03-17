@@ -80,6 +80,39 @@ def test_store_supports_multiple_active_devices_with_one_primary(monkeypatch, tm
     assert int(settings.get("rig_port")) == 4532
 
 
+def test_restart_preserves_non_default_runtime_primary(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    remote = store.save_device_profile(
+        {
+            "name": "Remote JS8",
+            "control_backend": "js8call",
+            "js8_host": "10.0.0.10",
+            "js8_port": 2542,
+        }
+    )
+    store.set_device_profile_runtime_active(int(remote["id"]), True)
+    store.set_runtime_primary_device_profile(int(remote["id"]))
+
+    restarted_settings = SettingsManager()
+    restarted_store = MultiRadioStore(settings_db_path())
+
+    primary = restarted_store.get_runtime_primary_device_profile()
+    devices = restarted_store.list_device_profiles()
+    default_device = next(row for row in devices if row["system_key"] == "default_device")
+
+    assert primary is not None
+    assert int(primary["id"]) == int(remote["id"])
+    assert int(default_device.get("runtime_primary", 0) or 0) == 0
+    assert restarted_settings.get("control_via") == "JS8Call"
+    assert restarted_settings.get("js8_host") == "10.0.0.10"
+    assert int(restarted_settings.get("js8_port")) == 2542
+
+
 def test_store_blocks_primary_deactivation_until_another_primary_exists(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))

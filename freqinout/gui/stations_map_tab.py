@@ -53,6 +53,12 @@ except Exception:
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
+from freqinout.core.js8_multi_source import (
+    ensure_js8_local_tables,
+    load_js8_links_offset_map,
+    resolve_js8_instance_sources,
+    upsert_js8_links_offset_state,
+)
 from freqinout.core.propagation_service import PropagationService
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.settings_manager import SettingsManager
@@ -6261,25 +6267,28 @@ class JS8LogLinkIndexer:
         Rebuild js8_links from DIRECTED.TXT and ALL.TXT.
         Returns number of rows inserted.
         """
-        directed_path = self._resolve_directed_path()
-        all_path = directed_path.parent / "ALL.TXT" if directed_path else None
-        directed_offset = 0
-        all_offset = 0
+        sources = resolve_js8_instance_sources(self.settings)
+        if not sources:
+            return 0
         effective_since = since_ts
         if effective_since is None:
             effective_since = self._ensure_latest_ts(last_default=0.0)
+        offsets_by_source: Dict[str, Dict[str, int]] = {}
         try:
-            directed_offset = int(self.settings.get("js8_links_directed_offset", 0) or 0)
-        except Exception:
-            directed_offset = 0
-        try:
-            all_offset = int(self.settings.get("js8_links_all_offset", 0) or 0)
-        except Exception:
-            all_offset = 0
+            state_conn = self._open_operator_db()
+            ensure_js8_local_tables(state_conn, settings=self.settings)
+            offsets_by_source = load_js8_links_offset_map(state_conn)
+            state_conn.commit()
+            state_conn.close()
+        except Exception as exc:
+            log.debug("JS8LogLinkIndexer: failed loading source offsets: %s", exc)
+            offsets_by_source = {}
+        force_reset_offsets = float(effective_since or 0.0) <= 0.0
 
         # De-duplicate by station pair + band, averaging SNR and keeping the newest timestamp/frequency.
         last_seen: Dict[str, float] = {}
         agg: Dict[tuple, Dict] = {}
+        updated_offsets: Dict[str, Dict[str, int]] = {}
 
         def handle_parsed(parsed: Optional[tuple]) -> None:
             if not parsed:
@@ -6315,86 +6324,101 @@ class JS8LogLinkIndexer:
             if entry["freq_hz"] is None and freq_hz is not None:
                 entry["freq_hz"] = freq_hz
 
-        if directed_path and directed_path.exists():
-            try:
-                size_now = directed_path.stat().st_size
-                if directed_offset < 0 or directed_offset > size_now:
-                    directed_offset = 0
-                with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
-                    if directed_offset > 0:
-                        fh.seek(directed_offset)
-                    last_pos = fh.tell()
-                    while True:
-                        line = fh.readline()
-                        if not line:
-                            break
-                        last_pos = fh.tell()
-                        parts = line.split("\t", 4)
-                        msg = parts[4] if len(parts) >= 5 else ""
-                        origin, _dest = self._extract_origin_dest(msg)
-                        freq_hz = None
-                        try:
-                            freq_hz = float(parts[1]) * 1_000_000.0 if len(parts) >= 2 else None
-                        except Exception:
-                            freq_hz = None
-                        if origin and msg:
-                            self._maybe_capture_geo_tokens(origin, msg, freq_hz)
-                        self._maybe_capture_group_grid(line)
-                        handle_parsed(self._parse_directed_line(line))
-                    try:
-                        self.settings.set("js8_links_directed_offset", int(last_pos))
-                    except Exception:
-                        pass
-            except Exception as e:
-                log.debug("JS8LogLinkIndexer: failed reading DIRECTED.TXT: %s", e)
+        for source in sources:
+            directed_path = source.directed_path
+            all_path = source.all_path
+            source_offsets = offsets_by_source.get(source.source_key, {})
+            directed_offset = 0 if force_reset_offsets else int(source_offsets.get("directed_offset", 0) or 0)
+            all_offset = 0 if force_reset_offsets else int(source_offsets.get("all_offset", 0) or 0)
+            last_directed_pos = directed_offset
+            last_all_pos = all_offset
 
-        if all_path and all_path.exists():
-            try:
-                size_now = all_path.stat().st_size
-                if all_offset < 0 or all_offset > size_now:
-                    all_offset = 0
-                with all_path.open("r", encoding="utf-8", errors="ignore") as fh:
-                    if all_offset > 0:
-                        fh.seek(all_offset)
-                    last_pos = fh.tell()
-                    while True:
-                        line = fh.readline()
-                        if not line:
-                            break
-                        last_pos = fh.tell()
-                        if "Transmitting" in line:
-                            msg_part = ""
-                            if "JS8:" in line:
-                                msg_part = line.split("JS8:", 1)[1]
-                            elif ":" in line:
-                                msg_part = line.split(":", 1)[1]
-                            msg_part = msg_part.lstrip(": ").strip()
-                            origin, _dest = self._extract_origin_dest(msg_part)
+            if directed_path and directed_path.exists():
+                try:
+                    size_now = directed_path.stat().st_size
+                    if directed_offset < 0 or directed_offset > size_now:
+                        directed_offset = 0
+                    with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                        if directed_offset > 0:
+                            fh.seek(directed_offset)
+                        last_directed_pos = fh.tell()
+                        while True:
+                            line = fh.readline()
+                            if not line:
+                                break
+                            last_directed_pos = fh.tell()
+                            parts = line.split("\t", 4)
+                            msg = parts[4] if len(parts) >= 5 else ""
+                            origin, _dest = self._extract_origin_dest(msg)
                             freq_hz = None
                             try:
-                                mhz_part = line.split("Transmitting", 1)[1]
-                                mhz_tok = [tok for tok in mhz_part.split() if tok.replace(".", "", 1).isdigit()]
-                                if mhz_tok:
-                                    freq_hz = float(mhz_tok[0]) * 1_000_000.0
+                                freq_hz = float(parts[1]) * 1_000_000.0 if len(parts) >= 2 else None
                             except Exception:
                                 freq_hz = None
-                            if origin and msg_part:
-                                self._maybe_capture_geo_tokens(origin, msg_part, freq_hz)
-                        handle_parsed(self._parse_all_line(line))
-                    try:
-                        self.settings.set("js8_links_all_offset", int(last_pos))
-                    except Exception:
-                        pass
-            except Exception as e:
-                log.debug("JS8LogLinkIndexer: failed reading ALL.TXT: %s", e)
+                            if origin and msg:
+                                self._maybe_capture_geo_tokens(origin, msg, freq_hz)
+                            self._maybe_capture_group_grid(line)
+                            handle_parsed(self._parse_directed_line(line))
+                except Exception as e:
+                    log.debug("JS8LogLinkIndexer: failed reading DIRECTED.TXT for %s: %s", source.source_key, e)
 
-        if not agg:
-            return 0
+            if all_path and all_path.exists():
+                try:
+                    size_now = all_path.stat().st_size
+                    if all_offset < 0 or all_offset > size_now:
+                        all_offset = 0
+                    with all_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                        if all_offset > 0:
+                            fh.seek(all_offset)
+                        last_all_pos = fh.tell()
+                        while True:
+                            line = fh.readline()
+                            if not line:
+                                break
+                            last_all_pos = fh.tell()
+                            if "Transmitting" in line:
+                                msg_part = ""
+                                if "JS8:" in line:
+                                    msg_part = line.split("JS8:", 1)[1]
+                                elif ":" in line:
+                                    msg_part = line.split(":", 1)[1]
+                                msg_part = msg_part.lstrip(": ").strip()
+                                origin, _dest = self._extract_origin_dest(msg_part)
+                                freq_hz = None
+                                try:
+                                    mhz_part = line.split("Transmitting", 1)[1]
+                                    mhz_tok = [tok for tok in mhz_part.split() if tok.replace(".", "", 1).isdigit()]
+                                    if mhz_tok:
+                                        freq_hz = float(mhz_tok[0]) * 1_000_000.0
+                                except Exception:
+                                    freq_hz = None
+                                if origin and msg_part:
+                                    self._maybe_capture_geo_tokens(origin, msg_part, freq_hz)
+                            handle_parsed(self._parse_all_line(line))
+                except Exception as e:
+                    log.debug("JS8LogLinkIndexer: failed reading ALL.TXT for %s: %s", source.source_key, e)
+
+            updated_offsets[source.source_key] = {
+                "directed_offset": int(last_directed_pos or 0),
+                "all_offset": int(last_all_pos or 0),
+            }
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         try:
+            ensure_js8_local_tables(conn, settings=self.settings)
             self._ensure_table(conn)
+            for source in sources:
+                offsets = updated_offsets.get(source.source_key, {})
+                upsert_js8_links_offset_state(
+                    conn,
+                    source,
+                    directed_offset=int(offsets.get("directed_offset", 0) or 0),
+                    all_offset=int(offsets.get("all_offset", 0) or 0),
+                )
+            if not agg:
+                conn.commit()
+                return 0
             payload = []
             for key, entry in agg.items():
                 pair, band = key
@@ -6434,7 +6458,7 @@ class JS8LogLinkIndexer:
                 for cs, ts_val in last_seen.items():
                     if not cs or not ts_val:
                         continue
-                    iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
+                    iso = datetime.datetime.fromtimestamp(ts_val, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                     conn.execute(
                         "UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?",
                         (iso, cs, cs),

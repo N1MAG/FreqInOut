@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
+import time
 from typing import Any, Dict, List, Mapping, Optional
 
 from freqinout.core.logger import log
-from freqinout.core.multi_radio_store import MultiRadioStore
+from freqinout.core.multi_radio_store import MultiRadioStore, normalize_ptt_group, normalize_resource_group
 from freqinout.core.software_status_service import SoftwareStatusService
+from freqinout.core.varac_ingest import load_latest_varac_sync_status
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.rigctl_client import RigControlClient, rig_control_client_from_settings
 
@@ -16,6 +20,76 @@ CONTROL_STATUS_KEYS: Dict[str, Optional[str]] = {
     "js8call": "JS8Call_API",
     "manual": None,
 }
+
+
+def _hz_to_band(freq_hz: Optional[float]) -> str:
+    if not freq_hz:
+        return ""
+    try:
+        mhz = float(freq_hz) / 1_000_000.0
+    except Exception:
+        return ""
+    bands = [
+        ("160M", 1.8, 2.0),
+        ("80M", 3.5, 4.0),
+        ("60M", 5.0, 5.5),
+        ("40M", 7.0, 7.3),
+        ("30M", 10.1, 10.15),
+        ("20M", 14.0, 14.35),
+        ("17M", 18.068, 18.168),
+        ("15M", 21.0, 21.45),
+        ("12M", 24.89, 24.99),
+        ("10M", 28.0, 29.7),
+        ("6M", 50.0, 54.0),
+        ("2M", 144.0, 148.0),
+    ]
+    for name, lo, hi in bands:
+        if lo <= mhz <= hi:
+            return name
+    return ""
+
+
+def _format_frequency_label(freq_hz: Optional[int]) -> str:
+    if not isinstance(freq_hz, (int, float)) or int(freq_hz) <= 0:
+        return ""
+    return f"{float(freq_hz) / 1_000_000.0:.3f} MHz"
+
+
+def _normalize_device_class(value: object) -> str:
+    raw = str(value or "").strip().lower() or "tx_rx"
+    return raw if raw in {"tx_rx", "observer", "gateway"} else "tx_rx"
+
+
+def _normalize_band_token(value: object) -> str:
+    return str(value or "").strip().upper().replace(" ", "")
+
+
+def _parse_string_list(value: object) -> List[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = [part.strip() for part in text.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        parsed = list(value)
+    else:
+        parsed = []
+    out = [_normalize_band_token(item) for item in parsed if _normalize_band_token(item)]
+    return list(dict.fromkeys(out))
+
+
+def _normalize_group_list(value: object) -> List[str]:
+    if isinstance(value, str):
+        raw_items = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raw_items = []
+    normalized = [normalize_resource_group(item) for item in raw_items if normalize_resource_group(item)]
+    return sorted(set(normalized))
 
 
 def _row_bool(value: object, default: bool) -> bool:
@@ -31,6 +105,14 @@ def _row_bool(value: object, default: bool) -> bool:
 
 
 def _device_endpoint_summary(profile: Mapping[str, Any]) -> str:
+    if _normalize_device_class(profile.get("device_class", "tx_rx")) == "observer":
+        host = str(profile.get("sdr_host", "") or "").strip()
+        port = profile.get("sdr_port")
+        if host and port not in (None, ""):
+            return f"Observer SDR {host}:{int(port)}"
+        if host:
+            return f"Observer SDR {host}"
+        return "Observer / no endpoint"
     backend = str(profile.get("control_backend", "") or "").strip().lower()
     if backend == "flrig":
         host = str(profile.get("flrig_host", "") or "").strip() or "127.0.0.1"
@@ -72,6 +154,7 @@ class DeviceSettingsProxy:
         backend = str(profile.get("control_backend", "manual") or "manual").strip().lower() or "manual"
         data: Dict[str, Any] = {
             "control_via": _legacy_control_via(backend),
+            "device_class": _normalize_device_class(profile.get("device_class", "tx_rx")),
             "rig_host": str(profile.get("rig_host", "") or "").strip(),
             "rig_port": profile.get("rig_port", 4532) or 4532,
             "flrig_host": str(profile.get("flrig_host", "") or "127.0.0.1").strip() or "127.0.0.1",
@@ -80,13 +163,24 @@ class DeviceSettingsProxy:
             or "127.0.0.1",
             "fldigi_port": profile.get("fldigi_port", 7362) or 7362,
             "fldigi_log_path": str(profile.get("fldigi_log_path", "") or "").strip(),
+            "fldigi_checkin_dir": str(profile.get("fldigi_checkin_dir", "") or "").strip(),
             "js8_host": str(profile.get("js8_host", "") or "127.0.0.1").strip() or "127.0.0.1",
             "js8_port": profile.get("js8_port", 2442) or 2442,
+            "js8_offset_hz": int(profile.get("js8_offset_hz", 0) or 0),
             "js8_profile_path": str(profile.get("js8_profile_path", "") or "").strip(),
+            "js8_forms_path": str(profile.get("js8_forms_path", "") or "").strip(),
             "varac_path": str(profile.get("varac_install_path", "") or "").strip(),
             "varac_db_path": str(profile.get("varac_db_path", "") or "").strip(),
             "varac_ini_path": str(profile.get("varac_ini_path", "") or "").strip(),
             "varac_launch_cmd": str(profile.get("launch_cmd", "") or "").strip(),
+            "message_paths": {},
+            "varac_cluster_id": str(profile.get("varac_cluster_public_id", "") or "").strip(),
+            "varac_cluster_name": str(profile.get("varac_cluster_name", "") or "").strip(),
+            "varac_instance_number": profile.get("varac_instance_number"),
+            "varac_gateway_handler": bool(int(profile.get("varac_gateway_handler", 0) or 0)),
+            "varac_shared_db_path": str(profile.get("varac_shared_db_path", "") or "").strip(),
+            "sdr_host": str(profile.get("sdr_host", "") or "").strip(),
+            "sdr_port": profile.get("sdr_port"),
             "launch_control_enabled": bool(int(profile.get("launch_enabled", 1) or 0)),
         }
         launch_path = str(profile.get("launch_path", "") or "").strip()
@@ -94,9 +188,41 @@ class DeviceSettingsProxy:
             data["path_flrig"] = launch_path
         elif backend == "js8call":
             data["path_js8call"] = launch_path
+        flrig_path = str(profile.get("flrig_path", "") or "").strip()
+        if flrig_path:
+            data["path_flrig"] = flrig_path
+        fldigi_path = str(profile.get("fldigi_path", "") or "").strip()
+        if fldigi_path:
+            data["path_fldigi"] = fldigi_path
+        js8_install_path = str(profile.get("js8_install_path", "") or "").strip()
+        if js8_install_path:
+            data["path_js8call"] = js8_install_path
+        js8_spotter_path = str(profile.get("js8_spotter_launch_path", "") or "").strip()
+        if js8_spotter_path:
+            data["path_js8spotter"] = js8_spotter_path
+        js8_commstat_path = str(profile.get("js8_commstat_launch_path", "") or "").strip()
+        if js8_commstat_path:
+            data["path_commstat"] = js8_commstat_path
+        varac_incoming_path = str(profile.get("varac_incoming_path", "") or "").strip()
+        if varac_incoming_path:
+            data["message_paths"] = {"varac": varac_incoming_path}
         return data
 
     def get(self, key: str, default: Any = None) -> Any:
+        if key == "message_paths":
+            merged_paths: Dict[str, Any] = {}
+            fallback_get = getattr(self._fallback, "get", None)
+            if callable(fallback_get):
+                try:
+                    fallback_value = fallback_get(key, default)
+                    if isinstance(fallback_value, dict):
+                        merged_paths.update(fallback_value)
+                except Exception:
+                    pass
+            local_value = self._data.get("message_paths", {})
+            if isinstance(local_value, dict):
+                merged_paths.update(local_value)
+            return merged_paths or default
         if key in self._data:
             return self._data.get(key, default)
         fallback_get = getattr(self._fallback, "get", None)
@@ -118,6 +244,12 @@ class DeviceSettingsProxy:
             except Exception:
                 pass
         merged.update(self._data)
+        fallback_message_paths = merged.get("message_paths", {})
+        local_message_paths = self._data.get("message_paths", {})
+        if isinstance(fallback_message_paths, dict) and isinstance(local_message_paths, dict):
+            combined_message_paths = dict(fallback_message_paths)
+            combined_message_paths.update(local_message_paths)
+            merged["message_paths"] = combined_message_paths
         return merged
 
 
@@ -125,12 +257,21 @@ class DeviceSettingsProxy:
 class DeviceRuntimeSnapshot:
     device_profile_id: int
     name: str
+    device_class: str
     control_backend: str
     deployment_mode: str
     runtime_active: bool
     runtime_primary: bool
     scheduler_owner: bool
     endpoint_summary: str
+    ptt_group: str
+    ptt_active: bool
+    current_frequency_hz: Optional[int]
+    current_frequency_label: str
+    current_band: str
+    antenna_group: str
+    frontend_group: str
+    amplifier_group: str
     assigned_operating_profile_id: Optional[int]
     assigned_operating_profile_name: str
     assignment_state: str
@@ -145,7 +286,57 @@ class DeviceRuntimeSnapshot:
     overall_state: str
     status_summary: str
     warning_text: str
+    shared_ptt_blocked: bool
+    shared_ptt_owner_device_id: Optional[int]
+    shared_ptt_owner_name: str
+    shared_ptt_status_text: str
+    observer_follow_source_device_id: Optional[int]
+    observer_follow_source_name: str
+    observer_follow_summary: str
+    varac_cluster_name: str
+    varac_cluster_id: str
+    varac_instance_number: Optional[int]
+    varac_gateway_handler: bool
+    varac_gateway_handler_name: str
+    varac_cluster_summary: str
+    swap_role: str
+    swap_summary: str
     service_states: Dict[str, Dict[str, object]]
+
+
+@dataclass
+class SharedPttLockSnapshot:
+    device_profile_id: int
+    ptt_group: str
+    blocked: bool
+    owner_device_profile_id: Optional[int]
+    owner_name: str
+    owner_backend: str
+    owner_ptt_active: bool
+    target_ptt_active: bool
+    reason: str
+
+
+@dataclass
+class RfConflictSnapshot:
+    target_device_profile_id: int
+    target_device_name: str
+    target_band: str
+    target_frequency_hz: Optional[int]
+    peer_device_profile_id: Optional[int]
+    peer_name: str
+    peer_band: str
+    peer_frequency_hz: Optional[int]
+    peer_device_ids: List[int]
+    peer_names: List[str]
+    shared_antenna_groups: List[str]
+    shared_amplifier_groups: List[str]
+    shared_frontend_groups: List[str]
+    same_band: bool
+    same_frequency: bool
+    summary: str
+    detail: str
+    signature: str
 
 
 class DeviceRuntime:
@@ -169,6 +360,14 @@ class DeviceRuntime:
         self.js8_control_client: Optional[JS8ControlClient] = None
         self.varac_status_client: Optional[VarACStatusClient] = None
         self._config_signature: tuple[object, ...] = tuple()
+        self._ptt_state_cache: bool = False
+        self._ptt_state_ts: float = 0.0
+        self._ptt_retry_ts: float = 0.0
+        self._ptt_state_ttl_sec: float = 0.8
+        self._ptt_retry_sec: float = 4.0
+        self._freq_state_cache: Optional[int] = None
+        self._freq_state_ts: float = 0.0
+        self._freq_retry_ts: float = 0.0
         self.update(
             profile,
             is_primary=is_primary,
@@ -228,6 +427,7 @@ class DeviceRuntime:
             except Exception as exc:
                 log.debug("DeviceRuntime: failed building JS8 client for %s: %s", self.profile.get("name", ""), exc)
                 self.js8_control_client = None
+        if _normalize_device_class(self.profile.get("device_class", "tx_rx")) != "observer":
             try:
                 self.varac_status_client = VarACStatusClient(settings=self.settings_proxy)
             except Exception as exc:
@@ -244,6 +444,59 @@ class DeviceRuntime:
         self.rig_client = None
         self.js8_control_client = None
         self.varac_status_client = None
+        self._ptt_state_cache = False
+        self._ptt_state_ts = 0.0
+        self._ptt_retry_ts = 0.0
+        self._freq_state_cache = None
+        self._freq_state_ts = 0.0
+        self._freq_retry_ts = 0.0
+
+    def ptt_active(self, *, force: bool = False) -> bool:
+        if _normalize_device_class(self.profile.get("device_class", "tx_rx")) == "observer":
+            return False
+        backend = str(self.profile.get("control_backend", "manual") or "manual").strip().lower() or "manual"
+        if backend not in {"flrig", "rigctld"}:
+            return False
+        if self.rig_client is None or not hasattr(self.rig_client, "get_ptt"):
+            return False
+        now = time.monotonic()
+        if not force and (now - float(self._ptt_state_ts or 0.0)) < float(self._ptt_state_ttl_sec):
+            return bool(self._ptt_state_cache)
+        if not force and now < float(self._ptt_retry_ts or 0.0):
+            return bool(self._ptt_state_cache)
+        try:
+            self._ptt_state_cache = bool(self.rig_client.get_ptt())
+            self._ptt_retry_ts = 0.0
+        except Exception as exc:
+            log.debug("DeviceRuntime: get_ptt failed for %s: %s", self.profile.get("name", ""), exc)
+            self._ptt_state_cache = False
+            self._ptt_retry_ts = now + float(self._ptt_retry_sec)
+        self._ptt_state_ts = now
+        return bool(self._ptt_state_cache)
+
+    def current_frequency_hz(self, *, force: bool = False) -> Optional[int]:
+        if _normalize_device_class(self.profile.get("device_class", "tx_rx")) == "observer":
+            return None
+        backend = str(self.profile.get("control_backend", "manual") or "manual").strip().lower() or "manual"
+        if backend not in {"flrig", "rigctld"}:
+            return None
+        if self.rig_client is None or not hasattr(self.rig_client, "get_vfo_frequency"):
+            return None
+        now = time.monotonic()
+        if not force and (now - float(self._freq_state_ts or 0.0)) < float(self._ptt_state_ttl_sec):
+            return self._freq_state_cache
+        if not force and now < float(self._freq_retry_ts or 0.0):
+            return self._freq_state_cache
+        try:
+            value = self.rig_client.get_vfo_frequency()
+            self._freq_state_cache = int(value) if isinstance(value, (int, float)) and int(value) > 0 else None
+            self._freq_retry_ts = 0.0
+        except Exception as exc:
+            log.debug("DeviceRuntime: get_vfo_frequency failed for %s: %s", self.profile.get("name", ""), exc)
+            self._freq_state_cache = None
+            self._freq_retry_ts = now + float(self._ptt_retry_sec)
+        self._freq_state_ts = now
+        return self._freq_state_cache
 
     def primary_signature(self) -> tuple[object, ...]:
         profile = self.profile
@@ -259,6 +512,12 @@ class DeviceRuntime:
             int(profile.get("rig_port", 4532) or 4532),
             str(profile.get("js8_host", "") or "").strip(),
             int(profile.get("js8_port", 2442) or 2442),
+            str(profile.get("varac_install_path", "") or "").strip(),
+            str(profile.get("varac_db_path", "") or "").strip(),
+            str(profile.get("varac_ini_path", "") or "").strip(),
+            str(profile.get("launch_cmd", "") or "").strip(),
+            str(profile.get("varac_cluster_public_id", "") or "").strip(),
+            int(profile.get("varac_instance_number", 0) or 0),
             bool(self.is_primary),
         )
 
@@ -296,7 +555,20 @@ class DeviceRuntime:
 
     def snapshot(self, *, force: bool = False) -> DeviceRuntimeSnapshot:
         service_states: Dict[str, Dict[str, object]] = {}
-        if self.status_service is not None:
+        device_class = _normalize_device_class(self.profile.get("device_class", "tx_rx"))
+        varac_cluster_name = str(self.profile.get("varac_cluster_name", "") or "").strip()
+        varac_cluster_id = str(self.profile.get("varac_cluster_public_id", "") or "").strip()
+        varac_cluster_member_enabled = bool(int(self.profile.get("varac_cluster_member_enabled", 0) or 0)) and bool(varac_cluster_name)
+        varac_instance_number = (
+            int(self.profile.get("varac_instance_number", 0) or 0)
+            if self.profile.get("varac_instance_number") not in (None, "")
+            else None
+        )
+        varac_gateway_handler = bool(int(self.profile.get("varac_gateway_handler", 0) or 0))
+        varac_gateway_handler_name = str(self.profile.get("varac_gateway_handler_name", "") or "").strip()
+        varac_cluster_member_count = int(self.profile.get("varac_cluster_enabled_member_count", 0) or 0)
+        varac_shared_db_path = str(self.profile.get("varac_shared_db_path", "") or "").strip()
+        if device_class != "observer" and self.status_service is not None:
             service_states = self.status_service.status_snapshot(
                 force=force,
                 host_override=str(self.profile.get("js8_host", "") or "").strip() or None,
@@ -310,45 +582,258 @@ class DeviceRuntime:
             )
 
         backend = str(self.profile.get("control_backend", "manual") or "manual").strip().lower() or "manual"
-        control_key = CONTROL_STATUS_KEYS.get(backend)
-        control_info = dict(service_states.get(control_key, {})) if control_key else {}
-        control_state = str(control_info.get("state", "ok" if backend == "manual" else "idle") or "idle").strip().lower()
-        if backend == "manual":
-            control_ready = True
-            overall_state = "ok"
-            status_summary = "Manual control"
+        warnings: List[str] = []
+        if device_class == "observer":
+            observer_info = (
+                self.status_service.generic_endpoint_status(
+                    service_name="OBSERVER",
+                    endpoint_label="Observer SDR",
+                    host=str(self.profile.get("sdr_host", "") or "").strip(),
+                    port=int(self.profile.get("sdr_port", 0) or 0),
+                    force=force,
+                )
+                if self.status_service is not None
+                else {
+                    "state": "idle",
+                    "tooltip": "Observer SDR status unavailable",
+                    "running": False,
+                    "reachable": False,
+                    "endpoint": "",
+                }
+            )
+            service_states["Observer"] = dict(observer_info)
+            control_ready = bool(observer_info.get("reachable", False))
+            overall_state = str(observer_info.get("state", "idle") or "idle").strip().lower() or "idle"
+            status_summary = str(observer_info.get("tooltip", "") or "").strip() or "Observer SDR status unavailable"
         else:
-            control_ready = control_state == "ok"
-            overall_state = control_state if control_state in {"ok", "warn", "error"} else "idle"
-            if self.is_primary and not control_ready and overall_state == "idle":
-                overall_state = "warn"
-            status_summary = str(control_info.get("tooltip", "") or "").strip()
-            if not status_summary:
-                if control_ready:
-                    status_summary = f"{backend.upper()} control reachable"
+            varac_install_path = str(self.profile.get("varac_install_path", "") or "").strip()
+            varac_db_path = str(self.profile.get("varac_db_path", "") or "").strip()
+            varac_ini_path = str(self.profile.get("varac_ini_path", "") or "").strip()
+            varac_launch_cmd = str(self.profile.get("launch_cmd", "") or "").strip()
+            varac_configured = any((varac_install_path, varac_db_path, varac_ini_path, varac_launch_cmd))
+            running_varac = False
+            if self.status_service is not None and varac_configured:
+                try:
+                    running_varac = bool(self.status_service.program_is_running("VarAC"))
+                except Exception:
+                    running_varac = False
+            raw_varac_status = (
+                self.varac_status_client.get_status()
+                if self.varac_status_client is not None and varac_configured
+                else {}
+            )
+            varac_reason = str(raw_varac_status.get("reason", "") or "").strip().lower()
+            reason_map = {
+                "waiting_for_frequency": "waiting for frequency to clear",
+                "connecting": "connecting",
+                "connected": "connected",
+                "incoming": "incoming session",
+                "file_wait": "waiting for file confirmation",
+                "transfer": "transferring data",
+                "broadcast_incomplete": "broadcast in progress",
+            }
+            if varac_cluster_member_enabled and not varac_configured:
+                varac_info = {
+                    "state": "warn",
+                    "tooltip": "VarAC cluster member enabled, but device-local VarAC settings are incomplete.",
+                    "running": False,
+                    "busy": False,
+                    "waiting_for_frequency": False,
+                }
+            elif varac_configured:
+                if bool(raw_varac_status.get("busy")) or bool(raw_varac_status.get("waiting_for_frequency")):
+                    reason_txt = reason_map.get(varac_reason, varac_reason.replace("_", " ").strip())
+                    tooltip = "VarAC busy"
+                    if reason_txt:
+                        tooltip = f"VarAC busy: {reason_txt}"
+                    varac_info = {
+                        "state": "ok",
+                        "tooltip": tooltip,
+                        "running": True,
+                        "busy": True,
+                        "waiting_for_frequency": bool(raw_varac_status.get("waiting_for_frequency")),
+                    }
+                elif running_varac:
+                    varac_info = {
+                        "state": "ok",
+                        "tooltip": "VarAC node running for this device.",
+                        "running": True,
+                        "busy": False,
+                        "waiting_for_frequency": False,
+                    }
                 else:
-                    status_summary = f"{backend.upper()} control unavailable"
+                    varac_info = {
+                        "state": "idle",
+                        "tooltip": "VarAC configured for this device, but not running.",
+                        "running": False,
+                        "busy": False,
+                        "waiting_for_frequency": False,
+                    }
+            else:
+                varac_info = {
+                    "state": "idle",
+                    "tooltip": "VarAC not configured for this device.",
+                    "running": False,
+                    "busy": False,
+                    "waiting_for_frequency": False,
+                }
+            service_states["VarAC"] = dict(varac_info)
 
-        warning_text = ""
-        if not self.is_primary:
-            warning_text = "Current control tabs remain bound to the primary compatibility device."
+            varac_cluster_summary = ""
+            if varac_cluster_member_enabled:
+                raw_cluster_sync = self.profile.get("varac_cluster_ingest_status", {})
+                cluster_sync = dict(raw_cluster_sync) if isinstance(raw_cluster_sync, dict) else {}
+                shared_db_exists = False
+                if varac_shared_db_path:
+                    try:
+                        shared_db_exists = Path(varac_shared_db_path).expanduser().exists()
+                    except Exception:
+                        shared_db_exists = False
+                cluster_role_text = ""
+                if varac_gateway_handler:
+                    cluster_role_text = "gateway handler"
+                elif varac_gateway_handler_name:
+                    cluster_role_text = f"gateway handled by {varac_gateway_handler_name}"
+                elif varac_cluster_member_count > 1:
+                    cluster_role_text = "gateway handler not selected"
+                elif varac_cluster_member_count == 1:
+                    cluster_role_text = "single-member cluster"
+                cluster_base = f"VarAC cluster {varac_cluster_name}"
+                if varac_cluster_id:
+                    cluster_base += f" [{varac_cluster_id}]"
+                if varac_instance_number is not None:
+                    cluster_base += f" node #{varac_instance_number}"
+                if cluster_role_text:
+                    cluster_base += f"; {cluster_role_text}"
+                varac_cluster_summary = cluster_base + "."
+
+                if varac_shared_db_path:
+                    if shared_db_exists:
+                        cluster_state = "ok"
+                        cluster_tooltip = f"{cluster_base}. Shared DB available at {varac_shared_db_path}."
+                    else:
+                        cluster_state = "warn"
+                        cluster_tooltip = f"{cluster_base}. Shared DB missing at {varac_shared_db_path}."
+                    cluster_endpoint = varac_shared_db_path
+                else:
+                    cluster_state = "warn"
+                    cluster_tooltip = (
+                        f"{cluster_base}. Shared DB path not configured."
+                        if cluster_base
+                        else "VarAC shared cluster DB path not configured."
+                    )
+                    cluster_endpoint = ""
+                ingest_summary = ""
+                finished_ts = float(cluster_sync.get("run_finished_ts", 0.0) or 0.0)
+                rows_written = int(cluster_sync.get("rows_written", 0) or 0)
+                success_flag = bool(int(cluster_sync.get("success", 0) or 0))
+                if finished_ts > 0:
+                    age_seconds = max(0.0, time.time() - finished_ts)
+                    if age_seconds >= 3600:
+                        age_label = f"{int(age_seconds // 3600)}h ago"
+                    elif age_seconds >= 60:
+                        age_label = f"{int(age_seconds // 60)}m ago"
+                    else:
+                        age_label = f"{int(age_seconds)}s ago"
+                    refresh_sec = max(5, int(self.profile.get("varac_counters_refresh_sec", 30) or 30))
+                    stale = age_seconds > max(120.0, float(refresh_sec * 4))
+                    if success_flag:
+                        ingest_summary = f" Last ingest OK {age_label} ({rows_written} rows written)."
+                        if stale and cluster_state == "ok":
+                            cluster_state = "warn"
+                            cluster_tooltip += f" Last ingest is stale ({age_label})."
+                        else:
+                            cluster_tooltip += ingest_summary
+                    else:
+                        ingest_error = str(cluster_sync.get("error_text", "") or "").strip()
+                        ingest_summary = f" Last ingest failed {age_label}."
+                        if ingest_error:
+                            ingest_summary += f" {ingest_error}"
+                        cluster_state = "warn"
+                        cluster_tooltip += ingest_summary
+                elif cluster_state == "ok":
+                    ingest_summary = " Awaiting first shared-cluster ingest."
+                    cluster_tooltip += ingest_summary
+                varac_cluster_summary = (cluster_base + "." + ingest_summary).strip()
+                service_states["VarAC Cluster"] = {
+                    "state": cluster_state,
+                    "tooltip": cluster_tooltip,
+                    "running": cluster_state == "ok",
+                    "reachable": cluster_state == "ok",
+                    "endpoint": cluster_endpoint,
+                }
+
+            control_key = CONTROL_STATUS_KEYS.get(backend)
+            control_info = dict(service_states.get(control_key, {})) if control_key else {}
+            control_state = str(control_info.get("state", "ok" if backend == "manual" else "idle") or "idle").strip().lower()
+            if backend == "manual":
+                control_ready = True
+                overall_state = "ok"
+                status_summary = "Manual control"
+            else:
+                control_ready = control_state == "ok"
+                overall_state = control_state if control_state in {"ok", "warn", "error"} else "idle"
+                if self.is_primary and not control_ready and overall_state == "idle":
+                    overall_state = "warn"
+                status_summary = str(control_info.get("tooltip", "") or "").strip()
+                if not status_summary:
+                    if control_ready:
+                        status_summary = f"{backend.upper()} control reachable"
+                    else:
+                        status_summary = f"{backend.upper()} control unavailable"
+            cluster_state = str(service_states.get("VarAC Cluster", {}).get("state", "idle") or "idle").strip().lower()
+            varac_state = str(service_states.get("VarAC", {}).get("state", "idle") or "idle").strip().lower()
+            if varac_cluster_member_enabled and overall_state not in {"warn", "error"} and (
+                cluster_state == "warn" or varac_state == "warn"
+            ):
+                overall_state = "warn"
+
+        if device_class == "observer":
+            warnings.append(
+                "Observer / SDR devices are monitored and receive follow guidance only; "
+                "they never own the primary compatibility shell in this slice."
+            )
+        elif not self.is_primary:
+            warnings.append("Current control tabs remain bound to the primary compatibility device.")
             if backend == "js8call":
-                warning_text = (
+                warnings.append(
                     "Secondary JS8 devices are monitored, but current JS8 tab workflows remain bound "
                     "to the primary compatibility device."
                 )
+        if str(service_states.get("VarAC", {}).get("state", "idle") or "idle").strip().lower() == "warn":
+            tooltip = str(service_states.get("VarAC", {}).get("tooltip", "") or "").strip()
+            if tooltip:
+                warnings.append(tooltip)
+        if str(service_states.get("VarAC Cluster", {}).get("state", "idle") or "idle").strip().lower() == "warn":
+            tooltip = str(service_states.get("VarAC Cluster", {}).get("tooltip", "") or "").strip()
+            if tooltip:
+                warnings.append(tooltip)
+        warning_text = " ".join(dict.fromkeys([warning for warning in warnings if warning]))
 
         assigned_name = str(self.operating_profile.get("name", "") or "").strip()
         policy = self.operating_policy()
+        ptt_group = "" if device_class == "observer" else normalize_ptt_group(self.profile.get("ptt_group", ""))
+        ptt_active = self.ptt_active(force=force)
+        current_frequency_hz = self.current_frequency_hz(force=force)
+        current_band = _hz_to_band(current_frequency_hz)
         return DeviceRuntimeSnapshot(
             device_profile_id=int(self.profile.get("id", 0) or 0),
             name=str(self.profile.get("name", "") or "").strip(),
+            device_class=device_class,
             control_backend=backend,
             deployment_mode=str(self.profile.get("deployment_mode", "full") or "full").strip().lower() or "full",
             runtime_active=bool(int(self.profile.get("runtime_active", 0) or 0)),
             runtime_primary=bool(self.is_primary),
-            scheduler_owner=bool(self.is_primary),
+            scheduler_owner=bool(self.is_primary and device_class != "observer"),
             endpoint_summary=_device_endpoint_summary(self.profile),
+            ptt_group=ptt_group,
+            ptt_active=ptt_active,
+            current_frequency_hz=current_frequency_hz,
+            current_frequency_label=_format_frequency_label(current_frequency_hz),
+            current_band=current_band,
+            antenna_group=normalize_resource_group(self.profile.get("antenna_group", "")),
+            frontend_group=normalize_resource_group(self.profile.get("frontend_group", "")),
+            amplifier_group=normalize_resource_group(self.profile.get("amplifier_group", "")),
             assigned_operating_profile_id=(
                 int(self.assignment.get("operating_profile_id", 0) or 0) if self.assignment.get("operating_profile_id") is not None else None
             ),
@@ -365,6 +850,21 @@ class DeviceRuntime:
             overall_state=overall_state,
             status_summary=status_summary,
             warning_text=warning_text,
+            shared_ptt_blocked=False,
+            shared_ptt_owner_device_id=None,
+            shared_ptt_owner_name="",
+            shared_ptt_status_text="",
+            observer_follow_source_device_id=None,
+            observer_follow_source_name="",
+            observer_follow_summary="",
+            varac_cluster_name=varac_cluster_name,
+            varac_cluster_id=varac_cluster_id,
+            varac_instance_number=varac_instance_number,
+            varac_gateway_handler=varac_gateway_handler,
+            varac_gateway_handler_name=varac_gateway_handler_name,
+            varac_cluster_summary=varac_cluster_summary if device_class != "observer" else "",
+            swap_role="",
+            swap_summary="",
             service_states=service_states,
         )
 
@@ -375,6 +875,12 @@ class StationRuntimeManager:
         self.settings = settings
         self._runtimes: Dict[int, DeviceRuntime] = {}
         self._primary_device_id: Optional[int] = None
+        self._rf_conflict_policies: List[Dict[str, Any]] = []
+        self._sdr_follow_policies: List[Dict[str, Any]] = []
+        self._varac_clusters: Dict[int, Dict[str, Any]] = {}
+        self._varac_cluster_members_by_device: Dict[int, Dict[str, Any]] = {}
+        self._varac_sync_by_source: Dict[str, Dict[str, Any]] = {}
+        self._active_profile_swap: Optional[Dict[str, Any]] = None
 
     def sync_with_store(self) -> None:
         settings_reload = getattr(self.settings, "reload", None)
@@ -398,6 +904,57 @@ class StationRuntimeManager:
             for row in self.store.list_operating_profiles()
             if isinstance(row, dict)
         }
+        try:
+            self._varac_clusters = {
+                int(row.get("id", 0) or 0): dict(row)
+                for row in self.store.list_varac_clusters()
+                if isinstance(row, dict)
+            }
+        except Exception as exc:
+            log.debug("StationRuntimeManager: failed loading VarAC clusters: %s", exc)
+            self._varac_clusters = {}
+        try:
+            self._varac_cluster_members_by_device = {
+                int(row.get("device_profile_id", 0) or 0): dict(row)
+                for row in self.store.list_varac_cluster_members()
+                if isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1
+            }
+        except Exception as exc:
+            log.debug("StationRuntimeManager: failed loading VarAC cluster members: %s", exc)
+            self._varac_cluster_members_by_device = {}
+        try:
+            self._varac_sync_by_source = {
+                str(key): dict(value)
+                for key, value in load_latest_varac_sync_status().items()
+                if isinstance(value, dict)
+            }
+        except Exception as exc:
+            log.debug("StationRuntimeManager: failed loading VarAC ingest status: %s", exc)
+            self._varac_sync_by_source = {}
+        try:
+            self._rf_conflict_policies = [
+                dict(row)
+                for row in self.store.list_station_coordination_policies("rf_conflict")
+                if isinstance(row, dict)
+            ]
+        except Exception as exc:
+            log.debug("StationRuntimeManager: failed loading RF conflict policies: %s", exc)
+            self._rf_conflict_policies = []
+        try:
+            self._sdr_follow_policies = [
+                dict(row)
+                for row in self.store.list_station_coordination_policies("sdr_follow")
+                if isinstance(row, dict)
+            ]
+        except Exception as exc:
+            log.debug("StationRuntimeManager: failed loading SDR follow policies: %s", exc)
+            self._sdr_follow_policies = []
+        try:
+            active_swap = self.store.get_active_profile_swap()
+            self._active_profile_swap = dict(active_swap) if isinstance(active_swap, dict) else None
+        except Exception as exc:
+            log.debug("StationRuntimeManager: failed loading active profile swap: %s", exc)
+            self._active_profile_swap = None
 
         active_ids = {int(profile.get("id", 0) or 0) for profile in active_profiles}
         for stale_id in [runtime_id for runtime_id in self._runtimes if runtime_id not in active_ids]:
@@ -409,10 +966,34 @@ class StationRuntimeManager:
             device_id = int(profile.get("id", 0) or 0)
             assignment = assignments.get(device_id)
             operating_profile = operating_profiles.get(int(assignment.get("operating_profile_id", 0) or 0)) if assignment else None
+            membership = dict(self._varac_cluster_members_by_device.get(device_id, {}))
+            cluster = (
+                dict(self._varac_clusters.get(int(membership.get("cluster_db_id", 0) or 0), {}))
+                if membership
+                else {}
+            )
+            profile_data = dict(profile)
+            if membership:
+                cluster_source_key = f"cluster:{int(membership.get('cluster_db_id', 0) or 0)}"
+                profile_data.update(
+                    {
+                        "varac_cluster_member_enabled": int(membership.get("enabled", 1) or 0),
+                        "varac_cluster_db_id": int(membership.get("cluster_db_id", 0) or 0),
+                        "varac_cluster_name": str(membership.get("cluster_name", "") or "").strip(),
+                        "varac_cluster_public_id": str(membership.get("cluster_public_id", "") or "").strip(),
+                        "varac_shared_db_path": str(membership.get("shared_db_path", "") or "").strip(),
+                        "varac_counters_refresh_sec": int(membership.get("counters_refresh_sec", 30) or 30),
+                        "varac_instance_number": int(membership.get("instance_number", 0) or 0),
+                        "varac_gateway_handler": 1 if bool(membership.get("is_gateway_handler")) else 0,
+                        "varac_gateway_handler_name": str(cluster.get("gateway_handler_name", "") or "").strip(),
+                        "varac_cluster_enabled_member_count": int(cluster.get("enabled_member_count", 0) or 0),
+                        "varac_cluster_ingest_status": dict(self._varac_sync_by_source.get(cluster_source_key, {})),
+                    }
+                )
             runtime = self._runtimes.get(device_id)
             if runtime is None:
                 runtime = DeviceRuntime(
-                    profile,
+                    profile_data,
                     is_primary=device_id == primary_id,
                     fallback_settings=self.settings,
                     assignment=assignment,
@@ -421,7 +1002,7 @@ class StationRuntimeManager:
                 self._runtimes[device_id] = runtime
             else:
                 runtime.update(
-                    profile,
+                    profile_data,
                     is_primary=device_id == primary_id,
                     assignment=assignment,
                     operating_profile=operating_profile,
@@ -434,9 +1015,209 @@ class StationRuntimeManager:
             runtime.stop()
         self._runtimes.clear()
         self._primary_device_id = None
+        self._sdr_follow_policies = []
+        self._varac_clusters = {}
+        self._varac_cluster_members_by_device = {}
+        self._varac_sync_by_source = {}
+        self._active_profile_swap = None
+
+    def shared_ptt_lock_snapshot(
+        self,
+        *,
+        for_device_id: Optional[int] = None,
+        force: bool = False,
+    ) -> SharedPttLockSnapshot:
+        target_id = int(for_device_id or 0) if for_device_id not in (None, "") else int(self._primary_device_id or 0)
+        if target_id <= 0:
+            return SharedPttLockSnapshot(
+                device_profile_id=0,
+                ptt_group="",
+                blocked=False,
+                owner_device_profile_id=None,
+                owner_name="",
+                owner_backend="",
+                owner_ptt_active=False,
+                target_ptt_active=False,
+                reason="",
+            )
+        target_runtime = self._runtimes.get(int(target_id))
+        if target_runtime is None:
+            return SharedPttLockSnapshot(
+                device_profile_id=int(target_id),
+                ptt_group="",
+                blocked=False,
+                owner_device_profile_id=None,
+                owner_name="",
+                owner_backend="",
+                owner_ptt_active=False,
+                target_ptt_active=False,
+                reason="",
+            )
+        ptt_group = normalize_ptt_group(target_runtime.profile.get("ptt_group", ""))
+        target_ptt_active = bool(target_runtime.ptt_active(force=force))
+        if not ptt_group:
+            return SharedPttLockSnapshot(
+                device_profile_id=int(target_id),
+                ptt_group="",
+                blocked=False,
+                owner_device_profile_id=None,
+                owner_name="",
+                owner_backend="",
+                owner_ptt_active=False,
+                target_ptt_active=target_ptt_active,
+                reason="",
+            )
+
+        owners: List[DeviceRuntime] = []
+        for runtime_id, runtime in self._runtimes.items():
+            if int(runtime_id) == int(target_id):
+                continue
+            if normalize_ptt_group(runtime.profile.get("ptt_group", "")) != ptt_group:
+                continue
+            if runtime.ptt_active(force=force):
+                owners.append(runtime)
+        owners.sort(key=lambda runtime: (0 if runtime.is_primary else 1, str(runtime.profile.get("name", "")).lower(), int(runtime.profile.get("id", 0) or 0)))
+        owner = owners[0] if owners else None
+        owner_name = str((owner.profile if owner is not None else {}).get("name", "") or "").strip()
+        owner_backend = str((owner.profile if owner is not None else {}).get("control_backend", "") or "").strip().lower()
+        blocked = owner is not None
+        reason = ""
+        if blocked:
+            owner_label = owner_name or f"Device {int((owner.profile if owner is not None else {}).get('id', 0) or 0)}"
+            reason = f"Shared PTT group {ptt_group} is in use by {owner_label}."
+        elif target_ptt_active:
+            target_name = str(target_runtime.profile.get("name", "") or "").strip() or f"Device {target_id}"
+            reason = f"Shared PTT group {ptt_group} is keyed by {target_name}."
+        else:
+            reason = f"Shared PTT group {ptt_group} is clear."
+        return SharedPttLockSnapshot(
+            device_profile_id=int(target_id),
+            ptt_group=ptt_group,
+            blocked=blocked,
+            owner_device_profile_id=(
+                int((owner.profile if owner is not None else {}).get("id", 0) or 0) if owner is not None else None
+            ),
+            owner_name=owner_name,
+            owner_backend=owner_backend,
+            owner_ptt_active=owner is not None,
+            target_ptt_active=target_ptt_active,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _apply_shared_ptt_annotations(snapshots: List[DeviceRuntimeSnapshot]) -> None:
+        by_group: Dict[str, List[DeviceRuntimeSnapshot]] = {}
+        for snapshot in snapshots:
+            snapshot.shared_ptt_blocked = False
+            snapshot.shared_ptt_owner_device_id = None
+            snapshot.shared_ptt_owner_name = ""
+            snapshot.shared_ptt_status_text = ""
+            if snapshot.ptt_group:
+                by_group.setdefault(snapshot.ptt_group, []).append(snapshot)
+        for group, members in by_group.items():
+            owners = [snap for snap in members if snap.ptt_active]
+            owners.sort(key=lambda snap: (0 if snap.runtime_primary else 1, snap.name.lower(), snap.device_profile_id))
+            for snapshot in members:
+                other_owners = [owner for owner in owners if owner.device_profile_id != snapshot.device_profile_id]
+                if other_owners:
+                    owner = other_owners[0]
+                    snapshot.shared_ptt_blocked = True
+                    snapshot.shared_ptt_owner_device_id = owner.device_profile_id
+                    snapshot.shared_ptt_owner_name = owner.name
+                    if snapshot.ptt_active:
+                        snapshot.shared_ptt_status_text = f"Shared PTT {group}: contention with {owner.name or f'Device {owner.device_profile_id}'}."
+                    else:
+                        snapshot.shared_ptt_status_text = f"Shared PTT {group}: blocked by {owner.name or f'Device {owner.device_profile_id}'}."
+                    continue
+                if snapshot.ptt_active:
+                    snapshot.shared_ptt_status_text = f"Shared PTT {group}: keyed here."
+                else:
+                    snapshot.shared_ptt_status_text = f"Shared PTT {group}: clear."
+
+    def _apply_observer_follow_annotations(self, snapshots: List[DeviceRuntimeSnapshot]) -> None:
+        for snapshot in snapshots:
+            snapshot.observer_follow_source_device_id = None
+            snapshot.observer_follow_source_name = ""
+            snapshot.observer_follow_summary = ""
+
+        primary_snapshot = next(
+            (snap for snap in snapshots if snap.runtime_primary and snap.device_class != "observer"),
+            None,
+        )
+        if primary_snapshot is None:
+            for snapshot in snapshots:
+                if snapshot.device_class == "observer":
+                    snapshot.observer_follow_summary = "Observer standby: awaiting a primary transceiver."
+            return
+
+        primary_id = int(primary_snapshot.device_profile_id)
+        primary_name = primary_snapshot.name or f"Device {primary_id}"
+        primary_band = str(primary_snapshot.current_band or "").strip().upper()
+        policy_by_target = {
+            int(policy.get("target_device_id", 0) or 0): dict(policy)
+            for policy in self._sdr_follow_policies
+            if bool(int(policy.get("enabled", 1) or 0)) and int(policy.get("source_device_id", 0) or 0) == primary_id
+        }
+
+        for snapshot in snapshots:
+            if snapshot.device_class != "observer":
+                continue
+            snapshot.observer_follow_source_device_id = primary_id
+            snapshot.observer_follow_source_name = primary_name
+            if snapshot.device_profile_id not in policy_by_target:
+                snapshot.observer_follow_summary = "Observer standby: no follow rule for the current primary device."
+                continue
+            runtime = self._runtimes.get(int(snapshot.device_profile_id))
+            preferred_bands = _parse_string_list(
+                (runtime.operating_profile if runtime is not None else {}).get("preferred_band_set_json", "[]")
+            )
+            alternate_band = next((band for band in preferred_bands if band and band != primary_band), "")
+            if primary_band and alternate_band:
+                snapshot.observer_follow_summary = (
+                    f"Observer follow: park on {alternate_band} while {primary_name} is on {primary_band}."
+                )
+            elif primary_band:
+                snapshot.observer_follow_summary = f"Observer follow: monitor {primary_name} on {primary_band}."
+            elif preferred_bands:
+                snapshot.observer_follow_summary = (
+                    f"Observer standby: preferred bands {', '.join(preferred_bands)}; primary band unavailable."
+                )
+            else:
+                snapshot.observer_follow_summary = (
+                    f"Observer standby: follow {primary_name} when the primary tuning becomes available."
+                )
+
+    def _apply_profile_swap_annotations(self, snapshots: List[DeviceRuntimeSnapshot]) -> None:
+        active_swap = dict(self._active_profile_swap or {})
+        for snapshot in snapshots:
+            snapshot.swap_role = ""
+            snapshot.swap_summary = ""
+        if not active_swap:
+            return
+        source_id = int(active_swap.get("source_device_id", 0) or 0)
+        target_id = int(active_swap.get("target_device_id", 0) or 0)
+        mode = str(active_swap.get("mode", "") or "").strip().lower()
+        source_name = str(active_swap.get("source_device_name", "") or "").strip() or f"Device {source_id}"
+        target_name = str(active_swap.get("target_device_name", "") or "").strip() or f"Device {target_id}"
+        carried_name = str(active_swap.get("applied_operating_profile_name", "") or "").strip()
+        for snapshot in snapshots:
+            if snapshot.device_profile_id == target_id:
+                snapshot.swap_role = "target"
+                if mode == "carry_primary_profile" and carried_name:
+                    snapshot.swap_summary = (
+                        f"Temporary swap target: primary shell moved from {source_name}; carrying {carried_name}."
+                    )
+                else:
+                    snapshot.swap_summary = f"Temporary swap target: acting as primary for {source_name}."
+            elif snapshot.device_profile_id == source_id:
+                snapshot.swap_role = "source"
+                snapshot.swap_summary = f"Temporary swap source: restore returns the primary shell to {source_name}."
 
     def get_runtime_snapshots(self, *, force: bool = False) -> List[DeviceRuntimeSnapshot]:
         snapshots = [runtime.snapshot(force=force) for runtime in self._runtimes.values()]
+        self._apply_shared_ptt_annotations(snapshots)
+        self._apply_observer_follow_annotations(snapshots)
+        self._apply_profile_swap_annotations(snapshots)
         snapshots.sort(key=lambda snap: (0 if snap.runtime_primary else 1, snap.name.lower(), snap.device_profile_id))
         return snapshots
 
@@ -444,6 +1225,151 @@ class StationRuntimeManager:
         if self._primary_device_id is None:
             return None
         return self._runtimes.get(int(self._primary_device_id))
+
+    def get_active_profile_swap(self) -> Optional[Dict[str, Any]]:
+        return dict(self._active_profile_swap) if isinstance(self._active_profile_swap, dict) else None
+
+    def evaluate_primary_rf_conflict(
+        self,
+        *,
+        target_band: str = "",
+        target_frequency_hz: Optional[int] = None,
+        source: str = "",
+        force: bool = False,
+    ) -> Optional[RfConflictSnapshot]:
+        primary_runtime = self.get_primary_runtime()
+        if primary_runtime is None:
+            return None
+        primary_id = int(primary_runtime.profile.get("id", 0) or 0)
+        if primary_id <= 0:
+            return None
+        normalized_band = str(target_band or "").strip().upper() or _hz_to_band(target_frequency_hz)
+        if not normalized_band and not isinstance(target_frequency_hz, (int, float)):
+            return None
+
+        candidates: List[Dict[str, Any]] = []
+        for policy in self._rf_conflict_policies:
+            if not bool(int(policy.get("enabled", 1) or 0)):
+                continue
+            source_id = int(policy.get("source_device_id", 0) or 0)
+            target_id = int(policy.get("target_device_id", 0) or 0)
+            if primary_id not in {source_id, target_id}:
+                continue
+            peer_id = target_id if primary_id == source_id else source_id
+            peer_runtime = self._runtimes.get(peer_id)
+            if peer_runtime is None:
+                continue
+            peer_frequency_hz = peer_runtime.current_frequency_hz(force=force)
+            if not isinstance(peer_frequency_hz, (int, float)) or int(peer_frequency_hz) <= 0:
+                continue
+            peer_frequency_hz = int(peer_frequency_hz)
+            peer_band = _hz_to_band(peer_frequency_hz)
+            same_frequency = (
+                isinstance(target_frequency_hz, (int, float))
+                and abs(int(target_frequency_hz) - peer_frequency_hz) <= 5
+            )
+            same_band = bool(normalized_band and peer_band and normalized_band == peer_band)
+            if not same_frequency and not same_band:
+                continue
+            trigger = dict(policy.get("trigger") or {})
+            antenna_groups = _normalize_group_list(trigger.get("antenna_groups"))
+            amplifier_groups = _normalize_group_list(trigger.get("amplifier_groups"))
+            frontend_groups = _normalize_group_list(trigger.get("frontend_groups"))
+            if not (antenna_groups or amplifier_groups or frontend_groups):
+                continue
+            peer_name = str(peer_runtime.profile.get("name", "") or "").strip() or f"Device {peer_id}"
+            candidates.append(
+                {
+                    "peer_id": peer_id,
+                    "peer_name": peer_name,
+                    "peer_band": peer_band,
+                    "peer_frequency_hz": peer_frequency_hz,
+                    "same_frequency": bool(same_frequency),
+                    "same_band": bool(same_band),
+                    "shared_antenna_groups": antenna_groups,
+                    "shared_amplifier_groups": amplifier_groups,
+                    "shared_frontend_groups": frontend_groups,
+                    "shared_count": len(antenna_groups) + len(amplifier_groups) + len(frontend_groups),
+                }
+            )
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda item: (
+                0 if bool(item.get("same_frequency")) else 1,
+                -int(item.get("shared_count", 0) or 0),
+                str(item.get("peer_name", "")).lower(),
+                int(item.get("peer_id", 0) or 0),
+            )
+        )
+        primary_candidate = candidates[0]
+        peer_ids = [int(item.get("peer_id", 0) or 0) for item in candidates]
+        peer_names = [str(item.get("peer_name", "") or "").strip() for item in candidates if str(item.get("peer_name", "") or "").strip()]
+        antenna_groups = sorted({group for item in candidates for group in item.get("shared_antenna_groups", [])})
+        amplifier_groups = sorted({group for item in candidates for group in item.get("shared_amplifier_groups", [])})
+        frontend_groups = sorted({group for item in candidates for group in item.get("shared_frontend_groups", [])})
+
+        resource_parts: List[str] = []
+        if antenna_groups:
+            resource_parts.append("antenna " + ", ".join(antenna_groups))
+        if amplifier_groups:
+            resource_parts.append("amplifier " + ", ".join(amplifier_groups))
+        if frontend_groups:
+            resource_parts.append("front-end " + ", ".join(frontend_groups))
+        resource_text = "; ".join(resource_parts) if resource_parts else "shared RF resources"
+
+        target_frequency_label = _format_frequency_label(int(target_frequency_hz) if isinstance(target_frequency_hz, (int, float)) else None)
+        peer_frequency_label = _format_frequency_label(int(primary_candidate["peer_frequency_hz"]))
+        overlap_text = (
+            f"same frequency {target_frequency_label}"
+            if primary_candidate["same_frequency"] and target_frequency_label
+            else f"same band {normalized_band or str(primary_candidate.get('peer_band', '') or '').strip()}"
+        )
+        extra_count = max(0, len(peer_names) - 1)
+        extra_text = f" (+{extra_count} more)" if extra_count else ""
+        summary = f"RF conflict: {primary_candidate['peer_name']}{extra_text} on {overlap_text} via {resource_text}."
+        target_tuning = " ".join(part for part in (target_frequency_label, normalized_band) if part).strip()
+        peer_tuning = " ".join(part for part in (peer_frequency_label, str(primary_candidate.get('peer_band', '') or '').strip()) if part).strip()
+        detail = (
+            f"Target {target_tuning or normalized_band or 'frequency change'} overlaps "
+            f"{primary_candidate['peer_name']} at {peer_tuning or 'active tuning'}."
+        )
+        if extra_count:
+            detail += f" Other active peers: {', '.join(peer_names[1:])}."
+        detail += f" Shared resources: {resource_text}."
+        signature = "|".join(
+            [
+                str(primary_id),
+                str(source or "").strip().upper(),
+                normalized_band,
+                str(int(target_frequency_hz) if isinstance(target_frequency_hz, (int, float)) else 0),
+                ",".join(str(peer_id) for peer_id in peer_ids),
+                ",".join(antenna_groups),
+                ",".join(amplifier_groups),
+                ",".join(frontend_groups),
+            ]
+        )
+        return RfConflictSnapshot(
+            target_device_profile_id=primary_id,
+            target_device_name=str(primary_runtime.profile.get("name", "") or "").strip() or f"Device {primary_id}",
+            target_band=normalized_band,
+            target_frequency_hz=int(target_frequency_hz) if isinstance(target_frequency_hz, (int, float)) else None,
+            peer_device_profile_id=int(primary_candidate["peer_id"]),
+            peer_name=str(primary_candidate["peer_name"]),
+            peer_band=str(primary_candidate.get("peer_band", "") or "").strip(),
+            peer_frequency_hz=int(primary_candidate["peer_frequency_hz"]),
+            peer_device_ids=peer_ids,
+            peer_names=peer_names,
+            shared_antenna_groups=antenna_groups,
+            shared_amplifier_groups=amplifier_groups,
+            shared_frontend_groups=frontend_groups,
+            same_band=bool(primary_candidate["same_band"]),
+            same_frequency=bool(primary_candidate["same_frequency"]),
+            summary=summary,
+            detail=detail,
+            signature=signature,
+        )
 
     def get_runtime_primary_device_profile(self) -> Optional[Dict[str, Any]]:
         runtime = self.get_primary_runtime()
@@ -470,11 +1396,58 @@ class StationRuntimeManager:
                 "use_background_ingest": True,
                 "use_launch_control": True,
                 "use_net_control_tabs": True,
+                "swap_active": False,
+                "swap_mode": "",
+                "swap_summary": "",
+                "swap_source_name": "",
+                "swap_target_name": "",
             }
-        return runtime.operating_policy()
+        policy = dict(runtime.operating_policy())
+        active_swap = dict(self._active_profile_swap or {})
+        target_id = int(active_swap.get("target_device_id", 0) or 0)
+        if target_id > 0 and int(runtime.profile.get("id", 0) or 0) == target_id:
+            mode = str(active_swap.get("mode", "") or "").strip().lower()
+            source_name = str(active_swap.get("source_device_name", "") or "").strip()
+            target_name = str(active_swap.get("target_device_name", "") or "").strip()
+            carried_name = str(active_swap.get("applied_operating_profile_name", "") or "").strip()
+            if mode == "carry_primary_profile" and carried_name:
+                summary = f"Temporary swap active: {source_name or 'previous primary'} -> {target_name or runtime.profile.get('name', '')}; carrying {carried_name}."
+            else:
+                summary = f"Temporary swap active: {source_name or 'previous primary'} -> {target_name or runtime.profile.get('name', '')}."
+            policy.update(
+                {
+                    "swap_active": True,
+                    "swap_mode": mode,
+                    "swap_summary": summary,
+                    "swap_source_name": source_name,
+                    "swap_target_name": target_name,
+                }
+            )
+            return policy
+        policy.update(
+            {
+                "swap_active": False,
+                "swap_mode": "",
+                "swap_summary": "",
+                "swap_source_name": "",
+                "swap_target_name": "",
+            }
+        )
+        return policy
 
     def primary_runtime_policy_signature(self) -> tuple[object, ...]:
-        runtime = self.get_primary_runtime()
-        if runtime is None:
-            return tuple()
-        return runtime.shell_policy_signature()
+        policy = self.primary_runtime_policy()
+        return (
+            str(policy.get("operating_profile_name", "") or "").strip(),
+            str(policy.get("assignment_state", "") or "").strip().lower(),
+            bool(policy.get("scheduler_enabled", True)),
+            str(policy.get("scheduler_mode", "full") or "").strip().lower(),
+            bool(policy.get("use_messages", True)),
+            bool(policy.get("use_map", True)),
+            bool(policy.get("use_background_ingest", True)),
+            bool(policy.get("use_launch_control", True)),
+            bool(policy.get("use_net_control_tabs", True)),
+            bool(policy.get("swap_active", False)),
+            str(policy.get("swap_mode", "") or "").strip().lower(),
+            str(policy.get("swap_summary", "") or "").strip(),
+        )

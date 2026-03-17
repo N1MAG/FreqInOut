@@ -99,6 +99,44 @@ def test_store_supports_operating_profile_crud_and_effective_assignment_override
     assert int(restored["operating_profile_id"]) == int(default_profile["id"])
 
 
+def test_settings_manager_reinit_preserves_effective_operating_assignment(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    primary = store.get_runtime_primary_device_profile()
+    assert primary is not None
+
+    field_ops = store.save_operating_profile(
+        {
+            "name": "Restart Persistence",
+            "scheduler_enabled": False,
+            "use_map": False,
+            "use_messages": False,
+            "use_background_ingest": False,
+            "use_launch_control": False,
+            "use_net_control_tabs": False,
+            "allow_profile_swap": True,
+        }
+    )
+    assigned = store.set_device_operating_profile(
+        int(primary["id"]),
+        int(field_ops["id"]),
+        assignment_state="active",
+        reason="Persist across settings reload",
+    )
+    assert int(assigned["operating_profile_id"]) == int(field_ops["id"])
+
+    SettingsManager()
+
+    reloaded_store = MultiRadioStore(settings_db_path())
+    effective = reloaded_store.get_effective_assignment_for_device(int(primary["id"]))
+    assert effective is not None
+    assert int(effective["operating_profile_id"]) == int(field_ops["id"])
+    assert str(effective["reason"] or "") == "Persist across settings reload"
+
+
 def test_station_runtime_manager_primary_snapshot_includes_operating_policy(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
@@ -338,12 +376,22 @@ class StubScheduler(QObject):
     varac_wait_detected = Signal(dict)
     varac_wait_cleared = Signal()
 
-    def __init__(self, parent=None, rig=None, js8=None, varac=None, fldigi_log=None, poll_interval_ms=5000):
+    def __init__(
+        self,
+        parent=None,
+        rig=None,
+        js8=None,
+        varac=None,
+        fldigi_log=None,
+        station_runtime_manager=None,
+        poll_interval_ms=5000,
+    ):
         super().__init__(parent)
         self.rig = rig
         self.js8 = js8
         self.varac = varac
         self.fldigi_log = fldigi_log
+        self.station_runtime_manager = station_runtime_manager
         self.next_change_utc = None
         self.started = False
         self.runtime_enabled = True
@@ -553,6 +601,41 @@ def test_main_window_applies_primary_operating_profile_policy(monkeypatch, tmp_p
 
         window._start_launch_control_startup()
         assert window.launch_orchestrator.start_calls == 0
+    finally:
+        window._on_app_about_to_quit()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_main_window_runtime_banner_shows_temporary_swap_state(monkeypatch, tmp_path):
+    app, window = _make_window(
+        monkeypatch,
+        tmp_path,
+        {
+            "id": 2,
+            "name": "Remote Rig",
+            "control_backend": "rigctld",
+            "deployment_mode": "full",
+        },
+        {
+            "operating_profile_name": "Portable Ops",
+            "assignment_state": "temporary_override",
+            "scheduler_enabled": True,
+            "scheduler_mode": "full",
+            "use_messages": True,
+            "use_map": True,
+            "use_background_ingest": True,
+            "use_launch_control": True,
+            "use_net_control_tabs": True,
+            "swap_active": True,
+            "swap_mode": "carry_primary_profile",
+            "swap_summary": "Temporary swap active: Base Station -> Remote Rig; carrying Portable Ops.",
+        },
+    )
+
+    try:
+        assert "Temporary swap active" in window.runtime_mode_label.text()
+        assert "Remote Rig" in window.runtime_mode_label.text()
     finally:
         window._on_app_about_to_quit()
         window.deleteLater()

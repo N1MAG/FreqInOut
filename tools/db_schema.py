@@ -288,6 +288,107 @@ NETS_TABLES: Dict[str, TableDef] = {
             ON js8_links(ts);
         """,
     ),
+    "js8_messages_v2": TableDef(
+        name="js8_messages_v2",
+        db=NETS_DB,
+        description="Source-aware local JS8 inbox mirror keyed by logical source plus upstream inbox row id.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS js8_messages_v2 (
+            local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_key TEXT NOT NULL,
+            source_scope TEXT NOT NULL,
+            source_label TEXT,
+            device_profile_id INTEGER,
+            remote_id INTEGER NOT NULL,
+            inbox_path TEXT,
+            directed_path TEXT,
+            all_path TEXT,
+            from_call TEXT,
+            to_call TEXT,
+            msg_type TEXT,
+            utc_str TEXT,
+            utc_ts REAL,
+            raw_text TEXT,
+            decoded_text TEXT,
+            state TEXT,
+            read_ts REAL,
+            flag_state INTEGER DEFAULT 0
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_js8_messages_v2_source_remote
+            ON js8_messages_v2(source_key, remote_id);
+        CREATE INDEX IF NOT EXISTS idx_js8_messages_v2_ts
+            ON js8_messages_v2(utc_ts DESC, local_id DESC);
+        CREATE INDEX IF NOT EXISTS idx_js8_messages_v2_source_ts
+            ON js8_messages_v2(source_key, utc_ts DESC, local_id DESC);
+        """,
+    ),
+    "js8_inbox_state_v2": TableDef(
+        name="js8_inbox_state_v2",
+        db=NETS_DB,
+        description="Source-aware JS8 local read-state mirror keyed by logical source plus upstream inbox row id.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS js8_inbox_state_v2 (
+            source_key TEXT NOT NULL,
+            remote_id INTEGER NOT NULL,
+            state TEXT,
+            last_seen REAL,
+            read_ts REAL,
+            PRIMARY KEY (source_key, remote_id)
+        )
+        """,
+    ),
+    "js8_inbox_ingest_state_v2": TableDef(
+        name="js8_inbox_ingest_state_v2",
+        db=NETS_DB,
+        description="Per-source JS8 inbox DB watermarks and resolved source metadata.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS js8_inbox_ingest_state_v2 (
+            source_key TEXT PRIMARY KEY,
+            source_scope TEXT NOT NULL,
+            source_label TEXT,
+            device_profile_id INTEGER,
+            inbox_path TEXT,
+            directed_path TEXT,
+            all_path TEXT,
+            last_remote_id INTEGER DEFAULT 0,
+            updated_ts REAL DEFAULT 0
+        )
+        """,
+    ),
+    "js8_spotter_ingest_state_v2": TableDef(
+        name="js8_spotter_ingest_state_v2",
+        db=NETS_DB,
+        description="Per-source JS8 Spotter offsets for multi-instance DIRECTED.TXT ingest.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS js8_spotter_ingest_state_v2 (
+            source_key TEXT PRIMARY KEY,
+            source_scope TEXT NOT NULL,
+            source_label TEXT,
+            device_profile_id INTEGER,
+            directed_path TEXT,
+            last_offset INTEGER DEFAULT 0,
+            updated_ts REAL DEFAULT 0
+        )
+        """,
+    ),
+    "js8_links_ingest_state_v2": TableDef(
+        name="js8_links_ingest_state_v2",
+        db=NETS_DB,
+        description="Per-source JS8 DIRECTED/ALL offsets for multi-instance js8_links ingest.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS js8_links_ingest_state_v2 (
+            source_key TEXT PRIMARY KEY,
+            source_scope TEXT NOT NULL,
+            source_label TEXT,
+            device_profile_id INTEGER,
+            directed_path TEXT,
+            all_path TEXT,
+            directed_offset INTEGER DEFAULT 0,
+            all_offset INTEGER DEFAULT 0,
+            updated_ts REAL DEFAULT 0
+        )
+        """,
+    ),
     "varac_ingest_state": TableDef(
         name="varac_ingest_state",
         db=NETS_DB,
@@ -296,6 +397,19 @@ NETS_TABLES: Dict[str, TableDef] = {
         CREATE TABLE IF NOT EXISTS varac_ingest_state (
             table_name TEXT PRIMARY KEY,
             last_id INTEGER DEFAULT 0
+        )
+        """,
+    ),
+    "varac_ingest_state_v2": TableDef(
+        name="varac_ingest_state_v2",
+        db=NETS_DB,
+        description="Per-source VarAC ingest checkpoints keyed by logical ingest source and upstream table name.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS varac_ingest_state_v2 (
+            ingest_source_key TEXT,
+            table_name TEXT,
+            last_id INTEGER DEFAULT 0,
+            PRIMARY KEY (ingest_source_key, table_name)
         )
         """,
     ),
@@ -308,6 +422,11 @@ NETS_TABLES: Dict[str, TableDef] = {
             run_started_ts REAL PRIMARY KEY,
             run_finished_ts REAL,
             varac_db_path TEXT,
+            ingest_source_key TEXT,
+            ingest_scope TEXT,
+            ingest_source_label TEXT,
+            cluster_name TEXT,
+            cluster_public_id TEXT,
             success INTEGER DEFAULT 0,
             rows_scanned INTEGER DEFAULT 0,
             rows_written INTEGER DEFAULT 0,
@@ -325,6 +444,8 @@ NETS_TABLES: Dict[str, TableDef] = {
         CREATE TABLE IF NOT EXISTS varac_sync_table_counts (
             run_started_ts REAL,
             table_name TEXT,
+            ingest_source_key TEXT,
+            ingest_source_label TEXT,
             rows_scanned INTEGER DEFAULT 0,
             rows_written INTEGER DEFAULT 0,
             watermark_id INTEGER DEFAULT 0,
@@ -343,6 +464,13 @@ NETS_TABLES: Dict[str, TableDef] = {
             id INTEGER,
             guid TEXT,
             source TEXT,
+            table_name TEXT,
+            ingest_source_key TEXT,
+            ingest_scope TEXT,
+            ingest_source_label TEXT,
+            cluster_name TEXT,
+            cluster_public_id TEXT,
+            ingest_db_path TEXT,
             msg_type TEXT,
             from_call TEXT,
             to_call TEXT,
@@ -368,6 +496,8 @@ NETS_TABLES: Dict[str, TableDef] = {
             ON varac_messages(ts);
         CREATE INDEX IF NOT EXISTS idx_varac_messages_source_ts
             ON varac_messages(source, ts);
+        CREATE INDEX IF NOT EXISTS idx_varac_messages_ingest_source_ts
+            ON varac_messages(ingest_source_key, ts);
         CREATE INDEX IF NOT EXISTS idx_varac_messages_folder_label
             ON varac_messages(folder_label);
         """,

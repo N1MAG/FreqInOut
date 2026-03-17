@@ -6,9 +6,22 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.js8_multi_source import (
+    JS8InstanceSource,
+    LEGACY_JS8_SOURCE_KEY,
+    LEGACY_JS8_SOURCE_LABEL,
+    ensure_js8_local_tables,
+    load_js8_inbox_state_map,
+    load_js8_inbox_watermarks,
+    load_js8_offset_map,
+    resolve_js8_instance_sources,
+    sync_js8_source_metadata,
+    upsert_js8_inbox_watermark,
+    upsert_js8_offset_state,
+)
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 
@@ -98,178 +111,271 @@ class MessageIngestor:
         self._decoder = JS8FormDecoder(settings)
 
     def ingest_js8_messages(self) -> None:
-        inbox_path = self._inbox_path()
-        if not inbox_path or not inbox_path.exists():
+        sources = resolve_js8_instance_sources(self.settings)
+        if not sources:
             return
-        self._ensure_local_js8_tables()
-        max_local_id = self._local_max_js8_id()
-        try:
-            conn = sqlite3.connect(inbox_path)
-            cur = conn.cursor()
-            queries = [
-                ("inbox_v1", "id, json, type, value"),
-                ("inbox_v1", "rowid as id, json, type, value"),
-                ("inbox_v1", "id, message, type, value"),
-                ("inbox_v1", "id, blob"),
-                ("inbox", "id, json, type, value"),
-                ("inbox", "rowid as id, json, type, value"),
-                ("inbox", "id, message, type, value"),
-            ]
-            rows = []
-            for table, cols in queries:
-                try:
-                    cur.execute(f"SELECT {cols} FROM {table} WHERE id > ?", (max_local_id,))
-                    rows = cur.fetchall()
-                    break
-                except Exception:
-                    rows = []
-            conn.close()
-        except Exception as e:
-            log.debug("MessageIngest: JS8 ingest read failed: %s", e)
-            rows = []
-
-        state_map = self._load_js8_state_map()
-        now_ts = time.time()
-        for row in rows:
-            rid = row[0] if len(row) > 0 else 0
-            if rid <= max_local_id:
-                continue
-            blob = row[1] if len(row) > 1 else ""
-            state = row[2] if len(row) > 2 else ""
-            js = blob
-            try:
-                parsed = json.loads(js or "{}")
-                if "params" not in parsed and len(row) >= 4:
-                    parsed = {
-                        "params": parsed,
-                        "type": row[2] if len(row) > 2 else "",
-                        "value": row[3] if len(row) > 3 else "",
-                    }
-                params = parsed.get("params", {}) or {}
-                if not state:
-                    state = parsed.get("type", "") or parsed.get("TYPE", "")
-            except Exception:
-                params = {}
-            text = (params.get("TEXT") or "").strip()
-            from_call = (params.get("FROM") or "").strip().upper()
-            to_call = (params.get("TO") or "").strip()
-            utc_str = (params.get("UTC") or "").strip()
-            try:
-                utc_ts = datetime.datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
-            except Exception:
-                utc_ts = 0.0
-            if utc_ts and (now_ts - utc_ts) > JS8_MAX_AGE_SECONDS:
-                continue
-            msg_type = "MSG"
-            decoded = text
-            if text.startswith("F!"):
-                form_part, resp, comment = self._parse_form_parts(text)
-                msg_type = f"F!{form_part}" if form_part else "MSG"
-                decoded = self._decoder.decode_form(form_part, resp, comment, raw=text)
-            saved_state = state_map.get(rid)
-            if saved_state:
-                eff_state = saved_state[0]
-                read_ts = saved_state[1]
-            else:
-                eff_state = (state or "").upper() or "UNREAD"
-                read_ts = 0.0
-            self._insert_js8_local(
-                rid,
-                from_call,
-                to_call,
-                msg_type,
-                utc_str,
-                utc_ts,
-                text,
-                decoded,
-                eff_state,
-                read_ts,
-            )
-            try:
-                self._enqueue_next_msg_id(from_call, text)
-            except Exception:
-                pass
-
-    def ingest_spotter_from_directed(self) -> None:
-        directed_path = self._resolve_directed_path()
-        if not directed_path or not directed_path.exists():
+        db_path = self._local_js8_db()
+        if not db_path:
             return
-        self._ensure_spotter_table()
+        local_conn = sqlite3.connect(db_path)
         try:
-            offset = int(self.settings.get(self._spotter_offset_key(), 0) or 0)
-        except Exception:
-            offset = 0
-        try:
-            size_now = directed_path.stat().st_size
-            if offset < 0 or offset > size_now:
-                offset = 0
-            with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
-                if offset:
-                    fh.seek(offset)
-                last_pos = fh.tell()
-                while True:
-                    line = fh.readline()
-                    if not line:
-                        break
-                    last_pos = fh.tell()
-                    parsed = self._parse_directed_spotter_line(line)
+            ensure_js8_local_tables(local_conn, settings=self.settings)
+            sync_js8_source_metadata(local_conn, sources)
+            state_map = load_js8_inbox_state_map(local_conn)
+            watermarks = load_js8_inbox_watermarks(local_conn)
+            now_ts = time.time()
+            cur = local_conn.cursor()
+            for source in sources:
+                inbox_path = source.inbox_path
+                if not inbox_path or not inbox_path.exists():
+                    continue
+                last_remote_id = int(watermarks.get(source.source_key, 0) or 0)
+                rows = self._read_source_inbox_rows(inbox_path, last_remote_id)
+                if not rows:
+                    upsert_js8_inbox_watermark(local_conn, source, last_remote_id)
+                    continue
+                payload: List[Tuple[Any, ...]] = []
+                max_remote_id = last_remote_id
+                for row in rows:
+                    parsed = self._parse_js8_inbox_row(row, now_ts)
                     if not parsed:
                         continue
-                    form_id = str(parsed.get("form_id") or "").strip()
-                    raw_form = str(parsed.get("raw_form") or "").strip()
-                    if not form_id or not raw_form:
-                        continue
-                    from_call = str(parsed.get("from_call") or "").strip().upper()
-                    token = str(parsed.get("spotter_token") or "").strip().upper()
-                    if not from_call:
-                        continue
-                    if self._spotter_exists(from_call, form_id, token, raw_form):
-                        continue
-                    form_part, resp, comment = self._parse_form_parts(raw_form)
-                    decoded = self._decoder.decode_form(form_part, resp, comment, raw=raw_form)
-                    db_path = self._db_path()
-                    if not db_path:
-                        continue
-                    conn = sqlite3.connect(db_path)
-                    cur = conn.cursor()
-                    ingested_ts = float(time.time())
-                    cur.execute(
-                        """
-                        INSERT INTO spotter_traffic
-                            (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
-                             raw_text, decoded_text, state, read_ts, relay_via, ingested_ts)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?)
-                        """,
+                    remote_id = int(parsed["remote_id"])
+                    state_key = (source.source_key, remote_id)
+                    saved_state = state_map.get(state_key)
+                    effective_state = saved_state[0] if saved_state else parsed["state"]
+                    read_ts = saved_state[1] if saved_state else 0.0
+                    payload.append(
                         (
-                            float(parsed.get("utc_ts") or 0.0),
-                            str(parsed.get("utc_str") or ""),
-                            from_call,
-                            str(parsed.get("to_call") or "").strip().upper(),
-                            form_id,
-                            token,
-                            raw_form,
-                            decoded or raw_form,
-                            str(parsed.get("relay_via") or "").strip().upper(),
-                            ingested_ts,
-                        ),
+                            source.source_key,
+                            source.source_scope,
+                            source.source_label,
+                            source.device_profile_id,
+                            remote_id,
+                            str(source.inbox_path or ""),
+                            str(source.directed_path or ""),
+                            str(source.all_path or ""),
+                            parsed["from_call"],
+                            parsed["to_call"],
+                            parsed["msg_type"],
+                            parsed["utc_str"],
+                            parsed["utc_ts"],
+                            parsed["raw_text"],
+                            parsed["decoded_text"],
+                            effective_state,
+                            read_ts,
+                        )
                     )
-                    self._upsert_spotter_station_status(
-                        cur,
-                        from_call=from_call,
-                        form_id=form_id,
-                        response_code=resp,
-                        raw_form=raw_form,
-                        utc_ts=float(parsed.get("utc_ts") or 0.0),
-                        utc_str=str(parsed.get("utc_str") or ""),
-                        ingested_ts=ingested_ts,
+                    max_remote_id = max(max_remote_id, remote_id)
+                    try:
+                        self._enqueue_next_msg_id(str(parsed["from_call"]), str(parsed["raw_text"]))
+                    except Exception:
+                        pass
+                if payload:
+                    cur.executemany(
+                        """
+                        INSERT INTO js8_messages_v2 (
+                            source_key, source_scope, source_label, device_profile_id, remote_id,
+                            inbox_path, directed_path, all_path,
+                            from_call, to_call, msg_type, utc_str, utc_ts, raw_text, decoded_text,
+                            state, read_ts
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(source_key, remote_id) DO UPDATE SET
+                            source_scope=excluded.source_scope,
+                            source_label=excluded.source_label,
+                            device_profile_id=excluded.device_profile_id,
+                            inbox_path=excluded.inbox_path,
+                            directed_path=excluded.directed_path,
+                            all_path=excluded.all_path,
+                            from_call=excluded.from_call,
+                            to_call=excluded.to_call,
+                            msg_type=excluded.msg_type,
+                            utc_str=excluded.utc_str,
+                            utc_ts=excluded.utc_ts,
+                            raw_text=excluded.raw_text,
+                            decoded_text=excluded.decoded_text
+                        """,
+                        payload,
                     )
-                    conn.commit()
-                    conn.close()
-                self.settings.set(self._spotter_offset_key(), int(last_pos))
-                if hasattr(self.settings, "save"):
-                    self.settings.save()
-        except Exception as e:
-            log.debug("MessageIngest: spotter ingest failed reading DIRECTED.TXT: %s", e)
+                upsert_js8_inbox_watermark(local_conn, source, max_remote_id)
+            local_conn.commit()
+        finally:
+            local_conn.close()
+
+    def ingest_spotter_from_directed(self) -> None:
+        sources = resolve_js8_instance_sources(self.settings)
+        if not sources:
+            return
+        db_path = self._db_path()
+        if not db_path:
+            return
+        conn = sqlite3.connect(db_path)
+        try:
+            self._ensure_spotter_table_conn(conn)
+            offsets = load_js8_offset_map(conn, "js8_spotter_ingest_state_v2")
+            cur = conn.cursor()
+            for source in sources:
+                directed_path = source.directed_path
+                if not directed_path or not directed_path.exists():
+                    continue
+                try:
+                    offset = int(offsets.get(source.source_key, 0) or 0)
+                except Exception:
+                    offset = 0
+                try:
+                    size_now = directed_path.stat().st_size
+                    if offset < 0 or offset > size_now:
+                        offset = 0
+                    with directed_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                        if offset:
+                            fh.seek(offset)
+                        last_pos = fh.tell()
+                        while True:
+                            line = fh.readline()
+                            if not line:
+                                break
+                            last_pos = fh.tell()
+                            parsed = self._parse_directed_spotter_line(line)
+                            if not parsed:
+                                continue
+                            form_id = str(parsed.get("form_id") or "").strip()
+                            raw_form = str(parsed.get("raw_form") or "").strip()
+                            if not form_id or not raw_form:
+                                continue
+                            from_call = str(parsed.get("from_call") or "").strip().upper()
+                            token = str(parsed.get("spotter_token") or "").strip().upper()
+                            if not from_call:
+                                continue
+                            if self._spotter_exists_cursor(cur, source.source_key, from_call, form_id, token, raw_form):
+                                continue
+                            form_part, resp, comment = self._parse_form_parts(raw_form)
+                            decoded = self._decoder.decode_form(form_part, resp, comment, raw=raw_form)
+                            ingested_ts = float(time.time())
+                            cur.execute(
+                                """
+                                INSERT INTO spotter_traffic
+                                    (utc_ts, utc_str, from_call, to_call, form_id, spotter_token,
+                                     raw_text, decoded_text, state, read_ts, relay_via, ingested_ts,
+                                     source_key, source_scope, source_label, device_profile_id, directed_path)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNREAD', 0, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    float(parsed.get("utc_ts") or 0.0),
+                                    str(parsed.get("utc_str") or ""),
+                                    from_call,
+                                    str(parsed.get("to_call") or "").strip().upper(),
+                                    form_id,
+                                    token,
+                                    raw_form,
+                                    decoded or raw_form,
+                                    str(parsed.get("relay_via") or "").strip().upper(),
+                                    ingested_ts,
+                                    source.source_key,
+                                    source.source_scope,
+                                    source.source_label,
+                                    source.device_profile_id,
+                                    str(source.directed_path or ""),
+                                ),
+                            )
+                            self._upsert_spotter_station_status(
+                                cur,
+                                from_call=from_call,
+                                form_id=form_id,
+                                response_code=resp,
+                                raw_form=raw_form,
+                                utc_ts=float(parsed.get("utc_ts") or 0.0),
+                                utc_str=str(parsed.get("utc_str") or ""),
+                                ingested_ts=ingested_ts,
+                            )
+                        upsert_js8_offset_state(conn, "js8_spotter_ingest_state_v2", source, int(last_pos))
+                except Exception as exc:
+                    log.debug(
+                        "MessageIngest: spotter ingest failed reading DIRECTED.TXT for %s: %s",
+                        source.source_key,
+                        exc,
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _read_source_inbox_rows(self, inbox_path: Path, min_remote_id: int) -> List[tuple]:
+        queries = [
+            ("inbox_v1", "id", "id, json, type, value"),
+            ("inbox_v1", "rowid", "rowid as id, json, type, value"),
+            ("inbox_v1", "id", "id, message, type, value"),
+            ("inbox_v1", "id", "id, blob"),
+            ("inbox", "id", "id, json, type, value"),
+            ("inbox", "rowid", "rowid as id, json, type, value"),
+            ("inbox", "id", "id, message, type, value"),
+        ]
+        try:
+            conn = sqlite3.connect(inbox_path)
+            try:
+                cur = conn.cursor()
+                for table, id_expr, cols in queries:
+                    try:
+                        cur.execute(
+                            f"SELECT {cols} FROM {table} WHERE {id_expr} > ? ORDER BY {id_expr} ASC",
+                            (int(min_remote_id or 0),),
+                        )
+                        rows = cur.fetchall()
+                        if rows:
+                            return rows
+                    except Exception:
+                        continue
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.debug("MessageIngest: JS8 ingest read failed for %s: %s", inbox_path, exc)
+        return []
+
+    def _parse_js8_inbox_row(self, row: tuple, now_ts: float) -> Optional[Dict[str, Any]]:
+        remote_id = int(row[0] or 0) if len(row) > 0 else 0
+        if remote_id <= 0:
+            return None
+        blob = row[1] if len(row) > 1 else ""
+        row_state = row[2] if len(row) > 2 else ""
+        try:
+            parsed = json.loads(blob or "{}")
+            if "params" not in parsed and len(row) >= 4:
+                parsed = {
+                    "params": parsed,
+                    "type": row[2] if len(row) > 2 else "",
+                    "value": row[3] if len(row) > 3 else "",
+                }
+            params = parsed.get("params", {}) or {}
+            if not row_state:
+                row_state = parsed.get("type", "") or parsed.get("TYPE", "")
+        except Exception:
+            params = {}
+        text = (params.get("TEXT") or "").strip()
+        from_call = (params.get("FROM") or "").strip().upper()
+        to_call = (params.get("TO") or "").strip().upper()
+        utc_str = (params.get("UTC") or "").strip()
+        try:
+            utc_ts = datetime.datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
+        except Exception:
+            utc_ts = 0.0
+        if utc_ts and (now_ts - utc_ts) > JS8_MAX_AGE_SECONDS:
+            return None
+        msg_type = "MSG"
+        decoded = text
+        if text.startswith("F!"):
+            form_part, resp, comment = self._parse_form_parts(text)
+            msg_type = f"F!{form_part}" if form_part else "MSG"
+            decoded = self._decoder.decode_form(form_part, resp, comment, raw=text)
+        return {
+            "remote_id": remote_id,
+            "from_call": from_call,
+            "to_call": to_call,
+            "msg_type": msg_type,
+            "utc_str": utc_str,
+            "utc_ts": utc_ts,
+            "raw_text": text,
+            "decoded_text": decoded,
+            "state": (str(row_state or "").upper() or "UNREAD"),
+        }
 
     def _db_path(self) -> Path | None:
         try:
@@ -357,32 +463,55 @@ class MessageIngestor:
             return None
         return Path(directed)
 
+    def _spotter_exists_cursor(
+        self,
+        cur: sqlite3.Cursor,
+        source_key: str,
+        from_call: str,
+        form_id: str,
+        token: str,
+        raw_text: str,
+    ) -> bool:
+        source = (source_key or "").strip()
+        if not source:
+            source = LEGACY_JS8_SOURCE_KEY
+        try:
+            if token:
+                cur.execute(
+                    """
+                    SELECT 1 FROM spotter_traffic
+                    WHERE source_key=? AND from_call=? AND form_id=? AND spotter_token=?
+                    LIMIT 1
+                    """,
+                    (source, from_call, form_id, token),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT 1 FROM spotter_traffic
+                    WHERE source_key=? AND from_call=? AND form_id=? AND raw_text=?
+                    LIMIT 1
+                    """,
+                    (source, from_call, form_id, raw_text),
+                )
+            return cur.fetchone() is not None
+        except Exception:
+            return False
+
     def _spotter_exists(self, from_call: str, form_id: str, token: str, raw_text: str) -> bool:
         db_path = self._db_path()
         if not db_path:
             return False
         try:
             conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            if token:
-                cur.execute(
-                    """
-                    SELECT 1 FROM spotter_traffic
-                    WHERE from_call=? AND form_id=? AND spotter_token=?
-                    LIMIT 1
-                    """,
-                    (from_call, form_id, token),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT 1 FROM spotter_traffic
-                    WHERE from_call=? AND form_id=? AND raw_text=?
-                    LIMIT 1
-                    """,
-                    (from_call, form_id, raw_text),
-                )
-            exists = cur.fetchone() is not None
+            exists = self._spotter_exists_cursor(
+                conn.cursor(),
+                LEGACY_JS8_SOURCE_KEY,
+                from_call,
+                form_id,
+                token,
+                raw_text,
+            )
             conn.close()
             return exists
         except Exception:
@@ -430,7 +559,7 @@ class MessageIngestor:
         if form_start < 0:
             return None
         raw_form = msg[form_start:].strip()
-        raw_form = re.split(r"\*DE\*", raw_form, 1, flags=re.IGNORECASE)[0].strip()
+        raw_form = re.split(r"\*DE\*", raw_form, maxsplit=1, flags=re.IGNORECASE)[0].strip()
         if raw_form.endswith("\u2662"):
             raw_form = raw_form[:-1].rstrip()
         token_match = re.search(r"(#[A-Z0-9]{3,})", raw_form.upper())
@@ -631,72 +760,103 @@ class MessageIngestor:
         except Exception as e:
             log.debug("MessageIngest: spotter status backfill failed: %s", e)
 
+    def _ensure_spotter_table_conn(self, conn: sqlite3.Connection) -> None:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS spotter_traffic (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                utc_ts REAL,
+                utc_str TEXT,
+                from_call TEXT,
+                to_call TEXT,
+                form_id TEXT,
+                spotter_token TEXT,
+                raw_text TEXT,
+                decoded_text TEXT,
+                state TEXT,
+                read_ts REAL,
+                flag_state INTEGER DEFAULT 0,
+                relay_via TEXT,
+                ingested_ts REAL,
+                source_key TEXT,
+                source_scope TEXT,
+                source_label TEXT,
+                device_profile_id INTEGER,
+                directed_path TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS spotter_station_status (
+                from_call TEXT PRIMARY KEY,
+                form_id TEXT NOT NULL,
+                status_key TEXT NOT NULL,
+                status_label TEXT NOT NULL,
+                response_code TEXT,
+                updated_utc_ts REAL NOT NULL DEFAULT 0,
+                updated_utc_str TEXT,
+                raw_text TEXT,
+                updated_ingested_ts REAL,
+                status_source TEXT,
+                status_source_detail TEXT
+            )
+            """
+        )
+        for col_name, col_ddl in (
+            ("flag_state", "INTEGER DEFAULT 0"),
+            ("source_key", "TEXT"),
+            ("source_scope", "TEXT"),
+            ("source_label", "TEXT"),
+            ("device_profile_id", "INTEGER"),
+            ("directed_path", "TEXT"),
+        ):
+            try:
+                cur.execute(f"ALTER TABLE spotter_traffic ADD COLUMN {col_name} {col_ddl}")
+            except Exception:
+                pass
+        for col_name, col_ddl in (
+            ("status_source", "TEXT"),
+            ("status_source_detail", "TEXT"),
+        ):
+            try:
+                cur.execute(f"ALTER TABLE spotter_station_status ADD COLUMN {col_name} {col_ddl}")
+            except Exception:
+                pass
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_spotter_traffic_form_call_ts ON spotter_traffic(form_id, from_call, utc_ts DESC, id DESC)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_spotter_traffic_from_ts ON spotter_traffic(from_call, utc_ts DESC, id DESC)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_spotter_traffic_source_ts ON spotter_traffic(source_key, utc_ts DESC, id DESC)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_spotter_status_key_ts ON spotter_station_status(status_key, updated_utc_ts DESC)"
+        )
+        legacy_directed = (self.settings.get("js8_directed_path", "") or "").strip()
+        cur.execute(
+            """
+            UPDATE spotter_traffic
+               SET source_key=COALESCE(NULLIF(source_key, ''), ?),
+                   source_scope=COALESCE(NULLIF(source_scope, ''), 'legacy'),
+                   source_label=COALESCE(NULLIF(source_label, ''), ?),
+                   directed_path=COALESCE(NULLIF(directed_path, ''), ?)
+             WHERE COALESCE(source_key, '')=''
+            """,
+            (LEGACY_JS8_SOURCE_KEY, LEGACY_JS8_SOURCE_LABEL, legacy_directed),
+        )
+        self._backfill_spotter_station_status(cur)
+
     def _ensure_spotter_table(self) -> None:
         db_path = self._db_path()
         if not db_path:
             return
         try:
             conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS spotter_traffic (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    utc_ts REAL,
-                    utc_str TEXT,
-                    from_call TEXT,
-                    to_call TEXT,
-                    form_id TEXT,
-                    spotter_token TEXT,
-                    raw_text TEXT,
-                    decoded_text TEXT,
-                    state TEXT,
-                    read_ts REAL,
-                    flag_state INTEGER DEFAULT 0,
-                    relay_via TEXT,
-                    ingested_ts REAL
-                )
-                """
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS spotter_station_status (
-                    from_call TEXT PRIMARY KEY,
-                    form_id TEXT NOT NULL,
-                    status_key TEXT NOT NULL,
-                    status_label TEXT NOT NULL,
-                    response_code TEXT,
-                    updated_utc_ts REAL NOT NULL DEFAULT 0,
-                    updated_utc_str TEXT,
-                    raw_text TEXT,
-                    updated_ingested_ts REAL,
-                    status_source TEXT,
-                    status_source_detail TEXT
-                )
-                """
-            )
-            try:
-                cur.execute("ALTER TABLE spotter_traffic ADD COLUMN flag_state INTEGER DEFAULT 0")
-            except Exception:
-                pass
-            for col_name, col_ddl in (
-                ("status_source", "TEXT"),
-                ("status_source_detail", "TEXT"),
-            ):
-                try:
-                    cur.execute(f"ALTER TABLE spotter_station_status ADD COLUMN {col_name} {col_ddl}")
-                except Exception:
-                    pass
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_spotter_traffic_form_call_ts ON spotter_traffic(form_id, from_call, utc_ts DESC, id DESC)"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_spotter_traffic_from_ts ON spotter_traffic(from_call, utc_ts DESC, id DESC)"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_spotter_status_key_ts ON spotter_station_status(status_key, updated_utc_ts DESC)"
-            )
-            self._backfill_spotter_station_status(cur)
+            self._ensure_spotter_table_conn(conn)
             conn.commit()
             conn.close()
         except Exception as e:
