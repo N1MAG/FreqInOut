@@ -6,21 +6,57 @@ By default, update checks are disabled unless UPDATE_INFO_URL is configured.
 from __future__ import annotations
 
 import os
-import zipfile
 import shutil
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Optional, Tuple
 
 import requests
 
+from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
 from freqinout import __version__ as LOCAL_VERSION
 
 UPDATE_INFO_URL = os.environ.get("FREQINOUT_UPDATE_INFO_URL", "").strip()
-DOWNLOAD_DIR = Path.home() / ".config" / "freqinout" / "downloads"
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 BACKUP_DIR_NAME = "backup_prev_version"
+
+
+def _download_dir() -> Path:
+    path = get_config_dir() / "downloads"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _validated_archive_target(extract_root: Path, member_name: str) -> Path:
+    normalized = str(member_name or "").replace("\\", "/").strip()
+    if not normalized:
+        raise ValueError("Archive member has an empty path.")
+    if normalized.startswith("/"):
+        raise ValueError(f"Archive member uses absolute path: {member_name}")
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    if not parts:
+        raise ValueError(f"Archive member resolves to an empty path: {member_name}")
+    if any(part == ".." for part in parts):
+        raise ValueError(f"Archive member escapes extraction root: {member_name}")
+    if ":" in parts[0]:
+        raise ValueError(f"Archive member uses drive-qualified path: {member_name}")
+    root = extract_root.resolve()
+    target = root.joinpath(*parts).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError(f"Archive member escapes extraction root: {member_name}")
+    return target
+
+
+def _safe_extract_zip(zf: zipfile.ZipFile, extract_root: Path) -> None:
+    for info in zf.infolist():
+        target = _validated_archive_target(extract_root, info.filename)
+        if info.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(info, "r") as src, target.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
 
 def parse_version(v: str):
     parts = v.strip().split(".")
@@ -52,7 +88,7 @@ def fetch_update_info(timeout: int = 10) -> Optional[dict]:
 
 def download_release(url: str) -> Optional[Path]:
     filename = url.split("/")[-1] or "freqinout_update.zip"
-    dest = DOWNLOAD_DIR / filename
+    dest = _download_dir() / filename
     try:
         with requests.get(url, stream=True, timeout=30) as r:
             r.raise_for_status()
@@ -88,7 +124,7 @@ def apply_update_archive(archive: Path, install_dir: Path) -> bool:
     tmp = Path(tempfile.mkdtemp(prefix="freqinout_update_"))
     try:
         with zipfile.ZipFile(archive, "r") as zf:
-            zf.extractall(tmp)
+            _safe_extract_zip(zf, tmp)
         for item in tmp.iterdir():
             dest = install_dir / item.name
             if dest.exists():

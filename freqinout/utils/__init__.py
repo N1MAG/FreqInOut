@@ -2,10 +2,24 @@
 from __future__ import annotations
 
 import datetime
+import os
 from typing import Optional
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.utils.timezones import get_timezone as _core_get_timezone
+
+
+def _configured_timezone_name() -> str:
+    tz_name = "UTC"
+    try:
+        settings = SettingsManager()
+        tz_name = settings.get("timezone", "UTC") or "UTC"
+    except Exception:
+        pass
+    env_tz = os.environ.get("FREQINOUT_TZ")
+    if env_tz:
+        tz_name = env_tz
+    return str(tz_name or "UTC")
 
 
 def get_timezone(tz_name: Optional[str] = None) -> datetime.tzinfo:
@@ -16,8 +30,7 @@ def get_timezone(tz_name: Optional[str] = None) -> datetime.tzinfo:
     If tz_name is None, it is read from Settings ('timezone', default 'UTC').
     """
     if tz_name is None:
-        settings = SettingsManager()
-        tz_name = settings.get("timezone", "UTC") or "UTC"
+        tz_name = _configured_timezone_name()
     return _core_get_timezone(tz_name)
 
 

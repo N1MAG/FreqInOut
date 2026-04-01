@@ -5,7 +5,7 @@ import shlex
 import socket
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import psutil
 
@@ -42,6 +42,13 @@ STATUS_KEYS: Sequence[str] = (
     "CommStat",
 )
 
+JS8_DEFAULT_HOST = "127.0.0.1"
+JS8_DEFAULT_PORT = 2442
+FLRIG_DEFAULT_HOST = "127.0.0.1"
+FLRIG_DEFAULT_PORT = 12345
+FLDIGI_DEFAULT_HOST = "127.0.0.1"
+FLDIGI_DEFAULT_PORT = 7362
+
 
 class SoftwareStatusService:
     """
@@ -55,6 +62,7 @@ class SoftwareStatusService:
     _shared_proc_snapshot: List[str] = []
     _shared_proc_snapshot_ts: float = 0.0
     _shared_js8_api_cache: Dict[tuple[str, int, bool], tuple[float, bool]] = {}
+    _shared_service_probe_cache: Dict[tuple[str, ...], tuple[float, bool]] = {}
 
     def __init__(self, settings: Any) -> None:
         self.settings = settings
@@ -65,6 +73,60 @@ class SoftwareStatusService:
         self._js8_api_cache_ok: bool = False
         self._js8_api_cache_ts: float = 0.0
         self._js8_api_cache_ttl_sec: float = 4.0
+        self._service_probe_ttl_sec: float = 4.0
+
+    def _settings_text(self, key: str, default: str = "") -> str:
+        try:
+            return str(self.settings.get(key, default) or "").strip()
+        except Exception:
+            return str(default or "").strip()
+
+    def _settings_int(self, key: str, default: int) -> int:
+        try:
+            value = self.settings.get(key, default)
+            return int(value if value not in (None, "") else default)
+        except Exception:
+            return int(default)
+
+    def _resolved_fldigi_host(self, host_override: Optional[str] = None) -> str:
+        override = str(host_override or "").strip()
+        if override:
+            return override
+        host = self._settings_text("fldigi_host", "")
+        if host:
+            return host
+        host = self._settings_text("flrig_host", FLDIGI_DEFAULT_HOST)
+        return host or FLDIGI_DEFAULT_HOST
+
+    @staticmethod
+    def _format_endpoint(host: str, port: int) -> str:
+        return f"{host}:{int(port)}"
+
+    @staticmethod
+    def _is_loopback_host(host: str) -> bool:
+        host_norm = str(host or "").strip().lower()
+        return host_norm in {"", "127.0.0.1", "localhost", "::1", "[::1]"}
+
+    def _cached_service_probe(
+        self,
+        cache_key: tuple[str, ...],
+        *,
+        force: bool = False,
+        probe: Callable[[], bool],
+    ) -> bool:
+        cls = type(self)
+        now = time.monotonic()
+        cached = cls._shared_service_probe_cache.get(cache_key)
+        if not force and cached:
+            cached_ts, cached_ok = cached
+            if (now - float(cached_ts or 0.0)) < float(self._service_probe_ttl_sec):
+                return bool(cached_ok)
+        try:
+            ok = bool(probe())
+        except Exception:
+            ok = False
+        cls._shared_service_probe_cache[cache_key] = (now, ok)
+        return ok
 
     def _refresh_process_snapshot(self, *, force: bool = False) -> None:
         cls = type(self)
@@ -227,35 +289,178 @@ class SoftwareStatusService:
         cls._shared_js8_api_cache[cache_key] = (self._js8_api_cache_ts, self._js8_api_cache_ok)
         return bool(reachable)
 
+    def flrig_api_reachable(
+        self,
+        *,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        host = (host_override or "").strip() or self._settings_text("flrig_host", FLRIG_DEFAULT_HOST) or FLRIG_DEFAULT_HOST
+        port = int(port_override) if port_override is not None else self._settings_int("flrig_port", FLRIG_DEFAULT_PORT)
+        cache_key = ("FLRIG", host.strip().lower(), str(int(port)))
+
+        def _probe() -> bool:
+            from freqinout.radio_interface.rigctl_client import FLRigClient
+
+            client = FLRigClient(host=host, port=port, timeout=0.35)
+            return bool(client.is_available())
+
+        return self._cached_service_probe(cache_key, force=force, probe=_probe)
+
+    def fldigi_api_reachable(
+        self,
+        *,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        flrig_port_override: Optional[int] = None,
+        flrig_host_override: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        host = self._resolved_fldigi_host(host_override)
+        port = int(port_override) if port_override is not None else self._settings_int("fldigi_port", FLDIGI_DEFAULT_PORT)
+        flrig_host = (flrig_host_override or "").strip() or self._settings_text("flrig_host", FLRIG_DEFAULT_HOST) or FLRIG_DEFAULT_HOST
+        flrig_port = (
+            int(flrig_port_override)
+            if flrig_port_override is not None
+            else self._settings_int("flrig_port", FLRIG_DEFAULT_PORT)
+        )
+        cache_key = (
+            "FLDIGI",
+            host.strip().lower(),
+            str(int(port)),
+            flrig_host.strip().lower(),
+            str(int(flrig_port)),
+        )
+
+        def _probe() -> bool:
+            from freqinout.radio_interface.rigctl_client import FLRigClient
+
+            client = FLRigClient(
+                host=flrig_host,
+                port=flrig_port,
+                fldigi_host=host,
+                fldigi_port=port,
+                timeout=0.35,
+            )
+            return bool(client.is_fldigi_available())
+
+        return self._cached_service_probe(cache_key, force=force, probe=_probe)
+
+    def _endpoint_status(
+        self,
+        *,
+        endpoint_label: str,
+        host: str,
+        port: int,
+        reachable: bool,
+        process_running: bool,
+    ) -> Dict[str, object]:
+        endpoint = self._format_endpoint(host, port)
+        if reachable:
+            return {
+                "state": "ok",
+                "tooltip": f"Configured {endpoint_label} reachable at {endpoint}",
+                "running": True,
+                "reachable": True,
+                "endpoint": endpoint,
+            }
+        if process_running:
+            return {
+                "state": "warn",
+                "tooltip": (
+                    f"Process running, configured {endpoint_label} unreachable at {endpoint} "
+                    "(possible instance/port mismatch)"
+                ),
+                "running": True,
+                "reachable": False,
+                "endpoint": endpoint,
+            }
+        tooltip = (
+            f"Not running at configured {endpoint_label} {endpoint}"
+            if self._is_loopback_host(host)
+            else f"Configured {endpoint_label} unreachable at {endpoint}"
+        )
+        return {
+            "state": "idle",
+            "tooltip": tooltip,
+            "running": False,
+            "reachable": False,
+            "endpoint": endpoint,
+        }
+
     def status_snapshot(
         self,
         *,
         port_override: Optional[int] = None,
         host_override: Optional[str] = None,
+        flrig_port_override: Optional[int] = None,
+        flrig_host_override: Optional[str] = None,
+        fldigi_port_override: Optional[int] = None,
+        fldigi_host_override: Optional[str] = None,
     ) -> Dict[str, Dict[str, object]]:
         running_js8 = self.program_is_running("JS8Call")
-        api_ok = self.js8_api_reachable(
+        js8_host = (host_override or "").strip() or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST
+        js8_port = int(port_override) if port_override is not None else self._settings_int("js8_port", JS8_DEFAULT_PORT)
+        js8_api_ok = self.js8_api_reachable(
             port_override=port_override,
             host_override=host_override,
             allow_fallback=False,
-        ) if running_js8 else False
+        )
+        running_flrig = self.program_is_running("FLRig")
+        flrig_host = (flrig_host_override or "").strip() or self._settings_text("flrig_host", FLRIG_DEFAULT_HOST) or FLRIG_DEFAULT_HOST
+        flrig_port = (
+            int(flrig_port_override)
+            if flrig_port_override is not None
+            else self._settings_int("flrig_port", FLRIG_DEFAULT_PORT)
+        )
+        flrig_api_ok = self.flrig_api_reachable(
+            port_override=flrig_port_override,
+            host_override=flrig_host_override,
+        )
+        running_fldigi = self.program_is_running("FLDigi")
+        fldigi_host = self._resolved_fldigi_host(fldigi_host_override)
+        fldigi_port = (
+            int(fldigi_port_override)
+            if fldigi_port_override is not None
+            else self._settings_int("fldigi_port", FLDIGI_DEFAULT_PORT)
+        )
+        fldigi_api_ok = self.fldigi_api_reachable(
+            port_override=fldigi_port_override,
+            host_override=fldigi_host_override,
+            flrig_port_override=flrig_port_override,
+            flrig_host_override=flrig_host_override,
+        )
 
         out: Dict[str, Dict[str, object]] = {}
-        out["JS8Call_API"] = {
-            "state": "ok" if api_ok else "warn" if running_js8 else "idle",
-            "tooltip": "API reachable" if api_ok else "Process running, API unreachable" if running_js8 else "Not running",
-            "running": bool(running_js8),
-        }
+        out["JS8Call_API"] = self._endpoint_status(
+            endpoint_label="TCP API",
+            host=js8_host,
+            port=js8_port,
+            reachable=js8_api_ok,
+            process_running=running_js8,
+        )
 
         for key in STATUS_KEYS:
             if key == "JS8Call_API":
                 continue
-            if key == "JS8Call":
-                out[key] = {
-                    "state": "ok" if api_ok else "warn" if running_js8 else "idle",
-                    "tooltip": "API reachable" if api_ok else "Process running, API unreachable" if running_js8 else "Not running",
-                    "running": bool(running_js8),
-                }
+            if key == "FLRig":
+                out[key] = self._endpoint_status(
+                    endpoint_label="XML-RPC",
+                    host=flrig_host,
+                    port=flrig_port,
+                    reachable=flrig_api_ok,
+                    process_running=running_flrig,
+                )
+                continue
+            if key == "FLDigi":
+                out[key] = self._endpoint_status(
+                    endpoint_label="XML-RPC",
+                    host=fldigi_host,
+                    port=fldigi_port,
+                    reachable=fldigi_api_ok,
+                    process_running=running_fldigi,
+                )
                 continue
             running = self.program_is_running(key)
             tooltip = "Running" if running else "Not running"

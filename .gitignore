@@ -60,6 +60,7 @@ htmlcov/
 # Local planning/docs artifacts (Codex workflow)
 AGENTS.md
 SPEC*.md
+!SPEC.md
 
 # Local runtime/user artifacts
 VarAC.ini
@@ -70,6 +71,16 @@ tests/
 !tests/
 tests/*
 !tests/__init__.py
+!tests/test_reliability_phase1.py
+!tests/test_background_ingest_phase2.py
+!tests/test_operator_checkins_schema_phase3.py
+!tests/test_software_status_phase4.py
+!tests/test_varac_schema_phase5.py
+!tests/test_pre_merge_runtime.py
+!tests/test_updater_security.py
+!tests/test_software_status_endpoints.py
+!tests/test_scheduler_shutdown.py
+!tests/test_settings_manager_thread_affinity.py
 
 # Local benchmark/smoke artifacts
 .benchmarks/

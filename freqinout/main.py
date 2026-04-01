@@ -12,6 +12,7 @@ from freqinout.core import db_initializer
 from freqinout.core.logger import log
 from freqinout.core import updater
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.startup_lock import try_acquire_single_instance_lock
 
 
 def _set_windows_app_user_model_id() -> None:
@@ -38,8 +39,6 @@ def _load_app_icon() -> QIcon:
         except Exception:
             continue
     return QIcon()
-
-
 def main():
     parser = argparse.ArgumentParser(description="FreqInOut HF controller")
     parser.add_argument("--update", action="store_true", help="Check for and apply updates, then exit.")
@@ -63,11 +62,7 @@ def main():
     lock_path = get_config_dir() / "freqinout.lock"
     lockfile = QLockFile(str(lock_path))
     lockfile.setStaleLockTime(60_000)
-    if not lockfile.isLocked():
-        if not lockfile.tryLock(0):
-            QMessageBox.information(None, "FreqInOut", "FreqInOut is already running.")
-            return
-    if not lockfile.isLocked():
+    if not try_acquire_single_instance_lock(lockfile):
         QMessageBox.information(None, "FreqInOut", "FreqInOut is already running.")
         return
     app._single_instance = lockfile  # type: ignore[attr-defined]

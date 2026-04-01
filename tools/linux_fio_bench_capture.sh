@@ -55,7 +55,7 @@ Options:
 Examples:
   bash tools/linux_fio_bench_capture.sh --duration 1800
   bash tools/linux_fio_bench_capture.sh --duration 0 --label live-net
-  bash tools/linux_fio_bench_capture.sh --interval 2 --fio-log /home/user/.config/FreqInOut/freqinout.log
+  bash tools/linux_fio_bench_capture.sh --interval 2 --fio-log /home/user/.freqinout/freqinout.log
 EOF
 }
 
@@ -289,6 +289,7 @@ copy_fio_log() {
     candidates+=("$FIO_LOG_PATH")
   else
     candidates+=(
+      "$HOME/.freqinout/freqinout.log"
       "$HOME/.config/FreqInOut/freqinout.log"
       "$HOME/.local/share/FreqInOut/freqinout.log"
       "$HOME/FreqInOut/freqinout.log"

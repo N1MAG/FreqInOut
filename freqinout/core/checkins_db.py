@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import re
 from pathlib import Path
@@ -10,41 +11,29 @@ from freqinout.core.config_paths import get_config_dir
 
 TRAILING_CALL_NOISE_RE = re.compile(r"[^A-Z0-9/]+$")
 PORTABLE_SUFFIX_RE = re.compile(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$")
+ALLOWED_GROUP_ROLES = {"", "HUB", "HUB-ALT", "NCS", "ANCS", "PEER"}
+OPERATOR_CHECKINS_COLUMNS = {
+    "callsign",
+    "name",
+    "state",
+    "grid",
+    "group1",
+    "group2",
+    "group3",
+    "group_role",
+    "first_seen_utc",
+    "last_seen_utc",
+    "last_net",
+    "last_role",
+    "checkin_count",
+    "groups_json",
+    "trusted",
+}
 
 
-def _canonical_callsign(value: object) -> str:
-    cs = str(value or "").strip().upper()
-    if not cs:
-        return ""
-    cs = TRAILING_CALL_NOISE_RE.sub("", cs)
-    if not cs:
-        return ""
-    return PORTABLE_SUFFIX_RE.sub("", cs)
-
-
-def _db_path() -> Path:
-    """
-    Returns the path to freqinout_nets.db under the shared config directory.
-    """
-    try:
-        config_dir = get_config_dir() / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        return config_dir / "freqinout_nets.db"
-    except Exception as e:
-        log.error("checkin_db: failed to determine DB path, falling back to home: %s", e)
-        fallback = Path.home() / "freqinout_nets.db"
-        return fallback
-
-
-def ensure_operator_checkins_schema(conn: sqlite3.Connection):
-    """
-    Ensures operator_checkins exists with the unified schema, migrating
-    from older layouts if necessary.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS operator_checkins (
+def _operator_checkins_create_ddl(table_name: str) -> str:
+    return f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
             callsign TEXT PRIMARY KEY,
             name TEXT,
             state TEXT,
@@ -61,92 +50,176 @@ def ensure_operator_checkins_schema(conn: sqlite3.Connection):
             groups_json TEXT,
             trusted INTEGER DEFAULT 0
         )
+    """
+
+
+def _canonical_callsign(value: object) -> str:
+    cs = str(value or "").strip().upper()
+    if not cs:
+        return ""
+    cs = TRAILING_CALL_NOISE_RE.sub("", cs)
+    if not cs:
+        return ""
+    return PORTABLE_SUFFIX_RE.sub("", cs)
+
+
+def _normalize_groups_list(values: List[object]) -> List[str]:
+    seen = set()
+    groups: List[str] = []
+    for value in values:
+        group = str(value or "").strip()
+        if not group:
+            continue
+        key = group.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        groups.append(group)
+    return groups
+
+
+def _normalize_group_role(value: object) -> str:
+    role = str(value or "").strip().upper()
+    return role if role in ALLOWED_GROUP_ROLES else ""
+
+
+def _db_path() -> Path:
+    """
+    Returns the path to freqinout_nets.db under the shared config directory.
+    """
+    try:
+        config_dir = get_config_dir() / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return config_dir / "freqinout_nets.db"
+    except Exception as e:
+        log.error("checkin_db: failed to determine DB path, falling back to home: %s", e)
+        fallback = Path.home() / "freqinout_nets.db"
+        return fallback
+
+
+def _operator_checkins_select_expr(legacy_cols: set[str], column: str) -> str:
+    if column == "callsign":
+        return "callsign"
+    if column == "first_seen_utc":
+        sources = [name for name in ("first_seen_utc", "last_seen_utc", "date_added") if name in legacy_cols]
+        return f"COALESCE({', '.join(sources)}, '')" if sources else "''"
+    if column in {"name", "state", "grid", "group1", "group2", "group3", "group_role", "last_net", "last_role"}:
+        return f"COALESCE({column}, '')" if column in legacy_cols else "''"
+    if column == "last_seen_utc":
+        return "COALESCE(last_seen_utc, '')" if "last_seen_utc" in legacy_cols else "''"
+    if column == "checkin_count":
+        return "COALESCE(checkin_count, 0)" if "checkin_count" in legacy_cols else "0"
+    if column == "groups_json":
+        return "groups_json" if "groups_json" in legacy_cols else "NULL"
+    if column == "trusted":
+        return "COALESCE(trusted, 0)" if "trusted" in legacy_cols else "0"
+    return "NULL"
+
+
+def _repair_operator_checkins_data(cur: sqlite3.Cursor) -> None:
+    cur.execute("UPDATE operator_checkins SET trusted=0 WHERE trusted IS NULL")
+    cur.execute(
+        """
+        UPDATE operator_checkins
+           SET group_role = CASE
+                WHEN TRIM(UPPER(COALESCE(group_role, ''))) IN ('HUB','HUB-ALT','NCS','ANCS','PEER')
+                    THEN TRIM(UPPER(COALESCE(group_role, '')))
+                ELSE ''
+              END
         """
     )
+    cur.execute(
+        """
+        UPDATE operator_checkins
+           SET first_seen_utc = last_seen_utc
+         WHERE (first_seen_utc IS NULL OR first_seen_utc = '')
+           AND COALESCE(last_seen_utc, '') <> ''
+        """
+    )
+    cur.execute("SELECT callsign, group1, group2, group3, groups_json FROM operator_checkins")
+    for callsign, group1, group2, group3, groups_json in cur.fetchall():
+        groups = None
+        if groups_json:
+            try:
+                parsed = json.loads(groups_json)
+                if isinstance(parsed, list):
+                    continue
+            except Exception:
+                pass
+        normalized = _normalize_groups_list([group1, group2, group3])
+        groups = json.dumps(normalized) if normalized else None
+        cur.execute(
+            "UPDATE operator_checkins SET groups_json=? WHERE callsign=?",
+            (groups, callsign),
+        )
 
-    # Migrate legacy schemas by recreating when key columns are missing
+
+def ensure_operator_checkins_schema(conn: sqlite3.Connection, *, repair_data: bool = False):
+    """
+    Ensures operator_checkins exists with the unified schema, migrating
+    from older layouts if necessary.
+    """
+    cur = conn.cursor()
+    cur.execute(_operator_checkins_create_ddl("operator_checkins"))
+
     cur.execute("PRAGMA table_info(operator_checkins)")
     cols = {row[1] for row in cur.fetchall()}
-    desired = {
-        "callsign",
-        "name",
-        "state",
-        "grid",
-        "group1",
-        "group2",
-        "group3",
-        "group_role",
-        "first_seen_utc",
-        "last_seen_utc",
-        "last_net",
-        "last_role",
-        "checkin_count",
-        "groups_json",
-        "trusted",
-    }
-    if desired.issubset(cols):
-        return
-
-    try:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS operator_checkins_new (
-                callsign TEXT PRIMARY KEY,
-                name TEXT,
-                state TEXT,
-                grid TEXT,
-                group1 TEXT,
-                group2 TEXT,
-                group3 TEXT,
-                group_role TEXT,
-                first_seen_utc TEXT,
-                last_seen_utc TEXT,
-                last_net TEXT,
-                last_role TEXT,
-                checkin_count INTEGER DEFAULT 0,
-                groups_json TEXT,
-                trusted INTEGER DEFAULT 0
+    schema_changed = False
+    if not OPERATOR_CHECKINS_COLUMNS.issubset(cols):
+        schema_changed = True
+        legacy_cols = set(cols)
+        cur.execute("DROP TABLE IF EXISTS operator_checkins_new")
+        cur.execute(_operator_checkins_create_ddl("operator_checkins_new"))
+        if "callsign" in legacy_cols:
+            ordered_columns = [
+                "callsign",
+                "name",
+                "state",
+                "grid",
+                "group1",
+                "group2",
+                "group3",
+                "group_role",
+                "first_seen_utc",
+                "last_seen_utc",
+                "last_net",
+                "last_role",
+                "checkin_count",
+                "groups_json",
+                "trusted",
+            ]
+            select_exprs = [_operator_checkins_select_expr(legacy_cols, column) for column in ordered_columns]
+            cur.execute(
+                f"""
+                INSERT OR REPLACE INTO operator_checkins_new
+                    ({", ".join(ordered_columns)})
+                SELECT
+                    {", ".join(select_exprs)}
+                FROM operator_checkins
+                WHERE COALESCE(callsign, '') <> ''
+                """
             )
-            """
-        )
-        # Copy what we can from the old table
-        cur.execute("PRAGMA table_info(operator_checkins)")
-        legacy_cols = [row[1] for row in cur.fetchall()]
-        has_last_seen = "last_seen_utc" in legacy_cols
-        has_groups_json = "groups_json" in legacy_cols
-        insert_stmt = """
-            INSERT OR REPLACE INTO operator_checkins_new
-                (callsign, name, state, grid, group1, group2, group3, group_role,
-                 first_seen_utc, last_seen_utc, last_net, last_role,
-                 checkin_count, groups_json, trusted)
-            SELECT
-                callsign,
-                COALESCE(name,''),
-                COALESCE(state,''),
-                COALESCE(grid,''),
-                COALESCE(group1,''),
-                COALESCE(group2,''),
-                COALESCE(group3,''),
-                COALESCE(group_role,''),
-                COALESCE(last_seen_utc, date_added, ''),  -- best-effort first_seen
-                COALESCE(last_seen_utc, ''),
-                COALESCE(last_net,''),
-                COALESCE(last_role,''),
-                COALESCE(checkin_count,0),
-                {groups_expr},
-                COALESCE(trusted,0)
-            FROM operator_checkins
-        """.format(
-            groups_expr="groups_json" if has_groups_json else "NULL"
-        )
-        try:
-            cur.execute(insert_stmt)
-        except Exception:
-            pass
         cur.execute("DROP TABLE operator_checkins")
         cur.execute("ALTER TABLE operator_checkins_new RENAME TO operator_checkins")
-    finally:
-        conn.commit()
+        cur.execute("PRAGMA table_info(operator_checkins)")
+        cols = {row[1] for row in cur.fetchall()}
+        log.info("checkins_db: migrated operator_checkins to unified schema.")
+
+    for missing_col, ddl in (
+        ("trusted", "INTEGER DEFAULT 0"),
+        ("groups_json", "TEXT"),
+        ("first_seen_utc", "TEXT"),
+        ("last_seen_utc", "TEXT"),
+        ("last_net", "TEXT"),
+        ("last_role", "TEXT"),
+    ):
+        if missing_col not in cols:
+            cur.execute(f"ALTER TABLE operator_checkins ADD COLUMN {missing_col} {ddl}")
+            schema_changed = True
+
+    if schema_changed or repair_data:
+        _repair_operator_checkins_data(cur)
+    conn.commit()
 
 
 def _ensure_table(conn: sqlite3.Connection):
@@ -186,7 +259,7 @@ def upsert_checkins(entries: List[Dict[str, Any]]):
             group1 = (e.get("group1") or "").strip()
             group2 = (e.get("group2") or "").strip()
             group3 = (e.get("group3") or "").strip()
-            group_role = (e.get("group_role") or "").strip()
+            group_role = _normalize_group_role(e.get("group_role"))
             last_seen = (e.get("last_seen_utc") or "").strip()
             first_seen = (e.get("first_seen_utc") or "").strip()
             last_net = (e.get("last_net") or "").strip()

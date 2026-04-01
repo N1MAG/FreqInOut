@@ -12,6 +12,27 @@ from freqinout.core.mode_utils import voice_sideband_for_band
 log = logging.getLogger(__name__)
 
 
+def _settings_text(settings: object, key: str, default: str = "") -> str:
+    try:
+        getter = getattr(settings, "get", None)
+        if callable(getter):
+            return str(getter(key, default) or "").strip()
+    except Exception:
+        pass
+    return str(default or "").strip()
+
+
+def _settings_int(settings: object, key: str, default: int) -> int:
+    try:
+        getter = getattr(settings, "get", None)
+        if callable(getter):
+            value = getter(key, default)
+            return int(value if value not in (None, "") else default)
+    except Exception:
+        pass
+    return int(default)
+
+
 @dataclass
 class FrequencyCommand:
     """
@@ -410,3 +431,14 @@ class FLRigClient:
         except Exception as e:
             log.error("Failed to start tune via FLRig: %s", e)
             return False
+
+
+def flrig_client_from_settings(settings: object) -> FLRigClient:
+    """
+    Build an FLRig client from persisted settings.
+    """
+    host = _settings_text(settings, "flrig_host", "127.0.0.1") or "127.0.0.1"
+    port = _settings_int(settings, "flrig_port", 12345)
+    fldigi_port = _settings_int(settings, "fldigi_port", 7362)
+    fldigi_host = _settings_text(settings, "fldigi_host", "") or None
+    return FLRigClient(host=host, port=port, fldigi_port=fldigi_port, fldigi_host=fldigi_host)

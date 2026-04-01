@@ -3,9 +3,11 @@ import logging
 import logging.handlers
 import os
 import sys
-import platform
+import tempfile
 import time
 from pathlib import Path
+
+from freqinout.core.config_paths import get_config_dir as shared_get_config_dir
 
 APP_NAME = "FreqInOut"
 
@@ -23,34 +25,31 @@ _LEVEL_MAP = {
 
 def _get_config_dir():
     """
-    Determine a writable config/log directory.
-    Preferred: %APPDATA%\\FreqInOut on Windows, ~/.config/freqinout on others.
-    Fallback: a `.freqinout` folder under the current working directory if the
-    preferred path cannot be created (e.g., roaming profile or permissions issues).
+    Determine a writable config/log directory using the shared runtime profile
+    root, with local and temp fallbacks if that path is unavailable.
     """
     candidates = []
-    if platform.system() == "Windows":
-        candidates.append(os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), APP_NAME))
-    else:
-        candidates.append(os.path.expanduser(f"~/.config/{APP_NAME.lower()}"))
-    # Local fallback
-    candidates.append(os.path.abspath(os.path.join(os.getcwd(), f".{APP_NAME.lower()}")))
+    try:
+        candidates.append(Path(shared_get_config_dir()))
+    except Exception:
+        pass
+    candidates.append(Path(os.path.abspath(os.path.join(os.getcwd(), f".{APP_NAME.lower()}"))))
+    candidates.append(Path(tempfile.gettempdir()) / APP_NAME)
 
     for path in candidates:
         try:
-            Path(path).mkdir(parents=True, exist_ok=True)
+            path = Path(path)
+            path.mkdir(parents=True, exist_ok=True)
             # ensure writable
-            test_file = Path(path) / ".write_test"
+            test_file = path / ".write_test"
             test_file.write_text("ok", encoding="utf-8")
             test_file.unlink(missing_ok=True)  # type: ignore[arg-type]
-            return path
+            return str(path)
         except Exception:
             continue
-    # Last resort: temp directory
-    import tempfile
-    fallback = os.path.join(tempfile.gettempdir(), APP_NAME)
-    Path(fallback).mkdir(parents=True, exist_ok=True)
-    return fallback
+    fallback = Path(tempfile.gettempdir()) / APP_NAME
+    fallback.mkdir(parents=True, exist_ok=True)
+    return str(fallback)
 
 def _get_log_file():
     return os.path.join(_get_config_dir(), "freqinout.log")

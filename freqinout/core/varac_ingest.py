@@ -30,6 +30,17 @@ def _local_db_path() -> Path:
     return get_config_dir() / "config" / "freqinout_nets.db"
 
 
+def ensure_varac_local_tables(conn: sqlite3.Connection) -> None:
+    """
+    Ensure the local VarAC-derived tables exist in the shared nets DB.
+
+    This is used both by the ingest path and by cold-start DB initialization
+    so UI components can safely query the VarAC summary tables before the first
+    ingest run.
+    """
+    _ensure_local_tables(conn)
+
+
 def _resolve_varac_db_path(settings) -> Optional[Path]:
     raw_db = (settings.get("varac_db_path", "") or "").strip()
     raw_install = (settings.get("varac_path", "") or "").strip()

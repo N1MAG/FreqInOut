@@ -8,10 +8,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from db_schema import CONFIG_DIR
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = ROOT / "tools"
-CONFIG_DIR = ROOT / "config"
 
 
 def run_tool(script_name: str, args: list[str]) -> int:
