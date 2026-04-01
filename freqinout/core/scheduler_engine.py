@@ -257,6 +257,7 @@ class SchedulerEngine(QObject):
         self._status_flrig_retry_ts: float = 0.0
         self._control_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-control")
         self._control_future = None
+        self._control_future_token: int = 0
         self._control_future_started_at: Optional[float] = None
         self._control_timeout_s: float = 8.0
         self._control_backoff_until: float = 0.0
@@ -305,6 +306,7 @@ class SchedulerEngine(QObject):
         self._next_transition_note: str = ""
         self._next_source_change: bool = False
         self._last_scheduler_selection_sig: Optional[Tuple] = None
+        self._shutdown_requested: bool = False
 
         self.timer = QTimer(self)
         self.timer.setInterval(poll_interval_ms)
@@ -459,6 +461,12 @@ class SchedulerEngine(QObject):
 
     def start(self) -> None:
         """Begin periodic schedule evaluation."""
+        if self._shutdown_requested:
+            self._control_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="freqinout-control",
+            )
+        self._shutdown_requested = False
         if not self.timer.isActive():
             self.timer.start()
         self._apply_js8_offset_startup()
@@ -470,8 +478,15 @@ class SchedulerEngine(QObject):
 
     def stop(self) -> None:
         """Stop periodic schedule evaluation."""
+        self._shutdown_requested = True
         if self.timer.isActive():
             self.timer.stop()
+        self._latest_intent = None
+        self._latest_intent_ts = 0.0
+        self._retry_scheduled = False
+        self._force_retry_after_control = False
+        self._forced_retry_attempts_left = 0
+        self._shutdown_control_executor("stop")
 
     def _ensure_js8_offset_default(self) -> None:
         try:
@@ -615,10 +630,7 @@ class SchedulerEngine(QObject):
         return True
 
     def _reset_control_executor(self, reason: str) -> None:
-        try:
-            self._control_executor.shutdown(wait=False)
-        except Exception:
-            pass
+        self._shutdown_control_executor(f"reset ({reason})")
         self._control_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="freqinout-control",
@@ -629,6 +641,27 @@ class SchedulerEngine(QObject):
         self._control_backoff_until = 0.0
         self._control_fail_count = 0
         log.warning("SchedulerEngine: control executor reset (%s).", reason)
+
+    def _shutdown_control_executor(self, reason: str) -> None:
+        self._control_future_token += 1
+        future = self._control_future
+        if future is not None and not future.done():
+            try:
+                future.cancel()
+            except Exception as e:
+                log.debug("SchedulerEngine: control future cancel failed during %s: %s", reason, e)
+        try:
+            self._control_executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            try:
+                self._control_executor.shutdown(wait=False)
+            except Exception as e:
+                log.debug("SchedulerEngine: control executor shutdown failed during %s: %s", reason, e)
+        except Exception as e:
+            log.debug("SchedulerEngine: control executor shutdown failed during %s: %s", reason, e)
+        self._control_future = None
+        self._control_future_started_at = None
+        self._pending_entry_key = None
 
     def _reset_control_if_running(self, reason: str) -> None:
         """
@@ -660,6 +693,9 @@ class SchedulerEngine(QObject):
         js8_offset: Optional[int],
         js8_group: str,
     ) -> bool:
+        if self._shutdown_requested:
+            log.debug("SchedulerEngine: control action skipped (shutdown requested).")
+            return False
         if not self._control_can_attempt():
             log.debug("SchedulerEngine: control action skipped (backoff active).")
             return False
@@ -719,8 +755,14 @@ class SchedulerEngine(QObject):
                         log.debug("SchedulerEngine: JS8Call set_frequency (FLRig control) failed: %s", e)
             return ok
 
+        self._control_future_token += 1
+        control_future_token = self._control_future_token
+
         def _on_done(fut):
             def _apply_result():
+                if self._shutdown_requested or control_future_token != self._control_future_token:
+                    return
+                self._control_future = None
                 self._pending_entry_key = None
                 self._control_future_started_at = None
                 ok = False

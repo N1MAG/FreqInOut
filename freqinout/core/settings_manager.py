@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -27,6 +28,7 @@ class SettingsManager:
 
         self._conn: Optional[sqlite3.Connection] = None
         self._data: Dict[str, Any] = {}
+        self._thread_id = threading.get_ident()
 
         self._init_db()
         self._maybe_migrate_from_json()
@@ -94,6 +96,7 @@ class SettingsManager:
 
     def reload(self) -> None:
         """Reload settings from SQLite into the in-memory dict."""
+        self._assert_thread_affinity()
         cur = self._conn.execute("SELECT key, value FROM kv")
         loaded: Dict[str, Any] = {}
         for key, val in cur.fetchall():
@@ -115,13 +118,24 @@ class SettingsManager:
 
     # ---------- public data API ---------- #
 
+    def _assert_thread_affinity(self) -> None:
+        current_thread_id = threading.get_ident()
+        if current_thread_id == self._thread_id:
+            return
+        raise sqlite3.ProgrammingError(
+            "SettingsManager used from a different thread than it was created on "
+            f"(created={self._thread_id}, current={current_thread_id})"
+        )
+
     def get(self, key: str, default: Any = None) -> Any:
+        self._assert_thread_affinity()
         return self._data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
         """
         Set a key and immediately persist to SQLite.
         """
+        self._assert_thread_affinity()
         self._data[key] = value
         try:
             with self._conn:
@@ -137,6 +151,7 @@ class SettingsManager:
         """
         Batch update multiple keys. Saves once by default to avoid repeated writes.
         """
+        self._assert_thread_affinity()
         self._data.update(values)
         try:
             payload = [(k, json.dumps(v)) for k, v in values.items()]
@@ -153,4 +168,5 @@ class SettingsManager:
         Return the in-memory dict. Callers that mutate this directly should not
         rely on it persisting unless they call set/set_many.
         """
+        self._assert_thread_affinity()
         return self._data

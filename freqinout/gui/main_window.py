@@ -39,7 +39,7 @@ from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
-from freqinout.radio_interface.rigctl_client import FLRigClient
+from freqinout.radio_interface.rigctl_client import flrig_client_from_settings
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
@@ -423,7 +423,7 @@ class MainWindow(QMainWindow):
         self._apply_callsign_to_tab_titles()
 
         # Start scheduler engine
-        self.rig_client = FLRigClient()
+        self.rig_client = flrig_client_from_settings(self.settings)
         self.js8_control = JS8ControlClient()
         self.varac_status = VarACStatusClient()
         self.fldigi_log_status = FldigiLogStatusClient()
@@ -1688,18 +1688,18 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "scheduler"):
                 self.scheduler.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow shutdown: scheduler stop failed: %s", e)
         try:
             if hasattr(self, "background_ingest"):
                 self.background_ingest.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow shutdown: background ingest stop failed: %s", e)
         try:
             if hasattr(self, "launch_orchestrator"):
                 self.launch_orchestrator.stop_sequence()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow shutdown: launch orchestrator stop failed: %s", e)
         try:
             if self._launch_progress_dialog is not None:
                 self._launch_progress_dialog.close()
@@ -1726,18 +1726,19 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "js8_control"):
                 self.js8_control.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow shutdown: JS8 control stop failed: %s", e)
         for _label, widget in self._screens:
             try:
                 if hasattr(widget, "shutdown"):
                     widget.shutdown()
-            except Exception:
+            except Exception as e:
+                log.debug("MainWindow shutdown: widget shutdown failed for %r: %s", widget, e)
                 continue
         try:
             JS8RxHub.instance().shutdown()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow shutdown: JS8RxHub shutdown failed: %s", e)
 
     def closeEvent(self, event):
         self._on_app_about_to_quit()
@@ -2157,10 +2158,11 @@ class MainWindow(QMainWindow):
 
     def _should_prewarm_webengine_at_startup(self) -> bool:
         """
-        Prefer stable first-Map activation by warming WebEngine during startup.
-        Hidden settings override remains available for troubleshooting.
+        Default to startup WebEngine prewarm on Windows, where the hidden
+        startup path measurably improves first Map activation. Other platforms
+        stay opt-in unless explicitly overridden in settings.
         """
-        default_enabled = True
+        default_enabled = sys.platform.startswith("win")
         try:
             raw = self.settings.get("map_webengine_startup_prewarm", None)
         except Exception:
