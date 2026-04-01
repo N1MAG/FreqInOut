@@ -29,13 +29,13 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
-## What's New in v1.2.1
+## What's New in v1.2.2
 
-- Added shared temporary hold presets (`30`, `60`, `90`, `120` minutes) for `Suspend` / `QSY + Hold` across `Schedule Status`, `ControlFreq`, `HF Daily`, `FLDigi / SSB`, `JS8Call`, and prompt-based pause actions
-- Added synchronized live hold countdown behavior so active hold timers stay aligned across tabs and the left rail
-- Fixed hold-duration selection syncing so changing the duration in one hold-aware tab updates the other hold selectors immediately
-- Added `Messages -> Hide Types` for persistent multi-select message-type suppression in the default view
-- Explicit `MSG Type...` selections in `Messages` now override hidden-type suppression for the current view, while `Clear Filters` still clears only the temporary filter row/search controls
+- Added the Reliability Baseline updates: background ingest now runs off the GUI thread, `operator_checkins` schema repair/init is centralized in core DB code, and VarAC local mirror tables are created during cold-start initialization
+- Fixed software-status validation so `JS8Call`, `FLRig`, and `FLDigi` badges are endpoint-aware, with persisted `FLDigi` XML-RPC host/port settings and Settings probes that honor the currently entered endpoint values
+- Fixed runtime profile consistency so logging, updater downloads, and DB admin tooling operate on the same active profile root as the running app
+- Hardened the updater by validating downloaded ZIP entry paths before extraction and rejecting unsafe archive contents
+- Simplified startup single-instance locking and changed WebEngine startup prewarm to default on for Windows and off for macOS/Linux unless explicitly overridden in settings
 
 ## Quick Start
 

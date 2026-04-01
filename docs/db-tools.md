@@ -65,8 +65,10 @@ python tools/db_tools.py --table js8_links --table-export ./js8_links.json
 
 ## Database Files
 
-- Settings DB: `config/freqinout.db`
-- Nets/ops DB: `config/freqinout_nets.db`
+- Settings DB: runtime profile `config/freqinout.db`
+- Nets/ops DB: runtime profile `config/freqinout_nets.db`
+- Linux/macOS default profile root: `~/.freqinout`
+- Windows default profile root: `%LOCALAPPDATA%\FreqInOut` (fallback `%APPDATA%\FreqInOut`)
 
 ## Propagation Regression Tests
 
@@ -97,4 +99,4 @@ python tools/propagation_calibrate.py --apply
 ```
 
 Output report default path:
-- `config/propagation/prop_calibration_recommendation.json`
+- runtime profile `config/propagation/prop_calibration_recommendation.json`

@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.2]
+- Fixed: Reliability Baseline Phase 1 now persists `FLRig XMLRPC Port`, applies the saved FLRig endpoint at startup, and aligns logger/DB-tool paths with the active runtime profile root so diagnostics and DB admin actions operate on the same profile the app is using.
+- Changed: Reliability Baseline Phase 2 moved background ingest work off the GUI thread into a serialized worker with duplicate-trigger suppression and worker-local settings objects, reducing startup/UI stall risk without changing ingest cadence.
+- Fixed: Reliability Baseline Phase 3 centralizes `operator_checkins` schema ownership in core DB code, upgrades legacy layouts during startup, removes destructive schema rebuild ownership from `Operator History`, and aligns DB tool schema metadata with the unified runtime schema.
+- Fixed: Reliability Baseline Phase 4 makes `JS8` and `FLRig` status badges endpoint-aware so the configured instance shows `ok`, while mismatched process-running / endpoint-unreachable cases show `warn` instead of false green status; Settings now probes FLRig status against the currently entered port value.
+- Fixed: Reliability Baseline Phase 5 ensures VarAC local tables are created during cold-start DB initialization, eliminating fresh-profile startup errors when `Stations Map` reads `varac_callsign_stats` before the first VarAC ingest run.
+- Fixed: Reliability Baseline Phase 6 tracks `SPEC.md` and the Phase 1-5 targeted regression tests in git, replaces the remaining deprecated `datetime.utcnow()` settings path with timezone-aware UTC, and adds FLDigi XML-RPC host/port persistence plus endpoint-aware FLDigi status validation in Settings.
+- Fixed: Updater archive extraction now validates ZIP entry paths before extraction, rejecting unsafe absolute or traversal paths and storing downloads under the active runtime config root.
+- Fixed: Startup single-instance lock acquisition now uses a single definitive lock attempt instead of redundant checks that could report an already-running state inconsistently.
+- Fixed: Scheduler shutdown now stops and tears down the serialized control executor cleanly, best-effort cancels any in-flight control future, and ignores stale control callbacks during app exit to reduce shutdown hangs and orphaned worker-thread risk.
+- Fixed: `SettingsManager` now enforces thread affinity at runtime so cross-thread reuse fails fast with a clear SQLite-style programming error instead of surfacing as intermittent thread-bound connection failures later.
+- Changed: Main-window teardown now emits targeted debug logging when scheduler/background-ingest/JS8/widget shutdown steps fail, and adds focused regression coverage for scheduler-stop cleanup and settings thread-affinity guardrails.
+- Changed: WebEngine startup prewarm now defaults to enabled on Windows and disabled on macOS/Linux unless `map_webengine_startup_prewarm` explicitly overrides the platform default.
+- Changed: App/documentation/installer version references updated to `1.2.2`.
+
 ## [1.2.1]
 - Added: Temporary schedule hold controls now use shared `30` / `60` / `90` / `120` minute presets across sidebar `Schedule Status`, `ControlFreq`, `HF Daily`, `FLDigi / SSB`, `JS8Call`, and prompt-based pause actions, with live countdowns and synchronized near-real-time updates across tabs.
 - Fixed: Changing the hold duration in one QSY/Suspend surface now updates the other hold selectors immediately in-process instead of waiting for a delayed settings reload.

@@ -3,7 +3,7 @@
 This guide assumes a fresh Windows system. Adjust paths as needed.
 
 ## 1) Prerequisites
-- Python 3.11+ installed and on PATH
+- Python 3.9+ installed and on PATH (3.11 recommended)
 - Git (if cloning)
 - Optional: FLRig/FLDigi/JS8Call/VarAC installed if you plan to auto-launch them
 
@@ -44,8 +44,9 @@ python -m freqinout.main
 - Set JS8Call DIRECTED.TXT path (for JS8 net control).
 
 ## 8) Data storage
-- Settings and schedules are stored in `config/freqinout.db` (SQLite).
-- Logs are under `%APPDATA%\FreqInOut\freqinout.log`.
+- Settings and schedules are stored in the runtime profile under `FreqInOut\config\freqinout.db` (SQLite).
+- On Windows, the default profile root is `%LOCALAPPDATA%\FreqInOut` (fallback `%APPDATA%\FreqInOut`).
+- Logs are stored in the profile root as `freqinout.log`.
 
 ## 9) Building an executable (optional)
 If `build_executable.py` is provided, activate the venv then run:
