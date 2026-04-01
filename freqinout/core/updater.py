@@ -5,7 +5,9 @@ By default, update checks are disabled unless UPDATE_INFO_URL is configured.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -58,13 +60,29 @@ def _safe_extract_zip(zf: zipfile.ZipFile, extract_root: Path) -> None:
         with zf.open(info, "r") as src, target.open("wb") as dst:
             shutil.copyfileobj(src, dst)
 
+
+def _normalize_expected_sha256(value: object) -> Optional[str]:
+    txt = str(value or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", txt):
+        return txt
+    return None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8192), b""):
+            if chunk:
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
 def parse_version(v: str):
-    parts = v.strip().split(".")
-    parts = (parts + ["0","0","0"])[:3]
-    try:
-        return tuple(int(p) for p in parts)
-    except ValueError:
-        return (0,0,0)
+    match = re.match(r"^\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?", str(v or ""))
+    if not match:
+        return (0, 0, 0)
+    parts = [int(group) if group is not None else 0 for group in match.groups()]
+    return tuple(parts)
 
 def is_remote_newer(local: str, remote: str) -> bool:
     return parse_version(remote) > parse_version(local)
@@ -74,21 +92,31 @@ def fetch_update_info(timeout: int = 10) -> Optional[dict]:
         log.info("Updater disabled: FREQINOUT_UPDATE_INFO_URL is not configured.")
         return None
     try:
-        log.info(f"Checking for updates at: {UPDATE_INFO_URL}")
+        log.info("Checking for updates at: %s", UPDATE_INFO_URL)
         r = requests.get(UPDATE_INFO_URL, timeout=timeout)
         r.raise_for_status()
         data = r.json()
-        if "version" not in data or "download_url" not in data:
+        if "version" not in data or "download_url" not in data or "sha256" not in data:
             log.error("Update JSON missing keys.")
             return None
+        sha256 = _normalize_expected_sha256(data.get("sha256"))
+        if not sha256:
+            log.error("Update JSON has invalid sha256.")
+            return None
+        data["sha256"] = sha256
         return data
     except Exception as e:
-        log.error(f"Failed to fetch update info: {e}")
+        log.error("Failed to fetch update info: %s", e)
         return None
 
-def download_release(url: str) -> Optional[Path]:
+
+def download_release(url: str, expected_sha256: str) -> Optional[Path]:
     filename = url.split("/")[-1] or "freqinout_update.zip"
     dest = _download_dir() / filename
+    normalized_sha256 = _normalize_expected_sha256(expected_sha256)
+    if not normalized_sha256:
+        log.error("Download aborted: invalid expected sha256.")
+        return None
     try:
         with requests.get(url, stream=True, timeout=30) as r:
             r.raise_for_status()
@@ -96,10 +124,23 @@ def download_release(url: str) -> Optional[Path]:
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
-        log.info(f"Downloaded update to {dest}")
+        actual_sha256 = _sha256_file(dest)
+        if actual_sha256 != normalized_sha256:
+            log.error(
+                "Download hash mismatch for %s: expected=%s actual=%s",
+                dest,
+                normalized_sha256,
+                actual_sha256,
+            )
+            try:
+                dest.unlink()
+            except Exception:
+                pass
+            return None
+        log.info("Downloaded update to %s", dest)
         return dest
     except Exception as e:
-        log.error(f"Download failed: {e}")
+        log.error("Download failed: %s", e)
         return None
 
 def backup_current_install(install_dir: Path) -> Optional[Path]:
@@ -108,10 +149,10 @@ def backup_current_install(install_dir: Path) -> Optional[Path]:
         shutil.rmtree(backup_dir, ignore_errors=True)
     try:
         shutil.copytree(install_dir, backup_dir)
-        log.info(f"Backup created at {backup_dir}")
+        log.info("Backup created at %s", backup_dir)
         return backup_dir
     except Exception as e:
-        log.error(f"Backup failed: {e}")
+        log.error("Backup failed: %s", e)
         return None
 
 def apply_update_archive(archive: Path, install_dir: Path) -> bool:
@@ -139,7 +180,7 @@ def apply_update_archive(archive: Path, install_dir: Path) -> bool:
         log.info("Update applied successfully.")
         return True
     except Exception as e:
-        log.error(f"Failed to apply update: {e}")
+        log.error("Failed to apply update: %s", e)
         return False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -171,7 +212,7 @@ def run_interactive_update() -> None:
     if not info:
         print("Failed to re-fetch update info.")
         return
-    archive = download_release(info["download_url"])
+    archive = download_release(info["download_url"], info["sha256"])
     if not archive:
         print("Download failed.")
         return

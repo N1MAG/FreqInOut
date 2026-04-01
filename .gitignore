@@ -65,6 +65,8 @@ SPEC*.md
 # Local runtime/user artifacts
 VarAC.ini
 js8spotter.db
+tmp_gpg_guidance.txt
+freqinout-review.zip
 
 # Local test workspace artifacts
 tests/
