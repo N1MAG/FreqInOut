@@ -4924,7 +4924,7 @@ class DailyScheduleTab(QWidget):
         """
         data = self.settings.all()
         callsign = (data.get("operator_callsign") or "").strip().upper() or "UNKNOWN"
-        default_name = f"{callsign}-hf-schedule-{datetime.datetime.utcnow().strftime('%Y%m%d')}.json"
+        default_name = f"{callsign}-hf-schedule-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d')}.json"
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export HF Schedule",
@@ -4940,7 +4940,7 @@ class DailyScheduleTab(QWidget):
         try:
             payload = {
                 "callsign": callsign,
-                "created_utc": datetime.datetime.utcnow().isoformat(),
+                "created_utc": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(),
                 "rows": [],
             }
             for r in rows:

@@ -793,7 +793,7 @@ class JS8CallNetControlTab(QWidget):
             return
 
         self._net_in_progress = True
-        self._net_start_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
+        self._net_start_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
         self._net_end_utc = None
         self.net_status_changed.emit("JS8", True)
         self._all_calls_seen.clear()
@@ -850,7 +850,7 @@ class JS8CallNetControlTab(QWidget):
             )
             if resp != QMessageBox.Yes:
                 return
-        ts = datetime.datetime.utcnow().strftime("%Y%m%d %H:%M")
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d %H:%M")
         ad_hoc_name = f"JS8 Net - Ad Hoc - {ts} UTC"
         self.net_name_edit.setText(ad_hoc_name)
         self._start_net()
@@ -876,7 +876,7 @@ class JS8CallNetControlTab(QWidget):
         if self._poll_timer:
             self._poll_timer.stop()
 
-        self._net_end_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
+        self._net_end_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
         # Send net concluded to group if set
         if send_concluded:
@@ -927,7 +927,7 @@ class JS8CallNetControlTab(QWidget):
         if not isinstance(net_sched, list):
             return
 
-        now_utc = datetime.datetime.utcnow()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
         day_name = now_utc.strftime("%A")
         now_min = now_utc.hour * 60 + now_utc.minute
 
@@ -1682,7 +1682,7 @@ class JS8CallNetControlTab(QWidget):
         if not net_name:
             net_name = "UNKNOWN_NET"
 
-        date_str = datetime.datetime.utcnow().strftime("%Y%m%d")
+        date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
 
         base_dir = self._directed_path.parent
         net_logs_dir = base_dir / "net_logs"
@@ -1734,7 +1734,7 @@ class JS8CallNetControlTab(QWidget):
         if not isinstance(net_sched, list):
             return ""
 
-        now_utc = datetime.datetime.utcnow()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
         current_day_name = now_utc.strftime("%A")
         now_min = now_utc.hour * 60 + now_utc.minute
 

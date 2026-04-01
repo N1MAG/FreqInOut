@@ -76,14 +76,14 @@ class TimeConversionTab(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._check_hour_rollover)
         self._refresh_timer.start(60_000)
-        self._last_utc_hour = datetime.datetime.utcnow().hour
+        self._last_utc_hour = datetime.datetime.now(datetime.timezone.utc).hour
 
     def _update_time_labels(self):
         self.utc_label.setText(f"<b>UTC:</b> {get_utc_time()}")
         self.local_label.setText(f"<b>Local:</b> {get_local_time()}")
 
     def _check_hour_rollover(self):
-        hour = datetime.datetime.utcnow().hour
+        hour = datetime.datetime.now(datetime.timezone.utc).hour
         if hour != self._last_utc_hour:
             self._last_utc_hour = hour
             self._rebuild_table()
@@ -125,7 +125,7 @@ class TimeConversionTab(QWidget):
         except Exception:
             local_tz = pytz.UTC
 
-        year = datetime.datetime.utcnow().year
+        year = datetime.datetime.now(datetime.timezone.utc).year
         base_date = datetime.date(year, 7, 15 if self.dst_checkbox.isChecked() else 1)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         current_hour = now_utc.hour

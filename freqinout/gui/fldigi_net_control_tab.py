@@ -1474,7 +1474,7 @@ class FldigiNetControlTab(QWidget):
             self._append_file(main_path, op_line + "\n")
 
         self._net_in_progress = True
-        self._net_start_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
+        self._net_start_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
         self.net_status_changed.emit("FLDIGI", True)
         self._set_net_button_styles(active=True)
         log.info("FLDigi net started: %s (%s)", self.net_name_combo.currentText().strip(), self.role_combo.currentText())
@@ -1498,7 +1498,7 @@ class FldigiNetControlTab(QWidget):
             )
             if resp != QMessageBox.Yes:
                 return
-        ts = datetime.datetime.utcnow().strftime("%Y%m%d %H:%M")
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d %H:%M")
         ad_hoc_name = f"FLDIGI - Ad Hoc - {ts} UTC"
         self.net_name_combo.setEditText(ad_hoc_name)
         self._start_net()
@@ -1670,7 +1670,7 @@ class FldigiNetControlTab(QWidget):
             log.info("FLDigi net ended (no check-ins file content).")
             return
 
-        now_utc = datetime.datetime.utcnow().isoformat(timespec="seconds")
+        now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
         net_name = self.net_name_combo.currentText().strip()
         role = self.role_combo.currentText().strip().upper()
         group_name = self._operating_group_for_freq(self._current_freq_mhz())
@@ -1895,7 +1895,7 @@ class FldigiNetControlTab(QWidget):
                     )
                     """
                 )
-                today_str = datetime.datetime.utcnow().strftime("%Y%m%d")
+                today_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
                 for e in entries:
                     cs = (e.get("callsign") or "").strip().upper()
                     if not cs:
@@ -1933,11 +1933,10 @@ class FldigiNetControlTab(QWidget):
                         VALUES (?, ?)
                         ON CONFLICT(callsign) DO UPDATE SET last_seen_ts=excluded.last_seen_ts
                         """,
-                        (cs, float(datetime.datetime.utcnow().timestamp())),
+                        (cs, float(datetime.datetime.now(datetime.timezone.utc).timestamp())),
                     )
                 conn.commit()
             finally:
                 conn.close()
         except Exception as ex:
             log.error("Failed to bump operator history: %s", ex)
-

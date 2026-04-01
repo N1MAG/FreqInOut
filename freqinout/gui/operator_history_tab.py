@@ -1733,8 +1733,8 @@ class OperatorHistoryTab(QWidget):
                     g2,
                     g3,
                     role_val,
-                    first_seen or last_seen or datetime.datetime.utcnow().strftime("%Y%m%d"),
-                    last_seen or datetime.datetime.utcnow().strftime("%Y%m%d"),
+                    first_seen or last_seen or datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d"),
+                    last_seen or datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d"),
                     row.get("last_net", existing_last_net or ""),
                     row.get("last_role", existing_last_role or ""),
                     cs,
@@ -1814,7 +1814,7 @@ class OperatorHistoryTab(QWidget):
             QMessageBox.information(self, "Export CSV", "No rows to export.")
             return
         callsign = (self.settings.get("operator_callsign", "") or "").strip().upper() or "CALLSIGN"
-        date_str = datetime.datetime.utcnow().strftime("%Y%m%d")
+        date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
         name_parts = [callsign] + [g.replace(" ", "") for g in selected_groups] + [date_str]
         default_name = "_".join([p for p in name_parts if p]) + ".csv"
         fn, _ = QFileDialog.getSaveFileName(self, "Export Operators CSV", default_name, "CSV Files (*.csv)")
@@ -1910,7 +1910,7 @@ class OperatorHistoryTab(QWidget):
                     groups_list = [g.strip().upper() for g in groups_raw.split(",") if g.strip()]
                     date_val = (lower_row.get("date added") or lower_row.get("date_added") or "").strip()
                     if not date_val:
-                        date_val = datetime.datetime.utcnow().strftime("%Y%m%d")
+                        date_val = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
                     raw_role = (lower_row.get("group role") or lower_row.get("group_role") or "").strip()
                     normalized_role = self._normalize_group_role(raw_role)
                     data = {

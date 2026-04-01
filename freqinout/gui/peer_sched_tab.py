@@ -933,7 +933,7 @@ class PeerSchedTab(QWidget):
             self._delete_callsign_variants(cur, "peer_hf_schedule", owner)
             # Imported schedule is authoritative for this callsign; clear stale inferred rows.
             self._delete_callsign_variants(cur, "peer_hf_schedule_inferred", owner)
-            now_str = datetime.datetime.utcnow().isoformat()
+            now_str = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()
             for row in valid_rows:
                 cur.execute(
                     """

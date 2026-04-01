@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import psutil
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 
 from freqinout.core.logger import log
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
@@ -213,6 +213,7 @@ class SchedulerEngine(QObject):
         poll_interval_ms: int = 5_000,
     ) -> None:
         super().__init__(parent)
+        self._assert_scheduler_thread_contract()
         self.settings = SettingsManager()
         self.rig: Optional[FLRigClient] = rig
         self.js8: Optional[JS8ControlClient] = js8
@@ -461,6 +462,7 @@ class SchedulerEngine(QObject):
 
     def start(self) -> None:
         """Begin periodic schedule evaluation."""
+        self._assert_scheduler_thread_contract()
         if self._shutdown_requested:
             self._control_executor = ThreadPoolExecutor(
                 max_workers=1,
@@ -495,13 +497,28 @@ class SchedulerEngine(QObject):
             val = None
         if val not in (None, "", 0):
             return
-        now_utc = datetime.datetime.utcnow()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
         offset = 1900 + (now_utc.hour % 7) * 50
         try:
             if hasattr(self.settings, "set"):
                 self.settings.set("js8_offset_hz", offset)
         except Exception:
             pass
+
+    def _assert_scheduler_thread_contract(self) -> None:
+        """
+        SchedulerEngine and its SettingsManager are expected to live on the Qt
+        app thread. Constructing or starting the engine elsewhere can trip the
+        settings thread-affinity guard and produce hard-to-diagnose behavior.
+        """
+        app = QCoreApplication.instance()
+        if app is None:
+            return
+        app_thread = app.thread()
+        engine_thread = self.thread()
+        if app_thread is None or engine_thread is None or engine_thread == app_thread:
+            return
+        raise RuntimeError("SchedulerEngine must be constructed and started on the Qt application thread.")
 
     def _apply_js8_offset_startup(self) -> None:
         if not self.js8:

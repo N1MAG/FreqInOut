@@ -917,7 +917,7 @@ class FreqPlannerTab(QWidget):
         hf_sched, net_sched, sop_sched, policy_rows = self._load_schedules()
         theme = resolve_theme(self.settings)
         self._last_snapshot = self._snapshot(hf_sched, net_sched, sop_sched, policy_rows)
-        now_utc = datetime.datetime.utcnow()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
         week_sunday = self._week_start_sunday_utc(now_utc)
 
         # Precompute net schedule coverage by (day, hour) with boundary-aware logic.

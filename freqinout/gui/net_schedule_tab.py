@@ -2663,7 +2663,7 @@ class NetScheduleTab(QWidget):
         """
         data = self.settings.all()
         callsign = (data.get("operator_callsign") or "").strip().upper() or "UNKNOWN"
-        default_name = f"{callsign}-net-schedule-{datetime.datetime.utcnow().strftime('%Y%m%d')}.json"
+        default_name = f"{callsign}-net-schedule-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d')}.json"
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Net Schedule",
@@ -2683,7 +2683,7 @@ class NetScheduleTab(QWidget):
         try:
             payload = {
                 "callsign": callsign,
-                "created_utc": datetime.datetime.utcnow().isoformat(),
+                "created_utc": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(),
                 "rows": [],
             }
             for r in rows:
@@ -3109,7 +3109,7 @@ class NetScheduleTab(QWidget):
 
     @staticmethod
     def _utc_now_iso() -> str:
-        return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     def _builtin_resource_files(self) -> List[Tuple[Path, str]]:
         root = Path(__file__).resolve().parents[2]
@@ -3853,7 +3853,7 @@ class NetScheduleTab(QWidget):
         return {
             "callsign": callsign,
             "resource_set": set_name,
-            "created_utc": datetime.datetime.utcnow().isoformat(),
+            "created_utc": datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(),
             "rows": payload_rows,
         }
 
@@ -3879,7 +3879,7 @@ class NetScheduleTab(QWidget):
         if not rows:
             QMessageBox.warning(self, "Export Net Resources", f"No rows found for set '{set_name}'.")
             return
-        timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
         slug = self._resource_file_slug(set_name if set_name != "All" else "all")
         default_name = f"net_resources_{slug}_{timestamp}.json"
         # Intentionally use the same chooser behavior/location as Export Net Schedule.
