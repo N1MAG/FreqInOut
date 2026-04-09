@@ -111,6 +111,10 @@ class ControlFreqTab(QWidget):
         self._operator_groups_cache_ts = 0.0
         self._operator_groups_cache_mtime = 0.0
         self._operator_groups_cache_ttl_sec = 20.0
+        self._activity_cache_key: Tuple[Any, ...] = ()
+        self._activity_cache_rows: List[List[str]] = []
+        self._activity_cache_ts = 0.0
+        self._activity_cache_ttl_sec = 10.0
         self._my_schedule_entries_cache: List[Dict[str, object]] = []
         self._my_schedule_entries_cache_ts = 0.0
         self._my_schedule_entries_cache_key: Tuple[float, float] = (0.0, 0.0)
@@ -1256,6 +1260,7 @@ class ControlFreqTab(QWidget):
     def on_settings_saved(self) -> None:
         self._reload_sop_manager_settings()
         self._invalidate_sop_window_cache()
+        self._invalidate_activity_cache()
         self._sop_outlook_refresh_pending = True
         self._apply_theme()
         if self._active:
@@ -1295,6 +1300,11 @@ class ControlFreqTab(QWidget):
     def _invalidate_sop_window_cache(self) -> None:
         self._sop_cache_epoch += 1
         self._sop_window_cache.clear()
+
+    def _invalidate_activity_cache(self) -> None:
+        self._activity_cache_key = ()
+        self._activity_cache_rows = []
+        self._activity_cache_ts = 0.0
 
     def _get_cached_sop_actions(
         self,
@@ -1989,81 +1999,49 @@ class ControlFreqTab(QWidget):
         self._operator_groups_cache_mtime = db_mtime
         return mapping
 
-    def _refresh_activity(self) -> None:
-        if not bool(self._view_cards.get("activity", True)):
-            return
-        window_minutes = int(self.activity_window_combo.currentData() or 120)
-        search = (self.search_edit.text() or "").strip().upper()
-        group_filter = self.group_combo.currentData() or ""
+    def _activity_cache_token(self) -> Tuple[float, float]:
+        return (
+            self._safe_db_mtime(self._settings_db_path()),
+            self._safe_db_mtime(self._db_path()),
+        )
+
+    @staticmethod
+    def _is_activity_callsign_token(value: object) -> bool:
+        cs = str(value or "").strip().upper()
+        return bool(cs) and not cs.startswith("@")
+
+    def _compute_activity_rows(
+        self,
+        window_minutes: int,
+        search: str,
+        group_filter: str,
+    ) -> List[List[str]]:
         group_freqs = self._group_freq_map()
         group_bands = self._group_band_map()
-        sched_freqs, sched_bands = self._scheduled_group_freqs(window_minutes)
-        if sched_freqs:
-            filtered_freqs: Dict[str, List[float]] = {}
-            for grp, freqs in group_freqs.items():
-                allowed = sched_freqs.get(grp, set())
-                if not allowed:
-                    continue
-                filtered = [f for f in freqs if any(abs(f - a) < 0.0005 for a in allowed)]
-                if filtered:
-                    filtered_freqs[grp] = filtered
-            group_freqs = filtered_freqs
-            if sched_bands:
-                filtered_bands: Dict[str, Set[str]] = {}
-                for grp, bands in group_bands.items():
-                    allowed_b = sched_bands.get(grp, set())
-                    if not allowed_b:
-                        continue
-                    filtered = {b for b in bands if b in allowed_b}
-                    if filtered:
-                        filtered_bands[grp] = filtered
-                group_bands = filtered_bands
         operator_groups = self._load_operator_group_map()
         db_path = self._db_path()
         if not db_path.exists():
-            self._set_table_rows(self.activity_table, [["No activity data", "--", "--", "--"]])
-            return
+            return [["No activity data", "--", "--", "--"]]
+
         now_ts = time.time()
         since_ts = now_ts - (window_minutes * 60)
 
-        # callsigns seen by group based on js8_links + checkins
         group_seen: Dict[str, Set[str]] = {g: set() for g in group_freqs}
         group_traffic: Dict[str, int] = {g: 0 for g in group_freqs}
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT origin, destination, band, freq_hz FROM js8_links WHERE ts >= ?",
-                (since_ts,),
-            )
-            rows = cur.fetchall()
-            conn.close()
-        except Exception as e:
-            log.debug("ControlFreq: failed to load js8_links: %s", e)
-            rows = []
-        for origin, dest, band, freq_hz in rows:
-            band = (band or "").strip().upper()
+
+        def _matching_groups_for_link(band: str, mhz: float) -> List[str]:
+            matched: List[str] = []
             for grp, freqs in group_freqs.items():
                 if group_filter and grp != group_filter:
                     continue
-                if band and grp in group_bands and band not in group_bands.get(grp, set()):
-                    continue
-                if freq_hz is None:
-                    continue
-                try:
-                    mhz = float(freq_hz) / 1_000_000.0
-                except Exception:
+                allowed_bands = group_bands.get(grp, set())
+                if band and allowed_bands and band not in allowed_bands:
                     continue
                 if any(abs(mhz - f) < 0.0005 for f in freqs):
-                    if origin:
-                        group_seen[grp].add(str(origin).strip().upper())
-                    if dest:
-                        group_seen[grp].add(str(dest).strip().upper())
-                    group_traffic[grp] = group_traffic.get(grp, 0) + 1
+                    matched.append(grp)
+            return matched
 
-        # traffic by group (messages + observed links + checkins)
-
-        def _add_group_traffic(cs: str):
+        def _add_group_traffic(cs: str) -> None:
             cs = (cs or "").strip().upper()
             if not cs:
                 return
@@ -2075,36 +2053,54 @@ class ControlFreqTab(QWidget):
                     group_traffic[g] += 1
                     group_seen[g].add(cs)
 
+        conn: Optional[sqlite3.Connection] = None
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.execute(
-                "SELECT from_call, utc_ts FROM js8_messages WHERE utc_ts >= ?",
+                "SELECT origin, destination, band, freq_hz FROM js8_links WHERE ts >= ?",
                 (since_ts,),
             )
-            for cs, _ in cur.fetchall():
-                _add_group_traffic(cs)
-            cur.execute(
-                "SELECT from_call, utc_ts FROM spotter_traffic WHERE utc_ts >= ?",
-                (since_ts,),
-            )
-            for cs, _ in cur.fetchall():
-                _add_group_traffic(cs)
-            cur.execute(
-                "SELECT from_call, ts FROM varac_messages WHERE ts >= ?",
-                (since_ts,),
-            )
-            for cs, _ in cur.fetchall():
-                _add_group_traffic(cs)
-            cur.execute(
-                "SELECT callsign, last_seen_ts FROM fldigi_checkins WHERE last_seen_ts >= ?",
-                (since_ts,),
-            )
-            for cs, _ in cur.fetchall():
-                _add_group_traffic(cs)
-            conn.close()
+            for origin, dest, band, freq_hz in cur.fetchall():
+                band = (band or "").strip().upper()
+                if freq_hz is None:
+                    continue
+                try:
+                    mhz = float(freq_hz) / 1_000_000.0
+                except Exception:
+                    continue
+                matched_groups = _matching_groups_for_link(band, mhz)
+                if not matched_groups:
+                    continue
+                origin_cs = str(origin or "").strip().upper()
+                dest_cs = str(dest or "").strip().upper()
+                for grp in matched_groups:
+                    if self._is_activity_callsign_token(origin_cs):
+                        group_seen[grp].add(origin_cs)
+                    if self._is_activity_callsign_token(dest_cs):
+                        group_seen[grp].add(dest_cs)
+                    group_traffic[grp] = group_traffic.get(grp, 0) + 1
+
+            for sql, label in (
+                ("SELECT from_call, utc_ts FROM js8_messages WHERE utc_ts >= ?", "js8_messages"),
+                ("SELECT from_call, utc_ts FROM spotter_traffic WHERE utc_ts >= ?", "spotter_traffic"),
+                ("SELECT from_call, ts FROM varac_messages WHERE ts >= ?", "varac_messages"),
+                ("SELECT callsign, last_seen_ts FROM fldigi_checkins WHERE last_seen_ts >= ?", "fldigi_checkins"),
+            ):
+                try:
+                    cur.execute(sql, (since_ts,))
+                    for cs, _ in cur.fetchall():
+                        _add_group_traffic(cs)
+                except Exception as e:
+                    log.debug("ControlFreq: failed to load %s for activity: %s", label, e)
         except Exception as e:
-            log.debug("ControlFreq: failed to load recent messages: %s", e)
+            log.debug("ControlFreq: failed to load activity rows: %s", e)
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
 
         rows_out: List[List[str]] = []
         for grp in sorted(group_freqs.keys()):
@@ -2126,6 +2122,33 @@ class ControlFreqTab(QWidget):
             rows_out.append([grp, band_freq or "-", str(calls_seen), str(msg_ct)])
         if not rows_out:
             rows_out = [["No activity in selected window", "--", "--", "--"]]
+        return rows_out
+
+    def _refresh_activity(self) -> None:
+        if not bool(self._view_cards.get("activity", True)):
+            return
+        window_minutes = int(self.activity_window_combo.currentData() or 120)
+        search = (self.search_edit.text() or "").strip().upper()
+        group_filter = self.group_combo.currentData() or ""
+        cache_key = (
+            window_minutes,
+            search,
+            str(group_filter).strip().upper(),
+            self._activity_cache_token(),
+        )
+        now_ts = time.time()
+        if (
+            cache_key == self._activity_cache_key
+            and (now_ts - float(self._activity_cache_ts) <= self._activity_cache_ttl_sec)
+            and self._activity_cache_rows
+        ):
+            self._set_table_rows(self.activity_table, self._activity_cache_rows)
+            return
+        with perf_span("controlfreq.refresh_activity", settings=self.settings, min_ms=5.0):
+            rows_out = self._compute_activity_rows(window_minutes, search, str(group_filter).strip().upper())
+        self._activity_cache_key = cache_key
+        self._activity_cache_ts = time.time()
+        self._activity_cache_rows = [list(row) for row in rows_out]
         self._set_table_rows(self.activity_table, rows_out)
 
     def _refresh_frequency_control(self, include_intersections: bool = True) -> None:

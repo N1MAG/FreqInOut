@@ -3,6 +3,16 @@
 ## [1.2.2]
 - Fixed: `ControlFreq` `Next Change` now shows the upcoming target frequency instead of repeating the currently active scheduled frequency.
 - Fixed: `ControlFreq` frequency hero now re-syncs to the actual active radio frequency more reliably after automatic schedule-driven QSY and other runtime frequency changes, while still preserving an intentional pending user selection.
+- Fixed: `ControlFreq` `Activity` now honors the selected recent-time window directly instead of hiding valid traffic through schedule-start narrowing; recent overnight/current traffic is no longer dropped simply because the nearest daily-schedule row starts on another band.
+- Changed: `ControlFreq` `Activity` now excludes `@GROUP` address tokens from `Callsigns Seen`, adds a short filter/data-aware result cache, and benefits from new low-risk time-query indexes for `js8_messages`, `spotter_traffic`, and `fldigi_checkins`.
+- Changed: `Settings` section navigation now uses reusable section-health warnings for incomplete single-radio setup, highlighting core identity/groups and clearly partial `JS8Call`, `Fast Light`, and `VarAC` configuration without warning on untouched optional integrations.
+- Fixed: `Settings` `JS8Call` section-health warnings now flag a missing `DIRECTED.TXT` when other JS8 integration paths are already configured.
+- Fixed: `Settings` section-health no longer treats `CommStat` as requiring `JS8Spotter forms`, and `FLDigi Log Path` no longer creates a missing-`FLDigi` warning by itself.
+- Changed: `Settings` `JS8Call` section-health now keys JS8 completeness off `JS8Call Install Folder`, requiring host, TCP port, and `DIRECTED.TXT`, while `JS8Spotter` only warns when its forms path is missing. The `JS8Call Install Folder` field is now shown above `DIRECTED.TXT`.
+- Fixed: `Settings` selected section headers now mirror warning-state health, so missing configuration remains visible even when the current nav item’s selected style hides the warning tint.
+- Fixed: `Settings` left-nav warning sections now stay visibly highlighted whether selected or not, instead of relying only on the clicked/selected state.
+- Fixed: `Settings` left-nav custom rendering now gives items more vertical room so label descenders are not clipped.
+- Changed: `Settings` section-health now also warns when `FLMsg`/`FLAmp` executables are set without their companion message folders, when `FLRig`/`FLDigi` executables are set without required endpoint fields, and when `VarAC Install Folder` is set without `Incoming Files`.
 - Changed: When a schedule hold is already active, changing the hold-duration preset from `ControlFreq` or the main sidebar now immediately adjusts the active hold window instead of only changing the default for the next hold.
 - Fixed: `HF Operator History` CSV import now accepts UTF-8-with-BOM files such as Excel `CSV UTF-8` exports.
 - Fixed: `Messages` now treats `.k2s` fallback payloads like `.b2s` transport forms so received NBEMS transport files decode through the existing form-friendly renderer instead of generic unknown-form output.

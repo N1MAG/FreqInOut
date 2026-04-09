@@ -694,6 +694,9 @@ class MessageIngestor:
                 "CREATE INDEX IF NOT EXISTS idx_spotter_traffic_from_ts ON spotter_traffic(from_call, utc_ts DESC, id DESC)"
             )
             cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_spotter_traffic_utc_ts ON spotter_traffic(utc_ts DESC, from_call, id DESC)"
+            )
+            cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_spotter_status_key_ts ON spotter_station_status(status_key, updated_utc_ts DESC)"
             )
             self._backfill_spotter_station_status(cur)
@@ -788,6 +791,9 @@ class MessageIngestor:
             cur.execute("ALTER TABLE js8_inbox_state ADD COLUMN last_ingested_id INTEGER")
         except Exception:
             pass
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_js8_messages_utc_ts ON js8_messages(utc_ts DESC, from_call)"
+        )
         conn.commit()
         conn.close()
 

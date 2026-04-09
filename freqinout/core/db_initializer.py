@@ -169,6 +169,27 @@ def _ensure_js8_links(conn: sqlite3.Connection) -> None:
     ensure_js8_callsign_stats(conn, rebuild_if_empty=True)
 
 
+def _ensure_controlfreq_support_indexes(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    tables = {
+        str(row[0])
+        for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        if row and row[0]
+    }
+    if "js8_messages" in tables:
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_js8_messages_utc_ts ON js8_messages(utc_ts DESC, from_call)"
+        )
+    if "spotter_traffic" in tables:
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_spotter_traffic_utc_ts ON spotter_traffic(utc_ts DESC, from_call, id DESC)"
+        )
+    if "fldigi_checkins" in tables:
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fldigi_checkins_last_seen_ts ON fldigi_checkins(last_seen_ts DESC, callsign)"
+        )
+
+
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
     cur = conn.cursor()
     cur.execute(f"PRAGMA table_info({table})")
@@ -1204,6 +1225,7 @@ def _ensure_nets_db() -> None:
         _ensure_local_operator_tables(conn)
         _ensure_js8_links(conn)
         ensure_varac_local_tables(conn)
+        _ensure_controlfreq_support_indexes(conn)
 
         conn.commit()
     finally:

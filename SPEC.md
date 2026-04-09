@@ -8906,3 +8906,255 @@ Targeted verification:
 
 - Revert the map HTML/CSS/JS legend-docking changes in `freqinout/gui/stations_map_tab.py`
 - Revert the spec/changelog/test updates together
+
+## 1.2.2 ControlFreq Activity Window Semantics and Low-Risk Responsiveness Pass
+
+### Problem
+
+Operators expect the `ControlFreq` `Activity` window selector to show recent activity over the selected time window. The current implementation does not do that reliably.
+
+`Activity` currently narrows configured operating-group frequencies through `_scheduled_group_freqs()`, which filters by schedule row `start_utc` proximity to `now`. That makes the activity result depend on nearby schedule start times instead of only on actual recent traffic, and it drops valid overnight/current traffic. On the staged production profile this is why `6h` activity can show empty even though recent `14.115 MHz` JS8 traffic exists.
+
+The section is also more synchronous than it needs to be:
+- repeated `Activity` refreshes recompute the same rows even when filters/data have not changed
+- supporting time-based queries rely on incomplete indexing for some tables
+
+### Goals
+
+- Make `Activity` window selection reflect actual recent traffic over the selected time window.
+- Remove schedule-start-time narrowing from `Activity` so recent activity is not hidden by unrelated schedule timing.
+- Keep `Callsigns Seen` limited to actual callsign-like station identifiers and avoid counting group-address tokens such as `@MAGNET`.
+- Reduce repeated `Activity` refresh work with a small cache keyed by filters and DB mtimes.
+- Add low-risk supporting indexes for existing profiles so time-window queries scale better.
+
+### Non-Goals
+
+- No redesign of the `Activity` table layout or column names in this phase.
+- No redesign of `Schedule Intersections`, `Schedule Outlook`, or `Propagation` behavior in this phase.
+- No semantic redesign of the mixed `Traffic` count beyond the recent-window correctness fix in this phase.
+- No background-thread move for `ControlFreq` in this phase.
+
+### Impacted Files
+
+- `SPEC.md`
+- `CHANGELOG.md`
+- `freqinout/gui/controlfreq_tab.py`
+- `freqinout/core/db_initializer.py`
+- `freqinout/core/message_ingest.py`
+- targeted tests under `tests/`
+
+### Design
+
+Activity semantics:
+- Remove `_scheduled_group_freqs()` narrowing from `_refresh_activity()`.
+- Compute `Activity` strictly from recent observed data inside the selected window.
+- Continue to summarize by configured operating group.
+
+Callsign counting:
+- Continue counting traffic rows for matching group-frequency JS8 links.
+- Exclude group-address tokens that start with `@` from `Callsigns Seen` so the unique seen count reflects stations rather than addressing aliases.
+
+Caching:
+- Add a short-lived `Activity` cache keyed by:
+  - selected window
+  - search text
+  - group filter
+  - settings DB mtime
+  - nets DB mtime
+- Reuse cached rows when nothing relevant has changed.
+
+Index support:
+- Ensure these low-risk indexes exist for existing profiles:
+  - `js8_messages(utc_ts, from_call)`
+  - `spotter_traffic(utc_ts, from_call)`
+  - `fldigi_checkins(last_seen_ts, callsign)`
+- Add the message-table indexes in message-ingest schema ownership and also ensure optional existing-profile indexes during core DB initialization when those tables already exist.
+
+### Acceptance Criteria
+
+- On a profile with recent `MAGNET 14.115 MHz` JS8 traffic in the last `6h`, `Activity` no longer shows `No activity in selected window` solely because the nearby daily-schedule start is on another band.
+- `1h`, `2h`, `6h`, and `24h` selections reflect actual recent traffic window boundaries rather than schedule-row start proximity.
+- `Callsigns Seen` does not count `@GROUP` address tokens as station callsigns.
+- Repeating the same `Activity` refresh without data/filter changes reuses cached rows instead of recomputing them.
+- Existing profiles gain the low-risk time-query indexes without breaking startup or DB tool health.
+
+### Failure Modes and Mitigations
+
+- Failure mode: operators were implicitly relying on schedule-biased activity rows.
+  - Mitigation: keep grouping by configured operating group and only remove the hidden schedule-start narrowing, which is the direct source of incorrect empty windows.
+- Failure mode: optional message tables may not exist yet on a fresh profile when DB init runs.
+  - Mitigation: create optional indexes only when the target table already exists; message-ingest remains the owner for tables it creates later.
+- Failure mode: cache serves stale rows after data changes.
+  - Mitigation: include settings/nets DB mtimes in the cache key and keep the TTL short.
+
+### Verification
+
+Required commands:
+
+```powershell
+python tools/release_preflight.py
+python -m compileall freqinout
+```
+
+Targeted verification:
+- targeted tests covering:
+  - recent `6h` activity remains visible even when daily-schedule rows would previously have narrowed the group to another band
+  - `@GROUP` tokens are excluded from `Callsigns Seen`
+  - repeated `Activity` refresh with unchanged inputs reuses the cache
+  - optional existing-profile time indexes are created by DB init
+- manual check with the staged production profile:
+  - compare `6h` vs `24h` `MAGNET` activity and confirm the `6h` row is present when recent `14.115 MHz` traffic exists
+
+### Rollback
+
+- Revert the `ControlFreq` activity changes in `freqinout/gui/controlfreq_tab.py`
+- Revert the optional index additions in `freqinout/core/db_initializer.py` and `freqinout/core/message_ingest.py`
+- Revert the spec/changelog/test updates together
+
+## 1.2.2 Settings Section Health Warnings (Single-Radio, Reusable for Multi-Rig)
+
+### Problem
+
+The release branch now avoids some unnecessary probing and treats incomplete software setup more carefully, but the `Settings` tab still does not make incomplete setup obvious enough. Runtime LEDs and tooltips are adequate on most screens, but inside `Settings` the left-side section navigation gives no clear visual cue that a section needs attention.
+
+Operators often miss partial setup for:
+- core station identity
+- operating groups
+- optional JS8/FL/VarAC integrations that have been started but not completed
+
+For a future multi-rig workflow, this guidance also needs to be built in a way that can later aggregate health across multiple radios instead of being hard-coded to a single global station.
+
+### Goals
+
+- Add a reusable section-health layer for `Settings` section navigation.
+- Visually warn the relevant section navigation entries when the section needs setup.
+- Keep optional untouched integrations neutral so warnings do not become noise.
+- Keep the current single-radio implementation structured so multi-rig aggregation can later replace the health snapshot builder without rewriting the UI paint path.
+- Keep the implementation lightweight and local to `Settings`; no new runtime polling or blocking work.
+
+### Non-Goals
+
+- No full readiness/gating refactor for the release branch.
+- No new global warning banners or modal prompts.
+- No new warning treatment outside the `Settings` tab section navigation in this phase.
+- No multi-rig implementation in this phase.
+
+### Impacted Files
+
+- `SPEC.md`
+- `CHANGELOG.md`
+- `freqinout/gui/settings_tab.py`
+- targeted tests under `tests/`
+
+### Design
+
+Section-health model:
+- Introduce a small internal section-health snapshot with states:
+  - `neutral`
+  - `ok`
+  - `warn`
+- Keep this separate from the navigation styling so a future multi-rig build can swap in an aggregated per-radio health snapshot.
+
+Settings section warning scope:
+- `FreqInOut Settings`
+  - warn when clear core setup is incomplete:
+    - callsign missing
+    - grid missing
+    - enforcement mode is `Prompt` but no prompt interval is selected
+- `HF Operating Groups`
+  - warn when no operating groups are configured
+- `JS8Call Settings`
+  - stay neutral when untouched
+  - warn only for clear partial setup, such as:
+    - `JS8Call Install Folder` being configured without one of:
+      - TCP host
+      - TCP port
+      - `DIRECTED.TXT`
+    - `JS8Spotter` launch path without `JS8Spotter forms`
+  - `CommStat` launch-path configuration is standalone in this phase and must not require `JS8Spotter forms`
+  - `JS8Spotter` launch-path configuration alone must not require `DIRECTED.TXT` in this phase
+- `Fast Light Settings`
+  - stay neutral when untouched
+  - warn only for clear partial setup, such as:
+    - custom `FLDigi` check-in support path set without an `FLDigi` executable path
+    - `FLRig` executable path set without XML-RPC port
+    - `FLDigi` executable path set without XML-RPC host or port
+    - `FLMsg` executable path set without `ICS/Messages`
+    - `FLAmp` executable path set without `FLAMP/rx`
+    - `FLMsg` message path set without an `FLMsg` executable path
+    - `FLAmp` message path set without an `FLAmp` executable path
+  - `FLDigi Log Path` is optional and must not create a warning by itself
+- `VarAC Settings`
+  - stay neutral when untouched
+  - warn only for clear partial setup, such as:
+    - install folder set without `Incoming Files`
+    - incoming/BBS/archive features configured without an install folder or launch override
+    - BBS archive is partially configured
+    - auto-archive enabled without both BBS directories
+
+UI treatment:
+- Apply the warning only to the `Settings` section navigation items.
+- Use a warning-tinted chip treatment plus tooltip text explaining why the section needs setup.
+- Warning-state section items in the left navigation must remain visibly highlighted whether selected or not.
+- When the warning section is currently selected, mirror that warning state on the section header row so the issue remains visible inside the section as well.
+- The custom left-nav rendering must preserve readable text metrics and leave enough vertical room for descenders such as `g`, `p`, and `y`.
+- Keep normal sections unchanged.
+
+Performance:
+- Section-health computation must be widget-state only and cheap to recompute on text/selection changes.
+- No process scanning, endpoint probing, filesystem validation, or database work is allowed in section-health refresh.
+
+### Acceptance Criteria
+
+- On a fresh profile, `FreqInOut Settings` and `HF Operating Groups` show a warning-state section navigation chip, while untouched optional `JS8Call`, `Fast Light`, and `VarAC` sections remain neutral.
+- If the user sets `JS8Spotter Launch Path` without `JS8Spotter forms`, the `JS8Call Settings` navigation chip switches to warning and its tooltip explains the missing forms path.
+- If the user removes `DIRECTED.TXT` after configuring other JS8 paths, the `JS8Call Settings` navigation chip switches to warning and its tooltip explains that `DIRECTED.TXT` is missing.
+- If the user sets `JS8Call Install Folder` and clears host, clears TCP port, or removes `DIRECTED.TXT`, the `JS8Call Settings` navigation chip switches to warning and its tooltip explains the missing JS8Call requirement.
+- If the user configures only `CommStat Launch Path`, the `JS8Call Settings` navigation chip does not warn for missing `JS8Spotter forms` or `DIRECTED.TXT`.
+- If the user configures `JS8Spotter Launch Path` with forms present but no `JS8Call Install Folder`, the `JS8Call Settings` navigation chip does not warn for missing `DIRECTED.TXT`.
+- If the user sets `FLMsg` executable path without `ICS/Messages`, `Fast Light Settings` warns and explains that the message path is missing.
+- If the user sets `FLAmp` executable path without `FLAMP/rx`, `Fast Light Settings` warns and explains that the receive path is missing.
+- If the user sets `FLRig` executable path without XML-RPC port, `Fast Light Settings` warns and explains that the port is missing.
+- If the user sets `FLDigi` executable path without host or port, `Fast Light Settings` warns and explains the missing endpoint field.
+- If the user configures VarAC incoming/BBS features without an install folder or launch override, the `VarAC Settings` navigation chip switches to warning and its tooltip explains the incomplete setup.
+- If the user sets `VarAC Install Folder` without `Incoming Files`, `VarAC Settings` warns and explains that the incoming-files path is missing.
+- If the user configures only `FLDigi Log Path`, the `Fast Light Settings` navigation chip does not warn for a missing `FLDigi` executable path.
+- If a warning section is not currently selected, its left-nav item still remains visibly highlighted.
+- If the user is currently viewing a warning section, the section header itself reflects the warning state so missing configuration remains visible while that nav item is selected.
+- Left-nav labels remain fully readable after custom warning rendering, without clipped descenders.
+- Section-health refresh is immediate on relevant settings edits and does not add noticeable lag while typing.
+- The health builder and the nav styling remain separate enough that a future multi-rig build can replace the health snapshot source without redesigning the UI code.
+
+### Failure Modes and Mitigations
+
+- Failure mode: optional unused integrations show too many warnings.
+  - Mitigation: untouched optional sections remain `neutral`; warnings are reserved for clearly partial setup.
+- Failure mode: warning text becomes stale after inline edits.
+  - Mitigation: refresh section-health from relevant widget signals and from existing section-title refresh points.
+- Failure mode: visual styling fights with theme selection or current-item selection.
+  - Mitigation: keep warning styling limited to item tint/tooltip/font treatment and continue using the existing theme-selected row styling.
+
+### Verification
+
+Required commands:
+
+```powershell
+python tools/release_preflight.py
+python -m compileall freqinout
+```
+
+Targeted verification:
+- targeted tests covering:
+  - fresh-profile section-health states
+  - partial `JS8Call` setup warning transition
+  - partial `VarAC` setup warning transition
+- manual check:
+  - open `Settings`
+  - confirm warning-tinted section nav items appear for incomplete core sections
+  - confirm untouched optional sections stay neutral
+  - edit a partial optional setup and confirm the warning chip/tooltip updates immediately
+
+### Rollback
+
+- Revert the section-health additions in `freqinout/gui/settings_tab.py`
+- Revert the spec/changelog/test updates together

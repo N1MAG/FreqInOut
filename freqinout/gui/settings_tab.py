@@ -12,8 +12,8 @@ import re
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QIntValidator
+from PySide6.QtCore import Qt, QTimer, Signal, QSize
+from PySide6.QtGui import QIntValidator, QColor, QBrush, QPainter, QPen
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -44,6 +44,8 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QStackedWidget,
+    QStyledItemDelegate,
+    QStyle,
 )
 
 from freqinout.core.logger import log, set_log_level, get_log_level, _get_log_file
@@ -78,6 +80,42 @@ from freqinout.gui.theme import (
     button_style,
 )
 from freqinout.version import __version__
+
+
+class _SettingsSectionNavDelegate(QStyledItemDelegate):
+    def __init__(self, owner: "SettingsTab") -> None:
+        super().__init__(owner)
+        self._owner = owner
+
+    def sizeHint(self, option, index) -> QSize:  # type: ignore[override]
+        base = super().sizeHint(option, index)
+        font_h = option.fontMetrics.height() if hasattr(option, "fontMetrics") else 16
+        height = max(int(base.height() or 0), int(font_h) + 12, 32)
+        width = max(int(base.width() or 0), int(option.fontMetrics.horizontalAdvance(str(index.data() or ""))) + 22)
+        return QSize(width, height)
+
+    def paint(self, painter: QPainter, option, index) -> None:  # type: ignore[override]
+        theme = resolve_theme(self._owner.settings)
+        state = str(index.data(self._owner.SECTION_HEALTH_STATE_ROLE) or "neutral").strip().lower()
+        selected = bool(option.state & QStyle.State_Selected)
+        hovered = bool(option.state & QStyle.State_MouseOver)
+        visuals = self._owner._section_nav_visuals(state, selected=selected, hovered=hovered, theme=theme)
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        rect = option.rect.adjusted(3, 1, -3, -1)
+        painter.setPen(QPen(visuals["border"]))
+        painter.setBrush(visuals["bg"])
+        painter.drawRoundedRect(rect, 6, 6)
+
+        font = option.font
+        font.setBold(bool(visuals["bold"]))
+        painter.setFont(font)
+        painter.setPen(QPen(visuals["fg"]))
+        painter.drawText(rect.adjusted(10, 1, -8, -1), Qt.AlignVCenter | Qt.AlignLeft, str(index.data() or ""))
+
+        painter.restore()
 
 
 TIMEZONE_CHOICES = [
@@ -290,6 +328,8 @@ class SettingsTab(QWidget):
     local_net_profiles_changed = Signal()
     open_logs_requested = Signal()
     log_level_changed = Signal(str)
+    SECTION_HEALTH_STATE_ROLE = int(Qt.UserRole) + 1
+    SECTION_HEALTH_KEY_ROLE = int(Qt.UserRole) + 2
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -655,6 +695,8 @@ class SettingsTab(QWidget):
         self.sections_nav_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sections_nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.sections_nav_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.sections_nav_list.setMouseTracking(True)
+        self.sections_nav_list.setItemDelegate(_SettingsSectionNavDelegate(self))
         self.sections_nav_list.currentRowChanged.connect(self._on_section_nav_changed)
         sections_row.addWidget(self.sections_nav_list, 0, Qt.AlignTop)
 
@@ -671,6 +713,7 @@ class SettingsTab(QWidget):
             fit_content=True,
         )
         self._register_collapsible_group(op_group, self._summary_freqinout_settings)
+        self._set_section_health_key(op_group, "freqinout")
         op_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(op_group)
 
@@ -750,6 +793,7 @@ class SettingsTab(QWidget):
         ops_container.setLayout(ops_layout)
         ops_group = self._make_collapsible_group("HF Operating Groups", ops_container, checked=True, fit_content=False)
         self._register_collapsible_group(ops_group, self._summary_operating_groups)
+        self._set_section_health_key(ops_group, "operating_groups")
         ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(ops_group)
 
@@ -877,6 +921,13 @@ class SettingsTab(QWidget):
             w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             return w
 
+        js8_exec_row = QHBoxLayout()
+        self.js8call_path_edit = QLineEdit()
+        self.js8call_path_edit.setPlaceholderText("Folder containing JS8Call")
+        js8_v.addWidget(
+            build_js8_path_row("JS8Call Install Folder:", self.js8call_path_edit, self._choose_js8call_install_path)
+        )
+
         directed_forms_row = QHBoxLayout()
         self.js8_directed_edit = QLineEdit()
         js8_v.addWidget(
@@ -887,13 +938,6 @@ class SettingsTab(QWidget):
         self.js8_forms_edit = QLineEdit()
         js8_v.addWidget(
             build_js8_path_row("JS8Spotter forms:", self.js8_forms_edit, self._choose_js8_forms_path)
-        )
-
-        js8_exec_row = QHBoxLayout()
-        self.js8call_path_edit = QLineEdit()
-        self.js8call_path_edit.setPlaceholderText("Folder containing JS8Call")
-        js8_v.addWidget(
-            build_js8_path_row("JS8Call Install Folder:", self.js8call_path_edit, self._choose_js8call_install_path)
         )
 
         js8spotter_exec_row = QHBoxLayout()
@@ -949,6 +993,7 @@ class SettingsTab(QWidget):
         js8_container.setLayout(js8_v)
         js8_group = self._make_collapsible_group("JS8Call Settings", js8_container, checked=True, fit_content=True)
         self._register_collapsible_group(js8_group, self._summary_js8_settings)
+        self._set_section_health_key(js8_group, "js8call")
         js8_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(js8_group)
 
@@ -1124,6 +1169,7 @@ class SettingsTab(QWidget):
             fit_content=True,
         )
         self._register_collapsible_group(fast_light_group, self._summary_fast_light_settings)
+        self._set_section_health_key(fast_light_group, "fast_light")
         fast_light_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(fast_light_group)
 
@@ -1418,6 +1464,7 @@ class SettingsTab(QWidget):
         varac_container.setLayout(varac_v)
         varac_group = self._make_collapsible_group("VarAC Settings", varac_container, checked=True, fit_content=True)
         self._register_collapsible_group(varac_group, self._summary_varac_settings)
+        self._set_section_health_key(varac_group, "varac")
         varac_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(varac_group)
         self._add_settings_section(gpg_group)
@@ -1565,7 +1612,7 @@ class SettingsTab(QWidget):
         header_btn.setText(title)
         header_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         header_btn.setMinimumHeight(28)
-        header_btn.setStyleSheet("QToolButton { padding: 4px 6px; font-weight: 600; }")
+        header_btn.setStyleSheet(self._section_header_style("neutral", resolve_theme(self.settings)))
 
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
@@ -1611,6 +1658,85 @@ class SettingsTab(QWidget):
             self._apply_collapsed_state(group, content, expanded)
         self._update_sections_nav_size()
 
+    def _set_section_health_key(self, group: QGroupBox, health_key: str) -> None:
+        meta = self._section_meta.get(group, {})
+        meta["health_key"] = str(health_key or "").strip().lower()
+        self._section_meta[group] = meta
+
+    def _section_header_style(self, state: str, theme: Dict[str, str]) -> str:
+        state = str(state or "neutral").strip().lower()
+        if state == "warn":
+            border = theme.get("warning", "#C99700")
+            fg = border
+            bg = theme.get("surface", "#ffffff")
+            hover_bg = theme.get("surface_alt", bg)
+            font_weight = "700"
+        else:
+            border = "transparent"
+            fg = theme.get("text", "#222222")
+            bg = "transparent"
+            hover_bg = theme.get("surface_alt", theme.get("surface", "#f2f2f2"))
+            font_weight = "600"
+        return (
+            "QToolButton {"
+            " padding: 4px 6px;"
+            f" font-weight: {font_weight};"
+            f" color: {fg};"
+            f" background: {bg};"
+            f" border: 1px solid {border};"
+            " border-radius: 6px;"
+            " text-align: left;"
+            "}"
+            " QToolButton:hover {"
+            f" background: {hover_bg};"
+            f" border: 1px solid {border if state == 'warn' else theme.get('border', '#cccccc')};"
+            "}"
+        )
+
+    def _section_nav_visuals(
+        self,
+        state: str,
+        *,
+        selected: bool,
+        hovered: bool,
+        theme: Dict[str, str],
+    ) -> Dict[str, object]:
+        state = str(state or "neutral").strip().lower()
+        text_color = QColor(theme.get("text", "#222222"))
+        transparent = QColor(0, 0, 0, 0)
+
+        if state == "warn":
+            border = QColor(theme.get("warning", "#C99700"))
+            bg = QColor(border)
+            bg.setAlpha(120 if selected else (84 if hovered else 58))
+            return {"bg": bg, "border": border, "fg": text_color, "bold": True}
+
+        if selected:
+            border = QColor(theme.get("accent", "#2a6fd3"))
+            bg = QColor(border)
+            bg.setAlpha(64 if theme.get("bg") == "#E6E8EA" else 92)
+            return {"bg": bg, "border": border, "fg": text_color, "bold": True}
+
+        if hovered:
+            border = QColor(theme.get("accent", "#2a6fd3"))
+            bg = QColor(theme.get("surface", "#ffffff"))
+            return {"bg": bg, "border": border, "fg": text_color, "bold": False}
+
+        return {"bg": transparent, "border": transparent, "fg": text_color, "bold": False}
+
+    def _apply_sections_nav_style(self) -> None:
+        if not hasattr(self, "sections_nav_list"):
+            return
+        theme = resolve_theme(self.settings)
+        self.sections_nav_list.setStyleSheet(
+            "QListWidget {"
+            f" background: {theme.get('surface_alt', theme.get('surface', '#f2f2f2'))};"
+            f" border: 1px solid {theme.get('border', '#cccccc')};"
+            f" color: {theme.get('text', '#222222')};"
+            "}"
+        )
+        self.sections_nav_list.viewport().update()
+
     def _update_sections_nav_size(self) -> None:
         if not hasattr(self, "sections_nav_list"):
             return
@@ -1647,6 +1773,7 @@ class SettingsTab(QWidget):
             return
         with perf_span("settings.section_switch", settings=self.settings, min_ms=10.0):
             self.sections_stack.setCurrentIndex(row)
+            self._apply_sections_nav_style()
             try:
                 page = self.sections_stack.currentWidget()
                 if isinstance(page, QGroupBox):
@@ -1703,6 +1830,7 @@ class SettingsTab(QWidget):
                         nav_item.setText(base)
                     nav_item.setToolTip(base)
             self._update_sections_nav_size()
+            self._refresh_section_nav_health()
             return
         for group, meta in self._section_meta.items():
             base = str(meta.get("title", ""))
@@ -1724,6 +1852,192 @@ class SettingsTab(QWidget):
             if nav_item:
                 nav_item.setText(base)
                 nav_item.setToolTip(summary if summary else base)
+        self._update_sections_nav_size()
+        self._refresh_section_nav_health()
+
+    def _build_section_health_entry(self, *, engaged: bool, issues: List[str]) -> Dict[str, str]:
+        detail = "; ".join(str(issue).strip() for issue in issues if str(issue).strip())
+        if detail:
+            return {"state": "warn", "detail": detail}
+        if engaged:
+            return {"state": "ok", "detail": ""}
+        return {"state": "neutral", "detail": ""}
+
+    def _build_section_health_snapshot(self) -> Dict[str, Dict[str, str]]:
+        snapshot: Dict[str, Dict[str, str]] = {}
+
+        freqinout_issues: List[str] = []
+        callsign = self.callsign_edit.text().strip().upper() if hasattr(self, "callsign_edit") else ""
+        grid = self.grid6_edit.text().strip().upper() if hasattr(self, "grid6_edit") else ""
+        if not callsign:
+            freqinout_issues.append("Callsign missing")
+        if not grid:
+            freqinout_issues.append("Grid missing")
+        prompt_pairs = [
+            ("Frequency", getattr(self, "freq_enforce_combo", None), getattr(self, "freq_prompt_combo", None)),
+            ("FLDigi", getattr(self, "fldigi_enforce_combo", None), getattr(self, "fldigi_prompt_combo", None)),
+            ("JS8Call", getattr(self, "js8_enforce_combo", None), getattr(self, "js8_prompt_combo", None)),
+        ]
+        for label, mode_combo, prompt_combo in prompt_pairs:
+            try:
+                mode_txt = mode_combo.currentText().strip() if mode_combo else ""
+                prompt_txt = prompt_combo.currentText().strip() if prompt_combo else ""
+            except Exception:
+                mode_txt = ""
+                prompt_txt = ""
+            if mode_txt == "Prompt" and prompt_txt == "Select Interval":
+                freqinout_issues.append(f"{label} prompt interval missing")
+        snapshot["freqinout"] = self._build_section_health_entry(engaged=True, issues=freqinout_issues)
+
+        op_group_issues = [] if self.operating_groups else ["No HF operating groups configured"]
+        snapshot["operating_groups"] = self._build_section_health_entry(engaged=True, issues=op_group_issues)
+
+        js8_directed = self.js8_directed_edit.text().strip() if hasattr(self, "js8_directed_edit") else ""
+        js8_forms = self.js8_forms_edit.text().strip() if hasattr(self, "js8_forms_edit") else ""
+        js8_host = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
+        js8_port = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
+        js8call_path = self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else ""
+        js8spotter_path = self.js8spotter_path_edit.text().strip() if hasattr(self, "js8spotter_path_edit") else ""
+        commstat_path = self.commstat_path_edit.text().strip() if hasattr(self, "commstat_path_edit") else ""
+        js8_engaged = any([js8_directed, js8_forms, js8call_path, js8spotter_path, commstat_path])
+        js8_issues: List[str] = []
+        if js8call_path and not js8_host:
+            js8_issues.append("JS8Call TCP host missing")
+        if js8call_path and not js8_port:
+            js8_issues.append("JS8Call TCP port missing")
+        if js8call_path and not js8_directed:
+            js8_issues.append("JS8Call DIRECTED.TXT path missing")
+        if js8spotter_path and not js8_forms:
+            js8_issues.append("JS8Spotter forms path missing")
+        snapshot["js8call"] = self._build_section_health_entry(engaged=js8_engaged, issues=js8_issues)
+
+        default_fldigi_checkin_dir = str(get_fldigi_checkin_dir())
+        flrig_path = self.path_edits.get("FLRig").text().strip() if self.path_edits.get("FLRig") else ""
+        flrig_port = self.flrig_port_edit.text().strip() if hasattr(self, "flrig_port_edit") else ""
+        fldigi_path = self.path_edits.get("FLDigi").text().strip() if self.path_edits.get("FLDigi") else ""
+        fldigi_host = self.fldigi_host_edit.text().strip() if hasattr(self, "fldigi_host_edit") else ""
+        fldigi_port = self.fldigi_port_edit.text().strip() if hasattr(self, "fldigi_port_edit") else ""
+        flmsg_path = self.path_edits.get("FLMsg").text().strip() if self.path_edits.get("FLMsg") else ""
+        flamp_path = self.path_edits.get("FLAmp").text().strip() if self.path_edits.get("FLAmp") else ""
+        fldigi_log_path = self.fldigi_log_path_edit.text().strip() if hasattr(self, "fldigi_log_path_edit") else ""
+        fldigi_checkin_dir = (
+            self.fldigi_checkin_dir_edit.text().strip() if hasattr(self, "fldigi_checkin_dir_edit") else ""
+        )
+        fldigi_has_custom_checkin_dir = bool(fldigi_checkin_dir and fldigi_checkin_dir != default_fldigi_checkin_dir)
+        flmsg_msg_path = self.msg_paths_edits.get("flmsg").text().strip() if self.msg_paths_edits.get("flmsg") else ""
+        flamp_msg_path = self.msg_paths_edits.get("flamp").text().strip() if self.msg_paths_edits.get("flamp") else ""
+        fast_light_engaged = any(
+            [
+                flrig_path,
+                fldigi_path,
+                flmsg_path,
+                flamp_path,
+                fldigi_log_path,
+                fldigi_has_custom_checkin_dir,
+                flmsg_msg_path,
+                flamp_msg_path,
+            ]
+        )
+        fast_light_issues: List[str] = []
+        if flrig_path and not flrig_port:
+            fast_light_issues.append("FLRig XML-RPC port missing")
+        if fldigi_path and not fldigi_host:
+            fast_light_issues.append("FLDigi XML-RPC host missing")
+        if fldigi_path and not fldigi_port:
+            fast_light_issues.append("FLDigi XML-RPC port missing")
+        if flmsg_path and not flmsg_msg_path:
+            fast_light_issues.append("FLMsg ICS/Messages path missing")
+        if flamp_path and not flamp_msg_path:
+            fast_light_issues.append("FLAmp FLAMP/rx path missing")
+        if fldigi_has_custom_checkin_dir and not fldigi_path:
+            fast_light_issues.append("FLDigi executable path missing")
+        if flmsg_msg_path and not flmsg_path:
+            fast_light_issues.append("FLMsg executable path missing")
+        if flamp_msg_path and not flamp_path:
+            fast_light_issues.append("FLAmp executable path missing")
+        snapshot["fast_light"] = self._build_section_health_entry(
+            engaged=fast_light_engaged,
+            issues=fast_light_issues,
+        )
+
+        varac_install = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
+        varac_launch = self.varac_launch_cmd_edit.text().strip() if hasattr(self, "varac_launch_cmd_edit") else ""
+        varac_incoming = self.msg_paths_edits.get("varac").text().strip() if self.msg_paths_edits.get("varac") else ""
+        varac_bbs_dir = self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
+        varac_bbs_archive = (
+            self.varac_bbs_archive_dir_edit.text().strip() if hasattr(self, "varac_bbs_archive_dir_edit") else ""
+        )
+        varac_auto_archive = bool(
+            hasattr(self, "varac_bbs_auto_archive_chk") and self.varac_bbs_auto_archive_chk.isChecked()
+        )
+        varac_engaged = any(
+            [varac_install, varac_launch, varac_incoming, varac_bbs_dir, varac_bbs_archive, varac_auto_archive]
+        )
+        varac_issues: List[str] = []
+        if varac_install and not varac_incoming:
+            varac_issues.append("VarAC incoming files path missing")
+        if (varac_incoming or varac_bbs_dir or varac_bbs_archive or varac_auto_archive) and not (
+            varac_install or varac_launch
+        ):
+            varac_issues.append("Install folder or launch override missing")
+        if bool(varac_bbs_dir) != bool(varac_bbs_archive):
+            varac_issues.append("BBS directory/archive setup incomplete")
+        if varac_auto_archive and not (varac_bbs_dir and varac_bbs_archive):
+            varac_issues.append("Auto-archive requires both BBS directories")
+        snapshot["varac"] = self._build_section_health_entry(engaged=varac_engaged, issues=varac_issues)
+        return snapshot
+
+    def _apply_section_nav_item_health(
+        self,
+        item: QListWidgetItem,
+        *,
+        base_title: str,
+        state: str,
+        detail: str,
+        theme: Dict[str, str],
+    ) -> None:
+        state = str(state or "neutral").strip().lower()
+        item.setData(self.SECTION_HEALTH_STATE_ROLE, state)
+        item.setToolTip(base_title if not detail else f"{base_title}\nNeeds Setup: {detail}")
+        font = item.font()
+        font.setBold(state == "warn")
+        item.setFont(font)
+        if state == "warn":
+            bg = QColor(theme.get("warning", "#C99700"))
+            bg.setAlpha(58 if theme.get("bg") == "#E6E8EA" else 78)
+            item.setBackground(QBrush(bg))
+            item.setForeground(QBrush(QColor(theme.get("text", "#222222"))))
+            return
+        item.setData(Qt.BackgroundRole, None)
+        item.setData(Qt.ForegroundRole, None)
+
+    def _refresh_section_nav_health(self) -> None:
+        if not hasattr(self, "sections_nav_list"):
+            return
+        theme = resolve_theme(self.settings)
+        snapshot = self._build_section_health_snapshot()
+        for group, meta in self._section_meta.items():
+            nav_item = self._section_nav_items.get(group)
+            header_btn = meta.get("header_btn")
+            if not nav_item:
+                if header_btn:
+                    header_btn.setStyleSheet(self._section_header_style("neutral", theme))
+                continue
+            base_title = str(meta.get("title", group.title() if hasattr(group, "title") else "")).strip()
+            health_key = str(meta.get("health_key", "") or "").strip().lower()
+            entry = snapshot.get(health_key, {"state": "neutral", "detail": ""})
+            nav_item.setData(self.SECTION_HEALTH_KEY_ROLE, health_key)
+            state = str(entry.get("state", "neutral"))
+            self._apply_section_nav_item_health(
+                nav_item,
+                base_title=base_title,
+                state=state,
+                detail=str(entry.get("detail", "")),
+                theme=theme,
+            )
+            if header_btn:
+                header_btn.setStyleSheet(self._section_header_style(state, theme))
+        self._apply_sections_nav_style()
         self._update_sections_nav_size()
 
     def _apply_collapsed_state(self, group: QGroupBox, content: QWidget, expanded: bool) -> None:
@@ -3052,6 +3366,7 @@ class SettingsTab(QWidget):
             self.fldigi_log_path_edit,
             self.varac_bbs_dir_edit,
             self.varac_bbs_archive_dir_edit,
+            self.varac_path_edit,
             self.varac_launch_cmd_edit,
             self.flrig_port_edit,
         ]
@@ -3091,6 +3406,7 @@ class SettingsTab(QWidget):
         if not self._settings_dirty:
             self._settings_dirty = True
             self._set_save_button_state("info")
+        self._refresh_section_nav_health()
 
     def _on_sop_export_text_changed(self) -> None:
         self._mark_settings_dirty()
@@ -3658,28 +3974,8 @@ class SettingsTab(QWidget):
             if hasattr(self, "logging_warning_label"):
                 self.logging_warning_label.setStyleSheet(f"color: {theme.get('text_muted', theme.get('text', '#666'))};")
             if hasattr(self, "sections_nav_list"):
-                self.sections_nav_list.setStyleSheet(
-                    "QListWidget {"
-                    f" background: {theme.get('surface_alt', theme.get('surface', '#f2f2f2'))};"
-                    f" border: 1px solid {theme.get('border', '#cccccc')};"
-                    f" color: {theme.get('text', '#222222')};"
-                    "}"
-                    "QListWidget::item {"
-                    " padding: 6px 8px;"
-                    " border-radius: 4px;"
-                    " margin: 1px 2px;"
-                    "}"
-                    "QListWidget::item:hover {"
-                    f" background: {theme.get('surface', '#ffffff')};"
-                    f" border: 1px solid {theme.get('accent', '#2a6fd3')};"
-                    "}"
-                    "QListWidget::item:selected {"
-                    f" background: {theme.get('accent_soft', theme.get('surface', '#e6f2ff'))};"
-                    f" color: {theme.get('text', '#222222')};"
-                    " font-weight: 600;"
-                    "}"
-                )
-                self._update_sections_nav_size()
+                self._apply_sections_nav_style()
+                self._refresh_section_nav_health()
             self._update_enforcement_visibility()
             self._update_logging_actions_layout()
             self._apply_accessibility_width_guards()
