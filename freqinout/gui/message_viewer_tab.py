@@ -56,6 +56,14 @@ from reportlab.pdfgen import canvas
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
+from freqinout.core.sitrep_metadata import (
+    parse_filter_subtype_label,
+    source_family_display_label,
+    source_families_from_sources,
+    subtype_filter_label,
+    subtype_label,
+    transport_label,
+)
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.gpg_tools import (
@@ -1096,7 +1104,7 @@ class _RowsBuildWorker(QObject):
             to_call = (msg.target or "").strip().upper()
             overall = (msg.overall_status or "").strip().lower()
             scope = (msg.scope or "").strip()
-            title_parts = [msg.subtype]
+            title_parts = [msg.subtype_label]
             if scope:
                 title_parts.append(scope)
             if overall:
@@ -1104,6 +1112,7 @@ class _RowsBuildWorker(QObject):
             title = " | ".join([p for p in title_parts if p]) or "SitRep"
             if len(title) > 60:
                 title = title[:57].rstrip() + "..."
+            source_label = (msg.source_family_label or "").strip()
             rows.append(
                 UnifiedMessage(
                     msg_type="SitRep",
@@ -1121,7 +1130,21 @@ class _RowsBuildWorker(QObject):
                         from_call,
                         to_call,
                         rcv_display,
-                        f"{title} {msg.subtype}",
+                        " ".join(
+                            part
+                            for part in (
+                                title,
+                                msg.subtype_label,
+                                source_label,
+                                msg.transport_label,
+                                msg.report_group,
+                                msg.state_code,
+                                msg.remarks_text,
+                                msg.brevity_code,
+                                msg.brevity_summary,
+                            )
+                            if part
+                        ),
                     ),
                 )
             )
@@ -1342,9 +1365,20 @@ class SitrepMessage:
     event_ts_utc: str
     from_call: str
     target: str
+    report_group: str
     grid: str
+    state_code: str
+    state_confidence: str
+    geo_confidence: str
     scope: str
     subtype: str
+    subtype_label: str
+    transport_mode: str
+    transport_label: str
+    remarks_text: str
+    brevity_code: str
+    brevity_summary: str
+    source_family_label: str
     overall_status: str
     power: str
     water: str
@@ -3485,7 +3519,7 @@ class MessageViewerTab(QWidget):
         if type_sel == "SitRep":
             return row.msg_type == "SitRep"
         if type_sel.startswith("SitRep/"):
-            subtype = type_sel.split("/", 1)[1].strip().upper()
+            subtype = parse_filter_subtype_label(type_sel)
             if row.msg_type != "SitRep":
                 return False
             row_subtype = str(getattr(row.payload, "subtype", "") or "").strip().upper()
@@ -4451,9 +4485,11 @@ class MessageViewerTab(QWidget):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT id, report_key, event_ts, event_ts_utc, from_call, target, grid, scope,
+                SELECT id, report_key, event_ts, event_ts_utc, from_call, target, report_group, grid,
+                       state_code, state_confidence, geo_confidence, scope,
                        subtype, overall_status, power, water, medical, communications, internet,
                        travel, food, fuel, crime, civil_unrest, political,
+                       transport_mode, remarks_text, brevity_code, brevity_summary,
                        source_first, source_last, source_count, sources_json, source_refs_json, raw_payload_json, updated_ts
                 FROM sitrep_events
                 ORDER BY event_ts DESC, id DESC
@@ -4466,6 +4502,11 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to load sitrep events: %s", e)
             rows = []
         for r in rows:
+            sources_json = str(r[32] or "")
+            source_candidates = self._safe_json_array_loads(sources_json)
+            if not source_candidates:
+                source_candidates = [str(r[29] or "").strip().upper(), str(r[30] or "").strip().upper()]
+            source_families = source_families_from_sources(source_candidates)
             msg = SitrepMessage(
                 event_id=int(r[0] or 0),
                 report_key=str(r[1] or ""),
@@ -4473,28 +4514,39 @@ class MessageViewerTab(QWidget):
                 event_ts_utc=str(r[3] or ""),
                 from_call=str(r[4] or "").strip().upper(),
                 target=str(r[5] or "").strip().upper(),
-                grid=str(r[6] or "").strip().upper(),
-                scope=str(r[7] or "").strip(),
-                subtype=str(r[8] or "").strip().upper(),
-                overall_status=str(r[9] or "").strip().lower(),
-                power=str(r[10] or "").strip().lower(),
-                water=str(r[11] or "").strip().lower(),
-                medical=str(r[12] or "").strip().lower(),
-                communications=str(r[13] or "").strip().lower(),
-                internet=str(r[14] or "").strip().lower(),
-                travel=str(r[15] or "").strip().lower(),
-                food=str(r[16] or "").strip().lower(),
-                fuel=str(r[17] or "").strip().lower(),
-                crime=str(r[18] or "").strip().lower(),
-                civil_unrest=str(r[19] or "").strip().lower(),
-                political=str(r[20] or "").strip().lower(),
-                source_first=str(r[21] or "").strip().upper(),
-                source_last=str(r[22] or "").strip().upper(),
-                source_count=int(r[23] or 0),
-                sources_json=str(r[24] or ""),
-                source_refs_json=str(r[25] or ""),
-                raw_payload_json=str(r[26] or ""),
-                updated_ts=float(r[27] or 0.0),
+                report_group=str(r[6] or "").strip().upper(),
+                grid=str(r[7] or "").strip().upper(),
+                state_code=str(r[8] or "").strip().upper(),
+                state_confidence=str(r[9] or "").strip().lower(),
+                geo_confidence=str(r[10] or "").strip().lower(),
+                scope=str(r[11] or "").strip(),
+                subtype=str(r[12] or "").strip().upper(),
+                subtype_label=subtype_label(r[12]),
+                transport_mode=str(r[25] or "").strip().lower(),
+                transport_label=transport_label(r[25]),
+                remarks_text=str(r[26] or "").strip(),
+                brevity_code=str(r[27] or "").strip().upper(),
+                brevity_summary=str(r[28] or "").strip(),
+                source_family_label=source_family_display_label(source_families),
+                overall_status=str(r[13] or "").strip().lower(),
+                power=str(r[14] or "").strip().lower(),
+                water=str(r[15] or "").strip().lower(),
+                medical=str(r[16] or "").strip().lower(),
+                communications=str(r[17] or "").strip().lower(),
+                internet=str(r[18] or "").strip().lower(),
+                travel=str(r[19] or "").strip().lower(),
+                food=str(r[20] or "").strip().lower(),
+                fuel=str(r[21] or "").strip().lower(),
+                crime=str(r[22] or "").strip().lower(),
+                civil_unrest=str(r[23] or "").strip().lower(),
+                political=str(r[24] or "").strip().lower(),
+                source_first=str(r[29] or "").strip().upper(),
+                source_last=str(r[30] or "").strip().upper(),
+                source_count=int(r[31] or 0),
+                sources_json=sources_json,
+                source_refs_json=str(r[33] or ""),
+                raw_payload_json=str(r[34] or ""),
+                updated_ts=float(r[35] or 0.0),
             )
             msgs.append(msg)
         self.sitrep_messages = msgs
@@ -5302,7 +5354,7 @@ class MessageViewerTab(QWidget):
             else:
                 type_vals.append("SitRep")
                 idx = len(type_vals)
-            sitrep_filters = [f"SitRep/{s}" for s in sitrep_subtypes]
+            sitrep_filters = [subtype_filter_label(s) for s in sitrep_subtypes]
             type_vals[idx:idx] = sitrep_filters
         if any(getattr(r.payload, "flag_state", 0) == 1 for r in rows):
             if "Action Needed" not in status_vals:
@@ -7837,6 +7889,27 @@ class MessageViewerTab(QWidget):
         except Exception:
             return raw
 
+    @staticmethod
+    def _safe_json_array_loads(text: str) -> List[str]:
+        raw = str(text or "").strip()
+        if not raw:
+            return []
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, list):
+                return [str(item or "").strip().upper() for item in obj if str(item or "").strip()]
+        except Exception:
+            pass
+        return []
+
+    def _message_source_identity(self, row: UnifiedMessage) -> str:
+        payload = row.payload
+        if isinstance(payload, SitrepMessage):
+            return str(getattr(payload, "source_family_label", "") or "").strip() or "SitRep"
+        if isinstance(payload, FileRecord):
+            return self._file_origin_label(payload)
+        return ""
+
     def _load_sitrep_content(self, msg: SitrepMessage) -> None:
         with perf_span(
             "messages.load_sitrep_content",
@@ -7855,9 +7928,13 @@ class MessageViewerTab(QWidget):
                 "",
                 f"CALLSIGN: {msg.from_call}",
                 f"TO:       {msg.target}",
+                f"GROUP:    {msg.report_group}",
                 f"GRID:     {msg.grid}",
+                f"STATE:    {msg.state_code or '--'}",
                 f"SCOPE:    {msg.scope or 'My Location'}",
-                f"SUBTYPE:  {msg.subtype}",
+                f"SUBTYPE:  {msg.subtype_label}",
+                f"SOURCE:   {msg.source_family_label or 'Unknown'}",
+                f"RECEIPT:  {msg.transport_label}",
                 f"{label}:  {ts_display}",
                 f"REPORT:   {msg.report_key}",
                 f"SOURCES:  {msg.source_count}",
@@ -7876,6 +7953,13 @@ class MessageViewerTab(QWidget):
                 f"  Civil Unrest:   {self._pretty_sitrep_value(msg.civil_unrest)}",
                 f"  Political:      {self._pretty_sitrep_value(msg.political)}",
                 "",
+                "CommStat / Location Metadata",
+                f"  Remarks:        {msg.remarks_text or '--'}",
+                f"  Brevity Code:   {msg.brevity_code or '--'}",
+                f"  Brevity Decode: {msg.brevity_summary or '--'}",
+                f"  State Confidence: {msg.state_confidence or '--'}",
+                f"  Geo Confidence:   {msg.geo_confidence or '--'}",
+                "",
                 "Source Metadata",
                 f"  First Source: {msg.source_first or 'Unknown'}",
                 f"  Last Source:  {msg.source_last or 'Unknown'}",
@@ -7888,7 +7972,11 @@ class MessageViewerTab(QWidget):
                 "Raw Payload JSON:",
                 raw_payload,
             ]
-            self.info_label.setText(f"SitRep {msg.subtype} {msg.from_call} -> {msg.target}")
+            self.info_label.setText(
+                f"SitRep {msg.subtype_label} {msg.from_call} -> {msg.target}"
+                + (f" | {msg.source_family_label}" if msg.source_family_label else "")
+                + (f" | {msg.transport_label}" if msg.transport_label else "")
+            )
             self.viewer.setAcceptRichText(False)
             self.viewer.setPlainText("\n".join(lines))
 

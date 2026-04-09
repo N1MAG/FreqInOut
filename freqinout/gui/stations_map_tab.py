@@ -60,6 +60,7 @@ from freqinout.core.operator_activity import (
     record_js8_activity_batch,
 )
 from freqinout.core.propagation_service import PropagationService
+from freqinout.core.sitrep_metadata import source_family_label, source_short_label, transport_label
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
@@ -446,6 +447,7 @@ class StationsMapTab(QWidget):
         self.operator_rows: List[Dict] = []
         self.operator_index: Dict[str, Dict] = {}
         self._operator_groups: List[str] = []
+        self._sitrep_report_groups: List[str] = []
         self._operator_regions: List[str] = []
         self._last_map_view: Optional[Dict[str, float]] = None
 
@@ -1873,10 +1875,11 @@ class StationsMapTab(QWidget):
 
     def _refresh_group_filter_options(self):
         current = self.group_filter_combo.currentData() if hasattr(self, "group_filter_combo") else None
+        group_values = sorted({str(g).strip().upper() for g in (self._operator_groups + self._sitrep_report_groups) if str(g).strip()})
         self.group_filter_combo.blockSignals(True)
         self.group_filter_combo.clear()
         self.group_filter_combo.addItem("All", "")
-        for g in self._operator_groups:
+        for g in group_values:
             self.group_filter_combo.addItem(g, g)
         if current and self.group_filter_combo.findData(current) >= 0:
             self.group_filter_combo.setCurrentIndex(self.group_filter_combo.findData(current))
@@ -3047,20 +3050,7 @@ class StationsMapTab(QWidget):
 
     @staticmethod
     def _source_short_label(source: str) -> str:
-        src = (source or "").strip().upper()
-        if not src:
-            return "UNK"
-        if src == "JS8SPOTTER":
-            return "SPT"
-        if src == "COMMSTAT3":
-            return "CS3"
-        if src == "COMMSTAT23":
-            return "CS2"
-        if src == "MANUAL":
-            return "MAN"
-        if len(src) <= 4:
-            return src
-        return src[:4]
+        return source_short_label(source)
 
     @classmethod
     def _encode_source_chips(cls, source_summary: Dict[str, str]) -> str:
@@ -3173,6 +3163,12 @@ class StationsMapTab(QWidget):
                             effective_status,
                             latest_event_ts,
                             latest_event_ts_utc,
+                            latest_report_group,
+                            latest_transport_mode,
+                            latest_state_code,
+                            latest_state_confidence,
+                            latest_geo_confidence,
+                            latest_brevity_summary,
                             source_summary_json
                         FROM sitrep_latest_by_callsign
                         """
@@ -3211,15 +3207,34 @@ class StationsMapTab(QWidget):
                 "updated_utc_ts": updated_ts,
                 "updated_utc_str": updated_str,
                 "response_code": (response_code or "").strip(),
-                "status_source": source,
+                "status_source": source_family_label(source),
                 "status_source_detail": source_detail,
                 "status_source_chips": source_chips,
                 "status_conflict": False,
                 "status_age": self._sitrep_age_text(updated_ts),
                 "status_source_count": len(source_summary),
+                "report_group": "",
+                "transport_label": "",
+                "state_code": "",
+                "state_confidence": "",
+                "geo_confidence": "",
+                "brevity_summary": "",
             }
 
-        for callsign, effective_status, latest_event_ts, latest_event_ts_utc, source_summary_json in fused_rows:
+        sitrep_report_groups: Set[str] = set()
+        for (
+            callsign,
+            effective_status,
+            latest_event_ts,
+            latest_event_ts_utc,
+            latest_report_group,
+            latest_transport_mode,
+            latest_state_code,
+            latest_state_confidence,
+            latest_geo_confidence,
+            latest_brevity_summary,
+            source_summary_json,
+        ) in fused_rows:
             call = (callsign or "").strip().upper()
             if not call:
                 continue
@@ -3233,7 +3248,7 @@ class StationsMapTab(QWidget):
                 summary = {"FUSED": key}
             source_count = len(summary)
             source_chips = self._encode_source_chips(summary)
-            source = next(iter(summary.keys()), "FUSED") if source_count <= 1 else f"MULTI({source_count})"
+            source = source_family_label(next(iter(summary.keys()), "FUSED")) if source_count <= 1 else "Mixed"
             updated_ts = self._safe_float(latest_event_ts, 0.0)
             updated_str = (latest_event_ts_utc or "").strip()
             if not updated_str and updated_ts > 0:
@@ -3253,7 +3268,15 @@ class StationsMapTab(QWidget):
                 "status_conflict": self._sitrep_conflict(summary),
                 "status_age": self._sitrep_age_text(updated_ts),
                 "status_source_count": source_count,
+                "report_group": str(latest_report_group or "").strip().upper(),
+                "transport_label": transport_label(latest_transport_mode),
+                "state_code": str(latest_state_code or "").strip().upper(),
+                "state_confidence": str(latest_state_confidence or "").strip().lower(),
+                "geo_confidence": str(latest_geo_confidence or "").strip().lower(),
+                "brevity_summary": str(latest_brevity_summary or "").strip(),
             }
+            if candidate["report_group"]:
+                sitrep_report_groups.add(candidate["report_group"])
             existing = statuses.get(call)
             if existing is None:
                 statuses[call] = candidate
@@ -3265,9 +3288,65 @@ class StationsMapTab(QWidget):
                 continue
             if updated_ts >= existing_ts:
                 statuses[call] = candidate
+        report_groups_sorted = sorted(sitrep_report_groups)
+        if report_groups_sorted != self._sitrep_report_groups:
+            self._sitrep_report_groups = report_groups_sorted
+            if hasattr(self, "group_filter_combo"):
+                self._refresh_group_filter_options()
 
         self._query_cache_set(cache_key, dict(statuses))
         return statuses
+
+    def _load_sitrep_state_rollup(self, report_group: str = "") -> List[Dict[str, object]]:
+        report_group_key = str(report_group or "").strip().upper() or "__ALL__"
+        cache_key = ("sitrep_state_rollup", report_group_key)
+        cached = self._query_cache_get(cache_key)
+        if isinstance(cached, list):
+            return [dict(row) for row in cached if isinstance(row, dict)]
+        try:
+            from freqinout.core.config_paths import get_config_dir
+
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return []
+        if not db_path.exists():
+            return []
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT state_code, callsign_count, red_count, yellow_count, green_count, unknown_count,
+                       js8_count, internet_count, mixed_transport_count, latest_event_ts
+                FROM sitrep_state_rollup
+                WHERE report_group=?
+                ORDER BY callsign_count DESC, latest_event_ts DESC, state_code
+                LIMIT 8
+                """,
+                (report_group_key,),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception:
+            return []
+        out = [
+            {
+                "state_code": str(row[0] or "").strip().upper(),
+                "callsign_count": int(row[1] or 0),
+                "red_count": int(row[2] or 0),
+                "yellow_count": int(row[3] or 0),
+                "green_count": int(row[4] or 0),
+                "unknown_count": int(row[5] or 0),
+                "js8_count": int(row[6] or 0),
+                "internet_count": int(row[7] or 0),
+                "mixed_transport_count": int(row[8] or 0),
+                "latest_event_ts": float(row[9] or 0.0),
+            }
+            for row in rows
+            if str(row[0] or "").strip()
+        ]
+        self._query_cache_set(cache_key, list(out))
+        return out
 
     def _load_recent_calls(self, max_age_sec: Optional[int], band_filter=None) -> Set[str]:
         if not max_age_sec or max_age_sec <= 0:
@@ -4573,6 +4652,14 @@ class StationsMapTab(QWidget):
         js8_all = _timed_map_call("map.load_js8_presence", self._load_js8_presence)
         fldigi_calls = _timed_map_call("map.load_fldigi_presence", self._load_fldigi_presence)
         spotter_status_lookup = _timed_map_call("map.load_spotter_station_status", self._load_spotter_station_status)
+        sitrep_state_summary: List[Dict[str, object]] = []
+        sitrep_summary_group = ""
+        if sitrep_mode:
+            sitrep_summary_group = str(group_filter or "").strip().upper()
+            sitrep_state_summary = _timed_map_call(
+                "map.load_sitrep_state_rollup",
+                lambda: self._load_sitrep_state_rollup(sitrep_summary_group),
+            )
         if sitrep_mode and links:
             allowed = {"red", "yellow", "green"}
             links = [
@@ -4611,7 +4698,7 @@ class StationsMapTab(QWidget):
             cs_upper = pt.callsign.upper()
             if not self._marker_station_matches_filters(
                 cs_upper,
-                group_filter=group_filter,
+                group_filter="" if sitrep_mode else group_filter,
                 region_filter=region_filter,
                 my_call=my_call,
                 allow_self=bool(self._links_active() or self._now_reachable_enabled),
@@ -4626,6 +4713,10 @@ class StationsMapTab(QWidget):
                 status_data = spotter_status_lookup.get(cs_upper, {})
                 if (status_data.get("status_key") or "").strip().lower() not in {"red", "yellow", "green"}:
                     continue
+                if group_filter:
+                    status_group = str(status_data.get("report_group") or "").strip().upper()
+                    if status_group != str(group_filter or "").strip().upper():
+                        continue
             if not show_all_stations:
                 if cs_upper not in traffic_calls and cs_upper != my_call:
                     continue
@@ -4685,6 +4776,12 @@ class StationsMapTab(QWidget):
                 spotter_status_source_chips = str(spotter_data.get("status_source_chips") or "").strip()
                 spotter_status_conflict = bool(spotter_data.get("status_conflict"))
                 spotter_status_age = str(spotter_data.get("status_age") or "").strip()
+                spotter_status_group = str(spotter_data.get("report_group") or "").strip()
+                spotter_status_transport = str(spotter_data.get("transport_label") or "").strip()
+                spotter_status_state = str(spotter_data.get("state_code") or "").strip()
+                spotter_status_state_conf = str(spotter_data.get("state_confidence") or "").strip()
+                spotter_status_geo_conf = str(spotter_data.get("geo_confidence") or "").strip()
+                spotter_status_brevity = str(spotter_data.get("brevity_summary") or "").strip()
                 if qsy_text:
                     detail_lines.append(f"Schedule: {qsy_text}")
                 # Filter empty lines
@@ -4722,11 +4819,17 @@ class StationsMapTab(QWidget):
                         "spotter_status_source_chips": spotter_status_source_chips,
                         "spotter_status_conflict": spotter_status_conflict,
                         "spotter_status_age": spotter_status_age,
+                        "spotter_status_group": spotter_status_group,
+                        "spotter_status_transport": spotter_status_transport,
+                        "spotter_status_state": spotter_status_state,
+                        "spotter_status_state_conf": spotter_status_state_conf,
+                        "spotter_status_geo_conf": spotter_status_geo_conf,
+                        "spotter_status_brevity": spotter_status_brevity,
                     }
                 )
 
         if self.web is not None and self._map_initialized and self._map_file and not force_reload:
-            self._push_map_payload(markers, links)
+            self._push_map_payload(markers, links, sitrep_state_summary=sitrep_state_summary, sitrep_summary_group=sitrep_summary_group)
             self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
             return
 
@@ -4764,6 +4867,8 @@ class StationsMapTab(QWidget):
             prop_overlay_enabled=self.prop_overlay_enabled,
             prop_region_scores=prop_region_scores,
             prop_state_scores=prop_state_scores,
+            sitrep_state_summary=sitrep_state_summary,
+            sitrep_summary_group=sitrep_summary_group,
         )
 
         if self.web is not None:
@@ -4786,6 +4891,8 @@ class StationsMapTab(QWidget):
                 "markers": markers,
                 "links": links,
                 "now_reachable_enabled": bool(self._now_reachable_enabled),
+                "sitrep_state_summary": sitrep_state_summary,
+                "sitrep_summary_group": sitrep_summary_group,
             }
             path = self._write_map_html(html)
             if path is not None:
@@ -4823,6 +4930,8 @@ class StationsMapTab(QWidget):
                 payload.get("markers", []),
                 payload.get("links", []),
                 payload.get("now_reachable_enabled"),
+                payload.get("sitrep_state_summary", []),
+                payload.get("sitrep_summary_group", ""),
             )
         if self._map_visible and self._map_dirty:
             self._map_dirty = False
@@ -4850,6 +4959,8 @@ class StationsMapTab(QWidget):
         markers: List[Dict],
         links: List[Dict],
         now_reachable_enabled: Optional[bool] = None,
+        sitrep_state_summary: Optional[List[Dict[str, object]]] = None,
+        sitrep_summary_group: str = "",
     ) -> None:
         if self.web is None:
             return
@@ -4864,11 +4975,13 @@ class StationsMapTab(QWidget):
                     "markers": markers,
                     "links": links,
                     "now_reachable_enabled": now_reachable_flag,
+                    "sitrep_state_summary": list(sitrep_state_summary or []),
+                    "sitrep_summary_group": str(sitrep_summary_group or ""),
                 }
             )
         except Exception:
             payload = (
-                '{"markers": [], "links": [], '
+                '{"markers": [], "links": [], "sitrep_state_summary": [], "sitrep_summary_group": "", '
                 f'"now_reachable_enabled": {str(now_reachable_flag).lower()}}}'
             )
         sig = str(hash(payload))
@@ -4917,6 +5030,8 @@ class StationsMapTab(QWidget):
         prop_overlay_enabled: bool = False,
         prop_region_scores: Optional[Dict[str, Dict]] = None,
         prop_state_scores: Optional[Dict[str, Dict]] = None,
+        sitrep_state_summary: Optional[List[Dict[str, object]]] = None,
+        sitrep_summary_group: str = "",
     ) -> str:
         theme = resolve_theme(self.settings)
         try:
@@ -4929,6 +5044,8 @@ class StationsMapTab(QWidget):
         now_reachable_enabled = str(bool(self._now_reachable_enabled)).lower()
         markers_json = json.dumps(markers)
         links_json = json.dumps(links)
+        sitrep_state_summary_json = json.dumps(sitrep_state_summary or [])
+        sitrep_summary_group_json = json.dumps(str(sitrep_summary_group or "").strip().upper())
         init_lat = initial_view.get("lat") if initial_view else 45
         init_lon = initial_view.get("lon") if initial_view else -97
         init_zoom = initial_view.get("zoom") if initial_view else 3
@@ -5342,6 +5459,11 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .detail-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; min-width: 150px; max-width: 220px; font-size: 11px; }}
     .zoom-display {{ padding: 4px 8px; font-size: 11px; background: {legend_bg}; color: {legend_text}; border: 1px solid {tooltip_border}; }}
     .legend-box {{ background: {legend_bg}; color: {legend_text}; padding: 8px 12px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: 11px; line-height: 1.3; max-width: min(100%, 860px); box-sizing: border-box; }}
+    .summary-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: 11px; line-height: 1.35; min-width: 180px; max-width: 240px; }}
+    .summary-row {{ display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }}
+    .summary-row + .summary-row {{ margin-top: 3px; }}
+    .summary-state {{ font-weight: 700; }}
+    .summary-counts {{ color: {legend_text}; opacity: 0.9; text-align: right; }}
     .legend-rows {{ display: flex; flex-direction: column; align-items: center; gap: 8px; }}
     .legend-row {{ display: inline-flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 14px; max-width: 100%; }}
     .legend-label {{ font-weight: 700; white-space: nowrap; }}
@@ -5369,6 +5491,8 @@ function addGridLabels(res, level, bounds, maxLabels) {
     window.propBandColors = {json.dumps(prop_colors)};
     const markers = {markers_json};
     const links = {links_json};
+    let sitrepStateSummary = {sitrep_state_summary_json};
+    let sitrepSummaryGroup = {sitrep_summary_group_json};
     window.FEMA_LOOKUP_ABBR = {json.dumps({s:r[1:] for r,states in FEMA_REGIONS.items() for s in states})};
     window.FEMA_LOOKUP_NAME = {json.dumps({US_STATE_NAMES[s]:r[1:] for r,states in FEMA_REGIONS.items() for s in states if s in US_STATE_NAMES})};
     window.STATE_ABBR_FROM_NAME = {json.dumps({**US_STATE_ABBR_FROM_NAME, **CANADA_PROV_ABBR_FROM_NAME})};
@@ -5432,6 +5556,47 @@ function addGridLabels(res, level, bounds, maxLabels) {
     function showDetail(html) {{
       const el = document.querySelector('.detail-panel');
       if (el) el.innerHTML = html;
+    }}
+
+    function buildSitrepSummaryHtml(rows, groupName) {{
+      if (!rows || !rows.length) {{
+        return '<b>SitRep State Summary</b><br/>No current state rollups.';
+      }}
+      const header = '<b>SitRep State Summary</b><br/>' + (groupName ? ('Group: ' + groupName + '<br/>') : 'All Groups<br/>');
+      const body = rows.map(r => {{
+        const counts = [
+          'R' + (r.red_count || 0),
+          'Y' + (r.yellow_count || 0),
+          'G' + (r.green_count || 0),
+          'U' + (r.unknown_count || 0)
+        ].join(' ');
+        const receipt = [
+          (r.js8_count || 0) ? ('JS8 ' + r.js8_count) : '',
+          (r.internet_count || 0) ? ('Net ' + r.internet_count) : '',
+          (r.mixed_transport_count || 0) ? ('Mix ' + r.mixed_transport_count) : ''
+        ].filter(Boolean).join(' | ');
+        return '<div class="summary-row">' +
+          '<span class="summary-state">' + r.state_code + ' (' + (r.callsign_count || 0) + ')</span>' +
+          '<span class="summary-counts">' + counts + (receipt ? ('<br/>' + receipt) : '') + '</span>' +
+          '</div>';
+      }}).join('');
+      return header + body;
+    }}
+
+    const sitrepSummaryPanel = L.control({{position: 'bottomleft'}});
+    sitrepSummaryPanel.onAdd = function() {{
+      this._div = L.DomUtil.create('div', 'summary-panel');
+      this._div.innerHTML = buildSitrepSummaryHtml(sitrepStateSummary, sitrepSummaryGroup);
+      this._div.style.display = (sitrepStateSummary && sitrepStateSummary.length) ? 'block' : 'none';
+      return this._div;
+    }};
+    sitrepSummaryPanel.addTo(map);
+    function updateSitrepSummaryPanel(rows, groupName) {{
+      const el = document.querySelector('.summary-panel');
+      if (el) {{
+        el.style.display = (rows && rows.length) ? 'block' : 'none';
+        el.innerHTML = buildSitrepSummaryHtml(rows || [], groupName || '');
+      }}
     }}
 
     // Legend for link colors
@@ -5550,6 +5715,12 @@ function addGridLabels(res, level, bounds, maxLabels) {
           (m.varac_last_band ? '<br/>VarAC Last Band: ' + m.varac_last_band : '') +
           (m.varac_avg_snr !== undefined && m.varac_avg_snr !== null ? '<br/>VarAC Avg SNR: ' + m.varac_avg_snr.toFixed(1) : '') +
           (m.spotter_status_label ? '<br/>SitRep: ' + m.spotter_status_label : '') +
+          (m.spotter_status_group ? '<br/>Report Group: ' + m.spotter_status_group : '') +
+          (m.spotter_status_transport ? '<br/>Receipt: ' + m.spotter_status_transport : '') +
+          (m.spotter_status_state ? '<br/>State: ' + m.spotter_status_state : '') +
+          (m.spotter_status_state_conf ? '<br/>State Confidence: ' + m.spotter_status_state_conf : '') +
+          (m.spotter_status_geo_conf ? '<br/>Geo Confidence: ' + m.spotter_status_geo_conf : '') +
+          (m.spotter_status_brevity ? '<br/>Brevity: ' + m.spotter_status_brevity : '') +
           (m.spotter_status_source ? '<br/>Source: ' + m.spotter_status_source + (m.spotter_status_source_detail ? ' (' + m.spotter_status_source_detail + ')' : '') : '') +
           (m.spotter_status_source_chips ? '<br/>Sources: ' + m.spotter_status_source_chips : '') +
           (m.spotter_status_conflict ? '<br/>Conflict: sources disagree' : '') +
@@ -5598,8 +5769,15 @@ function addGridLabels(res, level, bounds, maxLabels) {
         nowReachableEnabled = !!payload.now_reachable_enabled;
         updateLegend();
       }}
+      if (Object.prototype.hasOwnProperty.call(payload, 'sitrep_state_summary')) {{
+        sitrepStateSummary = payload.sitrep_state_summary || [];
+      }}
+      if (Object.prototype.hasOwnProperty.call(payload, 'sitrep_summary_group')) {{
+        sitrepSummaryGroup = payload.sitrep_summary_group || '';
+      }}
+      updateSitrepSummaryPanel(sitrepStateSummary, sitrepSummaryGroup);
     }};
-    window.updateMapData({{markers: markers, links: links}});
+    window.updateMapData({{markers: markers, links: links, sitrep_state_summary: sitrepStateSummary, sitrep_summary_group: sitrepSummaryGroup}});
     window._mapReady = true;
     }}
     </script>

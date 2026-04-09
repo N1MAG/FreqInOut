@@ -38,6 +38,7 @@ from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
 from freqinout.core.operator_activity import format_utc_iso, load_operator_activity_summary
 from freqinout.core.perf_metrics import span as perf_span
+from freqinout.core.sitrep_metadata import source_family_label, source_short_label, transport_label
 from freqinout.core.varac_callsign_tags import sync_varac_callsign_tags_from_db
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.theme import resolve_theme, button_style
@@ -448,20 +449,7 @@ class OperatorHistoryTab(QWidget):
 
     @staticmethod
     def _source_short_label(source: str) -> str:
-        src = (source or "").strip().upper()
-        if not src:
-            return "UNK"
-        if src == "JS8SPOTTER":
-            return "SPT"
-        if src == "COMMSTAT3":
-            return "CS3"
-        if src == "COMMSTAT23":
-            return "CS2"
-        if src == "MANUAL":
-            return "MAN"
-        if len(src) <= 4:
-            return src
-        return src[:4]
+        return source_short_label(source)
 
     @classmethod
     def _encode_source_chips(cls, source_summary: Dict[str, str]) -> str:
@@ -571,7 +559,7 @@ class OperatorHistoryTab(QWidget):
             out[cs] = {
                 "key": key,
                 "label": label,
-                "source": source,
+                "source": source_family_label(source),
                 "updated": ts_txt,
                 "updated_ts": ts_val,
                 "source_summary": summary,
@@ -579,6 +567,12 @@ class OperatorHistoryTab(QWidget):
                 "conflict": False,
                 "source_count": 1 if source else 0,
                 "age": self._age_text_from_epoch(ts_val),
+                "transport": "",
+                "report_group": "",
+                "state": "",
+                "state_confidence": "",
+                "geo_confidence": "",
+                "brevity_summary": "",
             }
 
         # Unified fused projection (effective status + per-source summary), behind a feature flag.
@@ -593,6 +587,12 @@ class OperatorHistoryTab(QWidget):
                     effective_status,
                     latest_event_ts,
                     latest_event_ts_utc,
+                    latest_report_group,
+                    latest_transport_mode,
+                    latest_state_code,
+                    latest_state_confidence,
+                    latest_geo_confidence,
+                    latest_brevity_summary,
                     source_summary_json
                 FROM sitrep_latest_by_callsign
                 """
@@ -601,7 +601,19 @@ class OperatorHistoryTab(QWidget):
         except Exception:
             fused_rows = []
 
-        for callsign, effective_status, latest_event_ts, latest_event_ts_utc, source_summary_json in fused_rows:
+        for (
+            callsign,
+            effective_status,
+            latest_event_ts,
+            latest_event_ts_utc,
+            latest_report_group,
+            latest_transport_mode,
+            latest_state_code,
+            latest_state_confidence,
+            latest_geo_confidence,
+            latest_brevity_summary,
+            source_summary_json,
+        ) in fused_rows:
             cs = (callsign or "").strip().upper()
             if not cs:
                 continue
@@ -617,9 +629,9 @@ class OperatorHistoryTab(QWidget):
                 summary = {"FUSED": key}
             source_count = len(summary)
             if source_count <= 1:
-                source = next(iter(summary.keys()), "FUSED")
+                source = source_family_label(next(iter(summary.keys()), "FUSED"))
             else:
-                source = f"MULTI({source_count})"
+                source = "Mixed"
             candidate = {
                 "key": key,
                 "label": self._sitrep_status_label(key),
@@ -631,6 +643,12 @@ class OperatorHistoryTab(QWidget):
                 "conflict": self._sitrep_conflict(summary),
                 "source_count": source_count,
                 "age": self._age_text_from_epoch(ts_val),
+                "transport": transport_label(latest_transport_mode),
+                "report_group": str(latest_report_group or "").strip().upper(),
+                "state": str(latest_state_code or "").strip().upper(),
+                "state_confidence": str(latest_state_confidence or "").strip().lower(),
+                "geo_confidence": str(latest_geo_confidence or "").strip().lower(),
+                "brevity_summary": str(latest_brevity_summary or "").strip(),
             }
             existing = out.get(cs)
             if not existing:
@@ -648,16 +666,34 @@ class OperatorHistoryTab(QWidget):
     def _sitrep_tooltip(self, row: Dict) -> str:
         key = (row.get("sitrep_status_key") or "unknown").strip().lower()
         label = (row.get("sitrep_status_label") or self._sitrep_status_label(key)).strip()
-        src = (row.get("sitrep_status_source") or "UNKNOWN").strip().upper()
+        src = (row.get("sitrep_status_source") or "Unknown").strip()
         updated = (row.get("sitrep_status_updated") or "").strip()
         chips = (row.get("sitrep_source_chips") or "").strip()
         age = (row.get("sitrep_status_age") or "").strip()
         conflict = bool(row.get("sitrep_conflict"))
+        report_group = (row.get("report_group") or "").strip()
+        transport = (row.get("transport") or "").strip()
+        state = (row.get("state") or "").strip()
+        state_conf = (row.get("state_confidence") or "").strip()
+        geo_conf = (row.get("geo_confidence") or "").strip()
+        brevity = (row.get("brevity_summary") or "").strip()
         lines = [f"SitRep: {label}", f"Source: {src}"]
         if updated:
             lines.append(f"Updated: {updated} UTC")
         if age:
             lines.append(f"Age: {age}")
+        if report_group:
+            lines.append(f"Group: {report_group}")
+        if transport:
+            lines.append(f"Receipt: {transport}")
+        if state:
+            lines.append(f"State: {state}")
+        if state_conf:
+            lines.append(f"State Confidence: {state_conf}")
+        if geo_conf:
+            lines.append(f"Geo Confidence: {geo_conf}")
+        if brevity:
+            lines.append(f"Brevity: {brevity}")
         if chips:
             lines.append(f"Sources: {chips}")
         if conflict:
@@ -987,6 +1023,12 @@ class OperatorHistoryTab(QWidget):
                             "sitrep_conflict": bool(sitrep_map.get((cs or "").strip().upper(), {}).get("conflict", False)),
                             "sitrep_source_count": int(sitrep_map.get((cs or "").strip().upper(), {}).get("source_count", 0) or 0),
                             "sitrep_source_chips": sitrep_map.get((cs or "").strip().upper(), {}).get("source_chips", ""),
+                            "report_group": sitrep_map.get((cs or "").strip().upper(), {}).get("report_group", ""),
+                            "transport": sitrep_map.get((cs or "").strip().upper(), {}).get("transport", ""),
+                            "state": sitrep_map.get((cs or "").strip().upper(), {}).get("state", ""),
+                            "state_confidence": sitrep_map.get((cs or "").strip().upper(), {}).get("state_confidence", ""),
+                            "geo_confidence": sitrep_map.get((cs or "").strip().upper(), {}).get("geo_confidence", ""),
+                            "brevity_summary": sitrep_map.get((cs or "").strip().upper(), {}).get("brevity_summary", ""),
                         }
                     )
                 conn.close()

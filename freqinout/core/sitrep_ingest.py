@@ -8,6 +8,14 @@ import time
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
+from freqinout.core.commstat_sitrep import (
+    decode_brevity_summary,
+    extract_brevity_code,
+    infer_state_and_geo,
+    parse_commstat_message,
+    report_group_for_target,
+    transport_mode_for_source,
+)
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
 
@@ -166,8 +174,16 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
             subtype TEXT NOT NULL,
             from_call TEXT,
             target TEXT,
+            report_group TEXT,
             grid TEXT,
             scope TEXT,
+            transport_mode TEXT,
+            remarks_text TEXT,
+            brevity_code TEXT,
+            brevity_summary TEXT,
+            state_code TEXT,
+            state_confidence TEXT,
+            geo_confidence TEXT,
             status_payload TEXT,
             raw_payload TEXT,
             event_ts REAL,
@@ -176,6 +192,20 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
             UNIQUE(source, source_table, source_db_path, source_id)
         )
         """
+    )
+    _ensure_columns(
+        conn,
+        "sitrep_source_events",
+        {
+            "report_group": "TEXT",
+            "transport_mode": "TEXT",
+            "remarks_text": "TEXT",
+            "brevity_code": "TEXT",
+            "brevity_summary": "TEXT",
+            "state_code": "TEXT",
+            "state_confidence": "TEXT",
+            "geo_confidence": "TEXT",
+        },
     )
     cur.execute(
         """
@@ -195,6 +225,16 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
             ON sitrep_ingest_checkpoint(updated_ts)
         """
     )
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    existing = {str(row[1] or "").strip().lower() for row in cur.fetchall()}
+    for name, ddl in columns.items():
+        if str(name).strip().lower() in existing:
+            continue
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 def _resolve_js8spotter_db_path(settings) -> Optional[Path]:
@@ -371,6 +411,14 @@ def _insert_source_event(
     target: str,
     grid: str,
     scope: str,
+    report_group: str = "",
+    transport_mode: str = "",
+    remarks_text: str = "",
+    brevity_code: str = "",
+    brevity_summary: str = "",
+    state_code: str = "",
+    state_confidence: str = "",
+    geo_confidence: str = "",
     status_payload: Dict,
     raw_payload: Dict,
     event_ts: float,
@@ -380,9 +428,10 @@ def _insert_source_event(
     cur.execute(
         """
         INSERT OR IGNORE INTO sitrep_source_events
-            (source, source_table, source_db_path, source_id, subtype, from_call, target, grid, scope,
+            (source, source_table, source_db_path, source_id, subtype, from_call, target, report_group, grid, scope,
+             transport_mode, remarks_text, brevity_code, brevity_summary, state_code, state_confidence, geo_confidence,
              status_payload, raw_payload, event_ts, event_ts_utc, ingested_ts)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source,
@@ -392,8 +441,16 @@ def _insert_source_event(
             subtype,
             _clean_call(from_call),
             (target or "").strip().upper(),
+            (report_group or "").strip().upper(),
             (grid or "").strip().upper(),
             (scope or "").strip(),
+            (transport_mode or "").strip().lower(),
+            (remarks_text or "").strip(),
+            (brevity_code or "").strip().upper(),
+            (brevity_summary or "").strip(),
+            (state_code or "").strip().upper(),
+            (state_confidence or "").strip().lower(),
+            (geo_confidence or "").strip().lower(),
             json.dumps(status_payload or {}, separators=(",", ":"), ensure_ascii=True),
             json.dumps(raw_payload or {}, separators=(",", ":"), ensure_ascii=True),
             float(event_ts or 0.0),
@@ -450,7 +507,14 @@ def _is_sitrep_like_message(text: str) -> bool:
     upper = (text or "").upper()
     if not upper:
         return False
-    return ("{&%}" in upper) or ("{F%}" in upper) or ("F!301" in upper) or ("F!304" in upper)
+    return (
+        ("{&%}" in upper)
+        or ("{&%3}" in upper)
+        or ("{F%}" in upper)
+        or ("{F%3}" in upper)
+        or ("F!301" in upper)
+        or ("F!304" in upper)
+    )
 
 
 def _parse_spotter_response(raw_text: str) -> str:
@@ -461,6 +525,39 @@ def _parse_spotter_response(raw_text: str) -> str:
     if not first.startswith("F!"):
         return ""
     return str(parts[1] or "").strip()
+
+
+def _commstat_asset_dir(source_db: Path) -> Optional[Path]:
+    try:
+        base = source_db.parent
+    except Exception:
+        return None
+    if not base.exists():
+        return None
+    return base
+
+
+def _commstat_metadata(
+    *,
+    target: str,
+    grid: str,
+    remarks_text: str,
+    source_value: object,
+    raw_message: str = "",
+    asset_dir: Optional[Path] = None,
+) -> Dict[str, str]:
+    state_code, state_confidence, geo_confidence = infer_state_and_geo(grid, remarks_text)
+    brevity_code = extract_brevity_code(remarks_text)
+    return {
+        "report_group": report_group_for_target(target),
+        "transport_mode": transport_mode_for_source(source_value, raw_message),
+        "remarks_text": str(remarks_text or "").strip(),
+        "brevity_code": brevity_code,
+        "brevity_summary": decode_brevity_summary(brevity_code, asset_dir),
+        "state_code": state_code,
+        "state_confidence": state_confidence,
+        "geo_confidence": geo_confidence,
+    }
 
 
 def _ingest_local_spotter_backfill(
@@ -704,6 +801,7 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
     out = {"rows_scanned": 0, "events_inserted": 0, "errors": 0}
     source = "COMMSTAT3"
     source_db_path = str(source_db)
+    asset_dir = _commstat_asset_dir(source_db)
     try:
         src = _open_source_db(source_db)
     except Exception as e:
@@ -711,72 +809,93 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
         out["errors"] += 1
         return out
     try:
-        if not _table_exists(src, "statrep"):
+        has_statrep = _table_exists(src, "statrep")
+        has_messages = _table_exists(src, "messages")
+        if not has_statrep and not has_messages:
             return out
 
         # statrep table
         table = "statrep"
         try:
-            last_id = _get_last_id(local_conn, source, table, source_db_path)
-            cur = src.cursor()
-            cur.execute(
-                """
-                SELECT id, datetime, date, freq, db, source, sr_id, from_callsign, target, grid, scope,
-                       map, power, water, med, telecom, travel, internet, fuel, food, crime, civil, political, comments
-                FROM statrep
-                WHERE id > ?
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (last_id, int(max_rows)),
-            )
-            rows = cur.fetchall()
-            max_seen = last_id
-            for row in rows:
-                rid = int(row[0] or 0)
-                max_seen = max(max_seen, rid)
-                out["rows_scanned"] += 1
-                event_ts, event_ts_utc = _parse_ts(row[1], fallback=str(row[2] or ""))
-                inserted = _insert_source_event(
-                    local_conn,
-                    source=source,
-                    source_table=table,
-                    source_db_path=source_db_path,
-                    source_id=rid,
-                    subtype="COMMSTAT_12",
-                    from_call=str(row[7] or ""),
-                    target=str(row[8] or ""),
-                    grid=str(row[9] or ""),
-                    scope=str(row[10] or ""),
-                    status_payload={
-                        "overall_status": str(row[11] or ""),
-                        "power": str(row[12] or ""),
-                        "water": str(row[13] or ""),
-                        "medical": str(row[14] or ""),
-                        "communications": str(row[15] or ""),
-                        "travel": str(row[16] or ""),
-                        "internet": str(row[17] or ""),
-                        "fuel": str(row[18] or ""),
-                        "food": str(row[19] or ""),
-                        "crime": str(row[20] or ""),
-                        "civil_unrest": str(row[21] or ""),
-                        "political": str(row[22] or ""),
-                    },
-                    raw_payload={
-                        "datetime": str(row[1] or ""),
-                        "date": str(row[2] or ""),
-                        "freq": row[3],
-                        "db": row[4],
-                        "source": row[5],
-                        "sr_id": str(row[6] or ""),
-                        "comments": str(row[23] or ""),
-                    },
-                    event_ts=event_ts,
-                    event_ts_utc=event_ts_utc,
+            if has_statrep:
+                last_id = _get_last_id(local_conn, source, table, source_db_path)
+                cur = src.cursor()
+                cur.execute(
+                    """
+                    SELECT id, datetime, date, freq, db, source, sr_id, from_callsign, target, grid, scope,
+                           map, power, water, med, telecom, travel, internet, fuel, food, crime, civil, political, comments
+                    FROM statrep
+                    WHERE id > ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (last_id, int(max_rows)),
                 )
-                if inserted:
-                    out["events_inserted"] += 1
-            _set_last_id(local_conn, source, table, source_db_path, max_seen)
+                rows = cur.fetchall()
+                max_seen = last_id
+                for row in rows:
+                    rid = int(row[0] or 0)
+                    max_seen = max(max_seen, rid)
+                    out["rows_scanned"] += 1
+                    event_ts, event_ts_utc = _parse_ts(row[1], fallback=str(row[2] or ""))
+                    target = str(row[8] or "")
+                    grid = str(row[9] or "")
+                    remarks_text = str(row[23] or "")
+                    metadata = _commstat_metadata(
+                        target=target,
+                        grid=grid,
+                        remarks_text=remarks_text,
+                        source_value=row[5],
+                        asset_dir=asset_dir,
+                    )
+                    inserted = _insert_source_event(
+                        local_conn,
+                        source=source,
+                        source_table=table,
+                        source_db_path=source_db_path,
+                        source_id=rid,
+                        subtype="COMMSTAT_12",
+                        from_call=str(row[7] or ""),
+                        target=target,
+                        report_group=metadata["report_group"],
+                        grid=grid,
+                        scope=str(row[10] or ""),
+                        transport_mode=metadata["transport_mode"],
+                        remarks_text=metadata["remarks_text"],
+                        brevity_code=metadata["brevity_code"],
+                        brevity_summary=metadata["brevity_summary"],
+                        state_code=metadata["state_code"],
+                        state_confidence=metadata["state_confidence"],
+                        geo_confidence=metadata["geo_confidence"],
+                        status_payload={
+                            "overall_status": str(row[11] or ""),
+                            "power": str(row[12] or ""),
+                            "water": str(row[13] or ""),
+                            "medical": str(row[14] or ""),
+                            "communications": str(row[15] or ""),
+                            "travel": str(row[16] or ""),
+                            "internet": str(row[17] or ""),
+                            "fuel": str(row[18] or ""),
+                            "food": str(row[19] or ""),
+                            "crime": str(row[20] or ""),
+                            "civil_unrest": str(row[21] or ""),
+                            "political": str(row[22] or ""),
+                        },
+                        raw_payload={
+                            "datetime": str(row[1] or ""),
+                            "date": str(row[2] or ""),
+                            "freq": row[3],
+                            "db": row[4],
+                            "source": row[5],
+                            "sr_id": str(row[6] or ""),
+                            "comments": remarks_text,
+                        },
+                        event_ts=event_ts,
+                        event_ts_utc=event_ts_utc,
+                    )
+                    if inserted:
+                        out["events_inserted"] += 1
+                _set_last_id(local_conn, source, table, source_db_path, max_seen)
         except Exception as e:
             out["errors"] += 1
             _set_last_id(local_conn, source, table, source_db_path, _get_last_id(local_conn, source, table, source_db_path), error_text=str(e))
@@ -785,12 +904,12 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
         # messages table (incremental checkpoint; ingest sitrep-like rows only).
         table = "messages"
         try:
-            if _table_exists(src, table):
+            if has_messages:
                 last_id = _get_last_id(local_conn, source, table, source_db_path)
                 cur = src.cursor()
                 cur.execute(
                     """
-                    SELECT id, datetime, date, msg_id, from_callsign, target, message
+                    SELECT id, datetime, date, freq, db, source, msg_id, from_callsign, target, message
                     FROM messages
                     WHERE id > ?
                     ORDER BY id ASC
@@ -804,37 +923,51 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
                     rid = int(row[0] or 0)
                     max_seen = max(max_seen, rid)
                     out["rows_scanned"] += 1
-                    message_text = str(row[6] or "")
+                    message_text = str(row[9] or "")
                     if not _is_sitrep_like_message(message_text):
                         continue
-                    upper = message_text.upper()
-                    if "F!301" in upper:
-                        subtype = "SPOTTER_301"
-                    elif "F!304" in upper:
-                        subtype = "SPOTTER_304"
-                    elif "{F%}" in upper:
-                        subtype = "COMMSTAT_FWD"
-                    else:
-                        subtype = "COMMSTAT_12"
+                    parsed = parse_commstat_message(
+                        message_text,
+                        target_hint=row[8],
+                        source_value=row[5],
+                        asset_dir=asset_dir,
+                    )
+                    if not parsed:
+                        continue
                     event_ts, event_ts_utc = _parse_ts(row[1], fallback=str(row[2] or ""))
+                    metadata = dict(parsed.get("metadata") or {})
+                    raw_payload = dict(parsed.get("raw_payload") or {})
+                    raw_payload.update(
+                        {
+                            "datetime": str(row[1] or ""),
+                            "date": str(row[2] or ""),
+                            "freq": row[3],
+                            "db": row[4],
+                            "source": row[5],
+                            "msg_id": str(row[6] or ""),
+                        }
+                    )
                     inserted = _insert_source_event(
                         local_conn,
                         source=source,
                         source_table=table,
                         source_db_path=source_db_path,
                         source_id=rid,
-                        subtype=subtype,
-                        from_call=str(row[4] or ""),
-                        target=str(row[5] or ""),
-                        grid="",
-                        scope="",
-                        status_payload={"message": message_text},
-                        raw_payload={
-                            "datetime": str(row[1] or ""),
-                            "date": str(row[2] or ""),
-                            "msg_id": str(row[3] or ""),
-                            "message": message_text,
-                        },
+                        subtype=str(parsed.get("subtype") or ""),
+                        from_call=str(row[7] or ""),
+                        target=str(row[8] or ""),
+                        report_group=metadata.get("report_group", ""),
+                        grid=str(parsed.get("grid") or ""),
+                        scope=str(parsed.get("scope") or ""),
+                        transport_mode=metadata.get("transport_mode", ""),
+                        remarks_text=metadata.get("remarks_text", ""),
+                        brevity_code=metadata.get("brevity_code", ""),
+                        brevity_summary=metadata.get("brevity_summary", ""),
+                        state_code=metadata.get("state_code", ""),
+                        state_confidence=metadata.get("state_confidence", ""),
+                        geo_confidence=metadata.get("geo_confidence", ""),
+                        status_payload=dict(parsed.get("status_payload") or {}),
+                        raw_payload=raw_payload,
                         event_ts=event_ts,
                         event_ts_utc=event_ts_utc,
                     )
@@ -882,6 +1015,7 @@ def _ingest_commstat23(local_conn: sqlite3.Connection, source_db: Path, *, max_r
     out = {"rows_scanned": 0, "events_inserted": 0, "errors": 0}
     source = "COMMSTAT23"
     source_db_path = str(source_db)
+    asset_dir = _commstat_asset_dir(source_db)
     try:
         src = _open_source_db(source_db)
     except Exception as e:
@@ -915,6 +1049,15 @@ def _ingest_commstat23(local_conn: sqlite3.Connection, source_db: Path, *, max_r
             target = str(row[5] or "").strip().upper()
             if target and not target.startswith("@"):
                 target = f"@{target}"
+            grid = str(row[6] or "")
+            remarks_text = str(row[21] or "")
+            metadata = _commstat_metadata(
+                target=target,
+                grid=grid,
+                remarks_text=remarks_text,
+                source_value="",
+                asset_dir=asset_dir,
+            )
             inserted = _insert_source_event(
                 local_conn,
                 source=source,
@@ -924,8 +1067,16 @@ def _ingest_commstat23(local_conn: sqlite3.Connection, source_db: Path, *, max_r
                 subtype="COMMSTAT_12",
                 from_call=str(row[4] or ""),
                 target=target,
-                grid=str(row[6] or ""),
+                report_group=metadata["report_group"],
+                grid=grid,
                 scope="",
+                transport_mode=metadata["transport_mode"],
+                remarks_text=metadata["remarks_text"],
+                brevity_code=metadata["brevity_code"],
+                brevity_summary=metadata["brevity_summary"],
+                state_code=metadata["state_code"],
+                state_confidence=metadata["state_confidence"],
+                geo_confidence=metadata["geo_confidence"],
                 status_payload={
                     "overall_status": str(row[9] or ""),
                     "power": str(row[10] or ""),
@@ -946,7 +1097,7 @@ def _ingest_commstat23(local_conn: sqlite3.Connection, source_db: Path, *, max_r
                     "freq": row[3],
                     "sr_id": str(row[7] or ""),
                     "precedence": str(row[8] or ""),
-                    "comments": str(row[21] or ""),
+                    "comments": remarks_text,
                 },
                 event_ts=event_ts,
                 event_ts_utc=event_ts_utc,

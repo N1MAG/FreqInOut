@@ -88,6 +88,8 @@ tests/*
 !tests/test_operator_history_varac_sync.py
 !tests/test_controlfreq_activity_phase1.py
 !tests/test_settings_section_health_phase1.py
+!tests/test_commstat_sitrep_slice1.py
+!tests/test_commstat_sitrep_remaining_slices.py
 
 # Local benchmark/smoke artifacts
 .benchmarks/

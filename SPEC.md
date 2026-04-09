@@ -9258,3 +9258,58 @@ Targeted verification:
 - Revert `freqinout/core/varac_callsign_tags.py`
 - Revert the Operator History integration points in `freqinout/gui/operator_history_tab.py`
 - Revert the spec/changelog/test updates together
+
+### 1.188 Addendum (2026-04-09): CommStat 4.x SitRep Fusion, Metadata Surfaces, and Operator/Map Sync
+
+Problem:
+- The `1.2.2` release branch still has only the older sitrep normalization path.
+- CommStat `messages` rows are not decode-complete in this branch, so CommStat standard/FWD/F!301/F!304 traffic cannot fully participate in fused sitrep status.
+- Messages, Map, and Operator History do not yet have the structured CommStat metadata needed for:
+  - transport provenance (`JS8`, `Internet`, `JS8 + Internet`)
+  - report target group filtering
+  - brevity summary display
+  - 4-character-grid state assist from leading remarks
+  - untrusted operator seeding from CommStat-origin sitrep traffic
+
+Release scope:
+- Keep CommStat-origin sitrep traffic under the unified `SitRep` category in Messages.
+- Use human-readable sitrep subtype labels in the UI:
+  - `COMMSTAT`
+  - `COMMSTAT FWD`
+  - `F!301`
+  - `F!304`
+- Use compact CommStat source chips where space is constrained:
+  - `CS`
+- Preserve version-specific CommStat provenance internally, but collapse it to the user-facing `CommStat` family.
+
+Implementation slices for `1.2.2`:
+1. Slice 1: decode-complete CommStat ingest
+   - add `freqinout/core/commstat_sitrep.py`
+   - extend sitrep source staging with `report_group`, `transport_mode`, `remarks_text`, `brevity_code`, `brevity_summary`, `state_code`, `state_confidence`, and `geo_confidence`
+   - decode CommStat standard/FWD/F!301/F!304 payloads from `messages`
+2. Slice 2: transport-aware fusion and latest projections
+   - add `freqinout/core/sitrep_metadata.py`
+   - extend `sitrep_events` and `sitrep_latest_by_callsign`
+   - merge CommStat and JS8Spotter provenance by family while retaining raw source refs
+   - derive `sitrep_state_rollup` for fast map summaries
+3. Slice 3: Messages sitrep surfaces
+   - show CommStat sitreps inside `SitRep`
+   - add source-family-aware loading/filter labels and richer sitrep detail content
+4. Slice 4: Operator History integration
+   - surface fused CommStat metadata in sitrep tooltips
+   - seed/update untrusted operators from CommStat-origin sitrep traffic
+5. Slice 5: Map integration
+   - support sitrep group filtering by report target group
+   - show CommStat provenance, transport, state-confidence, and brevity metadata in sitrep mode tooltips
+   - expose derived state rollups without UI-thread raw scans
+
+Acceptance:
+- CommStat 4.x sitrep-bearing `messages` rows decode into normalized sitrep events.
+- Messages shows CommStat sitreps under `SitRep` with `COMMSTAT` / `COMMSTAT FWD` labels, not `COMMSTAT_12`.
+- Map and Operator History source chips abbreviate CommStat as `CS`.
+- Fused sitrep status on Map and Operator History uses the newest report across CommStat and JS8Spotter.
+- CommStat-origin operators can appear as `untrusted` with best-known callsign/grid/state/group/sitrep data.
+- No CommStat parsing is introduced on UI-thread hot paths.
+
+Rollback:
+- Revert the CommStat sitrep core/schema additions and the sitrep UI surface changes together.
