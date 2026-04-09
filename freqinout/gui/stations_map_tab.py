@@ -983,6 +983,7 @@ class StationsMapTab(QWidget):
             self._refresh_links_button.setStyleSheet(button_style("primary", theme))
         self._update_now_reachable_button_visual(bool(self._now_reachable_enabled), theme=theme)
         self._update_sitrep_status_button_visual(bool(self._sitrep_status_only_enabled), theme=theme)
+        self._sync_map_control_button_widths()
         self._update_splitter_indicator_state(theme=theme)
         try:
             target_ctx = self._prop_target_context()
@@ -997,6 +998,19 @@ class StationsMapTab(QWidget):
         except Exception:
             # Keep theme updates resilient if propagation data is unavailable.
             self._update_prop_badge("National", "", 0.0, theme=theme)
+
+    def _sync_map_control_button_widths(self) -> None:
+        for button in (
+            self._refresh_links_button,
+            self._now_reachable_button,
+            self._sitrep_status_button,
+        ):
+            if button is None:
+                continue
+            try:
+                button.setMinimumWidth(max(button.minimumWidth(), button.sizeHint().width() + 6))
+            except Exception:
+                continue
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -1056,8 +1070,9 @@ class StationsMapTab(QWidget):
         self.relay_target_combo.setEditable(True)
         self.relay_target_combo.setInsertPolicy(QComboBox.NoInsert)
         self.relay_target_combo.setDuplicatesEnabled(False)
+        self.relay_target_combo.setMinimumWidth(180)
         try:
-            self.relay_target_combo.view().setMinimumWidth(520)
+            self.relay_target_combo.view().setMinimumWidth(360)
         except Exception:
             pass
         try:
@@ -1181,7 +1196,7 @@ class StationsMapTab(QWidget):
         self.region_filter_combo.setMinimumWidth(150)
         self.band_combo.setMinimumWidth(120)
         self.recency_combo.setMinimumWidth(90)
-        self.relay_target_combo.setMinimumWidth(280)
+        self.relay_target_combo.setMinimumWidth(180)
         self._refresh_links_button = QPushButton("Refresh Links")
         self._refresh_links_button.clicked.connect(lambda: self._auto_ingest_and_refresh(initial=False))
         self._now_reachable_button = QPushButton("Peer Sched Now")
@@ -1190,11 +1205,28 @@ class StationsMapTab(QWidget):
         self._sitrep_status_button = QPushButton("SitRep Status")
         self._sitrep_status_button.setCheckable(True)
         self._update_sitrep_status_button_visual(False)
+        for button in (
+            self._refresh_links_button,
+            self._now_reachable_button,
+            self._sitrep_status_button,
+        ):
+            try:
+                button.setMinimumWidth(button.sizeHint().width() + 6)
+            except Exception:
+                pass
         self._now_reachable_label = QLabel("")
         self._now_reachable_label.setWordWrap(True)
         self._now_reachable_label.setVisible(False)
         filter_bar = QFrame(map_container)
         self._map_filter_bar = filter_bar
+        path_actions_row = QWidget(filter_bar)
+        path_actions_layout = QHBoxLayout(path_actions_row)
+        path_actions_layout.setContentsMargins(0, 0, 0, 0)
+        path_actions_layout.setSpacing(8)
+        path_actions_layout.addWidget(self.relay_target_combo, 1)
+        path_actions_layout.addWidget(self._refresh_links_button, 0)
+        path_actions_layout.addWidget(self._now_reachable_button, 0)
+        path_actions_layout.addWidget(self._sitrep_status_button, 0)
         filter_grid = QGridLayout(filter_bar)
         filter_grid.setContentsMargins(0, 0, 0, 0)
         filter_grid.setHorizontalSpacing(8)
@@ -1210,10 +1242,7 @@ class StationsMapTab(QWidget):
         filter_grid.addWidget(QLabel("Recency"), 0, 8)
         filter_grid.addWidget(self.recency_combo, 0, 9)
         filter_grid.addWidget(QLabel("Paths to"), 1, 0)
-        filter_grid.addWidget(self.relay_target_combo, 1, 1, 1, 7)
-        filter_grid.addWidget(self._refresh_links_button, 1, 8, alignment=Qt.AlignRight)
-        filter_grid.addWidget(self._now_reachable_button, 1, 9, alignment=Qt.AlignRight)
-        filter_grid.addWidget(self._sitrep_status_button, 1, 10, alignment=Qt.AlignRight)
+        filter_grid.addWidget(path_actions_row, 1, 1, 1, 10)
         filter_grid.addWidget(self._now_reachable_label, 1, 11, alignment=Qt.AlignLeft)
         filter_grid.setColumnStretch(11, 1)
         map_layout.addWidget(filter_bar)
@@ -5297,8 +5326,12 @@ function addGridLabels(res, level, bounds, maxLabels) {
   <title>Stations Map</title>
   <link rel="stylesheet" href="{leaflet_css}" />
   <style>
-    html, body, #map {{ height: 100%; margin: 0; padding: 0; }}
-    #map {{ {dark_map_filter} }}
+    html, body {{ height: 100%; margin: 0; padding: 0; }}
+    body {{ min-height: 100%; background: {theme.get("bg", legend_bg)}; }}
+    #map-shell {{ height: 100%; display: flex; flex-direction: column; }}
+    #map-wrap {{ position: relative; flex: 1 1 auto; min-height: 0; }}
+    #map {{ height: 100%; {dark_map_filter} }}
+    #legendDock {{ flex: 0 0 auto; display: flex; justify-content: center; padding: 6px 10px 10px; }}
     .label-text {{ font-size: 10px; color: {label_color}; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; text-shadow: 0 1px 2px #000; }}
     .label-text.no-border {{ background: transparent; border: none; box-shadow: none; pointer-events: none; }}
     .region-label {{ color: {region_label_color}; font-weight: 700; pointer-events: auto; }}
@@ -5308,11 +5341,24 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .leaflet-popup.cs-tooltip {{ z-index: 10001; }}
     .detail-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; min-width: 150px; max-width: 220px; font-size: 11px; }}
     .zoom-display {{ padding: 4px 8px; font-size: 11px; background: {legend_bg}; color: {legend_text}; border: 1px solid {tooltip_border}; }}
-    .legend-box {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: 11px; line-height: 1.3; }}
+    .legend-box {{ background: {legend_bg}; color: {legend_text}; padding: 8px 12px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: 11px; line-height: 1.3; max-width: min(100%, 860px); box-sizing: border-box; }}
+    .legend-rows {{ display: flex; flex-direction: column; align-items: center; gap: 8px; }}
+    .legend-row {{ display: inline-flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 14px; max-width: 100%; }}
+    .legend-label {{ font-weight: 700; white-space: nowrap; }}
+    .legend-sep {{ display: inline-block; width: 0; height: 12px; border-left: 1px solid {tooltip_border}; opacity: 0.55; }}
+    .legend-item {{ display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; }}
+    .legend-swatch {{ display: inline-block; min-width: 12px; text-align: center; }}
   </style>
 </head>
 <body>
-  <div id="map"></div>
+  <div id="map-shell">
+    <div id="map-wrap">
+      <div id="map"></div>
+    </div>
+    <div id="legendDock">
+      <div class="legend-box" id="legendBox"></div>
+    </div>
+  </div>
   <script src="{leaflet_js}"></script>
   <script>
     window.FEMA_LOOKUP = {json.dumps({s:r[1:] for r,states in FEMA_REGIONS.items() for s in states})};
@@ -5389,39 +5435,62 @@ function addGridLabels(res, level, bounds, maxLabels) {
     }}
 
     // Legend for link colors
+    function linkColor(val) {{
+      if (val === null || val === undefined || isNaN(val)) return '#607d8b';
+      if (val >= 5) return '#1b5e20';
+      if (val >= 0) return '#2e7d32';
+      if (val >= -5) return '#fbc02d';
+      if (val >= -10) return '#f57c00';
+      return '#c62828';
+    }}
+    function legendItem(color, symbol, label) {{
+      return '<div class="legend-item"><span class="legend-swatch" style="color:' + color + ';">' + symbol + '</span><span>' + label + '</span></div>';
+    }}
+    function legendRow(label, items) {{
+      const body = items.map(function(item, idx) {{
+        return (idx ? '<span class="legend-sep"></span>' : '') + item;
+      }}).join('');
+      return '<div class="legend-row"><span class="legend-label">' + label + '</span>' + body + '</div>';
+    }}
     let nowReachableEnabled = {now_reachable_enabled};
     const propOverlayLegendEnabled = {'true' if prop_overlay_enabled else 'false'};
     function buildLegendHtml(showPeerSchedNow) {{
-      let html = '<b>Link SNR</b><br/>' +
-        '<span style="color:#1b5e20;">&#9632;</span> >= 5<br/>' +
-        '<span style="color:#2e7d32;">&#9632;</span> 0 to &lt;5<br/>' +
-        '<span style="color:#fbc02d;">&#9632;</span> -5 to &lt;0<br/>' +
-        '<span style="color:\\"#f57c00;\\">&#9632;</span> -10 to &lt;-5<br/>' +
-        '<span style="color:\\"#c62828;\\">&#9632;</span> &lt; -10' +
-        '<br/><br/><b>SitRep Status</b><br/>' +
-        '<span style="color:#43A047;">&#9679;</span> Functioning<br/>' +
-        '<span style="color:#FBC02D;">&#9679;</span> Partially Functioning<br/>' +
-        '<span style="color:#D32F2F;">&#9679;</span> Not Functioning<br/>' +
-        '<span style="color:#4FC3F7;">&#9679;</span> Unknown / No Report';
+      const rows = [];
+      rows.push(legendRow('Link SNR:', [
+        legendItem(linkColor(5), '&#9632;', '&gt;= 5'),
+        legendItem(linkColor(0), '&#9632;', '0 to &lt;5'),
+        legendItem(linkColor(-5), '&#9632;', '-5 to &lt;0'),
+        legendItem(linkColor(-6), '&#9632;', '-10 to &lt;-5'),
+        legendItem(linkColor(-11), '&#9632;', '&lt; -10')
+      ]));
+      rows.push(legendRow('SitRep Status:', [
+        legendItem('#43A047', '&#9679;', 'Functioning'),
+        legendItem('#FBC02D', '&#9679;', 'Partially Functioning'),
+        legendItem('#D32F2F', '&#9679;', 'Not Functioning'),
+        legendItem('#4FC3F7', '&#9679;', 'Unknown / No Report')
+      ]));
       if (showPeerSchedNow) {{
-        html += '<br/><br/><b>Peer Sched Now</b><br/>' +
-          '<span style="color:#2E7D32;">&#9679;</span> NOW<br/>' +
-          '<span style="color:#1E88E5;">&#9679;</span> Later Today<br/>' +
-          '<span style="color:#7E57C2;">&#9679;</span> QSY &lt;10m';
+        rows.push(legendRow('Peer Sched Now:', [
+          legendItem('#2E7D32', '&#9679;', 'NOW'),
+          legendItem('#1E88E5', '&#9679;', 'Later Today'),
+          legendItem('#7E57C2', '&#9679;', 'QSY &lt;10m')
+        ]));
       }}
       if (propOverlayLegendEnabled) {{
-        html += '<br/><br/><b>Best Band Now</b><br/>' +
-          Object.keys(window.propBandColors).map(k => '<span style="color:' + window.propBandColors[k] + ';">&#9632;</span> ' + k).join('<br/>');
+        rows.push(legendRow(
+          'Best Band Now:',
+          Object.keys(window.propBandColors).map(k => legendItem(window.propBandColors[k], '&#9632;', k))
+        ));
       }}
-      return html;
+      return '<div class="legend-rows">' + rows.join('') + '</div>';
     }}
-    const legend = L.control({{position:'bottomright'}});
-    legend.onAdd = function() {{
-      this._div = L.DomUtil.create('div', 'legend-box');
-      this._div.innerHTML = buildLegendHtml(nowReachableEnabled);
-      return this._div;
-    }};
-    legend.addTo(map);
+    function updateLegend() {{
+      const legendEl = document.getElementById('legendBox');
+      if (legendEl) {{
+        legendEl.innerHTML = buildLegendHtml(nowReachableEnabled);
+      }}
+    }}
+    updateLegend();
 
     const stationsLayer = L.layerGroup().addTo(map);
     const linksLayer = L.layerGroup().addTo(map);
@@ -5513,14 +5582,6 @@ function addGridLabels(res, level, bounds, maxLabels) {
       }});
     }}
     // JS8 links
-    function linkColor(val) {{
-      if (val === null || val === undefined || isNaN(val)) return '#607d8b';
-      if (val >= 5) return '#1b5e20';
-      if (val >= 0) return '#2e7d32';
-      if (val >= -5) return '#fbc02d';
-      if (val >= -10) return '#f57c00';
-      return '#c62828';
-    }}
     function renderLinks(list) {{
       linksLayer.clearLayers();
       list.forEach(l => {{
@@ -5535,9 +5596,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
       if (payload.links) renderLinks(payload.links);
       if (Object.prototype.hasOwnProperty.call(payload, 'now_reachable_enabled')) {{
         nowReachableEnabled = !!payload.now_reachable_enabled;
-        if (legend && legend._div) {{
-          legend._div.innerHTML = buildLegendHtml(nowReachableEnabled);
-        }}
+        updateLegend();
       }}
     }};
     window.updateMapData({{markers: markers, links: links}});

@@ -176,3 +176,60 @@ def test_map_marker_group_filter_uses_merged_group_membership():
         my_call="",
         allow_self=False,
     )
+
+
+def test_map_html_uses_bottom_docked_inline_legend_rows():
+    dummy = SimpleNamespace(
+        settings=_MemorySettings(),
+        _now_reachable_enabled=True,
+        show_grids=False,
+        show_grid_labels=False,
+        show_regions=False,
+        show_states=False,
+        show_cities=False,
+        _resolve_prop_band_colors=lambda: {"20M": "#43A047", "40M": "#1E88E5"},
+    )
+
+    html = StationsMapTab._build_leaflet_html(
+        dummy,
+        markers=[],
+        links=[],
+        max_zoom=18,
+        leaflet_js="leaflet.js",
+        leaflet_css="leaflet.css",
+        geojson_urls=[],
+        cities_geojson=None,
+        city_min_pop=0,
+        show_city_labels=False,
+        initial_view=None,
+        prop_overlay_enabled=True,
+        prop_region_scores=None,
+        prop_state_scores=None,
+    )
+
+    assert 'id="legendDock"' in html
+    assert 'id="legendBox"' in html
+    assert "const legend = L.control" not in html
+    assert "function updateLegend()" in html
+    assert "legend-rows" in html
+    assert "legend-label" in html
+    assert "legend-sep" in html
+    assert "Link SNR:" in html
+    assert "SitRep Status:" in html
+    assert "Peer Sched Now:" in html
+    assert "Best Band Now:" in html
+    assert 'color:\\"' not in html
+
+
+def test_map_controls_keep_action_buttons_readable(monkeypatch, tmp_path):
+    _app()
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+
+    tab = StationsMapTab()
+    try:
+        assert tab.relay_target_combo.minimumWidth() == 180
+        assert tab._refresh_links_button.minimumWidth() >= tab._refresh_links_button.sizeHint().width()
+        assert tab._now_reachable_button.minimumWidth() >= tab._now_reachable_button.sizeHint().width()
+        assert tab._sitrep_status_button.minimumWidth() >= tab._sitrep_status_button.sizeHint().width()
+    finally:
+        tab.deleteLater()

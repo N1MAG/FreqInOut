@@ -8817,3 +8817,92 @@ Targeted verification:
 - Revert `freqinout/core/operator_activity.py` and related schema hooks
 - Revert `Map` and `HF Operator History` to the legacy tooltip/table activity paths
 - Revert the compatibility updates in `checkins_db.py` and `varac_ingest.py` if needed
+
+## 1.2.2 Map Legend Docking, Color Parity, and Control-Row Fit
+
+### Problem
+
+The `Map` tooltip has grown taller after the `Last Seen` / `Last Contact` activity split. The existing legend still lives in the lower-right Leaflet control area, so large station detail content can be visually blocked by the legend when hovering/clicking stations near that corner.
+
+The current legend also has a correctness defect: the `-10 to <-5` and `< -10` `Link SNR` bins do not reliably show the same colors as the live link polylines, making the legend harder to trust during operator use.
+
+The `Map Controls` row also over-allocates width to the `Paths to` selector, which causes the `Refresh Links`, `Peer Sched Now`, and `SitRep Status` buttons to compress when the controls drawer is visible.
+
+### Goals
+
+- Move the map legend out of the lower-right control corner into a dedicated bottom legend dock.
+- Present `Link SNR` and `SitRep Status` as the primary left-to-right legend row.
+- Present `Peer Sched Now` and `Best Band Now` as an optional second left-to-right legend row when enabled.
+- Ensure the `Link SNR` legend colors are derived from the same color mapping used for live link lines.
+- Keep the map-control action buttons readable when the controls drawer is open by allowing the `Paths to` field to give up width first.
+- Keep the change lightweight and preserve map responsiveness.
+
+### Non-Goals
+
+- No redesign of marker/tooltip content in this phase.
+- No change to the underlying `Peer Sched Now` or propagation-overlay logic.
+- No new interactive controls inside the legend dock.
+
+### Impacted Files
+
+- `SPEC.md`
+- `CHANGELOG.md`
+- `freqinout/gui/stations_map_tab.py`
+- targeted tests under `tests/`
+
+### Design
+
+Layout:
+- Replace the bottom-right Leaflet legend control with a dedicated bottom dock below the map canvas inside the same HTML page.
+- Render the bottom legend as explicit inline rows:
+  - `Link SNR:` followed by all SNR bins on one left-to-right row
+  - `SitRep Status:` followed by all status bins on one left-to-right row
+  - `Peer Sched Now:` and `Best Band Now:` each as their own optional left-to-right rows when enabled
+- Keep each row center-aligned overall, but size the dock to the content so it does not consume more horizontal width than needed.
+- Use comfortably spaced inline swatches/items rather than boxed section blocks so the eye can scan the legend like a standard map key.
+
+Map controls:
+- Rebalance the `Paths to` row so the selector expands/contracts first while the action buttons keep their natural readable widths.
+- Reduce the selector's minimum footprint and keep its popup wide enough for search/readability.
+
+Color parity:
+- Use the existing `linkColor()` function as the single color authority for both live polylines and the `Link SNR` legend entries.
+- Remove the malformed inline-style quoting that currently causes the orange/red bins to render as inherited gray text.
+
+Performance:
+- Keep legend generation static and cheap.
+- Update the bottom legend HTML only when the relevant payload state changes, matching the current lightweight refresh path.
+
+### Acceptance Criteria
+
+- Hovering or clicking a station near the lower-right of the map no longer places the tooltip/detail content under the legend.
+- The map shows a bottom-docked legend with:
+  - a `Link SNR:` row containing all SNR bins inline
+  - a `SitRep Status:` row containing all status bins inline
+  - optional `Peer Sched Now:` and `Best Band Now:` rows only when enabled
+- The `-10 to <-5` legend bin uses the same orange as live links, and the `< -10` bin uses the same red as live links.
+- Toggling `Peer Sched Now` still adds/removes only that legend section without requiring a full map rebuild.
+- Showing the map controls drawer no longer compresses the `Refresh Links`, `Peer Sched Now`, and `SitRep Status` button labels under ordinary desktop widths because the `Paths to` field yields width first.
+
+### Verification
+
+Required commands:
+
+```powershell
+python tools/release_preflight.py
+python -m compileall freqinout
+```
+
+Targeted verification:
+- targeted test covering generated map HTML for:
+  - bottom legend dock markup
+  - `Peer Sched Now` / `Best Band Now` sections
+  - no malformed `Link SNR` color markup
+- manual map check:
+  - hover/click a lower-right station and confirm the detail content is no longer obscured by the legend
+  - verify the orange/red legend bins match the drawn JS8 link colors
+
+### Rollback
+
+- Revert the map HTML/CSS/JS legend-docking changes in `freqinout/gui/stations_map_tab.py`
+- Revert the spec/changelog/test updates together
