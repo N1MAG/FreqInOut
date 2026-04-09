@@ -1,6 +1,7 @@
 # Changelog
 
 ## [1.2.2]
+- Added: `HF Operator History` now uses the same high-contrast checkbox indicator styling as `Messages`, and `Manage Operators` now includes `Sync to VarAC` to reconcile `VarAC_callsign_tags.conf` from known callsign/name/state rows while add/edit/import/delete workflows keep the managed VarAC callsign-tag entries aligned.
 - Fixed: `ControlFreq` `Next Change` now shows the upcoming target frequency instead of repeating the currently active scheduled frequency.
 - Fixed: `ControlFreq` frequency hero now re-syncs to the actual active radio frequency more reliably after automatic schedule-driven QSY and other runtime frequency changes, while still preserving an intentional pending user selection.
 - Fixed: `ControlFreq` `Activity` now honors the selected recent-time window directly instead of hiding valid traffic through schedule-start narrowing; recent overnight/current traffic is no longer dropped simply because the nearest daily-schedule row starts on another band.

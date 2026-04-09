@@ -85,6 +85,7 @@ tests/*
 !tests/test_settings_manager_thread_affinity.py
 !tests/test_release_1_2_2_followup.py
 !tests/test_operator_activity_phase1.py
+!tests/test_operator_history_varac_sync.py
 !tests/test_controlfreq_activity_phase1.py
 !tests/test_settings_section_health_phase1.py
 

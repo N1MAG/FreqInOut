@@ -9158,3 +9158,103 @@ Targeted verification:
 
 - Revert the section-health additions in `freqinout/gui/settings_tab.py`
 - Revert the spec/changelog/test updates together
+
+## 1.2.2 Operator History Checkbox Contrast + VarAC Callsign Tag Sync
+
+### Problem
+
+- In dark theme, the `HF Operator History` row-selection checkbox is difficult to see.
+- The `Messages` tab already uses a higher-contrast checkbox indicator that remains readable in dark theme.
+- Operators also want FreqInOut to keep VarAC's `VarAC_callsign_tags.conf` aligned with known callsign/name/state metadata maintained in Operator History.
+
+### Goals
+
+- Make the Operator History row checkbox as visible in dark theme as the Messages checkbox.
+- Add a safe `Sync to VarAC` workflow from `Manage Operators`.
+- Keep automatic VarAC file sync limited to explicit operator-management mutations so the UI stays responsive and the app does not add background file churn.
+
+### Scope
+
+- Apply the same high-contrast checkbox indicator styling used by `Messages` to the Operator History table row indicators.
+- Add a small core helper for `VarAC_callsign_tags.conf` reconciliation.
+- Add `Manage Operators -> Sync to VarAC`.
+- Auto-run the same reconciliation after explicit Operator History mutations that can change callsign/name/state membership:
+  - `Add Operator`
+  - single-record `Edit Selected`
+  - `Import CSV`
+  - `Delete Selected`
+
+### Reconciliation Rules
+
+- Source of truth is `operator_checkins`.
+- Only rows with non-empty `callsign`, `name`, and `state` are eligible.
+- Canonical emitted format is:
+  - `"CALLSIGN / NAME / STATE"`
+- Callsign and state are normalized to uppercase.
+- Name is normalized to trimmed single-spacing.
+- No duplicate managed callsign entries are allowed in the output.
+- If an existing managed callsign entry has different name/state, replace it with the current Operator History value.
+- If a previously managed callsign no longer qualifies, remove it from the managed portion of the file.
+- Preserve non-managed / unknown lines in the file when possible instead of overwriting the file blindly.
+
+### Path Handling
+
+- Resolve the target path from `VarAC Install Folder`.
+- If the configured value points at an executable/file, use its parent folder.
+- Otherwise treat the configured value as the install folder directly.
+- The target file name is `VarAC_callsign_tags.conf`.
+
+### Failure Modes and Mitigations
+
+- `VarAC Install Folder` is not configured:
+  - manual sync shows a clear warning
+  - automatic sync quietly no-ops
+- VarAC install folder is invalid or not writable:
+  - operator DB save/delete/import still succeeds
+  - sync failure is logged and surfaced with a concise warning
+- Existing conf file contains comments or unrelated custom lines:
+  - preserve those lines verbatim
+- Existing conf file contains duplicate managed callsign rows:
+  - reconcile to one canonical row
+
+### Performance Constraints
+
+- No background polling or periodic file sync is added.
+- No sync runs on tab refresh, table render, or filter changes.
+- Sync work is limited to explicit operator-management actions and the manual menu action.
+- The helper performs one operator query and at most one file rewrite per user action.
+
+### Acceptance Criteria
+
+- Operator History checkboxes remain visible in dark theme with the same style family used by `Messages`.
+- `Manage Operators` includes `Sync to VarAC`.
+- When a user adds/edits/imports/deletes operators through Operator History, `VarAC_callsign_tags.conf` is reconciled from current eligible operator rows.
+- Eligible operators appear in the file as `"CALLSIGN / NAME / STATE"`.
+- Duplicate managed callsign rows are removed.
+- Updated state/name values replace stale managed lines for the same callsign.
+- Manual sync can rebuild the managed portion of the file from current DB state without introducing duplicates.
+
+### Verification
+
+Required commands:
+
+```powershell
+python tools/release_preflight.py
+python -m compileall freqinout
+powershell -ExecutionPolicy Bypass -File .\tools\freqinout-db.ps1 status
+```
+
+Targeted verification:
+- focused tests for:
+  - VarAC tags file parse/reconcile behavior
+  - Operator History dark-theme checkbox stylesheet parity
+  - manual sync action wiring / post-mutation sync behavior
+- manual check:
+  - open `HF Operator History` in dark theme and verify checkbox visibility
+  - run `Manage Operators -> Sync to VarAC` with a configured VarAC install folder and verify `VarAC_callsign_tags.conf`
+
+### Rollback
+
+- Revert `freqinout/core/varac_callsign_tags.py`
+- Revert the Operator History integration points in `freqinout/gui/operator_history_tab.py`
+- Revert the spec/changelog/test updates together

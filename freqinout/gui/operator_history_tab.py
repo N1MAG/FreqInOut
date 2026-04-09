@@ -38,6 +38,7 @@ from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
 from freqinout.core.operator_activity import format_utc_iso, load_operator_activity_summary
 from freqinout.core.perf_metrics import span as perf_span
+from freqinout.core.varac_callsign_tags import sync_varac_callsign_tags_from_db
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.theme import resolve_theme, button_style
 
@@ -1504,7 +1505,18 @@ class OperatorHistoryTab(QWidget):
                 f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
             )
         grid = theme["border"]
-        table_style = f"QTableWidget {{ gridline-color: {grid}; }}"
+        table_style = (
+            f"QTableWidget {{ gridline-color: {grid}; }}"
+            "QTableWidget::indicator {"
+            " width: 14px; height: 14px;"
+            f" border: 1px solid {theme['text_muted']};"
+            f" background-color: {theme['surface']};"
+            "}"
+            "QTableWidget::indicator:checked {"
+            f" background-color: {theme['accent']};"
+            f" border: 1px solid {theme['accent']};"
+            "}"
+        )
         self.table.setStyleSheet(table_style)
         header = self.table.horizontalHeader()
         if isinstance(header, OperatorHeaderWithCheckbox):
@@ -1572,6 +1584,48 @@ class OperatorHistoryTab(QWidget):
             return
         self._sync_header_checkbox()
         self._update_action_button_styles()
+
+    def _sync_varac_callsign_tags(self, *, notify_success: bool = False) -> bool:
+        db_path = self._db_path()
+        if not db_path:
+            if notify_success:
+                QMessageBox.warning(self, "Sync to VarAC", "Operator database path not found.")
+            return False
+        try:
+            result = sync_varac_callsign_tags_from_db(Path(db_path), self.settings)
+        except ValueError:
+            if notify_success:
+                QMessageBox.warning(
+                    self,
+                    "Sync to VarAC",
+                    "Configure VarAC Install Folder in Settings before syncing callsign tags.",
+                )
+            return False
+        except Exception as exc:
+            log.error("OperatorHistoryTab: VarAC callsign-tag sync failed: %s", exc)
+            QMessageBox.warning(
+                self,
+                "Sync to VarAC",
+                f"Operator History was updated, but VarAC sync failed:\n{exc}",
+            )
+            return False
+        if notify_success:
+            QMessageBox.information(
+                self,
+                "Sync to VarAC",
+                (
+                    f"Synced {result.managed_count} operator tag(s) to VarAC.\n\n"
+                    f"Added: {result.added}\n"
+                    f"Updated: {result.updated}\n"
+                    f"Removed: {result.removed}\n"
+                    f"Deduplicated: {result.deduplicated}\n\n"
+                    f"{result.path}"
+                ),
+            )
+        return True
+
+    def _sync_to_varac_action(self) -> None:
+        self._sync_varac_callsign_tags(notify_success=True)
 
     def _on_cell_clicked(self, row: int, col: int) -> None:
         if col != self.COL_SITREP:
@@ -1768,6 +1822,8 @@ class OperatorHistoryTab(QWidget):
         menu.addAction("Add Operator...", self._add_operator_dialog)
         menu.addAction("Edit Selected...", self._edit_selected_dialog)
         menu.addAction("Delete Selected...", self._delete_selected)
+        menu.addSeparator()
+        menu.addAction("Sync to VarAC", self._sync_to_varac_action)
         menu.exec(self.manage_btn.mapToGlobal(self.manage_btn.rect().bottomLeft()))
 
 
@@ -1946,6 +2002,8 @@ class OperatorHistoryTab(QWidget):
 
         self._load_data(show_toast=True)
         self._schedule_history_update()
+        if imported:
+            self._sync_varac_callsign_tags()
         msg = f"Imported {imported} record(s). Skipped {skipped}."
         if role_cleared:
             msg += f" Cleared {role_cleared} non-standard group role value(s)."
@@ -2035,6 +2093,7 @@ class OperatorHistoryTab(QWidget):
         if self._upsert_record(data, merge_groups=False):
             self._load_data(show_toast=True)
             self._schedule_history_update()
+            self._sync_varac_callsign_tags()
 
     def _edit_selected_dialog(self):
         calls = self._selected_callsigns()
@@ -2132,6 +2191,7 @@ class OperatorHistoryTab(QWidget):
         if self._upsert_record(data, merge_groups=False):
             self._load_data(show_toast=True)
             self._schedule_history_update()
+            self._sync_varac_callsign_tags()
 
     def _delete_selected(self):
         calls = self._selected_callsigns()
@@ -2175,6 +2235,8 @@ class OperatorHistoryTab(QWidget):
             conn.close()
         self._load_data(show_toast=True)
         self._schedule_history_update()
+        if deleted or skipped:
+            self._sync_varac_callsign_tags()
         QMessageBox.information(
             self,
             "Delete Operators",
