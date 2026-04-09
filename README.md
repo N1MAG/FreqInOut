@@ -60,6 +60,8 @@ python -m freqinout.main
 
 ### Linux (Debian/Ubuntu)
 
+This path is a full source/developer checkout and includes tests.
+
 ```bash
 sudo apt-get install python3 python3-venv python3-pip libxcb-cursor0 libxcb-xinerama0
 git clone https://github.com/N1MAG/FreqInOut.git FreqInOut
@@ -71,6 +73,8 @@ python -m freqinout.main
 ```
 
 ### Linux one-step installer
+
+Recommended for end users. The installer keeps the installed app checkout runtime-focused and excludes `tests/` and other developer-only paths from the installed working tree, so later `git pull` updates stay lean.
 
 Run locally from a clone:
 

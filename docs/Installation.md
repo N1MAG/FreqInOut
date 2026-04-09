@@ -70,3 +70,4 @@ For Linux users, prefer the guided installer:
 ```
 bash install_FreqInOut_linux.sh
 ```
+This installer is the recommended end-user path. It keeps the installed app checkout runtime-focused, excluding `tests/` and other developer-only paths, so later `git pull` updates in that installed folder do not materialize the test suite.

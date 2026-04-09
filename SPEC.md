@@ -9356,3 +9356,23 @@ Acceptance:
 - Messages/Map help text explains CommStat under unified `SitRep`, including receipt/source/brevity surfaces where relevant.
 - Map help text explains `Last Seen` vs `Last Contact`, the bottom legend, and sitrep state summary behavior.
 - ControlFreq help text explains active-hold duration changes and the current Activity-window behavior.
+
+### 1.191 Addendum (2026-04-09): Linux Runtime Checkout Excludes Tests
+
+Problem:
+- Linux installed users currently receive a full source checkout because the installer uses `git clone` directly into the install folder.
+- That means later `git pull` operations in the installed app directory bring down `tests/` and other developer-only files.
+
+Release-safe scope:
+- Keep tests in the repository for CI and development.
+- Change the Linux installer/update path so installed app directories use a runtime-oriented sparse checkout that excludes `tests/` and other developer-only files.
+- Keep required runtime/support content present:
+  - `freqinout/`, `assets/`, `config/`, `docs/`, `third_party/`, `tools/`
+  - `requirements.txt`, `README.md`, `CHANGELOG.md`, `LICENSE.md`
+  - Linux install/uninstall scripts
+- Update user-facing docs so Linux users are guided toward the installer for runtime installs rather than a full development clone.
+
+Acceptance:
+- A Linux install created by `install_FreqInOut_linux.sh` does not contain `tests/` after install.
+- A subsequent `git pull` in that installed directory does not materialize `tests/`.
+- Developer/source clones remain unchanged and continue to include tests.

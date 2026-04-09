@@ -1,6 +1,7 @@
 # Changelog
 
 ## [1.2.2]
+- Changed: The Linux guided installer now converts installed app checkouts to a runtime-oriented sparse checkout that excludes `tests/` and other developer-only paths, so end-user installs and later `git pull` updates in that managed install folder stay lean while developer/source clones remain unchanged.
 - Added: CommStat sitrep fusion now decodes CommStat 4.x sitrep-bearing traffic into the unified `SitRep` pipeline, preserves CommStat remarks/brevity/transport/report-group metadata, merges CommStat and JS8Spotter provenance into the latest sitrep view, seeds untrusted operator rows from CommStat sitrep traffic, and adds fast state rollups plus richer sitrep metadata in Messages, Operator History, and Map.
 - Added: `HF Operator History` now uses the same high-contrast checkbox indicator styling as `Messages`, and `Manage Operators` now includes `Sync to VarAC` to reconcile `VarAC_callsign_tags.conf` from known operator rows using the unquoted `CALLSIGN,NAME / STATE / GROUP1 / GROUP2 / GROUP3 / ROLE` format while add/edit/import/delete workflows keep the managed VarAC callsign-tag entries aligned.
 - Fixed: `ControlFreq` `Next Change` now shows the upcoming target frequency instead of repeating the currently active scheduled frequency.

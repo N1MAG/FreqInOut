@@ -987,6 +987,35 @@ clone_repository_into_install_dir() {
   else
     run_cmd git clone "$REPO_URL" "$INSTALL_DIR"
   fi
+  configure_runtime_sparse_checkout
+}
+
+configure_runtime_sparse_checkout() {
+  [[ -d "$INSTALL_DIR/.git" ]] || return 0
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log "DRY RUN: would configure runtime sparse checkout for $INSTALL_DIR"
+    return 0
+  fi
+  if ! git -C "$INSTALL_DIR" sparse-checkout -h >/dev/null 2>&1; then
+    warn "Installed git does not support sparse-checkout; leaving full source tree in place."
+    return 0
+  fi
+
+  log "Configuring runtime sparse checkout (excludes tests/dev-only paths)"
+  run_cmd git -C "$INSTALL_DIR" sparse-checkout init --cone
+  run_cmd git -C "$INSTALL_DIR" sparse-checkout set \
+    assets \
+    config \
+    docs \
+    freqinout \
+    third_party \
+    tools \
+    requirements.txt \
+    README.md \
+    CHANGELOG.md \
+    LICENSE.md \
+    install_FreqInOut_linux.sh \
+    uninstall_FreqInOut_linux.sh
 }
 
 handle_non_git_install_dir() {
@@ -1101,6 +1130,7 @@ update_existing_install() {
   else
     run_cmd git -C "$INSTALL_DIR" pull --ff-only
   fi
+  configure_runtime_sparse_checkout
 }
 
 create_venv_and_install_python_deps() {
@@ -1554,4 +1584,3 @@ main() {
 }
 
 main "$@"
-
