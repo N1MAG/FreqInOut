@@ -25,12 +25,20 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Net resources catalog workflow via SitRepNet.com or custom JSON: import JSON into managed Net Resources and promote selected entries into active Net Schedule
 - Launch orchestration with configurable start order, per-app startup toggles, global startup mode, and continue-on-failure handling
 - Messages center for JS8/FLMSG/FLAMP/VarAC plus VarAC BBS workflows (view/archive/delete, aging visibility, auto-archive support), including GPG/PGP and Hash signature verification
-- Operator History with CSV import/export, group/role standardization, trust tools, sorting/filtering, and SitRep chip updates
+- Operator History with CSV import/export, group/role standardization, trust tools, sorting/filtering, SitRep chip updates, and VarAC callsign-tag sync
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
 ## What's New in v1.2.2
 
+- Added CommStat sitrep fusion under the unified `SitRep` message family, including source/receipt metadata, brevity decode support, shared latest-status fusion with JS8Spotter, and map/operator history integration.
+- Added `HF Operators -> Manage Operators -> Sync to VarAC` to maintain `VarAC_callsign_tags.conf` from known operator rows, using the unquoted `CALLSIGN,NAME / STATE / GROUP1 / GROUP2 / GROUP3 / ROLE` format.
+- Improved Settings setup guidance with warning-highlighted section chips for incomplete single-radio configuration, including JS8Call companion fields, Fast Light endpoint/file-path gaps, and missing VarAC incoming-files path.
+- Fixed ControlFreq so `Next Change` shows the upcoming target frequency, the hero frequency re-syncs more reliably to the actual radio state, and changing the hold preset updates an already active hold immediately.
+- Fixed ControlFreq `Activity` so the selected time window reflects actual recent traffic rather than schedule-start proximity.
+- Fixed Map operator activity semantics so `Last Seen` reflects latest observed activity, `Last Contact` reflects direct inbound contact only, and sitrep-focused views can show receipt/source/state summary data with a bottom-docked legend.
+- Fixed `Messages` transport-form handling so `.k2s` fallback payloads decode through the same friendly path as `.b2s` where possible.
+- Fixed `HF Operator History` CSV import so Excel `CSV UTF-8` files with BOM import cleanly.
 - Added the Reliability Baseline updates: background ingest now runs off the GUI thread, `operator_checkins` schema repair/init is centralized in core DB code, and VarAC local mirror tables are created during cold-start initialization
 - Fixed software-status validation so `JS8Call`, `FLRig`, and `FLDigi` badges are endpoint-aware, with persisted `FLDigi` XML-RPC host/port settings and Settings probes that honor the currently entered endpoint values
 - Fixed runtime profile consistency so logging, updater downloads, and DB admin tooling operate on the same active profile root as the running app
@@ -135,6 +143,9 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 ## Configuration Notes
 
 - Set radio software paths and JS8Call DIRECTED.TXT in the Settings tab.
+- Watch the Settings left-nav for warning highlights; they indicate partially configured sections that still need required companion fields.
+- When `JS8Call Install Folder` is set, also configure host, TCP port, and `DIRECTED.TXT`. If `JS8Spotter Launch Path` is set, also configure `JS8Spotter forms`.
+- When `VarAC Install Folder` is set, also configure `Incoming Files`.
 - Populate Operator History before expecting the Map tab to show full results.
 - JS8 live ingest is used when available; log parsing is used as a fallback.
 - Set your operator Grid (Grid 6 recommended) in Settings to enable full propagation forecast output in ControlFreq.

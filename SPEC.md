@@ -9333,3 +9333,26 @@ Acceptance:
 - Managed lines contain no quote characters.
 - Duplicate callsigns are collapsed to one managed line.
 - If `state`, group fields, or role change in `HF Operator History`, the synced VarAC line is updated on the next sync.
+
+### 1.190 Addendum (2026-04-09): 1.2.2 User Documentation Alignment
+
+Problem:
+- `1.2.2` shipped several visible single-radio UX and workflow changes that were not fully reflected in the bundled guide, README, or installation notes.
+- The biggest gaps are in:
+  - Settings section-warning highlights for incomplete configuration
+  - CommStat sitrep behavior in Messages / Map / Operator History
+  - Map `Last Seen` vs `Last Contact`, sitrep summary, and bottom legend behavior
+  - `HF Operator History -> Sync to VarAC`
+  - ControlFreq hold/activity semantics
+
+Release-safe scope:
+- Update `docs/guide.html`, `README.md`, and `docs/Installation.md` only.
+- Keep all content explicitly single-radio and avoid any multi-rig wording or promises.
+- Describe user-visible behavior already present in the `1.2.2` release branch without introducing new runtime behavior.
+
+Acceptance:
+- The guide explains that Settings left-nav sections can highlight when required companion configuration is incomplete.
+- The guide documents `Sync to VarAC` and the VarAC callsign-tag sync format.
+- Messages/Map help text explains CommStat under unified `SitRep`, including receipt/source/brevity surfaces where relevant.
+- Map help text explains `Last Seen` vs `Last Contact`, the bottom legend, and sitrep state summary behavior.
+- ControlFreq help text explains active-hold duration changes and the current Activity-window behavior.
