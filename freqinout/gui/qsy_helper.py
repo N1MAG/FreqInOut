@@ -279,7 +279,13 @@ def active_hold_status_text(remaining_sec: Optional[float]) -> str:
     return f"Schedule resumes automatically in {mins} min." if mins else "Schedule resumes automatically."
 
 
-def suspend_schedule_hold(window, settings, minutes: Optional[int] = None) -> int:
+def set_active_hold_duration(
+    window,
+    settings,
+    minutes: Optional[int] = None,
+    *,
+    notify: bool = True,
+) -> int:
     mins = normalize_hold_minutes(minutes if minutes is not None else get_hold_duration_default(settings))
     until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=mins)
     try:
@@ -288,10 +294,17 @@ def suspend_schedule_hold(window, settings, minutes: Optional[int] = None) -> in
         scheduler = None
     if scheduler and hasattr(scheduler, "suspend_schedule"):
         scheduler.suspend_schedule(mins)
-        _SUSPEND_CACHE["ts"] = until.timestamp()
-        _SUSPEND_CACHE["loaded_at"] = time.time()
     else:
         set_suspend_until(settings, until)
+    _SUSPEND_CACHE["ts"] = until.timestamp()
+    _SUSPEND_CACHE["loaded_at"] = time.time()
+    if notify:
+        notify_hold_state_changed(window, force_reload=False)
+    return mins
+
+
+def suspend_schedule_hold(window, settings, minutes: Optional[int] = None) -> int:
+    mins = set_active_hold_duration(window, settings, minutes=minutes, notify=False)
     notify_hold_state_changed(window, force_reload=False)
     return mins
 

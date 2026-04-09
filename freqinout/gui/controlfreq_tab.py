@@ -105,6 +105,7 @@ class ControlFreqTab(QWidget):
         self._hold_state_snapshot: Optional[Dict[str, object]] = None
         self._freq_combo_cache_key: Tuple[Tuple[str, str, float, str, str, bool], ...] = ()
         self._last_hero_sched_freq_mhz: Optional[float] = None
+        self._last_hero_display_freq_mhz: Optional[float] = None
         self._current_time_full_text = "--"
         self._operator_groups_cache: Dict[str, Set[str]] = {}
         self._operator_groups_cache_ts = 0.0
@@ -1554,8 +1555,12 @@ class ControlFreqTab(QWidget):
                 now_utc = dt.datetime.now(dt.timezone.utc)
                 mins = int(max(0.0, (next_change - now_utc).total_seconds()) // 60)
                 display_dt = next_change.astimezone(self._get_display_tz()) if self._show_local else next_change
-                sched_freq = current_scheduler_freq(self.window())
-                freq_txt = f"{sched_freq:.3f}" if isinstance(sched_freq, (int, float)) else "--"
+                next_freq = status.get("next_frequency_mhz")
+                if isinstance(next_freq, (int, float)):
+                    freq_txt = f"{float(next_freq):.3f}"
+                else:
+                    sched_freq = current_scheduler_freq(self.window())
+                    freq_txt = f"{sched_freq:.3f}" if isinstance(sched_freq, (int, float)) else "--"
                 next_text = f"Next Change: {freq_txt} {display_dt:%H:%M}"
                 if next_source_change and next_source and next_source != source:
                     next_label = next_net_kind or next_source
@@ -2128,6 +2133,7 @@ class ControlFreqTab(QWidget):
         try:
             if (
                 self.freq_combo.view().isVisible()
+                or self.freq_combo.hasFocus()
                 or self.hold_duration_combo.view().isVisible()
                 or self.hold_duration_combo.hasFocus()
             ):
@@ -2207,10 +2213,6 @@ class ControlFreqTab(QWidget):
                     restore_idx = idx
                     break
         force_resync = bool(self._force_hero_resync)
-        if restore_idx >= 0 and not force_resync:
-            self.freq_combo.blockSignals(True)
-            self.freq_combo.setCurrentIndex(restore_idx)
-            self.freq_combo.blockSignals(False)
         status_snapshot: Optional[Dict[str, Any]] = None
         try:
             sched_obj = getattr(self.window(), "scheduler", None)
@@ -2237,12 +2239,38 @@ class ControlFreqTab(QWidget):
         sched_group = self._get_scheduled_group_name()
         active_freq = self._get_active_frequency_mhz(status_snapshot)
         display_freq = active_freq if active_freq is not None else sched_freq
-        if scheduler_freq_changed and sched_freq is not None:
-            # On scheduler transitions, prefer the new scheduled target for the
-            # hero selection so a briefly stale active-frequency poll does not
-            # preserve the prior combo item indefinitely.
+        if (
+            scheduler_freq_changed
+            and sched_freq is not None
+            and active_freq is not None
+            and prev_sched_freq is not None
+            and abs(active_freq - prev_sched_freq) < 0.0005
+        ):
+            # During a scheduler transition, a cached active-frequency poll may
+            # still briefly report the old scheduled value. Prefer the new
+            # scheduled target only for that narrow stale-poll case.
             display_freq = sched_freq
-        if (force_resync or restore_idx < 0) and display_freq is not None:
+        current_matches_display = (
+            current_freq is not None
+            and display_freq is not None
+            and abs(current_freq - float(display_freq)) < 0.0005
+        )
+        selection_is_last_hero = (
+            current_freq is not None
+            and self._last_hero_display_freq_mhz is not None
+            and abs(current_freq - float(self._last_hero_display_freq_mhz)) < 0.0005
+        )
+        pending_user_selection = (
+            not force_resync
+            and current_freq is not None
+            and not current_matches_display
+            and not selection_is_last_hero
+        )
+        if pending_user_selection and restore_idx >= 0:
+            self.freq_combo.blockSignals(True)
+            self.freq_combo.setCurrentIndex(restore_idx)
+            self.freq_combo.blockSignals(False)
+        elif display_freq is not None:
             for idx in range(1, self.freq_combo.count()):
                 meta = self.freq_combo.itemData(idx)
                 try:
@@ -2253,7 +2281,10 @@ class ControlFreqTab(QWidget):
                     self.freq_combo.blockSignals(True)
                     self.freq_combo.setCurrentIndex(idx)
                     self.freq_combo.blockSignals(False)
+                    self._last_hero_display_freq_mhz = float(display_freq)
                     break
+        elif not pending_user_selection:
+            self._last_hero_display_freq_mhz = None
         self._force_hero_resync = False
         sched_txt = f"{sched_freq:.3f}" if sched_freq is not None else "--"
         band_txt = self._band_for_group_freq(sched_group, sched_freq) if sched_freq is not None else "--"

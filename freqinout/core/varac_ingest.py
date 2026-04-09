@@ -10,6 +10,7 @@ from typing import Dict, Iterable, Optional
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
+from freqinout.core.operator_activity import format_utc_iso, newer_timestamp_text
 
 CALLSIGN_RE = re.compile(r"^[A-Z0-9/]{3,10}$")
 TRAILING_CALL_NOISE_RE = re.compile(r"[^A-Z0-9/]+$")
@@ -1226,19 +1227,20 @@ def ingest_varac(settings, *, force: bool = False) -> bool:
                 ts_val = float(data.get("last_seen_ts") or 0.0)
                 if not ts_val:
                     continue
-                date_txt = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d")
+                incoming_last_seen = format_utc_iso(ts_val)
+                existing_row = cur_local.execute(
+                    "SELECT last_seen_utc FROM operator_checkins WHERE callsign=?",
+                    (cs,),
+                ).fetchone()
+                merged_last_seen = newer_timestamp_text(existing_row[0] if existing_row else "", incoming_last_seen)
                 cur_local.execute(
                     """
                     INSERT INTO operator_checkins (callsign, last_seen_utc, checkin_count, trusted)
                     VALUES (?, ?, COALESCE((SELECT checkin_count FROM operator_checkins WHERE callsign=?), 0), COALESCE((SELECT trusted FROM operator_checkins WHERE callsign=?), 0))
                     ON CONFLICT(callsign) DO UPDATE SET
-                        last_seen_utc=CASE
-                            WHEN operator_checkins.last_seen_utc IS NULL OR operator_checkins.last_seen_utc='' THEN excluded.last_seen_utc
-                            WHEN operator_checkins.last_seen_utc < excluded.last_seen_utc THEN excluded.last_seen_utc
-                            ELSE operator_checkins.last_seen_utc
-                        END
+                        last_seen_utc=excluded.last_seen_utc
                     """,
-                    (cs, date_txt, cs, cs),
+                    (cs, merged_last_seen, cs, cs),
                 )
                 _note_table("operator_checkins", written=1)
 

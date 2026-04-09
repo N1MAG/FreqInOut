@@ -8442,3 +8442,378 @@ Mitigations:
 Rollback:
 - Each implementation phase should be independently revertible while preserving the migrated default single-radio profile layout.
 - The single-radio default runtime must remain available as the fallback operating mode until multi-device runtime is proven stable.
+
+## 1.2.2 Follow-up Fix Pack: ControlFreq, Messages, Operators, and Map
+
+### Problem
+
+Post-1.2.2 Windows upgrade testing surfaced several correctness and UX defects in the single-radio release path:
+
+- `ControlFreq` `Next Change` shows the currently active scheduled frequency instead of the frequency the schedule will change to.
+- `ControlFreq` hero frequency can remain on the prior scheduled value after an automatic schedule-driven QSY even when the radio has already moved.
+- Active schedule-hold duration is not adjusted when the operator changes the hold preset after `QSY+Hold` / `Suspend` is already active.
+- `HF Operator History` CSV import rejects Excel UTF-8 CSV files because the header row may include a UTF-8 BOM.
+- `Messages` treats some received `.k2s` / `.b2s` form files as unknown payloads instead of decoding them through the existing form rendering path.
+- `Map` station markers can ignore the selected group filter when the map is in station-display mode rather than link-only mode.
+
+These issues reduce operator trust because several screens can disagree about what the scheduler will do, what the radio is actually doing, and which stations/files should be visible under applied filters.
+
+### Goals
+
+- Make `ControlFreq` schedule and hero readouts reflect actual runtime state rather than stale or pre-transition values.
+- Allow UTF-8-with-BOM operator CSV imports with no change to the exported CSV shape.
+- Decode `.b2s` and `.k2s` message payloads through the same form-friendly rendering path used for existing NBEMS forms whenever possible.
+- Make `Map` group filtering apply consistently to station markers as well as link overlays.
+- Keep all changes backward compatible with the 1.2.2 single-radio release branch.
+
+### Non-Goals
+
+- No new multi-radio behavior.
+- No redesign of scheduler precedence or hold preset values.
+- No schema migration beyond existing runtime settings/state keys.
+- No new message format support beyond making current `.b2s` / `.k2s` handling consistent.
+
+### Impacted Files
+
+- `SPEC.md`
+- `CHANGELOG.md`
+- `freqinout/gui/controlfreq_tab.py`
+- `freqinout/gui/main_window.py`
+- `freqinout/gui/qsy_helper.py`
+- `freqinout/gui/operator_history_tab.py`
+- `freqinout/gui/message_viewer_tab.py`
+- `freqinout/gui/stations_map_tab.py`
+- targeted tests under `tests/` as needed
+
+### Root Causes
+
+1. `ControlFreq` schedule strip formats `Next Change` from `current_scheduler_freq(...)`, which reports the current active schedule entry, not the post-transition entry.
+2. `ControlFreq` hero resync currently prefers the new scheduled target on scheduler transitions to hide short radio-poll lag, but that can pin the hero to the scheduled value after the radio has already changed or after hold/suspend transitions.
+3. Hold-duration controls currently synchronize the default preset selection across tabs, but they do not rewrite an already-active suspend-until time.
+4. Operator CSV import opens files with `encoding="utf-8"` instead of `encoding="utf-8-sig"`, leaving BOM noise on the first header field.
+5. Message file rendering has a fallback form parser for `.b2s` but not for `.k2s`, so `.k2s` without a custom template falls through to unknown-form rendering.
+6. Map marker inclusion applies group/region filters to link queries, but the marker loop for `show_all_stations` only applies recency and reachability filters. In addition, operator index group membership is rebuilt from `group1/2/3` only, ignoring the merged `groups` list already loaded from `groups_json`.
+
+### UX Decision: Active Hold Adjustment
+
+Decision:
+- Changing the hold-duration preset while a hold is already active will automatically adjust the active hold window immediately.
+
+Rationale:
+- The operator has already expressed new intent by changing the active hold preset.
+- Requiring a second confirmation click leaves the visible preset and the actual suspend-until state out of sync.
+- Automatic adjustment keeps all hold surfaces truthful, provided the countdown updates immediately.
+
+Adjustment rule:
+- When a hold is active and the operator changes the preset from any hold-duration combo, recompute suspend-until as `now + selected_minutes`.
+- Refresh all hold badges / countdowns immediately after the change.
+
+### Implementation Plan
+
+Phase 1: Spec and targeted behavior fixes
+- Add this spec section and document the automatic active-hold adjustment decision.
+
+Phase 2: ControlFreq / hold-state fixes
+- Add a helper that derives the next scheduled transition frequency from the scheduler preview instead of the current active entry.
+- Update `ControlFreq` `Next Change` to show the target frequency for the next entry/source transition.
+- Make the ControlFreq hero display prefer the actual active radio frequency whenever available, even across automatic scheduler changes and suspend/resume transitions.
+- Add a shared hold-adjust helper so changing a hold preset during an active hold rewrites the active suspend window to `now + selected_minutes`.
+- Wire that behavior through both `ControlFreq` and the main-window sidebar hold selectors.
+
+Phase 3: Import / message decoding fixes
+- Change `HF Operator History` CSV import to open files with `utf-8-sig`.
+- Extend NBEMS fallback rendering so `.k2s` files use the same form parsing path as `.b2s` when they are not custom-template / known-form payloads.
+
+Phase 4: Map group-filter fix
+- Apply group and region filters in the marker inclusion path, not only the link queries.
+- Rebuild operator group membership from both `group1/2/3` and parsed `groups` data so marker filtering uses the same merged group view as the station records.
+
+Phase 5: Verification and release notes
+- Update `CHANGELOG.md` for all user-visible fixes.
+- Run release baseline verification and targeted tests.
+
+### Acceptance Criteria
+
+- `ControlFreq` `Next Change` shows the upcoming target frequency, not the currently active scheduled frequency.
+- After an automatic schedule-driven QSY, the `ControlFreq` hero frequency matches the actual radio frequency once the active-frequency poll reflects it; it must not remain pinned to the prior scheduled value.
+- If a schedule hold is active and the operator changes the hold preset from either `ControlFreq` or the main sidebar, the active hold countdown and resume time update immediately to the new duration.
+- `HF Operator History` successfully imports a CSV saved by Excel as UTF-8 with BOM when the column names otherwise match the expected schema.
+- `.b2s` and `.k2s` message files render through the existing form-friendly parser path instead of generic unknown-form rendering when no better custom-template match exists.
+- With a map group filter selected, station markers outside that group do not appear on the map in station-display mode or link-display mode, except for explicit allowed exceptions such as the operator's own station when required by an active specialized filter.
+- Existing single-radio schedule behavior, startup without radio software, and settings persistence remain unchanged.
+
+### Failure Modes and Mitigations
+
+- Failure mode: `Next Change` target frequency becomes blank when the next transition is a source-only change.
+  - Mitigation: fall back to current formatting when no future target entry/frequency can be derived.
+- Failure mode: hero frequency flickers between scheduled and active values during control transitions.
+  - Mitigation: prefer active polled frequency when available; keep only short, bounded resync pulses after manual/scheduler actions.
+- Failure mode: changing the hold preset unexpectedly lengthens/shortens an active hold.
+  - Mitigation: update the countdown immediately so the new resume time is obvious; document the automatic-adjust rule in the spec/changelog.
+- Failure mode: BOM-tolerant import changes non-BOM CSV behavior.
+  - Mitigation: `utf-8-sig` remains compatible with normal UTF-8 files.
+- Failure mode: `.k2s` fallback parsing mis-renders signed/auth payloads.
+  - Mitigation: preserve custom-template and known-form detection first; only change the fallback branch.
+- Failure mode: map marker filtering hides legitimate stations because operator group metadata is incomplete.
+  - Mitigation: merge `groups_json`-derived groups with `group1/2/3` when rebuilding the operator index.
+
+### Verification
+
+Required commands:
+
+```powershell
+python tools/release_preflight.py
+python -m compileall freqinout
+powershell -ExecutionPolicy Bypass -File .\tools\freqinout-db.ps1 status
+```
+
+Targeted verification:
+- targeted tests covering:
+  - `ControlFreq` next-change target frequency formatting
+  - active hold adjustment when changing presets mid-hold
+  - UTF-8 BOM CSV import
+  - `.k2s` / `.b2s` fallback rendering
+  - map marker group-filter enforcement
+- manual checks:
+  - launch with no radio software running
+  - exercise `ControlFreq` automatic schedule change and verify hero frequency updates to actual radio frequency
+  - trigger `QSY+Hold`, change hold duration in both hold selectors, and confirm countdown changes immediately
+  - import an Excel UTF-8 CSV in `HF Operator History`
+  - open `.b2s` and `.k2s` files in `Messages`
+  - apply/remove map group filters and confirm only in-group stations remain visible
+
+### Rollback
+
+- Revert the follow-up fix pack changes in:
+  - `controlfreq_tab.py`
+  - `main_window.py`
+  - `qsy_helper.py`
+  - `operator_history_tab.py`
+  - `message_viewer_tab.py`
+  - `stations_map_tab.py`
+  - related tests and changelog entries
+- If a partial rollback is needed, prioritize reverting active-hold adjustment separately from the display-only fixes because it changes runtime behavior rather than presentation only.
+
+## 1.2.2 FLDigi RX Polling Optimization (Phase 1)
+
+### Problem
+
+During active FLDigi receive windows with strong, readable text, operators report FreqInOut CPU spikes approaching full-core saturation. The current FLDigi busy detector is intentionally log-only, but it still performs synchronous log resolution and payload classification on every caller path:
+
+- scheduler enforcement
+- main-window schedule status
+- `ControlFreq` status/hero refresh while the tab is open
+
+Because the same shared detector instance is queried multiple times per second from the UI thread, even incremental parsing work compounds under heavy RX traffic.
+
+### Goals
+
+- Reduce redundant FLDigi log parsing across repeated caller paths without changing busy/not-busy semantics.
+- Keep the detector compatible with both a configured log directory and a configured direct log-file path.
+- Lower repeated CPU cost for common readable-text traffic by memoizing token and timestamp work.
+- Add enough perf instrumentation to confirm whether the optimization materially reduces hot-path time in real operator runs.
+- Keep the phase low-risk and fully backward compatible for the 1.2.2 single-radio release branch.
+
+### Non-Goals
+
+- No redesign of FLDigi busy-detection heuristics or hold times.
+- No switch to XML-RPC or event-driven FLDigi integration in this phase.
+- No scheduler/UI timer re-architecture in this phase.
+- No background worker/thread move yet; this phase only reduces synchronous work and makes it measurable.
+
+### Impacted Files
+
+- `SPEC.md`
+- `CHANGELOG.md`
+- `freqinout/radio_interface/fldigi_status.py`
+- targeted tests under `tests/`
+
+### Root Causes
+
+1. `FldigiLogStatusClient.get_status()` can be called several times per second from different surfaces, but it currently reparses newly appended log data for each caller with no short-lived shared status cache.
+2. `_resolve_log_path()` can rescan the configured `fldigi*.log` directory repeatedly even when the configured path and selected newest log have not changed.
+3. `_gibberish_score()` repeatedly re-scores the same tokens across readable traffic bursts, and timestamp parsing repeats `strptime()` for identical minute-level timestamps.
+4. There is no focused perf instrumentation around FLDigi status resolution/update paths, so operator reports are hard to validate quantitatively.
+
+### Phase 1 Scope
+
+Phase 1 will implement only low-risk hot-path reductions:
+
+- add a short-lived shared status cache inside `FldigiLogStatusClient`
+- cache resolved log-path selection for a short TTL, including directory newest-log resolution
+- memoize token scoring and RX timestamp parsing
+- add perf spans around FLDigi status resolution/update work
+
+### Design Decisions
+
+Status cache:
+- Cache the computed `FldigiLogStatus` snapshot for a short TTL shared by all callers of the same detector instance.
+- Target behavior: repeated calls within roughly one second reuse the same result.
+
+Log-path cache:
+- Cache the resolved log path keyed by the current `fldigi_log_path` setting value.
+- If the configured setting changes, invalidate immediately.
+- If the setting remains the same, tolerate a short TTL before rescanning the directory for a newer `fldigi*.log`.
+
+Memoization:
+- Memoize per-token readability scoring on normalized lowercase tokens.
+- Memoize fixed-format RX timestamp parsing by raw timestamp string.
+- Keep caches bounded to avoid unbounded memory growth.
+
+Instrumentation:
+- Add perf spans for:
+  - overall `get_status()` miss path
+  - directory scan / path resolution when it occurs
+  - appended-log parsing/update work
+- Include compact metadata such as cache hit/miss state, bytes read, and lines processed.
+
+### Acceptance Criteria
+
+- Multiple caller paths that request FLDigi status within the status-cache TTL do not trigger repeated log parsing work.
+- Repeated log-path resolution with the same `fldigi_log_path` setting value reuses a cached result until the short path-cache TTL expires.
+- Repeated scoring of identical readable tokens and repeated parsing of identical RX minute timestamps use bounded memoization.
+- Perf logs include measurable spans for the FLDigi status miss/update path so local testing can compare before/after behavior.
+- Busy/not-busy behavior remains backward compatible for normal operator workflows, with at most a short bounded delay equal to the new status-cache TTL.
+
+### Failure Modes and Mitigations
+
+- Failure mode: FLDigi busy state lags a newly appended line by up to the status-cache TTL.
+  - Mitigation: keep the TTL short and scoped to one detector instance shared by all existing callers.
+- Failure mode: newest-log rollover is not picked up immediately when the configured path is a directory.
+  - Mitigation: keep log-path TTL short and invalidate immediately if the configured setting string changes.
+- Failure mode: memoization grows without bound.
+  - Mitigation: use bounded caches only.
+- Failure mode: instrumentation adds noticeable overhead or log noise.
+  - Mitigation: use existing perf-metrics helpers with minimum-duration thresholds and compact metadata.
+
+### Verification
+
+Required commands:
+
+```powershell
+python tools/release_preflight.py
+python -m compileall freqinout
+```
+
+Targeted verification:
+- targeted tests covering:
+  - shared status cache reuse
+  - resolved-log-path cache reuse and invalidation on setting change
+  - bounded token/timestamp memoization hits
+- manual check:
+  - configure an FLDigi log with active readable traffic and confirm CPU is reduced relative to prior behavior while scheduler/status behavior remains correct
+
+### Rollback
+
+- Revert the optimization changes in `freqinout/radio_interface/fldigi_status.py`
+- Revert related tests and changelog entries
+- If needed, retain instrumentation while reverting only the caches; the behavior change is isolated to cache TTLs and memoization
+
+## 1.2.2 Map Tooltip Activity Semantics and Shared Last-Seen Summary
+
+### Problem
+
+Operators need two distinct activity meanings on the `Map` tooltip:
+
+- `Last Seen`: the most recent time FreqInOut observed that callsign active on the air, even if the activity involved another station or a group.
+- `Last Contact`: the most recent time the local station directly received that callsign.
+
+The current `1.2.2` release worktree derives tooltip `last seen` from the filtered JS8 link view used for map rendering. In default `My Station` mode that path is origin-biased, so it can omit legitimate on-air activity and can also conflate overall presence with direct inbound contact. This is why calls such as `W9BVM` can appear on the map with recent JS8 traffic but show no tooltip `last seen`.
+
+### Goals
+
+- Make `Map` tooltip activity terminology match operator expectations.
+- Keep `Last Seen` independent from the current link-filter mode and based on overall observed activity.
+- Make `Last Contact` reflect only direct inbound contact to the configured local callsign.
+- Do not count unanswered outbound attempts as direct contact.
+- Keep `HF Operator History` aligned with the same overall activity authority used by the map.
+- Preserve UI responsiveness by avoiding repeated full-table JS8 aggregation on every map refresh.
+
+### Non-Goals
+
+- No redesign of the map link-visualization filters in this phase.
+- No new background worker for map activity calculation in this phase.
+- No attempt to infer direct contact from relays, groups, or unaddressed traffic beyond explicit direct inbound JS8 rows.
+- No schema redesign of `operator_checkins` beyond compatibility-safe last-seen handling needed for consistency.
+
+### Impacted Files
+
+- `SPEC.md`
+- `CHANGELOG.md`
+- `freqinout/core/operator_activity.py`
+- `freqinout/core/db_initializer.py`
+- `tools/db_schema.py`
+- `freqinout/core/checkins_db.py`
+- `freqinout/core/varac_ingest.py`
+- `freqinout/gui/operator_history_tab.py`
+- `freqinout/gui/stations_map_tab.py`
+- targeted tests under `tests/`
+
+### Design
+
+Shared overall activity summary:
+- Add a compact `js8_callsign_stats` table keyed by callsign with latest observed JS8 activity (`last_seen_ts`, `last_band`, `last_freq_hz`).
+- Populate it from `js8_links` once on initialization if the table is empty, then keep it updated on incremental JS8 ingest paths.
+- Load a shared operator activity summary that merges:
+  - JS8 overall last seen from `js8_callsign_stats`
+  - VarAC overall last seen from `varac_callsign_stats`
+  - legacy `operator_checkins.last_seen_utc` only as a fallback when no mode-specific evidence exists
+
+Direct contact summary:
+- Compute a separate direct-contact lookup from JS8 rows where `destination == my_call`.
+- Treat only inbound rows from the other station as direct contact.
+- Outbound attempts from `my_call` to another station must not populate `Last Contact`.
+
+UI semantics:
+- `Map` tooltip `Last Seen` and `Last Band` come from the shared overall activity summary.
+- `Map` tooltip `Last Contact` comes from the direct-contact lookup and is shown only when there is an inbound direct contact row.
+- `HF Operator History` shows the shared overall last-seen value, formatted date-only, instead of trusting `operator_checkins.last_seen_utc` alone.
+
+Performance:
+- Use the existing map query cache for the shared activity summary and direct-contact lookup.
+- Keep summary reads O(number of operators) instead of O(number of JS8 links) during steady-state map refresh.
+- Add indexes that support direct-contact lookups without degrading existing link queries.
+
+### Acceptance Criteria
+
+- A station with recent observed activity only as a destination in JS8 traffic still shows `Last Seen` on the map tooltip.
+- A station with only outbound attempts from `my_call` and no inbound direct row shows no `Last Contact`.
+- A station with an inbound direct JS8 row to `my_call` shows `Last Contact` using that direct row timestamp.
+- `HF Operator History` and the `Map` tooltip agree on the overall last-seen date for the same operator when both are reading the same production profile.
+- Existing map refreshes remain responsive, with no new full-table JS8 scan added to each render once the summary table has been initialized.
+
+### Failure Modes and Mitigations
+
+- Failure mode: existing profiles have `js8_links` populated but the new summary table is empty.
+  - Mitigation: rebuild `js8_callsign_stats` once on initialization or first summary load when `js8_links` has rows.
+- Failure mode: `operator_callsign` is blank, so direct-contact semantics are undefined.
+  - Mitigation: return an empty direct-contact lookup and omit `Last Contact`.
+- Failure mode: mixed legacy `last_seen_utc` formats still exist in `operator_checkins`.
+  - Mitigation: use timestamp-aware comparison helpers for compatibility writes and treat `operator_checkins` as fallback-only for display.
+- Failure mode: tooltip fields remain filter-relative in some paths.
+  - Mitigation: keep the new `Last Seen` and `Last Contact` lookups independent from the link-filter aggregation path.
+
+### Verification
+
+Required commands:
+
+```powershell
+python tools/release_preflight.py
+python -m compileall freqinout
+```
+
+Targeted verification:
+- targeted tests covering:
+  - overall last-seen summary includes destination-only activity
+  - direct-contact summary ignores outbound-only attempts
+  - operator-history display uses the shared overall summary
+- manual check with the production-loaded profile:
+  - confirm `W9BVM` shows `Last Seen`
+  - confirm `W9BVM` does not show `Last Contact`
+  - confirm a known direct-contact station shows both values appropriately
+
+### Rollback
+
+- Revert `freqinout/core/operator_activity.py` and related schema hooks
+- Revert `Map` and `HF Operator History` to the legacy tooltip/table activity paths
+- Revert the compatibility updates in `checkins_db.py` and `varac_ingest.py` if needed

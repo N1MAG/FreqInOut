@@ -256,10 +256,32 @@ NETS_TABLES: Dict[str, TableDef] = {
             freq_hz REAL,
             is_relay INTEGER DEFAULT 0,
             relay_via TEXT,
-            is_spotter INTEGER DEFAULT 0
+            is_spotter INTEGER DEFAULT 0,
+            last_seen_utc TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_js8_links_ts
             ON js8_links(ts);
+        CREATE INDEX IF NOT EXISTS idx_js8_links_origin_ts
+            ON js8_links(origin, ts);
+        CREATE INDEX IF NOT EXISTS idx_js8_links_destination_ts
+            ON js8_links(destination, ts);
+        CREATE INDEX IF NOT EXISTS idx_js8_links_band
+            ON js8_links(band);
+        """,
+    ),
+    "js8_callsign_stats": TableDef(
+        name="js8_callsign_stats",
+        db=NETS_DB,
+        description="Compact per-callsign JS8 activity summary used for responsive map/history last-seen lookups.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS js8_callsign_stats (
+            callsign TEXT PRIMARY KEY,
+            last_seen_ts REAL,
+            last_band TEXT,
+            last_freq_hz REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_js8_callsign_stats_last_seen
+            ON js8_callsign_stats(last_seen_ts);
         """,
     ),
     "varac_ingest_state": TableDef(

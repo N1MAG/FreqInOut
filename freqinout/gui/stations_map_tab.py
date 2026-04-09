@@ -53,6 +53,12 @@ except Exception:
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
+from freqinout.core.operator_activity import (
+    ensure_js8_callsign_stats,
+    load_js8_direct_contact_summary,
+    load_operator_activity_summary,
+    record_js8_activity_batch,
+)
 from freqinout.core.propagation_service import PropagationService
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.settings_manager import SettingsManager
@@ -1465,6 +1471,65 @@ class StationsMapTab(QWidget):
             except Exception:
                 pass
 
+    def _load_operator_activity_summary(self) -> Dict[str, Dict[str, object]]:
+        cache_key = ("operator_activity_summary",)
+        cached = self._query_cache_get(cache_key, ttl_sec=2.0)
+        if isinstance(cached, dict):
+            return {str(k): (dict(v) if isinstance(v, dict) else {}) for k, v in cached.items()}
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception as e:
+            log.debug("StationsMap: failed to resolve operator activity DB path: %s", e)
+            return {}
+        if not db_path.exists():
+            return {}
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            summary = load_operator_activity_summary(conn)
+        except Exception as e:
+            log.debug("StationsMap: failed to load operator activity summary: %s", e)
+            return {}
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+        self._query_cache_set(cache_key, {k: dict(v) for k, v in summary.items()})
+        return summary
+
+    def _load_js8_direct_contact_summary(self, my_call: str) -> Dict[str, Dict[str, object]]:
+        my_call = (my_call or "").strip().upper()
+        if not my_call:
+            return {}
+        cache_key = ("js8_direct_contact_summary", my_call)
+        cached = self._query_cache_get(cache_key, ttl_sec=2.0)
+        if isinstance(cached, dict):
+            return {str(k): (dict(v) if isinstance(v, dict) else {}) for k, v in cached.items()}
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception as e:
+            log.debug("StationsMap: failed to resolve direct-contact DB path: %s", e)
+            return {}
+        if not db_path.exists():
+            return {}
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            summary = load_js8_direct_contact_summary(conn, my_call)
+        except Exception as e:
+            log.debug("StationsMap: failed to load JS8 direct-contact summary: %s", e)
+            return {}
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+        self._query_cache_set(cache_key, {k: dict(v) for k, v in summary.items()})
+        return summary
+
     # ------------- Data helpers ------------- #
     def _load_operator_history(self):
         """
@@ -1736,12 +1801,46 @@ class StationsMapTab(QWidget):
                 elif state_abbr in CANADA_PROV_ABBR_FROM_NAME:
                     state_abbr = CANADA_PROV_ABBR_FROM_NAME[state_abbr]
             region = STATE_TO_FEMA_REGION.get(state_abbr)
-            group_set = {g.strip() for g in (r.get("group1") or "", r.get("group2") or "", r.get("group3") or "") if g.strip()}
+            group_set = {
+                str(g).strip().upper()
+                for g in (
+                    r.get("group1") or "",
+                    r.get("group2") or "",
+                    r.get("group3") or "",
+                    *(r.get("groups") or []),
+                )
+                if str(g).strip()
+            }
             idx[cs] = {"state": state_abbr, "region": region, "groups": group_set}
             groups.update(group_set)
         self.operator_index = idx
         self._operator_groups = sorted(groups)
         self._operator_regions = sorted({v.get("region") for v in idx.values() if v.get("region")})
+
+    def _marker_station_matches_filters(
+        self,
+        callsign: str,
+        *,
+        group_filter: str = "",
+        region_filter: str = "",
+        my_call: str = "",
+        allow_self: bool = False,
+    ) -> bool:
+        cs = (callsign or "").strip().upper()
+        if not cs:
+            return False
+        if allow_self and my_call and cs == my_call:
+            return True
+        meta = self.operator_index.get(cs, {})
+        group_key = (group_filter or "").strip().upper()
+        if group_key:
+            groups = {str(g).strip().upper() for g in (meta.get("groups") or set()) if str(g).strip()}
+            if group_key not in groups:
+                return False
+        region_key = (region_filter or "").strip().upper()
+        if region_key and str(meta.get("region") or "").strip().upper() != region_key:
+            return False
+        return True
 
     def _refresh_group_filter_options(self):
         current = self.group_filter_combo.currentData() if hasattr(self, "group_filter_combo") else None
@@ -4437,6 +4536,11 @@ class StationsMapTab(QWidget):
             lambda: self._load_varac_stats(max_age_sec=self.recency_seconds),
         )
         varac_all = _timed_map_call("map.load_varac_stats_all", lambda: self._load_varac_stats(max_age_sec=None))
+        activity_lookup = _timed_map_call("map.load_operator_activity_summary", self._load_operator_activity_summary)
+        direct_contact_lookup = _timed_map_call(
+            "map.load_js8_direct_contact_summary",
+            lambda: self._load_js8_direct_contact_summary(my_call),
+        )
         js8_all = _timed_map_call("map.load_js8_presence", self._load_js8_presence)
         fldigi_calls = _timed_map_call("map.load_fldigi_presence", self._load_fldigi_presence)
         spotter_status_lookup = _timed_map_call("map.load_spotter_station_status", self._load_spotter_station_status)
@@ -4476,6 +4580,14 @@ class StationsMapTab(QWidget):
             )
         for pt in self.stations:
             cs_upper = pt.callsign.upper()
+            if not self._marker_station_matches_filters(
+                cs_upper,
+                group_filter=group_filter,
+                region_filter=region_filter,
+                my_call=my_call,
+                allow_self=bool(self._links_active() or self._now_reachable_enabled),
+            ):
+                continue
             if self._now_reachable_enabled:
                 # Peer Sched Now is a strict station filter: only peers whose
                 # schedule alignment is in the computed reachable set (plus me).
@@ -4512,6 +4624,8 @@ class StationsMapTab(QWidget):
                 cs_upper = pt.callsign.upper()
                 stats = stats_lookup.get(cs_upper, {})
                 vstats = varac_stats.get(cs_upper, {})
+                activity = activity_lookup.get(cs_upper, {})
+                direct_contact = direct_contact_lookup.get(cs_upper, {})
                 modes: List[str] = []
                 if cs_upper in js8_all:
                     modes.append("JS8")
@@ -4556,13 +4670,16 @@ class StationsMapTab(QWidget):
                         "title": title,
                         "tooltip": tooltip_html,
                         "label": pt.callsign if self.show_callsigns else "",
-                        "last_seen": _fmt_ts(stats.get("last_seen", 0)),
+                        "last_seen": _fmt_ts(activity.get("overall_last_seen_ts", 0)),
                         "last_spotter": _fmt_ts(stats.get("last_spotter", 0)),
                         "direct_snr": stats.get("direct_snr"),
                         "avg_snr_excl_my": stats.get("avg_snr_excl_my"),
                         "direct_count": stats.get("direct_count", 0),
                         "avg_snr_count": stats.get("avg_snr_count", 0),
-                        "last_band": stats.get("last_band", ""),
+                        "last_band": activity.get("overall_last_band", "") or "",
+                        "last_contact": _fmt_ts(direct_contact.get("last_contact_ts", 0)),
+                        "last_contact_band": direct_contact.get("last_contact_band", "") or "",
+                        "last_contact_snr": direct_contact.get("last_contact_snr"),
                         "varac_last_seen": _fmt_ts(vstats.get("last_seen_ts", 0)),
                         "varac_last_band": vstats.get("last_band", ""),
                         "varac_avg_snr": vstats.get("avg_snr"),
@@ -5349,16 +5466,19 @@ function addGridLabels(res, level, bounds, maxLabels) {
           pane: 'stationsPane'
         }});
         stationsLayer.addLayer(circle);
-        const hasJS8 = m.last_seen || m.last_band || m.direct_snr !== undefined || m.avg_snr_excl_my !== undefined;
+        const hasJS8 = m.last_seen || m.last_band || m.last_contact || m.last_contact_band || m.direct_snr !== undefined || m.avg_snr_excl_my !== undefined;
         const hasVarAC = m.varac_last_seen || m.varac_last_band || m.varac_avg_snr !== undefined;
         const tipText = (m.tooltip || m.title || '') +
-          (hasJS8 || hasVarAC ? '<br/>Last Seen, Last Band, SNR' : '') +
-          (m.last_seen ? '<br/>JS8: ' + m.last_seen : '') +
-          (m.last_band ? '<br/>JS8: ' + m.last_band : '') +
-          (m.direct_snr !== undefined && m.direct_snr !== null ? '<br/>JS8 Direct SNR: ' + m.direct_snr.toFixed(1) : '') +
-          (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/>JS8 Avg SNR: ' + m.avg_snr_excl_my.toFixed(1) : '') +
-          (m.varac_last_seen ? '<br/>VarAC: ' + m.varac_last_seen : '') +
-          (m.varac_last_band ? '<br/>VarAC: ' + m.varac_last_band : '') +
+          (hasJS8 || hasVarAC ? '<br/>Activity' : '') +
+          (m.last_seen ? '<br/>Last Seen: ' + m.last_seen : '') +
+          (m.last_band ? '<br/>Last Band: ' + m.last_band : '') +
+          (m.last_contact ? '<br/>Last Contact: ' + m.last_contact : '') +
+          (m.last_contact_band ? '<br/>Last Contact Band: ' + m.last_contact_band : '') +
+          (m.last_contact_snr !== undefined && m.last_contact_snr !== null ? '<br/>Last Contact SNR: ' + m.last_contact_snr.toFixed(1) : '') +
+          (m.direct_snr !== undefined && m.direct_snr !== null ? '<br/>Direct SNR Avg: ' + m.direct_snr.toFixed(1) : '') +
+          (m.avg_snr_excl_my !== undefined && m.avg_snr_excl_my !== null ? '<br/>Direct SNR Avg (Excl My): ' + m.avg_snr_excl_my.toFixed(1) : '') +
+          (m.varac_last_seen ? '<br/>VarAC Last Seen: ' + m.varac_last_seen : '') +
+          (m.varac_last_band ? '<br/>VarAC Last Band: ' + m.varac_last_band : '') +
           (m.varac_avg_snr !== undefined && m.varac_avg_snr !== null ? '<br/>VarAC Avg SNR: ' + m.varac_avg_snr.toFixed(1) : '') +
           (m.spotter_status_label ? '<br/>SitRep: ' + m.spotter_status_label : '') +
           (m.spotter_status_source ? '<br/>Source: ' + m.spotter_status_source + (m.spotter_status_source_detail ? ' (' + m.spotter_status_source_detail + ')' : '') : '') +
@@ -6224,14 +6344,18 @@ class JS8LogLinkIndexer:
             pass
         try:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_ts ON js8_links(ts)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_origin_ts ON js8_links(origin, ts)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_destination_ts ON js8_links(destination, ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_origin_dest ON js8_links(origin, destination)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_band ON js8_links(band)")
         except Exception:
             pass
+        ensure_js8_callsign_stats(conn, rebuild_if_empty=True)
         conn.commit()
 
     def _clear_table(self, conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM js8_links")
+        conn.execute("DELETE FROM js8_callsign_stats")
         conn.commit()
 
     def _ensure_latest_ts(self, last_default: float = 0.0) -> float:
@@ -6390,10 +6514,13 @@ class JS8LogLinkIndexer:
         try:
             self._ensure_table(conn)
             payload = []
+            activity_rows = []
             for key, entry in agg.items():
                 pair, band = key
                 origin, dest = pair
                 avg_snr = entry["snr_sum"] / entry["snr_count"] if entry["snr_count"] else None
+                activity_rows.append((origin, entry["last_ts"], band, entry.get("freq_hz")))
+                activity_rows.append((dest, entry["last_ts"], band, entry.get("freq_hz")))
                 payload.append(
                     (
                         entry["last_ts"],
@@ -6423,6 +6550,7 @@ class JS8LogLinkIndexer:
                 """,
                 payload,
             )
+            record_js8_activity_batch(conn, activity_rows)
             # Update last_seen_utc per callsign using most recent ts from source logs
             try:
                 for cs, ts_val in last_seen.items():
@@ -6476,6 +6604,13 @@ class JS8LogLinkIndexer:
                 VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
                 """,
                 (ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso),
+            )
+            record_js8_activity_batch(
+                conn,
+                (
+                    (origin, ts_val, band, freq_hz),
+                    (destination, ts_val, band, freq_hz),
+                ),
             )
             try:
                 conn.execute("UPDATE js8_links SET last_seen_utc=? WHERE origin=? OR destination=?", (iso, origin, origin))
@@ -6548,6 +6683,7 @@ class JS8LogLinkIndexer:
         if not observations:
             return
         rows = []
+        activity_rows = []
         last_seen: Dict[str, float] = {}
         for ts, origin, destination, snr, freq_hz, is_spotter in observations:
             origin = (origin or "").strip().upper()
@@ -6558,6 +6694,8 @@ class JS8LogLinkIndexer:
             ts_val = float(ts or time.time())
             iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
             rows.append((ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso))
+            activity_rows.append((origin, ts_val, band, freq_hz))
+            activity_rows.append((destination, ts_val, band, freq_hz))
             if ts_val:
                 last_seen[origin] = max(last_seen.get(origin, 0), ts_val)
                 last_seen[destination] = max(last_seen.get(destination, 0), ts_val)
@@ -6579,6 +6717,7 @@ class JS8LogLinkIndexer:
                     """,
                     (ts_val, origin, destination, snr, band, freq_hz, int(bool(is_spotter)), iso),
                 )
+            record_js8_activity_batch(conn, activity_rows)
             try:
                 for cs, ts_val in last_seen.items():
                     iso = datetime.datetime.utcfromtimestamp(ts_val).strftime("%Y-%m-%d %H:%M:%S")
@@ -6595,4 +6734,3 @@ class JS8LogLinkIndexer:
             return None
         p = Path(path_txt)
         return p if p.exists() else None
-

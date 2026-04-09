@@ -303,6 +303,7 @@ class SchedulerEngine(QObject):
         self._source_reason_detail: str = ""
         self._next_source: str = "NONE"
         self._next_net_kind: str = ""
+        self._next_transition_freq_hz: Optional[int] = None
         self._next_transition_utc: Optional[datetime.datetime] = None
         self._next_transition_note: str = ""
         self._next_source_change: bool = False
@@ -1387,6 +1388,12 @@ class SchedulerEngine(QObject):
             freq_label = f"{freq_hz / 1_000_000:.3f}"
         source = self.current_source or "NONE"
         net_kind = self._source_net_kind(source, entry)
+        next_freq_hz = self._next_transition_freq_hz
+        next_freq_label = ""
+        next_freq_mhz = None
+        if isinstance(next_freq_hz, (int, float)) and next_freq_hz > 0:
+            next_freq_mhz = float(next_freq_hz) / 1_000_000.0
+            next_freq_label = f"{next_freq_mhz:.3f}"
         # Reuse computed off-schedule flags to avoid duplicate FLDigi mode/offset polls
         # in status-heavy UI refresh paths (sidebar + ControlFreq).
         fldigi_mode_off = bool(flags.get("mode"))
@@ -1418,6 +1425,8 @@ class SchedulerEngine(QObject):
             "source_reason_detail": str(self._source_reason_detail or ""),
             "next_source": str(self._next_source or "NONE"),
             "next_net_kind": str(self._next_net_kind or ""),
+            "next_frequency_label": next_freq_label,
+            "next_frequency_mhz": next_freq_mhz,
             "next_transition_utc": self._next_transition_utc,
             "next_transition_note": str(self._next_transition_note or ""),
             "next_source_change": bool(self._next_source_change),
@@ -2672,6 +2681,7 @@ class SchedulerEngine(QObject):
         self._next_transition_utc = self.next_change_utc
         self._next_source = source
         self._next_net_kind = self._source_net_kind(source, active_entry)
+        self._next_transition_freq_hz = None
         self._next_transition_note = ""
         self._next_source_change = False
         if isinstance(self.next_change_utc, datetime.datetime):
@@ -2689,6 +2699,11 @@ class SchedulerEngine(QObject):
                 )
                 self._next_source = next_source
                 self._next_net_kind = self._source_net_kind(next_source, next_entry)
+                self._next_transition_freq_hz = (
+                    self._parse_freq_hz((next_entry.get("frequency") or "").strip())
+                    if next_entry
+                    else None
+                )
                 self._next_source_change = next_source != source
                 cur_sig = self._entry_transition_signature(active_entry)
                 next_sig = self._entry_transition_signature(next_entry)

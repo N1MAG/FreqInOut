@@ -71,6 +71,7 @@ from freqinout.gui.qsy_helper import (
     selected_hold_duration,
     suspend_snapshot,
     suspend_schedule_hold,
+    set_active_hold_duration,
     resume_schedule_hold,
     set_hold_duration_default,
     set_suspend_until,
@@ -1354,6 +1355,9 @@ class MainWindow(QMainWindow):
             if snapshot.get("until") and not snapshot.get("active"):
                 resume_schedule_hold(self, self.settings)
                 return
+        if snapshot.get("active"):
+            set_active_hold_duration(self, self.settings, notify=False)
+            snapshot = suspend_snapshot(self.settings, allow_reload=False)
         self._dispatch_hold_snapshot(snapshot, force=True, sync_combos=True)
 
     def _set_scheduler_reasons(self, lines: list[str]) -> None:

@@ -8,6 +8,7 @@ from typing import Dict, Any, List
 
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.operator_activity import newer_timestamp_text
 
 TRAILING_CALL_NOISE_RE = re.compile(r"[^A-Z0-9/]+$")
 PORTABLE_SUFFIX_RE = re.compile(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$")
@@ -301,7 +302,7 @@ def upsert_checkins(entries: List[Dict[str, Any]]):
                 existing_role = ""
 
             first_out = first_seen or existing_first or last_seen
-            last_out = last_seen or existing_last
+            last_out = newer_timestamp_text(existing_last, last_seen)
             groups_json_out = groups_json if groups_json is not None else existing_groups_json
             trusted_out = (
                 int(trusted_raw)
@@ -331,7 +332,7 @@ def upsert_checkins(entries: List[Dict[str, Any]]):
                     group3=excluded.group3,
                     group_role=excluded.group_role,
                     first_seen_utc=COALESCE(operator_checkins.first_seen_utc, excluded.first_seen_utc),
-                    last_seen_utc=COALESCE(excluded.last_seen_utc, operator_checkins.last_seen_utc),
+                    last_seen_utc=excluded.last_seen_utc,
                     last_net=excluded.last_net,
                     last_role=excluded.last_role,
                     checkin_count=operator_checkins.checkin_count + 1,

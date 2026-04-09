@@ -1,6 +1,14 @@
 # Changelog
 
 ## [1.2.2]
+- Fixed: `ControlFreq` `Next Change` now shows the upcoming target frequency instead of repeating the currently active scheduled frequency.
+- Fixed: `ControlFreq` frequency hero now re-syncs to the actual active radio frequency more reliably after automatic schedule-driven QSY and other runtime frequency changes, while still preserving an intentional pending user selection.
+- Changed: When a schedule hold is already active, changing the hold-duration preset from `ControlFreq` or the main sidebar now immediately adjusts the active hold window instead of only changing the default for the next hold.
+- Fixed: `HF Operator History` CSV import now accepts UTF-8-with-BOM files such as Excel `CSV UTF-8` exports.
+- Fixed: `Messages` now treats `.k2s` fallback payloads like `.b2s` transport forms so received NBEMS transport files decode through the existing form-friendly renderer instead of generic unknown-form output.
+- Fixed: `Map` station markers now honor the selected group/region filters in station-display mode, and marker filtering now uses merged operator group membership from both `group1/2/3` and stored group lists.
+- Fixed: `Map` tooltip activity now distinguishes overall `Last Seen` from direct inbound `Last Contact`; overall last-seen data is shared with `HF Operator History`, and outbound-only attempts no longer appear as contact.
+- Changed: FLDigi log-based RX busy detection now uses a short shared status cache, short-lived resolved-log-path cache, bounded token/timestamp memoization, and targeted perf spans to reduce repeated CPU load during active readable-text receive bursts without changing busy-detection rules.
 - Fixed: Reliability Baseline Phase 1 now persists `FLRig XMLRPC Port`, applies the saved FLRig endpoint at startup, and aligns logger/DB-tool paths with the active runtime profile root so diagnostics and DB admin actions operate on the same profile the app is using.
 - Changed: Reliability Baseline Phase 2 moved background ingest work off the GUI thread into a serialized worker with duplicate-trigger suppression and worker-local settings objects, reducing startup/UI stall risk without changing ingest cadence.
 - Fixed: Reliability Baseline Phase 3 centralizes `operator_checkins` schema ownership in core DB code, upgrades legacy layouts during startup, removes destructive schema rebuild ownership from `Operator History`, and aligns DB tool schema metadata with the unified runtime schema.

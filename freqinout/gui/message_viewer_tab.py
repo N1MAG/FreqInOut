@@ -7056,6 +7056,10 @@ class MessageViewerTab(QWidget):
         return MessageViewerTab._format_fields_table(parsed, "Message")
 
     @staticmethod
+    def _is_transport_form_ext(ext: str) -> bool:
+        return str(ext or "").strip().lower() in {".b2s", ".k2s"}
+
+    @staticmethod
     def _match_field(text: str, pattern: str) -> str:
         m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
         if not m:
@@ -7691,7 +7695,7 @@ class MessageViewerTab(QWidget):
             ext = rec.path.suffix.lower()
             if ext in {".html", ".htm"}:
                 is_html = True
-            elif ext in {".b2s", ".k2s"}:
+            elif self._is_transport_form_ext(ext):
                 lower = data.lower()
                 form_name = self._extract_custom_form_name(data)
                 forms_dir = self._resolve_custom_forms_path()
@@ -7736,8 +7740,8 @@ class MessageViewerTab(QWidget):
                         log.debug("MessageViewer: parsed statrep form for %s", rec.path.name)
                         content = self._parse_statrep_content(data)
                         is_html = True
-                    elif ext == ".b2s":
-                        log.debug("MessageViewer: parsed b2s form for %s", rec.path.name)
+                    elif self._is_transport_form_ext(ext):
+                        log.debug("MessageViewer: parsed transport form for %s", rec.path.name)
                         content = self._parse_b2s_form_content(data)
                         is_html = True
                     else:

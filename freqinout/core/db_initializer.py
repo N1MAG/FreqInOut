@@ -12,6 +12,7 @@ from typing import Dict, Set
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.operator_activity import ensure_js8_callsign_stats
 from freqinout.core.varac_ingest import ensure_varac_local_tables
 
 # Base config directory (user-writable)
@@ -162,6 +163,10 @@ def _ensure_js8_links(conn: sqlite3.Connection) -> None:
     if "last_seen_utc" not in cols:
         cur.execute("ALTER TABLE js8_links ADD COLUMN last_seen_utc TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_ts ON js8_links(ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_origin_ts ON js8_links(origin, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_destination_ts ON js8_links(destination, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_js8_links_band ON js8_links(band)")
+    ensure_js8_callsign_stats(conn, rebuild_if_empty=True)
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:

@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
+from freqinout.core.operator_activity import format_utc_iso, load_operator_activity_summary
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.gui.theme import resolve_theme, button_style
@@ -911,6 +912,7 @@ class OperatorHistoryTab(QWidget):
                 cur = conn.cursor()
                 self._ensure_schema(conn)
                 self._ensure_sitrep_status_schema(conn)
+                activity_map = load_operator_activity_summary(conn)
                 sitrep_map = self._load_sitrep_status_map(cur)
                 cur.execute(
                     """
@@ -947,6 +949,9 @@ class OperatorHistoryTab(QWidget):
                     gj,
                     trusted,
                 ) in cur.fetchall():
+                    observed = activity_map.get((cs or "").strip().upper(), {})
+                    observed_last_ts = float(observed.get("overall_last_seen_ts", 0.0) or 0.0)
+                    observed_last_iso = format_utc_iso(observed_last_ts) if observed_last_ts > 0 else ""
                     groups = []
                     try:
                         if gj:
@@ -969,7 +974,8 @@ class OperatorHistoryTab(QWidget):
                             "groups": groups,
                             "group_role": self._normalize_group_role(role),
                             "first_seen_utc": _normalize_date_only(first_seen) or (first_seen or "").strip(),
-                            "last_seen_utc": _normalize_date_only(last_seen) or (last_seen or "").strip(),
+                            "last_seen_utc": _normalize_date_only(observed_last_iso) or _normalize_date_only(last_seen) or (last_seen or "").strip(),
+                            "_stored_last_seen_utc": (last_seen or "").strip(),
                             "checkin_count": int(count or 0),
                             "trusted": 1 if int(trusted or 0) else 0,
                             "sitrep_status_key": sitrep_map.get((cs or "").strip().upper(), {}).get("key", "unknown"),
@@ -1888,7 +1894,7 @@ class OperatorHistoryTab(QWidget):
         skipped = 0
         role_cleared = 0
         try:
-            with open(fn, newline="", encoding="utf-8") as f:
+            with open(fn, newline="", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
                 headers = [h.lower() for h in reader.fieldnames or []]
                 required = {"callsign"}
