@@ -25,6 +25,10 @@ class _ManagedEntry:
     callsign: str
     name: str
     state: str
+    group1: str
+    group2: str
+    group3: str
+    role: str
 
 
 def _normalize_callsign(value: object) -> str:
@@ -32,11 +36,20 @@ def _normalize_callsign(value: object) -> str:
 
 
 def _normalize_name(value: object) -> str:
-    return " ".join(str(value or "").strip().split())
+    txt = " ".join(str(value or "").strip().split())
+    return txt.replace('"', "").replace(",", " ").replace("/", " ").strip()
 
 
 def _normalize_state(value: object) -> str:
-    return str(value or "").strip().upper()
+    return str(value or "").strip().replace('"', "").replace("/", " ").upper()
+
+
+def _normalize_group(value: object) -> str:
+    return str(value or "").strip().replace('"', "").replace("/", " ").upper()
+
+
+def _normalize_role(value: object) -> str:
+    return str(value or "").strip().replace('"', "").replace("/", " ").upper()
 
 
 def resolve_varac_callsign_tags_path(settings) -> Optional[Path]:
@@ -53,7 +66,10 @@ def resolve_varac_callsign_tags_path(settings) -> Optional[Path]:
 
 
 def _format_managed_entry(entry: _ManagedEntry) -> str:
-    return f'"{entry.callsign} / {entry.name} / {entry.state}"'
+    return (
+        f"{entry.callsign},{entry.name} / {entry.state} / "
+        f"{entry.group1} / {entry.group2} / {entry.group3} / {entry.role}"
+    )
 
 
 def _parse_managed_entry(line: str) -> Optional[_ManagedEntry]:
@@ -63,14 +79,39 @@ def _parse_managed_entry(line: str) -> Optional[_ManagedEntry]:
     if stripped.startswith('"') and stripped.endswith('"') and len(stripped) >= 2:
         stripped = stripped[1:-1].strip()
     parts = [part.strip() for part in stripped.split("/")]
-    if len(parts) != 3:
+    if len(parts) == 3:
+        callsign = _normalize_callsign(parts[0])
+        name = _normalize_name(parts[1])
+        state = _normalize_state(parts[2])
+        group1 = ""
+        group2 = ""
+        group3 = ""
+        role = ""
+    elif len(parts) == 6:
+        head = parts[0]
+        if "," not in head:
+            return None
+        raw_callsign, raw_name = head.split(",", 1)
+        callsign = _normalize_callsign(raw_callsign)
+        name = _normalize_name(raw_name)
+        state = _normalize_state(parts[1])
+        group1 = _normalize_group(parts[2])
+        group2 = _normalize_group(parts[3])
+        group3 = _normalize_group(parts[4])
+        role = _normalize_role(parts[5])
+    else:
         return None
-    callsign = _normalize_callsign(parts[0])
-    name = _normalize_name(parts[1])
-    state = _normalize_state(parts[2])
     if not callsign or not name or not state:
         return None
-    return _ManagedEntry(callsign=callsign, name=name, state=state)
+    return _ManagedEntry(
+        callsign=callsign,
+        name=name,
+        state=state,
+        group1=group1,
+        group2=group2,
+        group3=group3,
+        role=role,
+    )
 
 
 def _build_managed_entries(rows: Iterable[Mapping[str, object]]) -> dict[str, _ManagedEntry]:
@@ -79,9 +120,21 @@ def _build_managed_entries(rows: Iterable[Mapping[str, object]]) -> dict[str, _M
         callsign = _normalize_callsign(row.get("callsign"))
         name = _normalize_name(row.get("name"))
         state = _normalize_state(row.get("state"))
+        group1 = _normalize_group(row.get("group1"))
+        group2 = _normalize_group(row.get("group2"))
+        group3 = _normalize_group(row.get("group3"))
+        role = _normalize_role(row.get("group_role") or row.get("role"))
         if not callsign or not name or not state:
             continue
-        entries[callsign] = _ManagedEntry(callsign=callsign, name=name, state=state)
+        entries[callsign] = _ManagedEntry(
+            callsign=callsign,
+            name=name,
+            state=state,
+            group1=group1,
+            group2=group2,
+            group3=group3,
+            role=role,
+        )
     return entries
 
 
@@ -188,10 +241,18 @@ def sync_varac_callsign_tags_from_db(db_path: Path, settings) -> VarACCallsignTa
     conn = sqlite3.connect(str(db_path))
     try:
         rows = [
-            {"callsign": callsign, "name": name, "state": state}
-            for callsign, name, state in conn.execute(
+            {
+                "callsign": callsign,
+                "name": name,
+                "state": state,
+                "group1": group1,
+                "group2": group2,
+                "group3": group3,
+                "group_role": group_role,
+            }
+            for callsign, name, state, group1, group2, group3, group_role in conn.execute(
                 """
-                SELECT callsign, name, state
+                SELECT callsign, name, state, group1, group2, group3, group_role
                 FROM operator_checkins
                 ORDER BY callsign COLLATE NOCASE
                 """

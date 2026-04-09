@@ -27,18 +27,18 @@ def test_varac_callsign_tag_sync_reconciles_duplicates_and_preserves_unmanaged_l
     tags_path.write_text(
         "# keep me\n"
         '"K1AAA / Old Name / TX"\n'
-        '"K1AAA / Duplicate / WY"\n'
+        'K1AAA,Duplicate / WY / OLD1 / OLD2 / OLD3 / NCS\n'
         "custom=true\n"
-        '"K9ZZZ / Remove Me / CO"\n',
+        'K9ZZZ,Remove Me / CO / G1 / G2 / G3 / OPS\n',
         encoding="utf-8",
     )
 
     result = sync_varac_callsign_tags_file(
         tags_path,
         [
-            {"callsign": "k1aaa", "name": "New Name", "state": "co"},
-            {"callsign": "k2bbb", "name": "Jane Doe", "state": "wy"},
-            {"callsign": "k3ccc", "name": "", "state": "nm"},
+            {"callsign": "k1aaa", "name": "New Name", "state": "co", "group1": "magnet", "group2": "sitrep", "group3": "", "group_role": "ops"},
+            {"callsign": "k2bbb", "name": "Jane Doe", "state": "wy", "group1": "amrron", "group2": "", "group3": "ares", "group_role": "liaison"},
+            {"callsign": "k3ccc", "name": "", "state": "nm", "group1": "foo", "group2": "", "group3": "", "group_role": "ops"},
         ],
     )
 
@@ -51,9 +51,9 @@ def test_varac_callsign_tag_sync_reconciles_duplicates_and_preserves_unmanaged_l
 
     assert tags_path.read_text(encoding="utf-8").splitlines() == [
         "# keep me",
-        '"K1AAA / New Name / CO"',
+        "K1AAA,New Name / CO / MAGNET / SITREP /  / OPS",
         "custom=true",
-        '"K2BBB / Jane Doe / WY"',
+        "K2BBB,Jane Doe / WY / AMRRON /  / ARES / LIAISON",
     ]
 
 

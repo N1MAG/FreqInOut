@@ -9313,3 +9313,23 @@ Acceptance:
 
 Rollback:
 - Revert the CommStat sitrep core/schema additions and the sitrep UI surface changes together.
+
+### 1.189 Addendum (2026-04-09): VarAC Callsign Tag Sync File Format
+
+Problem:
+- VarAC callsign-tag sync currently writes the older quoted `CALLSIGN / NAME / STATE` format.
+- The required VarAC tag format for this release is:
+  - `CALLSIGN,NAME / STATE / GROUP1 / GROUP2 / GROUP3 / ROLE`
+- No quotes are allowed in managed lines.
+
+Release-safe scope:
+- Update the `HF Operator History -> Sync to VarAC` path and automatic Operator History reconciliation writes to emit the unquoted six-field format.
+- Include `group1`, `group2`, `group3`, and `group_role` from `operator_checkins`.
+- Continue to require known `callsign`, `name`, and `state` before creating a managed entry.
+- Keep the parser backward-compatible with the prior quoted three-field format so existing files reconcile cleanly on first sync.
+
+Acceptance:
+- Managed lines are written as `CALLSIGN,NAME / STATE / GROUP1 / GROUP2 / GROUP3 / ROLE`.
+- Managed lines contain no quote characters.
+- Duplicate callsigns are collapsed to one managed line.
+- If `state`, group fields, or role change in `HF Operator History`, the synced VarAC line is updated on the next sync.
