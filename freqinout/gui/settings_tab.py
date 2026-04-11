@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import datetime
+import json
 import platform
 import subprocess
 import sqlite3
@@ -10,7 +11,7 @@ import time
 import zipfile
 import re
 from pathlib import Path
-from typing import Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 
 from PySide6.QtCore import Qt, QTimer, Signal, QSize
 from PySide6.QtGui import QIntValidator, QColor, QBrush, QPainter, QPen
@@ -69,6 +70,11 @@ from freqinout.core.hash_tools import (
     normalize_hash_hex,
     normalize_trusted_hash_entries,
 )
+from freqinout.core.multi_radio_store import (
+    DEFAULT_OPERATING_NAME,
+    MultiRadioStore,
+    SUPPORTED_RUNTIME_CONTROL_BACKENDS,
+)
 from freqinout.core.mode_utils import normalize_operating_group_mode, voice_sideband_for_band
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
@@ -124,6 +130,22 @@ TIMEZONE_CHOICES = [
     "America/Chicago",
     "America/Denver",
     "America/Los_Angeles",
+]
+
+DEVICE_CLASS_OPTIONS = [
+    ("Transceiver", "tx_rx"),
+    ("Observer / SDR", "observer"),
+    ("Gateway", "gateway"),
+]
+
+OPERATING_SCHEDULER_MODE_OPTIONS = [
+    ("Full", "full"),
+    ("Simple", "simple"),
+]
+
+OPERATING_ASSIGNMENT_STATE_OPTIONS = [
+    ("Active", "active"),
+    ("Temporary Override", "temporary_override"),
 ]
 
 FLDIGI_MODE_OPTIONS = [
@@ -325,6 +347,7 @@ class SettingsTab(QWidget):
     """
 
     settings_saved = Signal()
+    device_profiles_changed = Signal()
     local_net_profiles_changed = Signal()
     open_logs_requested = Signal()
     log_level_changed = Signal(str)
@@ -341,6 +364,7 @@ class SettingsTab(QWidget):
         self.loading_label: QLabel | None = None
         self._status_service = SoftwareStatusService(self.settings)
         self.launch_orchestrator = LaunchOrchestrator(self.settings, self)
+        self.multi_radio_store = MultiRadioStore()
 
         self.PROGRAMS: Dict[str, Dict[str, str]] = {
             "FLRig": {"setting_key": "path_flrig", "autostart_key": "autostart_flrig"},
@@ -356,6 +380,12 @@ class SettingsTab(QWidget):
         self.js8_groups_edits: List[QLineEdit] = []
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
+        self.device_profiles: List[Dict[str, Any]] = []
+        self.operating_profiles: List[Dict[str, Any]] = []
+        self.device_assignments: List[Dict[str, Any]] = []
+        self.varac_clusters: List[Dict[str, Any]] = []
+        self.varac_cluster_members: List[Dict[str, Any]] = []
+        self.active_profile_swap: Optional[Dict[str, Any]] = None
         self.operating_groups: List[Dict[str, str]] = []
         self.local_net_profiles: List[Dict[str, str]] = []
         self._accordion_groups: List[QGroupBox] = []
@@ -364,6 +394,11 @@ class SettingsTab(QWidget):
         self._launch_items_cache: List[Dict[str, object]] = []
         self._launch_visible_names: List[str] = []
         self._launch_table_loading = False
+        self._device_profiles_table_loading = False
+        self._operating_profiles_table_loading = False
+        self._device_assignments_table_loading = False
+        self._varac_clusters_table_loading = False
+        self._varac_cluster_members_table_loading = False
         self._gpg_keys_table_loading = False
         self._gpg_keys_loaded = False
         self._gpg_keys_auto_probe_attempted = False
@@ -493,7 +528,7 @@ class SettingsTab(QWidget):
         ctrl_row.addSpacing(12)
         ctrl_row.addWidget(QLabel("Frequency Control:"))
         self.control_combo = QComboBox()
-        self.control_combo.addItems(["FLRig", "JS8Call", "Manual"])
+        self.control_combo.addItems(["FLRig", "RIGCTLD", "JS8Call", "Manual"])
         ctrl_row.addWidget(self.control_combo)
         ctrl_row.addSpacing(12)
         self.use_scheduler_chk = QCheckBox("Use FreqInOut Scheduler")
@@ -658,6 +693,7 @@ class SettingsTab(QWidget):
         status_items = [
             ("JS8Call_API", "JS8"),
             ("FLRig", "FLRig"),
+            ("RigCtlD", "RigCtlD"),
             ("FLDigi", "FLDigi"),
             ("FLMsg", "FLMsg"),
             ("FLAmp", "FLAmp"),
@@ -716,6 +752,309 @@ class SettingsTab(QWidget):
         self._set_section_health_key(op_group, "freqinout")
         op_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(op_group)
+
+        device_group = QGroupBox("Device Profiles")
+        device_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        device_layout = QVBoxLayout()
+        device_layout.setSpacing(6)
+        device_group.setLayout(device_layout)
+
+        self.device_profiles_hint_label = QLabel()
+        self.device_profiles_hint_label.setWordWrap(True)
+        device_layout.addWidget(self.device_profiles_hint_label)
+
+        device_actions = QHBoxLayout()
+        self.add_device_profile_btn = QPushButton("Add Profile")
+        self.add_device_profile_btn.clicked.connect(self._add_device_profile)
+        self.edit_device_profile_btn = QPushButton("Edit Selected")
+        self.edit_device_profile_btn.clicked.connect(self._edit_device_profile)
+        self.activate_device_profile_btn = QPushButton("Activate")
+        self.activate_device_profile_btn.clicked.connect(self._activate_selected_device_profiles)
+        self.deactivate_device_profile_btn = QPushButton("Deactivate")
+        self.deactivate_device_profile_btn.clicked.connect(self._deactivate_selected_device_profiles)
+        self.set_active_device_profile_btn = QPushButton("Set Station Default")
+        self.set_active_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)
+        self.delete_device_profile_btn = QPushButton("Delete Selected")
+        self.delete_device_profile_btn.clicked.connect(self._delete_device_profiles)
+        device_actions.addStretch()
+        device_actions.addWidget(self.add_device_profile_btn)
+        device_actions.addWidget(self.edit_device_profile_btn)
+        device_actions.addWidget(self.activate_device_profile_btn)
+        device_actions.addWidget(self.deactivate_device_profile_btn)
+        device_actions.addWidget(self.set_active_device_profile_btn)
+        device_actions.addWidget(self.delete_device_profile_btn)
+        device_layout.addLayout(device_actions)
+
+        self.device_profiles_table = QTableWidget(0, 11)
+        self.device_profiles_table.setHorizontalHeaderLabels(
+            [
+                "Selected",
+                "Active",
+                "Default",
+                "Name",
+                "Backend",
+                "Deploy",
+                "Endpoint",
+                "Launch",
+                "PTT Group",
+                "Class",
+                "Notes",
+            ]
+        )
+        self.device_profiles_table.verticalHeader().setVisible(False)
+        self.device_profiles_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.device_profiles_table.setSelectionMode(QTableWidget.NoSelection)
+        self.device_profiles_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.device_profiles_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.device_profiles_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        device_header = self.device_profiles_table.horizontalHeader()
+        device_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(6, QHeaderView.Stretch)
+        device_header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(9, QHeaderView.ResizeToContents)
+        device_header.setSectionResizeMode(10, QHeaderView.Stretch)
+        device_layout.addWidget(self.device_profiles_table)
+
+        device_container = QWidget()
+        device_container.setLayout(device_layout)
+        device_group = self._make_collapsible_group("Device Profiles", device_container, checked=True, fit_content=False)
+        self._register_collapsible_group(device_group, self._summary_device_profiles)
+        device_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(device_group)
+
+        operating_group = QGroupBox("Operating Profiles")
+        operating_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        operating_layout = QVBoxLayout()
+        operating_layout.setSpacing(6)
+        operating_group.setLayout(operating_layout)
+
+        self.operating_profiles_hint_label = QLabel()
+        self.operating_profiles_hint_label.setWordWrap(True)
+        operating_layout.addWidget(self.operating_profiles_hint_label)
+
+        operating_actions = QHBoxLayout()
+        self.add_operating_profile_btn = QPushButton("Add Profile")
+        self.add_operating_profile_btn.clicked.connect(self._add_operating_profile)
+        self.edit_operating_profile_btn = QPushButton("Edit Selected")
+        self.edit_operating_profile_btn.clicked.connect(self._edit_operating_profile)
+        self.delete_operating_profile_btn = QPushButton("Delete Selected")
+        self.delete_operating_profile_btn.clicked.connect(self._delete_operating_profiles)
+        operating_actions.addStretch()
+        operating_actions.addWidget(self.add_operating_profile_btn)
+        operating_actions.addWidget(self.edit_operating_profile_btn)
+        operating_actions.addWidget(self.delete_operating_profile_btn)
+        operating_layout.addLayout(operating_actions)
+
+        self.operating_profiles_table = QTableWidget(0, 6)
+        self.operating_profiles_table.setHorizontalHeaderLabels(
+            [
+                "Selected",
+                "Enabled",
+                "Name",
+                "Scheduler",
+                "Shell",
+                "Description",
+            ]
+        )
+        self.operating_profiles_table.verticalHeader().setVisible(False)
+        self.operating_profiles_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.operating_profiles_table.setSelectionMode(QTableWidget.NoSelection)
+        self.operating_profiles_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.operating_profiles_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.operating_profiles_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        operating_header = self.operating_profiles_table.horizontalHeader()
+        operating_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        operating_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        operating_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        operating_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        operating_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        operating_header.setSectionResizeMode(5, QHeaderView.Stretch)
+        operating_layout.addWidget(self.operating_profiles_table)
+
+        operating_container = QWidget()
+        operating_container.setLayout(operating_layout)
+        operating_group = self._make_collapsible_group("Operating Profiles", operating_container, checked=True, fit_content=False)
+        self._register_collapsible_group(operating_group, self._summary_operating_profiles)
+        operating_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(operating_group)
+
+        assignments_group = QGroupBox("Device Assignments")
+        assignments_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        assignments_layout = QVBoxLayout()
+        assignments_layout.setSpacing(6)
+        assignments_group.setLayout(assignments_layout)
+
+        self.device_assignments_hint_label = QLabel()
+        self.device_assignments_hint_label.setWordWrap(True)
+        assignments_layout.addWidget(self.device_assignments_hint_label)
+
+        assignments_actions = QHBoxLayout()
+        self.assign_device_operating_profile_btn = QPushButton("Assign / Override...")
+        self.assign_device_operating_profile_btn.clicked.connect(self._assign_operating_profile_to_selected_devices)
+        self.temporary_profile_swap_btn = QPushButton("Temporary Swap...")
+        self.temporary_profile_swap_btn.clicked.connect(self._start_temporary_profile_swap)
+        self.restore_profile_swap_btn = QPushButton("Restore Swap")
+        self.restore_profile_swap_btn.clicked.connect(self._restore_temporary_profile_swap)
+        self.restore_device_operating_profile_btn = QPushButton("Restore Default")
+        self.restore_device_operating_profile_btn.clicked.connect(self._restore_default_operating_profile_for_selected_devices)
+        assignments_actions.addStretch()
+        assignments_actions.addWidget(self.assign_device_operating_profile_btn)
+        assignments_actions.addWidget(self.temporary_profile_swap_btn)
+        assignments_actions.addWidget(self.restore_profile_swap_btn)
+        assignments_actions.addWidget(self.restore_device_operating_profile_btn)
+        assignments_layout.addLayout(assignments_actions)
+
+        self.device_assignments_table = QTableWidget(0, 8)
+        self.device_assignments_table.setHorizontalHeaderLabels(
+            [
+                "Selected",
+                "Active",
+                "Default",
+                "Device",
+                "Operating Profile",
+                "State",
+                "Policy",
+                "Endpoint",
+            ]
+        )
+        self.device_assignments_table.verticalHeader().setVisible(False)
+        self.device_assignments_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.device_assignments_table.setSelectionMode(QTableWidget.NoSelection)
+        self.device_assignments_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.device_assignments_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.device_assignments_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        assignments_header = self.device_assignments_table.horizontalHeader()
+        assignments_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        assignments_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        assignments_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        assignments_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        assignments_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        assignments_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        assignments_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        assignments_header.setSectionResizeMode(7, QHeaderView.Stretch)
+        assignments_layout.addWidget(self.device_assignments_table)
+
+        assignments_container = QWidget()
+        assignments_container.setLayout(assignments_layout)
+        assignments_group = self._make_collapsible_group("Device Assignments", assignments_container, checked=True, fit_content=False)
+        self._register_collapsible_group(assignments_group, self._summary_device_assignments)
+        assignments_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(assignments_group)
+
+        varac_clusters_group = QGroupBox("VarAC Clusters")
+        varac_clusters_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        varac_clusters_layout = QVBoxLayout()
+        varac_clusters_layout.setSpacing(6)
+        varac_clusters_group.setLayout(varac_clusters_layout)
+        self.varac_clusters_hint_label = QLabel()
+        self.varac_clusters_hint_label.setWordWrap(True)
+        varac_clusters_layout.addWidget(self.varac_clusters_hint_label)
+        varac_clusters_row = QHBoxLayout()
+        self.add_varac_cluster_btn = QPushButton("Add Cluster")
+        self.add_varac_cluster_btn.clicked.connect(self._add_varac_cluster)
+        self.edit_varac_cluster_btn = QPushButton("Edit Selected")
+        self.edit_varac_cluster_btn.clicked.connect(self._edit_varac_cluster)
+        self.delete_varac_cluster_btn = QPushButton("Delete Selected")
+        self.delete_varac_cluster_btn.clicked.connect(self._delete_varac_clusters)
+        varac_clusters_row.addStretch()
+        varac_clusters_row.addWidget(self.add_varac_cluster_btn)
+        varac_clusters_row.addWidget(self.edit_varac_cluster_btn)
+        varac_clusters_row.addWidget(self.delete_varac_cluster_btn)
+        varac_clusters_layout.addLayout(varac_clusters_row)
+        self.varac_clusters_table = QTableWidget(0, 8)
+        self.varac_clusters_table.setHorizontalHeaderLabels(
+            [
+                "Selected",
+                "Name",
+                "Cluster ID",
+                "Shared DB",
+                "Members",
+                "Gateway",
+                "PTT Lock",
+                "Refresh",
+            ]
+        )
+        self.varac_clusters_table.verticalHeader().setVisible(False)
+        self.varac_clusters_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.varac_clusters_table.setSelectionMode(QTableWidget.NoSelection)
+        self.varac_clusters_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.varac_clusters_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.varac_clusters_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        varac_clusters_header = self.varac_clusters_table.horizontalHeader()
+        varac_clusters_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(3, QHeaderView.Stretch)
+        varac_clusters_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        varac_clusters_header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        varac_clusters_layout.addWidget(self.varac_clusters_table)
+        varac_clusters_container = QWidget()
+        varac_clusters_container.setLayout(varac_clusters_layout)
+        varac_clusters_group = self._make_collapsible_group("VarAC Clusters", varac_clusters_container, checked=True, fit_content=False)
+        self._register_collapsible_group(varac_clusters_group, self._summary_varac_clusters)
+        varac_clusters_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(varac_clusters_group)
+
+        varac_members_group = QGroupBox("VarAC Memberships")
+        varac_members_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        varac_members_layout = QVBoxLayout()
+        varac_members_layout.setSpacing(6)
+        varac_members_group.setLayout(varac_members_layout)
+        self.varac_members_hint_label = QLabel()
+        self.varac_members_hint_label.setWordWrap(True)
+        varac_members_layout.addWidget(self.varac_members_hint_label)
+        varac_members_row = QHBoxLayout()
+        self.add_varac_membership_btn = QPushButton("Add / Edit Selected")
+        self.add_varac_membership_btn.clicked.connect(self._add_or_edit_varac_membership)
+        self.remove_varac_membership_btn = QPushButton("Remove Selected")
+        self.remove_varac_membership_btn.clicked.connect(self._remove_varac_memberships)
+        varac_members_row.addStretch()
+        varac_members_row.addWidget(self.add_varac_membership_btn)
+        varac_members_row.addWidget(self.remove_varac_membership_btn)
+        varac_members_layout.addLayout(varac_members_row)
+        self.varac_members_table = QTableWidget(0, 8)
+        self.varac_members_table.setHorizontalHeaderLabels(
+            [
+                "Selected",
+                "Cluster",
+                "Device",
+                "Runtime",
+                "Class",
+                "Instance",
+                "Enabled",
+                "Gateway",
+            ]
+        )
+        self.varac_members_table.verticalHeader().setVisible(False)
+        self.varac_members_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.varac_members_table.setSelectionMode(QTableWidget.NoSelection)
+        self.varac_members_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.varac_members_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.varac_members_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        varac_members_header = self.varac_members_table.horizontalHeader()
+        varac_members_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        varac_members_header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        varac_members_layout.addWidget(self.varac_members_table)
+        varac_members_container = QWidget()
+        varac_members_container.setLayout(varac_members_layout)
+        varac_members_group = self._make_collapsible_group("VarAC Memberships", varac_members_container, checked=True, fit_content=False)
+        self._register_collapsible_group(varac_members_group, self._summary_varac_memberships)
+        varac_members_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(varac_members_group)
 
         logging_container = QWidget()
         logging_container_layout = QVBoxLayout()
@@ -2241,7 +2580,7 @@ class SettingsTab(QWidget):
                 self.settings._data = data  # type: ignore[attr-defined]
 
         ctrl = data.get("control_via", "FLRig") or "FLRig"
-        allowed_ctrl = ["FLRig", "JS8Call", "Manual"]
+        allowed_ctrl = ["FLRig", "RIGCTLD", "JS8Call", "Manual"]
         if ctrl not in allowed_ctrl:
             ctrl = "FLRig"
         self.control_combo.setCurrentText(ctrl)
@@ -2473,9 +2812,13 @@ class SettingsTab(QWidget):
         launch_all = bool(self.settings.get("launch_control_enabled", data.get("launch_control_enabled", True)))
         self.launch_all_with_startup_chk.setChecked(launch_all)
         self._refresh_launch_control_table()
+        self._refresh_multi_radio_tables(refresh_section_titles=False)
 
         log.info("SettingsTab: settings loaded.")
         self._update_launch_control_buttons()
+        self._update_device_profile_action_buttons()
+        self._update_operating_profile_action_buttons()
+        self._update_device_assignment_action_buttons()
         self._update_op_group_action_buttons()
         self._update_local_net_action_buttons()
         self._loading_settings = False
@@ -3418,6 +3761,2281 @@ class SettingsTab(QWidget):
         theme = resolve_theme(self.settings)
         self.save_btn.setStyleSheet(button_style(role, theme))
 
+    # ---------- Device Profiles ---------- #
+
+    def _summary_device_profiles(self) -> str:
+        count = len(self.device_profiles)
+        active_count = len(
+            [
+                row
+                for row in self.device_profiles
+                if isinstance(row, dict) and int(row.get("runtime_active", 0) or 0) == 1
+            ]
+        )
+        primary = next(
+            (
+                str(row.get("name", "") or "").strip()
+                for row in self.device_profiles
+                if isinstance(row, dict) and int(row.get("runtime_primary", 0) or 0) == 1
+            ),
+            "",
+        )
+        observer_count = len(
+            [
+                row
+                for row in self.device_profiles
+                if isinstance(row, dict) and str(row.get("device_class", "") or "").strip().lower() == "observer"
+            ]
+        )
+        if count <= 0:
+            return "No device profiles"
+        if primary:
+            return (
+                f"{count} profile{'s' if count != 1 else ''}, "
+                f"{active_count} active, {observer_count} observer{'s' if observer_count != 1 else ''}, default {primary}"
+            )
+        return f"{count} profile{'s' if count != 1 else ''}"
+
+    def _selected_device_profile_ids(self) -> List[int]:
+        if not hasattr(self, "device_profiles_table"):
+            return []
+        selected: List[int] = []
+        for row in range(self.device_profiles_table.rowCount()):
+            wrapper = self.device_profiles_table.cellWidget(row, 0)
+            chk = wrapper.findChild(QCheckBox) if wrapper is not None else None
+            if chk is None or not chk.isChecked():
+                continue
+            try:
+                selected.append(int(chk.property("device_profile_id") or 0))
+            except Exception:
+                continue
+        return selected
+
+    def _selected_device_profiles(self) -> List[Dict[str, Any]]:
+        selected_ids = set(self._selected_device_profile_ids())
+        return [
+            dict(row)
+            for row in self.device_profiles
+            if isinstance(row, dict) and int(row.get("id", 0) or 0) in selected_ids
+        ]
+
+    def _emit_device_profiles_changed(self) -> None:
+        try:
+            self.device_profiles_changed.emit()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _device_backend_label(raw: str) -> str:
+        backend = str(raw or "").strip().lower()
+        return {
+            "flrig": "FLRig",
+            "js8call": "JS8Call",
+            "manual": "Manual",
+            "rigctld": "RIGCTLD",
+        }.get(backend, backend.upper() or "Unknown")
+
+    @staticmethod
+    def _device_deployment_label(raw: str) -> str:
+        mode = str(raw or "").strip().lower()
+        return {"full": "Full", "minimal": "Minimal"}.get(mode, mode.title() or "Full")
+
+    @staticmethod
+    def _device_class_label(raw: str) -> str:
+        device_class = str(raw or "").strip().lower()
+        for label, value in DEVICE_CLASS_OPTIONS:
+            if value == device_class:
+                return label
+        return device_class.title() or "Transceiver"
+
+    def _device_endpoint_summary(self, profile: Dict[str, Any]) -> str:
+        if str(profile.get("device_class", "") or "").strip().lower() == "observer":
+            host = str(profile.get("sdr_host", "") or "").strip()
+            port = str(profile.get("sdr_port", "") or "").strip()
+            if host and port:
+                return f"Observer SDR {host}:{port}"
+            if host:
+                return f"Observer SDR {host}"
+            return "Observer / no endpoint"
+        backend = str(profile.get("control_backend", "") or "").strip().lower()
+        if backend == "rigctld":
+            host = str(profile.get("rig_host", "") or "").strip() or "127.0.0.1"
+            port = str(profile.get("rig_port", "") or "").strip() or "4532"
+            return f"RIGCTLD {host}:{port}"
+        if backend == "js8call":
+            host = str(profile.get("js8_host", "") or "").strip() or "127.0.0.1"
+            port = str(profile.get("js8_port", "") or "").strip() or "2442"
+            return f"JS8 {host}:{port}"
+        if backend == "manual":
+            return "Manual / no control endpoint"
+        flrig_host = str(profile.get("flrig_host", "") or "").strip() or "127.0.0.1"
+        flrig_port = str(profile.get("flrig_port", "") or "").strip() or "12345"
+        fldigi_host = str(profile.get("fldigi_host", "") or "").strip() or flrig_host
+        fldigi_port = str(profile.get("fldigi_port", "") or "").strip() or "7362"
+        return f"FLRig {flrig_host}:{flrig_port}; FLDigi {fldigi_host}:{fldigi_port}"
+
+    @staticmethod
+    def _device_ptt_group_label(value: object) -> str:
+        txt = str(value or "").strip()
+        return txt or "--"
+
+    @staticmethod
+    def _preferred_band_text(value: object) -> str:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ""
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = [part.strip() for part in text.split(",") if part.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            parsed = list(value)
+        else:
+            parsed = []
+        bands = []
+        for item in parsed:
+            token = str(item or "").strip().upper().replace(" ", "")
+            if token and token not in bands:
+                bands.append(token)
+        return ", ".join(bands)
+
+    def _update_device_profiles_hint(self) -> None:
+        if not hasattr(self, "device_profiles_hint_label"):
+            return
+        count = len(self.device_profiles)
+        active_profiles = [
+            str(row.get("name", "") or "").strip()
+            for row in self.device_profiles
+            if isinstance(row, dict) and int(row.get("runtime_active", 0) or 0) == 1
+        ]
+        primary = next(
+            (
+                str(row.get("name", "") or "").strip()
+                for row in self.device_profiles
+                if isinstance(row, dict) and int(row.get("runtime_primary", 0) or 0) == 1
+            ),
+            "",
+        )
+        observer_count = len(
+            [
+                row
+                for row in self.device_profiles
+                if isinstance(row, dict) and str(row.get("device_class", "") or "").strip().lower() == "observer"
+            ]
+        )
+        ptt_groups = sorted(
+            {
+                str(row.get("ptt_group", "") or "").strip()
+                for row in self.device_profiles
+                if isinstance(row, dict) and str(row.get("ptt_group", "") or "").strip()
+            }
+        )
+        hint = (
+            "One or more device profiles can be runtime-active. "
+            "The Station Default profile drives the legacy compatibility controls in this tab."
+        )
+        if primary:
+            hint = f"Station default: {primary}. " + hint
+        if active_profiles:
+            hint += f" Active profiles: {', '.join(active_profiles)}."
+        if observer_count:
+            hint += f" Observer profiles: {observer_count}. Observer / SDR profiles can be active, but they never own the Station Default shell."
+        if count <= 1:
+            hint += " Additional profiles can be staged here without changing current runtime behavior."
+        if any(
+            str(row.get("control_backend", "") or "").strip().lower() == "rigctld"
+            for row in self.device_profiles
+            if isinstance(row, dict)
+        ):
+            hint += " RIGCTLD profiles use the configured TCP endpoint when selected as the Station Default."
+        if ptt_groups:
+            hint += f" Shared PTT groups: {', '.join(ptt_groups[:5])}."
+        else:
+            hint += " Use PTT Group to block scheduler and QSY actions when another linked device is keyed."
+        hint += " Antenna, Front-End, and Amplifier groups raise RF conflict warnings before scheduler or QSY changes proceed."
+        hint += " VarAC cluster membership is managed in the dedicated VarAC sections below."
+        self.device_profiles_hint_label.setText(hint)
+
+    def _update_device_profile_action_buttons(self) -> None:
+        if not hasattr(self, "add_device_profile_btn"):
+            return
+        theme = resolve_theme(self.settings)
+        selected = self._selected_device_profiles()
+        count = len(selected)
+        can_edit = count == 1
+        can_activate = count > 0 and any(int(row.get("runtime_active", 0) or 0) != 1 for row in selected)
+        can_deactivate = count > 0 and all(int(row.get("runtime_primary", 0) or 0) != 1 for row in selected) and any(
+            int(row.get("runtime_active", 0) or 0) == 1 for row in selected
+        )
+        can_set_active = (
+            count == 1
+            and int(selected[0].get("runtime_primary", 0) or 0) != 1
+            and str(selected[0].get("device_class", "") or "").strip().lower() != "observer"
+        )
+        can_delete = count > 0 and all(int(row.get("runtime_active", 0) or 0) != 1 for row in selected)
+
+        self.add_device_profile_btn.setStyleSheet(button_style("primary", theme))
+        self.edit_device_profile_btn.setEnabled(can_edit)
+        self.edit_device_profile_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
+        self.activate_device_profile_btn.setEnabled(can_activate)
+        self.activate_device_profile_btn.setStyleSheet(button_style("info" if can_activate else "muted", theme))
+        self.deactivate_device_profile_btn.setEnabled(can_deactivate)
+        self.deactivate_device_profile_btn.setStyleSheet(button_style("warning" if can_deactivate else "muted", theme))
+        self.set_active_device_profile_btn.setEnabled(can_set_active)
+        self.set_active_device_profile_btn.setStyleSheet(button_style("info" if can_set_active else "muted", theme))
+        self.delete_device_profile_btn.setEnabled(can_delete)
+        self.delete_device_profile_btn.setStyleSheet(button_style("warning" if can_delete else "muted", theme))
+
+    def _refresh_device_profiles_table(self, *, refresh_section_titles: bool = True) -> None:
+        if not hasattr(self, "device_profiles_table"):
+            return
+        table = self.device_profiles_table
+        try:
+            self.device_profiles = list(self.multi_radio_store.list_device_profiles())
+        except Exception:
+            log.exception("Failed loading device profiles from store.")
+            self.device_profiles = []
+        self._device_profiles_table_loading = True
+        try:
+            table.setRowCount(0)
+            for profile in self.device_profiles:
+                row = table.rowCount()
+                table.insertRow(row)
+                profile_id = int(profile.get("id", 0) or 0)
+
+                sel_chk = QCheckBox()
+                sel_chk.setFixedWidth(22)
+                sel_chk.setProperty("device_profile_id", profile_id)
+                sel_chk.stateChanged.connect(self._update_device_profile_action_buttons)
+                sel_wrap = QWidget()
+                sel_layout = QHBoxLayout(sel_wrap)
+                sel_layout.setContentsMargins(0, 0, 0, 0)
+                sel_layout.setAlignment(Qt.AlignCenter)
+                sel_layout.addWidget(sel_chk)
+                table.setCellWidget(row, 0, sel_wrap)
+
+                active_item = QTableWidgetItem("Yes" if int(profile.get("runtime_active", 0) or 0) == 1 else "")
+                active_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 1, active_item)
+
+                primary_item = QTableWidgetItem("Yes" if int(profile.get("runtime_primary", 0) or 0) == 1 else "")
+                primary_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 2, primary_item)
+
+                name_item = QTableWidgetItem(str(profile.get("name", "") or ""))
+                name_item.setData(Qt.UserRole, profile_id)
+                table.setItem(row, 3, name_item)
+
+                backend = str(profile.get("control_backend", "") or "")
+                backend_item = QTableWidgetItem(self._device_backend_label(backend))
+                if backend.strip().lower() == "rigctld":
+                    backend_item.setToolTip("Active RIGCTLD profiles use the configured TCP endpoint.")
+                table.setItem(row, 4, backend_item)
+                table.setItem(row, 5, QTableWidgetItem(self._device_deployment_label(str(profile.get("deployment_mode", "") or ""))))
+                table.setItem(row, 6, QTableWidgetItem(self._device_endpoint_summary(profile)))
+                table.setItem(row, 7, QTableWidgetItem("Enabled" if bool(profile.get("launch_enabled", 1)) else "Off"))
+                ptt_item = QTableWidgetItem(self._device_ptt_group_label(profile.get("ptt_group", "")))
+                ptt_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 8, ptt_item)
+                class_item = QTableWidgetItem(self._device_class_label(str(profile.get("device_class", "") or "")))
+                class_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 9, class_item)
+                table.setItem(row, 10, QTableWidgetItem(str(profile.get("notes", "") or "")))
+        finally:
+            self._device_profiles_table_loading = False
+        self._update_device_profiles_hint()
+        self._update_device_profile_action_buttons()
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    def _refresh_multi_radio_tables(self, *, refresh_section_titles: bool = True) -> None:
+        self._refresh_device_profiles_table(refresh_section_titles=refresh_section_titles)
+        self._refresh_operating_profiles_table(
+            refresh_assignments=True,
+            refresh_section_titles=refresh_section_titles,
+        )
+        self._refresh_varac_clusters_table(
+            refresh_memberships=True,
+            refresh_section_titles=refresh_section_titles,
+        )
+
+    def _summary_varac_clusters(self) -> str:
+        rows = [row for row in self.varac_clusters if isinstance(row, dict)]
+        count = len(rows)
+        members = sum(int(row.get("enabled_member_count", 0) or 0) for row in rows)
+        gateway_count = len([row for row in rows if row.get("gateway_handler_device_id") not in (None, "", 0)])
+        if count <= 0:
+            return "No VarAC clusters"
+        return (
+            f"{count} cluster{'s' if count != 1 else ''}, "
+            f"{members} member{'s' if members != 1 else ''}, "
+            f"{gateway_count} gateway"
+        )
+
+    def _summary_varac_memberships(self) -> str:
+        rows = [row for row in self.varac_cluster_members if isinstance(row, dict)]
+        if not rows:
+            return "No VarAC memberships"
+        enabled_count = len([row for row in rows if int(row.get("enabled", 1) or 0) == 1])
+        gateway_count = len([row for row in rows if bool(row.get("is_gateway_handler"))])
+        return f"{enabled_count}/{len(rows)} enabled, {gateway_count} gateway handler{'s' if gateway_count != 1 else ''}"
+
+    def _update_varac_clusters_hint(self) -> None:
+        label = getattr(self, "varac_clusters_hint_label", None)
+        if label is None:
+            return
+        if not self.varac_clusters:
+            label.setText(
+                "Define shared VarAC clusters here. A cluster holds the shared DB identity, optional shared DB path, "
+                "and the designated gateway handler for its enabled members."
+            )
+            return
+        missing_gateway = [
+            row
+            for row in self.varac_clusters
+            if isinstance(row, dict)
+            and int(row.get("enabled_member_count", 0) or 0) > 1
+            and row.get("gateway_handler_device_id") in (None, "", 0)
+        ]
+        if missing_gateway:
+            names = ", ".join(str(row.get("name", "") or "Cluster").strip() for row in missing_gateway[:3])
+            label.setText(
+                f"Clusters with more than one enabled member should select one gateway handler. Pending handler selection: {names}."
+            )
+            return
+        label.setText(
+            "Define shared VarAC clusters here. Edit a cluster to choose its gateway handler from the enabled "
+            "members already assigned to that cluster."
+        )
+
+    def _update_varac_memberships_hint(self) -> None:
+        label = getattr(self, "varac_members_hint_label", None)
+        if label is None:
+            return
+        if not self.varac_cluster_members:
+            label.setText(
+                "Assign device profiles to VarAC clusters here. Each device may hold one enabled cluster membership in this phase."
+            )
+            return
+        missing_node_config = [
+            row
+            for row in self.varac_cluster_members
+            if isinstance(row, dict)
+            and int(row.get("enabled", 1) or 0) == 1
+            and not any(
+                str(device.get(key, "") or "").strip()
+                for device in self.device_profiles
+                if isinstance(device, dict) and int(device.get("id", 0) or 0) == int(row.get("device_profile_id", 0) or 0)
+                for key in ("varac_install_path", "varac_db_path", "varac_ini_path", "launch_cmd")
+            )
+        ]
+        if missing_node_config:
+            names = ", ".join(str(row.get("device_name", "") or "Device").strip() for row in missing_node_config[:3])
+            label.setText(
+                f"Enabled cluster memberships should also have device-local VarAC settings. Review: {names}."
+            )
+            return
+        label.setText(
+            "Assign device profiles to VarAC clusters here. Instance numbers must be unique within each cluster, "
+            "and the gateway handler must be one of that cluster's enabled members."
+        )
+
+    def _selected_varac_cluster_ids(self) -> List[int]:
+        rows: List[int] = []
+        if not hasattr(self, "varac_clusters_table"):
+            return rows
+        for row in range(self.varac_clusters_table.rowCount()):
+            wrapper = self.varac_clusters_table.cellWidget(row, 0)
+            chk = wrapper.findChild(QCheckBox) if wrapper is not None else None
+            if chk is None or not chk.isChecked():
+                continue
+            try:
+                rows.append(int(chk.property("varac_cluster_id")))
+            except Exception:
+                continue
+        return rows
+
+    def _selected_varac_clusters(self) -> List[Dict[str, Any]]:
+        selected_ids = set(self._selected_varac_cluster_ids())
+        return [
+            dict(row)
+            for row in self.varac_clusters
+            if isinstance(row, dict) and int(row.get("id", 0) or 0) in selected_ids
+        ]
+
+    def _selected_varac_memberships(self) -> List[Dict[str, Any]]:
+        selected_pairs: set[tuple[int, int]] = set()
+        if not hasattr(self, "varac_members_table"):
+            return []
+        for row in range(self.varac_members_table.rowCount()):
+            wrapper = self.varac_members_table.cellWidget(row, 0)
+            chk = wrapper.findChild(QCheckBox) if wrapper is not None else None
+            if chk is None or not chk.isChecked():
+                continue
+            try:
+                selected_pairs.add(
+                    (
+                        int(chk.property("varac_cluster_id") or 0),
+                        int(chk.property("device_profile_id") or 0),
+                    )
+                )
+            except Exception:
+                continue
+        return [
+            dict(row)
+            for row in self.varac_cluster_members
+            if isinstance(row, dict)
+            and (
+                int(row.get("cluster_db_id", 0) or 0),
+                int(row.get("device_profile_id", 0) or 0),
+            )
+            in selected_pairs
+        ]
+
+    def _update_varac_cluster_action_buttons(self) -> None:
+        if not hasattr(self, "add_varac_cluster_btn"):
+            return
+        theme = resolve_theme(self.settings)
+        selected = self._selected_varac_clusters()
+        count = len(selected)
+        can_edit = count == 1
+        can_delete = count > 0
+        self.add_varac_cluster_btn.setStyleSheet(button_style("primary", theme))
+        self.edit_varac_cluster_btn.setEnabled(can_edit)
+        self.edit_varac_cluster_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
+        self.delete_varac_cluster_btn.setEnabled(can_delete)
+        self.delete_varac_cluster_btn.setStyleSheet(button_style("warning" if can_delete else "muted", theme))
+
+    def _update_varac_membership_action_buttons(self) -> None:
+        if not hasattr(self, "add_varac_membership_btn"):
+            return
+        theme = resolve_theme(self.settings)
+        selected = self._selected_varac_memberships()
+        can_remove = len(selected) > 0
+        self.add_varac_membership_btn.setStyleSheet(button_style("primary", theme))
+        self.remove_varac_membership_btn.setEnabled(can_remove)
+        self.remove_varac_membership_btn.setStyleSheet(button_style("warning" if can_remove else "muted", theme))
+
+    def _refresh_varac_clusters_table(
+        self,
+        *,
+        refresh_memberships: bool = True,
+        refresh_section_titles: bool = True,
+    ) -> None:
+        if not hasattr(self, "varac_clusters_table"):
+            return
+        table = self.varac_clusters_table
+        try:
+            self.varac_clusters = list(self.multi_radio_store.list_varac_clusters())
+        except Exception:
+            log.exception("Failed loading VarAC clusters from store.")
+            self.varac_clusters = []
+        self._varac_clusters_table_loading = True
+        try:
+            table.setRowCount(0)
+            for cluster in self.varac_clusters:
+                row = table.rowCount()
+                table.insertRow(row)
+                cluster_id = int(cluster.get("id", 0) or 0)
+                sel_chk = QCheckBox()
+                sel_chk.setFixedWidth(22)
+                sel_chk.setProperty("varac_cluster_id", cluster_id)
+                sel_chk.stateChanged.connect(self._update_varac_cluster_action_buttons)
+                sel_wrap = QWidget()
+                sel_layout = QHBoxLayout(sel_wrap)
+                sel_layout.setContentsMargins(0, 0, 0, 0)
+                sel_layout.setAlignment(Qt.AlignCenter)
+                sel_layout.addWidget(sel_chk)
+                table.setCellWidget(row, 0, sel_wrap)
+                name_item = QTableWidgetItem(str(cluster.get("name", "") or ""))
+                name_item.setData(Qt.UserRole, cluster_id)
+                table.setItem(row, 1, name_item)
+                table.setItem(row, 2, QTableWidgetItem(str(cluster.get("cluster_id", "") or "")))
+                table.setItem(row, 3, QTableWidgetItem(str(cluster.get("shared_db_path", "") or "")))
+                table.setItem(
+                    row,
+                    4,
+                    QTableWidgetItem(f"{int(cluster.get('enabled_member_count', 0) or 0)}/{int(cluster.get('member_count', 0) or 0)}"),
+                )
+                table.setItem(row, 5, QTableWidgetItem(str(cluster.get("gateway_handler_name", "") or "")))
+                table.setItem(row, 6, QTableWidgetItem("On" if int(cluster.get("ptt_lock_enabled", 0) or 0) == 1 else "Off"))
+                table.setItem(row, 7, QTableWidgetItem(f"{int(cluster.get('counters_refresh_sec', 30) or 30)}s"))
+        finally:
+            self._varac_clusters_table_loading = False
+        self._update_varac_clusters_hint()
+        self._update_varac_cluster_action_buttons()
+        if refresh_memberships and hasattr(self, "varac_members_table"):
+            self._refresh_varac_memberships_table(refresh_section_titles=False)
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    def _refresh_varac_memberships_table(self, *, refresh_section_titles: bool = True) -> None:
+        if not hasattr(self, "varac_members_table"):
+            return
+        table = self.varac_members_table
+        try:
+            self.varac_cluster_members = list(self.multi_radio_store.list_varac_cluster_members())
+        except Exception:
+            log.exception("Failed loading VarAC cluster memberships from store.")
+            self.varac_cluster_members = []
+        self._varac_cluster_members_table_loading = True
+        try:
+            table.setRowCount(0)
+            for membership in self.varac_cluster_members:
+                row = table.rowCount()
+                table.insertRow(row)
+                cluster_id = int(membership.get("cluster_db_id", 0) or 0)
+                device_id = int(membership.get("device_profile_id", 0) or 0)
+                sel_chk = QCheckBox()
+                sel_chk.setFixedWidth(22)
+                sel_chk.setProperty("varac_cluster_id", cluster_id)
+                sel_chk.setProperty("device_profile_id", device_id)
+                sel_chk.stateChanged.connect(self._update_varac_membership_action_buttons)
+                sel_wrap = QWidget()
+                sel_layout = QHBoxLayout(sel_wrap)
+                sel_layout.setContentsMargins(0, 0, 0, 0)
+                sel_layout.setAlignment(Qt.AlignCenter)
+                sel_layout.addWidget(sel_chk)
+                table.setCellWidget(row, 0, sel_wrap)
+                table.setItem(row, 1, QTableWidgetItem(str(membership.get("cluster_name", "") or "")))
+                table.setItem(row, 2, QTableWidgetItem(str(membership.get("device_name", "") or "")))
+                runtime_label = "Primary" if int(membership.get("runtime_primary", 0) or 0) == 1 else ("Active" if int(membership.get("runtime_active", 0) or 0) == 1 else "")
+                runtime_item = QTableWidgetItem(runtime_label)
+                runtime_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 3, runtime_item)
+                table.setItem(row, 4, QTableWidgetItem(self._device_class_label(str(membership.get("device_class", "") or ""))))
+                instance_item = QTableWidgetItem(str(int(membership.get("instance_number", 0) or 0)))
+                instance_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 5, instance_item)
+                enabled_item = QTableWidgetItem("Yes" if int(membership.get("enabled", 1) or 0) == 1 else "")
+                enabled_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 6, enabled_item)
+                table.setItem(row, 7, QTableWidgetItem("Handler" if bool(membership.get("is_gateway_handler")) else "Member"))
+        finally:
+            self._varac_cluster_members_table_loading = False
+        self._update_varac_memberships_hint()
+        self._update_varac_membership_action_buttons()
+        self._update_varac_clusters_hint()
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    # ---------- Operating Profiles / Device Assignments ---------- #
+
+    def _summary_operating_profiles(self) -> str:
+        count = len(self.operating_profiles)
+        enabled_count = len(
+            [row for row in self.operating_profiles if isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1]
+        )
+        if count <= 0:
+            return "No operating profiles"
+        return f"{count} profile{'s' if count != 1 else ''}, {enabled_count} enabled"
+
+    def _summary_device_assignments(self) -> str:
+        rows = [row for row in self.device_assignments if isinstance(row, dict)]
+        if not rows:
+            return "No device assignments"
+        overrides = len(
+            [row for row in rows if str(row.get("assignment_state", "") or "").strip().lower() == "temporary_override"]
+        )
+        assigned = len([row for row in rows if row.get("operating_profile_id") not in (None, "", 0)])
+        summary = f"{assigned} assigned"
+        if overrides:
+            summary += f", {overrides} temporary override{'s' if overrides != 1 else ''}"
+        if isinstance(self.active_profile_swap, dict) and self.active_profile_swap:
+            summary += ", swap active"
+        return summary
+
+    def _operating_profile_by_id(self, operating_profile_id: int) -> Optional[Dict[str, Any]]:
+        for row in self.operating_profiles:
+            if not isinstance(row, dict):
+                continue
+            if int(row.get("id", 0) or 0) == int(operating_profile_id):
+                return dict(row)
+        return None
+
+    @staticmethod
+    def _assignment_state_label(state: str) -> str:
+        normalized = str(state or "").strip().lower()
+        if normalized == "temporary_override":
+            return "Temporary Override"
+        if normalized == "active":
+            return "Active"
+        if normalized == "scheduled":
+            return "Scheduled"
+        if normalized == "superseded":
+            return "Superseded"
+        if normalized == "inactive":
+            return "Inactive"
+        return "Unassigned"
+
+    @staticmethod
+    def _operating_profile_shell_summary(profile: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(profile, dict):
+            return "Unassigned"
+        bits: List[str] = []
+        if int(profile.get("scheduler_enabled", 1) or 0) != 1:
+            bits.append("Scheduler Off")
+        if int(profile.get("use_messages", 1) or 0) != 1:
+            bits.append("Messages Off")
+        if int(profile.get("use_map", 1) or 0) != 1:
+            bits.append("Map Off")
+        if int(profile.get("use_background_ingest", 1) or 0) != 1:
+            bits.append("Ingest Off")
+        if int(profile.get("use_launch_control", 1) or 0) != 1:
+            bits.append("Launch Off")
+        if int(profile.get("use_net_control_tabs", 1) or 0) != 1:
+            bits.append("NetCtrl Off")
+        if not bits:
+            return "Full shell"
+        return ", ".join(bits)
+
+    def _selected_operating_profile_ids(self) -> List[int]:
+        if not hasattr(self, "operating_profiles_table"):
+            return []
+        selected: List[int] = []
+        for row in range(self.operating_profiles_table.rowCount()):
+            wrapper = self.operating_profiles_table.cellWidget(row, 0)
+            chk = wrapper.findChild(QCheckBox) if wrapper is not None else None
+            if chk is None or not chk.isChecked():
+                continue
+            try:
+                selected.append(int(chk.property("operating_profile_id") or 0))
+            except Exception:
+                continue
+        return selected
+
+    def _selected_operating_profiles(self) -> List[Dict[str, Any]]:
+        selected_ids = set(self._selected_operating_profile_ids())
+        return [
+            dict(row)
+            for row in self.operating_profiles
+            if isinstance(row, dict) and int(row.get("id", 0) or 0) in selected_ids
+        ]
+
+    def _selected_assignment_rows(self) -> List[Dict[str, Any]]:
+        if not hasattr(self, "device_assignments_table"):
+            return []
+        selected: List[Dict[str, Any]] = []
+        for row in range(self.device_assignments_table.rowCount()):
+            wrapper = self.device_assignments_table.cellWidget(row, 0)
+            chk = wrapper.findChild(QCheckBox) if wrapper is not None else None
+            if chk is None or not chk.isChecked():
+                continue
+            try:
+                device_profile_id = int(chk.property("device_profile_id") or 0)
+            except Exception:
+                continue
+            match = next(
+                (
+                    dict(item)
+                    for item in self.device_assignments
+                    if isinstance(item, dict) and int(item.get("device_profile_id", 0) or 0) == device_profile_id
+                ),
+                None,
+            )
+            if match is not None:
+                selected.append(match)
+        return selected
+
+    def _update_operating_profiles_hint(self) -> None:
+        if not hasattr(self, "operating_profiles_hint_label"):
+            return
+        if not self.operating_profiles:
+            self.operating_profiles_hint_label.setText("No operating profiles are available.")
+            return
+        primary_assignment = next(
+            (
+                row
+                for row in self.device_assignments
+                if isinstance(row, dict) and int(row.get("runtime_primary", 0) or 0) == 1
+            ),
+            None,
+        )
+        hint = "Operating profiles define the compatibility shell used by the Station Default device."
+        if isinstance(primary_assignment, dict):
+            operating_name = str(primary_assignment.get("operating_profile_name", "") or "").strip() or DEFAULT_OPERATING_NAME
+            state_label = self._assignment_state_label(str(primary_assignment.get("assignment_state", "") or "active"))
+            hint = f"Station default policy: {operating_name} ({state_label}). " + hint
+        self.operating_profiles_hint_label.setText(hint)
+
+    def _update_device_assignments_hint(self) -> None:
+        if not hasattr(self, "device_assignments_hint_label"):
+            return
+        active_swap = dict(self.active_profile_swap or {})
+        if active_swap:
+            source_name = str(active_swap.get("source_device_name", "") or "").strip() or "previous primary"
+            target_name = str(active_swap.get("target_device_name", "") or "").strip() or "target device"
+            mode = str(active_swap.get("mode", "") or "").strip().lower()
+            if mode == "carry_primary_profile":
+                carried_name = (
+                    str(active_swap.get("applied_operating_profile_name", "") or "").strip()
+                    or "the previous primary operating profile"
+                )
+                self.device_assignments_hint_label.setText(
+                    f"Temporary swap active: {source_name} -> {target_name}. "
+                    f"{carried_name} is temporarily applied on the target device. Restore Swap returns the previous primary and target assignment."
+                )
+            else:
+                self.device_assignments_hint_label.setText(
+                    f"Temporary swap active: {source_name} -> {target_name}. "
+                    "Restore Swap returns the previous primary device without rewriting endpoint settings."
+                )
+            return
+        rows = [row for row in self.device_assignments if isinstance(row, dict)]
+        if not rows:
+            self.device_assignments_hint_label.setText("No device assignments are available.")
+            return
+        assigned = len([row for row in rows if row.get("operating_profile_id") not in (None, "", 0)])
+        overrides = len(
+            [row for row in rows if str(row.get("assignment_state", "") or "").strip().lower() == "temporary_override"]
+        )
+        primary = next((row for row in rows if int(row.get("runtime_primary", 0) or 0) == 1), None)
+        hint = f"{assigned} device profile{'s' if assigned != 1 else ''} currently have an effective operating profile."
+        if overrides:
+            hint += f" {overrides} temporary override{'s are' if overrides != 1 else ' is'} active."
+        if isinstance(primary, dict):
+            operating_name = str(primary.get("operating_profile_name", "") or "").strip() or DEFAULT_OPERATING_NAME
+            hint += f" The Station Default device is currently using {operating_name}."
+        self.device_assignments_hint_label.setText(hint)
+
+    def _update_operating_profile_action_buttons(self) -> None:
+        if not hasattr(self, "add_operating_profile_btn"):
+            return
+        theme = resolve_theme(self.settings)
+        selected = self._selected_operating_profiles()
+        count = len(selected)
+        assigned_ids = {
+            int(row.get("operating_profile_id", 0) or 0)
+            for row in self.device_assignments
+            if isinstance(row, dict) and row.get("operating_profile_id") not in (None, "", 0)
+        }
+        can_edit = count == 1
+        can_delete = count > 0 and all(
+            str(row.get("system_key", "") or "").strip() != "default_operating"
+            and int(row.get("id", 0) or 0) not in assigned_ids
+            for row in selected
+        )
+        self.add_operating_profile_btn.setStyleSheet(button_style("primary", theme))
+        self.edit_operating_profile_btn.setEnabled(can_edit)
+        self.edit_operating_profile_btn.setStyleSheet(button_style("info" if can_edit else "muted", theme))
+        self.delete_operating_profile_btn.setEnabled(can_delete)
+        self.delete_operating_profile_btn.setStyleSheet(button_style("warning" if can_delete else "muted", theme))
+
+    def _update_device_assignment_action_buttons(self) -> None:
+        if not hasattr(self, "assign_device_operating_profile_btn"):
+            return
+        theme = resolve_theme(self.settings)
+        selected = self._selected_assignment_rows()
+        count = len(selected)
+        active_swap = dict(self.active_profile_swap or {})
+        swap_device_ids = {
+            int(active_swap.get("source_device_id", 0) or 0),
+            int(active_swap.get("target_device_id", 0) or 0),
+        }
+        swap_device_ids.discard(0)
+        selection_includes_swap_devices = any(
+            int(row.get("device_profile_id", 0) or 0) in swap_device_ids for row in selected
+        )
+        has_enabled_profile = any(
+            isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1 for row in self.operating_profiles
+        )
+        can_assign = count > 0 and has_enabled_profile and not selection_includes_swap_devices
+        can_restore = count > 0 and not selection_includes_swap_devices and any(
+            str(row.get("assignment_state", "") or "").strip().lower() == "temporary_override"
+            or str(row.get("operating_system_key", "") or "").strip() != "default_operating"
+            for row in selected
+        )
+        can_swap = (
+            not active_swap
+            and count == 1
+            and int(selected[0].get("runtime_active", 0) or 0) == 1
+            and int(selected[0].get("runtime_primary", 0) or 0) != 1
+            and str(selected[0].get("device_class", "") or "").strip().lower() != "observer"
+        )
+        can_restore_swap = bool(active_swap)
+        self.assign_device_operating_profile_btn.setEnabled(can_assign)
+        self.assign_device_operating_profile_btn.setStyleSheet(button_style("info" if can_assign else "muted", theme))
+        self.temporary_profile_swap_btn.setEnabled(can_swap)
+        self.temporary_profile_swap_btn.setStyleSheet(button_style("info" if can_swap else "muted", theme))
+        self.restore_profile_swap_btn.setEnabled(can_restore_swap)
+        self.restore_profile_swap_btn.setStyleSheet(button_style("warning" if can_restore_swap else "muted", theme))
+        self.restore_device_operating_profile_btn.setEnabled(can_restore)
+        self.restore_device_operating_profile_btn.setStyleSheet(button_style("warning" if can_restore else "muted", theme))
+
+    def _refresh_operating_profiles_table(
+        self,
+        *,
+        refresh_assignments: bool = True,
+        refresh_section_titles: bool = True,
+    ) -> None:
+        if not hasattr(self, "operating_profiles_table"):
+            return
+        table = self.operating_profiles_table
+        try:
+            self.operating_profiles = list(self.multi_radio_store.list_operating_profiles())
+        except Exception:
+            log.exception("Failed loading operating profiles from store.")
+            self.operating_profiles = []
+        self._operating_profiles_table_loading = True
+        try:
+            table.setRowCount(0)
+            for profile in self.operating_profiles:
+                row = table.rowCount()
+                table.insertRow(row)
+                profile_id = int(profile.get("id", 0) or 0)
+
+                sel_chk = QCheckBox()
+                sel_chk.setFixedWidth(22)
+                sel_chk.setProperty("operating_profile_id", profile_id)
+                sel_chk.stateChanged.connect(self._update_operating_profile_action_buttons)
+                sel_wrap = QWidget()
+                sel_layout = QHBoxLayout(sel_wrap)
+                sel_layout.setContentsMargins(0, 0, 0, 0)
+                sel_layout.setAlignment(Qt.AlignCenter)
+                sel_layout.addWidget(sel_chk)
+                table.setCellWidget(row, 0, sel_wrap)
+
+                enabled_item = QTableWidgetItem("Yes" if int(profile.get("enabled", 1) or 0) == 1 else "")
+                enabled_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 1, enabled_item)
+
+                name_item = QTableWidgetItem(str(profile.get("name", "") or ""))
+                name_item.setData(Qt.UserRole, profile_id)
+                table.setItem(row, 2, name_item)
+                table.setItem(row, 3, QTableWidgetItem("On" if int(profile.get("scheduler_enabled", 1) or 0) == 1 else "Off"))
+                table.setItem(row, 4, QTableWidgetItem(self._operating_profile_shell_summary(profile)))
+                table.setItem(row, 5, QTableWidgetItem(str(profile.get("description", "") or "")))
+        finally:
+            self._operating_profiles_table_loading = False
+        self._update_operating_profiles_hint()
+        self._update_operating_profile_action_buttons()
+        if refresh_assignments:
+            self._refresh_device_assignments_table(refresh_section_titles=False)
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    def _refresh_device_assignments_table(self, *, refresh_section_titles: bool = True) -> None:
+        if not hasattr(self, "device_assignments_table"):
+            return
+        table = self.device_assignments_table
+        try:
+            if not self.device_profiles:
+                self.device_profiles = list(self.multi_radio_store.list_device_profiles())
+            if not self.operating_profiles:
+                self.operating_profiles = list(self.multi_radio_store.list_operating_profiles())
+            effective_assignments = {
+                int(row.get("device_profile_id", 0) or 0): dict(row)
+                for row in self.multi_radio_store.list_effective_assignments()
+                if isinstance(row, dict)
+            }
+        except Exception:
+            log.exception("Failed loading device assignments from store.")
+            effective_assignments = {}
+        try:
+            active_swap = self.multi_radio_store.get_active_profile_swap()
+        except Exception:
+            log.exception("Failed loading active profile swap from store.")
+            active_swap = None
+        self.active_profile_swap = dict(active_swap) if isinstance(active_swap, dict) else None
+
+        profiles = {
+            int(row.get("id", 0) or 0): dict(row)
+            for row in self.operating_profiles
+            if isinstance(row, dict)
+        }
+        rows: List[Dict[str, Any]] = []
+        for device in self.device_profiles:
+            if not isinstance(device, dict):
+                continue
+            device_id = int(device.get("id", 0) or 0)
+            assignment = effective_assignments.get(device_id, {})
+            operating_id = assignment.get("operating_profile_id")
+            operating = profiles.get(int(operating_id or 0)) if operating_id not in (None, "") else None
+            rows.append(
+                {
+                    "device_profile_id": device_id,
+                    "device_name": str(device.get("name", "") or ""),
+                    "runtime_active": int(device.get("runtime_active", 0) or 0),
+                    "runtime_primary": int(device.get("runtime_primary", 0) or 0),
+                    "device_class": str(device.get("device_class", "") or ""),
+                    "endpoint_summary": self._device_endpoint_summary(device),
+                    "operating_profile_id": int(operating_id or 0) if operating_id not in (None, "") else None,
+                    "operating_profile_name": str((operating or {}).get("name", "") or ""),
+                    "operating_system_key": str((operating or {}).get("system_key", "") or ""),
+                    "assignment_state": str(assignment.get("assignment_state", "") or ""),
+                    "shell_summary": self._operating_profile_shell_summary(operating),
+                }
+            )
+        self.device_assignments = rows
+
+        self._device_assignments_table_loading = True
+        try:
+            table.setRowCount(0)
+            for row_data in self.device_assignments:
+                row = table.rowCount()
+                table.insertRow(row)
+                device_profile_id = int(row_data.get("device_profile_id", 0) or 0)
+
+                sel_chk = QCheckBox()
+                sel_chk.setFixedWidth(22)
+                sel_chk.setProperty("device_profile_id", device_profile_id)
+                sel_chk.stateChanged.connect(self._update_device_assignment_action_buttons)
+                sel_wrap = QWidget()
+                sel_layout = QHBoxLayout(sel_wrap)
+                sel_layout.setContentsMargins(0, 0, 0, 0)
+                sel_layout.setAlignment(Qt.AlignCenter)
+                sel_layout.addWidget(sel_chk)
+                table.setCellWidget(row, 0, sel_wrap)
+
+                active_item = QTableWidgetItem("Yes" if int(row_data.get("runtime_active", 0) or 0) == 1 else "")
+                active_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 1, active_item)
+
+                primary_item = QTableWidgetItem("Yes" if int(row_data.get("runtime_primary", 0) or 0) == 1 else "")
+                primary_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 2, primary_item)
+                table.setItem(row, 3, QTableWidgetItem(str(row_data.get("device_name", "") or "")))
+                table.setItem(row, 4, QTableWidgetItem(str(row_data.get("operating_profile_name", "") or "Unassigned")))
+                table.setItem(row, 5, QTableWidgetItem(self._assignment_state_label(str(row_data.get("assignment_state", "") or ""))))
+                table.setItem(row, 6, QTableWidgetItem(str(row_data.get("shell_summary", "") or "")))
+                table.setItem(row, 7, QTableWidgetItem(str(row_data.get("endpoint_summary", "") or "")))
+        finally:
+            self._device_assignments_table_loading = False
+        self._update_device_assignments_hint()
+        self._update_device_assignment_action_buttons()
+        if refresh_section_titles:
+            self._refresh_section_titles()
+
+    def _open_operating_profile_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit Operating Profile" if existing else "Add Operating Profile")
+        dlg.resize(560, 0)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.addLayout(form)
+
+        name_edit = QLineEdit(str((existing or {}).get("name", "") or ""))
+        form.addRow("Name:", name_edit)
+
+        enabled_chk = QCheckBox("Profile Enabled")
+        enabled_chk.setChecked(bool((existing or {}).get("enabled", 1)))
+        form.addRow("", enabled_chk)
+
+        description_edit = QPlainTextEdit(str((existing or {}).get("description", "") or ""))
+        description_edit.setFixedHeight(80)
+        form.addRow("Description:", description_edit)
+
+        scheduler_enabled_chk = QCheckBox("Enable scheduler automation when primary")
+        scheduler_enabled_chk.setChecked(bool((existing or {}).get("scheduler_enabled", 1)))
+        form.addRow("", scheduler_enabled_chk)
+
+        scheduler_mode_combo = QComboBox()
+        for label, value in OPERATING_SCHEDULER_MODE_OPTIONS:
+            scheduler_mode_combo.addItem(label, value)
+        current_mode = str((existing or {}).get("scheduler_mode", "full") or "full").strip().lower()
+        mode_idx = scheduler_mode_combo.findData(current_mode)
+        scheduler_mode_combo.setCurrentIndex(mode_idx if mode_idx >= 0 else 0)
+        form.addRow("Scheduler Mode:", scheduler_mode_combo)
+
+        preferred_bands_edit = QLineEdit(
+            self._preferred_band_text(
+                (existing or {}).get("preferred_band_set_json", (existing or {}).get("preferred_band_set", ""))
+            )
+        )
+        preferred_bands_edit.setPlaceholderText("Optional preferred bands, e.g. 40M, 80M")
+        form.addRow("Preferred Bands:", preferred_bands_edit)
+
+        use_messages_chk = QCheckBox("Use Messages")
+        use_messages_chk.setChecked(bool((existing or {}).get("use_messages", 1)))
+        form.addRow("", use_messages_chk)
+
+        use_map_chk = QCheckBox("Use Map")
+        use_map_chk.setChecked(bool((existing or {}).get("use_map", 1)))
+        form.addRow("", use_map_chk)
+
+        use_background_ingest_chk = QCheckBox("Use background ingest")
+        use_background_ingest_chk.setChecked(bool((existing or {}).get("use_background_ingest", 1)))
+        form.addRow("", use_background_ingest_chk)
+
+        use_launch_control_chk = QCheckBox("Use Launch Control")
+        use_launch_control_chk.setChecked(bool((existing or {}).get("use_launch_control", 1)))
+        form.addRow("", use_launch_control_chk)
+
+        use_net_control_tabs_chk = QCheckBox("Use net control tabs")
+        use_net_control_tabs_chk.setChecked(bool((existing or {}).get("use_net_control_tabs", 1)))
+        form.addRow("", use_net_control_tabs_chk)
+
+        allow_profile_swap_chk = QCheckBox("Allow profile swap coordination")
+        allow_profile_swap_chk.setChecked(bool((existing or {}).get("allow_profile_swap", 0)))
+        form.addRow("", allow_profile_swap_chk)
+
+        info_label = QLabel()
+        info_label.setWordWrap(True)
+        form.addRow("", info_label)
+
+        def _update_hint() -> None:
+            disabled: List[str] = []
+            if not scheduler_enabled_chk.isChecked():
+                disabled.append("scheduler automation")
+            if not use_messages_chk.isChecked():
+                disabled.append("Messages")
+            if not use_map_chk.isChecked():
+                disabled.append("Map")
+            if not use_background_ingest_chk.isChecked():
+                disabled.append("background ingest")
+            if not use_launch_control_chk.isChecked():
+                disabled.append("Launch Control")
+            if not use_net_control_tabs_chk.isChecked():
+                disabled.append("net control tabs")
+            if disabled:
+                info_label.setText(
+                    "When this profile is assigned to the Station Default device, it suppresses: "
+                    + ", ".join(disabled)
+                    + "."
+                )
+            else:
+                info_label.setText(
+                    "This profile leaves the current Station Default compatibility shell fully enabled."
+                )
+
+        for chk in (
+            scheduler_enabled_chk,
+            use_messages_chk,
+            use_map_chk,
+            use_background_ingest_chk,
+            use_launch_control_chk,
+            use_net_control_tabs_chk,
+        ):
+            chk.toggled.connect(_update_hint)
+        _update_hint()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        out: Dict[str, Any] = {}
+
+        def _save() -> None:
+            name = name_edit.text().strip()
+            if not name:
+                QMessageBox.warning(self, "Validation", "Operating profile name is required.")
+                return
+            out.update(
+                {
+                    "id": (existing or {}).get("id"),
+                    "system_key": (existing or {}).get("system_key"),
+                    "name": name,
+                    "enabled": bool(enabled_chk.isChecked()),
+                    "description": description_edit.toPlainText().strip(),
+                    "scheduler_enabled": bool(scheduler_enabled_chk.isChecked()),
+                    "scheduler_mode": str(scheduler_mode_combo.currentData() or "full"),
+                    "preferred_band_set": preferred_bands_edit.text().strip(),
+                    "use_messages": bool(use_messages_chk.isChecked()),
+                    "use_map": bool(use_map_chk.isChecked()),
+                    "use_background_ingest": bool(use_background_ingest_chk.isChecked()),
+                    "use_launch_control": bool(use_launch_control_chk.isChecked()),
+                    "use_net_control_tabs": bool(use_net_control_tabs_chk.isChecked()),
+                    "allow_profile_swap": bool(allow_profile_swap_chk.isChecked()),
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _persist_operating_profile(self, values: Dict[str, Any]) -> None:
+        try:
+            self.multi_radio_store.save_operating_profile(values)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Operating Profiles", str(exc))
+            return
+        except Exception:
+            log.exception("Failed to save operating profile.")
+            QMessageBox.warning(self, "Operating Profiles", "Unable to save the operating profile.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _add_operating_profile(self) -> None:
+        created = self._open_operating_profile_dialog(existing=None)
+        if not created:
+            return
+        self._persist_operating_profile(created)
+
+    def _edit_operating_profile(self) -> None:
+        selected = self._selected_operating_profiles()
+        if not selected:
+            QMessageBox.information(self, "Edit Operating Profile", "Select one operating profile to edit.")
+            return
+        if len(selected) > 1:
+            QMessageBox.warning(self, "Edit Operating Profile", "Please select only one operating profile to edit.")
+            return
+        updated = self._open_operating_profile_dialog(existing=selected[0])
+        if not updated:
+            return
+        self._persist_operating_profile(updated)
+
+    def _delete_operating_profiles(self) -> None:
+        selected = self._selected_operating_profiles()
+        if not selected:
+            QMessageBox.information(self, "Delete Operating Profiles", "Select one or more operating profiles to delete.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete Operating Profiles",
+            f"Delete {len(selected)} selected operating profile(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.delete_operating_profile(int(row.get("id", 0) or 0))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Delete Operating Profiles", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed deleting operating profiles.")
+            QMessageBox.warning(self, "Delete Operating Profiles", "Unable to delete the selected operating profiles.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+        QMessageBox.information(
+            self,
+            "Delete Operating Profiles",
+            f"Deleted {len(selected)} operating profile{'s' if len(selected) != 1 else ''}.",
+        )
+
+    def _open_assignment_dialog(self, selected_devices: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        enabled_profiles = [
+            row for row in self.operating_profiles if isinstance(row, dict) and int(row.get("enabled", 1) or 0) == 1
+        ]
+        if not enabled_profiles:
+            QMessageBox.information(
+                self,
+                "Device Assignments",
+                "Create or enable an operating profile before assigning it to a device.",
+            )
+            return None
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Assign Operating Profile")
+        dlg.resize(540, 0)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        summary_label = QLabel(
+            f"Apply one effective operating profile to {len(selected_devices)} selected device profile{'s' if len(selected_devices) != 1 else ''}."
+        )
+        summary_label.setWordWrap(True)
+        form.addRow("", summary_label)
+
+        profile_combo = QComboBox()
+        for row in enabled_profiles:
+            profile_combo.addItem(str(row.get("name", "") or "Operating Profile"), int(row.get("id", 0) or 0))
+        form.addRow("Operating Profile:", profile_combo)
+
+        state_combo = QComboBox()
+        for label, value in OPERATING_ASSIGNMENT_STATE_OPTIONS:
+            state_combo.addItem(label, value)
+        form.addRow("Assignment State:", state_combo)
+
+        reason_edit = QLineEdit()
+        reason_edit.setPlaceholderText("Optional operator note")
+        form.addRow("Reason:", reason_edit)
+
+        ends_edit = QLineEdit()
+        ends_edit.setPlaceholderText("Optional UTC metadata only; no automatic expiry in this checkpoint")
+        form.addRow("Ends UTC:", ends_edit)
+
+        info_label = QLabel()
+        info_label.setWordWrap(True)
+        form.addRow("", info_label)
+
+        def _update_hint() -> None:
+            state = str(state_combo.currentData() or "active").strip().lower()
+            if state == "temporary_override":
+                info_label.setText(
+                    "Temporary Override becomes effective immediately. Automatic timed expiry is not active in this checkpoint; restore the default profile manually when the override ends."
+                )
+            else:
+                info_label.setText("Active assignments become the current operating profile immediately.")
+
+        state_combo.currentIndexChanged.connect(_update_hint)
+        _update_hint()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        out: Dict[str, Any] = {}
+
+        def _save() -> None:
+            profile_id = int(profile_combo.currentData() or 0)
+            if profile_id <= 0:
+                QMessageBox.warning(self, "Validation", "Select an operating profile.")
+                return
+            state = str(state_combo.currentData() or "active").strip().lower() or "active"
+            reason_value = reason_edit.text().strip()
+            if state == "temporary_override" and not reason_value:
+                reason_value = "Temporary override from Settings."
+            out.update(
+                {
+                    "operating_profile_id": profile_id,
+                    "assignment_state": state,
+                    "reason": reason_value,
+                    "ends_utc": ends_edit.text().strip(),
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _assign_operating_profile_to_selected_devices(self) -> None:
+        selected = self._selected_assignment_rows()
+        if not selected:
+            QMessageBox.information(self, "Device Assignments", "Select one or more devices to assign.")
+            return
+        values = self._open_assignment_dialog(selected)
+        if not values:
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.set_device_operating_profile(
+                    int(row.get("device_profile_id", 0) or 0),
+                    int(values.get("operating_profile_id", 0) or 0),
+                    assignment_state=str(values.get("assignment_state", "active") or "active"),
+                    reason=str(values.get("reason", "") or ""),
+                    ends_utc=str(values.get("ends_utc", "") or ""),
+                )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Device Assignments", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed updating device assignments.")
+            QMessageBox.warning(self, "Device Assignments", "Unable to update the selected device assignments.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _restore_default_operating_profile_for_selected_devices(self) -> None:
+        selected = self._selected_assignment_rows()
+        if not selected:
+            QMessageBox.information(self, "Device Assignments", "Select one or more devices to restore.")
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.restore_default_operating_profile(int(row.get("device_profile_id", 0) or 0))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Device Assignments", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed restoring default operating profile.")
+            QMessageBox.warning(self, "Device Assignments", "Unable to restore the default operating profile.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _open_temporary_profile_swap_dialog(self, target_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        primary_row = next(
+            (
+                row
+                for row in self.device_assignments
+                if isinstance(row, dict) and int(row.get("runtime_primary", 0) or 0) == 1
+            ),
+            None,
+        )
+        if not isinstance(primary_row, dict):
+            QMessageBox.warning(self, "Temporary Swap", "The current primary device assignment could not be resolved.")
+            return None
+        primary_profile = self._operating_profile_by_id(int(primary_row.get("operating_profile_id", 0) or 0))
+        allow_carry = bool(primary_profile and int(primary_profile.get("allow_profile_swap", 0) or 0) == 1)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Temporary Profile Swap")
+        dlg.resize(560, 0)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        summary_label = QLabel(
+            f"Temporarily move the Station Default runtime from "
+            f"{str(primary_row.get('device_name', '') or 'current primary')} to "
+            f"{str(target_row.get('device_name', '') or 'selected target')}."
+        )
+        summary_label.setWordWrap(True)
+        form.addRow("", summary_label)
+
+        form.addRow("Current Primary:", QLabel(str(primary_row.get("device_name", "") or "")))
+        form.addRow("Primary Profile:", QLabel(str(primary_row.get("operating_profile_name", "") or "Unassigned")))
+        form.addRow("Target Device:", QLabel(str(target_row.get("device_name", "") or "")))
+        form.addRow("Target Profile:", QLabel(str(target_row.get("operating_profile_name", "") or "Unassigned")))
+
+        mode_combo = QComboBox()
+        mode_combo.addItem("Use target device profile (Recommended)", "use_target_profile")
+        if allow_carry:
+            mode_combo.addItem("Carry current primary profile", "carry_primary_profile")
+        form.addRow("Swap Mode:", mode_combo)
+
+        reason_edit = QLineEdit()
+        reason_edit.setPlaceholderText("Optional operator note")
+        reason_edit.setText(
+            f"Temporary swap {str(primary_row.get('device_name', '') or 'primary')} -> {str(target_row.get('device_name', '') or 'target')}"
+        )
+        form.addRow("Reason:", reason_edit)
+
+        ends_edit = QLineEdit()
+        ends_edit.setPlaceholderText("Optional UTC metadata only; no automatic expiry in this checkpoint")
+        form.addRow("Ends UTC:", ends_edit)
+
+        info_label = QLabel()
+        info_label.setWordWrap(True)
+        form.addRow("", info_label)
+
+        def _update_hint() -> None:
+            mode = str(mode_combo.currentData() or "use_target_profile").strip().lower()
+            if mode == "carry_primary_profile":
+                carried_name = str((primary_profile or {}).get("name", "") or "Current Primary Profile")
+                info_label.setText(
+                    f"{carried_name} will be copied onto the target device as a temporary override. "
+                    "Restore Swap returns the target device to its prior effective assignment."
+                )
+            elif not allow_carry:
+                info_label.setText(
+                    "The current primary operating profile does not allow carried swaps, so this workflow keeps the target device's existing effective profile."
+                )
+            else:
+                info_label.setText(
+                    "This swap changes the Station Default device temporarily but leaves the target device's current effective profile in place."
+                )
+
+        mode_combo.currentIndexChanged.connect(_update_hint)
+        _update_hint()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        out: Dict[str, Any] = {}
+
+        def _save() -> None:
+            out.update(
+                {
+                    "mode": str(mode_combo.currentData() or "use_target_profile").strip().lower() or "use_target_profile",
+                    "reason": reason_edit.text().strip(),
+                    "ends_utc": ends_edit.text().strip(),
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _start_temporary_profile_swap(self) -> None:
+        if isinstance(self.active_profile_swap, dict) and self.active_profile_swap:
+            QMessageBox.information(self, "Temporary Swap", "A temporary swap is already active. Restore it before starting another.")
+            return
+        selected = self._selected_assignment_rows()
+        if not selected:
+            QMessageBox.information(self, "Temporary Swap", "Select one active non-primary device to use as the temporary swap target.")
+            return
+        if len(selected) != 1:
+            QMessageBox.warning(self, "Temporary Swap", "Please select exactly one active non-primary device as the temporary swap target.")
+            return
+        target_row = selected[0]
+        if int(target_row.get("runtime_primary", 0) or 0) == 1:
+            QMessageBox.information(self, "Temporary Swap", "The selected device is already the Station Default runtime.")
+            return
+        if str(target_row.get("device_class", "") or "").strip().lower() == "observer":
+            QMessageBox.warning(self, "Temporary Swap", "Observer / SDR device profiles cannot be used as temporary-swap targets.")
+            return
+        if int(target_row.get("runtime_active", 0) or 0) != 1:
+            QMessageBox.warning(self, "Temporary Swap", "The temporary swap target must already be runtime-active.")
+            return
+        values = self._open_temporary_profile_swap_dialog(target_row)
+        if not values:
+            return
+        try:
+            self.multi_radio_store.start_temporary_profile_swap(
+                int(target_row.get("device_profile_id", 0) or 0),
+                mode=str(values.get("mode", "use_target_profile") or "use_target_profile"),
+                reason=str(values.get("reason", "") or ""),
+                ends_utc=str(values.get("ends_utc", "") or ""),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Temporary Swap", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed starting temporary profile swap.")
+            QMessageBox.warning(self, "Temporary Swap", "Unable to start the temporary profile swap.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _restore_temporary_profile_swap(self) -> None:
+        active_swap = dict(self.active_profile_swap or {})
+        if not active_swap:
+            QMessageBox.information(self, "Restore Swap", "No temporary profile swap is currently active.")
+            return
+        source_name = str(active_swap.get("source_device_name", "") or "").strip() or "previous primary"
+        target_name = str(active_swap.get("target_device_name", "") or "").strip() or "temporary target"
+        confirm = QMessageBox.question(
+            self,
+            "Restore Swap",
+            f"Restore the Station Default runtime from {target_name} back to {source_name}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self.multi_radio_store.restore_temporary_profile_swap()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Restore Swap", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed restoring temporary profile swap.")
+            QMessageBox.warning(self, "Restore Swap", "Unable to restore the temporary profile swap.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _confirm_runtime_projection_override(self, action_name: str) -> bool:
+        if not self._settings_dirty:
+            return True
+        confirm = QMessageBox.question(
+            self,
+            action_name,
+            "Unsaved Settings changes are present.\n\n"
+            "Continuing will replace the visible compatibility backend and endpoint fields with the selected device "
+            "profile projection.\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return confirm == QMessageBox.Yes
+
+    def _open_device_profile_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit Device Profile" if existing else "Add Device Profile")
+        dlg.resize(620, 0)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.addLayout(form)
+
+        name_edit = QLineEdit(str((existing or {}).get("name", "") or ""))
+        form.addRow("Name:", name_edit)
+
+        device_class_combo = QComboBox()
+        for label, value in DEVICE_CLASS_OPTIONS:
+            device_class_combo.addItem(label, value)
+        device_class = str((existing or {}).get("device_class", "tx_rx") or "tx_rx").strip().lower()
+        class_idx = device_class_combo.findData(device_class)
+        device_class_combo.setCurrentIndex(class_idx if class_idx >= 0 else 0)
+        form.addRow("Device Class:", device_class_combo)
+
+        backend_combo = QComboBox()
+        backend_options = [
+            ("FLRig", "flrig"),
+            ("JS8Call", "js8call"),
+            ("Manual", "manual"),
+            ("RIGCTLD", "rigctld"),
+        ]
+        for label, value in backend_options:
+            backend_combo.addItem(label, value)
+        backend_idx = backend_combo.findData(str((existing or {}).get("control_backend", "flrig") or "flrig").strip().lower())
+        backend_combo.setCurrentIndex(backend_idx if backend_idx >= 0 else 0)
+        form.addRow("Control Backend:", backend_combo)
+
+        deploy_combo = QComboBox()
+        deploy_combo.addItem("Full", "full")
+        deploy_combo.addItem("Minimal", "minimal")
+        deploy_idx = deploy_combo.findData(str((existing or {}).get("deployment_mode", "full") or "full").strip().lower())
+        deploy_combo.setCurrentIndex(deploy_idx if deploy_idx >= 0 else 0)
+        form.addRow("Deployment Mode:", deploy_combo)
+
+        rig_host_edit = QLineEdit(str((existing or {}).get("rig_host", "") or ""))
+        rig_port_edit = QLineEdit(str((existing or {}).get("rig_port", "") or ""))
+        rig_port_edit.setValidator(QIntValidator(1, 65535, rig_port_edit))
+        rig_row = QHBoxLayout()
+        rig_row.addWidget(rig_host_edit, 1)
+        rig_row.addWidget(QLabel("Port"))
+        rig_row.addWidget(rig_port_edit)
+        rig_wrap = QWidget()
+        rig_wrap.setLayout(rig_row)
+        form.addRow("RIGCTLD:", rig_wrap)
+
+        flrig_host_edit = QLineEdit(str((existing or {}).get("flrig_host", "") or ""))
+        flrig_port_edit = QLineEdit(str((existing or {}).get("flrig_port", "") or ""))
+        flrig_port_edit.setValidator(QIntValidator(1, 65535, flrig_port_edit))
+        flrig_row = QHBoxLayout()
+        flrig_row.addWidget(flrig_host_edit, 1)
+        flrig_row.addWidget(QLabel("Port"))
+        flrig_row.addWidget(flrig_port_edit)
+        flrig_wrap = QWidget()
+        flrig_wrap.setLayout(flrig_row)
+        form.addRow("FLRig:", flrig_wrap)
+
+        fldigi_host_edit = QLineEdit(str((existing or {}).get("fldigi_host", "") or ""))
+        fldigi_port_edit = QLineEdit(str((existing or {}).get("fldigi_port", "") or ""))
+        fldigi_port_edit.setValidator(QIntValidator(1, 65535, fldigi_port_edit))
+        fldigi_row = QHBoxLayout()
+        fldigi_row.addWidget(fldigi_host_edit, 1)
+        fldigi_row.addWidget(QLabel("Port"))
+        fldigi_row.addWidget(fldigi_port_edit)
+        fldigi_wrap = QWidget()
+        fldigi_wrap.setLayout(fldigi_row)
+        form.addRow("FLDigi:", fldigi_wrap)
+
+        js8_host_edit = QLineEdit(str((existing or {}).get("js8_host", "") or ""))
+        js8_port_edit = QLineEdit(str((existing or {}).get("js8_port", "") or ""))
+        js8_port_edit.setValidator(QIntValidator(1, 65535, js8_port_edit))
+        js8_row = QHBoxLayout()
+        js8_row.addWidget(js8_host_edit, 1)
+        js8_row.addWidget(QLabel("Port"))
+        js8_row.addWidget(js8_port_edit)
+        js8_wrap = QWidget()
+        js8_wrap.setLayout(js8_row)
+        form.addRow("JS8Call:", js8_wrap)
+
+        varac_install_edit = QLineEdit(str((existing or {}).get("varac_install_path", "") or ""))
+        form.addRow("VarAC Install:", varac_install_edit)
+
+        varac_db_edit = QLineEdit(str((existing or {}).get("varac_db_path", "") or ""))
+        form.addRow("VarAC DB:", varac_db_edit)
+
+        varac_ini_edit = QLineEdit(str((existing or {}).get("varac_ini_path", "") or ""))
+        form.addRow("VarAC INI:", varac_ini_edit)
+
+        varac_launch_cmd_edit = QLineEdit(str((existing or {}).get("launch_cmd", "") or ""))
+        form.addRow("VarAC Launch:", varac_launch_cmd_edit)
+
+        launch_enabled_chk = QCheckBox("Launch enabled for runtime compatibility profile")
+        launch_enabled_chk.setChecked(bool((existing or {}).get("launch_enabled", 1)))
+        form.addRow("", launch_enabled_chk)
+
+        launch_path_edit = QLineEdit(str((existing or {}).get("launch_path", "") or ""))
+        launch_path_btn = QPushButton("Browse")
+        launch_row = QHBoxLayout()
+        launch_row.addWidget(launch_path_edit, 1)
+        launch_row.addWidget(launch_path_btn)
+        launch_wrap = QWidget()
+        launch_wrap.setLayout(launch_row)
+        form.addRow("Launch Path:", launch_wrap)
+
+        sdr_host_edit = QLineEdit(str((existing or {}).get("sdr_host", "") or ""))
+        sdr_port_edit = QLineEdit(str((existing or {}).get("sdr_port", "") or ""))
+        sdr_port_edit.setValidator(QIntValidator(1, 65535, sdr_port_edit))
+        sdr_row = QHBoxLayout()
+        sdr_row.addWidget(sdr_host_edit, 1)
+        sdr_row.addWidget(QLabel("Port"))
+        sdr_row.addWidget(sdr_port_edit)
+        sdr_wrap = QWidget()
+        sdr_wrap.setLayout(sdr_row)
+        form.addRow("Observer SDR:", sdr_wrap)
+
+        ptt_group_edit = QLineEdit(str((existing or {}).get("ptt_group", "") or ""))
+        ptt_group_edit.setPlaceholderText("Optional shared transmit/PTT domain, e.g. AMP-A")
+        form.addRow("PTT Group:", ptt_group_edit)
+
+        antenna_group_edit = QLineEdit(str((existing or {}).get("antenna_group", "") or ""))
+        antenna_group_edit.setPlaceholderText("Optional shared antenna path, e.g. ANT-1")
+        form.addRow("Antenna Group:", antenna_group_edit)
+
+        frontend_group_edit = QLineEdit(str((existing or {}).get("frontend_group", "") or ""))
+        frontend_group_edit.setPlaceholderText("Optional shared front-end chain, e.g. FRONT-A")
+        form.addRow("Front-End Group:", frontend_group_edit)
+
+        amplifier_group_edit = QLineEdit(str((existing or {}).get("amplifier_group", "") or ""))
+        amplifier_group_edit.setPlaceholderText("Optional shared amplifier chain, e.g. AMP-MAIN")
+        form.addRow("Amplifier Group:", amplifier_group_edit)
+
+        notes_edit = QPlainTextEdit(str((existing or {}).get("notes", "") or ""))
+        notes_edit.setMaximumHeight(96)
+        form.addRow("Notes:", notes_edit)
+
+        def _browse_launch_path() -> None:
+            start = launch_path_edit.text().strip()
+            fn, _ = QFileDialog.getOpenFileName(self, "Select launch path", start)
+            if fn:
+                launch_path_edit.setText(fn)
+
+        launch_path_btn.clicked.connect(_browse_launch_path)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        out: Dict[str, Any] = {}
+
+        def _save() -> None:
+            name = name_edit.text().strip()
+            if not name:
+                QMessageBox.warning(self, "Validation", "Device profile name is required.")
+                return
+            out.update(
+                {
+                    "id": (existing or {}).get("id"),
+                    "name": name,
+                    "device_class": str(device_class_combo.currentData() or "tx_rx"),
+                    "control_backend": str(backend_combo.currentData() or "flrig"),
+                    "deployment_mode": str(deploy_combo.currentData() or "full"),
+                    "rig_host": rig_host_edit.text().strip(),
+                    "rig_port": rig_port_edit.text().strip(),
+                    "flrig_host": flrig_host_edit.text().strip(),
+                    "flrig_port": flrig_port_edit.text().strip(),
+                    "fldigi_host": fldigi_host_edit.text().strip(),
+                    "fldigi_port": fldigi_port_edit.text().strip(),
+                    "js8_host": js8_host_edit.text().strip(),
+                    "js8_port": js8_port_edit.text().strip(),
+                    "varac_install_path": varac_install_edit.text().strip(),
+                    "varac_db_path": varac_db_edit.text().strip(),
+                    "varac_ini_path": varac_ini_edit.text().strip(),
+                    "launch_cmd": varac_launch_cmd_edit.text().strip(),
+                    "launch_enabled": bool(launch_enabled_chk.isChecked()),
+                    "launch_path": launch_path_edit.text().strip(),
+                    "sdr_host": sdr_host_edit.text().strip(),
+                    "sdr_port": sdr_port_edit.text().strip(),
+                    "ptt_group": ptt_group_edit.text().strip(),
+                    "antenna_group": antenna_group_edit.text().strip(),
+                    "frontend_group": frontend_group_edit.text().strip(),
+                    "amplifier_group": amplifier_group_edit.text().strip(),
+                    "notes": notes_edit.toPlainText().strip(),
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out
+
+    def _apply_runtime_projection_widgets(self, data: Dict[str, Any]) -> None:
+        ctrl = data.get("control_via", "FLRig") or "FLRig"
+        allowed_ctrl = ["FLRig", "RIGCTLD", "JS8Call", "Manual"]
+        if ctrl not in allowed_ctrl:
+            ctrl = "FLRig"
+        self.control_combo.setCurrentText(ctrl)
+        self.use_scheduler_chk.setChecked(bool(data.get("use_scheduler", True)))
+
+        self.js8_host_edit.setText(str(data.get("js8_host", "") or "").strip() or "127.0.0.1")
+        self.js8_port_edit.setText(str(data.get("js8_port", "2442") or "2442"))
+        self.js8_offset_edit.setText(str(data.get("js8_offset_hz", 0) or 0))
+        self.js8_directed_edit.setText(str(data.get("js8_directed_path", "") or ""))
+        self.js8_forms_edit.setText(str(data.get("js8_forms_path", "") or ""))
+        self.js8call_path_edit.setText(str(data.get("path_js8call", "") or "").strip())
+        self.js8spotter_path_edit.setText(str(data.get("path_js8spotter", "") or "").strip())
+        self.commstat_path_edit.setText(str(data.get("path_commstat", "") or "").strip())
+
+        msg_paths = data.get("message_paths", {})
+        if not isinstance(msg_paths, dict):
+            msg_paths = {}
+        for origin, edit in self.msg_paths_edits.items():
+            edit.setText(str(msg_paths.get(origin, "") or ""))
+
+        self.varac_path_edit.setText(str(data.get("varac_path", "") or "").strip())
+        self.varac_launch_cmd_edit.setText(str(data.get("varac_launch_cmd", "") or "").strip())
+        self.fldigi_log_path_edit.setText(str(data.get("fldigi_log_path", "") or "").strip())
+
+        fldigi_dir = str(data.get("fldigi_checkin_dir", "") or "").strip()
+        if not fldigi_dir:
+            fldigi_dir = str(get_fldigi_checkin_dir())
+        self.fldigi_checkin_dir_edit.setText(fldigi_dir)
+        self.fldigi_host_edit.setText(self._resolved_fldigi_host_value(data))
+        self.fldigi_port_edit.setText(str(data.get("fldigi_port", "7362") or "7362"))
+        self.flrig_port_edit.setText(str(data.get("flrig_port", "12345") or "12345"))
+
+        for prog_name, meta in self.PROGRAMS.items():
+            path_key = meta["setting_key"]
+            if path_key:
+                self.path_edits[prog_name].setText(str(data.get(path_key, "") or ""))
+
+        self.launch_all_with_startup_chk.setChecked(bool(data.get("launch_control_enabled", True)))
+        self._launch_items_cache = self.launch_orchestrator.get_launch_items()
+        self._refresh_fldigi_checkin_file_labels()
+        self._refresh_launch_control_table()
+
+    def _refresh_runtime_projection_ui(self, *, refresh_multi_radio: bool = False, emit_saved: bool = False) -> None:
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        data = self.settings.all()
+        previous_loading = self._loading_settings
+        self._loading_settings = True
+        try:
+            self._apply_runtime_projection_widgets(data)
+        finally:
+            self._loading_settings = previous_loading
+        if refresh_multi_radio:
+            self._refresh_multi_radio_tables(refresh_section_titles=False)
+        self._update_launch_control_buttons()
+        self._update_launch_selected_state()
+        self._update_device_profile_action_buttons()
+        self._update_operating_profile_action_buttons()
+        self._update_device_assignment_action_buttons()
+        self._refresh_section_titles()
+        self._refresh_running_status()
+        if emit_saved:
+            try:
+                self.settings_saved.emit()
+            except Exception:
+                pass
+
+    def _persist_device_profile(self, values: Dict[str, Any], *, existing: Optional[Dict[str, Any]] = None) -> None:
+        is_active_edit = bool(existing and int(existing.get("runtime_active", 0) or 0) == 1)
+        is_primary_edit = bool(existing and int(existing.get("runtime_primary", 0) or 0) == 1)
+        target_backend = str(values.get("control_backend", (existing or {}).get("control_backend", "")) or "").strip().lower()
+        if is_active_edit and target_backend not in SUPPORTED_RUNTIME_CONTROL_BACKENDS:
+            QMessageBox.warning(
+                self,
+                "Device Profiles",
+                f"Cannot save {self._device_backend_label(target_backend)} as the active compatibility device until runtime support exists.",
+            )
+            return
+        if is_primary_edit and not self._confirm_runtime_projection_override("Edit Station Default Device Profile"):
+            return
+        try:
+            saved = self.multi_radio_store.save_device_profile(values)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Device Profiles", str(exc))
+            return
+        except Exception:
+            log.exception("Failed to save device profile.")
+            QMessageBox.warning(self, "Device Profiles", "Unable to save the device profile.")
+            return
+
+        if is_primary_edit or int(saved.get("runtime_primary", 0) or 0) == 1:
+            try:
+                self.multi_radio_store.sync_runtime_active_device_to_legacy_settings(int(saved.get("id", 0) or 0))
+            except ValueError as exc:
+                QMessageBox.warning(self, "Device Profiles", str(exc))
+                self._refresh_multi_radio_tables()
+                return
+            except Exception:
+                log.exception("Failed to refresh runtime-primary device projection.")
+                QMessageBox.warning(self, "Device Profiles", "Unable to refresh the runtime compatibility projection.")
+                self._refresh_multi_radio_tables()
+                return
+            self._refresh_runtime_projection_ui(refresh_multi_radio=True, emit_saved=True)
+        else:
+            self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _add_device_profile(self) -> None:
+        created = self._open_device_profile_dialog(existing=None)
+        if not created:
+            return
+        self._persist_device_profile(created)
+
+    def _edit_device_profile(self) -> None:
+        selected = self._selected_device_profiles()
+        if not selected:
+            QMessageBox.information(self, "Edit Device Profile", "Select one device profile to edit.")
+            return
+        if len(selected) > 1:
+            QMessageBox.warning(self, "Edit Device Profile", "Please select only one device profile to edit.")
+            return
+        existing = selected[0]
+        updated = self._open_device_profile_dialog(existing=existing)
+        if not updated:
+            return
+        self._persist_device_profile(updated, existing=existing)
+
+    def _set_active_selected_device_profile(self) -> None:
+        selected = self._selected_device_profiles()
+        if not selected:
+            QMessageBox.information(self, "Set Station Default", "Select one device profile to use as the Station Default.")
+            return
+        if len(selected) > 1:
+            QMessageBox.warning(self, "Set Station Default", "Please select only one device profile to use as the Station Default.")
+            return
+        target = selected[0]
+        if int(target.get("runtime_primary", 0) or 0) == 1:
+            QMessageBox.information(self, "Set Station Default", "That device profile is already the Station Default.")
+            return
+        if not self._confirm_runtime_projection_override("Set Station Default"):
+            return
+        try:
+            self.multi_radio_store.set_runtime_primary_device_profile(int(target.get("id", 0) or 0))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Set Station Default", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed to set runtime-primary device profile.")
+            QMessageBox.warning(self, "Set Station Default", "Unable to update the selected device profile.")
+            self._refresh_multi_radio_tables()
+            return
+        self._refresh_runtime_projection_ui(refresh_multi_radio=True, emit_saved=True)
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _activate_selected_device_profiles(self) -> None:
+        selected = self._selected_device_profiles()
+        if not selected:
+            QMessageBox.information(self, "Activate Device Profiles", "Select one or more device profiles to activate.")
+            return
+        activated = 0
+        for target in selected:
+            if int(target.get("runtime_active", 0) or 0) == 1:
+                continue
+            try:
+                self.multi_radio_store.set_device_profile_runtime_active(int(target.get("id", 0) or 0), True)
+                activated += 1
+            except ValueError as exc:
+                QMessageBox.warning(self, "Activate Device Profiles", str(exc))
+                self._refresh_multi_radio_tables()
+                return
+            except Exception:
+                log.exception("Failed to activate device profiles.")
+                QMessageBox.warning(self, "Activate Device Profiles", "Unable to activate the selected device profiles.")
+                self._refresh_multi_radio_tables()
+                return
+        self._refresh_multi_radio_tables()
+        if activated:
+            self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _deactivate_selected_device_profiles(self) -> None:
+        selected = self._selected_device_profiles()
+        if not selected:
+            QMessageBox.information(self, "Deactivate Device Profiles", "Select one or more device profiles to deactivate.")
+            return
+        deactivated = 0
+        for target in selected:
+            if int(target.get("runtime_active", 0) or 0) != 1:
+                continue
+            try:
+                self.multi_radio_store.set_device_profile_runtime_active(int(target.get("id", 0) or 0), False)
+                deactivated += 1
+            except ValueError as exc:
+                QMessageBox.warning(self, "Deactivate Device Profiles", str(exc))
+                self._refresh_multi_radio_tables()
+                return
+            except Exception:
+                log.exception("Failed to deactivate device profiles.")
+                QMessageBox.warning(
+                    self,
+                    "Deactivate Device Profiles",
+                    "Unable to deactivate the selected device profiles.",
+                )
+                self._refresh_multi_radio_tables()
+                return
+        self._refresh_multi_radio_tables()
+        if deactivated:
+            self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _delete_device_profiles(self) -> None:
+        selected = self._selected_device_profiles()
+        if not selected:
+            QMessageBox.information(self, "Delete Device Profiles", "Select one or more device profiles to delete.")
+            return
+        if any(int(row.get("runtime_active", 0) or 0) == 1 for row in selected):
+            QMessageBox.warning(
+                self,
+                "Delete Device Profiles",
+                "Active device profiles cannot be deleted. Deactivate them first.",
+            )
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete Device Profiles",
+            f"Delete {len(selected)} selected device profile(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.delete_device_profile(int(row.get("id", 0) or 0))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Delete Device Profiles", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed deleting device profiles.")
+            QMessageBox.warning(self, "Delete Device Profiles", "Unable to delete the selected device profiles.")
+            self._refresh_multi_radio_tables()
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+        QMessageBox.information(
+            self,
+            "Delete Device Profiles",
+            f"Deleted {len(selected)} device profile{'s' if len(selected) != 1 else ''}.",
+        )
+
+    def _varac_cluster_by_id(self, cluster_id: int) -> Optional[Dict[str, Any]]:
+        return next(
+            (
+                dict(row)
+                for row in self.varac_clusters
+                if isinstance(row, dict) and int(row.get("id", 0) or 0) == int(cluster_id)
+            ),
+            None,
+        )
+
+    def _open_varac_cluster_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit VarAC Cluster" if existing else "Add VarAC Cluster")
+        dlg.resize(620, 0)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        name_edit = QLineEdit(str((existing or {}).get("name", "") or ""))
+        form.addRow("Name:", name_edit)
+
+        cluster_id_edit = QLineEdit(str((existing or {}).get("cluster_id", "") or ""))
+        cluster_id_edit.setPlaceholderText("Stable shared VarAC cluster ID")
+        form.addRow("Cluster ID:", cluster_id_edit)
+
+        shared_db_edit = QLineEdit(str((existing or {}).get("shared_db_path", "") or ""))
+        shared_db_edit.setPlaceholderText("Optional shared VarAC DB path")
+        form.addRow("Shared DB Path:", shared_db_edit)
+
+        refresh_edit = QLineEdit(str(int((existing or {}).get("counters_refresh_sec", 30) or 30)))
+        refresh_edit.setValidator(QIntValidator(5, 600, refresh_edit))
+        form.addRow("Refresh Sec:", refresh_edit)
+
+        ptt_lock_chk = QCheckBox("Enable cluster PTT lock metadata")
+        ptt_lock_chk.setChecked(bool((existing or {}).get("ptt_lock_enabled", 0)))
+        form.addRow("", ptt_lock_chk)
+
+        gateway_combo = QComboBox()
+        gateway_combo.addItem("No gateway handler selected", 0)
+        existing_cluster_id = int((existing or {}).get("id", 0) or 0)
+        enabled_members = [
+            row
+            for row in self.varac_cluster_members
+            if isinstance(row, dict)
+            and int(row.get("cluster_db_id", 0) or 0) == existing_cluster_id
+            and int(row.get("enabled", 1) or 0) == 1
+        ]
+        for row in enabled_members:
+            gateway_combo.addItem(
+                f"{str(row.get('device_name', '') or 'Device').strip()} (#{int(row.get('instance_number', 0) or 0)})",
+                int(row.get("device_profile_id", 0) or 0),
+            )
+        gateway_device_id = int((existing or {}).get("gateway_handler_device_id", 0) or 0)
+        gateway_index = gateway_combo.findData(gateway_device_id)
+        gateway_combo.setCurrentIndex(gateway_index if gateway_index >= 0 else 0)
+        form.addRow("Gateway Handler:", gateway_combo)
+
+        info_label = QLabel()
+        info_label.setWordWrap(True)
+        form.addRow("", info_label)
+
+        def _update_hint() -> None:
+            if existing_cluster_id <= 0:
+                info_label.setText(
+                    "Create the cluster first, then assign members in VarAC Memberships. Return here to choose the gateway handler after at least one member is enabled."
+                )
+                return
+            if not enabled_members:
+                info_label.setText(
+                    "This cluster has no enabled members yet. Assign one or more device profiles in VarAC Memberships before selecting the gateway handler."
+                )
+                return
+            if int(gateway_combo.currentData() or 0) > 0:
+                info_label.setText(
+                    "The selected gateway handler becomes the exclusive gateway role for this cluster in Phase F Slice 3."
+                )
+                return
+            info_label.setText(
+                "Leave Gateway Handler blank for now if the cluster is receive-only or not yet finalized. Multi-member clusters should generally designate one handler."
+            )
+
+        gateway_combo.currentIndexChanged.connect(_update_hint)
+        _update_hint()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        out: Dict[str, Any] = {}
+
+        def _save() -> None:
+            name = name_edit.text().strip()
+            if not name:
+                QMessageBox.warning(self, "Validation", "VarAC cluster name is required.")
+                return
+            refresh_text = refresh_edit.text().strip() or "30"
+            try:
+                refresh_value = int(refresh_text)
+            except Exception:
+                QMessageBox.warning(self, "Validation", "Refresh seconds must be a valid integer.")
+                return
+            out.update(
+                {
+                    "id": (existing or {}).get("id"),
+                    "name": name,
+                    "cluster_id": cluster_id_edit.text().strip(),
+                    "shared_db_path": shared_db_edit.text().strip(),
+                    "counters_refresh_sec": refresh_value,
+                    "ptt_lock_enabled": bool(ptt_lock_chk.isChecked()),
+                    "gateway_handler_device_id": int(gateway_combo.currentData() or 0) or None,
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _persist_varac_cluster(self, values: Dict[str, Any]) -> None:
+        try:
+            self.multi_radio_store.save_varac_cluster(values)
+        except ValueError as exc:
+            QMessageBox.warning(self, "VarAC Clusters", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed saving VarAC cluster.")
+            QMessageBox.warning(self, "VarAC Clusters", "Unable to save the VarAC cluster.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _add_varac_cluster(self) -> None:
+        created = self._open_varac_cluster_dialog(existing=None)
+        if created:
+            self._persist_varac_cluster(created)
+
+    def _edit_varac_cluster(self) -> None:
+        selected = self._selected_varac_clusters()
+        if not selected:
+            QMessageBox.information(self, "Edit VarAC Cluster", "Select one VarAC cluster to edit.")
+            return
+        if len(selected) > 1:
+            QMessageBox.warning(self, "Edit VarAC Cluster", "Please select only one VarAC cluster to edit.")
+            return
+        updated = self._open_varac_cluster_dialog(existing=selected[0])
+        if updated:
+            self._persist_varac_cluster(updated)
+
+    def _delete_varac_clusters(self) -> None:
+        selected = self._selected_varac_clusters()
+        if not selected:
+            QMessageBox.information(self, "Delete VarAC Clusters", "Select one or more VarAC clusters to delete.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Delete VarAC Clusters",
+            f"Delete {len(selected)} selected VarAC cluster(s) and their memberships?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.delete_varac_cluster(int(row.get("id", 0) or 0))
+        except Exception:
+            log.exception("Failed deleting VarAC clusters.")
+            QMessageBox.warning(self, "Delete VarAC Clusters", "Unable to delete the selected VarAC clusters.")
+            self._refresh_multi_radio_tables()
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _open_varac_membership_dialog(self, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        clusters = [row for row in self.varac_clusters if isinstance(row, dict)]
+        if not clusters:
+            QMessageBox.information(self, "VarAC Memberships", "Create a VarAC cluster before assigning device memberships.")
+            return None
+        devices = [
+            row
+            for row in self.device_profiles
+            if isinstance(row, dict) and str(row.get("device_class", "") or "").strip().lower() != "observer"
+        ]
+        if not devices:
+            QMessageBox.information(self, "VarAC Memberships", "Create a non-observer device profile before assigning VarAC memberships.")
+            return None
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit VarAC Membership" if existing else "Add VarAC Membership")
+        dlg.resize(560, 0)
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        cluster_combo = QComboBox()
+        for row in clusters:
+            cluster_combo.addItem(
+                f"{str(row.get('name', '') or 'Cluster').strip()} [{str(row.get('cluster_id', '') or '').strip()}]",
+                int(row.get("id", 0) or 0),
+            )
+        cluster_index = cluster_combo.findData(int((existing or {}).get("cluster_db_id", 0) or 0))
+        cluster_combo.setCurrentIndex(cluster_index if cluster_index >= 0 else 0)
+        cluster_combo.setEnabled(existing is None)
+        form.addRow("Cluster:", cluster_combo)
+
+        device_combo = QComboBox()
+        for row in devices:
+            label = str(row.get("name", "") or "Device").strip()
+            device_combo.addItem(label, int(row.get("id", 0) or 0))
+        device_index = device_combo.findData(int((existing or {}).get("device_profile_id", 0) or 0))
+        device_combo.setCurrentIndex(device_index if device_index >= 0 else 0)
+        device_combo.setEnabled(existing is None)
+        form.addRow("Device:", device_combo)
+
+        instance_edit = QLineEdit(str(int((existing or {}).get("instance_number", 1) or 1)))
+        instance_edit.setValidator(QIntValidator(1, 9999, instance_edit))
+        form.addRow("Instance Number:", instance_edit)
+
+        enabled_chk = QCheckBox("Membership Enabled")
+        enabled_chk.setChecked(True if existing is None else bool((existing or {}).get("enabled", 1)))
+        form.addRow("", enabled_chk)
+
+        info_label = QLabel()
+        info_label.setWordWrap(True)
+        form.addRow("", info_label)
+
+        def _update_hint() -> None:
+            selected_cluster = self._varac_cluster_by_id(int(cluster_combo.currentData() or 0)) or {}
+            device_id = int(device_combo.currentData() or 0)
+            device_row = next(
+                (
+                    row
+                    for row in self.device_profiles
+                    if isinstance(row, dict) and int(row.get("id", 0) or 0) == device_id
+                ),
+                {},
+            )
+            node_ready = any(
+                str(device_row.get(key, "") or "").strip()
+                for key in ("varac_install_path", "varac_db_path", "varac_ini_path", "launch_cmd")
+            )
+            base = f"Instance numbers must be unique inside {str(selected_cluster.get('name', '') or 'the selected cluster').strip()}."
+            if not node_ready:
+                info_label.setText(base + " This device does not yet have device-local VarAC settings configured.")
+                return
+            info_label.setText(base + " The cluster gateway handler is chosen from the cluster editor.")
+
+        cluster_combo.currentIndexChanged.connect(_update_hint)
+        device_combo.currentIndexChanged.connect(_update_hint)
+        _update_hint()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        out: Dict[str, Any] = {}
+
+        def _save() -> None:
+            try:
+                instance_value = int(instance_edit.text().strip() or "0")
+            except Exception:
+                QMessageBox.warning(self, "Validation", "Instance number must be a valid integer.")
+                return
+            if instance_value <= 0:
+                QMessageBox.warning(self, "Validation", "Instance number must be greater than zero.")
+                return
+            out.update(
+                {
+                    "cluster_id": int(cluster_combo.currentData() or 0),
+                    "device_profile_id": int(device_combo.currentData() or 0),
+                    "instance_number": instance_value,
+                    "enabled": bool(enabled_chk.isChecked()),
+                }
+            )
+            dlg.accept()
+
+        buttons.accepted.connect(_save)
+        buttons.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return out if out else None
+
+    def _add_or_edit_varac_membership(self) -> None:
+        selected = self._selected_varac_memberships()
+        if len(selected) > 1:
+            QMessageBox.warning(self, "VarAC Memberships", "Please select at most one existing membership to edit.")
+            return
+        values = self._open_varac_membership_dialog(existing=selected[0] if selected else None)
+        if not values:
+            return
+        try:
+            self.multi_radio_store.set_varac_cluster_member(
+                int(values.get("cluster_id", 0) or 0),
+                int(values.get("device_profile_id", 0) or 0),
+                instance_number=int(values.get("instance_number", 0) or 0),
+                enabled=bool(values.get("enabled", True)),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "VarAC Memberships", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed saving VarAC membership.")
+            QMessageBox.warning(self, "VarAC Memberships", "Unable to save the VarAC membership.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
+    def _remove_varac_memberships(self) -> None:
+        selected = self._selected_varac_memberships()
+        if not selected:
+            QMessageBox.information(self, "VarAC Memberships", "Select one or more VarAC memberships to remove.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Remove VarAC Memberships",
+            f"Remove {len(selected)} selected VarAC membership(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            for row in selected:
+                self.multi_radio_store.remove_varac_cluster_member(
+                    int(row.get("cluster_db_id", 0) or 0),
+                    int(row.get("device_profile_id", 0) or 0),
+                )
+        except ValueError as exc:
+            QMessageBox.warning(self, "VarAC Memberships", str(exc))
+            self._refresh_multi_radio_tables()
+            return
+        except Exception:
+            log.exception("Failed removing VarAC memberships.")
+            QMessageBox.warning(self, "VarAC Memberships", "Unable to remove the selected VarAC memberships.")
+            return
+        self._refresh_multi_radio_tables()
+        self._emit_device_profiles_changed()
+        self._set_save_button_state("info" if self._settings_dirty else "success")
+
     # ---------- Launch Control ---------- #
 
     def _on_launch_paths_changed(self, *_args) -> None:
@@ -3554,10 +6172,16 @@ class SettingsTab(QWidget):
         row = self.launch_control_table.currentRow() if hasattr(self, "launch_control_table") else -1
         has_rows = bool(hasattr(self, "launch_control_table") and self.launch_control_table.rowCount() > 0)
         can_move = has_rows and row >= 0
+        launch_allowed = True
+        if hasattr(self.launch_orchestrator, "launch_allowed"):
+            try:
+                launch_allowed = bool(self.launch_orchestrator.launch_allowed())
+            except Exception:
+                launch_allowed = True
         self.launch_order_up_btn.setEnabled(bool(can_move and row > 0))
         self.launch_order_down_btn.setEnabled(bool(can_move and row < self.launch_control_table.rowCount() - 1))
         self.launch_reset_order_btn.setEnabled(has_rows)
-        self.launch_configured_now_btn.setEnabled(has_rows and not self.launch_orchestrator.is_active())
+        self.launch_configured_now_btn.setEnabled(has_rows and launch_allowed and not self.launch_orchestrator.is_active())
         self.launch_stop_btn.setEnabled(self.launch_orchestrator.is_active())
 
     def _move_launch_row(self, direction: int) -> None:
@@ -3615,6 +6239,20 @@ class SettingsTab(QWidget):
 
     def _launch_configured_now(self) -> None:
         self._sync_launch_cache_from_table()
+        if hasattr(self.launch_orchestrator, "launch_allowed"):
+            try:
+                if not self.launch_orchestrator.launch_allowed():
+                    reason = ""
+                    if hasattr(self.launch_orchestrator, "launch_block_reason"):
+                        reason = str(self.launch_orchestrator.launch_block_reason() or "").strip()
+                    QMessageBox.information(
+                        self,
+                        "Launch Control",
+                        reason or "Launch Control is disabled by the primary operating profile.",
+                    )
+                    return
+            except Exception:
+                pass
         started = self.launch_orchestrator.start_manual_sequence(self._launch_items_cache)
         if not started:
             QMessageBox.information(self, "Launch Control", "No enabled configured applications to launch.")
@@ -3960,6 +6598,7 @@ class SettingsTab(QWidget):
                 self.loading_label.setVisible(False)
             self._refresh_running_status()
             self._update_launch_selected_state()
+            self._update_device_profile_action_buttons()
             self._update_op_group_action_buttons()
             self._update_local_net_action_buttons()
             self._set_save_button_state("info" if self._settings_dirty else "success")

@@ -370,6 +370,7 @@ class JS8CallNetControlTab(QWidget):
         self._maybe_reload_operating_groups()
         self._apply_theme()
         self._refresh_group_completer()
+        self._setup_js8_rx_timer()
 
     def show_loading_toast(self) -> None:
         # NCS tabs do not use a loading banner/toast.
@@ -509,16 +510,22 @@ class JS8CallNetControlTab(QWidget):
         self._update_clock_labels()
 
     def _setup_js8_rx_timer(self):
-        if self._js8_rx_hub is None:
-            self._js8_rx_hub = JS8RxHub.instance()
-        if not self._js8_rx_registered:
-            self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
-            self._js8_rx_registered = True
         host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
             port = int(self.settings.get("js8_port", 2442) or 2442)
         except Exception:
             port = 2442
+        if self._js8_rx_hub is None or self._js8_rx_hub.endpoint() != (host, port):
+            if self._js8_rx_hub is not None and self._js8_rx_registered:
+                try:
+                    self._js8_rx_hub.unregister_listener(self._on_js8_rx_messages)
+                except Exception:
+                    pass
+                self._js8_rx_registered = False
+            self._js8_rx_hub = JS8RxHub.instance(host, port)
+        if not self._js8_rx_registered:
+            self._js8_rx_hub.register_listener(self._on_js8_rx_messages)
+            self._js8_rx_registered = True
         self._js8_rx_hub.start(host, port)
 
     def _update_timer_interval(self):

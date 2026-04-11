@@ -13,6 +13,7 @@ DEFAULT_HOLD_DURATION_MIN = 30
 HOLD_WARNING_SECONDS = 10 * 60
 HOLD_CRITICAL_SECONDS = 2 * 60
 _HOLD_DURATION_DEFAULT_CACHE: Dict[str, Optional[int]] = {"minutes": None}
+_SCHEDULER_ENABLED_OVERRIDE: Dict[str, Optional[bool]] = {"enabled": None}
 
 
 def load_operating_groups(settings) -> List[Dict]:
@@ -117,6 +118,42 @@ def current_scheduler_freq(window) -> Optional[float]:
         return None
 
 
+def _shared_ptt_block_reason(scheduler) -> str:
+    if scheduler is None or not hasattr(scheduler, "get_status_summary"):
+        return ""
+    try:
+        status = scheduler.get_status_summary()
+    except Exception:
+        return ""
+    if not isinstance(status, dict) or not bool(status.get("shared_ptt_blocked")):
+        return ""
+    reason = str(status.get("shared_ptt_reason") or "").strip()
+    if reason:
+        return reason
+    group = str(status.get("shared_ptt_group") or "").strip()
+    owner = str(status.get("shared_ptt_owner_name") or "").strip()
+    if group and owner:
+        return f"Shared PTT group {group} is in use by {owner}."
+    if group:
+        return f"Shared PTT group {group} is currently busy."
+    return "Shared PTT interlock is active."
+
+
+def _coordination_conflict_warning(scheduler, entry: Dict) -> Dict[str, object]:
+    if scheduler is None or not hasattr(scheduler, "evaluate_coordination_conflict"):
+        return {}
+    try:
+        payload = scheduler.evaluate_coordination_conflict(entry, source="QSY")
+    except TypeError:
+        try:
+            payload = scheduler.evaluate_coordination_conflict(entry)
+        except Exception:
+            return {}
+    except Exception:
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
 def perform_qsy(window, meta: Dict) -> bool:
     try:
         scheduler = getattr(window, "scheduler", None)
@@ -138,6 +175,28 @@ def perform_qsy(window, meta: Dict) -> bool:
         "group": (meta.get("group") or "").strip().upper(),
         "group_name": (meta.get("group") or "").strip().upper(),
     }
+    block_reason = _shared_ptt_block_reason(scheduler)
+    if block_reason:
+        QMessageBox.warning(window, "QSY Blocked", block_reason)
+        return False
+    conflict = _coordination_conflict_warning(scheduler, entry)
+    if bool(conflict.get("warning")):
+        msg = QMessageBox(window)
+        msg.setWindowTitle("RF Conflict Warning")
+        msg.setText(str(conflict.get("summary") or "RF conflict detected.").strip() or "RF conflict detected.")
+        detail = str(conflict.get("detail") or "").strip()
+        if detail:
+            msg.setInformativeText(detail)
+        proceed_btn = msg.addButton("Proceed QSY", QMessageBox.AcceptRole)
+        msg.addButton("Cancel", QMessageBox.RejectRole)
+        msg.exec()
+        if msg.clickedButton() != proceed_btn:
+            return False
+        try:
+            scheduler.apply_manual_qsy(entry, ignore_coordination_prompt=True)
+        except TypeError:
+            scheduler.apply_manual_qsy(entry)
+        return True
     scheduler.apply_manual_qsy(entry)
     return True
 
@@ -384,7 +443,14 @@ def suspend_active(settings) -> bool:
     return dt is not None and datetime.datetime.now(datetime.timezone.utc) < dt
 
 
+def set_scheduler_enabled_override(enabled: Optional[bool]) -> None:
+    _SCHEDULER_ENABLED_OVERRIDE["enabled"] = None if enabled is None else bool(enabled)
+
+
 def scheduler_enabled(settings) -> bool:
+    override = _SCHEDULER_ENABLED_OVERRIDE.get("enabled")
+    if override is not None:
+        return bool(override)
     try:
         return bool(settings.get("use_scheduler", True))
     except Exception:

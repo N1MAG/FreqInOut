@@ -3,11 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import sys
 from typing import Dict, List, Optional
-
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = "FreqInOut"
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from freqinout.core.multi_radio_store import SETTINGS_TABLE_SPECS
 
 
 def _runtime_app_root() -> Path:
@@ -67,11 +72,22 @@ SETTINGS_TABLES: Dict[str, TableDef] = {
             start_utc TEXT NOT NULL,
             end_utc TEXT NOT NULL,
             group_name TEXT,
-            auto_tune INTEGER DEFAULT 0
+            auto_tune INTEGER DEFAULT 0,
+            target_scope TEXT NOT NULL DEFAULT 'station',
+            target_device_profile_id INTEGER,
+            target_operating_profile_id INTEGER
         )
         """,
     ),
 }
+
+for _table_name, _spec in SETTINGS_TABLE_SPECS.items():
+    SETTINGS_TABLES[_table_name] = TableDef(
+        name=_table_name,
+        db=SETTINGS_DB,
+        description=f"Wave 1 multi-rig settings table: {_table_name}.",
+        ddl=str(_spec["ddl"]),
+    )
 
 NETS_TABLES: Dict[str, TableDef] = {
     "operator_checkins": TableDef(
@@ -168,7 +184,10 @@ NETS_TABLES: Dict[str, TableDef] = {
             group_name TEXT,
             fldigi_mode TEXT,
             fldigi_offset TEXT,
-            resource_id INTEGER
+            resource_id INTEGER,
+            target_scope TEXT NOT NULL DEFAULT 'station',
+            target_device_profile_id INTEGER,
+            target_operating_profile_id INTEGER
         )
         """,
     ),
@@ -195,7 +214,10 @@ NETS_TABLES: Dict[str, TableDef] = {
             net_name TEXT,
             group_name TEXT,
             fldigi_mode TEXT,
-            fldigi_offset TEXT
+            fldigi_offset TEXT,
+            target_scope TEXT NOT NULL DEFAULT 'station',
+            target_device_profile_id INTEGER,
+            target_operating_profile_id INTEGER
         )
         """,
     ),

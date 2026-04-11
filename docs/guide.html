@@ -38,11 +38,51 @@
   <h2 id="quick-start">Quick Start</h2>
   <ol class="section-list">
     <li>Open <a href="#settings">Settings</a>, enter your operator identity, set required software/file paths, and click <em>Save Settings</em>.</li>
+    <li>If you are using more than one radio, read <a href="#multi-rig-configuration">Multi-Rig Configuration</a> next and complete the multi-rig Settings sections before editing schedules.</li>
     <li>Build your baseline station plan in <a href="#settings-hf-groups">HF Operating Groups</a>, <a href="#hf-daily">HF Daily</a>, and <a href="#hf-nets">HF Nets</a>.</li>
+    <li>Open <a href="#station-overview">Station Overview</a> to confirm which device is the current <code>Station Default</code>, which profiles are active, and whether warnings need attention.</li>
     <li>Validate the plan in <a href="#freqplanner">FreqPlanner</a> and <a href="#controlfreq">ControlFreq</a>.</li>
     <li>If running net operations, use <a href="#ncs-fldigi-ssb">FLDigi / SSB</a>, <a href="#ncs-js8call">JS8Call</a>, or <a href="#ncs-vhf-uhf">VHF/UHF</a>.</li>
     <li>Use <a href="#sop-builder">SOP Builder</a> for condition-driven action plans and <a href="#messages">Messages</a> for traffic review and message actions.</li>
   </ol>
+
+  <h2 id="multi-rig-configuration">Multi-Rig Configuration</h2>
+  <p><strong>Purpose</strong>: configure multiple device profiles while keeping the current <code>1.2.2</code> compatibility shell predictable.</p>
+  <p><strong>Compatibility model</strong>: one or more device profiles can be runtime-active at the same time, but exactly one non-observer device is the <code>Station Default</code>. Current tabs such as ControlFreq, FreqPlanner, Messages, Map, scheduler control, launch behavior, and the NCS tabs continue to follow that Station Default device unless this guide explicitly says otherwise.</p>
+  <p><strong>Observer / SDR note</strong>: <code>Observer / SDR</code> device profiles can be active and visible in <a href="#station-overview">Station Overview</a>, but they never become the <code>Station Default</code> shell and cannot be used as temporary-swap targets.</p>
+
+  <h3 id="multi-rig-setup-order">Recommended Setup Order</h3>
+  <ol class="section-list">
+    <li><strong>1) Build <a href="#settings-device-profiles">Device Profiles</a> first</strong>: create one row for each radio/control endpoint you want to manage. This is where you define control backend, deployment mode, backend endpoints, launch path, device-local VarAC paths, optional observer/SDR endpoint, and shared resource labels such as <code>PTT Group</code>, <code>Antenna Group</code>, <code>Front-End Group</code>, and <code>Amplifier Group</code>.</li>
+    <li><strong>2) Mark the runtime-active devices and choose one <code>Station Default</code></strong>: use <code>Activate</code> for devices that should participate in the running station, then use <code>Set Station Default</code> on the one device that should drive the current compatibility shell. Existing primary tabs continue to control that device.</li>
+    <li><strong>3) Create <a href="#settings-operating-profiles">Operating Profiles</a></strong>: define the shell policy you want a device to use when it becomes the Station Default. This is where you enable or suppress scheduler automation, Messages, Map, background ingest, Launch Control, and the net-control tabs. Preferred bands and <code>Allow profile swap coordination</code> also live here.</li>
+    <li><strong>4) Apply <a href="#settings-device-assignments">Device Assignments</a></strong>: assign the intended operating profile to each device. Use <code>Temporary Override</code> when you want a different shell policy now without rewriting the baseline assignment, and use <code>Restore Default</code> when that temporary policy is no longer needed.</li>
+    <li><strong>5) Use <code>Temporary Swap...</code> only when you need to move the Station Default runtime temporarily</strong>: the recommended mode is <code>Use target device profile</code>, which changes the Station Default device without rewriting that target device's current effective profile. <code>Carry current primary profile</code> is only available when the current primary operating profile explicitly allows it.</li>
+    <li><strong>6) Group shared transmit and RF resources before operating</strong>: matching <code>PTT Group</code> values create hard shared-PTT protection, while matching antenna/front-end/amplifier groups raise prompt-first RF conflict warnings before scheduler or QSY changes proceed.</li>
+    <li><strong>7) Configure device-local VarAC data in Device Profiles before you build clusters</strong>: per-device VarAC install path, DB path, INI path, and optional launch command stay with the device profile. Shared-cluster identity is configured later in <a href="#settings-varac-clusters">VarAC Clusters</a> and <a href="#settings-varac-memberships">VarAC Memberships</a>.</li>
+    <li><strong>8) Create VarAC clusters, then memberships, then select the gateway handler</strong>: create the cluster record first, assign enabled non-observer devices with unique instance numbers, and then return to the cluster editor to choose the gateway handler from the enabled members.</li>
+    <li><strong>9) Confirm the result in Station Overview before trusting live control</strong>: verify the Station Default badge, active device cards, shared PTT/RF warnings, observer follow guidance, VarAC cluster summaries, and any temporary-swap notices.</li>
+  </ol>
+
+  <h3 id="multi-rig-settings-reference">Settings Configuration Reference</h3>
+  <table>
+    <thead>
+      <tr><th>Settings Section</th><th>How Multi-Rig Uses It</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><a href="#settings-device-profiles">Device Profiles</a></td><td>Stores one row per radio/control endpoint, including backend endpoints, deployment mode, observer/SDR data, shared PTT/RF group labels, launch settings, and device-local VarAC paths. This is the source of truth for per-device connectivity.</td></tr>
+      <tr><td><a href="#settings-operating-profiles">Operating Profiles</a></td><td>Defines the compatibility shell policy that follows a device when it is assigned to the Station Default runtime. Use this section to decide whether scheduler automation, Messages, Map, background ingest, Launch Control, and net-control tabs stay available.</td></tr>
+      <tr><td><a href="#settings-device-assignments">Device Assignments</a></td><td>Chooses which operating profile each device uses right now. This section also starts and restores temporary Station Default swaps.</td></tr>
+      <tr><td><a href="#settings-varac-clusters">VarAC Clusters</a></td><td>Defines the shared cluster identity, optional shared DB path, refresh cadence, optional PTT lock metadata, and gateway handler selection.</td></tr>
+      <tr><td><a href="#settings-varac-memberships">VarAC Memberships</a></td><td>Maps non-observer device profiles into VarAC clusters with unique instance numbers and enabled/disabled membership state.</td></tr>
+      <tr><td>FreqInOut Settings</td><td>Scheduler enablement, prompt behavior, diagnostics, and compatibility-shell controls still apply to the current Station Default runtime.</td></tr>
+      <tr><td>JS8Call Settings, Fast Light Settings, VarAC Settings</td><td>These legacy endpoint/path sections show the current Station Default projection. Use Device Profiles to define separate device endpoints, then verify the projected values here after choosing the Station Default.</td></tr>
+      <tr><td>Launch Control</td><td>Launch actions still follow the current Station Default shell. Operating-profile suppression or Minimal deployment mode can disable launch behavior even when paths exist.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    Tip: multi-rig CRUD actions in <code>Device Profiles</code>, <code>Operating Profiles</code>, <code>Device Assignments</code>, <code>VarAC Clusters</code>, and <code>VarAC Memberships</code> save immediately through their dialogs and action buttons. <code>Save Settings</code> still matters for the legacy station-global sections and for refreshing the projected Station Default compatibility fields across tabs.
+  </div>
 
   <h2 id="main-menu">Main Menu and Left Rail</h2>
   <p>The left rail is grouped and collapsible. You can keep multiple groups open or collapse groups to save space.</p>
@@ -53,7 +93,7 @@
       <tr><th>Group</th><th>Buttons</th></tr>
     </thead>
     <tbody>
-      <tr><td>Core</td><td><code>ControlFreq</code>, <code>FreqPlanner</code>, <code>Messages</code>, <code>Map</code></td></tr>
+      <tr><td>Core</td><td><code>ControlFreq</code>, <code>Station Overview</code>, <code>FreqPlanner</code>, <code>Messages</code>, <code>Map</code></td></tr>
       <tr><td>NCS</td><td><code>FLDigi / SSB</code>, <code>JS8Call</code>, <code>VHF/UHF</code></td></tr>
       <tr><td>Schedules</td><td><code>HF Daily</code>, <code>HF Nets</code>, <code>HF Peers</code></td></tr>
       <tr><td>Operators</td><td><code>HF Callsigns</code>, <code>Local Callsigns</code></td></tr>
@@ -134,6 +174,30 @@
       <tr><td>Propagation Forecast</td><td><code>Zone</code>, <code>Morning</code>, <code>Day</code>, <code>Night</code></td></tr>
     </tbody>
   </table>
+  <p><strong>Multi-rig scope</strong>: ControlFreq remains bound to the current <code>Station Default</code> device profile. Targeted HF and Net rows only participate here when they match that Station Default device or its effective operating profile, and shared PTT / RF-conflict warnings are resolved from this shell before scheduler or <code>QSY + Hold</code> actions proceed.</p>
+
+  <h2 id="station-overview">Station Overview</h2>
+  <p><strong>Purpose</strong>: read-only multi-rig dashboard for all runtime-active device profiles.</p>
+  <table>
+    <thead>
+      <tr><th>Area</th><th>What It Shows</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Summary line</td><td>Active device count, current <code>Station Default</code>, warning count, observer profile count, VarAC cluster-member count, and temporary-swap status.</td></tr>
+      <tr><td>Alerts line</td><td>Combined warning text for shared PTT blocks, RF conflict warnings, missing VarAC cluster requirements, or other runtime attention items.</td></tr>
+      <tr><td>Device card header</td><td>Device name, <code>Observer / SDR</code> badge when applicable, <code>Station Default</code> badge for the current compatibility owner, and the overall device state badge.</td></tr>
+      <tr><td>Device card metadata</td><td>Control endpoint summary, deployment mode, PTT group, assigned operating profile, assignment state, current tuning/band, and shared RF resource groups.</td></tr>
+      <tr><td>Policy line</td><td>Whether the assigned operating profile leaves the shell in <code>Full shell</code> mode or suppresses items such as scheduler automation, Messages, Map, ingest, Launch Control, or net-control tabs.</td></tr>
+      <tr><td>Runtime details</td><td>Status summary, shared PTT ownership/block state, observer follow guidance, VarAC cluster summary, temporary-swap summary, and any warning text.</td></tr>
+      <tr><td>Service LEDs</td><td>Compact per-service state for backend/API readiness and cluster visibility.</td></tr>
+    </tbody>
+  </table>
+  <ul class="section-list">
+    <li><strong>Read-only dashboard</strong>: Station Overview is an operating picture, not a replacement for <a href="#settings">Settings</a>. Use Settings to activate devices, change Station Default, edit assignments, or modify clusters.</li>
+    <li><strong>Station Default reminder</strong>: a device can be active without owning the current compatibility shell. The <code>Station Default</code> badge is the one that matters for current scheduler control, Messages, Map, NCS, and launch behavior.</li>
+    <li><strong>Observer guidance</strong>: observer/SDR cards can show follow guidance and endpoint status, but they do not take over the main shell.</li>
+    <li><strong>Swap visibility</strong>: when a temporary swap is active, the summary line and the affected cards show it clearly so you can restore the normal primary device before ending the operating event.</li>
+  </ul>
 
   <h2 id="freqplanner">FreqPlanner</h2>
   <p><strong>Purpose</strong>: read-only visual planner for HF, Net, and SOP-effective schedule coverage.</p>
@@ -148,6 +212,7 @@
     </tbody>
   </table>
   <p><strong>Planner columns</strong>: <code>UTC Hour</code>, <code>Local Time (TZ)</code>, <code>Sunday</code> ... <code>Saturday</code>.</p>
+  <p><strong>Multi-rig scope</strong>: FreqPlanner still renders the schedule that is eligible for the current <code>Station Default</code> runtime. Rows targeted to a different device profile or operating profile stay out of the planner until that target becomes the current Station Default match. This tab can also be hidden by the Station Default operating profile or by Minimal deployment mode.</p>
 
   <h2 id="messages">Messages</h2>
   <p><strong>Purpose</strong>: unified traffic review, filtering, read state, and file-level actions.</p>
@@ -190,6 +255,7 @@
   </ul>
   <p><code>Open Image</code> appears when selected content is an image-capable file and opens it externally.</p>
   <p><strong>Transport forms</strong>: received <code>.b2s</code> and <code>.k2s</code> transport files use the same form-friendly decode path when the payload can be interpreted as a supported transport form.</p>
+  <p><strong>Multi-rig scope</strong>: Messages remains a Station Default shell view in this branch. JS8, VarAC, and file-backed refreshes follow the current Station Default projection, and the tab itself can be hidden by the Station Default operating profile or Minimal deployment mode.</p>
   <ol class="section-list">
     <li><strong>1) Use <code>Hide Types</code> to hide noisy traffic from the default view</strong>: check one or more message types you do not want to see every time you open Messages.</li>
     <li><strong>2) Leave <code>MSG Type...</code> unselected for the normal default view</strong>: hidden message types stay out of the list while all other filters continue to work normally.</li>
@@ -241,6 +307,7 @@
     <li><strong>Bottom legend</strong>: the link-SNR and sitrep legend is docked across the bottom of the map. Optional <code>Peer Sched Now</code> and <code>Best Band Now</code> rows appear only when those overlays are active.</li>
     <li><strong>SitRep summary</strong>: in sitrep-focused views, a bottom-left state summary panel can show per-state counts and receipt mix without requiring raw table scans on every refresh.</li>
   </ul>
+  <p><strong>Multi-rig scope</strong>: Map remains tied to the current <code>Station Default</code> shell. It does not select the active device for you, and it can be hidden by the Station Default operating profile or Minimal deployment mode. Use <a href="#station-overview">Station Overview</a> to confirm which device currently owns the shell before you trust map context during a swap.</p>
 
   <h2 id="ncs-fldigi-ssb">NCS: FLDigi / SSB</h2>
   <p><strong>Purpose</strong>: FLDigi/SSB net control workflow and check-in log operations.</p>
@@ -257,6 +324,7 @@
     </tbody>
   </table>
   <p><strong>Lookup table columns</strong>: <code>Select</code>, <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Grid</code>, <code>Group</code>, <code>Trusted</code>, <code>Last Seen</code>.</p>
+  <p><strong>Multi-rig scope</strong>: FLDigi / SSB net control remains bound to the current <code>Station Default</code> device. If you need a different active radio to own the shell for a net, switch the Station Default or use <code>Temporary Swap...</code> in <a href="#settings-device-assignments">Device Assignments</a> before starting the session.</p>
 
   <h2 id="ncs-js8call">NCS: JS8Call</h2>
   <p><strong>Purpose</strong>: JS8Call-directed net control, check-in handling, and query/ack workflows.</p>
@@ -271,6 +339,7 @@
     </tbody>
   </table>
   <p><strong>Check-in table columns</strong>: <code>CALLSIGN</code>, <code>NAME</code>, <code>ST</code>, <code>GRID</code>, <code>REGION</code>, <code>MODE</code>, <code>SNR</code>, <code>OFFSET</code>, <code>STATUS</code>, action column.</p>
+  <p><strong>Multi-rig scope</strong>: JS8Call net control follows the current <code>Station Default</code> JS8 endpoint and can be hidden by the assigned operating profile. Multi-rig device and endpoint changes are configured in <a href="#settings-device-profiles">Device Profiles</a>, not inside this tab.</p>
 
   <h2 id="ncs-vhf-uhf">NCS: VHF/UHF (Local NCS)</h2>
   <p><strong>Purpose</strong>: local net session control, check-in logging, and persistent local situational notes.</p>
@@ -288,6 +357,7 @@
   </table>
   <p><strong>Check-in table columns</strong>: <code>Check-in UTC</code>, <code>Callsign</code>, <code>Name</code>, <code>City</code>, <code>State</code>, <code>Category</code>, <code>SitRep</code>, <code>Notes</code>.</p>
   <p><strong>Session behavior</strong>: each net is a unique session. <code>End Net</code> clears session check-in rows while keeping roster/operator data.</p>
+  <p><strong>Multi-rig scope</strong>: the Local NCS workflow remains part of the current Station Default shell. It does not create a second independently targeted shell for another active device.</p>
 
   <h2 id="hf-daily">Schedules: HF Daily</h2>
   <p><strong>Purpose</strong>: manage active HF daily schedule rows and resource-backed schedule candidates.</p>
@@ -309,8 +379,9 @@
       <tr><td><code>Save HF Schedule</code></td><td>Persists active HF rows.</td></tr>
     </tbody>
   </table>
-  <p><strong>Active Schedule columns</strong>: <code>Selected</code>, <code>Day</code>, <code>Source</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Auto-Tune</code>.</p>
+  <p><strong>Active Schedule columns</strong>: <code>Selected</code>, <code>Day</code>, <code>Source</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Auto-Tune</code>, <code>Target Scope</code>, <code>Target</code>.</p>
   <p>Rows are shown in time sequence by default to simplify conflict review.</p>
+  <p><strong>Multi-rig scope</strong>: use <code>Target Scope</code> and <code>Target</code> to decide whether an HF row applies station-wide, to one device profile, or to one operating profile. Station rows apply to any current Station Default runtime, device-profile rows apply only when that device is the Station Default, and operating-profile rows apply only when the Station Default device carries that effective operating profile.</p>
 
   <h3 id="hf-daily-resources">Schedule Resources Section</h3>
   <table>
@@ -366,8 +437,9 @@
       <tr><td><code>Save Net Schedule</code></td><td>Persists net schedule rows.</td></tr>
     </tbody>
   </table>
-  <p><strong>Net Schedule columns</strong>: <code>Select</code>, <code>Day</code>, <code>Recurrence</code>, <code>Weeks of Month</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Early (min)</code>, <code>FLDigi Mode</code>, <code>FLDigi Offset</code>, <code>Net Name</code>, <code>Auto-Tune</code>.</p>
+  <p><strong>Net Schedule columns</strong>: <code>Select</code>, <code>Day</code>, <code>Recurrence</code>, <code>Weeks of Month</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Early (min)</code>, <code>FLDigi Mode</code>, <code>FLDigi Offset</code>, <code>Net Name</code>, <code>Auto-Tune</code>, <code>Target Scope</code>, <code>Target</code>.</p>
   <p><strong>Recurrence values</strong>: <code>Weekly</code>, <code>Daily</code>, <code>Periodic</code>. Periodic rows use <code>Weeks of Month</code>.</p>
+  <p><strong>Multi-rig scope</strong>: Net rows use the same targeting rules as HF Daily. The row can be station-wide, bound to one device profile, or bound to one operating profile, but the current compatibility shell still follows only the current Station Default device.</p>
 
   <h3 id="hf-nets-resources">Net Resources Section</h3>
   <table>
@@ -457,6 +529,7 @@
   <p><strong>Purpose</strong>: build and activate one HF SOP and one Local Comms SOP with conflict-aware HF activation.</p>
   <p><strong>Model</strong>: SOP action rows are daily by design (no periodic row mode in SOP Builder).</p>
   <p><strong>If you are new</strong>: build the SOP here first, then use HF Daily and HF Nets to confirm the runtime schedule and any priority decisions.</p>
+  <p><strong>Multi-rig scope</strong>: SOP Builder remains a Station Default compatibility-shell tool in this branch. Use HF Daily/HF Nets target scoping plus <a href="#station-overview">Station Overview</a> to verify which active device currently owns the shell before you trust the live runtime result.</p>
 
   <h3 id="sop-builder-actions">Top-Level Actions</h3>
   <table>
@@ -556,7 +629,7 @@
   <h2 id="settings">Settings</h2>
   <p><strong>Purpose</strong>: configure station identity, scheduler behavior, integration paths, data trust, and launch behavior.</p>
   <p>The Settings tab uses a left section list and collapsible section cards. Select a section in the list to jump directly.</p>
-  <p><strong>Warning highlights</strong>: the left section list uses warning highlighting to call out incomplete setup for the current single-radio station. This is meant as inline guidance, not as a generic error state for every optional integration.</p>
+  <p><strong>Warning highlights</strong>: the left section list uses warning highlighting to call out incomplete setup for the current <code>Station Default</code> compatibility shell. Multi-rig sections also surface contextual hints for active profiles, temporary swaps, shared PTT / RF groups, and VarAC cluster safety.</p>
 
   <h3 id="settings-sections">Settings Sections</h3>
   <table>
@@ -570,7 +643,31 @@
       </tr>
       <tr>
         <td>FreqInOut Settings</td>
-        <td>Theme, Text Size (Normal/Medium/Large), Frequency Control mode, scheduler enable, enforcement and prompt intervals, logging level and diagnostics controls</td>
+        <td>Theme, Text Size (Normal/Medium/Large), Frequency Control mode, scheduler enable, enforcement and prompt intervals, logging level and diagnostics controls for the current Station Default shell</td>
+      </tr>
+      <tr id="settings-device-profiles">
+        <td>Device Profiles</td>
+        <td><code>Add Profile</code>, <code>Edit Selected</code>, <code>Activate</code>, <code>Deactivate</code>, <code>Set Station Default</code>, <code>Delete Selected</code>; table columns: <code>Selected</code>, <code>Active</code>, <code>Default</code>, <code>Name</code>, <code>Backend</code>, <code>Deploy</code>, <code>Endpoint</code>, <code>Launch</code>, <code>PTT Group</code>, <code>Class</code>, <code>Notes</code></td>
+      </tr>
+      <tr id="settings-operating-profiles">
+        <td>Operating Profiles</td>
+        <td><code>Add Profile</code>, <code>Edit Selected</code>, <code>Delete Selected</code>; table columns: <code>Selected</code>, <code>Enabled</code>, <code>Name</code>, <code>Scheduler</code>, <code>Shell</code>, <code>Description</code></td>
+      </tr>
+      <tr id="settings-device-assignments">
+        <td>Device Assignments</td>
+        <td><code>Assign / Override...</code>, <code>Temporary Swap...</code>, <code>Restore Swap</code>, <code>Restore Default</code>; table columns: <code>Selected</code>, <code>Active</code>, <code>Default</code>, <code>Device</code>, <code>Operating Profile</code>, <code>State</code>, <code>Policy</code>, <code>Endpoint</code></td>
+      </tr>
+      <tr id="settings-varac-clusters">
+        <td>VarAC Clusters</td>
+        <td><code>Add Cluster</code>, <code>Edit Selected</code>, <code>Delete Selected</code>; table columns: <code>Selected</code>, <code>Name</code>, <code>Cluster ID</code>, <code>Shared DB</code>, <code>Members</code>, <code>Gateway</code>, <code>PTT Lock</code>, <code>Refresh</code></td>
+      </tr>
+      <tr id="settings-varac-memberships">
+        <td>VarAC Memberships</td>
+        <td><code>Add / Edit Selected</code>, <code>Remove Selected</code>; table columns: <code>Selected</code>, <code>Cluster</code>, <code>Device</code>, <code>Runtime</code>, <code>Class</code>, <code>Instance</code>, <code>Enabled</code>, <code>Gateway</code></td>
+      </tr>
+      <tr>
+        <td>Logging &amp; Diagnostics</td>
+        <td><code>Enable DEBUG For</code>, <code>Open Logs</code>, <code>Open Log Folder</code>, <code>Export Diagnostics</code></td>
       </tr>
       <tr id="settings-hf-groups">
         <td>HF Operating Groups</td>
@@ -586,11 +683,11 @@
       </tr>
       <tr>
         <td>JS8Call Settings</td>
-        <td>TCP host/IP (default <code>127.0.0.1</code>), TCP port, offset, mark-read option, path fields, and <code>Load JS8 Traffic</code> (manual rebuild with in-process indicator)</td>
+        <td>Station Default JS8 projection: TCP host/IP (default <code>127.0.0.1</code>), TCP port, offset, mark-read option, path fields, and <code>Load JS8 Traffic</code> (manual rebuild with in-process indicator)</td>
       </tr>
       <tr>
         <td>Fast Light Settings</td>
-        <td>FLRig/FLDigi/FLMsg/FLAmp paths, FLRig XMLRPC port, check-in/log paths, copy path helpers</td>
+        <td>Station Default FLRig/FLDigi/FLMsg/FLAmp projection, FLRig XMLRPC port, check-in/log paths, copy path helpers</td>
       </tr>
       <tr>
         <td>Message Auth (Key/Hash)</td>
@@ -598,15 +695,11 @@
       </tr>
       <tr>
         <td>VarAC Settings</td>
-        <td>Install path, optional Linux launch command (Wine), incoming files path, BBS directory/archive, auto-archive policy</td>
+        <td>Station Default VarAC projection: install path, optional Linux launch command (Wine), incoming files path, BBS directory/archive, auto-archive policy</td>
       </tr>
       <tr>
         <td>Launch Control</td>
-        <td>Per-app enable/startup toggles, order management (<code>Up</code>, <code>Down</code>, <code>Reset Default Order</code>), launch/stop controls, and dependency-aware readiness pacing (JS8 API + targeted settle delays)</td>
-      </tr>
-      <tr>
-        <td>Logging &amp; Diagnostics</td>
-        <td><code>Enable DEBUG For</code>, <code>Open Logs</code>, <code>Open Log Folder</code>, <code>Export Diagnostics</code></td>
+        <td>Per-app enable/startup toggles, order management (<code>Up</code>, <code>Down</code>, <code>Reset Default Order</code>), launch/stop controls, and dependency-aware readiness pacing for the current Station Default shell</td>
       </tr>
       <tr>
         <td>Save</td>
@@ -617,9 +710,42 @@
   <p><strong>Enforcement and prompt intervals</strong> control how schedule corrections behave when the station drifts off schedule. <code>On Schedule Change</code> applies corrections when the scheduler moves to a new schedule row. <code>Prompt</code> raises an off-schedule prompt and waits for user action. FLDigi mode and FLDigi offset may be prompted separately.</p>
   <ul class="section-list">
     <li><strong>Section-health warnings</strong>: warning-highlighted sections usually mean you configured part of an integration but left out a required companion field.</li>
+    <li><strong>Projection rule</strong>: <code>JS8Call Settings</code>, <code>Fast Light Settings</code>, <code>VarAC Settings</code>, and <code>Launch Control</code> show the current Station Default device projection. Use <code>Device Profiles</code> to define per-device endpoints, then confirm the projection here after selecting the Station Default.</li>
+    <li><strong>Immediate-save multi-rig sections</strong>: <code>Device Profiles</code>, <code>Operating Profiles</code>, <code>Device Assignments</code>, <code>VarAC Clusters</code>, and <code>VarAC Memberships</code> persist through their own dialogs and actions immediately; <code>Save Settings</code> remains the commit point for the legacy station-global sections.</li>
     <li><strong>JS8Call completeness</strong>: when <code>JS8Call Install Folder</code> is set, FreqInOut expects host, TCP port, and <code>DIRECTED.TXT</code>. If <code>JS8Spotter Launch Path</code> is set, FreqInOut also expects <code>JS8Spotter forms</code>.</li>
     <li><strong>Fast Light completeness</strong>: warning highlights can appear when FLRig/FLDigi executables are set without endpoint values, or when FLMsg/FLAmp executables are set without their companion message folders.</li>
     <li><strong>VarAC completeness</strong>: warning highlights can appear when <code>VarAC Install Folder</code> is set without <code>Incoming Files</code>.</li>
+  </ul>
+
+  <h3 id="settings-device-profiles-details">Device Profiles and Station Default Details</h3>
+  <ul class="section-list">
+    <li><strong>Runtime-active vs Station Default</strong>: <code>Active</code> means the device participates in runtime monitoring. <code>Default</code> marks the one non-observer device that owns the current compatibility shell.</li>
+    <li><strong>Endpoint ownership</strong>: backend and endpoint fields in the device dialog are the per-device source of truth. Changing the Station Default re-projects that device into the legacy JS8/Fast Light/VarAC sections.</li>
+    <li><strong>Observer / SDR behavior</strong>: observer profiles may be active and visible in Station Overview, but they do not become Station Default and cannot be used for temporary swaps.</li>
+    <li><strong>Shared PTT</strong>: matching <code>PTT Group</code> values create the shared-transmit interlock. If another linked device is keyed, scheduler/QSY actions warn or block from the Station Default shell.</li>
+    <li><strong>RF resource warnings</strong>: matching antenna/front-end/amplifier groups do not rewrite assignments automatically; they raise operator-readable RF conflict warnings so you can decide whether to proceed.</li>
+    <li><strong>Delete rule</strong>: active device profiles cannot be deleted. Deactivate them first, and if the profile is the Station Default choose another default before removal.</li>
+  </ul>
+
+  <h3 id="settings-operating-profiles-details">Operating Profiles and Device Assignments Details</h3>
+  <ul class="section-list">
+    <li><strong>Operating profile purpose</strong>: an operating profile defines the compatibility shell used by the Station Default device, including scheduler automation, Messages, Map, background ingest, Launch Control, and net-control visibility.</li>
+    <li><strong>Shell summary</strong>: <code>Full shell</code> means no feature suppression. A summary such as <code>Messages Off</code> or <code>NetCtrl Off</code> means those surfaces are suppressed when that profile is active on the Station Default device.</li>
+    <li><strong>Preferred bands</strong>: this is advisory policy metadata for the assigned operating profile. It does not independently retarget current tabs by itself.</li>
+    <li><strong>Assign / Override...</strong>: use <code>Active</code> for the normal effective profile or <code>Temporary Override</code> when you need a different shell policy now without rewriting the device's baseline role.</li>
+    <li><strong>Restore Default</strong>: removes the effective override and returns the device to the default operating profile assignment.</li>
+    <li><strong>Temporary Swap...</strong>: moves the Station Default runtime temporarily to one active non-primary non-observer device. <code>Restore Swap</code> returns the prior primary device and, if needed, restores the target device's prior effective operating profile.</li>
+    <li><strong>Carry-profile rule</strong>: the swap dialog only offers <code>Carry current primary profile</code> when the current primary operating profile has <code>Allow profile swap coordination</code> enabled.</li>
+  </ul>
+
+  <h3 id="settings-varac-clusters-details">VarAC Clusters and Memberships Details</h3>
+  <ul class="section-list">
+    <li><strong>Cluster workflow</strong>: create the cluster first, then assign memberships, then return to the cluster editor to choose the gateway handler from the enabled members.</li>
+    <li><strong>Cluster fields</strong>: <code>Name</code>, <code>Cluster ID</code>, optional <code>Shared DB</code>, refresh interval, optional <code>PTT Lock</code>, and gateway-handler selection.</li>
+    <li><strong>Membership fields</strong>: cluster, device, instance number, enabled state, and gateway-role visibility.</li>
+    <li><strong>Eligibility rule</strong>: observer / SDR device profiles are not eligible for VarAC cluster memberships.</li>
+    <li><strong>Membership safety</strong>: each device may hold one enabled cluster membership in this phase, enabled instance numbers must be unique inside a cluster, and the gateway handler must be one of that cluster's enabled members.</li>
+    <li><strong>Node-local settings</strong>: device-local VarAC install path, DB path, INI path, and optional launch command remain on the device profile. Clusters describe the shared relationship, not the per-device local installation.</li>
   </ul>
 
   <h3 id="settings-hf-groups-details">HF Operating Groups Details</h3>
@@ -675,10 +801,14 @@
   <ul class="section-list">
     <li>If a button appears disabled, confirm required row selection or required fields.</li>
     <li>If schedule behavior is unexpected, check <code>Schedule Status</code> first (paused/off-schedule/manual mode reasons).</li>
+    <li>If the wrong radio appears to own ControlFreq, Messages, Map, or an NCS tab, check <code>Settings &gt; Device Profiles</code> for the current <code>Station Default</code> and check <code>Settings &gt; Device Assignments</code> for an active temporary swap.</li>
+    <li>If an HF Daily or HF Nets row never becomes active, verify its <code>Target Scope</code> and <code>Target</code> against the current Station Default device and its effective operating profile.</li>
     <li>If a Settings section stays highlighted, open that section and look for a missing companion field such as <code>DIRECTED.TXT</code>, an endpoint port, a forms path, or <code>Incoming Files</code>.</li>
+    <li>If Map, Messages, or NCS buttons disappear, review the current Station Default operating profile and deployment mode. Those surfaces can be intentionally suppressed.</li>
     <li>If FLDigi offset returns unexpectedly, check <code>Settings &gt; FreqInOut Settings</code> for FLDigi enforcement mode (<code>On Schedule Change</code> vs <code>Prompt</code>) and confirm whether a new schedule row transition occurred.</li>
     <li>If message actions are missing (for example <code>+BBS</code>), verify required Settings paths are configured.</li>
     <li>If VarAC does not launch from Launch Control on Linux, first clear <code>VarAC Launch Command</code> and test auto-launch from <code>VarAC Install Folder</code>. If needed, then set a custom Wine command using absolute paths.</li>
+    <li>If VarAC cluster warnings persist, confirm the cluster shared DB path, ensure enabled memberships have device-local VarAC settings, and make sure any multi-member cluster has one enabled gateway handler selected.</li>
     <li>If JS8Spotter/CommStat launch too early, keep JS8Call earlier in Launch Control order; FreqInOut now waits for JS8 API readiness before proceeding.</li>
     <li>If BBS auto-archive does not run, turn on <code>Enable Auto-Archive</code>, confirm both BBS paths are valid and different, then open Messages once after startup.</li>
     <li>If signature/hash states are neutral, verify Message Auth settings and trusted key/hash entries.</li>

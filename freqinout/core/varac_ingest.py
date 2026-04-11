@@ -506,6 +506,71 @@ def _record_sync_status(
         )
 
 
+def load_latest_varac_sync_status(*, db_path: Optional[Path] = None) -> Dict[str, Dict[str, object]]:
+    target_db = Path(db_path) if db_path is not None else _local_db_path()
+    if not target_db.exists():
+        return {}
+    conn = sqlite3.connect(target_db)
+    try:
+        conn.row_factory = sqlite3.Row
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='varac_sync_status'"
+        ).fetchone()
+        if exists is None:
+            return {}
+        cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(varac_sync_status)").fetchall()}
+        select_fields = [
+            "run_started_ts",
+            "run_finished_ts",
+            "varac_db_path",
+            "success",
+            "rows_scanned",
+            "rows_written",
+            "COALESCE(error_text, '') AS error_text",
+            (
+                "COALESCE(ingest_source_key, 'legacy') AS ingest_source_key"
+                if "ingest_source_key" in cols
+                else "'legacy' AS ingest_source_key"
+            ),
+            (
+                "COALESCE(ingest_scope, 'legacy') AS ingest_scope"
+                if "ingest_scope" in cols
+                else "'legacy' AS ingest_scope"
+            ),
+            (
+                "COALESCE(ingest_source_label, '') AS ingest_source_label"
+                if "ingest_source_label" in cols
+                else "'' AS ingest_source_label"
+            ),
+            (
+                "COALESCE(cluster_name, '') AS cluster_name"
+                if "cluster_name" in cols
+                else "'' AS cluster_name"
+            ),
+            (
+                "COALESCE(cluster_public_id, '') AS cluster_public_id"
+                if "cluster_public_id" in cols
+                else "'' AS cluster_public_id"
+            ),
+        ]
+        rows = conn.execute(
+            f"""
+            SELECT {", ".join(select_fields)}
+              FROM varac_sync_status
+          ORDER BY COALESCE(run_finished_ts, run_started_ts) DESC, run_started_ts DESC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    latest: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        data = dict(row)
+        key = str(data.get("ingest_source_key", "legacy") or "legacy")
+        if key not in latest:
+            latest[key] = data
+    return latest
+
+
 def _update_stats(
     stats: Dict[str, Dict],
     callsign: str,

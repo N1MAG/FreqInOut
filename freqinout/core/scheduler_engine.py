@@ -13,8 +13,13 @@ from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 
 from freqinout.core.logger import log
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
+from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
+from freqinout.core.schedule_targeting import (
+    normalize_schedule_target_fields,
+    schedule_row_matches_target_context,
+)
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.radio_interface.rigctl_client import FLRigClient, FrequencyCommand
+from freqinout.radio_interface.rigctl_client import FrequencyCommand, RigControlClient
 from freqinout.radio_interface.js8_status import JS8ControlClient
 
 
@@ -202,23 +207,28 @@ class SchedulerEngine(QObject):
     off_schedule_cleared = Signal()
     varac_wait_detected = Signal(dict)
     varac_wait_cleared = Signal()
+    coordination_conflict_detected = Signal(dict)
+    coordination_conflict_cleared = Signal()
 
     def __init__(
         self,
         parent: Optional[QObject] = None,
-        rig: Optional[FLRigClient] = None,
+        rig: Optional[RigControlClient] = None,
         js8: Optional[JS8ControlClient] = None,
         varac: Optional[object] = None,
         fldigi_log: Optional[object] = None,
+        station_runtime_manager: Optional[object] = None,
         poll_interval_ms: int = 5_000,
     ) -> None:
         super().__init__(parent)
         self._assert_scheduler_thread_contract()
         self.settings = SettingsManager()
-        self.rig: Optional[FLRigClient] = rig
+        self.rig: Optional[RigControlClient] = rig
         self.js8: Optional[JS8ControlClient] = js8
         self.varac: Optional[object] = varac
         self.fldigi_log: Optional[object] = fldigi_log
+        self.station_runtime_manager = station_runtime_manager
+        self._runtime_scheduler_enabled_override: Optional[bool] = None
 
         # We keep a small cache of the last applied entry so we don't
         # spam the rig with identical commands.
@@ -247,6 +257,10 @@ class SchedulerEngine(QObject):
         self._last_fldigi_offset_prompt_sig: Optional[Tuple[Optional[int], Optional[int]]] = None
         self._varac_wait_prompt_active: bool = False
         self._varac_wait_prompt_entry_key: Optional[Tuple] = None
+        self._coordination_prompt_active: bool = False
+        self._coordination_prompt_signature: Optional[str] = None
+        self._coordination_prompt_payload: Optional[Dict[str, object]] = None
+        self._coordination_prompt_suppressed_signature: Optional[str] = None
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
         self._status_poll_ttl_s: float = 0.8
@@ -319,10 +333,22 @@ class SchedulerEngine(QObject):
         if self.rig is not None:
             try:
                 if hasattr(rig, "is_available") and not rig.is_available():
-                    log.warning("SchedulerEngine: FLRig client is not available at init.")
+                    log.warning("SchedulerEngine: rig control client is not available at init.")
             except Exception as e:
-                log.error("SchedulerEngine: error probing FLRig availability: %s", e)
+                log.error("SchedulerEngine: error probing rig control availability: %s", e)
         self._ensure_js8_offset_default()
+
+    def set_runtime_scheduler_enabled(self, enabled: Optional[bool]) -> None:
+        self._runtime_scheduler_enabled_override = None if enabled is None else bool(enabled)
+
+    def _scheduler_enabled(self) -> bool:
+        override = self._runtime_scheduler_enabled_override
+        if override is not None:
+            return bool(override)
+        try:
+            return bool(self.settings.get("use_scheduler", True))
+        except Exception:
+            return True
 
     def set_manual_net_active(self, kind: str, active: bool) -> None:
         """
@@ -431,6 +457,10 @@ class SchedulerEngine(QObject):
             if self.rig is None:
                 return "NONE"
             return "FLRIG" if self._flrig_running() else "NONE"
+        if mode == "RIGCTLD":
+            if self.rig is None:
+                return "NONE"
+            return "RIGCTLD"
         if mode == "JS8CALL":
             if self.js8 is None:
                 return "NONE"
@@ -443,6 +473,60 @@ class SchedulerEngine(QObject):
             return val
         except Exception:
             return 0
+
+    def _primary_schedule_target_context(self) -> Tuple[Optional[int], Optional[int]]:
+        manager = getattr(self, "station_runtime_manager", None)
+        if manager is not None:
+            try:
+                runtime = manager.get_primary_runtime() if hasattr(manager, "get_primary_runtime") else None
+            except Exception:
+                runtime = None
+            if runtime is not None:
+                try:
+                    profile = runtime.profile if isinstance(runtime.profile, dict) else {}
+                    assignment = runtime.assignment if isinstance(runtime.assignment, dict) else {}
+                    device_profile_id = int(profile.get("id", 0) or 0)
+                    operating_profile_id = assignment.get("operating_profile_id")
+                    return (
+                        device_profile_id or None,
+                        int(operating_profile_id) if operating_profile_id not in (None, "") else None,
+                    )
+                except Exception:
+                    pass
+        try:
+            store = MultiRadioStore(settings_db_path())
+            primary = store.get_runtime_primary_device_profile()
+            if not primary:
+                return None, None
+            device_profile_id = int(primary.get("id", 0) or 0)
+            assignment = store.get_effective_assignment_for_device(device_profile_id)
+            operating_profile_id = assignment.get("operating_profile_id") if assignment else None
+            return (
+                device_profile_id or None,
+                int(operating_profile_id) if operating_profile_id not in (None, "") else None,
+            )
+        except Exception:
+            return None, None
+
+    def _filter_rows_for_runtime_target(
+        self,
+        rows: List[Dict],
+        *,
+        primary_device_profile_id: Optional[int],
+        primary_operating_profile_id: Optional[int],
+    ) -> List[Dict]:
+        filtered: List[Dict] = []
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            row = normalize_schedule_target_fields(raw)
+            if schedule_row_matches_target_context(
+                row,
+                device_profile_id=primary_device_profile_id,
+                operating_profile_id=primary_operating_profile_id,
+            ):
+                filtered.append(row)
+        return filtered
 
     def _parse_freq_hz(self, freq_text: str) -> Optional[int]:
         if not freq_text:
@@ -606,6 +690,7 @@ class SchedulerEngine(QObject):
         force: bool = False,
         ignore_suspend: bool = False,
         ignore_wait_prompt: bool = False,
+        ignore_coordination_prompt: bool = False,
         ignore_fldigi_busy: bool = False,
         apply_js8_offset: bool = True,
         apply_fldigi: bool = True,
@@ -617,6 +702,7 @@ class SchedulerEngine(QObject):
             "force": bool(force),
             "ignore_suspend": bool(ignore_suspend),
             "ignore_wait_prompt": bool(ignore_wait_prompt),
+            "ignore_coordination_prompt": bool(ignore_coordination_prompt),
             "ignore_fldigi_busy": bool(ignore_fldigi_busy),
             "apply_js8_offset": bool(apply_js8_offset),
             "apply_fldigi": bool(apply_fldigi),
@@ -641,6 +727,7 @@ class SchedulerEngine(QObject):
             force=bool(intent.get("force")),
             ignore_suspend=bool(intent.get("ignore_suspend")),
             ignore_wait_prompt=bool(intent.get("ignore_wait_prompt")),
+            ignore_coordination_prompt=bool(intent.get("ignore_coordination_prompt")),
             ignore_fldigi_busy=bool(intent.get("ignore_fldigi_busy")),
             apply_js8_offset=bool(intent.get("apply_js8_offset")),
             apply_fldigi=bool(intent.get("apply_fldigi")),
@@ -755,8 +842,8 @@ class SchedulerEngine(QObject):
                         ok = self.rig.set_frequency(cmd)
                 except Exception as e:
                     log.error("SchedulerEngine: error sending set_frequency to FLRig: %s", e)
-            if ok and control_mode == "FLRIG":
-                if auto_tune:
+            if ok and control_mode in {"FLRIG", "RIGCTLD"}:
+                if auto_tune and control_mode == "FLRIG":
                     try:
                         if self.rig and hasattr(self.rig, "tune"):
                             self.rig.tune()
@@ -1100,6 +1187,7 @@ class SchedulerEngine(QObject):
         *,
         force: bool = False,
         ignore_wait_prompt: bool = False,
+        ignore_coordination_prompt: bool = False,
         ignore_suspend: bool = False,
         ignore_net_suppression: bool = False,
         ignore_fldigi_busy: bool = False,
@@ -1117,6 +1205,7 @@ class SchedulerEngine(QObject):
             now_utc=now,
             force=force,
             ignore_wait_prompt=ignore_wait_prompt,
+            ignore_coordination_prompt=ignore_coordination_prompt,
             ignore_suspend=ignore_suspend,
             ignore_net_suppression=ignore_net_suppression,
             ignore_fldigi_busy=ignore_fldigi_busy,
@@ -1138,6 +1227,36 @@ class SchedulerEngine(QObject):
         elif action == "suspend":
             self._suspend_for_minutes(self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()))
 
+    def _clear_coordination_prompt(self) -> None:
+        was_active = bool(
+            self._coordination_prompt_active or self._coordination_prompt_signature or self._coordination_prompt_payload
+        )
+        self._coordination_prompt_active = False
+        self._coordination_prompt_signature = None
+        self._coordination_prompt_payload = None
+        if was_active:
+            try:
+                self.coordination_conflict_cleared.emit()
+            except Exception:
+                pass
+
+    def resolve_coordination_conflict(self, action: str, minutes: Optional[int] = None) -> None:
+        signature = str(
+            (self._coordination_prompt_payload or {}).get("signature") or self._coordination_prompt_signature or ""
+        ).strip()
+        if action in {"apply", "ignore"} and signature:
+            self._coordination_prompt_suppressed_signature = signature
+        elif not signature:
+            self._coordination_prompt_suppressed_signature = None
+        self._clear_coordination_prompt()
+        if action == "apply":
+            self.apply_current_entry(
+                force=True,
+                ignore_coordination_prompt=True,
+            )
+        elif action == "suspend":
+            self._suspend_for_minutes(self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes()))
+
     def resume_schedule(self) -> None:
         try:
             if hasattr(self.settings, "set"):
@@ -1149,6 +1268,7 @@ class SchedulerEngine(QObject):
         self._prompt_active = False
         self._prompt_items = []
         self._prompt_entry_key = None
+        self._clear_coordination_prompt()
         self._reset_prompt_timers()
         resume_skip_fldigi_apply = False
         entry = self.current_schedule_entry or {}
@@ -1344,10 +1464,7 @@ class SchedulerEngine(QObject):
         return "none", "No active schedule row."
 
     def get_status_summary(self) -> Dict[str, object]:
-        try:
-            use_scheduler = bool(self.settings.get("use_scheduler", True))
-        except Exception:
-            use_scheduler = True
+        use_scheduler = self._scheduler_enabled()
         control_mode = self._control_mode()
         entry = self.current_schedule_entry or {}
         freq_hz = self._current_rig_frequency(control_mode=control_mode, status_cached=True)
@@ -1378,8 +1495,9 @@ class SchedulerEngine(QObject):
             fldigi_busy = False
             fldigi_busy_reason = None
         ptt_active = False
-        if control_mode == "FLRIG":
-            ptt_active = self._status_poll_flrig_ptt()
+        if control_mode in {"FLRIG", "RIGCTLD"}:
+            ptt_active = self._status_poll_rig_ptt()
+        shared_ptt = self._shared_ptt_lock_status(force=False)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         suspended_until = self._suspend_until_dt()
         auto_resume_utc, auto_resume_source = self._auto_resume_utc(now_utc, suspended_until, flags)
@@ -1387,6 +1505,7 @@ class SchedulerEngine(QObject):
         if isinstance(freq_hz, (int, float)) and freq_hz > 0:
             freq_label = f"{freq_hz / 1_000_000:.3f}"
         source = self.current_source or "NONE"
+        coordination_conflict = self._coordination_conflict_status(entry, source=source, force=False)
         net_kind = self._source_net_kind(source, entry)
         next_freq_hz = self._next_transition_freq_hz
         next_freq_label = ""
@@ -1409,6 +1528,15 @@ class SchedulerEngine(QObject):
             "fldigi_busy_reason": fldigi_busy_reason,
             "varac_busy": bool(varac_status.get("busy")),
             "ptt_active": ptt_active,
+            "shared_ptt_group": str(shared_ptt.get("ptt_group", "") or "").strip(),
+            "shared_ptt_blocked": bool(shared_ptt.get("blocked")),
+            "shared_ptt_owner_name": str(shared_ptt.get("owner_name", "") or "").strip(),
+            "shared_ptt_reason": str(shared_ptt.get("reason", "") or "").strip(),
+            "rf_conflict_warning": bool(coordination_conflict.get("warning")),
+            "rf_conflict_summary": str(coordination_conflict.get("summary", "") or "").strip(),
+            "rf_conflict_detail": str(coordination_conflict.get("detail", "") or "").strip(),
+            "rf_conflict_signature": str(coordination_conflict.get("signature", "") or "").strip(),
+            "rf_conflict_peer_name": str(coordination_conflict.get("peer_name", "") or "").strip(),
             "suspended_until": suspended_until,
             "auto_resume_utc": auto_resume_utc,
             "auto_resume_source": auto_resume_source,
@@ -1499,14 +1627,11 @@ class SchedulerEngine(QObject):
                 self._prompt_state[key]["last_prompt_ts"] = ts
 
     def _maybe_prompt_enforcement(self) -> None:
-        try:
-            if not bool(self.settings.get("use_scheduler", True)):
-                self._prompt_active = False
-                self._prompt_items = []
-                self._last_fldigi_offset_prompt_sig = None
-                return
-        except Exception:
-            pass
+        if not self._scheduler_enabled():
+            self._prompt_active = False
+            self._prompt_items = []
+            self._last_fldigi_offset_prompt_sig = None
+            return
         control_mode = self._control_mode()
         if control_mode in ("MANUAL", "NONE"):
             self._prompt_active = False
@@ -1817,11 +1942,8 @@ class SchedulerEngine(QObject):
     def _maybe_apply_fldigi(self) -> None:
         if not self.rig:
             return
-        try:
-            if not bool(self.settings.get("use_scheduler", True)):
-                return
-        except Exception:
-            pass
+        if not self._scheduler_enabled():
+            return
         if self._control_mode() in ("MANUAL", "NONE"):
             return
         entry = self.current_schedule_entry or {}
@@ -1947,6 +2069,11 @@ class SchedulerEngine(QObject):
                 "group_name",
                 "auto_tune",
             ]
+            target_cols = [
+                "target_scope",
+                "target_device_profile_id",
+                "target_operating_profile_id",
+            ]
             legacy_cols = [
                 "day_utc",
                 "band",
@@ -1962,51 +2089,78 @@ class SchedulerEngine(QObject):
                 "comment",
                 "auto_tune",
             ]
+            has_target_cols = self._table_has_columns(conn, "daily_schedule_tab", target_cols)
 
             if self._table_has_columns(conn, "daily_schedule_tab", new_cols):
                 cur = conn.execute(
-                    """
-                    SELECT
+                    (
+                        """
+                        SELECT
+                            day_utc,
+                            band,
+                            mode,
+                            vfo,
+                            frequency,
+                            start_utc,
+                            end_utc,
+                            group_name,
+                            auto_tune,
+                            target_scope,
+                            target_device_profile_id,
+                            target_operating_profile_id
+                        FROM daily_schedule_tab
+                        """
+                        if has_target_cols
+                        else """
+                        SELECT
+                            day_utc,
+                            band,
+                            mode,
+                            vfo,
+                            frequency,
+                            start_utc,
+                            end_utc,
+                            group_name,
+                            auto_tune
+                        FROM daily_schedule_tab
+                        """
+                    )
+                )
+                rows: List[Dict] = []
+                for fetched in cur.fetchall():
+                    (
                         day_utc,
                         band,
                         mode,
                         vfo,
-                        frequency,
+                        freq,
                         start_utc,
                         end_utc,
                         group_name,
-                        auto_tune
-                    FROM daily_schedule_tab
-                    """
-                )
-                rows: List[Dict] = []
-                for (
-                    day_utc,
-                    band,
-                    mode,
-                    vfo,
-                    freq,
-                    start_utc,
-                    end_utc,
-                    group_name,
-                    auto_tune,
-                ) in cur.fetchall():
+                        auto_tune,
+                        *target_meta,
+                    ) = fetched
                     rows.append(
-                        {
-                            "day_utc": day_utc or "ALL",
-                            "band": band or "",
-                            "mode": mode or "",
-                            "vfo": (vfo or "A").strip().upper() or "A",
-                            "frequency": str(freq or ""),
-                            "fldigi_offset": "",
-                            "js8_offset": "",
-                            "start_utc": start_utc or "",
-                            "end_utc": end_utc or "",
-                            "primary_js8call_group": "",
-                            "group_name": group_name or "",
-                            "comment": "",
-                            "auto_tune": bool(auto_tune),
-                        }
+                        normalize_schedule_target_fields(
+                            {
+                                "day_utc": day_utc or "ALL",
+                                "band": band or "",
+                                "mode": mode or "",
+                                "vfo": (vfo or "A").strip().upper() or "A",
+                                "frequency": str(freq or ""),
+                                "fldigi_offset": "",
+                                "js8_offset": "",
+                                "start_utc": start_utc or "",
+                                "end_utc": end_utc or "",
+                                "primary_js8call_group": "",
+                                "group_name": group_name or "",
+                                "comment": "",
+                                "auto_tune": bool(auto_tune),
+                                "target_scope": target_meta[0] if len(target_meta) > 0 else "station",
+                                "target_device_profile_id": target_meta[1] if len(target_meta) > 1 else None,
+                                "target_operating_profile_id": target_meta[2] if len(target_meta) > 2 else None,
+                            }
+                        )
                     )
                 return rows
 
@@ -2047,21 +2201,23 @@ class SchedulerEngine(QObject):
                     auto_tune,
                 ) in cur.fetchall():
                     rows.append(
-                        {
-                            "day_utc": day_utc or "ALL",
-                            "band": band or "",
-                            "mode": mode or "",
-                            "vfo": (vfo or "A").strip().upper() or "A",
-                            "frequency": str(freq or ""),
-                            "fldigi_offset": "",
-                            "js8_offset": "",
-                            "start_utc": start_utc or "",
-                            "end_utc": end_utc or "",
-                            "primary_js8call_group": "",
-                            "group_name": group_name or "",
-                            "comment": "",
-                            "auto_tune": bool(auto_tune),
-                        }
+                        normalize_schedule_target_fields(
+                            {
+                                "day_utc": day_utc or "ALL",
+                                "band": band or "",
+                                "mode": mode or "",
+                                "vfo": (vfo or "A").strip().upper() or "A",
+                                "frequency": str(freq or ""),
+                                "fldigi_offset": "",
+                                "js8_offset": "",
+                                "start_utc": start_utc or "",
+                                "end_utc": end_utc or "",
+                                "primary_js8call_group": "",
+                                "group_name": group_name or "",
+                                "comment": "",
+                                "auto_tune": bool(auto_tune),
+                            }
+                        )
                     )
                 return rows
 
@@ -2119,6 +2275,9 @@ class SchedulerEngine(QObject):
                     "group_name",
                     "fldigi_mode",
                     "fldigi_offset",
+                    "target_scope",
+                    "target_device_profile_id",
+                    "target_operating_profile_id",
                 ]
                 available = [c for c in select_order if c in cols]
                 cur = conn.execute(f"SELECT {', '.join(available)} FROM {table}")
@@ -2130,28 +2289,33 @@ class SchedulerEngine(QObject):
                     except Exception:
                         biweekly = 0
                     rows.append(
-                        {
-                            "day_utc": row_data.get("day_utc") or "",
-                            "recurrence": row_data.get("recurrence") or "Weekly",
-                            "biweekly_offset_weeks": biweekly,
-                            "month_weeks": row_data.get("month_weeks") or "",
-                            "band": row_data.get("band") or "",
-                            "mode": row_data.get("mode") or "",
-                            "vfo": vfo_value,
-                            "frequency": str(row_data.get("frequency") or ""),
-                            "start_utc": row_data.get("start_utc") or "",
-                            "end_utc": row_data.get("end_utc") or "",
-                            "early_checkin": row_data.get("early_checkin")
-                            if row_data.get("early_checkin") is not None
-                            else 0,
-                            "auto_tune": bool(row_data.get("auto_tune")),
-                            "primary_js8call_group": row_data.get("primary_js8call_group") or "",
-                            "comment": row_data.get("comment") or "",
-                            "net_name": row_data.get("net_name") or "",
-                            "group_name": row_data.get("group_name") or "",
-                            "fldigi_mode": row_data.get("fldigi_mode") or "",
-                            "fldigi_offset": row_data.get("fldigi_offset") or "",
-                        }
+                        normalize_schedule_target_fields(
+                            {
+                                "day_utc": row_data.get("day_utc") or "",
+                                "recurrence": row_data.get("recurrence") or "Weekly",
+                                "biweekly_offset_weeks": biweekly,
+                                "month_weeks": row_data.get("month_weeks") or "",
+                                "band": row_data.get("band") or "",
+                                "mode": row_data.get("mode") or "",
+                                "vfo": vfo_value,
+                                "frequency": str(row_data.get("frequency") or ""),
+                                "start_utc": row_data.get("start_utc") or "",
+                                "end_utc": row_data.get("end_utc") or "",
+                                "early_checkin": row_data.get("early_checkin")
+                                if row_data.get("early_checkin") is not None
+                                else 0,
+                                "auto_tune": bool(row_data.get("auto_tune")),
+                                "primary_js8call_group": row_data.get("primary_js8call_group") or "",
+                                "comment": row_data.get("comment") or "",
+                                "net_name": row_data.get("net_name") or "",
+                                "group_name": row_data.get("group_name") or "",
+                                "fldigi_mode": row_data.get("fldigi_mode") or "",
+                                "fldigi_offset": row_data.get("fldigi_offset") or "",
+                                "target_scope": row_data.get("target_scope") or "station",
+                                "target_device_profile_id": row_data.get("target_device_profile_id"),
+                                "target_operating_profile_id": row_data.get("target_operating_profile_id"),
+                            }
+                        )
                     )
                 return True
 
@@ -2420,7 +2584,7 @@ class SchedulerEngine(QObject):
         return ",".join(str(v) for v in sorted(set(weeks)))
 
     def _net_row_signature(self, row: Optional[Dict]) -> str:
-        data = row or {}
+        data = normalize_schedule_target_fields(row or {})
         group_name = str(data.get("group_name") or "").strip().upper()
         band = str(data.get("band") or "").strip().upper()
         freq = self._normalize_sched_frequency(data.get("frequency"))
@@ -2431,9 +2595,13 @@ class SchedulerEngine(QObject):
         start_utc = str(data.get("start_utc") or "").strip()
         end_utc = str(data.get("end_utc") or "").strip()
         net_name = str(data.get("net_name") or data.get("name") or "").strip().upper()
+        target_scope = str(data.get("target_scope") or "station").strip().lower() or "station"
+        target_device_profile_id = int(data.get("target_device_profile_id") or 0)
+        target_operating_profile_id = int(data.get("target_operating_profile_id") or 0)
         return (
             f"NET|{group_name}|{band}|{freq}|{day}|{recurrence}|{biweekly}|"
-            f"{month_weeks}|{start_utc}|{end_utc}|{net_name}"
+            f"{month_weeks}|{start_utc}|{end_utc}|{net_name}|{target_scope}|"
+            f"{target_device_profile_id}|{target_operating_profile_id}"
         )
 
     def _sop_row_signature(self, row: Optional[Dict]) -> str:
@@ -2575,9 +2743,16 @@ class SchedulerEngine(QObject):
         cache = getattr(self, "_schedule_cache", None)
         config_db = self._config_dir() / "freqinout.db"
         nets_db = self._config_dir() / "freqinout_nets.db"
-        mtimes = (self._db_mtime(config_db), self._db_mtime(nets_db), 1 if self._sop_layer_enabled() else 0)
+        primary_device_profile_id, primary_operating_profile_id = self._primary_schedule_target_context()
+        cache_key = (
+            self._db_mtime(config_db),
+            self._db_mtime(nets_db),
+            1 if self._sop_layer_enabled() else 0,
+            int(primary_device_profile_id or 0),
+            int(primary_operating_profile_id or 0),
+        )
 
-        if cache and not force and cache.get("mtimes") == mtimes and cache.get("data"):
+        if cache and not force and cache.get("cache_key") == cache_key and cache.get("data"):
             return cache["data"]  # type: ignore[return-value]
 
         hf_db = self._load_daily_schedule_from_db()
@@ -2599,9 +2774,21 @@ class SchedulerEngine(QObject):
             sop_layer = []
         if not isinstance(policies, list):
             policies = []
+        hf_rows = [normalize_schedule_target_fields(row) for row in hf if isinstance(row, dict)]
+        net_rows = [normalize_schedule_target_fields(row) for row in net if isinstance(row, dict)]
+        hf_filtered = self._filter_rows_for_runtime_target(
+            hf_rows,
+            primary_device_profile_id=primary_device_profile_id,
+            primary_operating_profile_id=primary_operating_profile_id,
+        )
+        net_filtered = self._filter_rows_for_runtime_target(
+            net_rows,
+            primary_device_profile_id=primary_device_profile_id,
+            primary_operating_profile_id=primary_operating_profile_id,
+        )
 
-        self._schedule_cache = {"mtimes": mtimes, "data": (hf, net, sop_layer, policies)}
-        return hf, net, sop_layer, policies
+        self._schedule_cache = {"cache_key": cache_key, "data": (hf_filtered, net_filtered, sop_layer, policies)}
+        return hf_filtered, net_filtered, sop_layer, policies
 
     def _evaluate(self, now_utc: datetime.datetime, force: bool = False) -> None:
         """
@@ -2722,6 +2909,7 @@ class SchedulerEngine(QObject):
             # No active schedule; if we previously had something applied,
             # we keep the rig where it was (no auto "clear") but still
             # notify UI that source is NONE.
+            self._clear_coordination_prompt()
             if source != self.current_source or force:
                 self.current_source = "NONE"
                 self.current_schedule_entry = {}
@@ -2772,13 +2960,20 @@ class SchedulerEngine(QObject):
             scheduler_transition=scheduler_transition,
         )
 
-    def apply_manual_qsy(self, entry: Dict) -> None:
+    def apply_manual_qsy(self, entry: Dict, *, ignore_coordination_prompt: bool = False) -> None:
         """
         Apply an immediate user-driven QSY, bypassing suspend and force-applying the change.
 
         Expects entry to contain at least "frequency" (MHz). Mode/band/vfo/auto_tune
         are honored when provided.
         """
+        shared_ptt = self._shared_ptt_lock_status(force=True)
+        if bool(shared_ptt.get("blocked")):
+            log.warning(
+                "SchedulerEngine: refusing manual QSY due to shared PTT interlock: %s",
+                str(shared_ptt.get("reason", "") or "").strip() or "shared PTT blocked",
+            )
+            return
         now = datetime.datetime.now(datetime.timezone.utc)
         self._manual_qsy_active = True
         self._manual_qsy_entry_key = (
@@ -2799,6 +2994,7 @@ class SchedulerEngine(QObject):
             force=True,
             ignore_suspend=True,
             ignore_wait_prompt=True,
+            ignore_coordination_prompt=ignore_coordination_prompt,
             ignore_fldigi_busy=True,
         )
 
@@ -3095,9 +3291,9 @@ class SchedulerEngine(QObject):
         voice_hint = (entry.get("fldigi_mode") or "").strip()
         return resolve_rig_mode(mode_txt, band_txt, voice_hint=voice_hint)
 
-    def _status_poll_flrig_frequency(self) -> Optional[int]:
+    def _status_poll_rig_frequency(self, *, control_mode: Optional[str] = None) -> Optional[int]:
         """
-        Lightweight FLRig status poll with short-lived caching/backoff.
+        Lightweight rig-backend status poll with short-lived caching/backoff.
         """
         if not self.rig or not hasattr(self.rig, "get_vfo_frequency"):
             self._status_flrig_freq_hz = None
@@ -3108,7 +3304,7 @@ class SchedulerEngine(QObject):
         if now_ts < self._status_flrig_retry_ts:
             return self._status_flrig_freq_hz
         self._status_flrig_freq_ts = now_ts
-        freq = self._current_rig_frequency(control_mode="FLRIG", status_cached=False)
+        freq = self._current_rig_frequency(control_mode=control_mode or "FLRIG", status_cached=False)
         if isinstance(freq, (int, float)) and freq > 0:
             self._status_flrig_freq_hz = int(freq)
             self._status_flrig_retry_ts = 0.0
@@ -3117,9 +3313,9 @@ class SchedulerEngine(QObject):
         self._status_flrig_retry_ts = now_ts + self._status_poll_retry_s
         return None
 
-    def _status_poll_flrig_ptt(self) -> bool:
+    def _status_poll_rig_ptt(self) -> bool:
         """
-        Lightweight FLRig PTT status poll with shared retry backoff.
+        Lightweight rig-backend PTT status poll with shared retry backoff.
         """
         if not self.rig or not hasattr(self.rig, "get_ptt"):
             self._status_flrig_ptt = False
@@ -3136,6 +3332,100 @@ class SchedulerEngine(QObject):
             self._status_flrig_ptt = False
         return self._status_flrig_ptt
 
+    def _shared_ptt_lock_status(self, *, force: bool = False) -> Dict[str, object]:
+        manager = getattr(self, "station_runtime_manager", None)
+        if manager is None or not hasattr(manager, "shared_ptt_lock_snapshot"):
+            return {
+                "ptt_group": "",
+                "blocked": False,
+                "owner_device_profile_id": None,
+                "owner_name": "",
+                "owner_backend": "",
+                "owner_ptt_active": False,
+                "target_ptt_active": False,
+                "reason": "",
+            }
+        try:
+            snapshot = manager.shared_ptt_lock_snapshot(force=force)
+        except Exception as exc:
+            log.debug("SchedulerEngine: shared PTT status lookup failed: %s", exc)
+            return {
+                "ptt_group": "",
+                "blocked": False,
+                "owner_device_profile_id": None,
+                "owner_name": "",
+                "owner_backend": "",
+                "owner_ptt_active": False,
+                "target_ptt_active": False,
+                "reason": "",
+            }
+        return {
+            "ptt_group": str(getattr(snapshot, "ptt_group", "") or "").strip(),
+            "blocked": bool(getattr(snapshot, "blocked", False)),
+            "owner_device_profile_id": getattr(snapshot, "owner_device_profile_id", None),
+            "owner_name": str(getattr(snapshot, "owner_name", "") or "").strip(),
+            "owner_backend": str(getattr(snapshot, "owner_backend", "") or "").strip(),
+            "owner_ptt_active": bool(getattr(snapshot, "owner_ptt_active", False)),
+            "target_ptt_active": bool(getattr(snapshot, "target_ptt_active", False)),
+            "reason": str(getattr(snapshot, "reason", "") or "").strip(),
+        }
+
+    def _coordination_conflict_status(
+        self,
+        entry: Optional[Dict],
+        *,
+        source: str,
+        force: bool = False,
+    ) -> Dict[str, object]:
+        row = entry or {}
+        if not row:
+            return {}
+        manager = getattr(self, "station_runtime_manager", None)
+        if manager is None or not hasattr(manager, "evaluate_primary_rf_conflict"):
+            return {}
+        freq_hz = self._parse_freq_hz((row.get("frequency") or "").strip())
+        band = (row.get("band") or "").strip().upper()
+        if not band and freq_hz is None:
+            return {}
+        try:
+            snapshot = manager.evaluate_primary_rf_conflict(
+                target_band=band,
+                target_frequency_hz=freq_hz,
+                source=source,
+                force=force,
+            )
+        except Exception as exc:
+            log.debug("SchedulerEngine: RF conflict status lookup failed: %s", exc)
+            return {}
+        if snapshot is None:
+            return {}
+        return {
+            "warning": True,
+            "summary": str(getattr(snapshot, "summary", "") or "").strip(),
+            "detail": str(getattr(snapshot, "detail", "") or "").strip(),
+            "signature": str(getattr(snapshot, "signature", "") or "").strip(),
+            "peer_device_id": getattr(snapshot, "peer_device_profile_id", None),
+            "peer_name": str(getattr(snapshot, "peer_name", "") or "").strip(),
+            "peer_band": str(getattr(snapshot, "peer_band", "") or "").strip(),
+            "peer_frequency_hz": getattr(snapshot, "peer_frequency_hz", None),
+            "target_band": str(getattr(snapshot, "target_band", "") or "").strip(),
+            "target_frequency_hz": getattr(snapshot, "target_frequency_hz", None),
+            "same_band": bool(getattr(snapshot, "same_band", False)),
+            "same_frequency": bool(getattr(snapshot, "same_frequency", False)),
+            "shared_antenna_groups": list(getattr(snapshot, "shared_antenna_groups", []) or []),
+            "shared_amplifier_groups": list(getattr(snapshot, "shared_amplifier_groups", []) or []),
+            "shared_frontend_groups": list(getattr(snapshot, "shared_frontend_groups", []) or []),
+        }
+
+    def evaluate_coordination_conflict(
+        self,
+        entry: Dict,
+        *,
+        source: str = "HF",
+        force: bool = False,
+    ) -> Dict[str, object]:
+        return self._coordination_conflict_status(entry, source=source, force=force)
+
     def _current_rig_frequency(
         self,
         *,
@@ -3150,18 +3440,18 @@ class SchedulerEngine(QObject):
         hint is provided.
         """
         mode = (control_mode or "").strip().upper()
-        if control_mode is not None and mode not in {"FLRIG", "JS8CALL"}:
+        if control_mode is not None and mode not in {"FLRIG", "RIGCTLD", "JS8CALL"}:
             return None
-        if mode == "FLRIG":
+        if mode in {"FLRIG", "RIGCTLD"}:
             if status_cached:
-                return self._status_poll_flrig_frequency()
+                return self._status_poll_rig_frequency(control_mode=mode)
             try:
                 if self.rig and hasattr(self.rig, "get_vfo_frequency"):
                     freq = self.rig.get_vfo_frequency()
                     if freq:
                         return freq
             except Exception as e:
-                log.error("SchedulerEngine: failed to read current rig frequency: %s", e)
+                log.error("SchedulerEngine: failed to read current rig-backend frequency: %s", e)
             return None
         if mode == "JS8CALL":
             try:
@@ -3177,7 +3467,7 @@ class SchedulerEngine(QObject):
                 if freq:
                     return freq
         except Exception as e:
-            log.error("SchedulerEngine: failed to read current rig frequency: %s", e)
+            log.error("SchedulerEngine: failed to read current rig-backend frequency: %s", e)
 
         try:
             if self.js8 and hasattr(self.js8, "get_frequency"):
@@ -3199,6 +3489,7 @@ class SchedulerEngine(QObject):
         force: bool = False,
         ignore_suspend: bool = False,
         ignore_wait_prompt: bool = False,
+        ignore_coordination_prompt: bool = False,
         ignore_net_suppression: bool = False,
         ignore_fldigi_busy: bool = False,
         apply_js8_offset: bool = True,
@@ -3230,6 +3521,7 @@ class SchedulerEngine(QObject):
         self.current_schedule_entry = effective_entry
         self._scheduled_vfo = vfo
         if source != "QSY" and self._manual_qsy_active:
+            self._clear_coordination_prompt()
             log.debug("SchedulerEngine: manual QSY active; skipping scheduled frequency change.")
             self.active_entry_changed.emit(effective_entry, source)
             return
@@ -3237,14 +3529,17 @@ class SchedulerEngine(QObject):
         control_mode = self._control_mode()
         # If we're not in JS8CALL mode and have no rig backend, just update UI state.
         if control_mode != "JS8CALL" and self.rig is None:
+            self._clear_coordination_prompt()
             self.active_entry_changed.emit(effective_entry, source)
             return
 
         if control_mode == "MANUAL":
+            self._clear_coordination_prompt()
             log.debug("SchedulerEngine: manual control selected; no frequency commands sent.")
             self.active_entry_changed.emit(effective_entry, source)
             return
         if control_mode == "NONE":
+            self._clear_coordination_prompt()
             log.debug(
                 "SchedulerEngine: control backend unavailable for mode=%s; not sending commands.",
                 self.settings.get("control_via", "FLRig"),
@@ -3253,6 +3548,7 @@ class SchedulerEngine(QObject):
             return
         # Respect temporary suspend timer (QSY/Suspend button)
         if not ignore_suspend and self._scheduling_suspended(now_utc or datetime.datetime.now(datetime.timezone.utc)):
+            self._clear_coordination_prompt()
             dt = self._suspend_until_dt()
             until_txt = dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ") if dt else ""
             log.debug("SchedulerEngine: scheduling suspended until %s; skipping frequency change.", until_txt)
@@ -3260,13 +3556,11 @@ class SchedulerEngine(QObject):
             return
 
         # Scheduler master switch (from Settings tab)
-        try:
-            if not bool(self.settings.get("use_scheduler", True)):
-                log.debug("SchedulerEngine: scheduler disabled in settings; no frequency changes sent.")
-                self.active_entry_changed.emit(effective_entry, source)
-                return
-        except Exception:
-            pass
+        if not self._scheduler_enabled():
+            self._clear_coordination_prompt()
+            log.debug("SchedulerEngine: scheduler disabled in settings; no frequency changes sent.")
+            self.active_entry_changed.emit(effective_entry, source)
+            return
         # Parse frequency text early to support VarAC wait prompts.
         if not freq_text:
             log.warning("SchedulerEngine: schedule entry missing 'frequency'; skipping.")
@@ -3290,6 +3584,7 @@ class SchedulerEngine(QObject):
             and bool(varac_status.get("waiting_for_frequency"))
             and not ignore_wait_prompt
         ):
+            self._clear_coordination_prompt()
             if (not self._varac_wait_prompt_active) or (self._varac_wait_prompt_entry_key != prompt_key):
                 self._varac_wait_prompt_active = True
                 self._varac_wait_prompt_entry_key = prompt_key
@@ -3304,12 +3599,17 @@ class SchedulerEngine(QObject):
         )
         # Safety: avoid changing frequency while a backend is busy transmitting.
         busy_reasons = []
-        if control_mode == "FLRIG" and self.rig and hasattr(self.rig, "get_ptt"):
+        if control_mode in {"FLRIG", "RIGCTLD"} and self.rig and hasattr(self.rig, "get_ptt"):
             try:
                 if self.rig.get_ptt():
-                    busy_reasons.append("FLRig PTT is active")
+                    busy_reasons.append(f"{control_mode} PTT is active")
             except Exception as e:
                 log.warning("SchedulerEngine: get_ptt() failed: %s", e)
+        shared_ptt = self._shared_ptt_lock_status(force=bool(force))
+        if bool(shared_ptt.get("blocked")):
+            busy_reasons.append(
+                str(shared_ptt.get("reason", "") or "").strip() or "Shared PTT interlock is active"
+            )
 
         if source != "NET" and not self._js8_busy_ok():
             busy_reasons.append("JS8Call is busy (RX/TX)")
@@ -3328,11 +3628,38 @@ class SchedulerEngine(QObject):
             busy_reasons.append(reason)
 
         if busy_reasons:
+            self._clear_coordination_prompt()
             log.warning(
                 "SchedulerEngine: skipping frequency change for %s schedule due to activity: %s",
                 source,
                 "; ".join(busy_reasons),
             )
+            self.active_entry_changed.emit(effective_entry, source)
+            return
+
+        coordination_conflict = self._coordination_conflict_status(effective_entry, source=source, force=bool(force))
+        coordination_signature = str(coordination_conflict.get("signature", "") or "").strip()
+        suppressed_signature = str(self._coordination_prompt_suppressed_signature or "").strip()
+        if suppressed_signature and suppressed_signature != coordination_signature:
+            self._coordination_prompt_suppressed_signature = None
+            suppressed_signature = ""
+        if not coordination_signature:
+            self._coordination_prompt_suppressed_signature = None
+        should_prompt_coordination = bool(
+            coordination_signature
+            and not ignore_coordination_prompt
+            and coordination_signature != suppressed_signature
+        )
+        if self._coordination_prompt_active:
+            active_signature = str(self._coordination_prompt_signature or "").strip()
+            if (not should_prompt_coordination) or active_signature != coordination_signature:
+                self._clear_coordination_prompt()
+        if should_prompt_coordination:
+            if (not self._coordination_prompt_active) or (self._coordination_prompt_signature != coordination_signature):
+                self._coordination_prompt_active = True
+                self._coordination_prompt_signature = coordination_signature
+                self._coordination_prompt_payload = dict(coordination_conflict)
+                self.coordination_conflict_detected.emit(dict(coordination_conflict))
             self.active_entry_changed.emit(effective_entry, source)
             return
 
@@ -3366,10 +3693,12 @@ class SchedulerEngine(QObject):
             if source == "NET" and self._last_entry_key != entry_key:
                 self._net_fldigi_apply_allowed_once = True
             if self._manual_net_fldigi_active or self._manual_net_js8_active:
+                self._clear_coordination_prompt()
                 log.debug("SchedulerEngine: net active; skipping schedule enforcement.")
                 self.active_entry_changed.emit(effective_entry, source)
                 return
             if self._last_entry_key == entry_key:
+                self._clear_coordination_prompt()
                 log.debug("SchedulerEngine: net schedule active; skipping corrections for current entry.")
                 self.active_entry_changed.emit(effective_entry, source)
                 return
@@ -3379,6 +3708,7 @@ class SchedulerEngine(QObject):
             # frequency-only actions) must not behave like schedule transitions.
             self._fldigi_force_apply_once = True
         if self._pending_entry_key == entry_key and not force:
+            self._clear_coordination_prompt()
             log.debug("SchedulerEngine: control action skipped (pending entry key).")
             self.active_entry_changed.emit(effective_entry, source)
             return
@@ -3386,6 +3716,7 @@ class SchedulerEngine(QObject):
             self._last_entry_key == entry_key and self._last_source == source
         )
         if not force and already_applied:
+            self._clear_coordination_prompt()
             log.debug("SchedulerEngine: schedule entry already applied; skipping re-apply.")
             self.active_entry_changed.emit(effective_entry, source)
             return
@@ -3420,6 +3751,7 @@ class SchedulerEngine(QObject):
                 force=force,
                 ignore_suspend=ignore_suspend,
                 ignore_wait_prompt=ignore_wait_prompt,
+                ignore_coordination_prompt=ignore_coordination_prompt,
                 ignore_fldigi_busy=ignore_fldigi_busy,
                 apply_js8_offset=apply_js8_offset,
                 apply_fldigi=apply_fldigi,

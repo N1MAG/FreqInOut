@@ -90,6 +90,18 @@ tests/*
 !tests/test_settings_section_health_phase1.py
 !tests/test_commstat_sitrep_slice1.py
 !tests/test_commstat_sitrep_remaining_slices.py
+!tests/test_multi_rig_wave1_slice_a.py
+!tests/test_multi_rig_wave1_slice_b.py
+!tests/test_multi_rig_wave1_slice_c.py
+!tests/test_multi_rig_wave2.py
+!tests/test_multi_rig_wave3.py
+!tests/test_multi_rig_wave3_slice4.py
+!tests/test_multi_rig_wave4_phase_e_slice1.py
+!tests/test_multi_rig_wave4_phase_e_slice2.py
+!tests/test_multi_rig_wave4_phase_e_slice3.py
+!tests/test_multi_rig_wave4_phase_f_slice1.py
+!tests/test_multi_rig_wave4_phase_f_slice2.py
+!tests/test_multi_rig_wave4_phase_f_slice3.py
 
 # Local benchmark/smoke artifacts
 .benchmarks/

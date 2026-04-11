@@ -33,8 +33,13 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
+from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.propagation_service import PropagationService
+from freqinout.core.schedule_targeting import (
+    normalize_schedule_target_fields,
+    schedule_row_matches_target_context,
+)
 from freqinout.core.software_status_service import SoftwareStatusService, PROGRAM_PATH_KEYS
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
@@ -1261,6 +1266,7 @@ class ControlFreqTab(QWidget):
         self._reload_sop_manager_settings()
         self._invalidate_sop_window_cache()
         self._invalidate_activity_cache()
+        self._invalidate_schedule_row_caches()
         self._sop_outlook_refresh_pending = True
         self._apply_theme()
         if self._active:
@@ -1602,6 +1608,14 @@ class ControlFreqTab(QWidget):
         try:
             if bool(status.get("ptt_active")):
                 return "PTT active"
+            if bool(status.get("shared_ptt_blocked")):
+                owner = str(status.get("shared_ptt_owner_name") or "").strip()
+                group = str(status.get("shared_ptt_group") or "").strip()
+                if owner and group:
+                    return f"Shared PTT ({group}: {owner})"
+                if group:
+                    return f"Shared PTT ({group})"
+                return "Shared PTT"
             if bool(status.get("js8_busy")):
                 return "JS8Call"
             if bool(status.get("varac_waiting")) or bool(status.get("varac_busy")):
@@ -1818,6 +1832,64 @@ class ControlFreqTab(QWidget):
             except Exception:
                 pass
 
+    def _invalidate_schedule_row_caches(self) -> None:
+        self._daily_schedule_rows_cache = []
+        self._daily_schedule_rows_cache_ts = 0.0
+        self._daily_schedule_rows_cache_mtime = 0.0
+        self._net_schedule_rows_cache = []
+        self._net_schedule_rows_cache_ts = 0.0
+        self._net_schedule_rows_cache_mtime = 0.0
+
+    def _primary_schedule_target_context(self) -> Tuple[Optional[int], Optional[int]]:
+        win = self.window()
+        manager = getattr(win, "station_runtime_manager", None) if win is not None else None
+        if manager is not None:
+            try:
+                runtime = manager.get_primary_runtime() if hasattr(manager, "get_primary_runtime") else None
+            except Exception:
+                runtime = None
+            if runtime is not None:
+                try:
+                    profile = runtime.profile if isinstance(runtime.profile, dict) else {}
+                    assignment = runtime.assignment if isinstance(runtime.assignment, dict) else {}
+                    device_profile_id = int(profile.get("id", 0) or 0)
+                    operating_profile_id = assignment.get("operating_profile_id")
+                    return (
+                        device_profile_id or None,
+                        int(operating_profile_id) if operating_profile_id not in (None, "") else None,
+                    )
+                except Exception:
+                    pass
+        try:
+            store = MultiRadioStore(settings_db_path())
+            primary = store.get_runtime_primary_device_profile()
+            if not primary:
+                return None, None
+            device_profile_id = int(primary.get("id", 0) or 0)
+            assignment = store.get_effective_assignment_for_device(device_profile_id)
+            operating_profile_id = assignment.get("operating_profile_id") if assignment else None
+            return (
+                device_profile_id or None,
+                int(operating_profile_id) if operating_profile_id not in (None, "") else None,
+            )
+        except Exception:
+            return None, None
+
+    def _filter_schedule_rows_for_runtime_target(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        device_profile_id, operating_profile_id = self._primary_schedule_target_context()
+        filtered: List[Dict[str, Any]] = []
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            row = normalize_schedule_target_fields(raw)
+            if schedule_row_matches_target_context(
+                row,
+                device_profile_id=device_profile_id,
+                operating_profile_id=operating_profile_id,
+            ):
+                filtered.append(row)
+        return filtered
+
     def _daily_schedule_rows(self) -> List[Dict[str, Any]]:
         db_path = self._settings_db_path()
         now_ts = time.time()
@@ -1827,12 +1899,12 @@ class ControlFreqTab(QWidget):
             and (now_ts - float(self._daily_schedule_rows_cache_ts) < self._daily_schedule_rows_cache_ttl_sec)
             and abs(float(self._daily_schedule_rows_cache_mtime) - db_mtime) < 0.0001
         ):
-            return self._daily_schedule_rows_cache
+            return self._filter_schedule_rows_for_runtime_target(self._daily_schedule_rows_cache)
         rows = self._load_schedule_rows(db_path, "daily_schedule_tab")
         self._daily_schedule_rows_cache = rows
         self._daily_schedule_rows_cache_ts = now_ts
         self._daily_schedule_rows_cache_mtime = db_mtime
-        return rows
+        return self._filter_schedule_rows_for_runtime_target(rows)
 
     def _net_schedule_rows(self) -> List[Dict[str, Any]]:
         db_path = self._db_path()
@@ -1843,12 +1915,12 @@ class ControlFreqTab(QWidget):
             and (now_ts - float(self._net_schedule_rows_cache_ts) < self._net_schedule_rows_cache_ttl_sec)
             and abs(float(self._net_schedule_rows_cache_mtime) - db_mtime) < 0.0001
         ):
-            return self._net_schedule_rows_cache
+            return self._filter_schedule_rows_for_runtime_target(self._net_schedule_rows_cache)
         rows = self._load_schedule_rows(db_path, "net_schedule_tab")
         self._net_schedule_rows_cache = rows
         self._net_schedule_rows_cache_ts = now_ts
         self._net_schedule_rows_cache_mtime = db_mtime
-        return rows
+        return self._filter_schedule_rows_for_runtime_target(rows)
 
     def _peer_schedule_rows(self) -> List[Dict[str, Any]]:
         db_path = self._db_path()
@@ -2916,11 +2988,11 @@ class ControlFreqTab(QWidget):
 
     def _on_freq_set_clicked(self) -> None:
         control_via = (self.settings.get("control_via", "") or "").strip()
-        if control_via not in {"FLRig", "JS8Call"}:
+        if control_via not in {"FLRig", "RIGCTLD", "JS8Call"}:
             QMessageBox.information(
                 self,
                 "Frequency Control",
-                "Frequency control is available when Control Via is FLRig or JS8Call.",
+                "Frequency control is available when Control Via is FLRig, RIGCTLD, or JS8Call.",
             )
             return
         meta = selected_qsy_meta(self.freq_combo)

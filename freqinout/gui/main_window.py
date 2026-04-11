@@ -35,11 +35,13 @@ from pathlib import Path
 from freqinout.core.logger import log
 from freqinout.core.logger import set_log_level
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
-from freqinout.radio_interface.rigctl_client import flrig_client_from_settings
+from freqinout.radio_interface.rigctl_client import rig_control_client_from_settings
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
@@ -66,11 +68,13 @@ from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.peer_sched_tab import PeerSchedTab
 from freqinout.gui.help_tab import HelpTab
 from freqinout.gui.controlfreq_tab import ControlFreqTab
+from freqinout.gui.station_overview_tab import StationOverviewTab
 from freqinout.gui.qsy_helper import (
     refresh_hold_duration_combo,
     selected_hold_duration,
     suspend_snapshot,
     suspend_schedule_hold,
+    set_scheduler_enabled_override,
     set_active_hold_duration,
     resume_schedule_hold,
     set_hold_duration_default,
@@ -102,6 +106,14 @@ class MainWindow(QMainWindow):
         self._shutting_down = False
 
         self.settings = SettingsManager()
+        self.multi_radio_store = MultiRadioStore()
+        self.station_runtime_manager = StationRuntimeManager(store=self.multi_radio_store, settings=self.settings)
+        self.station_runtime_manager.sync_with_store()
+        self._runtime_profile_signature: tuple[object, ...] | None = None
+        self._active_runtime_profile = self._load_runtime_active_device_profile()
+        self._active_runtime_policy = self._primary_runtime_policy()
+        self._suppressed_screen_labels: set[str] = set()
+        self._launch_startup_suppressed = False
         self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
         self._set_window_icon()
 
@@ -129,6 +141,8 @@ class MainWindow(QMainWindow):
         self.peer_sched_tab = PeerSchedTab(self)
         self.help_tab = HelpTab(self)
         self.controlfreq_tab = ControlFreqTab(self)
+        self.station_overview_tab = StationOverviewTab(self)
+        self.station_overview_tab.set_runtime_manager(self.station_runtime_manager)
         self._sop_data_refresh_pending = False
         self._sop_data_refresh_timer = QTimer(self)
         self._sop_data_refresh_timer.setSingleShot(True)
@@ -150,6 +164,7 @@ class MainWindow(QMainWindow):
         # Internal screen registry (stable keys used by cross-tab navigation/lazy loading)
         self._screens = [
             ("ControlFreq", self.controlfreq_tab),
+            ("Station Overview", self.station_overview_tab),
             ("FreqPlanner", self._placeholder_widget("FreqPlanner")),
             ("SOP", self.sop_tab),
             ("Messages", self._placeholder_widget("Messages")),
@@ -175,6 +190,7 @@ class MainWindow(QMainWindow):
         # but do not show it as a primary sidebar button.
         self._nav_specs = [
             ("ControlFreq", "ControlFreq"),
+            ("Station", "Station Overview"),
             ("FreqPlanner", "FreqPlanner"),
             ("Messages", "Messages"),
             ("Map", "Map"),
@@ -383,6 +399,16 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(4)
 
+        self.runtime_mode_banner = QFrame(right_container)
+        self.runtime_mode_banner.setVisible(False)
+        banner_layout = QHBoxLayout(self.runtime_mode_banner)
+        banner_layout.setContentsMargins(10, 8, 10, 8)
+        banner_layout.setSpacing(6)
+        self.runtime_mode_label = QLabel("")
+        self.runtime_mode_label.setWordWrap(True)
+        banner_layout.addWidget(self.runtime_mode_label)
+        right_layout.addWidget(self.runtime_mode_banner, 0)
+
         right_layout.addWidget(self.stack, stretch=1)
 
         # Layout composition
@@ -402,8 +428,12 @@ class MainWindow(QMainWindow):
         self._webengine_warmup_widget = None
         self._webengine_warmup_done = False
         self._pending_map_switch_index: int | None = None
+        self._runtime_client_signature: tuple[object, ...] | None = None
 
-        self._startup_webengine_prewarm_enabled = self._should_prewarm_webengine_at_startup()
+        startup_policy = self._primary_runtime_policy()
+        startup_suppressed = self._suppressed_screens_for_runtime(self._active_runtime_profile, startup_policy)
+        self._lazy_prewarm_labels = self._runtime_lazy_prewarm_labels(startup_suppressed)
+        self._startup_webengine_prewarm_enabled = ("Map" not in startup_suppressed) and self._should_prewarm_webengine_at_startup()
         if self._startup_webengine_prewarm_enabled:
             # Kick WebEngine warmup during init so first Map activation is not the
             # first WebEngine surface/process startup path seen by users.
@@ -424,9 +454,22 @@ class MainWindow(QMainWindow):
         self._apply_callsign_to_tab_titles()
 
         # Start scheduler engine
-        self.rig_client = flrig_client_from_settings(self.settings)
-        self.js8_control = JS8ControlClient()
-        self.varac_status = VarACStatusClient()
+        primary_runtime = self.station_runtime_manager.get_primary_runtime()
+        self.rig_client = (
+            primary_runtime.rig_client
+            if primary_runtime is not None and primary_runtime.rig_client is not None
+            else rig_control_client_from_settings(self.settings)
+        )
+        self.js8_control = (
+            primary_runtime.js8_control_client
+            if primary_runtime is not None and primary_runtime.js8_control_client is not None
+            else self._new_js8_control_client()
+        )
+        self.varac_status = (
+            primary_runtime.varac_status_client
+            if primary_runtime is not None and primary_runtime.varac_status_client is not None
+            else self._new_varac_status_client()
+        )
         self.fldigi_log_status = FldigiLogStatusClient()
         self.scheduler = SchedulerEngine(
             self,
@@ -434,10 +477,33 @@ class MainWindow(QMainWindow):
             js8=self.js8_control,
             varac=self.varac_status,
             fldigi_log=self.fldigi_log_status,
+            station_runtime_manager=self.station_runtime_manager,
         )
+        self._runtime_client_signature = self._runtime_client_signature_for_settings()
+        try:
+            if hasattr(self.scheduler, "set_runtime_scheduler_enabled"):
+                self.scheduler.set_runtime_scheduler_enabled(bool(startup_policy.get("scheduler_enabled", True)))
+        except Exception:
+            pass
+        try:
+            set_scheduler_enabled_override(bool(startup_policy.get("scheduler_enabled", True)))
+        except Exception:
+            pass
         self.scheduler.start()
         self.background_ingest = BackgroundIngestController(self.settings)
-        self.background_ingest.start()
+        if self._runtime_background_ingest_enabled(self._active_runtime_profile, startup_policy):
+            self.background_ingest.start()
+        else:
+            log.info("MainWindow: background ingest disabled for current runtime policy")
+        try:
+            if hasattr(self.launch_orchestrator, "set_runtime_launch_enabled"):
+                self.launch_orchestrator.set_runtime_launch_enabled(
+                    self._runtime_launch_enabled(self._active_runtime_profile, startup_policy),
+                    reason="Launch Control is disabled by the primary operating profile.",
+                )
+            self._launch_startup_suppressed = not self._runtime_launch_enabled(self._active_runtime_profile, startup_policy)
+        except Exception:
+            pass
         try:
             self.scheduler.off_schedule_detected.connect(self._on_off_schedule_detected)
         except Exception:
@@ -452,6 +518,14 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.scheduler.varac_wait_cleared.connect(self._dismiss_varac_wait_prompt)
+        except Exception:
+            pass
+        try:
+            self.scheduler.coordination_conflict_detected.connect(self._on_coordination_conflict_detected)
+        except Exception:
+            pass
+        try:
+            self.scheduler.coordination_conflict_cleared.connect(self._dismiss_coordination_conflict_prompt)
         except Exception:
             pass
         try:
@@ -472,6 +546,7 @@ class MainWindow(QMainWindow):
         self._status_timer.setInterval(2000)
         self._status_timer.timeout.connect(self._refresh_scheduler_status_panel)
         self._status_timer.timeout.connect(self._refresh_condition_level_panel)
+        self._status_timer.timeout.connect(self._refresh_station_overview)
         self._status_timer.timeout.connect(self._check_timed_debug_expiry)
         self._status_timer.start()
         self._condition_levels_refresh_timer = QTimer(self)
@@ -552,6 +627,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self.settings_tab.settings_saved.connect(self._on_runtime_settings_saved)
+        except Exception:
+            pass
+        try:
+            if hasattr(self.settings_tab, "device_profiles_changed"):
+                self.settings_tab.device_profiles_changed.connect(self._on_runtime_device_profiles_changed)
+        except Exception:
+            pass
+        try:
             self.settings_tab.settings_saved.connect(self._update_log_indicator)
         except Exception:
             pass
@@ -576,6 +660,8 @@ class MainWindow(QMainWindow):
         self._update_log_indicator()
         self._refresh_scheduler_status_panel()
         self._refresh_condition_level_panel()
+        self._refresh_station_overview(force=True)
+        self._apply_runtime_profile_state(force=True)
 
         try:
             self.launch_orchestrator.sequence_started.connect(self._on_launch_sequence_started)
@@ -1413,6 +1499,12 @@ class MainWindow(QMainWindow):
         off_schedule = bool(status.get("off_schedule"))
         varac_waiting = bool(status.get("varac_waiting"))
         ptt_active = bool(status.get("ptt_active"))
+        shared_ptt_blocked = bool(status.get("shared_ptt_blocked"))
+        shared_ptt_reason = str(status.get("shared_ptt_reason") or "").strip()
+        shared_ptt_group = str(status.get("shared_ptt_group") or "").strip()
+        shared_ptt_owner_name = str(status.get("shared_ptt_owner_name") or "").strip()
+        rf_conflict_warning = bool(status.get("rf_conflict_warning"))
+        rf_conflict_summary = str(status.get("rf_conflict_summary") or "").strip()
         js8_busy = bool(status.get("js8_busy"))
         fldigi_busy = bool(status.get("fldigi_busy"))
         fldigi_busy_reason = (status.get("fldigi_busy_reason") or "").strip().lower()
@@ -1488,6 +1580,15 @@ class MainWindow(QMainWindow):
                 reasons.append("Waiting to Clear")
             if ptt_active:
                 reasons.append("Sending Traffic")
+            if shared_ptt_blocked:
+                if shared_ptt_owner_name and shared_ptt_group:
+                    reasons.append(f"Shared PTT {shared_ptt_group}: {shared_ptt_owner_name}")
+                elif shared_ptt_reason:
+                    reasons.append(shared_ptt_reason)
+                else:
+                    reasons.append("Shared PTT")
+            if rf_conflict_warning and rf_conflict_summary:
+                reasons.append(rf_conflict_summary)
             if js8_busy or varac_busy:
                 reasons.append("QSO")
             if busy_line and not net_kind:
@@ -1505,6 +1606,15 @@ class MainWindow(QMainWindow):
                 reasons.append("Waiting to Clear")
             if ptt_active:
                 reasons.append("Sending Traffic")
+            if shared_ptt_blocked:
+                if shared_ptt_owner_name and shared_ptt_group:
+                    reasons.append(f"Shared PTT {shared_ptt_group}: {shared_ptt_owner_name}")
+                elif shared_ptt_reason:
+                    reasons.append(shared_ptt_reason)
+                else:
+                    reasons.append("Shared PTT")
+            if rf_conflict_warning and rf_conflict_summary:
+                reasons.append(rf_conflict_summary)
             if js8_busy or varac_busy:
                 reasons.append("QSO")
             if net_kind:
@@ -1740,9 +1850,18 @@ class MainWindow(QMainWindow):
                 log.debug("MainWindow shutdown: widget shutdown failed for %r: %s", widget, e)
                 continue
         try:
-            JS8RxHub.instance().shutdown()
+            JS8RxHub.shutdown_all()
         except Exception as e:
             log.debug("MainWindow shutdown: JS8RxHub shutdown failed: %s", e)
+        try:
+            if hasattr(self, "station_runtime_manager"):
+                self.station_runtime_manager.stop()
+        except Exception as e:
+            log.debug("MainWindow shutdown: station runtime manager stop failed: %s", e)
+        try:
+            set_scheduler_enabled_override(None)
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         self._on_app_about_to_quit()
@@ -1925,6 +2044,14 @@ class MainWindow(QMainWindow):
                 pass
             self._varac_wait_prompt = None
 
+    def _dismiss_coordination_conflict_prompt(self) -> None:
+        if hasattr(self, "_coordination_conflict_prompt") and self._coordination_conflict_prompt is not None:
+            try:
+                self._coordination_conflict_prompt.close()
+            except Exception:
+                pass
+            self._coordination_conflict_prompt = None
+
     def _build_prompt_hold_duration_combo(self, parent) -> QComboBox:
         combo = QComboBox(parent)
         combo.setToolTip("Temporary schedule hold duration.")
@@ -2052,6 +2179,46 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._varac_wait_prompt = None
+
+    def _on_coordination_conflict_detected(self, payload: dict) -> None:
+        if self._shutting_down:
+            return
+        self._dismiss_coordination_conflict_prompt()
+        summary = str((payload or {}).get("summary") or "").strip() or "RF conflict detected."
+        detail = str((payload or {}).get("detail") or "").strip()
+        msg = QMessageBox(self)
+        msg.setWindowTitle("RF Conflict Warning")
+        msg.setText(summary)
+        if detail:
+            msg.setInformativeText(detail)
+        apply_btn = msg.addButton("Proceed Once", QMessageBox.AcceptRole)
+        ignore_btn = msg.addButton("Skip Once", QMessageBox.RejectRole)
+        suspend_btn = msg.addButton("Pause Schedule", QMessageBox.DestructiveRole)
+        hold_combo = self._build_prompt_hold_duration_combo(msg)
+        self._attach_prompt_hold_duration_row(msg, hold_combo)
+        self._coordination_conflict_prompt = msg
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == apply_btn:
+            try:
+                self.scheduler.resolve_coordination_conflict("apply")
+            except Exception:
+                pass
+        elif clicked == suspend_btn:
+            try:
+                mins = selected_hold_duration(hold_combo, self.settings)
+                set_hold_duration_default(self.settings, mins)
+                self._sync_hold_duration_combos()
+                self.scheduler.resolve_coordination_conflict("suspend", minutes=mins)
+                self.on_hold_state_changed(force_reload=True)
+            except Exception:
+                pass
+        else:
+            try:
+                self.scheduler.resolve_coordination_conflict("ignore")
+            except Exception:
+                pass
+        self._coordination_conflict_prompt = None
 
     # ------------------------------------------------------------------ #
     # Helpers                                                            #
@@ -2450,6 +2617,452 @@ class MainWindow(QMainWindow):
             pass
         try:
             self._refresh_map_prop_target_controls()
+        except Exception:
+            pass
+
+    def _load_runtime_active_device_profile(self) -> dict[str, object]:
+        manager = getattr(self, "station_runtime_manager", None)
+        if manager is not None and hasattr(manager, "get_runtime_primary_device_profile"):
+            try:
+                profile = manager.get_runtime_primary_device_profile()
+            except Exception as e:
+                log.debug("MainWindow: failed to load runtime-primary device profile: %s", e)
+                profile = None
+            if isinstance(profile, dict):
+                return dict(profile)
+        try:
+            profile = self.multi_radio_store.get_runtime_primary_device_profile()
+        except Exception as e:
+            log.debug("MainWindow: failed to load runtime-primary device profile from store: %s", e)
+            return {}
+        return dict(profile) if isinstance(profile, dict) else {}
+
+    @staticmethod
+    def _runtime_profile_deployment_mode(profile: object) -> str:
+        if not isinstance(profile, dict):
+            return "full"
+        mode = str(profile.get("deployment_mode", "full") or "full").strip().lower()
+        return mode if mode in {"full", "minimal"} else "full"
+
+    @staticmethod
+    def _runtime_policy_enabled(policy: object, key: str, default: bool = True) -> bool:
+        if not isinstance(policy, dict):
+            return bool(default)
+        value = policy.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return int(value) != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(default)
+
+    @staticmethod
+    def _runtime_state_signature_for(profile: object, policy: object) -> tuple[object, ...]:
+        if not isinstance(profile, dict):
+            profile = {}
+        if not isinstance(policy, dict):
+            policy = {}
+        return (
+            int(profile.get("id", 0) or 0),
+            str(profile.get("name", "") or "").strip(),
+            str(profile.get("control_backend", "") or "").strip().lower(),
+            MainWindow._runtime_profile_deployment_mode(profile),
+            str(policy.get("operating_profile_name", "") or "").strip(),
+            str(policy.get("assignment_state", "") or "").strip().lower(),
+            MainWindow._runtime_policy_enabled(policy, "scheduler_enabled", True),
+            str(policy.get("scheduler_mode", "full") or "full").strip().lower(),
+            MainWindow._runtime_policy_enabled(policy, "use_messages", True),
+            MainWindow._runtime_policy_enabled(policy, "use_map", True),
+            MainWindow._runtime_policy_enabled(policy, "use_background_ingest", True),
+            MainWindow._runtime_policy_enabled(policy, "use_launch_control", True),
+            MainWindow._runtime_policy_enabled(policy, "use_net_control_tabs", True),
+            bool(policy.get("swap_active", False)),
+            str(policy.get("swap_mode", "") or "").strip().lower(),
+            str(policy.get("swap_summary", "") or "").strip(),
+        )
+
+    def _primary_runtime_policy(self) -> dict[str, object]:
+        manager = getattr(self, "station_runtime_manager", None)
+        policy: object = {}
+        if manager is not None and hasattr(manager, "primary_runtime_policy"):
+            try:
+                policy = manager.primary_runtime_policy()
+            except Exception:
+                policy = {}
+        data = dict(policy) if isinstance(policy, dict) else {}
+        return {
+            "operating_profile_name": str(data.get("operating_profile_name", "") or "").strip(),
+            "assignment_state": str(data.get("assignment_state", "unassigned") or "unassigned").strip().lower(),
+            "scheduler_enabled": self._runtime_policy_enabled(data, "scheduler_enabled", True),
+            "scheduler_mode": str(data.get("scheduler_mode", "full") or "full").strip().lower() or "full",
+            "use_messages": self._runtime_policy_enabled(data, "use_messages", True),
+            "use_map": self._runtime_policy_enabled(data, "use_map", True),
+            "use_background_ingest": self._runtime_policy_enabled(data, "use_background_ingest", True),
+            "use_launch_control": self._runtime_policy_enabled(data, "use_launch_control", True),
+            "use_net_control_tabs": self._runtime_policy_enabled(data, "use_net_control_tabs", True),
+            "swap_active": bool(data.get("swap_active", False)),
+            "swap_mode": str(data.get("swap_mode", "") or "").strip().lower(),
+            "swap_summary": str(data.get("swap_summary", "") or "").strip(),
+            "swap_source_name": str(data.get("swap_source_name", "") or "").strip(),
+            "swap_target_name": str(data.get("swap_target_name", "") or "").strip(),
+        }
+
+    @staticmethod
+    def _suppressed_screens_for_runtime(profile: object, policy: object) -> set[str]:
+        suppressed: set[str] = set()
+        if MainWindow._runtime_profile_deployment_mode(profile) == "minimal":
+            suppressed.update({"Map", "Messages", "FreqPlanner"})
+        if not MainWindow._runtime_policy_enabled(policy, "use_map", True):
+            suppressed.add("Map")
+        if not MainWindow._runtime_policy_enabled(policy, "use_messages", True):
+            suppressed.add("Messages")
+        if not MainWindow._runtime_policy_enabled(policy, "use_net_control_tabs", True):
+            suppressed.update({"NCS-FLDigi/SSB", "NCS-JS8", "NCS-Local"})
+        return suppressed
+
+    @staticmethod
+    def _runtime_background_ingest_enabled(profile: object, policy: object) -> bool:
+        if MainWindow._runtime_profile_deployment_mode(profile) == "minimal":
+            return False
+        return MainWindow._runtime_policy_enabled(policy, "use_background_ingest", True)
+
+    @staticmethod
+    def _runtime_launch_enabled(profile: object, policy: object) -> bool:
+        if MainWindow._runtime_profile_deployment_mode(profile) == "minimal":
+            return False
+        return MainWindow._runtime_policy_enabled(policy, "use_launch_control", True)
+
+    @staticmethod
+    def _runtime_lazy_prewarm_labels(suppressed_labels: set[str]) -> list[str]:
+        return [label for label in ("Messages", "FreqPlanner") if label not in suppressed_labels]
+
+    @staticmethod
+    def _runtime_banner_text(profile: object, policy: object) -> str:
+        profile_name = str(profile.get("name", "") or "").strip() if isinstance(profile, dict) else ""
+        backend = str(profile.get("control_backend", "") or "").strip().upper() if isinstance(profile, dict) else ""
+        operating_name = str(policy.get("operating_profile_name", "") or "").strip() if isinstance(policy, dict) else ""
+        assignment_state = str(policy.get("assignment_state", "") or "").strip().lower() if isinstance(policy, dict) else ""
+        swap_summary = str(policy.get("swap_summary", "") or "").strip() if isinstance(policy, dict) else ""
+        profile_label = profile_name or "Primary device"
+        backend_txt = f" via {backend}" if backend else ""
+        if MainWindow._runtime_profile_deployment_mode(profile) == "minimal":
+            return (
+                f"{profile_label}{backend_txt} is running in Minimal mode. "
+                "Map, Messages, FreqPlanner, startup launch, and background ingest are suppressed."
+            )
+
+        restrictions: list[str] = []
+        if not MainWindow._runtime_policy_enabled(policy, "scheduler_enabled", True):
+            restrictions.append("scheduler automation off")
+        if not MainWindow._runtime_policy_enabled(policy, "use_map", True):
+            restrictions.append("Map hidden")
+        if not MainWindow._runtime_policy_enabled(policy, "use_messages", True):
+            restrictions.append("Messages hidden")
+        if not MainWindow._runtime_policy_enabled(policy, "use_net_control_tabs", True):
+            restrictions.append("net control tabs hidden")
+        if not MainWindow._runtime_policy_enabled(policy, "use_background_ingest", True):
+            restrictions.append("background ingest off")
+        if not MainWindow._runtime_policy_enabled(policy, "use_launch_control", True):
+            restrictions.append("launch control off")
+        if not restrictions:
+            return swap_summary
+        operating_txt = operating_name or "assigned operating profile"
+        state_txt = "temporary override" if assignment_state == "temporary_override" else "active policy"
+        detail = f"{profile_label}{backend_txt} is running under {operating_txt} ({state_txt}): {'; '.join(restrictions)}."
+        if swap_summary:
+            return f"{swap_summary} {detail}"
+        return detail
+
+    def _style_runtime_mode_banner(self, theme: dict) -> None:
+        if not hasattr(self, "runtime_mode_banner") or not hasattr(self, "runtime_mode_label"):
+            return
+        border = theme.get("warning", theme.get("accent", "#d97706"))
+        surface = theme.get("surface_alt", theme.get("surface", "#f4f4f5"))
+        text = theme.get("text", "#222222")
+        try:
+            self.runtime_mode_banner.setStyleSheet(
+                f"QFrame {{ border: 1px solid {border}; border-radius: 6px; background: {surface}; }}"
+            )
+            self.runtime_mode_label.setStyleSheet(f"color: {text}; font-weight: 600;")
+        except Exception:
+            pass
+
+    def _set_nav_visibility_for_screen(self, screen_label: str, visible: bool) -> None:
+        screen_idx = self._screen_index_by_label.get(str(screen_label or "").strip())
+        if screen_idx is None:
+            return
+        nav_idx = self._nav_screen_index_map.get(screen_idx)
+        if nav_idx is None or not (0 <= nav_idx < len(self.nav_buttons)):
+            return
+        try:
+            self.nav_buttons[nav_idx].setVisible(bool(visible))
+        except Exception:
+            pass
+
+    def _runtime_fallback_screen_index(self) -> int:
+        for label in ("ControlFreq", "Settings"):
+            idx = self._screen_index_by_label.get(label)
+            if idx is not None:
+                return int(idx)
+        return 0
+
+    def _screen_is_runtime_suppressed(self, screen_label: str) -> bool:
+        return str(screen_label or "").strip() in self._suppressed_screen_labels
+
+    def _apply_runtime_profile_state(self, *, force: bool = False) -> None:
+        profile = self._load_runtime_active_device_profile()
+        policy = self._primary_runtime_policy()
+        signature = self._runtime_state_signature_for(profile, policy)
+        if not force and signature == self._runtime_profile_signature:
+            return
+        self._active_runtime_profile = profile
+        self._active_runtime_policy = policy
+        self._runtime_profile_signature = signature
+        self._suppressed_screen_labels = self._suppressed_screens_for_runtime(profile, policy)
+        for label in ("Map", "Messages", "FreqPlanner", "NCS-FLDigi/SSB", "NCS-JS8", "NCS-Local"):
+            self._set_nav_visibility_for_screen(label, label not in self._suppressed_screen_labels)
+        self._launch_startup_suppressed = not self._runtime_launch_enabled(profile, policy)
+        try:
+            if hasattr(self.launch_orchestrator, "set_runtime_launch_enabled"):
+                self.launch_orchestrator.set_runtime_launch_enabled(
+                    not self._launch_startup_suppressed,
+                    reason="Launch Control is disabled by the primary operating profile.",
+                )
+        except Exception:
+            pass
+        if self._launch_startup_suppressed:
+            try:
+                self.launch_orchestrator.stop_sequence()
+            except Exception:
+                pass
+        try:
+            if hasattr(self, "settings_tab") and hasattr(self.settings_tab, "_update_launch_control_buttons"):
+                self.settings_tab._update_launch_control_buttons()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "scheduler") and self.scheduler is not None and hasattr(self.scheduler, "set_runtime_scheduler_enabled"):
+                self.scheduler.set_runtime_scheduler_enabled(bool(policy.get("scheduler_enabled", True)))
+        except Exception:
+            pass
+        try:
+            set_scheduler_enabled_override(bool(policy.get("scheduler_enabled", True)))
+        except Exception:
+            pass
+        self._lazy_prewarm_labels = self._runtime_lazy_prewarm_labels(self._suppressed_screen_labels)
+        if not self._runtime_background_ingest_enabled(profile, policy):
+            if hasattr(self, "background_ingest") and self.background_ingest is not None:
+                try:
+                    self.background_ingest.stop()
+                except Exception:
+                    pass
+        else:
+            if hasattr(self, "background_ingest") and self.background_ingest is not None:
+                try:
+                    if hasattr(self.background_ingest, "is_running"):
+                        if not self.background_ingest.is_running():
+                            self.background_ingest.start()
+                    else:
+                        self.background_ingest.start()
+                except Exception:
+                    pass
+            if (not self._webengine_warmup_done) and ("Map" not in self._suppressed_screen_labels) and self._should_prewarm_webengine_at_startup():
+                try:
+                    self._prewarm_webengine()
+                except Exception:
+                    pass
+            QTimer.singleShot(0, self._start_lazy_prewarm)
+
+        banner_text = self._runtime_banner_text(profile, policy)
+        if hasattr(self, "runtime_mode_label"):
+            self.runtime_mode_label.setText(banner_text)
+        if hasattr(self, "runtime_mode_banner"):
+            self.runtime_mode_banner.setVisible(bool(banner_text))
+        try:
+            self._style_runtime_mode_banner(resolve_theme(self.settings))
+        except Exception:
+            pass
+        try:
+            current_index = self.stack.currentIndex() if hasattr(self, "stack") else -1
+            if 0 <= current_index < len(self._screens):
+                current_label = self._screens[current_index][0]
+                if self._screen_is_runtime_suppressed(current_label):
+                    self._set_screen(self._runtime_fallback_screen_index())
+        except Exception:
+            pass
+        try:
+            self._update_nav_layout_metrics()
+        except Exception:
+            pass
+
+    def _refresh_station_overview(self, *, force: bool = False) -> None:
+        try:
+            if hasattr(self, "station_overview_tab") and self.station_overview_tab is not None:
+                self.station_overview_tab.refresh_from_manager(force=force)
+        except Exception:
+            pass
+
+    def _runtime_client_signature_for_settings(self) -> tuple[object, ...]:
+        manager = getattr(self, "station_runtime_manager", None)
+        if manager is not None and hasattr(manager, "primary_runtime_signature"):
+            try:
+                signature = manager.primary_runtime_signature()
+                if signature:
+                    return tuple(signature)
+            except Exception:
+                pass
+
+        def _text(key: str, default: str = "") -> str:
+            try:
+                return str(self.settings.get(key, default) or "").strip()
+            except Exception:
+                return str(default or "").strip()
+
+        def _int(key: str, default: int) -> int:
+            try:
+                value = self.settings.get(key, default)
+                return int(value if value not in (None, "") else default)
+            except Exception:
+                return int(default)
+
+        return (
+            _text("control_via", "FLRig").upper(),
+            _text("rig_host", "127.0.0.1"),
+            _int("rig_port", 4532),
+            _text("flrig_host", "127.0.0.1"),
+            _int("flrig_port", 12345),
+            _text("fldigi_host", ""),
+            _int("fldigi_port", 7362),
+            _text("js8_host", "127.0.0.1"),
+            _int("js8_port", 2442),
+        )
+
+    def _new_js8_control_client(self) -> object:
+        js8_host = str(self.settings.get("js8_host", "") or "").strip() or None
+        js8_port = int(self.settings.get("js8_port", 2442) or 2442)
+        for kwargs in (
+            {"host": js8_host, "port": js8_port, "settings": self.settings},
+            {"host": js8_host, "port": js8_port},
+            {"host": js8_host},
+            {},
+        ):
+            try:
+                return JS8ControlClient(**kwargs)
+            except TypeError:
+                continue
+        return JS8ControlClient()
+
+    def _new_varac_status_client(self) -> object:
+        for kwargs in ({"settings": self.settings}, {}):
+            try:
+                return VarACStatusClient(**kwargs)
+            except TypeError:
+                continue
+        return VarACStatusClient()
+
+    def _rebuild_runtime_clients(self, *, force: bool = False) -> None:
+        old_signature = self._runtime_client_signature
+        station_runtime_manager = getattr(self, "station_runtime_manager", None)
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        if station_runtime_manager is not None:
+            try:
+                station_runtime_manager.sync_with_store()
+            except Exception as e:
+                log.debug("MainWindow: station runtime sync failed: %s", e)
+        signature = self._runtime_client_signature_for_settings()
+        if not force and signature == self._runtime_client_signature:
+            self._refresh_station_overview(force=False)
+            return
+        self._runtime_client_signature = signature
+
+        old_js8 = getattr(self, "js8_control", None)
+        if old_signature is not None and signature != old_signature:
+            try:
+                JS8RxHub.shutdown_all()
+            except Exception:
+                pass
+
+        primary_runtime = station_runtime_manager.get_primary_runtime() if station_runtime_manager is not None else None
+        try:
+            self.rig_client = (
+                primary_runtime.rig_client
+                if primary_runtime is not None and primary_runtime.rig_client is not None
+                else rig_control_client_from_settings(self.settings)
+            )
+        except Exception as e:
+            log.debug("MainWindow: rig backend rebuild failed: %s", e)
+            self.rig_client = None
+
+        try:
+            self.js8_control = (
+                primary_runtime.js8_control_client
+                if primary_runtime is not None and primary_runtime.js8_control_client is not None
+                else self._new_js8_control_client()
+            )
+        except Exception as e:
+            log.debug("MainWindow: JS8 control rebuild failed: %s", e)
+            self.js8_control = self._new_js8_control_client()
+
+        try:
+            self.varac_status = (
+                primary_runtime.varac_status_client
+                if primary_runtime is not None and primary_runtime.varac_status_client is not None
+                else self._new_varac_status_client()
+            )
+        except Exception as e:
+            log.debug("MainWindow: VarAC status rebuild failed: %s", e)
+            self.varac_status = self._new_varac_status_client()
+
+        try:
+            self.fldigi_log_status = FldigiLogStatusClient()
+        except Exception as e:
+            log.debug("MainWindow: FLDigi log status rebuild failed: %s", e)
+
+        try:
+            if old_js8 is not None and old_js8 is not self.js8_control and hasattr(old_js8, "stop"):
+                old_js8.stop()
+        except Exception:
+            pass
+
+        if hasattr(self, "scheduler") and self.scheduler is not None:
+            try:
+                self.scheduler.rig = self.rig_client
+                self.scheduler.js8 = self.js8_control
+                self.scheduler.varac = self.varac_status
+                self.scheduler.fldigi_log = self.fldigi_log_status
+            except Exception:
+                pass
+        self._refresh_station_overview(force=True)
+
+    def _on_runtime_settings_saved(self) -> None:
+        self._rebuild_runtime_clients()
+        self._apply_runtime_profile_state()
+        try:
+            if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "_start_js8_rx_listener"):
+                self.stations_map_tab._start_js8_rx_listener()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "scheduler") and self.scheduler is not None:
+                self.scheduler.force_refresh()
+        except Exception:
+            pass
+
+    def _on_runtime_device_profiles_changed(self) -> None:
+        self._rebuild_runtime_clients()
+        self._apply_runtime_profile_state()
+        try:
+            if self.stations_map_tab is not None and hasattr(self.stations_map_tab, "_start_js8_rx_listener"):
+                self.stations_map_tab._start_js8_rx_listener()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "scheduler") and self.scheduler is not None:
+                self.scheduler.force_refresh()
         except Exception:
             pass
 
@@ -3029,6 +3642,11 @@ class MainWindow(QMainWindow):
         ):
             if 0 <= index < self.stack.count():
                 label = self._screens[index][0]
+                if self._screen_is_runtime_suppressed(label):
+                    fallback_index = self._runtime_fallback_screen_index()
+                    if fallback_index != index:
+                        self._set_screen(fallback_index)
+                    return
                 if label != "Map" and self._pending_map_switch_index is not None:
                     self._pending_map_switch_index = None
                 if label == "Map" and self._queue_map_switch_after_webengine_warmup(index):

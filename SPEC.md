@@ -9376,3 +9376,1171 @@ Acceptance:
 - A Linux install created by `install_FreqInOut_linux.sh` does not contain `tests/` after install.
 - A subsequent `git pull` in that installed directory does not materialize `tests/`.
 - Developer/source clones remain unchanged and continue to include tests.
+
+### 1.192 Addendum (2026-04-10): Multi-Rig-on-1.2.2 Integration Plan
+
+Problem:
+- The existing multi-radio branch was built on top of the `1.2.1` lineage, while `main` now carries the promoted `1.2.2` single-radio release with critical polling, readiness, reliability, installer, activity, and sitrep fixes.
+- The local multi-radio workspace also contains a large dirty working tree, and some of those local-only changes overlap with logic already present in `1.2.2`.
+- A direct merge from the old multi-radio branch into `1.2.2` would risk regressing the `1.2.2` fixes that now define the single-radio baseline.
+
+Decisions:
+- Create a clean `1.2.2`-based multi-rig branch/worktree and treat that as the only place new multi-rig integration work lands.
+- Use `origin/feature/multi-radio-architecture` as the primary reference implementation.
+- Use the dirty local multi-radio workspace only as secondary reference material for:
+  - specs
+  - unpushed experiments
+  - targeted logic that is demonstrably missing from GitHub
+- Do not perform a wholesale merge from the old multi-radio branch.
+- Do not attempt a full rewrite from scratch.
+- Port the design in bounded slices, with `1.2.2` runtime behavior treated as authoritative unless the multi-rig spec explicitly changes it.
+
+Current branch/worktree baseline:
+- Clean multi-rig integration worktree:
+  - `C:\Users\billd\RadioCode\FreqInOut-multi-rig-1.2.2`
+  - branch: `feature/multi-rig-on-1.2.2`
+  - base: `v1.2.2` / `origin/main`
+- Legacy reference branch:
+  - `origin/feature/multi-radio-architecture`
+  - tip: `ef295d0`
+- Dirty local reference workspace:
+  - `C:\Users\billd\RadioCode\FreqInOut`
+
+Non-negotiable integration rules:
+- Preserve `1.2.2` polling/readiness gating as the baseline model for all per-device service state.
+- Preserve `1.2.2` UI responsiveness work:
+  - no blocking probes on tab activation
+  - no uncontrolled global refresh storms
+  - no return to process-name-only readiness
+- Preserve `1.2.2` activity/sitrep/operator semantics unless a multi-rig spec explicitly expands them.
+- Shared non-multi-rig fixes should land on `main` first, then be pulled into this branch.
+- Multi-rig-only code must stay isolated from the single-radio release line.
+
+Reference phase map from the existing multi-rig specs:
+- Phase A:
+  - structured settings/data-model foundation
+- Phase B:
+  - device profiles, active compatibility device, remote backend support, minimal mode
+- Phase C:
+  - station runtime manager, multiple active devices, Settings station overview
+- Phase D:
+  - operating profiles, assignments, primary-runtime enforcement, schedule targeting
+- Phase E:
+  - shared-PTT, RF conflict prompts, temporary profile swap
+- Phase F:
+  - observer/SDR roles, VarAC cluster model and enforcement
+- Phase G:
+  - UX refinement, ingest deduplication, JS8 source-aware ingest, performance hardening
+- Phase H:
+  - selected-radio shell, ControlFreq/FreqPlanner/Messages/NCS targeting, settings IA cleanup, guided setup
+
+Recommended integration order on top of `1.2.2`:
+
+Wave 0: branch hygiene and inventory
+- Goal:
+  - establish a clean `1.2.2`-based branch and classify old multi-rig work before code porting
+- Work:
+  - map old branch files/spec slices to `1.2.2` touched areas
+  - identify old changes already superseded by `1.2.2`
+  - identify local-only dirty changes that are truly multi-rig-specific
+- Acceptance:
+  - there is a file-by-file source map for each upcoming slice
+  - no code is ported blindly from the dirty local tree
+
+Wave 1: runtime/data-model foundation only
+- Source slices:
+  - Phase A
+  - Phase B Slice 1
+  - Phase B Slice 2
+  - Phase B Slice 3
+  - Phase B Slice 4
+- Deliverables:
+  - structured multi-radio settings entities
+  - migrated default device/profile model
+  - runtime-active compatibility device projection
+  - device profile CRUD/settings UI
+  - remote `rigctld` support where still applicable on `1.2.2`
+  - minimal deployment mode enforcement
+- Constraints:
+  - keep the app effectively single-runtime from the operator point of view
+  - preserve all `1.2.2` software readiness semantics
+  - preserve all `1.2.2` background-ingest gating rules
+- Acceptance:
+  - one migrated device behaves exactly like `1.2.2`
+  - adding device metadata does not alter single-radio behavior
+
+Wave 2: multi-runtime core without broad UI expansion
+- Source slices:
+  - Phase C Slice 1
+  - Phase C Slice 2
+  - Phase C Slice 3
+- Deliverables:
+  - `StationRuntimeManager`
+  - multiple runtime-active devices
+  - one explicit primary compatibility device
+  - per-device runtime snapshots and station overview
+- Constraints:
+  - current single-radio tabs remain primary-device scoped until explicitly upgraded
+  - JS8/FLDigi/VarAC status paths must remain endpoint-first and cache-aware
+- Acceptance:
+  - station runtime can represent multiple active devices without degrading one-radio workflows
+  - primary-device compatibility remains stable and predictable
+
+Wave 3: operating-profile and schedule targeting
+- Source slices:
+  - Phase D Slice 1-4
+- Deliverables:
+  - operating profile CRUD
+  - device assignments
+  - primary-runtime enforcement
+  - schedule target inheritance/overrides
+- Constraints:
+  - scheduler behavior for a plain one-radio station remains consistent with `1.2.2`
+  - `ControlFreq`, `HF Daily`, and `Net Schedule` must not regress in responsiveness
+
+Wave 4: station coordination and specialization
+- Source slices:
+  - Phase E Slice 1-3
+  - Phase F Slice 1-3
+- Deliverables:
+  - shared-PTT coordination
+  - prompt-first RF conflict warnings
+  - temporary profile swap
+  - observer/SDR roles
+  - VarAC cluster CRUD and enforcement
+- Constraints:
+  - prompt-first policy remains the default
+  - no hidden auto-actions without strong runtime confidence
+
+Wave 5: operator-facing multi-rig UX
+- Source slices:
+  - Phase G Slice 1-3
+  - Phase H Slice 1-6
+  - Settings IA / guided setup follow-on
+- Deliverables:
+  - selected-radio shell
+  - selected-radio ControlFreq/FreqPlanner
+  - source-aware Messages/NCS targeting
+  - schedule-level target inheritance UX
+  - settings IA cleanup and guided setup
+- Constraints:
+  - one-radio stations must remain simple and close to `1.2.2`
+  - heavy tabs must continue to avoid blocking context-switch behavior
+
+Files that require manual porting rather than blind cherry-picks:
+- `freqinout/core/background_ingest.py`
+- `freqinout/core/scheduler_engine.py`
+- `freqinout/core/software_status_service.py`
+- `freqinout/radio_interface/js8_status.py`
+- `freqinout/gui/settings_tab.py`
+- `freqinout/gui/controlfreq_tab.py`
+- `freqinout/gui/stations_map_tab.py`
+- `freqinout/gui/message_viewer_tab.py`
+- `freqinout/gui/operator_history_tab.py`
+- `freqinout/gui/main_window.py`
+
+Reason:
+- These files changed materially in `1.2.2` for readiness gating, activity semantics, CommStat/SitRep behavior, ControlFreq logic, and UI responsiveness.
+- Old multi-rig edits in these files must be re-applied intentionally onto the `1.2.2` logic rather than overriding it.
+
+Files likely to be reusable more directly from the old branch/specs:
+- `freqinout/core/multi_radio_store.py`
+- `freqinout/core/station_runtime_manager.py`
+- new multi-rig-only tests
+- high-level phase specs and acceptance criteria
+
+First implementation slice to prepare next:
+- Wave 1, Slice A:
+  - port structured settings/data-model foundation from Phase A
+  - port runtime-active compatibility device projection from Phase B Slice 1
+  - re-evaluate these slices against `1.2.2` readiness gating before any UI expansion
+
+Wave 1, Slice A acceptance:
+- A clean `1.2.2` profile migrates to one default device/profile without visible behavior change.
+- Legacy flat settings still drive the effective single-radio runtime.
+- Structured device/profile tables become the persistence foundation for later slices.
+- No regression in `1.2.2` readiness gating, background ingest suppression, or startup behavior when software is absent.
+
+Wave 1, Slice B:
+- Goal:
+  - add the first operator-facing multi-rig Settings surface without changing `1.2.2` runtime behavior.
+- Files:
+  - `SPEC.md`
+  - `freqinout/gui/settings_tab.py`
+  - `freqinout/core/multi_radio_store.py`
+  - targeted tests in `tests/`
+- Scope:
+  - add a `Device Profiles` section to Settings
+  - list stored device profiles from `MultiRadioStore`
+  - support add/edit/delete for device profiles
+  - support explicit `Set Active` for the runtime compatibility device
+  - refresh the legacy Settings widgets from the newly selected runtime-active device without forcing a full tab rebuild
+  - allow storage/editing of `rigctld` metadata, but keep `rigctld` activation blocked until runtime support exists
+- Device profile fields in scope:
+  - `name`
+  - `control_backend`
+  - `deployment_mode`
+  - `rig_host` / `rig_port`
+  - `flrig_host` / `flrig_port`
+  - `fldigi_host` / `fldigi_port`
+  - `js8_host` / `js8_port`
+  - `launch_enabled` / `launch_path`
+  - `notes`
+- Constraints:
+  - preserve `1.2.2` single-radio behavior and readiness gating
+  - keep the UI effectively single-runtime from the operator point of view
+  - do not add JS8/Fast Light/VarAC managed-record editors in this slice
+  - do not enable runtime activation of unsupported backends
+- Failure modes to guard:
+  - selecting a new active device triggers a full Settings reload and regresses responsiveness
+  - deleting or editing a profile silently corrupts the active runtime projection
+  - a `rigctld` profile becomes runtime-active even though `1.2.2` does not support it
+  - a no-software or disconnected-radio startup regresses because the new section assumes live backends
+- Acceptance:
+  - a migrated `1.2.2` profile shows one default device profile in Settings
+  - adding and editing a device profile persists through `MultiRadioStore`
+  - `Set Active` refreshes the visible legacy control/backend widgets to match the selected device
+  - attempting to activate a `rigctld` profile shows a clear warning and leaves the existing active device unchanged
+  - deleting a non-active device profile removes it from both the store and the Settings table
+  - no regression in `1.2.2` startup or Settings responsiveness when radio software is absent
+- Rollback:
+  - revert the Device Profiles Settings section, dialog/actions, targeted tests, and this spec addendum together, leaving Slice A storage/projection intact
+
+Wave 1, Slice C:
+- Goal:
+  - add real single-runtime `rigctld` backend support so stored `rigctld` device profiles can become the active compatibility device on top of the `1.2.2` runtime model.
+- Files:
+  - `SPEC.md`
+  - `freqinout/radio_interface/rigctl_client.py`
+  - `freqinout/core/software_status_service.py`
+  - `freqinout/core/scheduler_engine.py`
+  - `freqinout/gui/main_window.py`
+  - `freqinout/gui/settings_tab.py`
+  - targeted tests in `tests/`
+- Scope:
+  - add a lightweight TCP `rigctld` client with:
+    - availability probe
+    - frequency read/set
+    - PTT read
+    - best-effort mode/VFO handling
+  - add a rig-backend factory that selects FLRig or `rigctld` from current settings
+  - allow `rigctld` device profiles to become runtime-active through the Slice B Settings UI
+  - teach scheduler control/readback/PTT paths that `RIGCTLD` is a supported rig backend
+  - rebuild the active rig backend in the main window when the active profile projects `control_via=RIGCTLD`
+  - extend software status with endpoint-aware `RigCtlD` probing
+  - update current Settings behavior so an active `RIGCTLD` projection is preserved rather than coerced back to `FLRig`
+- Out of scope:
+  - multi-device concurrent runtime ownership
+  - per-device schedulers
+  - schedule-targeting UX
+  - multi-rig station overview/dashboard work
+  - minimal deployment-mode enforcement
+- Constraints:
+  - preserve current `1.2.2` FLRig, JS8Call, and Manual behavior
+  - endpoint loss must fail safe with no surprise QSY/transmit behavior
+  - probes/control calls must remain short and cache-aware enough to avoid UI-freeze-like behavior
+  - remote `rigctld` endpoints are valid; no local process should be required for truth
+- Failure modes to guard:
+  - Settings still rewrites projected `RIGCTLD` back to `FLRig`
+  - activating a `rigctld` profile updates Settings state but leaves the main runtime/backend on FLRig
+  - scheduler treats `RIGCTLD` as unsupported and silently stops applying frequency changes
+  - status LEDs have no endpoint-aware `RigCtlD` truth and mislead operators
+  - `rigctld` connection failures block UI paths too long or cause repeated retries without backoff
+- Acceptance:
+  - a `rigctld` device profile can be activated from Settings and projects `control_via=RIGCTLD` plus host/port into legacy settings
+  - main-window runtime rebuild selects a usable `rigctld` backend when the active profile requires it
+  - scheduler control/readback/PTT paths operate under `RIGCTLD` mode without regressing existing FLRig/JS8/Manual behavior
+  - software status exposes endpoint-aware `RigCtlD` state
+  - Settings no longer rewrites an active `RIGCTLD` projection back to `FLRig` on load/save
+  - verification passes:
+    - `python -m pytest tests\\test_multi_rig_wave1_slice_a.py tests\\test_multi_rig_wave1_slice_b.py tests\\test_multi_rig_wave1_slice_c.py tests\\test_software_status_phase4.py -q`
+    - `python tools/release_preflight.py`
+    - `python -m compileall freqinout tools`
+- Rollback:
+  - revert the `rigctld` client/factory, scheduler/status/main-window wiring, Settings projection updates, targeted tests, and this spec addendum together so the branch returns cleanly to Slice B behavior
+
+Slice C implementation notes for this `1.2.2` branch:
+- Impacted files for the bounded port:
+  - `freqinout/radio_interface/rigctl_client.py`
+  - `freqinout/core/software_status_service.py`
+  - `freqinout/core/scheduler_engine.py`
+  - `freqinout/gui/main_window.py`
+  - `freqinout/gui/settings_tab.py`
+  - `freqinout/core/multi_radio_store.py`
+  - targeted tests in `tests/`
+- Porting rules:
+  - keep the existing `FLRigClient` code path unchanged unless a shared abstraction is required for the new factory
+  - keep `SchedulerEngine` thread/backoff logic unchanged; only extend supported backend selection, readback, and PTT handling
+  - keep endpoint probing short-timeout and endpoint-first; do not require a local `rigctld` process for remote endpoints
+  - rebuild the active rig backend from `MainWindow` on `settings_saved` and `device_profiles_changed` so `Set Active` takes effect without restart
+  - preserve current JS8/FLDigi status and launch behavior
+- Failure modes to guard during the port:
+  - `Settings` load/save still coerces `RIGCTLD` back to `FLRig`
+  - the main window keeps using an old FLRig client after a `rigctld` profile becomes active
+  - scheduler status/readback still treats `RIGCTLD` as unsupported and reports stale/no control state
+  - status LEDs probe only process presence and misreport a reachable remote `rigctld` endpoint as unavailable
+  - remote endpoint failures block UI paths longer than the existing FLRig timeout budget
+- Slice C verification target set for this branch:
+  - `python -m pytest tests\\test_multi_rig_wave1_slice_a.py tests\\test_multi_rig_wave1_slice_b.py tests\\test_multi_rig_wave1_slice_c.py tests\\test_software_status_phase4.py -q`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+
+Verification expectations for every upcoming slice:
+- `python tools/release_preflight.py`
+- `python -m compileall freqinout`
+- relevant targeted tests from the old multi-rig branch, rewritten as needed on top of `1.2.2`
+- manual checks:
+  - startup with no radio software running
+  - Settings tab responsiveness
+  - ControlFreq responsiveness
+  - scheduler behavior on a migrated single-radio profile
+
+Rollback strategy:
+- Port slices independently and keep them revertible.
+- If a slice destabilizes `1.2.2` single-radio behavior, revert that slice and keep the branch on the last proven `1.2.2`-compatible multi-rig milestone.
+
+### 1.193 Addendum (2026-04-10): Multi-Rig-on-1.2.2 Wave 2 Checkpoint (Phase C)
+
+Problem:
+- Wave 1 left the branch with richer device-profile storage and runtime `rigctld` support, but the running station still behaves as if exactly one device can be active at a time.
+- The current store normalization still collapses `runtime_active` and `runtime_primary` onto the same single row, which blocks the Phase C bridge described in the reference specs.
+- Operators also have no `1.2.2`-safe visibility into multiple active runtimes, so advancing into later waves without a bounded Phase C checkpoint would make runtime state too opaque.
+
+Goal:
+- Land the full Wave 2 / Phase C checkpoint on this `1.2.2` branch in one bounded pass:
+  - multiple runtime-active devices
+  - one explicit primary compatibility device
+  - station runtime manager snapshots
+  - Settings multi-active controls
+  - a lightweight `Station Overview` UI
+
+Files:
+- `SPEC.md`
+- `freqinout/core/multi_radio_store.py`
+- `freqinout/core/settings_manager.py`
+- new `freqinout/core/station_runtime_manager.py`
+- `freqinout/radio_interface/js8_rx_hub.py`
+- `freqinout/radio_interface/js8_status.py`
+- `freqinout/gui/settings_tab.py`
+- `freqinout/gui/main_window.py`
+- `freqinout/gui/js8call_net_control_tab.py`
+- `freqinout/gui/stations_map_tab.py`
+- new `freqinout/gui/station_overview_tab.py`
+- targeted tests in `tests/`
+
+Scope:
+- Complete the Phase C bridge while keeping current operator workflows primary-device scoped:
+  - allow more than one non-observer `device_profiles` row to be `runtime_active=1`
+  - require exactly one `runtime_primary=1` device among the active set
+  - keep legacy flat-settings projection and Settings-to-store mirroring bound to the primary device only
+  - expose store APIs for:
+    - listing runtime-active profiles
+    - toggling per-profile runtime-active state
+    - choosing the runtime-primary profile
+    - re-projecting the primary device into legacy settings on demand
+- Add a `StationRuntimeManager` that:
+  - owns one runtime object per active device profile
+  - builds per-device endpoint-aware status/control objects from device rows rather than only from global settings
+  - exposes snapshot data for the UI including:
+    - device identity
+    - active/primary flags
+    - control backend
+    - deployment mode
+    - endpoint summary
+    - assigned operating-profile summary
+    - control readiness / overall status
+    - per-service status payload
+- Add JS8 endpoint-keyed runtime safety needed by Phase C:
+  - `JS8RxHub` instances keyed by host/port
+  - JS8 control/status clients accept explicit host/port and fallback settings objects
+  - primary-device endpoint changes tear down stale JS8 hubs so the current UI does not continue reading the wrong endpoint
+- Extend Settings `Device Profiles` for true Phase C behavior:
+  - show both `Active` and `Primary`
+  - add `Activate`, `Deactivate`, and `Set Station Default`
+  - preserve add/edit/delete behavior
+  - refresh visible legacy Settings widgets from the chosen primary device without a full tab rebuild
+- Add a lightweight `Station Overview` tab that shows one card per active device with:
+  - clear primary marker
+  - backend and endpoint summary
+  - deployment mode
+  - assigned operating profile
+  - compact service-state indicators
+  - note when a device is active but not the current primary compatibility owner
+- Rebuild/sync runtime state in `MainWindow` after Settings saves and device-profile changes so:
+  - scheduler/runtime clients stay bound to the primary device
+  - the station overview refreshes without restart
+
+Out of scope:
+- schedule-targeting UX or per-device schedulers
+- operating-profile CRUD/editor work
+- shared-PTT enforcement and RF conflict prompts
+- observer/SDR follow guidance
+- VarAC cluster CRUD/enforcement
+- selected-radio shell / per-tab device targeting
+- runtime-policy suppression of Map/Messages/FreqPlanner/launch paths
+
+Constraints:
+- Existing tabs remain bound to the primary compatibility device in this checkpoint.
+- `1.2.2` startup must still succeed when no radio software is running.
+- JS8/FLRig/`rigctld` endpoint probes must remain short-timeout and fail safe.
+- Flat settings remain the live compatibility surface for current runtime code; they must always reflect the primary device only.
+- At least one runtime-active device must remain enabled.
+- Observer devices remain stored metadata only for later waves; they do not become the primary compatibility owner in this checkpoint.
+
+Failure modes to guard:
+- store normalization still collapses every activation back to one active row
+- deactivating a non-primary device unexpectedly rewrites flat settings or changes the primary device
+- primary-device changes leave `MainWindow`, scheduler, or JS8 tabs attached to the old endpoint
+- Settings multi-active actions leave the store with zero primaries or multiple primaries
+- `Station Overview` implies per-device scheduler/tab ownership that does not actually exist yet
+- startup or tab responsiveness regresses because snapshot/status refresh work blocks the UI path
+
+Acceptance:
+- operators can persist multiple runtime-active device profiles while exactly one remains `runtime_primary=1`
+- legacy flat settings continue to mirror only the current primary device
+- deactivating the primary device is blocked until another active device becomes primary
+- `StationRuntimeManager` returns snapshots for every active device and exposes the current primary runtime object
+- JS8 endpoint changes replace stale RX-hub bindings rather than reusing the old endpoint
+- Settings allows activating/deactivating multiple profiles and choosing one Station Default explicitly
+- `Station Overview` renders one card per active device and refreshes after runtime changes without restart
+- current tabs, scheduler, and runtime control continue to operate against the primary device exactly as before
+- verification passes:
+  - `python -m pytest tests\\test_multi_rig_wave1_slice_a.py tests\\test_multi_rig_wave1_slice_b.py tests\\test_multi_rig_wave1_slice_c.py tests\\test_multi_rig_wave2.py tests\\test_software_status_phase4.py -q`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Rollback:
+- revert the Phase C store/runtime-manager/UI files, targeted Wave 2 tests, and this addendum together so the branch returns cleanly to the proven Wave 1 single-primary compatibility model.
+
+### 1.194 Addendum (2026-04-10): Multi-Rig-on-1.2.2 Wave 3 Checkpoint (Phase D Slices 1-3)
+
+Problem:
+- Wave 2 can now represent and monitor multiple active devices, but the branch still treats operating profiles as seeded metadata with no supported CRUD or reassignment workflow.
+- `StationRuntimeManager` already carries assignment-linked policy fields into runtime snapshots, but there is no safe public store API to change effective assignments or to preserve assignment history when operators swap roles.
+- The current `1.2.2` compatibility shell also still ignores the primary device's assigned operating profile, so multi-rig policy remains mostly descriptive instead of changing current runtime behavior where it matters.
+
+Goal:
+- Land the Wave 3 checkpoint for this branch in one bounded pass:
+  - operating-profile CRUD and guarded delete/disable behavior
+  - explicit per-device assignment / temporary-override workflows
+  - primary compatibility-runtime enforcement of operating-profile policy
+- Defer schedule-row target scoping until a later checkpoint so HF/Net/SOP schedule precedence does not change in the same pass.
+
+Files:
+- `SPEC.md`
+- `freqinout/core/multi_radio_store.py`
+- `freqinout/core/station_runtime_manager.py`
+- `freqinout/core/scheduler_engine.py`
+- `freqinout/core/launch_orchestrator.py`
+- `freqinout/gui/qsy_helper.py`
+- `freqinout/gui/settings_tab.py`
+- `freqinout/gui/main_window.py`
+- targeted tests in `tests/`
+
+Scope:
+- Add supported Phase D store APIs:
+  - save/load/delete operating profiles
+  - fetch one normalized effective assignment per device
+  - assign or temporarily override a device's operating profile by creating a new effective row and superseding the prior effective row
+  - restore a device to the default operating profile
+- Extend Settings with:
+  - an `Operating Profiles` section for CRUD
+  - a `Device Assignments` section showing the effective operating profile for each device
+  - explicit assign / temporary-override / restore-default actions
+- Keep `Station Overview` aligned with Wave 3 policy data:
+  - assignment state remains visible
+  - disabled-feature summaries remain visible from the assigned operating profile
+- Enforce the primary runtime operating policy in the current compatibility shell only:
+  - `scheduler_enabled` disables the current compatibility scheduler automation without stopping schedule visibility
+  - `use_map`, `use_messages`, and `use_net_control_tabs` suppress the corresponding primary-shell views
+  - `use_background_ingest` controls background ingest
+  - `use_launch_control` blocks startup launch automation and Launch Control actions
+  - stored `deployment_mode=minimal` remains the strongest shell-suppression mode when combined with operating-profile policy
+
+Out of scope:
+- HF / Net / SOP schedule-row `target_scope`
+- schedule schema/editor changes for operating-profile or device targeting
+- per-device concurrent schedulers
+- automatic timed assignment start/expiry behavior
+- temporary swap orchestration, RF-conflict prompts, SDR follow, or VarAC-cluster specialization
+
+Constraints:
+- Existing single-radio `1.2.2` behavior must remain unchanged when the primary device uses the default operating profile.
+- Each device must have at most one effective assignment at a time.
+- Disabling or deleting an operating profile that is currently assigned to any device must fail clearly.
+- Runtime policy changes applied to the primary device must take effect live with no restart.
+- Suppressed views must fall back safely to an allowed screen instead of leaving dead navigation states behind.
+
+Failure modes to guard:
+- a device ends up with multiple effective assignments because prior active rows are not retired
+- restarting the app silently re-inserts the default operating profile as a second effective assignment and changes runtime behavior
+- Settings CRUD drifts from runtime state because assignment changes do not notify the main window
+- Launch Control remains clickable even though the primary operating profile disables it
+- the scheduler keeps advertising or applying automation even when the primary operating profile disables it
+- view suppression hides buttons but still allows programmatic navigation into unsupported tabs
+- forced runtime snapshot refresh crashes at startup because `SoftwareStatusService.status_snapshot()` does not accept or honor the `force` flag forwarded by `StationRuntimeManager`
+
+Acceptance:
+- Operators can create, edit, and delete non-assigned operating profiles through supported APIs and Settings UI.
+- Assigning or temporarily overriding an operating profile creates a new effective assignment row and supersedes the previous effective row for that device.
+- Restarting on this branch preserves the selected effective assignment for the primary device.
+- Settings shows the effective operating profile and assignment state for device rows and allows restoring selected devices to the default operating profile.
+- The primary assigned operating profile can disable scheduler automation, Launch Control, background ingest, Map, Messages, and net-control tabs in the current compatibility shell.
+- Startup and `Station Overview` forced-refresh paths tolerate `force=True` runtime snapshots without raising signature errors and still use fresh status probes.
+- When the primary device remains on the default operating profile, current `1.2.2` workflows behave the same as before this checkpoint.
+- Verification passes:
+  - `python -m pytest tests\\test_multi_rig_wave1_slice_a.py tests\\test_multi_rig_wave1_slice_b.py tests\\test_multi_rig_wave1_slice_c.py tests\\test_multi_rig_wave2.py tests\\test_multi_rig_wave3.py tests\\test_software_status_phase4.py -q`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred Wave 3 boundary:
+- Phase D Slice 4 schedule target scope is intentionally deferred on this branch.
+- That work needs broader schedule schema/editor/preference updates and should land only after the compatibility-shell policy checkpoint is proven stable.
+
+Rollback:
+- Revert the operating-profile CRUD/assignment APIs, Settings sections, primary-shell policy enforcement, targeted tests, and this spec addendum together so the branch returns cleanly to the verified Wave 2 checkpoint.
+
+### 1.195 Addendum (2026-04-10): Multi-Rig-on-1.2.2 Wave 3 Slice 4 (HF/Net Schedule Target Scope for the Primary Compatibility Runtime)
+
+Problem:
+- Wave 3 slices 1-3 let the primary compatibility runtime react to the assigned operating profile, but HF and Net schedule rows are still treated as station-global.
+- Operators need to stage schedule rows for different device profiles or operating profiles without cloning databases or rewriting rows every time the primary device changes.
+- This branch still runs one compatibility scheduler and one primary shell, so slice 4 must constrain schedule eligibility safely rather than implying concurrent per-device schedulers.
+
+Goal:
+- Land a bounded Phase D Slice 4 on this branch:
+  - explicit persisted target metadata on HF and Net schedule rows
+  - primary-runtime filtering of HF and Net schedule eligibility
+  - conflict/signature updates so mutually exclusive targets do not collide incorrectly
+- Keep the implementation compatible with the current `1.2.2` shell and the Wave 3 checkpoint already on this branch.
+
+Files:
+- `SPEC.md`
+- new `freqinout/core/schedule_targeting.py`
+- `freqinout/core/db_initializer.py`
+- `tools/db_schema.py`
+- `freqinout/core/scheduler_engine.py`
+- `freqinout/core/sop_manager.py`
+- `freqinout/gui/controlfreq_tab.py`
+- `freqinout/gui/daily_schedule_tab.py`
+- `freqinout/gui/net_schedule_tab.py`
+- targeted tests in `tests/`
+
+Scope:
+- Extend HF and Net schedule rows with persisted target metadata:
+  - `target_scope` in `{station, device_profile, operating_profile}`
+  - `target_device_profile_id`
+  - `target_operating_profile_id`
+- Default all legacy rows to `station`.
+- Add compact `Target Scope` and `Target` controls to editable HF and Net schedule rows:
+  - operators can target the station, a device profile, or an operating profile
+  - stale/missing ids remain visible instead of being dropped silently
+- Make the primary compatibility runtime honor only schedule rows whose target matches the current primary runtime context:
+  - scheduler evaluation
+  - primary-shell schedule views that read HF/Net rows directly
+- Update collision/signature behavior where target metadata changes meaning:
+  - HF active-schedule overlap checks should not flag rows that can never apply to the same runtime target
+  - Net/SOP conflict signatures must distinguish rows that differ only by target metadata
+- Preserve import/export and DB round-trip of the new target fields for HF and Net schedule rows.
+
+Out of scope:
+- Schedule-default target inheritance UI or row-level `inherited` scope on this branch
+- SOP schedule-layer target scopes
+- Net resource catalog target metadata
+- Per-device concurrent schedulers or multi-shell execution
+- Phase E coordination prompts or automatic swap orchestration
+
+Constraints:
+- Existing single-radio `1.2.2` behavior must remain unchanged when all rows remain `target_scope=station`.
+- Primary-device or primary operating-profile changes must affect schedule eligibility live with no restart.
+- The scheduler cache must invalidate on runtime target-context changes, not only DB mtime changes.
+- Schedule editors must remain table-driven and compatible with the existing branch UI structure.
+- Missing target ids must remain operator-visible so corrupted or stale references can be repaired safely.
+
+Failure modes to guard:
+- target columns exist in one DB/schema path but not the others, causing partial saves or silent row truncation
+- scheduler or ControlFreq still evaluates rows for the wrong device/profile because runtime target filtering is missing or cache keys stay stale
+- HF rows targeted at different devices/profiles still show as active conflicts even though they are mutually exclusive
+- Net/SOP policy rows collide because target-specific rows still share the same net signature
+- import/export or load/save drops target metadata and silently converts targeted rows back to station-wide behavior
+
+Acceptance:
+- HF and Net schedule rows can be saved, loaded, and exported/imported with `target_scope`, `target_device_profile_id`, and `target_operating_profile_id`.
+- Legacy rows with no target metadata continue to behave as station-wide rows.
+- The primary compatibility scheduler ignores rows whose target does not match the current primary device profile or its effective operating profile.
+- Switching the primary device or the primary device's effective operating profile changes HF/Net schedule eligibility live.
+- HF active conflict detection no longer flags rows that differ only by mutually exclusive target scope.
+- Net/SOP policy signatures differ when otherwise-identical Net rows carry different target metadata.
+- Verification passes:
+  - `python -m pytest tests\\test_multi_rig_wave3_slice4.py -q`
+  - `python -m pytest tests\\test_multi_rig_wave2.py tests\\test_multi_rig_wave3.py tests\\test_software_status_phase4.py -q`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Schedule-default inheritance UI and schedule-level default targets stay deferred for a later multi-radio UX phase.
+- SOP target scoping stays deferred because SOP already has profile/layer arbitration and needs a separate UI/runtime design.
+- The scheduler remains primary-runtime only; target scope limits eligible rows, it does not create new scheduler instances.
+
+Rollback:
+- Revert the schedule-target helper/schema changes, HF/Net editor updates, scheduler/control-view filtering, targeted tests, and this addendum together so schedule behavior returns to the Wave 3 slices 1-3 global-row model.
+
+### 1.196 Addendum (2026-04-10): Multi-Rig-on-1.2.2 Wave 4 Phase E Slice 1 (Shared-PTT Coordination Interlock)
+
+Problem:
+- Wave 2 and Wave 3 allow multiple devices to be runtime-active, but the branch still lacks an enforced notion of a shared transmit/PTT domain.
+- An operator can already keep more than one rig runtime-active, yet the primary compatibility scheduler and manual QSY path still behave as if they are the only transmitter in the station.
+- The branch already includes `station_coordination_policies` in the data model, but there is no operator-facing `ptt_group` workflow and no runtime interlock that uses it.
+
+Goal:
+- Land the first bounded Wave 4 / Phase E slice on this branch:
+  - expose `ptt_group` in the existing multi-rig device-profile workflow
+  - derive persisted `shared_ptt` coordination rows automatically from active device metadata
+  - compute live shared-PTT ownership/block state across runtime-active devices
+  - block unsafe primary-runtime frequency/control changes when another device in the same PTT group is keyed
+- Keep this slice safety-first and compatibility-shell scoped. Do not introduce prompt-first RF conflict flows or temporary swap workflows yet.
+
+Files:
+- `SPEC.md`
+- `freqinout/core/multi_radio_store.py`
+- `freqinout/core/station_runtime_manager.py`
+- `freqinout/core/scheduler_engine.py`
+- `freqinout/gui/settings_tab.py`
+- `freqinout/gui/station_overview_tab.py`
+- `freqinout/gui/controlfreq_tab.py`
+- `freqinout/gui/qsy_helper.py`
+- targeted tests in `tests/`
+
+Scope:
+- Extend `device_profiles` with persisted `ptt_group` metadata and normalize it consistently.
+- Expose `ptt_group` in the existing Settings `Device Profiles` dialog and table.
+- Add store APIs to:
+  - normalize and persist `ptt_group`
+  - derive/synchronize `shared_ptt` rows in `station_coordination_policies`
+  - list derived station-coordination policy rows for audit/debugging
+- Extend station runtime snapshots with shared-PTT state:
+  - device-local `ptt_group`
+  - live cached rig-backed PTT status where available
+  - whether a runtime is blocked by another active device in the same PTT group
+  - a concise operator-facing status string
+- Enforce the shared-PTT interlock in the primary compatibility scheduler:
+  - scheduled HF/Net/SOP actions must not queue a frequency/control change when another runtime-active device in the same `ptt_group` is keyed
+  - manual QSY must respect the same interlock and abort cleanly before applying hold/suspend side effects
+- Surface shared-PTT state in current operator-visible UIs:
+  - `Station Overview`
+  - existing frequency-action busy labels / scheduler status text
+
+Out of scope:
+- Prompt-first RF conflict warnings across antenna/front-end/amplifier groups
+- Temporary profile swap / restore workflows
+- Observer / SDR specialization
+- Secondary-device duplicate control tabs or per-device schedulers
+- A separate station-coordination policy editor
+
+Constraints:
+- Existing single-device installs with blank `ptt_group` values must behave exactly as before.
+- Shared-PTT polling must stay lightweight and cache-backed; no new blocking loops on tab activation.
+- The interlock must reuse the current primary-runtime compatibility model and existing busy-reason surfaces.
+- Slice 1 is hard-block only: unsafe frequency/control actions are refused and explained, not prompted through.
+
+Failure modes to guard:
+- `ptt_group` is stored in Settings UI but not persisted through schema/migration, causing silent resets.
+- Derived `shared_ptt` policy rows duplicate or go stale as device profiles change.
+- Runtime snapshots cannot identify which active device currently owns a shared PTT domain.
+- Scheduler and manual QSY paths disagree about whether the shared-PTT interlock is active.
+- Shared-PTT busy state exists in the runtime but remains invisible in current station/frequency surfaces.
+
+Acceptance:
+- Operators can save and reload a `ptt_group` value from the existing Device Profiles workflow.
+- The store derives stable `shared_ptt` coordination rows from non-empty matching `ptt_group` values without duplicates.
+- When another runtime-active device in the same `ptt_group` reports PTT active, the primary compatibility scheduler refuses the frequency/control action and reports a shared-PTT reason.
+- Manual QSY uses the same shared-PTT interlock and does not start schedule hold when blocked.
+- `Station Overview` and the current frequency/scheduler status surfaces expose the shared PTT group and whether it is clear, keyed here, or blocked by another device.
+- Verification passes:
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_e_slice1.py -q`
+  - `python -m pytest tests\\test_multi_rig_wave2.py tests\\test_multi_rig_wave3.py tests\\test_multi_rig_wave3_slice4.py tests\\test_software_status_phase4.py tests\\test_software_status_endpoints.py -q`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Prompt-first RF conflict warnings remain the next Phase E slice.
+- Temporary profile swap / restore remains a later Phase E slice.
+- Full RF resource families beyond shared PTT remain deferred until the hard interlock is proven stable on this branch.
+
+Rollback:
+- Revert the shared-PTT schema/store/runtime/scheduler/UI changes, targeted tests, and this addendum together so Wave 4 returns cleanly to the Wave 3 target-scope checkpoint.
+
+### 1.197 Addendum (2026-04-10): Multi-Rig-on-1.2.2 Wave 4 Phase E Slice 2 (Prompt-First RF Conflict Warnings)
+
+Problem:
+- Slice 1 added a hard shared-PTT interlock, but the branch still has no operator-visible workflow for shared RF resource conflicts.
+- Two runtime-active devices can still share the same antenna path, front-end, or amplifier chain and overlap on the same band or target frequency without any warning in the primary compatibility scheduler or manual QSY path.
+- `station_coordination_policies` exists and now supports derived shared-PTT rows, but there is still no derived `rf_conflict` coordination model on this branch.
+
+Goal:
+- Land the next bounded Wave 4 / Phase E slice on this branch:
+  - expose `antenna_group`, `frontend_group`, and `amplifier_group` in the existing device-profile workflow
+  - derive persisted `rf_conflict` coordination rows automatically from shared RF resource metadata
+  - compute prompt-first RF conflict context for the current Station Default runtime when another active device overlaps on the same band or target frequency through shared resources
+  - surface a one-time warning prompt for scheduled actions and manual QSY, allowing the operator to proceed once, skip once, or pause the schedule
+- Keep this slice warning-first and compatibility-shell scoped. Do not add temporary profile swaps, observer follow orchestration, or per-device schedulers.
+
+Files:
+- `SPEC.md`
+- `freqinout/core/multi_radio_store.py`
+- `freqinout/core/station_runtime_manager.py`
+- `freqinout/core/scheduler_engine.py`
+- `freqinout/gui/settings_tab.py`
+- `freqinout/gui/station_overview_tab.py`
+- `freqinout/gui/main_window.py`
+- `freqinout/gui/qsy_helper.py`
+- targeted tests in `tests/`
+
+Scope:
+- Extend `device_profiles` with persisted `antenna_group`, `frontend_group`, and `amplifier_group` metadata and normalize them consistently.
+- Expose those resource-group fields in the existing Settings `Device Profiles` dialog.
+- Add store APIs to:
+  - normalize and persist shared RF resource groups
+  - derive/synchronize `rf_conflict` rows in `station_coordination_policies`
+  - list derived RF conflict rows for audit/debugging
+- Extend station runtime snapshots with shared RF resource metadata:
+  - device-local antenna/front-end/amplifier groups
+  - a prompt-ready RF conflict evaluation for the Station Default device against other runtime-active devices
+- Enforce prompt-first RF conflict behavior in the primary compatibility scheduler:
+  - scheduled HF/Net/SOP actions emit a warning prompt when another runtime-active device overlaps on the same band or target frequency through shared RF resources
+  - operators can proceed once, skip once, or pause the schedule
+  - manual QSY shows the same warning prompt and only proceeds when explicitly confirmed
+- Surface RF conflict context in current operator-visible compatibility surfaces:
+  - `Station Overview` resource metadata
+  - scheduler/sidebar status text and prompt flows already used for off-schedule and VarAC wait handling
+
+Out of scope:
+- Temporary profile swap / restore workflows
+- Observer / SDR follow specialization
+- Automatic conflict resolution or automatic rerouting between antennas/front ends
+- Per-device schedule execution outside the Station Default compatibility runtime
+- A dedicated policy editor for RF coordination rows
+
+Constraints:
+- Existing installs with blank RF resource group values must behave exactly as before.
+- This slice is prompt-first, not hard-block: operators may explicitly proceed once after seeing the warning.
+- Conflict evaluation must remain cache-backed and runtime-local; no new blocking scans on tab activation.
+- The prompt flow must reuse the existing compatibility-shell prompt patterns and avoid duplicate popups for the same active conflict signature.
+
+Failure modes to guard:
+- Resource-group values are stored in Settings UI but not persisted through schema/migration.
+- Derived `rf_conflict` rows duplicate or become stale as device profiles change.
+- The Station Default runtime cannot identify overlapping active peers on shared resources.
+- Scheduler and manual QSY disagree about when to warn.
+- The same RF conflict prompt repeats continuously without a signature-based suppress-once path.
+- Current station/scheduler surfaces hide RF conflict context even when prompting is active.
+
+Acceptance:
+- Operators can save and reload `antenna_group`, `frontend_group`, and `amplifier_group` values through the existing Device Profiles workflow.
+- The store derives stable `rf_conflict` coordination rows from shared non-empty resource groups without duplicates.
+- The station runtime manager can report RF conflict context for the Station Default device, including peer name, overlap type, shared groups, and a stable signature.
+- Scheduled compatibility-shell actions emit a prompt-first RF conflict warning instead of silently applying the change.
+- Manual QSY shows the same RF conflict warning and only proceeds once confirmed.
+- `Station Overview` and the current scheduler/status surfaces expose enough RF resource/conflict context for the operator to understand the warning.
+- Verification passes:
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_e_slice2.py -q`
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_e_slice1.py tests\\test_multi_rig_wave2.py tests\\test_multi_rig_wave3.py tests\\test_multi_rig_wave3_slice4.py tests\\test_software_status_phase4.py tests\\test_software_status_endpoints.py -q`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Temporary profile swap / restore remains the next Phase E slice.
+- Observer follow / SDR coordination remains deferred.
+- Any automatic mitigation beyond prompt-first warnings remains deferred until this warning path proves stable on the 1.2.2 compatibility shell.
+
+Rollback:
+- Revert the RF resource schema/store/runtime/scheduler/UI changes, targeted tests, and this addendum together so Wave 4 returns cleanly to the shared-PTT-only checkpoint.
+
+### 1.198 Addendum (2026-04-10): Multi-Rig-on-1.2.2 Wave 4 Phase E Slice 3 (Temporary Profile Swap / Restore)
+
+Problem:
+- Wave 3 added per-device effective operating-profile assignments, including `temporary_override`, and Slice 2 now warns before shared RF conflicts, but operators still cannot temporarily move the Station Default runtime to another already-active device without manually rewriting assignments and then reconstructing the previous state.
+- The Phase E design calls for a prompt-driven temporary swap workflow that can either:
+  - move the primary compatibility runtime to the target device while keeping that target device's current effective profile, or
+  - carry the current primary operating profile onto the target device as a temporary override when the source profile explicitly allows it.
+- The current branch has no persisted `profile_swap` coordination row, no restore snapshot for the target assignment, and no UI flow for start/restore on top of the existing assignment workflow.
+
+Goal:
+- Land the next bounded Wave 4 / Phase E slice on this branch:
+  - add an explicit `allow_profile_swap` capability flag to operating profiles
+  - persist one active temporary profile-swap coordination row in `station_coordination_policies`
+  - capture the target device's prior effective assignment before a carried-profile swap changes it
+  - restore the original primary device and target assignment in one operator action
+  - surface active-swap context in the current compatibility UI so operators can see which device is temporarily acting as Station Default
+- Keep this slice manual and bounded. Do not add automatic expiry, schedule-driven swap orchestration, or endpoint rewrites beyond the existing runtime-primary projection.
+
+Files:
+- `SPEC.md`
+- `freqinout/core/multi_radio_store.py`
+- `freqinout/core/station_runtime_manager.py`
+- `freqinout/gui/settings_tab.py`
+- `freqinout/gui/station_overview_tab.py`
+- `freqinout/gui/main_window.py`
+- targeted tests in `tests/`
+
+Scope:
+- Extend `operating_profiles` with persisted `allow_profile_swap` metadata and expose it in the existing Settings operating-profile dialog.
+- Add store helpers to:
+  - identify the active `profile_swap` coordination row
+  - normalize swap mode values
+  - snapshot and restore a device's effective assignment
+  - enrich active-swap rows with source/target/profile names for UI consumption
+- Add store APIs to:
+  - start a temporary profile swap against one already runtime-active, non-observer, non-primary target device
+  - optionally carry the current primary operating profile to that target as a `temporary_override`
+  - restore the original primary device and target assignment
+- Guard unsafe edits while a temporary swap is active:
+  - block assignment edits on the swap source/target devices
+  - block runtime-primary changes away from the active swap target
+  - block runtime activation changes on the swap source/target devices
+  - block disabling or deleting an operating profile that is only being preserved as the restore target for an active swap
+- Extend station runtime state with active swap annotations:
+  - per-device `swap_role` / `swap_summary`
+  - primary-runtime policy fields that identify active swap state for current compatibility surfaces
+- Extend Settings device-assignment actions with:
+  - `Temporary Swap...`
+  - `Restore Swap`
+  - active-swap hint text and selection guards
+
+Out of scope:
+- Automatic swap expiry based on `ends_utc`
+- Background timers or scheduler callbacks that restore swaps automatically
+- Multi-step swap chains or more than one active swap at a time
+- Observer / SDR follow orchestration
+- Any endpoint remapping beyond the existing Station Default runtime projection
+- Per-device schedulers or non-primary shell ownership
+
+Constraints:
+- Existing installs must migrate safely with `allow_profile_swap` defaulting to disabled.
+- Only one temporary swap may be active at a time.
+- The swap target must already be runtime-active; this slice does not auto-activate or auto-launch the target device.
+- `carry_primary_profile` is only allowed when the source operating profile explicitly enables profile-swap coordination.
+- Restore must remain manual and idempotent; `ends_utc` is metadata only in this slice.
+
+Failure modes to guard:
+- Starting a swap leaves no persisted record of the prior target assignment, so Restore cannot reconstruct the target shell policy.
+- Assignment edits, deactivation, or primary changes break the active swap's restore path.
+- A carried primary profile rewrites endpoints instead of using the existing assignment model.
+- Active-swap state is invisible in Settings, Station Overview, or the runtime banner, leaving operators unsure which device is temporarily primary.
+- Restore returns the primary device but leaves the target assignment stuck in the carried override state.
+
+Acceptance:
+- Operators can save and reload `allow_profile_swap` through the existing Operating Profiles workflow.
+- Settings can start a temporary swap to one selected active non-primary device and restore it later.
+- `use_target_profile` swaps move the Station Default runtime without changing the target device's effective operating profile.
+- `carry_primary_profile` swaps apply the source operating profile to the target device as a `temporary_override` and Restore returns the target to its prior effective assignment.
+- While a swap is active, unsafe assignment/runtime edits on the swap source/target are rejected with operator-readable errors.
+- Station runtime snapshots and the current runtime banner expose enough active-swap context for operators to see the temporary ownership change.
+- Verification passes:
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_e_slice3.py -q`
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_e_slice1.py tests\\test_multi_rig_wave4_phase_e_slice2.py tests\\test_multi_rig_wave2.py tests\\test_multi_rig_wave3.py tests\\test_multi_rig_wave3_slice4.py tests\\test_software_status_phase4.py tests\\test_software_status_endpoints.py -q`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Automatic swap expiry and scheduler-driven restore remain deferred.
+- Observer-follow coordination remains deferred.
+- Any swap flow that activates devices, launches software, or rewrites endpoint wiring remains deferred until the manual restore path proves stable on the 1.2.2 compatibility shell.
+
+Rollback:
+- Revert the temporary-swap schema/store/runtime/UI changes, targeted tests, and this addendum together so Wave 4 returns cleanly to the RF-conflict-warning checkpoint.
+
+### 1.199 Addendum (2026-04-10): Multi-Rig-on-1.2.2 Wave 4 Phase F Slice 1 (Observer / SDR Runtime and Follow Guidance)
+
+Problem:
+- Wave 4 Phase E now covers shared PTT, prompt-first RF conflict warnings, and temporary profile swap / restore, but observer follow remains fully deferred on this branch.
+- The store already persists `device_class`, yet the current compatibility branch still treats `observer` as a mostly inert value:
+  - Settings does not expose `Device Class` or SDR endpoint fields.
+  - observer devices cannot become `runtime_active`.
+  - runtime snapshots do not surface observer endpoint health or follow guidance.
+- The architecture calls for advisory SDR follow / parking rules, but this branch has no derived `sdr_follow` coordination rows or operator-visible explanation of what an active observer should monitor.
+
+Goal:
+- Land the next bounded Wave 4 / Phase F slice on this branch:
+  - make `observer` a supported runtime-active device role without allowing it to own the Station Default compatibility shell
+  - persist observer SDR endpoint metadata (`sdr_host`, `sdr_port`) through the existing device-profile workflow
+  - persist a lightweight preferred-band list on operating profiles for advisory observer parking guidance
+  - derive persisted `sdr_follow` coordination rows between enabled transceivers and enabled observers
+  - surface observer endpoint health and follow / park guidance in the current compatibility UI
+- Keep this slice advisory-first. Do not add automatic SDR tuning, direct panadapter control, or broader Phase F cluster work.
+
+Files:
+- `SPEC.md`
+- `freqinout/core/multi_radio_store.py`
+- `freqinout/core/software_status_service.py`
+- `freqinout/core/station_runtime_manager.py`
+- `freqinout/gui/settings_tab.py`
+- `freqinout/gui/station_overview_tab.py`
+- targeted tests in `tests/`
+
+Scope:
+- Extend `device_profiles` with persisted `sdr_host` and `sdr_port` metadata and expose them in the Settings device-profile dialog.
+- Extend `operating_profiles` with persisted `preferred_band_set_json` metadata and expose it as a simple comma-separated preferred-band field in the existing operating-profile dialog.
+- Extend Settings `Device Profiles` to:
+  - edit `Device Class` with `Transceiver`, `Observer / SDR`, and `Gateway`
+  - show observer identity clearly in the device table and hint text
+  - allow observer profiles to be runtime-active
+  - keep `Set Station Default` disabled for observer profiles
+- Keep observer safety boundaries intact:
+  - observer devices must not become `runtime_primary`
+  - observer devices must not become temporary-swap targets
+  - observer devices remain outside shared-PTT ownership and RF-conflict primary-shell control paths
+- Add store synchronization for derived `sdr_follow` rows in `station_coordination_policies` using enabled transceiver/observer pairs.
+- Add a generic endpoint probe in `SoftwareStatusService` so observer SDR reachability can be reported without introducing a device-specific control client.
+- Extend station runtime snapshots with observer-specific state:
+  - observer endpoint status
+  - follow source device id/name
+  - readable observer follow / standby guidance derived from:
+    - the current Station Default band when available
+    - the observer device's effective operating profile preferred-band list when configured
+- Extend `Station Overview` to surface observer counts and per-card follow guidance.
+
+Out of scope:
+- Direct SDR tuning or retune commands
+- Automatic observer retune when the primary device changes band
+- Explicit `observer_park` policy rows
+- VarAC cluster CRUD or gateway enforcement
+- Main-window selected-radio UX work from later waves
+
+Constraints:
+- Existing single-radio and transceiver-only workflows must behave exactly as before.
+- Observer devices may be runtime-active, but they never own the current compatibility shell in this slice.
+- Observer guidance must remain advisory text only; no hidden auto-actions.
+- Preferred-band metadata must migrate safely with empty defaults for existing profiles.
+
+Failure modes to guard:
+- Activating an observer steals the Station Default projection or leaves no transceiver-backed primary runtime.
+- Observer endpoint fields appear in Settings but are not persisted through schema migration.
+- Derived `sdr_follow` rows duplicate or go stale as device profiles change.
+- Runtime cards show an observer as a generic manual device with no clear health/follow context.
+- Temporary swap or primary-runtime actions accidentally start accepting observer targets.
+
+Acceptance:
+- Operators can create and edit `Observer / SDR` device profiles with SDR endpoint fields in Settings.
+- Observer profiles can be runtime-active, but attempts to make them the Station Default or use them as temporary-swap targets are rejected.
+- The store derives stable `sdr_follow` coordination rows for enabled transceiver/observer pairs without duplicates.
+- Station runtime snapshots expose observer endpoint health plus readable follow / park guidance.
+- `Station Overview` makes it obvious which active devices are observers and what they are advised to monitor.
+- Verification passes:
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_f_slice1.py -q`
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_e_slice1.py tests\\test_multi_rig_wave4_phase_e_slice2.py tests\\test_multi_rig_wave4_phase_e_slice3.py tests\\test_multi_rig_wave2.py tests\\test_multi_rig_wave3.py tests\\test_multi_rig_wave3_slice4.py tests\\test_software_status_phase4.py tests\\test_software_status_endpoints.py -q`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Observer tuning and retune remain operator-guided only.
+- Explicit observer parking policies remain deferred.
+- VarAC cluster specialization remains the next major Phase F follow-on.
+
+Rollback:
+- Revert the observer schema/store/runtime/UI changes, targeted tests, and this addendum together so Wave 4 returns cleanly to the temporary-swap checkpoint.
+
+### 1.200 Addendum (2026-04-10): Multi-Rig-on-1.2.2 Wave 4 Phase F Slice 2 (VarAC Cluster CRUD and Runtime Visibility)
+
+Problem:
+- Phase F Slice 1 landed observer runtime support, but the branch still has only schema placeholders for shared VarAC clusters.
+- Operators cannot define cluster identities, assign enabled device memberships, or see which active device is participating in which shared cluster.
+- Runtime snapshots therefore cannot explain shared-DB readiness, cluster membership, or gateway ownership on the current compatibility shell.
+
+Goal:
+- Land the next bounded Phase F slice on this branch:
+  - add CRUD workflows for `varac_clusters`
+  - add membership workflows for `varac_cluster_members`
+  - persist unique cluster identity and per-device instance numbering
+  - project cluster membership into runtime snapshots and current Settings / Station Overview surfaces
+- Keep this slice visibility-first. Do not yet enforce gateway exclusivity or advanced shared-cluster ingest orchestration beyond readable runtime status.
+
+Files:
+- `SPEC.md`
+- `freqinout/core/multi_radio_store.py`
+- `freqinout/core/station_runtime_manager.py`
+- `freqinout/core/varac_ingest.py`
+- `freqinout/gui/settings_tab.py`
+- `freqinout/gui/station_overview_tab.py`
+- targeted tests in `tests/`
+
+Scope:
+- Add store APIs to:
+  - list, create, update, and delete VarAC clusters
+  - list, create, update, and delete VarAC cluster memberships
+- Normalize `cluster_id` into a stable uppercase token and reject duplicates.
+- Surface cluster/member summaries in Settings:
+  - `VarAC Clusters` table
+  - `VarAC Memberships` table
+  - dialogs to edit clusters, memberships, and optional gateway handler selection from enabled members
+- Extend runtime snapshots with:
+  - cluster name / public ID
+  - instance number
+  - gateway-handler role flag
+  - readable cluster summary text
+  - `VarAC Cluster` service state that reports shared DB configured / missing
+- Keep observer devices out of VarAC memberships.
+
+Out of scope:
+- Enforcing one gateway handler against peer members
+- Rejecting duplicate enabled instance numbers at the coordination-policy layer beyond store validation
+- Shared-cluster ingest fan-out or cluster-scoped message deduplication
+
+Constraints:
+- Existing device-local VarAC settings remain the source for node-local launch/runtime details.
+- Shared cluster status must not break startup when shared DB paths are absent.
+- Single-radio / non-VarAC operators must see no behavior change.
+
+Failure modes to guard:
+- Cluster CRUD exists, but memberships are not reflected into runtime snapshots.
+- Shared DB warnings stay invisible to operators even when a device is an enabled cluster member.
+- Settings tables misreport gateway handler or runtime-active state.
+- Observer devices accidentally become eligible cluster members.
+
+Acceptance:
+- Operators can define VarAC clusters and assign enabled non-observer device memberships in Settings.
+- Runtime snapshots expose readable VarAC cluster summaries and a `VarAC Cluster` service state.
+- Settings surfaces show cluster/member tables with correct gateway and instance data.
+- Verification passes:
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_f_slice2.py -q`
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_f_slice1.py tests\\test_multi_rig_wave4_phase_e_slice1.py tests\\test_multi_rig_wave4_phase_e_slice2.py tests\\test_multi_rig_wave4_phase_e_slice3.py tests\\test_multi_rig_wave2.py tests\\test_multi_rig_wave3.py tests\\test_multi_rig_wave3_slice4.py tests\\test_software_status_phase4.py tests\\test_software_status_endpoints.py -q`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Gateway exclusivity enforcement remains the next follow-on.
+- Cluster-scoped ingest freshness is informative only on this branch.
+
+Rollback:
+- Revert the VarAC cluster CRUD/runtime/UI changes, targeted tests, and this addendum together so Phase F returns to the observer-only checkpoint.
+
+### 1.201 Addendum (2026-04-10): Multi-Rig-on-1.2.2 Wave 4 Phase F Slice 3 (VarAC Gateway Enforcement and Membership Guardrails)
+
+Problem:
+- Slice 2 adds cluster CRUD and visibility, but cluster safety is still loose without enforcement:
+  - a device could hold multiple enabled memberships
+  - enabled members could duplicate instance numbers inside one cluster
+  - a gateway handler could be missing, disabled, or removed without operator-readable guardrails
+- The architecture requires one effective gateway handler and stable per-cluster node identity.
+
+Goal:
+- Land the final bounded Phase F slice available on this branch:
+  - enforce one enabled cluster membership per device profile
+  - enforce unique enabled instance numbers within each cluster
+  - require the gateway handler to be one of that cluster's enabled members
+  - block disabling/removing a gateway-handler membership until the handler is cleared or reassigned
+  - derive readable `gateway_exclusive` coordination rows for cluster peers
+
+Files:
+- `SPEC.md`
+- `freqinout/core/multi_radio_store.py`
+- `freqinout/core/station_runtime_manager.py`
+- `freqinout/gui/settings_tab.py`
+- targeted tests in `tests/`
+
+Scope:
+- Add store validation for enabled-membership uniqueness and per-cluster instance uniqueness.
+- Add store validation for gateway handler assignment, disable, and removal flows.
+- Derive `gateway_exclusive` coordination policy rows from each cluster's enabled gateway handler to its enabled peer members.
+- Extend runtime warnings/summary text so operators see:
+  - missing shared DB path
+  - missing gateway handler selection on multi-member clusters
+  - incomplete device-local VarAC node configuration for enabled members
+
+Out of scope:
+- Automatic gateway failover
+- Launch orchestration that treats the gateway handler specially
+- Cluster-wide scheduler ownership or direct message-routing changes
+
+Constraints:
+- Guardrails must be store-level so both UI and future automation paths inherit the same safety.
+- Existing non-cluster workflows must stay unchanged.
+
+Failure modes to guard:
+- Duplicate instance numbers persist after editing memberships.
+- Gateway handler can be disabled or removed without clearing the role first.
+- Runtime warnings fail to surface missing shared DB or missing gateway-handler selection.
+- Derived gateway policies linger after membership or handler changes.
+
+Acceptance:
+- Store-level validation rejects invalid membership and gateway operations with operator-readable errors.
+- `gateway_exclusive` coordination rows reflect the currently selected enabled gateway handler.
+- Runtime snapshots warn when cluster shared DB is missing or when a multi-member cluster has no gateway handler.
+- Verification passes:
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_f_slice3.py -q`
+  - `python -m pytest tests\\test_multi_rig_wave4_phase_f_slice2.py tests\\test_multi_rig_wave4_phase_f_slice1.py tests\\test_multi_rig_wave4_phase_e_slice1.py tests\\test_multi_rig_wave4_phase_e_slice2.py tests\\test_multi_rig_wave4_phase_e_slice3.py tests\\test_multi_rig_wave2.py tests\\test_multi_rig_wave3.py tests\\test_multi_rig_wave3_slice4.py tests\\test_software_status_phase4.py tests\\test_software_status_endpoints.py -q`
+  - `python tools/release_preflight.py`
+  - `python -m compileall freqinout`
+  - `powershell -ExecutionPolicy Bypass -File .\\tools\\freqinout-db.ps1 status`
+
+Deferred boundary after this slice:
+- Later waves may still refine shared-cluster ingest ownership and selected-radio UX, but the bounded Phase F specialization work on this branch is complete after this checkpoint.
+
+Rollback:
+- Revert the gateway-enforcement changes, targeted tests, and this addendum together so VarAC cluster support returns to the CRUD/runtime-visibility checkpoint.
+
+### 1.202 Addendum (2026-04-11): Multi-Rig-on-1.2.2 User Guide Alignment Refresh
+
+Problem:
+- The current `docs/guide.html` still reads primarily as a single-radio guide even though this branch now ships bounded multi-rig operator surfaces.
+- Operators do not currently get one early, coherent explanation of how `Device Profiles`, `Operating Profiles`, `Device Assignments`, `Station Overview`, temporary swaps, observer/SDR profiles, shared PTT, RF conflict warnings, and VarAC clusters fit together.
+- Several existing tab sections also lack explicit scoping guidance, so an operator can easily assume a tab is multi-device aware when it is still bound to the Station Default compatibility shell.
+
+Goal:
+- Refresh the shipped user guide so the `1.2.2` multi-rig branch is documented accurately without changing runtime behavior:
+  - add a detailed `Multi-Rig Configuration` section near the beginning of the guide
+  - document the current `Settings` multi-rig sections and their key controls
+  - add a `Station Overview` section
+  - add concise multi-rig scope notes under the affected tab/section references so operators understand what is multi-rig aware versus Station Default scoped
+
+Files:
+- `SPEC.md`
+- `docs/guide.html`
+
+Scope:
+- Add an early multi-rig workflow section that explains:
+  - runtime-active device profiles
+  - the Station Default device profile
+  - operating profiles and effective assignments
+  - temporary swap / restore behavior
+  - observer / SDR limitations
+  - shared PTT and RF conflict warnings
+  - VarAC cluster configuration order
+- Update the `Settings` section to describe the current multi-rig tables, actions, and configuration intent.
+- Add a `Station Overview` guide section that matches the current card-based UI and warning summaries.
+- Add tab-level multi-rig notes where relevant:
+  - current compatibility-shell tabs remain Station Default scoped
+  - schedule editors can target station/device/operating-profile scope, but runtime control still follows the Station Default device
+  - Messages / Map / NCS / Launch Control visibility can be suppressed by the Station Default operating profile
+
+Out of scope:
+- New runtime behavior
+- New multi-rig UI or settings IA changes
+- Future selected-radio-shell documentation for waves that have not landed on this branch
+
+Constraints:
+- The guide must describe only behavior that exists on `feature/multi-rig-on-1.2.2`.
+- Do not imply that every tab is independently multi-device aware.
+- Keep single-radio operators readable by framing multi-rig behavior as an extension of the existing compatibility shell rather than a separate product mode.
+
+Failure modes to guard:
+- The guide claims per-device tab ownership that does not exist yet.
+- The guide omits the Station Default concept and misleads operators about which device current tabs control.
+- The guide documents future selected-radio workflows or automatic swap/expiry behavior that this branch does not implement.
+
+Acceptance:
+- The guide contains an early `Multi-Rig Configuration` section with explicit setup order and settings guidance.
+- The guide contains a `Station Overview` section matching the current active-device cards and warnings.
+- The affected tab sections explain the current multi-rig display/configuration or Station Default scoping accurately.
+- `python tools/release_preflight.py` passes after the guide update.
+
+Rollback:
+- Revert this addendum and the corresponding `docs/guide.html` update together.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import queue
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QTimer, QCoreApplication
 
@@ -30,9 +30,9 @@ class JS8RxHub(QObject):
     This avoids multiple tabs draining the same queue.
     """
 
-    _instance: Optional["JS8RxHub"] = None
+    _instances: Dict[Tuple[str, int], "JS8RxHub"] = {}
 
-    def __init__(self) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 2442) -> None:
         app = QCoreApplication.instance()
         super().__init__(app)
         self._listeners: List[Callable[[List[dict]], None]] = []
@@ -41,20 +41,26 @@ class JS8RxHub(QObject):
         self._timer.timeout.connect(self._poll_queue)
         self._max_msgs = 200
         self._net_started = False
-        self._host = "127.0.0.1"
-        self._port = 2442
+        self._host = str(host or "127.0.0.1").strip() or "127.0.0.1"
+        self._port = int(port or 2442)
         self._last_rx_activity_ts: float = 0.0
         self._last_ptt_ts: float = 0.0
         self._ptt_active: bool = False
 
     @classmethod
-    def instance(cls) -> "JS8RxHub":
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+    def instance(cls, host: Optional[str] = None, port: Optional[int] = None) -> "JS8RxHub":
+        host_txt = str(host or "127.0.0.1").strip() or "127.0.0.1"
+        port_num = int(port or 2442)
+        key = (host_txt, port_num)
+        if key not in cls._instances:
+            cls._instances[key] = cls(host=host_txt, port=port_num)
+        return cls._instances[key]
 
     def is_active(self) -> bool:
         return self._timer.isActive()
+
+    def endpoint(self) -> Tuple[str, int]:
+        return (self._host, int(self._port))
 
     def register_listener(self, cb: Callable[[List[dict]], None]) -> None:
         if cb not in self._listeners:
@@ -66,11 +72,13 @@ class JS8RxHub(QObject):
         if not self._listeners and self._timer.isActive():
             self._timer.stop()
 
-    def start(self, host: str, port: int) -> bool:
+    def start(self, host: Optional[str] = None, port: Optional[int] = None) -> bool:
         if js8net is None:
             return False
-        self._host = host
-        self._port = int(port)
+        if host is not None:
+            self._host = str(host or "").strip() or self._host
+        if port is not None:
+            self._port = int(port)
         if not self._net_started:
             if not self._js8call_running():
                 return False
@@ -95,7 +103,19 @@ class JS8RxHub(QObject):
             self.deleteLater()
         except Exception:
             pass
-        type(self)._instance = None
+        try:
+            type(self)._instances.pop((self._host, int(self._port)), None)
+        except Exception:
+            pass
+
+    @classmethod
+    def shutdown_all(cls) -> None:
+        for hub in list(cls._instances.values()):
+            try:
+                hub.shutdown()
+            except Exception:
+                continue
+        cls._instances.clear()
 
     def _js8call_running(self) -> bool:
         if psutil is None:

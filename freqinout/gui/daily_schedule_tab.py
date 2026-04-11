@@ -36,7 +36,18 @@ from PySide6.QtGui import QAction, QColor
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.logger import log
+from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.perf_metrics import span as perf_span
+from freqinout.core.schedule_targeting import (
+    TARGET_SCOPE_DEVICE_PROFILE,
+    TARGET_SCOPE_OPERATING_PROFILE,
+    TARGET_SCOPE_STATION,
+    normalize_schedule_target,
+    normalize_schedule_target_fields,
+    normalize_target_scope,
+    schedule_target_identity_parts,
+    schedule_targets_may_overlap,
+)
 from freqinout.core.sop_manager import SOPManager
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.theme import resolve_theme, button_style
@@ -94,6 +105,11 @@ BAND_OPTIONS = [
 ]
 
 MODE_OPTIONS = ["Digi", "SSB"]
+SCHEDULE_TARGET_SCOPE_ITEMS = [
+    ("Station", TARGET_SCOPE_STATION),
+    ("Device Profile", TARGET_SCOPE_DEVICE_PROFILE),
+    ("Operating Profile", TARGET_SCOPE_OPERATING_PROFILE),
+]
 
 
 class _SortKeyTableWidgetItem(QTableWidgetItem):
@@ -171,6 +187,8 @@ class DailyScheduleTab(QWidget):
     COL_START = 7
     COL_END = 8
     COL_AUTOTUNE = 9
+    COL_TARGET_SCOPE = 10
+    COL_TARGET = 11
 
     # Resource table column indices
     RES_COL_SELECT = 0
@@ -196,6 +214,9 @@ class DailyScheduleTab(QWidget):
             pass
         self.operating_groups: List[Dict] = self._load_operating_groups()
         self._operating_groups_sig = self._snapshot_operating_groups(self.operating_groups)
+        self.device_profiles: List[Dict[str, Any]] = []
+        self.operating_profiles: List[Dict[str, Any]] = []
+        self._refresh_schedule_target_catalogs()
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
         self._show_local: bool = default_mode != "UTC"
         self._raw_schedule: List[Dict] = []
@@ -239,6 +260,128 @@ class DailyScheduleTab(QWidget):
             return f"{float(val):.3f}"
         except Exception:
             return str(val) if val is not None else ""
+
+    def _refresh_schedule_target_catalogs(self) -> None:
+        try:
+            store = MultiRadioStore(settings_db_path())
+            self.device_profiles = [dict(row) for row in store.list_device_profiles()]
+            self.operating_profiles = [dict(row) for row in store.list_operating_profiles()]
+        except Exception as e:
+            log.debug("HF Schedule: failed loading target catalogs: %s", e)
+            self.device_profiles = []
+            self.operating_profiles = []
+
+    @staticmethod
+    def _device_target_label(row: Dict[str, Any]) -> str:
+        name = str(row.get("name") or "").strip()
+        device_id = int(row.get("id", 0) or 0)
+        return name or f"Device #{device_id}"
+
+    @staticmethod
+    def _operating_target_label(row: Dict[str, Any]) -> str:
+        name = str(row.get("name") or "").strip()
+        profile_id = int(row.get("id", 0) or 0)
+        return name or f"Profile #{profile_id}"
+
+    @staticmethod
+    def _target_scope_tooltip() -> str:
+        return (
+            "Station rows apply to any current station-default runtime. "
+            "Device Profile rows apply only when that device is the station default. "
+            "Operating Profile rows apply only when the station-default device carries that effective assignment."
+        )
+
+    def _populate_target_value_combo(
+        self,
+        combo: QComboBox,
+        scope: str,
+        *,
+        target_device_profile_id: Optional[int] = None,
+        target_operating_profile_id: Optional[int] = None,
+        editable: bool = True,
+        fixed_label: str = "",
+    ) -> None:
+        prev_block = combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.setToolTip(self._target_scope_tooltip())
+            if not editable:
+                combo.addItem(fixed_label or "SOP Layer", None)
+                combo.setEnabled(False)
+                return
+            if scope == TARGET_SCOPE_STATION:
+                combo.addItem("Station-wide", None)
+                combo.setEnabled(False)
+                return
+            if scope == TARGET_SCOPE_DEVICE_PROFILE:
+                for row in self.device_profiles:
+                    combo.addItem(self._device_target_label(row), int(row.get("id", 0) or 0))
+                if target_device_profile_id is not None and combo.findData(int(target_device_profile_id)) < 0:
+                    combo.addItem(f"Missing device #{int(target_device_profile_id)}", int(target_device_profile_id))
+                if combo.count() <= 0:
+                    combo.addItem("No device profiles", None)
+                    combo.setEnabled(False)
+                    return
+                combo.setEnabled(True)
+                if target_device_profile_id is not None:
+                    idx = combo.findData(int(target_device_profile_id))
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+                return
+            for row in self.operating_profiles:
+                combo.addItem(self._operating_target_label(row), int(row.get("id", 0) or 0))
+            if target_operating_profile_id is not None and combo.findData(int(target_operating_profile_id)) < 0:
+                combo.addItem(
+                    f"Missing operating profile #{int(target_operating_profile_id)}",
+                    int(target_operating_profile_id),
+                )
+            if combo.count() <= 0:
+                combo.addItem("No operating profiles", None)
+                combo.setEnabled(False)
+                return
+            combo.setEnabled(True)
+            if target_operating_profile_id is not None:
+                idx = combo.findData(int(target_operating_profile_id))
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        finally:
+            combo.blockSignals(prev_block)
+
+    def _selected_schedule_target(self, row_index: int) -> Tuple[str, Optional[int], Optional[int]]:
+        scope_widget = self.table.cellWidget(row_index, self.COL_TARGET_SCOPE)
+        target_widget = self.table.cellWidget(row_index, self.COL_TARGET)
+        if not isinstance(scope_widget, QComboBox):
+            return TARGET_SCOPE_STATION, None, None
+        scope = normalize_target_scope(scope_widget.currentData())
+        target_id = target_widget.currentData() if isinstance(target_widget, QComboBox) else None
+        return normalize_schedule_target(
+            scope,
+            target_device_profile_id=target_id if scope == TARGET_SCOPE_DEVICE_PROFILE else None,
+            target_operating_profile_id=target_id if scope == TARGET_SCOPE_OPERATING_PROFILE else None,
+        )
+
+    def _refresh_schedule_target_widgets(self) -> None:
+        self._refresh_schedule_target_catalogs()
+        for row_index in range(self.table.rowCount()):
+            scope_widget = self.table.cellWidget(row_index, self.COL_TARGET_SCOPE)
+            target_widget = self.table.cellWidget(row_index, self.COL_TARGET)
+            if not isinstance(scope_widget, QComboBox) or not isinstance(target_widget, QComboBox):
+                continue
+            if self._is_sop_overlay_row(row_index):
+                self._populate_target_value_combo(
+                    target_widget,
+                    TARGET_SCOPE_STATION,
+                    editable=False,
+                    fixed_label="SOP Layer",
+                )
+                continue
+            scope, target_device_profile_id, target_operating_profile_id = self._selected_schedule_target(row_index)
+            self._populate_target_value_combo(
+                target_widget,
+                scope,
+                target_device_profile_id=target_device_profile_id,
+                target_operating_profile_id=target_operating_profile_id,
+            )
 
     # ---------------- UI ---------------- #
 
@@ -328,6 +471,8 @@ class DailyScheduleTab(QWidget):
             self.COL_START,
             self.COL_END,
             self.COL_AUTOTUNE,
+            self.COL_TARGET_SCOPE,
+            self.COL_TARGET,
         ):
             hv.setSectionResizeMode(col, QHeaderView.Stretch)
 
@@ -889,21 +1034,26 @@ class DailyScheduleTab(QWidget):
             if not row:
                 continue
             rows.append(
-                {
-                    "day_utc": str(row.get("day_utc") or "ALL"),
-                    "band": str(row.get("band") or "").strip().upper(),
-                    "mode": str(row.get("mode") or "").strip().upper(),
-                    "vfo": "A",
-                    "frequency": self._normalize_freq_text(str(row.get("frequency") or "")),
-                    "start_utc": self._normalize_hhmm(str(row.get("start_utc") or "")),
-                    "end_utc": self._normalize_hhmm(str(row.get("end_utc") or "")),
-                    "group_name": str(row.get("group_name") or "").strip(),
-                    "fldigi_offset": "",
-                    "js8_offset": "",
-                    "primary_js8call_group": "",
-                    "comment": "",
-                    "auto_tune": bool(row.get("auto_tune", False)),
-                }
+                normalize_schedule_target_fields(
+                    {
+                        "day_utc": str(row.get("day_utc") or "ALL"),
+                        "band": str(row.get("band") or "").strip().upper(),
+                        "mode": str(row.get("mode") or "").strip().upper(),
+                        "vfo": "A",
+                        "frequency": self._normalize_freq_text(str(row.get("frequency") or "")),
+                        "start_utc": self._normalize_hhmm(str(row.get("start_utc") or "")),
+                        "end_utc": self._normalize_hhmm(str(row.get("end_utc") or "")),
+                        "group_name": str(row.get("group_name") or "").strip(),
+                        "fldigi_offset": "",
+                        "js8_offset": "",
+                        "primary_js8call_group": "",
+                        "comment": "",
+                        "auto_tune": bool(row.get("auto_tune", False)),
+                        "target_scope": row.get("target_scope"),
+                        "target_device_profile_id": row.get("target_device_profile_id"),
+                        "target_operating_profile_id": row.get("target_operating_profile_id"),
+                    }
+                )
             )
         return rows
 
@@ -922,6 +1072,9 @@ class DailyScheduleTab(QWidget):
                     "start_utc": str(row.get("start_utc") or ""),
                     "end_utc": str(row.get("end_utc") or ""),
                     "auto_tune": bool(row.get("auto_tune", False)),
+                    "target_scope": str(row.get("target_scope") or TARGET_SCOPE_STATION),
+                    "target_device_profile_id": row.get("target_device_profile_id"),
+                    "target_operating_profile_id": row.get("target_operating_profile_id"),
                 }
             )
         return self._rows_signature(sig_rows)
@@ -2166,8 +2319,8 @@ class DailyScheduleTab(QWidget):
             return []
         return [dict(r) for r in self._resource_view_rows if self._resource_source_key(r) in selected_keys]
 
-    def _active_schedule_keys(self) -> Set[Tuple[str, str, str, str, str, str, str]]:
-        keys: Set[Tuple[str, str, str, str, str, str, str]] = set()
+    def _active_schedule_keys(self) -> Set[Tuple[str, str, str, str, str, str, str, str, str, str]]:
+        keys: Set[Tuple[str, str, str, str, str, str, str, str, str, str]] = set()
         for r in range(self.table.rowCount()):
             row = self._active_row_to_utc(r)
             if row:
@@ -2482,18 +2635,29 @@ class DailyScheduleTab(QWidget):
             source_day = day
             day, start = self._convert_day_time(source_day, start, to_local=False)
             _, end = self._convert_day_time(source_day, end, to_local=False)
-        return {
-            "day_utc": self._normalize_day(day),
-            "group_name": str(group).strip(),
-            "mode": str(mode).strip().upper(),
-            "band": str(band).strip().upper(),
-            "frequency": self._normalize_freq_text(freq),
-            "start_utc": self._normalize_hhmm(start),
-            "end_utc": self._normalize_hhmm(end),
-            "auto_tune": bool(auto_tune),
-        }
+        target_scope, target_device_profile_id, target_operating_profile_id = (
+            (TARGET_SCOPE_STATION, None, None)
+            if is_sop_overlay
+            else self._selected_schedule_target(row_index)
+        )
+        return normalize_schedule_target_fields(
+            {
+                "day_utc": self._normalize_day(day),
+                "group_name": str(group).strip(),
+                "mode": str(mode).strip().upper(),
+                "band": str(band).strip().upper(),
+                "frequency": self._normalize_freq_text(freq),
+                "start_utc": self._normalize_hhmm(start),
+                "end_utc": self._normalize_hhmm(end),
+                "auto_tune": bool(auto_tune),
+                "target_scope": target_scope,
+                "target_device_profile_id": target_device_profile_id,
+                "target_operating_profile_id": target_operating_profile_id,
+            }
+        )
 
-    def _active_dup_key(self, row: Dict[str, Any]) -> Tuple[str, str, str, str, str, str, str]:
+    def _active_dup_key(self, row: Dict[str, Any]) -> Tuple[str, str, str, str, str, str, str, str, str, str]:
+        target_scope, target_device_profile_id, target_operating_profile_id = schedule_target_identity_parts(row)
         return (
             self._normalize_day(str(row.get("day_utc") or "ALL")),
             str(row.get("group_name") or "").strip().upper(),
@@ -2502,6 +2666,9 @@ class DailyScheduleTab(QWidget):
             self._normalize_freq_text(str(row.get("frequency") or "")),
             self._normalize_hhmm(str(row.get("start_utc") or "")),
             self._normalize_hhmm(str(row.get("end_utc") or "")),
+            target_scope,
+            target_device_profile_id,
+            target_operating_profile_id,
         )
 
     def _resource_rows_to_schedule_rows(self, resources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3546,12 +3713,14 @@ class DailyScheduleTab(QWidget):
                 selected_rows = {int(r) for r in selected_scope}
             day_intervals: Dict[str, List[Tuple[int, int, int, bool]]] = {d: [] for d in DAY_CANON}
             row_frequency_key: Dict[int, Tuple[str, str]] = {}
+            row_target_context: Dict[int, Dict[str, Any]] = {}
             for r in range(self.table.rowCount()):
                 if self._is_sop_overlay_row(r):
                     continue
                 row = self._active_row_to_utc(r, include_sop_overlay=False)
                 if not row:
                     continue
+                row_target_context[r] = dict(row)
                 row_frequency_key[r] = (
                     str(row.get("band") or "").strip().upper(),
                     self._normalize_freq_text(str(row.get("frequency") or "")),
@@ -3586,6 +3755,13 @@ class DailyScheduleTab(QWidget):
                 right_band, right_freq = right
                 return bool(left_band and left_freq and left_band == right_band and left_freq == right_freq)
 
+            def _targets_overlap(left_row: int, right_row: int) -> bool:
+                left = row_target_context.get(int(left_row))
+                right = row_target_context.get(int(right_row))
+                if not left or not right:
+                    return True
+                return schedule_targets_may_overlap(left, right)
+
             for day_name, spans in day_intervals.items():
                 spans_sorted = sorted(spans, key=lambda x: (x[1], x[2], x[0], int(x[3])))
                 active_all: List[Tuple[int, int, bool]] = []
@@ -3600,6 +3776,8 @@ class DailyScheduleTab(QWidget):
                         for other_row, _other_end, _other_selected in active_all:
                             if _is_same_frequency_pair(row_idx, other_row):
                                 continue
+                            if not _targets_overlap(row_idx, other_row):
+                                continue
                             pair_key = (min(row_idx, other_row), max(row_idx, other_row), day_name)
                             if pair_key in seen:
                                 continue
@@ -3610,6 +3788,8 @@ class DailyScheduleTab(QWidget):
                     else:
                         for other_row, _other_end in active_selected:
                             if _is_same_frequency_pair(row_idx, other_row):
+                                continue
+                            if not _targets_overlap(row_idx, other_row):
                                 continue
                             pair_key = (min(row_idx, other_row), max(row_idx, other_row), day_name)
                             if pair_key in seen:
@@ -3875,6 +4055,8 @@ class DailyScheduleTab(QWidget):
             f"Start ({mode_label})",
             f"End ({mode_label})",
             "Auto-Tune",
+            "Target Scope",
+            "Target",
         ]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
@@ -3964,52 +4146,87 @@ class DailyScheduleTab(QWidget):
             )
             if not cur.fetchone():
                 return []
+            table_cols = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(daily_schedule_tab)").fetchall()
+            }
+            has_target_cols = {
+                "target_scope",
+                "target_device_profile_id",
+                "target_operating_profile_id",
+            }.issubset(table_cols)
 
             # Try new schema; if fails, fall back to legacy (we'll map)
             try:
                 cur = conn.execute(
-                    """
-                    SELECT
+                    (
+                        """
+                        SELECT
+                            day_utc,
+                            band,
+                            mode,
+                            vfo,
+                            frequency,
+                            start_utc,
+                            end_utc,
+                            group_name,
+                            auto_tune,
+                            target_scope,
+                            target_device_profile_id,
+                            target_operating_profile_id
+                        FROM daily_schedule_tab
+                        """
+                        if has_target_cols
+                        else """
+                        SELECT
+                            day_utc,
+                            band,
+                            mode,
+                            vfo,
+                            frequency,
+                            start_utc,
+                            end_utc,
+                            group_name,
+                            auto_tune
+                        FROM daily_schedule_tab
+                        """
+                    )
+                )
+                rows: List[Dict] = []
+                for fetched in cur.fetchall():
+                    (
                         day_utc,
                         band,
                         mode,
                         vfo,
-                        frequency,
+                        freq,
                         start_utc,
                         end_utc,
                         group_name,
-                        auto_tune
-                    FROM daily_schedule_tab
-                    """
-                )
-                rows: List[Dict] = []
-                for (
-                    day_utc,
-                    band,
-                    mode,
-                    vfo,
-                    freq,
-                    start_utc,
-                    end_utc,
-                    group_name,
-                    auto_tune,
-                ) in cur.fetchall():
+                        auto_tune,
+                        *target_meta,
+                    ) = fetched
                     rows.append(
-                        {
-                            "day_utc": (day_utc or "ALL").strip(),
-                            "band": (band or "").strip(),
-                            "mode": (mode or "Digi").strip(),
-                            "vfo": (vfo or "A").strip().upper(),
-                            "frequency": str(freq or ""),
-                            "start_utc": start_utc or "",
-                            "end_utc": end_utc or "",
-                            "group_name": (group_name or "").strip(),
-                            "auto_tune": bool(auto_tune),
-                            "fldigi_offset": "",
-                            "js8_offset": "",
-                            "primary_js8call_group": "",
-                            "comment": "",
-                        }
+                        normalize_schedule_target_fields(
+                            {
+                                "day_utc": (day_utc or "ALL").strip(),
+                                "band": (band or "").strip(),
+                                "mode": (mode or "Digi").strip(),
+                                "vfo": (vfo or "A").strip().upper(),
+                                "frequency": str(freq or ""),
+                                "start_utc": start_utc or "",
+                                "end_utc": end_utc or "",
+                                "group_name": (group_name or "").strip(),
+                                "auto_tune": bool(auto_tune),
+                                "fldigi_offset": "",
+                                "js8_offset": "",
+                                "primary_js8call_group": "",
+                                "comment": "",
+                                "target_scope": target_meta[0] if len(target_meta) > 0 else TARGET_SCOPE_STATION,
+                                "target_device_profile_id": target_meta[1] if len(target_meta) > 1 else None,
+                                "target_operating_profile_id": target_meta[2] if len(target_meta) > 2 else None,
+                            }
+                        )
                     )
                 return rows
             except Exception:
@@ -4052,21 +4269,23 @@ class DailyScheduleTab(QWidget):
                 auto_tune,
             ) in cur.fetchall():
                 rows.append(
-                    {
-                        "day_utc": (day_utc or "ALL").strip(),
-                        "band": (band or "").strip(),
-                        "mode": (mode or "Digi").strip(),
-                        "vfo": (vfo or "A").strip().upper(),
-                        "frequency": str(freq or ""),
-                        "fldigi_offset": "",
-                        "js8_offset": "",
-                        "start_utc": start_utc or "",
-                        "end_utc": end_utc or "",
-                        "primary_js8call_group": "",
-                        "group_name": group_name or "",
-                        "comment": "",
-                        "auto_tune": bool(auto_tune),
-                    }
+                    normalize_schedule_target_fields(
+                        {
+                            "day_utc": (day_utc or "ALL").strip(),
+                            "band": (band or "").strip(),
+                            "mode": (mode or "Digi").strip(),
+                            "vfo": (vfo or "A").strip().upper(),
+                            "frequency": str(freq or ""),
+                            "fldigi_offset": "",
+                            "js8_offset": "",
+                            "start_utc": start_utc or "",
+                            "end_utc": end_utc or "",
+                            "primary_js8call_group": "",
+                            "group_name": group_name or "",
+                            "comment": "",
+                            "auto_tune": bool(auto_tune),
+                        }
+                    )
                 )
             return rows
         except Exception as e:
@@ -4095,29 +4314,37 @@ class DailyScheduleTab(QWidget):
                     start_utc TEXT NOT NULL,
                     end_utc TEXT NOT NULL,
                     group_name TEXT,
-                    auto_tune INTEGER DEFAULT 0
+                    auto_tune INTEGER DEFAULT 0,
+                    target_scope TEXT NOT NULL DEFAULT 'station',
+                    target_device_profile_id INTEGER,
+                    target_operating_profile_id INTEGER
                 )
                 """
             )
             conn.execute("DELETE FROM daily_schedule_tab")
             for row in rows:
+                normalized = normalize_schedule_target_fields(row)
                 conn.execute(
                     """
                     INSERT INTO daily_schedule_tab
                         (day_utc, band, mode, vfo, frequency,
-                         start_utc, end_utc, group_name, auto_tune)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         start_utc, end_utc, group_name, auto_tune,
+                         target_scope, target_device_profile_id, target_operating_profile_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        row.get("day_utc"),
-                        row.get("band"),
-                        row.get("mode"),
-                        row.get("vfo"),
-                        row.get("frequency"),
-                        row.get("start_utc"),
-                        row.get("end_utc"),
-                        row.get("group_name"),
-                        1 if row.get("auto_tune") else 0,
+                        normalized.get("day_utc"),
+                        normalized.get("band"),
+                        normalized.get("mode"),
+                        normalized.get("vfo"),
+                        normalized.get("frequency"),
+                        normalized.get("start_utc"),
+                        normalized.get("end_utc"),
+                        normalized.get("group_name"),
+                        1 if normalized.get("auto_tune") else 0,
+                        normalized.get("target_scope"),
+                        normalized.get("target_device_profile_id"),
+                        normalized.get("target_operating_profile_id"),
                     ),
                 )
             conn.commit()
@@ -4176,6 +4403,7 @@ class DailyScheduleTab(QWidget):
         return True, f"HF rows saved: {len(hf_rows)}."
 
     def _load_schedule(self):
+        self._refresh_schedule_target_catalogs()
         hf_sched = self._load_schedule_from_db()
         loaded_from_db = bool(hf_sched)
 
@@ -4189,6 +4417,7 @@ class DailyScheduleTab(QWidget):
 
             if not isinstance(hf_sched, list):
                 hf_sched = []
+        hf_sched = [normalize_schedule_target_fields(entry) for entry in hf_sched if isinstance(entry, dict)]
 
         self._suspend_dirty_tracking = True
         try:
@@ -4786,8 +5015,15 @@ class DailyScheduleTab(QWidget):
             start_val = self._get_text_value(r, self.COL_START)
             end_val = self._get_text_value(r, self.COL_END)
             auto_tune = self._get_checkbox_value(r, self.COL_AUTOTUNE)
+            target_scope, target_device_profile_id, target_operating_profile_id = self._selected_schedule_target(r)
 
             if not group_name or not band or not freq_text or not start_val or not end_val:
+                continue
+            if target_scope == TARGET_SCOPE_DEVICE_PROFILE and target_device_profile_id is None:
+                format_errors.append(f"Row {r+1}: Device-targeted rows require a device profile.")
+                continue
+            if target_scope == TARGET_SCOPE_OPERATING_PROFILE and target_operating_profile_id is None:
+                format_errors.append(f"Row {r+1}: Operating-profile-targeted rows require an operating profile.")
                 continue
 
             # Enforce frequency validity for band/mode
@@ -4809,21 +5045,26 @@ class DailyScheduleTab(QWidget):
                 end_utc = end_val
 
             hf_rows.append(
-                {
-                    "day_utc": day_utc,
-                    "band": band,
-                    "mode": mode,
-                    "vfo": "A",
-                    "frequency": freq_text,
-                    "start_utc": start_utc,
-                    "end_utc": end_utc,
-                    "group_name": group_name,
-                    "fldigi_offset": "",
-                    "js8_offset": "",
-                    "primary_js8call_group": "",
-                    "comment": "",
-                    "auto_tune": bool(auto_tune),
-                }
+                normalize_schedule_target_fields(
+                    {
+                        "day_utc": day_utc,
+                        "band": band,
+                        "mode": mode,
+                        "vfo": "A",
+                        "frequency": freq_text,
+                        "start_utc": start_utc,
+                        "end_utc": end_utc,
+                        "group_name": group_name,
+                        "fldigi_offset": "",
+                        "js8_offset": "",
+                        "primary_js8call_group": "",
+                        "comment": "",
+                        "auto_tune": bool(auto_tune),
+                        "target_scope": target_scope,
+                        "target_device_profile_id": target_device_profile_id,
+                        "target_operating_profile_id": target_operating_profile_id,
+                    }
+                )
             )
 
         if format_errors:
@@ -4954,6 +5195,9 @@ class DailyScheduleTab(QWidget):
                         "band": r.get("band", ""),
                         "mode": r.get("mode", ""),
                         "frequency": r.get("frequency", ""),
+                        "target_scope": r.get("target_scope", TARGET_SCOPE_STATION),
+                        "target_device_profile_id": r.get("target_device_profile_id"),
+                        "target_operating_profile_id": r.get("target_operating_profile_id"),
                     }
                 )
             Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -5033,17 +5277,27 @@ class DailyScheduleTab(QWidget):
             if not self._validate_time(start) or not self._validate_time(end):
                 skipped_rows += 1
                 continue
+            target_scope, target_device_profile_id, target_operating_profile_id = normalize_schedule_target(
+                raw.get("target_scope"),
+                target_device_profile_id=raw.get("target_device_profile_id"),
+                target_operating_profile_id=raw.get("target_operating_profile_id"),
+            )
             imported_rows.append(
-                {
-                    "day_utc": day,
-                    "group_name": group,
-                    "mode": mode,
-                    "band": band,
-                    "frequency": freq,
-                    "start_utc": start,
-                    "end_utc": end,
-                    "auto_tune": False,
-                }
+                normalize_schedule_target_fields(
+                    {
+                        "day_utc": day,
+                        "group_name": group,
+                        "mode": mode,
+                        "band": band,
+                        "frequency": freq,
+                        "start_utc": start,
+                        "end_utc": end,
+                        "auto_tune": False,
+                        "target_scope": target_scope,
+                        "target_device_profile_id": target_device_profile_id,
+                        "target_operating_profile_id": target_operating_profile_id,
+                    }
+                )
             )
 
         if not imported_rows:
@@ -5076,16 +5330,21 @@ class DailyScheduleTab(QWidget):
                     if str(row.get("source") or "").strip().upper() != "HF":
                         continue
                     current_hf_rows.append(
-                        {
-                            "day_utc": str(row.get("day_utc") or "ALL"),
-                            "group_name": str(row.get("group_name") or ""),
-                            "mode": str(row.get("mode") or ""),
-                            "band": str(row.get("band") or ""),
-                            "frequency": str(row.get("frequency") or ""),
-                            "start_utc": str(row.get("start_utc") or ""),
-                            "end_utc": str(row.get("end_utc") or ""),
-                            "auto_tune": bool(row.get("auto_tune", False)),
-                        }
+                        normalize_schedule_target_fields(
+                            {
+                                "day_utc": str(row.get("day_utc") or "ALL"),
+                                "group_name": str(row.get("group_name") or ""),
+                                "mode": str(row.get("mode") or ""),
+                                "band": str(row.get("band") or ""),
+                                "frequency": str(row.get("frequency") or ""),
+                                "start_utc": str(row.get("start_utc") or ""),
+                                "end_utc": str(row.get("end_utc") or ""),
+                                "auto_tune": bool(row.get("auto_tune", False)),
+                                "target_scope": row.get("target_scope"),
+                                "target_device_profile_id": row.get("target_device_profile_id"),
+                                "target_operating_profile_id": row.get("target_operating_profile_id"),
+                            }
+                        )
                     )
                 current_hf_rows.extend(dict(r) for r in imported_rows)
                 self._raw_schedule = current_hf_rows
@@ -5263,12 +5522,14 @@ class DailyScheduleTab(QWidget):
         latest = self._load_operating_groups()
         self.operating_groups = latest
         self._operating_groups_sig = self._snapshot_operating_groups(latest)
+        self._refresh_schedule_target_catalogs()
         prev_suppress = self._suppress_autostart
         self._suppress_autostart = True
         prev_dirty = self._suspend_dirty_tracking
         self._suspend_dirty_tracking = True
         try:
             self._refresh_group_band_cells()
+            self._refresh_schedule_target_widgets()
         finally:
             self._suppress_autostart = prev_suppress
             self._suspend_dirty_tracking = prev_dirty
@@ -5295,6 +5556,7 @@ class DailyScheduleTab(QWidget):
             meta={"rows": int(self.table.rowCount())},
             min_ms=5.0,
         ):
+            self._refresh_schedule_target_widgets()
             self._refresh_sop_overlay_rows_in_table()
             self._refresh_sop_profiles_panel(force=True)
             self._update_effective_source_label()
@@ -5345,6 +5607,11 @@ class DailyScheduleTab(QWidget):
     def _rows_signature(self, rows: List[Dict]) -> str:
         normalized: List[Dict[str, object]] = []
         for row in rows:
+            target_scope, target_device_profile_id, target_operating_profile_id = normalize_schedule_target(
+                row.get("target_scope"),
+                target_device_profile_id=row.get("target_device_profile_id"),
+                target_operating_profile_id=row.get("target_operating_profile_id"),
+            )
             normalized.append(
                 {
                     "source": str(row.get("source", "HF")),
@@ -5357,6 +5624,9 @@ class DailyScheduleTab(QWidget):
                     "start_utc": str(row.get("start_utc", "")),
                     "end_utc": str(row.get("end_utc", "")),
                     "auto_tune": bool(row.get("auto_tune", False)),
+                    "target_scope": target_scope,
+                    "target_device_profile_id": target_device_profile_id,
+                    "target_operating_profile_id": target_operating_profile_id,
                 }
             )
         return json.dumps(normalized, sort_keys=True)
@@ -5382,6 +5652,9 @@ class DailyScheduleTab(QWidget):
                     "start_utc": str(row.get("start_utc") or ""),
                     "end_utc": str(row.get("end_utc") or ""),
                     "auto_tune": bool(row.get("auto_tune", False)),
+                    "target_scope": str(row.get("target_scope") or TARGET_SCOPE_STATION),
+                    "target_device_profile_id": row.get("target_device_profile_id"),
+                    "target_operating_profile_id": row.get("target_operating_profile_id"),
                 }
             )
         return rows
@@ -5606,6 +5879,50 @@ class DailyScheduleTab(QWidget):
         auto_layout.setAlignment(Qt.AlignCenter)
         auto_layout.addWidget(chk)
         self.table.setCellWidget(row, self.COL_AUTOTUNE, auto_wrap)
+
+        target_scope_combo = QComboBox()
+        target_scope_combo.setToolTip(self._target_scope_tooltip())
+        target_value_combo = QComboBox()
+        target_value_combo.setToolTip(self._target_scope_tooltip())
+        if is_sop_overlay:
+            target_scope_combo.addItem("SOP Layer", "sop_layer")
+            target_scope_combo.setEnabled(False)
+            target_scope_combo.setToolTip("SOP layer target scope is not editable in this slice.")
+            self._populate_target_value_combo(
+                target_value_combo,
+                TARGET_SCOPE_STATION,
+                editable=False,
+                fixed_label=overlay_profile or "SOP Layer",
+            )
+        else:
+            target_scope, target_device_profile_id, target_operating_profile_id = normalize_schedule_target(
+                entry.get("target_scope"),
+                target_device_profile_id=entry.get("target_device_profile_id"),
+                target_operating_profile_id=entry.get("target_operating_profile_id"),
+            )
+            for label, value in SCHEDULE_TARGET_SCOPE_ITEMS:
+                target_scope_combo.addItem(label, value)
+            idx = target_scope_combo.findData(target_scope)
+            if idx >= 0:
+                target_scope_combo.setCurrentIndex(idx)
+            self._populate_target_value_combo(
+                target_value_combo,
+                target_scope,
+                target_device_profile_id=target_device_profile_id,
+                target_operating_profile_id=target_operating_profile_id,
+            )
+            target_scope_combo.currentIndexChanged.connect(
+                lambda _idx, scope_combo=target_scope_combo, value_combo=target_value_combo: self._populate_target_value_combo(
+                    value_combo,
+                    normalize_target_scope(scope_combo.currentData()),
+                )
+            )
+            target_scope_combo.currentTextChanged.connect(self._mark_dirty)
+            target_scope_combo.currentTextChanged.connect(lambda _text: self._queue_table_conflict_refresh())
+            target_value_combo.currentTextChanged.connect(self._mark_dirty)
+            target_value_combo.currentTextChanged.connect(lambda _text: self._queue_table_conflict_refresh())
+        self.table.setCellWidget(row, self.COL_TARGET_SCOPE, target_scope_combo)
+        self.table.setCellWidget(row, self.COL_TARGET, target_value_combo)
 
         if is_sop_overlay:
             self._update_delete_button_state()
