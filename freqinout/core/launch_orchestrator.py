@@ -133,9 +133,54 @@ class LaunchOrchestrator(QObject):
     def launch_block_reason(self) -> str:
         return self._runtime_launch_block_reason
 
-    def build_default_items(self, existing: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    @staticmethod
+    def normalize_custom_tools(raw_items: Any) -> List[Dict[str, str]]:
+        normalized: List[Dict[str, str]] = []
+        seen: set[str] = set()
+        builtin_names = {name.lower() for name in LAUNCH_APP_ORDER}
+        for item in raw_items if isinstance(raw_items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            command = str(item.get("command", "")).strip()
+            key = name.lower()
+            if not name or not command:
+                continue
+            if key in builtin_names or key in seen:
+                continue
+            seen.add(key)
+            normalized.append({"name": name, "command": command})
+        return normalized
+
+    def get_custom_tools(self) -> List[Dict[str, str]]:
+        return self.normalize_custom_tools(self.settings.get("custom_tool_items", []))
+
+    def launch_catalog_order(self, custom_tools: Optional[List[Dict[str, Any]]] = None) -> List[str]:
+        names = list(LAUNCH_APP_ORDER)
+        for item in self.normalize_custom_tools(custom_tools if custom_tools is not None else self.get_custom_tools()):
+            name = str(item.get("name", "")).strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _custom_tool_command(self, name: str, custom_tools: Optional[List[Dict[str, Any]]] = None) -> str:
+        target = str(name or "").strip()
+        if not target:
+            return ""
+        for item in self.normalize_custom_tools(custom_tools if custom_tools is not None else self.get_custom_tools()):
+            if str(item.get("name", "")).strip() == target:
+                return str(item.get("command", "")).strip()
+        return ""
+
+    def build_default_items(
+        self,
+        existing: Optional[List[Dict[str, Any]]] = None,
+        *,
+        custom_tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
         existing_map: Dict[str, Dict[str, Any]] = {}
         existing_order: List[str] = []
+        catalog = self.launch_catalog_order(custom_tools)
         for item in existing or []:
             if not isinstance(item, dict):
                 continue
@@ -146,11 +191,11 @@ class LaunchOrchestrator(QObject):
         ordered_names: List[str] = []
         seen: set[str] = set()
         for name in existing_order:
-            if name not in LAUNCH_APP_ORDER or name in seen:
+            if name not in catalog or name in seen:
                 continue
             ordered_names.append(name)
             seen.add(name)
-        for name in LAUNCH_APP_ORDER:
+        for name in catalog:
             if name in seen:
                 continue
             ordered_names.append(name)
@@ -176,11 +221,11 @@ class LaunchOrchestrator(QObject):
         raw = self.settings.get("launch_control_items", [])
         if not isinstance(raw, list):
             raw = []
-        normalized = self.build_default_items(raw)
+        normalized = self.build_default_items(raw, custom_tools=self.get_custom_tools())
         return normalized
 
     def set_launch_items(self, items: List[Dict[str, Any]], launch_all_with_startup: bool) -> None:
-        normalized = self.build_default_items(items)
+        normalized = self.build_default_items(items, custom_tools=self.get_custom_tools())
         batch: Dict[str, Any] = {
             "launch_control_items": normalized,
             "launch_control_enabled": bool(launch_all_with_startup),
@@ -218,7 +263,9 @@ class LaunchOrchestrator(QObject):
             return False
         if not self.launch_allowed():
             return False
-        base_items = self.build_default_items(items) if items is not None else self.get_launch_items()
+        base_items = (
+            self.build_default_items(items, custom_tools=self.get_custom_tools()) if items is not None else self.get_launch_items()
+        )
         queue = self._build_queue(base_items, startup_only=False)
         if not queue:
             return False
@@ -236,6 +283,9 @@ class LaunchOrchestrator(QObject):
         return str(LAUNCH_APP_META.get(name, {}).get("path_key", "") or "")
 
     def is_configured(self, name: str) -> bool:
+        custom_cmd = self._custom_tool_command(name)
+        if custom_cmd:
+            return True
         meta = LAUNCH_APP_META.get(name, {})
         launch_cmd_key = str(meta.get("launch_cmd_key", "") or "")
         if launch_cmd_key:
@@ -254,7 +304,10 @@ class LaunchOrchestrator(QObject):
         raw_items = self.settings.get("launch_control_items", None)
         if migrated and isinstance(raw_items, list):
             return
-        defaults = self.build_default_items(raw_items if isinstance(raw_items, list) else None)
+        defaults = self.build_default_items(
+            raw_items if isinstance(raw_items, list) else None,
+            custom_tools=self.get_custom_tools(),
+        )
         batch = {
             "launch_control_items": defaults,
             "launch_control_enabled": bool(self.settings.get("launch_control_enabled", True)),
@@ -274,11 +327,12 @@ class LaunchOrchestrator(QObject):
 
     def _build_queue(self, items: List[Dict[str, Any]], startup_only: bool) -> List[str]:
         queue: List[str] = []
+        catalog = set(self.launch_catalog_order())
         for item in items:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name", "")).strip()
-            if name not in LAUNCH_APP_META:
+            if name not in catalog:
                 continue
             if not bool(item.get("enabled", False)):
                 continue
@@ -454,6 +508,11 @@ class LaunchOrchestrator(QObject):
             return False
 
     def _resolve_launch_command(self, name: str) -> Tuple[Optional[List[str]], str]:
+        custom_cmd = self._custom_tool_command(name)
+        if custom_cmd:
+            cmd = self._command_from_freeform(custom_cmd)
+            if cmd:
+                return self._finalize_launch_command(name, cmd), "configured custom tool"
         meta = LAUNCH_APP_META.get(name, {})
         launch_cmd_key = str(meta.get("launch_cmd_key", "") or "")
         if launch_cmd_key:
@@ -484,6 +543,10 @@ class LaunchOrchestrator(QObject):
     def _command_from_config_path(self, name: str, raw: str) -> Optional[List[str]]:
         p = Path(raw)
         if p.exists() and p.is_dir():
+            if platform.system() == "Darwin" and p.suffix.lower() == ".app":
+                cmd = self._command_from_app_bundle(name, p)
+                if cmd:
+                    return cmd
             for cand in LAUNCH_APP_META.get(name, {}).get("folder_candidates", []):
                 fp = p / str(cand)
                 if fp.exists() and fp.is_file():
@@ -503,6 +566,23 @@ class LaunchOrchestrator(QObject):
             return [self._normalize_command_token(p) for p in parts]
         except Exception:
             return None
+
+    def _command_from_app_bundle(self, name: str, bundle: Path) -> Optional[List[str]]:
+        candidates: List[Path] = []
+        bundle_name = bundle.stem.strip()
+        for cand in LAUNCH_APP_META.get(name, {}).get("folder_candidates", []):
+            token = Path(str(cand)).stem
+            candidates.append(bundle / "Contents" / "MacOS" / token)
+            candidates.append(bundle / "Contents" / "MacOS" / token.lower())
+            candidates.append(bundle / "Contents" / "MacOS" / token.upper())
+        if bundle_name:
+            candidates.append(bundle / "Contents" / "MacOS" / bundle_name)
+            candidates.append(bundle / "Contents" / "MacOS" / bundle_name.lower())
+            candidates.append(bundle / "Contents" / "MacOS" / bundle_name.upper())
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return [str(candidate)]
+        return ["open", "-a", str(bundle)]
 
     @staticmethod
     def _normalize_command_token(token: str) -> str:
@@ -627,6 +707,14 @@ class LaunchOrchestrator(QObject):
                         return str(root)
                     if root.exists() and root.is_file():
                         return str(root.parent)
+            if cmd_desc == "configured custom tool":
+                first = Path(str(cmd[0])).expanduser() if cmd else None
+                if first is not None and first.exists() and first.is_file():
+                    return str(first.parent)
+                if len(cmd) >= 2:
+                    second = Path(str(cmd[1])).expanduser()
+                    if second.exists() and second.is_file():
+                        return str(second.parent)
             if cmd_desc != "configured path":
                 return None
             first_name = os.path.basename(str(cmd[0])).lower()

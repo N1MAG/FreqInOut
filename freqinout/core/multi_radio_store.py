@@ -61,6 +61,8 @@ MIRRORED_LEGACY_KEYS = frozenset(
         "js8_forms_path",
         "path_flrig",
         "path_fldigi",
+        "path_flmsg",
+        "path_flamp",
         "path_js8call",
         "path_js8spotter",
         "path_commstat",
@@ -68,6 +70,13 @@ MIRRORED_LEGACY_KEYS = frozenset(
         "varac_db_path",
         "varac_ini_path",
         "varac_launch_cmd",
+        "varac_outbox_dir",
+        "varac_bbs_dir",
+        "varac_bbs_archive_dir",
+        "varac_bbs_enabled",
+        "varac_bbs_limit_access_enabled",
+        "varac_bbs_allowed_callsigns",
+        "varac_bbs_announce_enabled",
         "message_paths",
         "launch_control_enabled",
         "use_scheduler",
@@ -81,6 +90,9 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             system_key TEXT UNIQUE,
             name TEXT NOT NULL,
+            radio_catalog_id TEXT,
+            radio_manufacturer TEXT,
+            radio_model TEXT,
             enabled INTEGER NOT NULL DEFAULT 1,
             runtime_active INTEGER NOT NULL DEFAULT 0,
             runtime_primary INTEGER NOT NULL DEFAULT 0,
@@ -88,6 +100,14 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             device_class TEXT NOT NULL DEFAULT 'tx_rx',
             deployment_mode TEXT NOT NULL DEFAULT 'full',
             control_backend TEXT NOT NULL DEFAULT 'flrig',
+            use_flrig INTEGER NOT NULL DEFAULT 0,
+            use_fldigi INTEGER NOT NULL DEFAULT 0,
+            use_flmsg INTEGER NOT NULL DEFAULT 0,
+            use_flamp INTEGER NOT NULL DEFAULT 0,
+            use_js8call INTEGER NOT NULL DEFAULT 0,
+            use_js8spotter INTEGER NOT NULL DEFAULT 0,
+            use_commstat INTEGER NOT NULL DEFAULT 0,
+            use_varac INTEGER NOT NULL DEFAULT 0,
             rig_host TEXT,
             rig_port INTEGER,
             flrig_host TEXT,
@@ -96,6 +116,10 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             fldigi_port INTEGER,
             fldigi_log_path TEXT,
             fldigi_checkin_dir TEXT,
+            flmsg_path TEXT,
+            flmsg_message_path TEXT,
+            flamp_path TEXT,
+            flamp_message_path TEXT,
             js8_host TEXT,
             js8_port INTEGER,
             js8_instance_id INTEGER,
@@ -107,6 +131,15 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             varac_db_path TEXT,
             varac_ini_path TEXT,
             varac_node_id INTEGER,
+            varac_outbox_dir TEXT,
+            varac_bbs_dir TEXT,
+            varac_bbs_archive_dir TEXT,
+            varac_bbs_enabled INTEGER NOT NULL DEFAULT 0,
+            varac_bbs_limit_access_enabled INTEGER NOT NULL DEFAULT 0,
+            varac_bbs_allowed_callsigns TEXT,
+            varac_bbs_announce_enabled INTEGER NOT NULL DEFAULT 0,
+            varac_bbs_auto_archive_enabled INTEGER NOT NULL DEFAULT 0,
+            varac_bbs_auto_archive_days INTEGER NOT NULL DEFAULT 14,
             varac_cluster_member_enabled INTEGER DEFAULT 0,
             launch_enabled INTEGER NOT NULL DEFAULT 1,
             launch_path TEXT,
@@ -125,6 +158,9 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
         "columns": {
             "system_key": "TEXT",
             "name": "TEXT NOT NULL",
+            "radio_catalog_id": "TEXT",
+            "radio_manufacturer": "TEXT",
+            "radio_model": "TEXT",
             "enabled": "INTEGER NOT NULL DEFAULT 1",
             "runtime_active": "INTEGER NOT NULL DEFAULT 0",
             "runtime_primary": "INTEGER NOT NULL DEFAULT 0",
@@ -132,6 +168,14 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "device_class": "TEXT NOT NULL DEFAULT 'tx_rx'",
             "deployment_mode": "TEXT NOT NULL DEFAULT 'full'",
             "control_backend": "TEXT NOT NULL DEFAULT 'flrig'",
+            "use_flrig": "INTEGER NOT NULL DEFAULT 0",
+            "use_fldigi": "INTEGER NOT NULL DEFAULT 0",
+            "use_flmsg": "INTEGER NOT NULL DEFAULT 0",
+            "use_flamp": "INTEGER NOT NULL DEFAULT 0",
+            "use_js8call": "INTEGER NOT NULL DEFAULT 0",
+            "use_js8spotter": "INTEGER NOT NULL DEFAULT 0",
+            "use_commstat": "INTEGER NOT NULL DEFAULT 0",
+            "use_varac": "INTEGER NOT NULL DEFAULT 0",
             "rig_host": "TEXT",
             "rig_port": "INTEGER",
             "flrig_host": "TEXT",
@@ -140,6 +184,10 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "fldigi_port": "INTEGER",
             "fldigi_log_path": "TEXT",
             "fldigi_checkin_dir": "TEXT",
+            "flmsg_path": "TEXT",
+            "flmsg_message_path": "TEXT",
+            "flamp_path": "TEXT",
+            "flamp_message_path": "TEXT",
             "js8_host": "TEXT",
             "js8_port": "INTEGER",
             "js8_instance_id": "INTEGER",
@@ -151,6 +199,15 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "varac_db_path": "TEXT",
             "varac_ini_path": "TEXT",
             "varac_node_id": "INTEGER",
+            "varac_outbox_dir": "TEXT",
+            "varac_bbs_dir": "TEXT",
+            "varac_bbs_archive_dir": "TEXT",
+            "varac_bbs_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "varac_bbs_limit_access_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "varac_bbs_allowed_callsigns": "TEXT",
+            "varac_bbs_announce_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "varac_bbs_auto_archive_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "varac_bbs_auto_archive_days": "INTEGER NOT NULL DEFAULT 14",
             "varac_cluster_member_enabled": "INTEGER DEFAULT 0",
             "launch_enabled": "INTEGER NOT NULL DEFAULT 1",
             "launch_path": "TEXT",
@@ -1843,55 +1900,110 @@ def _legacy_settings_projection_from_device(
     existing_settings: Mapping[str, Any],
 ) -> Dict[str, Any]:
     control_backend = _coerce_text(device_profile.get("control_backend", "manual"), "manual").lower() or "manual"
+    use_flrig = bool(_coerce_bool_int(device_profile.get("use_flrig"), control_backend == "flrig"))
+    use_fldigi = bool(_coerce_bool_int(device_profile.get("use_fldigi"), False))
+    use_flmsg = bool(_coerce_bool_int(device_profile.get("use_flmsg"), False))
+    use_flamp = bool(_coerce_bool_int(device_profile.get("use_flamp"), False))
+    use_js8call = bool(_coerce_bool_int(device_profile.get("use_js8call"), control_backend == "js8call"))
+    use_js8spotter = bool(_coerce_bool_int(device_profile.get("use_js8spotter"), False))
+    use_commstat = bool(_coerce_bool_int(device_profile.get("use_commstat"), False))
+    use_varac = bool(_coerce_bool_int(device_profile.get("use_varac"), False))
     flrig_host = _coerce_text(device_profile.get("flrig_host", ""), "127.0.0.1") or "127.0.0.1"
     fldigi_host = _coerce_text(device_profile.get("fldigi_host", ""), "") or flrig_host or "127.0.0.1"
     js8_host = _coerce_text(device_profile.get("js8_host", ""), "127.0.0.1") or "127.0.0.1"
     message_paths = dict(existing_settings.get("message_paths", {}) or {})
+    flmsg_message_path = _coerce_text(device_profile.get("flmsg_message_path", ""), "")
+    if use_flmsg and flmsg_message_path:
+        message_paths["flmsg"] = flmsg_message_path
+    else:
+        message_paths.pop("flmsg", None)
+    flamp_message_path = _coerce_text(device_profile.get("flamp_message_path", ""), "")
+    if use_flamp and flamp_message_path:
+        message_paths["flamp"] = flamp_message_path
+    else:
+        message_paths.pop("flamp", None)
     varac_incoming = _coerce_text(device_profile.get("varac_incoming_path", ""), "")
-    if varac_incoming:
+    if use_varac and varac_incoming:
         message_paths["varac"] = varac_incoming
+    else:
+        message_paths.pop("varac", None)
     updates: Dict[str, Any] = {
         "control_via": _legacy_control_via(control_backend),
         "rig_host": _coerce_text(device_profile.get("rig_host", ""), ""),
         "rig_port": _coerce_optional_int(device_profile.get("rig_port"), 4532),
-        "flrig_host": flrig_host,
-        "flrig_port": _coerce_optional_int(device_profile.get("flrig_port"), 12345),
-        "fldigi_host": fldigi_host,
-        "fldigi_port": _coerce_optional_int(device_profile.get("fldigi_port"), 7362),
-        "fldigi_log_path": _coerce_text(device_profile.get("fldigi_log_path", ""), ""),
-        "fldigi_checkin_dir": _coerce_text(device_profile.get("fldigi_checkin_dir", ""), ""),
-        "js8_host": js8_host,
-        "js8_port": _coerce_optional_int(device_profile.get("js8_port"), 2442),
-        "js8_offset_hz": _coerce_optional_int(device_profile.get("js8_offset_hz"), 0) or 0,
-        "js8_profile_path": _coerce_text(device_profile.get("js8_profile_path", ""), ""),
-        "js8_directed_path": _coerce_text(device_profile.get("js8_directed_path", ""), ""),
-        "js8_forms_path": _coerce_text(device_profile.get("js8_forms_path", ""), ""),
-        "varac_path": _coerce_text(device_profile.get("varac_install_path", ""), ""),
-        "varac_db_path": _coerce_text(device_profile.get("varac_db_path", ""), ""),
-        "varac_ini_path": _coerce_text(device_profile.get("varac_ini_path", ""), ""),
-        "varac_launch_cmd": _coerce_text(device_profile.get("launch_cmd", ""), ""),
+        "flrig_host": flrig_host if use_flrig else "",
+        "flrig_port": _coerce_optional_int(device_profile.get("flrig_port"), 12345) if use_flrig else None,
+        "fldigi_host": fldigi_host if use_fldigi else "",
+        "fldigi_port": _coerce_optional_int(device_profile.get("fldigi_port"), 7362) if use_fldigi else None,
+        "fldigi_log_path": _coerce_text(device_profile.get("fldigi_log_path", ""), "") if use_fldigi else "",
+        "fldigi_checkin_dir": _coerce_text(device_profile.get("fldigi_checkin_dir", ""), "") if use_fldigi else "",
+        "varac_outbox_dir": _coerce_text(device_profile.get("varac_outbox_dir", ""), "") if use_varac else "",
+        "varac_bbs_dir": _coerce_text(device_profile.get("varac_bbs_dir", ""), "") if use_varac else "",
+        "varac_bbs_archive_dir": _coerce_text(device_profile.get("varac_bbs_archive_dir", ""), "") if use_varac else "",
+        "varac_bbs_enabled": bool(_coerce_bool_int(device_profile.get("varac_bbs_enabled", 0), False)) if use_varac else False,
+        "varac_bbs_limit_access_enabled": bool(
+            _coerce_bool_int(device_profile.get("varac_bbs_limit_access_enabled", 0), False)
+        )
+        if use_varac
+        else False,
+        "varac_bbs_allowed_callsigns": _coerce_text(device_profile.get("varac_bbs_allowed_callsigns", ""), "") if use_varac else "",
+        "varac_bbs_announce_enabled": bool(
+            _coerce_bool_int(device_profile.get("varac_bbs_announce_enabled", 0), False)
+        )
+        if use_varac
+        else False,
+        "varac_bbs_auto_archive_enabled": bool(
+            _coerce_bool_int(device_profile.get("varac_bbs_auto_archive_enabled", 0), False)
+        )
+        if use_varac
+        else False,
+        "varac_bbs_auto_archive_days": _coerce_optional_int(device_profile.get("varac_bbs_auto_archive_days"), 14)
+        if use_varac
+        else 14,
+        "js8_host": js8_host if use_js8call else "",
+        "js8_port": _coerce_optional_int(device_profile.get("js8_port"), 2442) if use_js8call else None,
+        "js8_offset_hz": (_coerce_optional_int(device_profile.get("js8_offset_hz"), 0) or 0) if use_js8call else 0,
+        "js8_profile_path": _coerce_text(device_profile.get("js8_profile_path", ""), "") if use_js8call else "",
+        "js8_directed_path": _coerce_text(device_profile.get("js8_directed_path", ""), "") if use_js8call else "",
+        "js8_forms_path": _coerce_text(device_profile.get("js8_forms_path", ""), "") if use_js8call else "",
+        "varac_path": _coerce_text(device_profile.get("varac_install_path", ""), "") if use_varac else "",
+        "varac_db_path": _coerce_text(device_profile.get("varac_db_path", ""), "") if use_varac else "",
+        "varac_ini_path": _coerce_text(device_profile.get("varac_ini_path", ""), "") if use_varac else "",
+        "varac_launch_cmd": _coerce_text(device_profile.get("launch_cmd", ""), "") if use_varac else "",
         "message_paths": message_paths,
         "launch_control_enabled": bool(_coerce_bool_int(device_profile.get("launch_enabled", 1), True)),
     }
     flrig_path = _coerce_text(device_profile.get("flrig_path", ""), "")
-    if flrig_path:
+    if use_flrig and flrig_path:
         updates["path_flrig"] = flrig_path
-    if control_backend == "flrig" and not flrig_path:
+    elif use_flrig and control_backend == "flrig" and not flrig_path:
         updates["path_flrig"] = _coerce_text(device_profile.get("launch_path", ""), "")
+    else:
+        updates["path_flrig"] = ""
     fldigi_path = _coerce_text(device_profile.get("fldigi_path", ""), "")
-    if fldigi_path:
+    if use_fldigi and fldigi_path:
         updates["path_fldigi"] = fldigi_path
+    else:
+        updates["path_fldigi"] = ""
+    updates["path_flmsg"] = _coerce_text(device_profile.get("flmsg_path", ""), "") if use_flmsg else ""
+    updates["path_flamp"] = _coerce_text(device_profile.get("flamp_path", ""), "") if use_flamp else ""
     js8_install_path = _coerce_text(device_profile.get("js8_install_path", ""), "")
-    if js8_install_path:
+    if use_js8call and js8_install_path:
         updates["path_js8call"] = js8_install_path
-    if control_backend == "js8call" and not js8_install_path:
+    elif use_js8call and control_backend == "js8call" and not js8_install_path:
         updates["path_js8call"] = _coerce_text(device_profile.get("launch_path", ""), "")
+    else:
+        updates["path_js8call"] = ""
     spotter_launch = _coerce_text(device_profile.get("spotter_launch_path", ""), "")
-    if spotter_launch:
+    if use_js8spotter and spotter_launch:
         updates["path_js8spotter"] = spotter_launch
+    else:
+        updates["path_js8spotter"] = ""
     commstat_launch = _coerce_text(device_profile.get("commstat_launch_path", ""), "")
-    if commstat_launch:
+    if use_commstat and commstat_launch:
         updates["path_commstat"] = commstat_launch
+    else:
+        updates["path_commstat"] = ""
     scheduler_enabled = device_profile.get("scheduler_enabled")
     if scheduler_enabled is not None:
         updates["use_scheduler"] = bool(_coerce_bool_int(scheduler_enabled, True))
@@ -2012,6 +2124,7 @@ def _seed_device_defaults(
     flrig_host = _settings_text(settings_values, "flrig_host", "127.0.0.1") or "127.0.0.1"
     fldigi_host = _settings_text(settings_values, "fldigi_host", "") or flrig_host or "127.0.0.1"
     js8_host = _settings_text(settings_values, "js8_host", "127.0.0.1") or "127.0.0.1"
+    message_paths = settings_values.get("message_paths", {}) or {}
     launch_path = ""
     if control_backend == "flrig":
         launch_path = _settings_text(settings_values, "path_flrig", "")
@@ -2027,6 +2140,26 @@ def _seed_device_defaults(
         "device_class": "tx_rx",
         "deployment_mode": "full",
         "control_backend": control_backend,
+        "use_flrig": _coerce_bool_int(
+            control_backend == "flrig" or bool(_settings_text(settings_values, "path_flrig", "")),
+            False,
+        ),
+        "use_fldigi": _coerce_bool_int(
+            bool(_settings_text(settings_values, "path_fldigi", "") or _settings_text(settings_values, "fldigi_log_path", "")),
+            False,
+        ),
+        "use_flmsg": _coerce_bool_int(bool(_settings_text(settings_values, "path_flmsg", "")), False),
+        "use_flamp": _coerce_bool_int(bool(_settings_text(settings_values, "path_flamp", "")), False),
+        "use_js8call": _coerce_bool_int(
+            control_backend == "js8call" or bool(_settings_text(settings_values, "path_js8call", "")),
+            False,
+        ),
+        "use_js8spotter": _coerce_bool_int(bool(_settings_text(settings_values, "path_js8spotter", "")), False),
+        "use_commstat": _coerce_bool_int(bool(_settings_text(settings_values, "path_commstat", "")), False),
+        "use_varac": _coerce_bool_int(
+            bool(_settings_text(settings_values, "varac_path", "") or _settings_text(settings_values, "varac_launch_cmd", "")),
+            False,
+        ),
         "rig_host": _settings_text(settings_values, "rig_host", ""),
         "rig_port": _settings_optional_int(settings_values, "rig_port"),
         "flrig_host": flrig_host,
@@ -2035,6 +2168,10 @@ def _seed_device_defaults(
         "fldigi_port": _settings_int(settings_values, "fldigi_port", 7362),
         "fldigi_log_path": _settings_text(settings_values, "fldigi_log_path", ""),
         "fldigi_checkin_dir": _settings_text(settings_values, "fldigi_checkin_dir", ""),
+        "flmsg_path": _settings_text(settings_values, "path_flmsg", ""),
+        "flmsg_message_path": _coerce_text(message_paths.get("flmsg", ""), ""),
+        "flamp_path": _settings_text(settings_values, "path_flamp", ""),
+        "flamp_message_path": _coerce_text(message_paths.get("flamp", ""), ""),
         "js8_host": js8_host,
         "js8_port": _settings_int(settings_values, "js8_port", 2442),
         "js8_instance_id": int(js8_instance_id),
@@ -2046,6 +2183,24 @@ def _seed_device_defaults(
         "varac_db_path": _settings_text(settings_values, "varac_db_path", ""),
         "varac_ini_path": _settings_text(settings_values, "varac_ini_path", ""),
         "varac_node_id": int(varac_node_id),
+        "varac_outbox_dir": _settings_text(settings_values, "varac_outbox_dir", ""),
+        "varac_bbs_dir": _settings_text(settings_values, "varac_bbs_dir", ""),
+        "varac_bbs_archive_dir": _settings_text(settings_values, "varac_bbs_archive_dir", ""),
+        "varac_bbs_enabled": _coerce_bool_int(settings_values.get("varac_bbs_enabled"), False),
+        "varac_bbs_limit_access_enabled": _coerce_bool_int(
+            settings_values.get("varac_bbs_limit_access_enabled"),
+            False,
+        ),
+        "varac_bbs_allowed_callsigns": _settings_text(settings_values, "varac_bbs_allowed_callsigns", ""),
+        "varac_bbs_announce_enabled": _coerce_bool_int(
+            settings_values.get("varac_bbs_announce_enabled"),
+            False,
+        ),
+        "varac_bbs_auto_archive_enabled": _coerce_bool_int(
+            settings_values.get("varac_bbs_auto_archive_enabled"),
+            False,
+        ),
+        "varac_bbs_auto_archive_days": _settings_int(settings_values, "varac_bbs_auto_archive_days", 14),
         "launch_enabled": _coerce_bool_int(settings_values.get("launch_control_enabled"), True),
         "launch_path": launch_path,
         "launch_cmd": _settings_text(settings_values, "varac_launch_cmd", ""),
@@ -2154,6 +2309,10 @@ def mirror_legacy_settings_into_runtime_active_device(
         "fldigi_port": _settings_int(settings_values, "fldigi_port", 7362),
         "fldigi_log_path": _settings_text(settings_values, "fldigi_log_path", ""),
         "fldigi_checkin_dir": _settings_text(settings_values, "fldigi_checkin_dir", ""),
+        "flmsg_path": _settings_text(settings_values, "path_flmsg", ""),
+        "flmsg_message_path": _coerce_text((settings_values.get("message_paths", {}) or {}).get("flmsg", ""), ""),
+        "flamp_path": _settings_text(settings_values, "path_flamp", ""),
+        "flamp_message_path": _coerce_text((settings_values.get("message_paths", {}) or {}).get("flamp", ""), ""),
         "js8_host": js8_host,
         "js8_port": _settings_int(settings_values, "js8_port", 2442),
         "js8_profile_path": _settings_text(settings_values, "js8_profile_path", ""),
@@ -2162,6 +2321,24 @@ def mirror_legacy_settings_into_runtime_active_device(
         "varac_install_path": _settings_text(settings_values, "varac_path", ""),
         "varac_db_path": _settings_text(settings_values, "varac_db_path", ""),
         "varac_ini_path": _settings_text(settings_values, "varac_ini_path", ""),
+        "varac_outbox_dir": _settings_text(settings_values, "varac_outbox_dir", ""),
+        "varac_bbs_dir": _settings_text(settings_values, "varac_bbs_dir", ""),
+        "varac_bbs_archive_dir": _settings_text(settings_values, "varac_bbs_archive_dir", ""),
+        "varac_bbs_enabled": _coerce_bool_int(settings_values.get("varac_bbs_enabled"), False),
+        "varac_bbs_limit_access_enabled": _coerce_bool_int(
+            settings_values.get("varac_bbs_limit_access_enabled"),
+            False,
+        ),
+        "varac_bbs_allowed_callsigns": _settings_text(settings_values, "varac_bbs_allowed_callsigns", ""),
+        "varac_bbs_announce_enabled": _coerce_bool_int(
+            settings_values.get("varac_bbs_announce_enabled"),
+            False,
+        ),
+        "varac_bbs_auto_archive_enabled": _coerce_bool_int(
+            settings_values.get("varac_bbs_auto_archive_enabled"),
+            False,
+        ),
+        "varac_bbs_auto_archive_days": _settings_int(settings_values, "varac_bbs_auto_archive_days", 14),
         "launch_enabled": _coerce_bool_int(settings_values.get("launch_control_enabled"), True),
         "launch_path": launch_path,
         "launch_cmd": _settings_text(settings_values, "varac_launch_cmd", ""),
@@ -2314,6 +2491,12 @@ class MultiRadioStore:
         record = {
             "system_key": system_key,
             "name": _coerce_text(payload.get("name", (existing or {}).get("name", "Device Profile")), "Device Profile") or "Device Profile",
+            "radio_catalog_id": _coerce_text(payload.get("radio_catalog_id", (existing or {}).get("radio_catalog_id", "")), ""),
+            "radio_manufacturer": _coerce_text(
+                payload.get("radio_manufacturer", (existing or {}).get("radio_manufacturer", "")),
+                "",
+            ),
+            "radio_model": _coerce_text(payload.get("radio_model", (existing or {}).get("radio_model", "")), ""),
             "enabled": _coerce_bool_int(payload.get("enabled", (existing or {}).get("enabled", 1)), True),
             "runtime_active": _coerce_bool_int(payload.get("runtime_active", (existing or {}).get("runtime_active", 0)), False),
             "runtime_primary": _coerce_bool_int(payload.get("runtime_primary", (existing or {}).get("runtime_primary", 0)), False),
@@ -2321,6 +2504,14 @@ class MultiRadioStore:
             "device_class": device_class,
             "deployment_mode": deployment_mode,
             "control_backend": control_backend,
+            "use_flrig": _coerce_bool_int(payload.get("use_flrig", (existing or {}).get("use_flrig", 0)), control_backend == "flrig"),
+            "use_fldigi": _coerce_bool_int(payload.get("use_fldigi", (existing or {}).get("use_fldigi", 0)), False),
+            "use_flmsg": _coerce_bool_int(payload.get("use_flmsg", (existing or {}).get("use_flmsg", 0)), False),
+            "use_flamp": _coerce_bool_int(payload.get("use_flamp", (existing or {}).get("use_flamp", 0)), False),
+            "use_js8call": _coerce_bool_int(payload.get("use_js8call", (existing or {}).get("use_js8call", 0)), control_backend == "js8call"),
+            "use_js8spotter": _coerce_bool_int(payload.get("use_js8spotter", (existing or {}).get("use_js8spotter", 0)), False),
+            "use_commstat": _coerce_bool_int(payload.get("use_commstat", (existing or {}).get("use_commstat", 0)), False),
+            "use_varac": _coerce_bool_int(payload.get("use_varac", (existing or {}).get("use_varac", 0)), False),
             "rig_host": _coerce_text(payload.get("rig_host", (existing or {}).get("rig_host", "")), ""),
             "rig_port": _coerce_optional_int(payload.get("rig_port", (existing or {}).get("rig_port"))),
             "flrig_host": flrig_host,
@@ -2329,6 +2520,16 @@ class MultiRadioStore:
             "fldigi_port": _coerce_optional_int(payload.get("fldigi_port", (existing or {}).get("fldigi_port")), 7362),
             "fldigi_log_path": _coerce_text(payload.get("fldigi_log_path", (existing or {}).get("fldigi_log_path", "")), ""),
             "fldigi_checkin_dir": _coerce_text(payload.get("fldigi_checkin_dir", (existing or {}).get("fldigi_checkin_dir", "")), ""),
+            "flmsg_path": _coerce_text(payload.get("flmsg_path", (existing or {}).get("flmsg_path", "")), ""),
+            "flmsg_message_path": _coerce_text(
+                payload.get("flmsg_message_path", (existing or {}).get("flmsg_message_path", "")),
+                "",
+            ),
+            "flamp_path": _coerce_text(payload.get("flamp_path", (existing or {}).get("flamp_path", "")), ""),
+            "flamp_message_path": _coerce_text(
+                payload.get("flamp_message_path", (existing or {}).get("flamp_message_path", "")),
+                "",
+            ),
             "js8_host": js8_host,
             "js8_port": _coerce_optional_int(payload.get("js8_port", (existing or {}).get("js8_port")), 2442),
             "js8_instance_id": js8_instance_id,
@@ -2340,6 +2541,54 @@ class MultiRadioStore:
             "varac_db_path": _coerce_text(payload.get("varac_db_path", (existing or {}).get("varac_db_path", "")), ""),
             "varac_ini_path": _coerce_text(payload.get("varac_ini_path", (existing or {}).get("varac_ini_path", "")), ""),
             "varac_node_id": varac_node_id,
+            "varac_outbox_dir": _coerce_text(
+                payload.get("varac_outbox_dir", (existing or {}).get("varac_outbox_dir", "")),
+                "",
+            ),
+            "varac_bbs_dir": _coerce_text(payload.get("varac_bbs_dir", (existing or {}).get("varac_bbs_dir", "")), ""),
+            "varac_bbs_archive_dir": _coerce_text(
+                payload.get("varac_bbs_archive_dir", (existing or {}).get("varac_bbs_archive_dir", "")),
+                "",
+            ),
+            "varac_bbs_enabled": _coerce_bool_int(
+                payload.get("varac_bbs_enabled", (existing or {}).get("varac_bbs_enabled", 0)),
+                False,
+            ),
+            "varac_bbs_limit_access_enabled": _coerce_bool_int(
+                payload.get(
+                    "varac_bbs_limit_access_enabled",
+                    (existing or {}).get("varac_bbs_limit_access_enabled", 0),
+                ),
+                False,
+            ),
+            "varac_bbs_allowed_callsigns": _coerce_text(
+                payload.get(
+                    "varac_bbs_allowed_callsigns",
+                    (existing or {}).get("varac_bbs_allowed_callsigns", ""),
+                ),
+                "",
+            ),
+            "varac_bbs_announce_enabled": _coerce_bool_int(
+                payload.get(
+                    "varac_bbs_announce_enabled",
+                    (existing or {}).get("varac_bbs_announce_enabled", 0),
+                ),
+                False,
+            ),
+            "varac_bbs_auto_archive_enabled": _coerce_bool_int(
+                payload.get(
+                    "varac_bbs_auto_archive_enabled",
+                    (existing or {}).get("varac_bbs_auto_archive_enabled", 0),
+                ),
+                False,
+            ),
+            "varac_bbs_auto_archive_days": _coerce_optional_int(
+                payload.get(
+                    "varac_bbs_auto_archive_days",
+                    (existing or {}).get("varac_bbs_auto_archive_days", 14),
+                ),
+                14,
+            ),
             "launch_enabled": _coerce_bool_int(payload.get("launch_enabled", (existing or {}).get("launch_enabled", 1)), True),
             "launch_path": _coerce_text(payload.get("launch_path", (existing or {}).get("launch_path", "")), ""),
             "launch_cmd": _coerce_text(payload.get("launch_cmd", (existing or {}).get("launch_cmd", "")), ""),

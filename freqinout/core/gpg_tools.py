@@ -30,7 +30,9 @@ class SignatureResult:
     gpg_status: str = ""
 
 
-DEFAULT_INLINE_SIGNED_SUFFIXES: Tuple[str, ...] = ("-sig.k2s", "-sig.b2s")
+DEFAULT_INLINE_SIGNED_SUFFIXES: Tuple[str, ...] = ("-sig.k2s", "-sig.b2s", ".sig.k2s", ".sig.b2s")
+DETACHED_SIGNATURE_SUFFIXES: Tuple[str, ...] = (".sig", ".asc", ".gpg")
+FLAMP_PAYLOAD_SUFFIXES: Tuple[str, ...] = (".k2s", ".b2s")
 _PGP_CLEARSIGNED_HEADER = b"-----BEGIN PGP SIGNED MESSAGE-----"
 
 
@@ -79,6 +81,10 @@ def _looks_like_clearsigned(file_path: Path, *, max_scan_bytes: int = 65536) -> 
     except Exception:
         return False
     return _PGP_CLEARSIGNED_HEADER in head
+
+
+def is_detached_signature_file(file_path: Path) -> bool:
+    return str(Path(file_path).suffix or "").strip().lower() in DETACHED_SIGNATURE_SUFFIXES
 
 
 def resolve_gpg_executable(configured_path: str = "") -> Optional[str]:
@@ -259,15 +265,49 @@ def local_sign_key(fingerprint: str, configured_path: str = "", gnupg_home: str 
     return True, detail
 
 
+def clearsign_file(
+    file_path: str | Path,
+    *,
+    output_path: str | Path,
+    configured_path: str = "",
+    gnupg_home: str = "",
+) -> Tuple[bool, str]:
+    gpg_path = resolve_gpg_executable(configured_path)
+    if not gpg_path:
+        return False, "GPG executable not found."
+    src = Path(str(file_path or "").strip())
+    dst = Path(str(output_path or "").strip())
+    if not src.exists() or not src.is_file():
+        return False, "Message file not found."
+    if not str(dst):
+        return False, "Missing output path."
+    try:
+        cp = _run_gpg(
+            gpg_path,
+            ["--armor", "--clearsign", "--output", str(dst), str(src)],
+            gnupg_home=gnupg_home,
+            timeout_sec=45.0,
+        )
+    except Exception as e:
+        return False, f"Clearsign failed: {e}"
+    if cp.returncode != 0:
+        detail = (cp.stderr or cp.stdout or "").strip() or f"exit code {cp.returncode}"
+        return False, f"Clearsign failed: {detail}"
+    if not dst.exists():
+        return False, "Clearsign did not create an output file."
+    detail = (cp.stderr or cp.stdout or "").strip() or f"Signed file created: {dst}"
+    return True, detail
+
+
 def signature_candidates(file_path: Path) -> List[Path]:
     out: List[Path] = []
     name = file_path.name
     stem = file_path.stem
-    for ext in (".sig", ".asc", ".gpg"):
+    for ext in DETACHED_SIGNATURE_SUFFIXES:
         out.append(file_path.with_name(name + ext))
-    for ext in (".sig", ".asc", ".gpg"):
+    for ext in DETACHED_SIGNATURE_SUFFIXES:
         out.append(file_path.with_suffix(ext))
-    for ext in (".sig", ".asc", ".gpg"):
+    for ext in DETACHED_SIGNATURE_SUFFIXES:
         out.append(file_path.with_name(stem + ext))
     dedup: List[Path] = []
     seen: Set[str] = set()
@@ -278,6 +318,39 @@ def signature_candidates(file_path: Path) -> List[Path]:
         seen.add(key)
         dedup.append(cand)
     return dedup
+
+
+def signature_payload_candidates(signature_path: Path) -> List[Path]:
+    sig_ref = Path(signature_path)
+    if not is_detached_signature_file(sig_ref):
+        return []
+    base = sig_ref.with_suffix("")
+    out: List[Path] = []
+    if str(base.suffix or "").strip().lower() in FLAMP_PAYLOAD_SUFFIXES:
+        out.append(base)
+    else:
+        for ext in FLAMP_PAYLOAD_SUFFIXES:
+            out.append(base.with_name(base.name + ext))
+        out.append(base)
+    dedup: List[Path] = []
+    seen: Set[str] = set()
+    for cand in out:
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(cand)
+    return dedup
+
+
+def find_payload_for_signature(signature_path: Path) -> Optional[Path]:
+    for cand in signature_payload_candidates(signature_path):
+        try:
+            if cand.exists() and cand.is_file():
+                return cand
+        except Exception:
+            continue
+    return None
 
 
 def find_detached_signature(file_path: Path) -> Optional[Path]:
@@ -302,6 +375,33 @@ def verify_file_with_discovery(
     file_ref = Path(file_path)
     if not file_ref.exists() or not file_ref.is_file():
         return SignatureResult(status="error", detail="Message file not found.")
+
+    if allow_inline_clearsigned and _looks_like_clearsigned(file_ref):
+        return verify_inline_clearsigned(
+            file_ref,
+            configured_path=configured_path,
+            gnupg_home=gnupg_home,
+            trusted_fingerprints=trusted_fingerprints,
+        )
+
+    if is_detached_signature_file(file_ref):
+        payload = find_payload_for_signature(file_ref)
+        if payload:
+            result = verify_detached_signature(
+                payload,
+                file_ref,
+                configured_path=configured_path,
+                gnupg_home=gnupg_home,
+                trusted_fingerprints=trusted_fingerprints,
+            )
+            result.signature_path = str(file_ref)
+            return result
+        return SignatureResult(
+            status="unsigned",
+            detail="Detached signature payload not found.",
+            signature_path=str(file_ref),
+        )
+
     sig = find_detached_signature(file_ref)
     if sig:
         result = verify_detached_signature(
@@ -319,13 +419,6 @@ def verify_file_with_discovery(
             inline_name_suffixes if inline_name_suffixes is not None else DEFAULT_INLINE_SIGNED_SUFFIXES
         )
         if suffixes and _file_name_matches_suffixes(file_ref, suffixes):
-            if _looks_like_clearsigned(file_ref):
-                return verify_inline_clearsigned(
-                    file_ref,
-                    configured_path=configured_path,
-                    gnupg_home=gnupg_home,
-                    trusted_fingerprints=trusted_fingerprints,
-                )
             return SignatureResult(status="unsigned", detail="No embedded PGP clearsigned content found.")
 
     return SignatureResult(status="unsigned", detail="No detached signature found.")

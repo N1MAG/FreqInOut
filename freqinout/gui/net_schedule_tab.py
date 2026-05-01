@@ -52,7 +52,8 @@ from freqinout.core.sop_manager import SOPManager
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.logger import log
 from freqinout.utils.timezones import get_timezone
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.theme import resolve_theme, button_style, font_css
 
 
 # ---- Band / Mode metadata (keep in sync with HF tab) ----
@@ -267,6 +268,14 @@ class NetScheduleTab(QWidget):
         self._setup_clock_timer()
         self._suppress_autostart = False
 
+    def _open_context_help(self, context_key: str) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help(context_key)
+            except Exception:
+                pass
+
     # --------- UI --------- #
 
     def _build_ui(self):
@@ -275,6 +284,10 @@ class NetScheduleTab(QWidget):
         # header with clocks
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Net Schedules</h3>"))
+        self.help_btn = QPushButton("Help")
+        self.help_btn.setToolTip("Open Net Schedules help.")
+        self.help_btn.clicked.connect(lambda: self._open_context_help("tab.hf-nets"))
+        header.addWidget(self.help_btn)
         header.addStretch()
         self.utc_label = QLabel()
         self.local_label = QLabel()
@@ -341,13 +354,14 @@ class NetScheduleTab(QWidget):
         self.add_to_schedule_btn = QToolButton()
         self.add_to_schedule_btn.setPopupMode(QToolButton.MenuButtonPopup)
         add_menu = QMenu(self.add_to_schedule_btn)
-        self.add_selected_resource_action = QAction("Add Selected to Net Schedule", self)
-        self.add_filtered_resource_action = QAction("Add Filtered to Net Schedule", self)
+        self.add_selected_resource_action = QAction("Add Selected to Schedule", self)
+        self.add_filtered_resource_action = QAction("Add Filtered to Schedule", self)
         add_menu.addAction(self.add_selected_resource_action)
         add_menu.addAction(self.add_filtered_resource_action)
         self.add_to_schedule_btn.setMenu(add_menu)
-        self.add_to_schedule_default_action = QAction("Add to Net Schedule", self)
+        self.add_to_schedule_default_action = QAction("Add to Schedule", self)
         self.add_to_schedule_btn.setDefaultAction(self.add_to_schedule_default_action)
+        self.add_to_schedule_btn.setFont(self.add_btn.font())
 
         self.manage_resources_btn = QToolButton()
         self.manage_resources_btn.setPopupMode(QToolButton.MenuButtonPopup)
@@ -358,10 +372,11 @@ class NetScheduleTab(QWidget):
         manage_menu.addSeparator()
         manage_menu.addAction(self.manage_export_new_action)
         self.manage_resources_btn.setMenu(manage_menu)
-        self.manage_resources_default_action = QAction("Manage Net Resources", self)
+        self.manage_resources_default_action = QAction("Manage", self)
         self.manage_resources_btn.setDefaultAction(self.manage_resources_default_action)
+        self.manage_resources_btn.setFont(self.add_btn.font())
 
-        self.edit_resource_btn = QPushButton("Edit Selected Resource")
+        self.edit_resource_btn = QPushButton("Edit Selected")
         self.delete_resource_btn = QPushButton("Delete Selected Resources")
         res_controls.addWidget(self.add_to_schedule_btn)
         res_controls.addWidget(self.manage_resources_btn)
@@ -469,7 +484,8 @@ class NetScheduleTab(QWidget):
         return (
             "Station rows apply to any current station-default runtime. "
             "Device Profile rows apply only when that device is the station default. "
-            "Operating Profile rows apply only when the station-default device carries that effective assignment."
+            "Operating Profile rows apply only when the station-default device carries that effective assignment. "
+            "Full radio-owned schedule orchestration is a later-phase feature and is not modeled by these compatibility targets."
         )
 
     def _populate_target_value_combo(
@@ -617,15 +633,19 @@ class NetScheduleTab(QWidget):
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        menu_font_css = font_css(self.add_btn.font())
         self._update_time_toggle_style(theme)
+        self.help_btn.setStyleSheet(button_style("secondary", theme))
         self.add_btn.setStyleSheet(button_style("primary", theme))
         self.del_btn.setStyleSheet(button_style("muted", theme))
         self.move_to_resources_btn.setStyleSheet(button_style("muted", theme))
         self.export_btn.setStyleSheet(button_style("info", theme))
         self.manage_net_sop_policies_btn.setStyleSheet(button_style("muted", theme))
         self._refresh_save_button_state(theme)
-        self.add_to_schedule_btn.setStyleSheet(button_style("muted", theme))
-        self.manage_resources_btn.setStyleSheet(button_style("muted", theme))
+        self.add_to_schedule_btn.setStyleSheet(button_style("muted", theme) + menu_font_css)
+        self.add_to_schedule_btn.setFont(self.add_btn.font())
+        self.manage_resources_btn.setStyleSheet(button_style("muted", theme) + menu_font_css)
+        self.manage_resources_btn.setFont(self.add_btn.font())
         self.edit_resource_btn.setStyleSheet(button_style("muted", theme))
         self.delete_resource_btn.setStyleSheet(button_style("muted", theme))
         self._update_delete_button_state()
@@ -4413,7 +4433,7 @@ class NetScheduleTab(QWidget):
         self._highlight_resource_candidates(resources)
         confirm = QMessageBox.question(
             self,
-            "Add to Net Schedule",
+            "Add to Schedule",
             f"Add Selected {len(candidates)} Nets for Automated Scheduling?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,

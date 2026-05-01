@@ -569,7 +569,7 @@ class OperatorHistoryTab(QWidget):
                 "age": self._age_text_from_epoch(ts_val),
                 "transport": "",
                 "report_group": "",
-                "state": "",
+                "sitrep_state": "",
                 "state_confidence": "",
                 "geo_confidence": "",
                 "brevity_summary": "",
@@ -645,7 +645,7 @@ class OperatorHistoryTab(QWidget):
                 "age": self._age_text_from_epoch(ts_val),
                 "transport": transport_label(latest_transport_mode),
                 "report_group": str(latest_report_group or "").strip().upper(),
-                "state": str(latest_state_code or "").strip().upper(),
+                "sitrep_state": str(latest_state_code or "").strip().upper(),
                 "state_confidence": str(latest_state_confidence or "").strip().lower(),
                 "geo_confidence": str(latest_geo_confidence or "").strip().lower(),
                 "brevity_summary": str(latest_brevity_summary or "").strip(),
@@ -673,7 +673,7 @@ class OperatorHistoryTab(QWidget):
         conflict = bool(row.get("sitrep_conflict"))
         report_group = (row.get("report_group") or "").strip()
         transport = (row.get("transport") or "").strip()
-        state = (row.get("state") or "").strip()
+        state = (row.get("sitrep_state") or "").strip()
         state_conf = (row.get("state_confidence") or "").strip()
         geo_conf = (row.get("geo_confidence") or "").strip()
         brevity = (row.get("brevity_summary") or "").strip()
@@ -1025,7 +1025,7 @@ class OperatorHistoryTab(QWidget):
                             "sitrep_source_chips": sitrep_map.get((cs or "").strip().upper(), {}).get("source_chips", ""),
                             "report_group": sitrep_map.get((cs or "").strip().upper(), {}).get("report_group", ""),
                             "transport": sitrep_map.get((cs or "").strip().upper(), {}).get("transport", ""),
-                            "state": sitrep_map.get((cs or "").strip().upper(), {}).get("state", ""),
+                            "sitrep_state": sitrep_map.get((cs or "").strip().upper(), {}).get("sitrep_state", ""),
                             "state_confidence": sitrep_map.get((cs or "").strip().upper(), {}).get("state_confidence", ""),
                             "geo_confidence": sitrep_map.get((cs or "").strip().upper(), {}).get("geo_confidence", ""),
                             "brevity_summary": sitrep_map.get((cs or "").strip().upper(), {}).get("brevity_summary", ""),

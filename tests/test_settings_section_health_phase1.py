@@ -267,6 +267,37 @@ def test_settings_section_health_warns_for_partial_varac_setup(monkeypatch, tmp_
     assert "Install folder or launch override missing" in str(varac_item.toolTip())
 
 
+def test_varac_cluster_mode_hides_and_reveals_cluster_sections(monkeypatch, tmp_path):
+    if sys.platform == "darwin":
+        pytest.skip("PySide6 QtWidgets import aborts in this macOS test environment")
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
+
+    tab = SettingsTab()
+    try:
+        clusters_item = _nav_item(tab, "VarAC Clusters")
+        memberships_item = _nav_item(tab, "VarAC Memberships")
+        assert clusters_item.isHidden() is True
+        assert memberships_item.isHidden() is True
+
+        tab.varac_cluster_mode_chk.setChecked(True)
+        app.processEvents()
+
+        assert clusters_item.isHidden() is False
+        assert memberships_item.isHidden() is False
+    finally:
+        tab.deleteLater()
+        app.processEvents()
+
+
 def test_settings_section_health_warns_when_varac_install_folder_missing_incoming_files(monkeypatch, tmp_path):
     if sys.platform == "darwin":
         pytest.skip("PySide6 QtWidgets import aborts in this macOS test environment")

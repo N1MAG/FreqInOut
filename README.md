@@ -29,21 +29,14 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
-## What's New in v1.2.2
+## What's New in v1.2.3
 
-- Added CommStat sitrep fusion under the unified `SitRep` message family, including source/receipt metadata, brevity decode support, shared latest-status fusion with JS8Spotter, and map/operator history integration.
-- Added `HF Operators -> Manage Operators -> Sync to VarAC` to maintain `VarAC_callsign_tags.conf` from known operator rows, using the unquoted `CALLSIGN,NAME / STATE / GROUP1 / GROUP2 / GROUP3 / ROLE` format.
-- Improved Settings setup guidance with warning-highlighted section chips for incomplete single-radio configuration, including JS8Call companion fields, Fast Light endpoint/file-path gaps, and missing VarAC incoming-files path.
-- Fixed ControlFreq so `Next Change` shows the upcoming target frequency, the hero frequency re-syncs more reliably to the actual radio state, and changing the hold preset updates an already active hold immediately.
-- Fixed ControlFreq `Activity` so the selected time window reflects actual recent traffic rather than schedule-start proximity.
-- Fixed Map operator activity semantics so `Last Seen` reflects latest observed activity, `Last Contact` reflects direct inbound contact only, and sitrep-focused views can show receipt/source/state summary data with a bottom-docked legend.
-- Fixed `Messages` transport-form handling so `.k2s` fallback payloads decode through the same friendly path as `.b2s` where possible.
-- Fixed `HF Operator History` CSV import so Excel `CSV UTF-8` files with BOM import cleanly.
-- Added the Reliability Baseline updates: background ingest now runs off the GUI thread, `operator_checkins` schema repair/init is centralized in core DB code, and VarAC local mirror tables are created during cold-start initialization
-- Fixed software-status validation so `JS8Call`, `FLRig`, and `FLDigi` badges are endpoint-aware, with persisted `FLDigi` XML-RPC host/port settings and Settings probes that honor the currently entered endpoint values
-- Fixed runtime profile consistency so logging, updater downloads, and DB admin tooling operate on the same active profile root as the running app
-- Hardened the updater by validating downloaded ZIP entry paths before extraction and rejecting unsafe archive contents
-- Simplified startup single-instance locking and changed WebEngine startup prewarm to default on for Windows and off for macOS/Linux unless explicitly overridden in settings
+- FLDigi Net Control now uses a unified editable local roster table for the left-side working area, with category outputs and live check-in file sync derived from the roster rather than the legacy TFC/QRU/LATE text buckets.
+- Added FLDigi macro-profile discovery and mapping for `.mdf` files, including structured `<FILE:...>` parsing, review-only fallback separation, and safe persistence of operator-configured rows without activating mapped mode until a complete enabled mapping exists.
+- Added profile-scoped persistence with absolute-path keys, profile-local custom-name fallback, and reviewable storage for incomplete or disabled operator edits instead of silently discarding them.
+- Added FLDigi log-assisted intake TX-context support so the most recent TX prompt can annotate later RX review candidates across incremental polls without creating inbound check-ins or changing RX-only intake semantics.
+- Fixed Task 2 regression coverage so the real `.mdf` fixture, manual fallback review paths, and activation/persistence split stay covered before Task 3.
+- Fixed Task 3 workspace refinement so enabled custom mappings surface as visible workspace cards and compare options stay aligned with the current role and mapped profile.
 
 ## Quick Start
 

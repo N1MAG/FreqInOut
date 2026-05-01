@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from freqinout.gui import qsy_helper
+from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.operator_history_tab import OperatorHistoryTab
 from freqinout.gui.stations_map_tab import StationsMapTab
@@ -90,6 +92,53 @@ def test_scheduler_status_summary_reports_next_transition_frequency(monkeypatch,
         assert summary["next_frequency_mhz"] == pytest.approx(7.115)
     finally:
         engine.deleteLater()
+
+
+def test_controlfreq_next_change_falls_back_to_schedule_outlook(monkeypatch, tmp_path):
+    app = _app()
+    assert app is not None
+
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    monkeypatch.setattr(ControlFreqTab, "_refresh_all", lambda self, **_kwargs: None)
+
+    preview_when = dt.datetime(2026, 4, 30, 20, 0, tzinfo=dt.timezone.utc)
+    fake_summary = {
+        "source": "NONE",
+        "net_kind": "",
+        "source_reason_detail": "",
+        "sop_contention": False,
+        "sop_contention_profiles": [],
+        "sop_selected_profile": "",
+        "next_source": "NONE",
+        "next_net_kind": "",
+        "next_source_change": False,
+        "next_transition_note": "",
+        "off_schedule": False,
+        "next_frequency_mhz": None,
+    }
+    fake_scheduler = SimpleNamespace(
+        next_change_utc=None,
+        get_status_summary=lambda: dict(fake_summary),
+    )
+
+    tab = ControlFreqTab()
+    try:
+        monkeypatch.setattr(tab, "window", lambda: SimpleNamespace(scheduler=fake_scheduler))
+        tab._show_local = False
+        tab._next_schedule_outlook_preview = {
+            "when_utc": preview_when,
+            "freq_mhz": 14.115,
+            "type": "HF",
+            "group": "MAGNET",
+        }
+
+        tab._refresh_scheduler_strip(fake_summary)
+
+        assert tab.next_change_label.text() == "Next Change: 14.115 20:00"
+        assert "Schedule Outlook fallback" in tab.next_change_label.toolTip()
+    finally:
+        tab.deleteLater()
 
 
 def test_operator_history_import_accepts_utf8_bom(monkeypatch, tmp_path):

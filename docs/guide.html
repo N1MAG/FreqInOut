@@ -263,14 +263,27 @@
     <li><strong>4) Use <code>Clear Filters</code> only to reset the temporary filters</strong>: it clears the filter row and search box, but intentionally leaves your hidden-type choices in place for the next session.</li>
   </ol>
 
+  <h3 id="messages-compose">Compose and Staging</h3>
+  <ul class="section-list">
+    <li><strong>Mode switch</strong>: use <code>Inbox</code> and <code>Compose</code> to move between received traffic review and outbound form staging.</li>
+    <li><strong>Compose setup</strong>: choose form family and template, priority, send target, optional VarAC copy target, and report title before staging files.</li>
+    <li><strong>Report title</strong>: keep the title short and file-safe. FreqInOut removes spaces and minimizes punctuation in the staged filename.</li>
+    <li><strong>Refresh Forms</strong>: reloads the available NBEMS forms from your configured source folders without restarting the app.</li>
+    <li><strong>Open Source Folder</strong>: opens the source folder for the currently selected form family so you can confirm templates or supporting files.</li>
+    <li><strong>VarAC copy choices</strong>: when selected, FreqInOut stages the finished file and then copies it to the configured VarAC destination such as <code>Outbox</code> or <code>BBS</code>.</li>
+    <li><strong>FLAmp signing flow</strong>: when the compose destination includes FLAmp, signing options apply only to the staged FLAmp output. Signature verification for received traffic remains governed by <code>Settings &gt; Message Auth (Key/Hash)</code>.</li>
+  </ul>
+
   <h3 id="messages-bbs-archive">BBS Archive and Auto-Archive</h3>
   <p>Use this to keep your BBS folder clean without deleting files.</p>
   <ul class="section-list">
+    <li><strong>Manage VarAC BBS</strong>: opens <code>Settings &gt; VarAC Settings</code>, which is the authoritative place to configure BBS folders, access controls, and INI sync.</li>
     <li><strong>Manual archive</strong>: click <code>Archive</code> on a BBS row to move just that file now.</li>
     <li><strong>Auto-archive timing</strong>: with <code>Enable Auto-Archive</code> on, checks run when you first open Messages after startup, then about once per day.</li>
     <li><strong>Age rule</strong>: files older than <code>After &lt;days&gt; days</code> are moved.</li>
     <li><strong>Required setup</strong>: <code>BBS Directory</code> and <code>BBS Archive</code> must both exist and be different folders.</li>
     <li><strong>Archived rows</strong>: archived BBS files stay visible in Messages with an <code>[Archived]</code> title prefix so you can still <code>View</code> or <code>Delete</code> them from the archive folder.</li>
+    <li><strong>Operational inspiration</strong>: FreqInOut's VarAC BBS management direction is informed by KG5RKW's Vault and VGuard workflows.</li>
   </ul>
 
   <h2 id="map">Map</h2>
@@ -300,6 +313,13 @@
   <ul class="section-list">
     <li><strong>Layers Display</strong>: <code>Callsigns</code>, <code>Regions</code>, <code>States</code>, <code>Cities</code>, <code>Grids</code>, plus city population filter.</li>
     <li><strong>Propagation</strong>: <code>Enable Propagation Overlay</code>, <code>Mode</code> (Actual/Blended/Modeled), <code>Window</code>, <code>Target</code>, <code>Value</code>, and best-band badge.</li>
+  </ul>
+  <h3 id="map-paths">Paths, Paths To, and Peer Sched Now</h3>
+  <ul class="section-list">
+    <li><strong>Paths</strong>: controls whether path overlays are hidden, limited to your station, or shown for all available recent links.</li>
+    <li><strong>Paths To</strong>: narrows the decision-support view to a specific target callsign so you can compare direct visibility and likely shared intermediates.</li>
+    <li><strong>Peer Sched Now</strong>: overlays stations that are expected to be on-air now according to peer schedules. This is schedule guidance, not proof of current RF reachability.</li>
+    <li><strong>Decision-support note</strong>: FreqInOut map paths are designed for operator awareness and quick relay context. They do not replace deeper routing-analysis tools.</li>
   </ul>
   <ul class="section-list">
     <li><strong>Station activity tooltip</strong>: <code>Last Seen</code> is the most recent observed on-air activity, while <code>Last Contact</code> is the most recent direct inbound contact with your station. Outbound unanswered attempts do not count as contact.</li>
@@ -717,6 +737,34 @@
     <li><strong>VarAC completeness</strong>: warning highlights can appear when <code>VarAC Install Folder</code> is set without <code>Incoming Files</code>.</li>
   </ul>
 
+  <h3 id="settings-operator-info">Operator Information</h3>
+  <ul class="section-list">
+    <li><strong>Callsign</strong>: used throughout the app for message naming, schedule logic, and operator identity.</li>
+    <li><strong>Name and State</strong>: carried into operator history, form defaults, and some message workflows.</li>
+    <li><strong>Grid 6</strong>: used by mapping, propagation, and geographic decision-support features.</li>
+  </ul>
+
+  <h3 id="settings-freqinout-details">FreqInOut Settings Details</h3>
+  <ul class="section-list">
+    <li><strong>Theme and Text Size</strong>: control overall readability and platform consistency.</li>
+    <li><strong>Frequency Control</strong>: selects how FreqInOut drives or advises radio control in the current station model.</li>
+    <li><strong>Use FreqInOut Scheduler</strong>: enables automatic schedule-driven behavior.</li>
+    <li><strong>Enforcement and prompt intervals</strong>: choose whether corrections happen automatically on schedule changes or wait for user confirmation.</li>
+  </ul>
+
+  <h3 id="settings-js8call-details">JS8Call Settings Details</h3>
+  <ul class="section-list">
+    <li><strong>Host and Port</strong>: point FreqInOut to the JS8Call TCP API.</li>
+    <li><strong>DIRECTED.TXT and inbox paths</strong>: give FreqInOut the local files it needs for message and link-data workflows.</li>
+    <li><strong>Load JS8 Traffic</strong>: manually rebuilds JS8 traffic evidence used by Map and related views.</li>
+  </ul>
+
+  <h3 id="settings-fast-light-details">Fast Light Settings Details</h3>
+  <ul class="section-list">
+    <li><strong>Projection view</strong>: this section shows the current FLRig, FLDigi, FLMsg, and FLAmp compatibility shell for the selected <code>Station Default</code> device.</li>
+    <li><strong>Endpoint readiness</strong>: use it to confirm XMLRPC, message-folder, and launch-path values before relying on schedule-driven workflows.</li>
+  </ul>
+
   <h3 id="settings-device-profiles-details">Device Profiles and Station Default Details</h3>
   <ul class="section-list">
     <li><strong>Runtime-active vs Station Default</strong>: <code>Active</code> means the device participates in runtime monitoring. <code>Default</code> marks the one non-observer device that owns the current compatibility shell.</li>
@@ -758,13 +806,23 @@
     <li><strong>Condition levels</strong>: group-scoped; toggling one row applies to all rows for the same Group.</li>
   </ul>
 
+  <h3 id="settings-local-comms-details">Local Comms Groups Details</h3>
+  <ul class="section-list">
+    <li><strong>Local planning rows</strong>: capture nearby resources, targets, and notes used for local coordination.</li>
+    <li><strong>Reusable structure</strong>: keep local operating information consistent so it can be reused across tabs and workflows.</li>
+  </ul>
+
   <h3 id="settings-varac-details">VarAC Settings Details</h3>
   <ul class="section-list">
+    <li><strong>VarAC INI File</strong>: direct path to the selected radio's <code>VarAC.ini</code>. Use this when auto-detection is not enough or when you want to sync BBS policy from the authoritative INI.</li>
     <li><strong>BBS Directory</strong>: where incoming BBS files are read from.</li>
     <li><strong>BBS Archive</strong>: where archived BBS files are moved to.</li>
+    <li><strong>BBS Access</strong>: <code>Enable BBS</code>, <code>Limit Access To Callsigns</code>, <code>Announce</code>, and <code>Allowed Callsigns</code> mirror the authoritative <code>[BBS]</code> settings in <code>VarAC.ini</code> for the selected radio.</li>
+    <li><strong>Sync From VarAC.ini</strong>: reads the <code>[BBS]</code> section and applies BBS enablement, directory, access rules, and announcement behavior to the current radio-scoped VarAC view.</li>
     <li><strong>VarAC Launch Command</strong>: advanced override. Recommended: leave blank so FreqInOut auto-launches from <code>VarAC Install Folder</code>. On Linux, set this only if default launch fails or you need a custom Wine prefix/command (use absolute paths, for example <code>env WINEPREFIX=/home/user/.wine wine-stable C:\VarAC\VarAC.exe</code>).</li>
     <li><strong>Enable Auto-Archive</strong>: turns on background checks (first Messages open after startup, then about daily).</li>
     <li><strong>After &lt;days&gt; days</strong>: older files are moved from <code>BBS Directory</code> to <code>BBS Archive</code>.</li>
+    <li><strong>Credit</strong>: advanced VarAC BBS management in FreqInOut is being shaped with explicit credit to KG5RKW for the operational ideas behind Vault and VGuard.</li>
   </ul>
 
   <h3 id="settings-message-auth">Message Auth (Key/Hash) Details</h3>
@@ -775,6 +833,20 @@
     <li><strong>GPG actions</strong>: <code>Browse</code>, <code>Test</code>, <code>Refresh Keys</code>, <code>Import Key File</code>, <code>Import Armored Key</code>, <code>Local-Sign Selected</code>.</li>
     <li><strong>Key table columns</strong>: <code>Trusted</code>, <code>Fingerprint</code>, <code>User IDs</code>.</li>
     <li><strong>Trusted hash table columns</strong>: <code>Use</code>, <code>Algorithm</code>, <code>Hash</code>, <code>Label</code>.</li>
+  </ul>
+
+  <h3 id="settings-launch-control">Launch Control Details</h3>
+  <ul class="section-list">
+    <li><strong>Per-app enablement</strong>: decides which supported tools FreqInOut will launch and manage.</li>
+    <li><strong>Startup toggles</strong>: controls which enabled tools should auto-start with the application.</li>
+    <li><strong>Order management</strong>: use <code>Up</code>, <code>Down</code>, and <code>Reset Default Order</code> to control startup sequencing.</li>
+  </ul>
+
+  <h3 id="settings-logging-diagnostics">Logging and Diagnostics Details</h3>
+  <ul class="section-list">
+    <li><strong>Enable DEBUG For</strong>: temporarily raises logging detail for troubleshooting.</li>
+    <li><strong>Open Logs</strong> and <code>Open Log Folder</code>: quick access to active log output.</li>
+    <li><strong>Export Diagnostics</strong>: packages logs and troubleshooting context for support review.</li>
   </ul>
 
   <h2 id="help">Help</h2>

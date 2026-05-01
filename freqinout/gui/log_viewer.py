@@ -104,12 +104,12 @@ class LogViewerTab(QWidget):
         )
 
     def _apply_saved_level(self):
-        saved = (self.settings.get("log_level", "") or "INFO").upper()
+        saved = (self.settings.get("log_level", "") or "DISABLED").upper()
         idx = self.level_combo.findText(saved)
         if idx >= 0:
             self.level_combo.setCurrentIndex(idx)
         else:
-            self.level_combo.setCurrentIndex(self.level_combo.findText("INFO"))
+            self.level_combo.setCurrentIndex(self.level_combo.findText("DISABLED"))
         if saved != "ALL":
             set_log_level(saved)
 

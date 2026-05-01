@@ -5,7 +5,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -18,10 +18,14 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QFileDialog,
+    QDialog,
+    QDialogButtonBox,
     QMessageBox,
     QLineEdit,
+    QFormLayout,
 )
 
+from freqinout.core.checkins_db import upsert_operator_metadata
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.utils.timezones import get_timezone
@@ -43,10 +47,375 @@ FEMA_REGIONS = {
 }
 STATE_TO_REGION = {st: region for region, states in FEMA_REGIONS.items() for st in states}
 
+DAY_CHOICES: Sequence[str] = (
+    "ALL",
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+)
+
+TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+CALLSIGN_RE = re.compile(r"^[A-Z0-9/\\-]{3,20}$")
+
+
+def _nets_db_path() -> Path:
+    from freqinout.core.config_paths import get_config_dir
+
+    return get_config_dir() / "config" / "freqinout_nets.db"
+
+
+def _normalize_callsign(value: object) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", raw)
+
+
+def _normalize_day_label(value: object) -> str:
+    txt = str(value or "").strip()
+    if not txt:
+        return "ALL"
+    up = txt.upper()
+    if up in {"ALL", "DAILY"}:
+        return "ALL"
+    for day in DAY_CHOICES[1:]:
+        low = day.lower()
+        if txt.lower().startswith(low[:3]) or low.startswith(txt.lower()[:3]):
+            return day
+    raise ValueError("Select a valid UTC day.")
+
+
+def _normalize_groups_csv(value: object) -> Tuple[List[str], str]:
+    groups: List[str] = []
+    seen = set()
+    for raw in str(value or "").replace(";", ",").split(","):
+        group = raw.strip().upper()
+        if not group or group in seen:
+            continue
+        seen.add(group)
+        groups.append(group)
+    return groups, ", ".join(groups)
+
+
+def _normalize_schedule_row_input(values: Dict[str, object]) -> Dict[str, str]:
+    callsign = _normalize_callsign(values.get("callsign"))
+    if not callsign or not CALLSIGN_RE.match(callsign):
+        raise ValueError("Enter a valid callsign.")
+
+    day_utc = _normalize_day_label(values.get("day_utc"))
+    start_utc = str(values.get("start_utc") or "").strip()
+    end_utc = str(values.get("end_utc") or "").strip()
+    if not TIME_RE.match(start_utc):
+        raise ValueError("Start UTC must use HH:MM.")
+    if not TIME_RE.match(end_utc):
+        raise ValueError("End UTC must use HH:MM.")
+
+    band = str(values.get("band") or "").strip().upper()
+    mode = str(values.get("mode") or "").strip().upper()
+    frequency = str(values.get("frequency") or "").strip()
+    if not band:
+        raise ValueError("Band is required.")
+    if not mode:
+        raise ValueError("Mode is required.")
+    if not frequency:
+        raise ValueError("Frequency is required.")
+    try:
+        float(frequency)
+    except Exception as exc:
+        raise ValueError("Frequency must be numeric.") from exc
+
+    groups_list, groups_display = _normalize_groups_csv(values.get("groups"))
+    return {
+        "callsign": callsign,
+        "name": str(values.get("name") or "").strip(),
+        "state": str(values.get("state") or "").strip().upper(),
+        "groups": groups_display,
+        "groups_json": json.dumps(groups_list) if groups_list else "",
+        "day_utc": day_utc,
+        "start_utc": start_utc,
+        "end_utc": end_utc,
+        "band": band,
+        "mode": mode,
+        "frequency": frequency,
+        "notes": str(values.get("notes") or "").strip(),
+    }
+
+
+def _schedule_row_key(row: Dict[str, object]) -> Tuple[str, str, str, str, str, str, str]:
+    return (
+        _normalize_callsign(row.get("callsign") or row.get("owner_callsign")),
+        _normalize_day_label(row.get("day_utc")),
+        str(row.get("start_utc") or "").strip(),
+        str(row.get("end_utc") or "").strip(),
+        str(row.get("band") or "").strip().upper(),
+        str(row.get("mode") or "").strip().upper(),
+        str(row.get("frequency") or "").strip(),
+    )
+
+
+def _delete_callsign_variants(cur: sqlite3.Cursor, table: str, callsign: str) -> int:
+    base = _normalize_callsign(callsign)
+    if not base:
+        return 0
+    deleted = 0
+    try:
+        cur.execute(
+            f"""
+            SELECT DISTINCT owner_callsign
+            FROM {table}
+            WHERE owner_callsign IS NOT NULL AND TRIM(owner_callsign) <> ''
+            """
+        )
+        raw_values = [str(v or "").strip() for (v,) in cur.fetchall()]
+    except Exception:
+        raw_values = []
+    for raw in raw_values:
+        if _normalize_callsign(raw) != base:
+            continue
+        cur.execute(f"DELETE FROM {table} WHERE owner_callsign=?", (raw,))
+        deleted += int(cur.rowcount or 0)
+    return deleted
+
+
+def _delete_explicit_row_variants(cur: sqlite3.Cursor, row_key: Tuple[str, str, str, str, str, str, str]) -> int:
+    callsign, day_utc, start_utc, end_utc, band, mode, frequency = row_key
+    base = _normalize_callsign(callsign)
+    if not base:
+        return 0
+    deleted = 0
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT owner_callsign
+            FROM peer_hf_schedule
+            WHERE owner_callsign IS NOT NULL AND TRIM(owner_callsign) <> ''
+            """
+        )
+        raw_values = [str(v or "").strip() for (v,) in cur.fetchall()]
+    except Exception:
+        raw_values = []
+    for raw in raw_values:
+        if _normalize_callsign(raw) != base:
+            continue
+        cur.execute(
+            """
+            DELETE FROM peer_hf_schedule
+            WHERE owner_callsign=?
+              AND UPPER(TRIM(day_utc))=UPPER(TRIM(?))
+              AND TRIM(start_utc)=TRIM(?)
+              AND TRIM(end_utc)=TRIM(?)
+              AND UPPER(TRIM(band))=UPPER(TRIM(?))
+              AND UPPER(TRIM(mode))=UPPER(TRIM(?))
+              AND TRIM(frequency)=TRIM(?)
+            """,
+            (raw, day_utc, start_utc, end_utc, band, mode, frequency),
+        )
+        deleted += int(cur.rowcount or 0)
+    return deleted
+
+
+def save_explicit_peer_schedule_rows(
+    db_path: Path,
+    owner_callsign: str,
+    rows: Sequence[Dict[str, str]],
+    *,
+    source_type: str,
+    replace_callsign: bool = False,
+    remove_row_keys: Optional[Sequence[Tuple[str, str, str, str, str, str, str]]] = None,
+    operator_profile: Optional[Dict[str, str]] = None,
+) -> int:
+    owner = _normalize_callsign(owner_callsign)
+    if not owner:
+        raise ValueError("A valid callsign is required.")
+    if not rows:
+        raise ValueError("At least one schedule row is required.")
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        inserted = 0
+        source_label = str(source_type or "MANUAL").strip().upper() or "MANUAL"
+        normalized_rows = [dict(row) for row in rows]
+        row_keys = {_schedule_row_key({"callsign": owner, **row}) for row in normalized_rows}
+        if len(row_keys) != len(normalized_rows):
+            raise ValueError("Duplicate schedule rows are not allowed.")
+
+        if replace_callsign:
+            _delete_callsign_variants(cur, "peer_hf_schedule", owner)
+            _delete_callsign_variants(cur, "peer_hf_schedule_inferred", owner)
+        if remove_row_keys:
+            for row_key in remove_row_keys:
+                _delete_explicit_row_variants(cur, row_key)
+
+        for row in normalized_rows:
+            meta_payload: Dict[str, Any] = {}
+            notes = str(row.get("notes") or "").strip()
+            if notes:
+                meta_payload["notes"] = notes
+            meta_json = json.dumps(meta_payload) if meta_payload else None
+            now_str = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()
+            cur.execute(
+                """
+                INSERT INTO peer_hf_schedule
+                    (owner_callsign, day_utc, start_utc, end_utc, band, mode, frequency,
+                     meta_json, imported_at, source_type, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    owner,
+                    row["day_utc"],
+                    row["start_utc"],
+                    row["end_utc"],
+                    row["band"],
+                    row["mode"],
+                    row["frequency"],
+                    meta_json,
+                    now_str,
+                    source_label,
+                    now_str,
+                ),
+            )
+            inserted += 1
+
+        if operator_profile:
+            groups_json = operator_profile.get("groups_json") or ""
+            groups_list = []
+            if groups_json:
+                try:
+                    groups_list = json.loads(groups_json)
+                except Exception:
+                    groups_list = []
+            upsert_operator_metadata(
+                [
+                    {
+                        "callsign": owner,
+                        "name": operator_profile.get("name") or "",
+                        "state": operator_profile.get("state") or "",
+                        "group1": groups_list[0] if len(groups_list) > 0 else "",
+                        "group2": groups_list[1] if len(groups_list) > 1 else "",
+                        "group3": groups_list[2] if len(groups_list) > 2 else "",
+                        "groups_json": groups_json or None,
+                        "trusted": 0,
+                        "last_seen_utc": datetime.datetime.now(datetime.timezone.utc).replace(
+                            tzinfo=None
+                        ).isoformat(),
+                    }
+                ],
+                conn=conn,
+            )
+
+        conn.commit()
+        return inserted
+    finally:
+        conn.close()
+
+
+class ManualPeerScheduleDialog(QDialog):
+    def __init__(self, parent: Optional[QWidget] = None, *, initial: Optional[Dict[str, str]] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Peer Schedule")
+        self.setModal(True)
+        self._build_ui(initial or {})
+
+    def _build_ui(self, initial: Dict[str, str]) -> None:
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        layout.addLayout(form)
+
+        self.callsign_edit = QLineEdit(initial.get("callsign", ""))
+        self.callsign_edit.setPlaceholderText("W1ABC")
+        form.addRow("Callsign", self.callsign_edit)
+
+        self.name_edit = QLineEdit(initial.get("name", ""))
+        form.addRow("Operator Name", self.name_edit)
+
+        self.state_edit = QLineEdit(initial.get("state", ""))
+        self.state_edit.setMaxLength(8)
+        self.state_edit.setPlaceholderText("CO")
+        form.addRow("State", self.state_edit)
+
+        self.groups_edit = QLineEdit(initial.get("groups", ""))
+        self.groups_edit.setPlaceholderText("MAGNET, AMRRON")
+        form.addRow("Groups", self.groups_edit)
+
+        self.day_combo = QComboBox()
+        for day in DAY_CHOICES:
+            self.day_combo.addItem(day)
+        day_value = initial.get("day_utc", "ALL") or "ALL"
+        idx = self.day_combo.findText(_normalize_day_label(day_value))
+        self.day_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        form.addRow("Day (UTC)", self.day_combo)
+
+        self.start_edit = QLineEdit(initial.get("start_utc", ""))
+        self.start_edit.setPlaceholderText("18:00")
+        form.addRow("Start UTC", self.start_edit)
+
+        self.end_edit = QLineEdit(initial.get("end_utc", ""))
+        self.end_edit.setPlaceholderText("18:30")
+        form.addRow("End UTC", self.end_edit)
+
+        self.band_edit = QLineEdit(initial.get("band", ""))
+        self.band_edit.setPlaceholderText("40M")
+        form.addRow("Band", self.band_edit)
+
+        self.mode_edit = QLineEdit(initial.get("mode", ""))
+        self.mode_edit.setPlaceholderText("JS8")
+        form.addRow("Mode", self.mode_edit)
+
+        self.frequency_edit = QLineEdit(initial.get("frequency", ""))
+        self.frequency_edit.setPlaceholderText("7.078")
+        form.addRow("Frequency", self.frequency_edit)
+
+        self.notes_edit = QLineEdit(initial.get("notes", ""))
+        self.notes_edit.setPlaceholderText("Optional notes")
+        form.addRow("Notes", self.notes_edit)
+
+        self.error_label = QLabel("")
+        self.error_label.setWordWrap(True)
+        self.error_label.setStyleSheet("color: #b22222;")
+        layout.addWidget(self.error_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def data(self) -> Dict[str, str]:
+        return _normalize_schedule_row_input(
+            {
+                "callsign": self.callsign_edit.text(),
+                "name": self.name_edit.text(),
+                "state": self.state_edit.text(),
+                "groups": self.groups_edit.text(),
+                "day_utc": self.day_combo.currentText(),
+                "start_utc": self.start_edit.text(),
+                "end_utc": self.end_edit.text(),
+                "band": self.band_edit.text(),
+                "mode": self.mode_edit.text(),
+                "frequency": self.frequency_edit.text(),
+                "notes": self.notes_edit.text(),
+            }
+        )
+
+    def _accept_if_valid(self) -> None:
+        try:
+            self.data()
+        except ValueError as exc:
+            self.error_label.setText(str(exc))
+            return
+        self.error_label.setText("")
+        self.accept()
+
 
 class PeerSchedTab(QWidget):
     """
-    View and manage imported peer HF schedules (non-net).
+    View and manage explicit and inferred peer HF schedules (non-net).
     """
 
     COLS: Sequence[str] = (
@@ -68,6 +437,7 @@ class PeerSchedTab(QWidget):
         super().__init__(parent)
         self.settings = SettingsManager()
         self._rows: List[Dict] = []
+        self._visible_rows: List[Dict] = []
         self._operator_meta: Dict[str, Dict[str, str]] = {}
         self._my_schedule: List[Dict] = []
         self._my_schedule_by_mode: Dict[str, List[Dict]] = {}
@@ -85,12 +455,18 @@ class PeerSchedTab(QWidget):
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Peer HF Schedules</h3>"))
         header.addStretch()
+        self.add_btn = QPushButton("Add Schedule")
+        self.edit_btn = QPushButton("Edit Selected")
+        self.delete_row_btn = QPushButton("Delete Row")
         self.import_btn = QPushButton("Import Schedule")
         self.refresh_btn = QPushButton("Refresh")
         self.delete_callsign_combo = QComboBox()
         self.delete_callsign_combo.addItem("Select callsign", None)
         self.delete_btn = QPushButton("Delete Schedule")
         self.tz_toggle_btn = QPushButton("Showing: UTC")
+        header.addWidget(self.add_btn)
+        header.addWidget(self.edit_btn)
+        header.addWidget(self.delete_row_btn)
         header.addWidget(self.import_btn)
         header.addWidget(self.refresh_btn)
         header.addWidget(QLabel("Delete:"))
@@ -141,6 +517,9 @@ class PeerSchedTab(QWidget):
         layout.addWidget(self.table)
 
         # Signals
+        self.add_btn.clicked.connect(self._add_schedule)
+        self.edit_btn.clicked.connect(self._edit_selected_row)
+        self.delete_row_btn.clicked.connect(self._delete_selected_row)
         self.import_btn.clicked.connect(self._import_schedule)
         self.refresh_btn.clicked.connect(self._load_data)
         self.callsign_filter.currentIndexChanged.connect(self._apply_filters)
@@ -152,23 +531,20 @@ class PeerSchedTab(QWidget):
         self.delete_btn.clicked.connect(self._delete_selected)
         self.tz_toggle_btn.clicked.connect(self._toggle_timezone_view)
         self.table.cellClicked.connect(self._on_table_cell_clicked)
+        self.table.itemSelectionChanged.connect(self._update_row_action_state)
         self.tz_toggle_btn.setText("Showing: Local" if self._show_local_times else "Showing: UTC")
         self._apply_theme()
         self._update_delete_button_state()
+        self._update_row_action_state()
 
     # ---------- data ----------
 
     def _db_path(self) -> Path:
-        from freqinout.core.config_paths import get_config_dir
-
-        return get_config_dir() / "config" / "freqinout_nets.db"
+        return _nets_db_path()
 
     @staticmethod
     def _normalize_callsign(value: object) -> str:
-        raw = str(value or "").strip().upper()
-        if not raw:
-            return ""
-        return re.sub(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$", "", raw)
+        return _normalize_callsign(value)
 
     def _load_operator_meta(self) -> None:
         """
@@ -289,7 +665,13 @@ class PeerSchedTab(QWidget):
                     "source_type": src,
                     "confidence": confidence,
                 }
-                src_priority = 1 if str(src).strip().upper() == "IMPORTED" else 0
+                src_upper = str(src).strip().upper()
+                if src_upper == "MANUAL":
+                    src_priority = 2
+                elif src_upper == "IMPORTED":
+                    src_priority = 1
+                else:
+                    src_priority = 0
                 prev = deduped_rows.get(key)
                 if prev is None:
                     row_obj["_src_priority"] = src_priority
@@ -423,6 +805,7 @@ class PeerSchedTab(QWidget):
                     continue
             filtered.append(row)
 
+        self._visible_rows = filtered
         was_sorting = self.table.isSortingEnabled()
         sort_col = self.table.horizontalHeader().sortIndicatorSection()
         sort_order = self.table.horizontalHeader().sortIndicatorOrder()
@@ -435,8 +818,11 @@ class PeerSchedTab(QWidget):
             overlap_ranges = self._compute_overlaps(row)
             overlap_display = self._format_overlap_summary(overlap_ranges)
             mode_val = row.get("mode", "")
-            if str(row.get("source_type") or "").strip().upper() == "INFERRED":
+            source_upper = str(row.get("source_type") or "").strip().upper()
+            if source_upper == "INFERRED":
                 mode_val = f"{mode_val} [I]"
+            elif source_upper == "MANUAL":
+                mode_val = f"{mode_val} [M]"
             vals = [
                 cs,
                 meta.get("name", ""),
@@ -459,6 +845,8 @@ class PeerSchedTab(QWidget):
             for c, val in enumerate(vals):
                 item = QTableWidgetItem(val)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if c == 0:
+                    item.setData(Qt.UserRole, dict(row))
                 if c == self._overlap_col and overlap_ranges:
                     item.setToolTip("\n".join(self._format_overlap_ranges(overlap_ranges)))
                     item.setData(Qt.UserRole, overlap_ranges)
@@ -467,6 +855,7 @@ class PeerSchedTab(QWidget):
             self.table.setSortingEnabled(True)
             if 0 <= sort_col < self.table.columnCount():
                 self.table.sortItems(sort_col, sort_order)
+        self._update_row_action_state()
 
     # ---------- helpers ----------
 
@@ -479,27 +868,7 @@ class PeerSchedTab(QWidget):
         return self._normalize_callsign(selected)
 
     def _delete_callsign_variants(self, cur: sqlite3.Cursor, table: str, callsign: str) -> int:
-        base = self._normalize_callsign(callsign)
-        if not base:
-            return 0
-        deleted = 0
-        try:
-            cur.execute(
-                f"""
-                SELECT DISTINCT owner_callsign
-                FROM {table}
-                WHERE owner_callsign IS NOT NULL AND TRIM(owner_callsign) <> ''
-                """
-            )
-            raw_values = [str(v or "").strip() for (v,) in cur.fetchall()]
-        except Exception:
-            raw_values = []
-        for raw in raw_values:
-            if self._normalize_callsign(raw) != base:
-                continue
-            cur.execute(f"DELETE FROM {table} WHERE owner_callsign=?", (raw,))
-            deleted += int(cur.rowcount or 0)
-        return deleted
+        return _delete_callsign_variants(cur, table, callsign)
 
     def _settings_db_path(self) -> Path:
         cfg_path = getattr(self.settings, "_config_path", None)
@@ -816,9 +1185,11 @@ class PeerSchedTab(QWidget):
 
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
+        self.add_btn.setStyleSheet(button_style("primary", theme))
         self.delete_btn.setStyleSheet(button_style("muted", theme))
         self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
         self._update_timezone_button_style()
+        self._update_row_action_state()
 
     def apply_theme(self) -> None:
         self._apply_theme()
@@ -850,10 +1221,37 @@ class PeerSchedTab(QWidget):
         role = "danger" if enabled else "muted"
         self.delete_btn.setStyleSheet(button_style(role, theme))
 
+    def _selected_row_payload(self) -> Optional[Dict[str, Any]]:
+        row_idx = self.table.currentRow()
+        if row_idx < 0:
+            return None
+        item = self.table.item(row_idx, 0)
+        payload = item.data(Qt.UserRole) if item is not None else None
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def _update_row_action_state(self) -> None:
+        theme = resolve_theme(self.settings)
+        selected = self._selected_row_payload()
+        source_type = str((selected or {}).get("source_type") or "").strip().upper()
+        explicit_selected = bool(selected) and source_type != "INFERRED"
+        self.edit_btn.setEnabled(explicit_selected)
+        self.delete_row_btn.setEnabled(explicit_selected)
+        self.edit_btn.setStyleSheet(button_style("primary" if explicit_selected else "muted", theme))
+        self.delete_row_btn.setStyleSheet(button_style("danger" if explicit_selected else "muted", theme))
+
     def _update_timezone_button_style(self) -> None:
         theme = resolve_theme(self.settings)
         role = "info" if not self._show_local_times else "muted"
         self.tz_toggle_btn.setStyleSheet(button_style(role, theme))
+
+    def _notify_peer_schedule_changed(self) -> None:
+        self._load_data()
+        window = self.window()
+        if window is not None and hasattr(window, "on_peer_schedule_data_changed"):
+            try:
+                window.on_peer_schedule_data_changed()
+            except Exception as e:
+                log.debug("PeerSched: downstream refresh failed: %s", e)
 
     def _on_table_cell_clicked(self, row: int, col: int) -> None:
         if col != self._overlap_col:
@@ -869,6 +1267,154 @@ class PeerSchedTab(QWidget):
             return
         msg = "\n".join(lines)
         QMessageBox.information(self, "Overlap Details", msg)
+
+    def _prompt_existing_callsign_policy(self, callsign: str, *, for_edit: bool = False) -> str:
+        prompt = QMessageBox(self)
+        prompt.setIcon(QMessageBox.Question)
+        prompt.setWindowTitle("Existing Explicit Schedule")
+        verb = "updated" if for_edit else "added"
+        prompt.setText(f"{callsign} already has explicit peer schedule rows.")
+        prompt.setInformativeText(
+            f"Choose whether this manual schedule should replace that callsign's current explicit rows or append to them."
+        )
+        replace_btn = prompt.addButton("Replace Explicit Rows", QMessageBox.AcceptRole)
+        append_btn = prompt.addButton("Append Row", QMessageBox.ActionRole)
+        prompt.addButton(QMessageBox.Cancel)
+        prompt.setDefaultButton(replace_btn)
+        prompt.exec()
+        clicked = prompt.clickedButton()
+        if clicked == replace_btn:
+            return "replace"
+        if clicked == append_btn:
+            return "append"
+        return "cancel"
+
+    def _add_schedule(self) -> None:
+        dialog = ManualPeerScheduleDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            data = dialog.data()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid Schedule", str(exc))
+            return
+
+        callsign = data["callsign"]
+        existing_explicit = [
+            row
+            for row in self._rows
+            if row.get("callsign") == callsign and str(row.get("source_type") or "").strip().upper() != "INFERRED"
+        ]
+        replace_callsign = False
+        if existing_explicit:
+            policy = self._prompt_existing_callsign_policy(callsign)
+            if policy == "cancel":
+                return
+            replace_callsign = policy == "replace"
+        try:
+            save_explicit_peer_schedule_rows(
+                self._db_path(),
+                callsign,
+                [data],
+                source_type="MANUAL",
+                replace_callsign=replace_callsign,
+                operator_profile=data,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save Schedule", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Failed", f"Could not save schedule:\n{exc}")
+            log.error("PeerSched: add manual schedule failed: %s", exc)
+            return
+        self._notify_peer_schedule_changed()
+
+    def _edit_selected_row(self) -> None:
+        selected = self._selected_row_payload()
+        if not selected or str(selected.get("source_type") or "").strip().upper() == "INFERRED":
+            return
+        meta = self._operator_meta.get(selected.get("callsign", ""), {})
+        initial = {
+            "callsign": selected.get("callsign", ""),
+            "name": meta.get("name", ""),
+            "state": meta.get("state", ""),
+            "groups": meta.get("groups", ""),
+            "day_utc": selected.get("day_utc", ""),
+            "start_utc": selected.get("start_utc", ""),
+            "end_utc": selected.get("end_utc", ""),
+            "band": selected.get("band", ""),
+            "mode": selected.get("mode", ""),
+            "frequency": selected.get("frequency", ""),
+        }
+        dialog = ManualPeerScheduleDialog(self, initial=initial)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            data = dialog.data()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid Schedule", str(exc))
+            return
+
+        old_key = _schedule_row_key(selected)
+        old_callsign = selected.get("callsign", "")
+        new_callsign = data["callsign"]
+        remove_row_keys = [old_key]
+        replace_callsign = False
+        if new_callsign != old_callsign:
+            existing_target_rows = [
+                row
+                for row in self._rows
+                if row.get("callsign") == new_callsign
+                and str(row.get("source_type") or "").strip().upper() != "INFERRED"
+            ]
+            if existing_target_rows:
+                policy = self._prompt_existing_callsign_policy(new_callsign, for_edit=True)
+                if policy == "cancel":
+                    return
+                replace_callsign = policy == "replace"
+        try:
+            save_explicit_peer_schedule_rows(
+                self._db_path(),
+                new_callsign,
+                [data],
+                source_type="MANUAL",
+                replace_callsign=replace_callsign,
+                remove_row_keys=remove_row_keys,
+                operator_profile=data,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save Schedule", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Failed", f"Could not save schedule:\n{exc}")
+            log.error("PeerSched: edit schedule failed: %s", exc)
+            return
+        self._notify_peer_schedule_changed()
+
+    def _delete_selected_row(self) -> None:
+        selected = self._selected_row_payload()
+        if not selected or str(selected.get("source_type") or "").strip().upper() == "INFERRED":
+            return
+        callsign = selected.get("callsign", "")
+        confirm = QMessageBox.question(
+            self,
+            "Delete Row",
+            f"Delete the selected explicit schedule row for {callsign}?",
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            conn = sqlite3.connect(self._db_path())
+            cur = conn.cursor()
+            deleted = _delete_explicit_row_variants(cur, _schedule_row_key(selected))
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            QMessageBox.critical(self, "Delete Failed", f"DB delete failed:\n{exc}")
+            log.error("PeerSched: delete row failed: %s", exc)
+            return
+        if deleted:
+            self._notify_peer_schedule_changed()
 
     # ---------- import / delete ----------
 
@@ -926,37 +1472,40 @@ class PeerSchedTab(QWidget):
             return
 
         try:
-            db_path = self._db_path()
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            self._delete_callsign_variants(cur, "peer_hf_schedule", owner)
-            # Imported schedule is authoritative for this callsign; clear stale inferred rows.
-            self._delete_callsign_variants(cur, "peer_hf_schedule_inferred", owner)
-            now_str = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()
-            for row in valid_rows:
-                cur.execute(
-                    """
-                    INSERT INTO peer_hf_schedule
-                        (owner_callsign, day_utc, start_utc, end_utc, band, mode, frequency, meta_json, imported_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        owner,
-                        row["day_utc"],
-                        row["start_utc"],
-                        row["end_utc"],
-                        row["band"],
-                        row["mode"],
-                        row["frequency"],
-                        json.dumps({"created_utc": data.get("created_utc"), "timezone": data.get("timezone")}),
-                        now_str,
+            save_explicit_peer_schedule_rows(
+                self._db_path(),
+                owner,
+                [
+                    {
+                        **row,
+                        "notes": "",
+                    }
+                    for row in valid_rows
+                ],
+                source_type="IMPORTED",
+                replace_callsign=True,
+                operator_profile={
+                    "callsign": owner,
+                    "name": str(data.get("name") or "").strip(),
+                    "state": str(data.get("state") or "").strip().upper(),
+                    "groups": ", ".join(
+                        [
+                            str(g).strip().upper()
+                            for g in (
+                                data.get("group1"),
+                                data.get("group2"),
+                                data.get("group3"),
+                            )
+                            if str(g or "").strip()
+                        ]
                     ),
-                )
-            conn.commit()
-            conn.close()
+                    "groups_json": json.dumps(data.get("groups") or [])
+                    if isinstance(data.get("groups"), list)
+                    else "",
+                },
+            )
             QMessageBox.information(self, "Import", f"Imported {len(valid_rows)} rows for {owner}.")
-            self._load_data()
+            self._notify_peer_schedule_changed()
         except Exception as e:
             QMessageBox.critical(self, "Import Failed", f"DB write failed:\n{e}")
             log.error("PeerSched: import failed: %s", e)
@@ -973,7 +1522,7 @@ class PeerSchedTab(QWidget):
         confirm = QMessageBox.question(
             self,
             "Delete Schedule",
-            f"Delete all imported schedule rows for {cs}?",
+            f"Delete all explicit schedule rows for {cs}?",
         )
         if confirm != QMessageBox.Yes:
             return
@@ -983,8 +1532,8 @@ class PeerSchedTab(QWidget):
             deleted = self._delete_callsign_variants(cur, "peer_hf_schedule", cs)
             conn.commit()
             conn.close()
-            self._load_data()
-            QMessageBox.information(self, "Delete", f"Deleted {deleted} imported row(s) for {cs}.")
+            self._notify_peer_schedule_changed()
+            QMessageBox.information(self, "Delete", f"Deleted {deleted} explicit row(s) for {cs}.")
         except Exception as e:
             QMessageBox.critical(self, "Delete Failed", f"DB delete failed:\n{e}")
             log.error("PeerSched: delete failed for %s: %s", cs, e)
@@ -999,7 +1548,7 @@ class PeerSchedTab(QWidget):
         confirm = QMessageBox.question(
             self,
             "Clear All",
-            "Delete all imported peer schedules?",
+            "Delete all explicit peer schedules?",
         )
         if confirm != QMessageBox.Yes:
             return
@@ -1009,7 +1558,7 @@ class PeerSchedTab(QWidget):
             cur.execute("DELETE FROM peer_hf_schedule")
             conn.commit()
             conn.close()
-            self._load_data()
+            self._notify_peer_schedule_changed()
             QMessageBox.information(self, "Clear All", "All peer schedules removed.")
         except Exception as e:
             QMessageBox.critical(self, "Clear Failed", f"DB delete failed:\n{e}")

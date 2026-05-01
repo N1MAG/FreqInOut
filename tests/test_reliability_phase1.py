@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -39,6 +40,63 @@ def test_tool_db_schema_uses_runtime_config_dir(monkeypatch, tmp_path):
     assert db_schema.CONFIG_DIR == cfg_root / "config"
     assert db_schema.SETTINGS_DB == cfg_root / "config" / "freqinout.db"
     assert db_schema.NETS_DB == cfg_root / "config" / "freqinout_nets.db"
+
+
+def test_db_admin_init_upgrades_existing_schedule_target_columns(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    nets_db = config_dir / "freqinout_nets.db"
+    conn = sqlite3.connect(nets_db)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE net_schedule_tab (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day_utc TEXT NOT NULL,
+                recurrence TEXT DEFAULT 'Weekly',
+                biweekly_offset_weeks INTEGER DEFAULT 0,
+                month_weeks TEXT,
+                band TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                vfo TEXT,
+                frequency TEXT NOT NULL,
+                start_utc TEXT NOT NULL,
+                end_utc TEXT NOT NULL,
+                early_checkin INTEGER NOT NULL,
+                auto_tune INTEGER DEFAULT 0,
+                primary_js8call_group TEXT,
+                comment TEXT,
+                net_name TEXT,
+                group_name TEXT,
+                fldigi_mode TEXT,
+                fldigi_offset TEXT,
+                resource_id INTEGER
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    tools_dir = Path(__file__).resolve().parents[1] / "tools"
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+
+    import db_admin
+
+    db_admin = importlib.reload(db_admin)
+    db_admin.ensure_tables(["net_schedule_tab"])
+
+    conn = sqlite3.connect(nets_db)
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(net_schedule_tab)").fetchall()}
+    finally:
+        conn.close()
+
+    assert {"target_scope", "target_device_profile_id", "target_operating_profile_id"}.issubset(cols)
 
 
 def test_flrig_client_from_settings_uses_saved_port(monkeypatch, tmp_path):

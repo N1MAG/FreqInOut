@@ -182,6 +182,7 @@ class JS8CallNetControlTab(QWidget):
         self._is_shutting_down = False
         self._polling_directed = False
         self._polling_rx = False
+        self._active = False
 
         self._poll_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -197,8 +198,6 @@ class JS8CallNetControlTab(QWidget):
         self._update_suspend_state()
         self._refresh_auto_query_flags()
         self._refresh_qsy_options()
-        if self._poll_timer:
-            self._poll_timer.start()
 
     def _send_js8_message(self, text: str) -> bool:
         """
@@ -383,6 +382,20 @@ class JS8CallNetControlTab(QWidget):
             self._maybe_reload_operating_groups()
             self._refresh_group_completer()
 
+    def set_tab_active(self, active: bool) -> None:
+        self._active = bool(active)
+        if self._active:
+            if self._clock_timer and not self._clock_timer.isActive():
+                self._clock_timer.start(1000)
+            if self._poll_timer and not self._poll_timer.isActive():
+                self._poll_timer.start()
+            QTimer.singleShot(0, self.on_tab_activated)
+            return
+        if self._clock_timer and self._clock_timer.isActive() and not self._js8_net_started:
+            self._clock_timer.stop()
+        if self._poll_timer and self._poll_timer.isActive() and not self._js8_net_started:
+            self._poll_timer.stop()
+
     def _load_settings(self):
         data = self.settings.all()
         self.auto_query_msg_id = bool(data.get("js8_auto_query_msg_id", False))
@@ -504,7 +517,6 @@ class JS8CallNetControlTab(QWidget):
     def _setup_clock_timer(self):
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._tick_clock)
-        self._clock_timer.start(1000)
 
     def _tick_clock(self):
         self._update_clock_labels()

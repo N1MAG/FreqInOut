@@ -17,6 +17,7 @@ import queue
 
 from PySide6.QtCore import QUrl, Qt, QTimer, QCoreApplication, QSize
 from PySide6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -63,9 +64,17 @@ from freqinout.core.propagation_service import PropagationService
 from freqinout.core.sitrep_metadata import source_family_label, source_short_label, transport_label
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.support_reporting import build_support_summary, bullet_lines
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.gui.qsy_helper import current_scheduler_freq
-from freqinout.gui.theme import resolve_theme, BAND_COLORS_DARK, BAND_COLORS_LIGHT, button_style
+from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.theme import (
+    resolve_theme,
+    resolve_ui_text_scale,
+    BAND_COLORS_DARK,
+    BAND_COLORS_LIGHT,
+    button_style,
+)
 from freqinout.utils.timezones import get_timezone
 
 
@@ -480,10 +489,23 @@ class StationsMapTab(QWidget):
         self._last_map_config: Optional[tuple] = None
         self._last_map_render_ts: float = 0.0
         self._render_pending: bool = False
+        self._pending_refresh_level: int = 0
+        self._pending_refresh_reason: str = ""
+        self._pending_refresh_preserve_view: object = True
         self._map_visible: bool = False
         self._map_dirty: bool = False
         self._ingest_started: bool = False
+        self._deferred_initial_ingest_pending: bool = False
         self._map_load_ok: bool = False
+        self._map_page_loading: bool = False
+        self._render_requested_during_load: bool = False
+        self._render_requested_during_load_level: int = 0
+        self._map_runtime_state: str = "cold"
+        self._map_runtime_detail: str = "Map has not been opened yet."
+        self._map_last_error: str = ""
+        self._map_last_event_ts: float = 0.0
+        self._map_marker_count: int = 0
+        self._map_link_count: int = 0
         self.prop_overlay_enabled: bool = False
         self.prop_adaptive_enabled: bool = True
         self.prop_mode: str = "blended"
@@ -524,6 +546,10 @@ class StationsMapTab(QWidget):
         self._query_cache_ttl_sec: float = 3.0
         self._prop_prewarm_done: bool = False
         self._initial_data_loaded: bool = False
+        self._map_refresh_timer = QTimer(self)
+        self._map_refresh_timer.setSingleShot(True)
+        self._map_refresh_timer.setInterval(160)
+        self._map_refresh_timer.timeout.connect(self._flush_requested_map_refresh)
 
         self._build_ui()
         self._refresh_group_filter_options()
@@ -706,46 +732,254 @@ class StationsMapTab(QWidget):
         return self._js8_indexer
 
     def _schedule_render(self) -> None:
-        if self._is_shutting_down:
-            return
-        if not self._map_visible:
-            self._map_dirty = True
-            return
-        if not self._map_initialized:
-            self._map_dirty = True
-            return
-        now_ts = time.time()
-        if now_ts - self._last_map_render_ts >= 1.0:
-            self._last_map_render_ts = now_ts
-            with perf_span("map.render_call", settings=self.settings, meta={"source": "schedule"}, min_ms=10.0):
-                self._render_map(preserve_view=True)
-            return
-        if not self._render_pending:
-            self._render_pending = True
-            QTimer.singleShot(1000, self._flush_scheduled_render)
+        self._request_map_refresh(level="medium", reason="schedule", preserve_view=True)
 
     def _flush_scheduled_render(self) -> None:
+        self._flush_requested_map_refresh()
+
+    @staticmethod
+    def _refresh_level_rank(level: str) -> int:
+        normalized = str(level or "").strip().lower()
+        return {"light": 1, "medium": 2, "full": 3}.get(normalized, 2)
+
+    @staticmethod
+    def _refresh_level_name(rank: int) -> str:
+        mapping = {1: "light", 2: "medium", 3: "full"}
+        return mapping.get(int(rank or 0), "medium")
+
+    def _emit_map_event(self, event: str, **meta: object) -> None:
+        payload = {
+            "event": str(event or "").strip(),
+            "state": self._map_runtime_state,
+            "visible": bool(self._map_visible),
+            "initialized": bool(self._map_initialized),
+            "loading": bool(self._map_page_loading),
+            "markers": int(self._map_marker_count),
+            "links": int(self._map_link_count),
+        }
+        payload.update(meta)
+        try:
+            log.info("MAP|%s", json.dumps(payload, sort_keys=True, default=str))
+        except Exception:
+            log.info("MAP|%s", payload)
+        self._map_last_event_ts = time.time()
+
+    def _set_map_runtime_state(self, state: str, detail: str = "", *, error: str = "") -> None:
+        normalized = str(state or "cold").strip().lower() or "cold"
+        self._map_runtime_state = normalized
+        self._map_runtime_detail = str(detail or "").strip()
+        self._map_last_error = str(error or "").strip()
+        self._update_map_support_card()
+
+    def _request_map_refresh(self, *, level: str = "medium", reason: str = "", preserve_view: object = True) -> None:
         if self._is_shutting_down:
             return
+        requested_rank = self._refresh_level_rank(level)
+        if not self._map_visible:
+            self._map_dirty = True
+            self._pending_refresh_level = max(self._pending_refresh_level, requested_rank)
+            self._pending_refresh_reason = reason or self._pending_refresh_reason
+            self._pending_refresh_preserve_view = preserve_view
+            return
+        if self._map_page_loading:
+            self._map_dirty = True
+            self._render_requested_during_load = True
+            self._render_requested_during_load_level = max(self._render_requested_during_load_level, requested_rank)
+            self._pending_refresh_reason = reason or self._pending_refresh_reason
+            self._pending_refresh_preserve_view = preserve_view
+            self._emit_map_event("render_queued_while_loading", level=self._refresh_level_name(requested_rank), reason=reason)
+            return
+        self._pending_refresh_level = max(self._pending_refresh_level, requested_rank)
+        if reason:
+            self._pending_refresh_reason = reason
+        self._pending_refresh_preserve_view = preserve_view
+        delay_ms = 90 if requested_rank <= 1 else 180
+        if requested_rank >= 3:
+            delay_ms = 30
+        self._render_pending = True
+        self._map_refresh_timer.start(delay_ms)
+        self._emit_map_event("render_requested", level=self._refresh_level_name(requested_rank), reason=reason)
+
+    def _flush_requested_map_refresh(self) -> None:
+        if self._is_shutting_down:
+            return
+        rank = max(int(self._pending_refresh_level or 0), 2 if self._map_dirty else 0)
+        reason = self._pending_refresh_reason or "coalesced"
+        preserve_view = self._pending_refresh_preserve_view
+        self._pending_refresh_level = 0
+        self._pending_refresh_reason = ""
+        self._pending_refresh_preserve_view = True
+        self._render_pending = False
         if not self._map_visible:
             self._map_dirty = True
             return
-        self._render_pending = False
-        self._last_map_render_ts = time.time()
-        with perf_span("map.render_call", settings=self.settings, meta={"source": "flush"}, min_ms=10.0):
-            self._render_map(preserve_view=True)
+        if self._map_page_loading:
+            self._map_dirty = True
+            self._render_requested_during_load = True
+            self._render_requested_during_load_level = max(self._render_requested_during_load_level, rank)
+            return
+        if rank <= 0:
+            return
+        now_ts = time.time()
+        if rank < 3 and now_ts - self._last_map_render_ts < 0.75:
+            self._pending_refresh_level = max(self._pending_refresh_level, rank)
+            self._pending_refresh_reason = reason or self._pending_refresh_reason
+            self._pending_refresh_preserve_view = preserve_view
+            self._render_pending = True
+            self._map_refresh_timer.start(220)
+            return
+        self._last_map_render_ts = now_ts
+        self._perform_map_refresh(level=self._refresh_level_name(rank), reason=reason, preserve_view=preserve_view)
+
+    def _perform_map_refresh(self, *, level: str, reason: str, preserve_view: object = True) -> None:
+        self._emit_map_event("render_started", level=level, reason=reason)
+        if level == "full" or not self._map_initialized:
+            self._set_map_runtime_state("loading", "Refreshing the map surface and rebuilding overlays.")
+        elif self._map_runtime_state != "degraded":
+            self._set_map_runtime_state("loading", "Refreshing map data.")
+        try:
+            with perf_span("map.render_call", settings=self.settings, meta={"source": reason, "level": level}, min_ms=10.0):
+                self._render_map(preserve_view=preserve_view)
+        except Exception as exc:
+            self._enter_map_degraded(
+                "Map refresh did not complete cleanly. You can retry without restarting FIO.",
+                reason=reason,
+                exc=exc,
+            )
+            return
+        if not self._map_page_loading and self._map_runtime_state != "degraded":
+            self._set_map_runtime_state(
+                "ready",
+                f"Map is ready with {int(self._map_marker_count)} station markers and {int(self._map_link_count)} links.",
+            )
+        self._emit_map_event("render_completed", level=level, reason=reason)
+
+    def _enter_map_degraded(self, detail: str, *, reason: str = "", exc: Exception | None = None) -> None:
+        error_text = str(exc or "").strip()
+        self._set_map_runtime_state("degraded", detail, error=error_text)
+        self._emit_map_event("degraded", reason=reason, error=error_text or detail)
+
+    def _retry_map_render(self) -> None:
+        self._emit_map_event("retry_requested")
+        self._request_map_refresh(level="full", reason="retry", preserve_view=True)
+
+    def _reload_map_data(self) -> None:
+        self._emit_map_event("reload_data_requested")
+        self._ensure_initial_data_loaded()
+        self._auto_ingest_and_refresh(initial=False)
+
+    def _map_support_summary(self) -> str:
+        top_lines = [
+            f"State: {self._map_runtime_state.title()}",
+            f"Visible: {'Yes' if self._map_visible else 'No'}",
+            f"Markers: {int(self._map_marker_count)}",
+            f"Links: {int(self._map_link_count)}",
+            f"Page Loading: {'Yes' if self._map_page_loading else 'No'}",
+            f"WebEngine Ready: {'Yes' if self._map_initialized else 'No'}",
+        ]
+        sections = [
+            (
+                "Current Detail",
+                bullet_lines(
+                    [
+                        self._map_runtime_detail,
+                        f"Last error: {self._map_last_error}" if self._map_last_error else "",
+                        f"Active band filter: {self.selected_band or 'All'}",
+                        f"Recency filter: {self.recency_combo.currentText()}" if hasattr(self, "recency_combo") else "",
+                        f"Link mode: {self.link_mode_combo.currentText()}" if hasattr(self, "link_mode_combo") else "",
+                        f"Group filter: {self.group_filter_combo.currentText()}" if hasattr(self, "group_filter_combo") else "",
+                        f"Region filter: {self.region_filter_combo.currentText()}" if hasattr(self, "region_filter_combo") else "",
+                    ]
+                ),
+            ),
+        ]
+        return build_support_summary("FreqInOut Multi-Rig Map Diagnostics", top_lines, sections=sections)
+
+    def _copy_map_diagnostics(self) -> None:
+        QApplication.clipboard().setText(self._map_support_summary())
+        if hasattr(self, "_map_copy_summary_btn") and self._map_copy_summary_btn is not None:
+            self._map_copy_summary_btn.setText("Copied")
+            QTimer.singleShot(1500, lambda: self._map_copy_summary_btn.setText("Copy Diagnostics"))
+
+    def _update_map_support_card(self) -> None:
+        card = getattr(self, "_map_support_card", None)
+        if card is None:
+            return
+        label = getattr(self, "_map_support_label", None)
+        if label is not None:
+            text = self._map_runtime_detail or "Map is standing by."
+            label.setText(f"Map Status: {self._map_runtime_state.title()}. {text}")
+            label.setToolTip(self._map_support_summary())
+        theme = self._theme_snapshot()
+        border = theme.get("border", "#cccccc")
+        role = "muted"
+        if self._map_runtime_state == "degraded":
+            border = theme.get("danger", "#b3261e")
+            role = "danger"
+        elif self._map_runtime_state in {"loading", "warming"}:
+            border = theme.get("warning", "#c99700")
+            role = "warning"
+        elif self._map_runtime_state == "ready":
+            border = theme.get("success", theme.get("accent", "#2a6fd3"))
+            role = "success"
+        bg = theme.get("surface_alt", theme.get("surface", "#f7f7f7"))
+        fg = theme.get("text", "#222222")
+        card.setStyleSheet(
+            "QFrame {"
+            f" background: {bg};"
+            f" border: 1px solid {border};"
+            " border-radius: 6px;"
+            "}"
+            " QLabel {"
+            f" color: {fg};"
+            " border: none;"
+            " background: transparent;"
+            "}"
+        )
+        if getattr(self, "_map_retry_btn", None) is not None:
+            self._map_retry_btn.setStyleSheet(button_style("warning" if role in {"warning", "danger"} else "secondary", theme))
+        if getattr(self, "_map_reload_btn", None) is not None:
+            self._map_reload_btn.setStyleSheet(button_style("secondary", theme))
+        if getattr(self, "_map_copy_summary_btn", None) is not None:
+            self._map_copy_summary_btn.setStyleSheet(button_style("secondary", theme))
+            self._map_copy_summary_btn.setVisible(self._map_runtime_state in {"loading", "warming", "degraded"})
+        if getattr(self, "_map_support_help_btn", None) is not None:
+            self._map_support_help_btn.setStyleSheet(button_style("muted", theme))
+
+    def _start_map_ingest_lifecycle(self) -> None:
+        if self._ingest_started:
+            return
+        self._ingest_started = True
+        self._start_js8_ingest_timer()
+        # Initial ingest to catch up since last run (looks back to last exit time if available)
+        QTimer.singleShot(500, lambda: self._auto_ingest_and_refresh(initial=True))
+
+    def _maybe_start_map_ingest(self) -> bool:
+        if self._ingest_started or not self._deferred_initial_ingest_pending:
+            return False
+        if not self._map_load_ok:
+            return False
+        self._deferred_initial_ingest_pending = False
+        self._start_map_ingest_lifecycle()
+        return True
 
     def set_map_visible(self, is_visible: bool) -> None:
         is_visible = bool(is_visible)
         if self._map_visible == is_visible:
             return
         self._map_visible = is_visible
+        if not self._map_visible:
+            if self._js8_timer is not None:
+                self._js8_timer.stop()
+            return
         if self._map_visible and not self._ingest_started:
-            self._ingest_started = True
-            self._start_js8_ingest_timer()
-            # Initial ingest to catch up since last run (looks back to last exit time if available)
-            QTimer.singleShot(500, lambda: self._auto_ingest_and_refresh(initial=True))
+            self._deferred_initial_ingest_pending = True
+            self._maybe_start_map_ingest()
+        elif self._map_visible and self._js8_timer is not None and self._ingest_started and not self._js8_timer.isActive():
+            self._js8_timer.start()
         if self._map_visible:
+            self._set_map_runtime_state("warming", "Preparing the map view and refreshing station data.")
+            self._emit_map_event("activation_started")
             self._map_dirty = True
             QTimer.singleShot(0, self._on_map_visible_deferred)
 
@@ -753,7 +987,7 @@ class StationsMapTab(QWidget):
         """
         Consume js8net rx messages and upsert live observations into js8_links.
         """
-        if self._is_shutting_down or self._js8_polling:
+        if self._is_shutting_down or self._js8_polling or not self._map_visible:
             return
         if not self.settings:
             return
@@ -987,6 +1221,10 @@ class StationsMapTab(QWidget):
         theme = self._theme_snapshot(force_reload=True)
         if self._controls_button is not None:
             self._controls_button.setStyleSheet(button_style("muted", theme))
+        if getattr(self, "_help_button", None) is not None:
+            self._help_button.setStyleSheet(button_style("secondary", theme))
+        if getattr(self, "_paths_help_button", None) is not None:
+            self._paths_help_button.setStyleSheet(button_style("secondary", theme))
         if self._refresh_links_button is not None:
             self._refresh_links_button.setStyleSheet(button_style("primary", theme))
         self._update_now_reachable_button_visual(bool(self._now_reachable_enabled), theme=theme)
@@ -1006,12 +1244,22 @@ class StationsMapTab(QWidget):
         except Exception:
             # Keep theme updates resilient if propagation data is unavailable.
             self._update_prop_badge("National", "", 0.0, theme=theme)
+        self._update_map_support_card()
+
+    def _open_context_help(self, context_key: str) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help(context_key)
+            except Exception:
+                pass
 
     def _sync_map_control_button_widths(self) -> None:
         for button in (
             self._refresh_links_button,
             self._now_reachable_button,
             self._sitrep_status_button,
+            getattr(self, "_paths_help_button", None),
         ):
             if button is None:
                 continue
@@ -1025,10 +1273,40 @@ class StationsMapTab(QWidget):
         layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(6)
 
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(6)
         self._controls_button = QPushButton("Show Map Controls")
         self._controls_button.setVisible(False)
         self._controls_button.clicked.connect(self._toggle_controls_drawer)
-        layout.addWidget(self._controls_button, alignment=Qt.AlignLeft)
+        top_row.addWidget(self._controls_button, alignment=Qt.AlignLeft)
+        self._help_button = QPushButton("Help")
+        self._help_button.setToolTip("Open focused help for Map controls and overlays.")
+        self._help_button.clicked.connect(lambda: self._open_context_help("tab.map"))
+        top_row.addWidget(self._help_button, alignment=Qt.AlignLeft)
+        top_row.addStretch(1)
+        layout.addLayout(top_row)
+
+        self._map_support_card = QFrame(self)
+        support_layout = QHBoxLayout(self._map_support_card)
+        support_layout.setContentsMargins(10, 8, 10, 8)
+        support_layout.setSpacing(8)
+        self._map_support_label = QLabel("Map Status: Cold. Map has not been opened yet.")
+        self._map_support_label.setWordWrap(True)
+        support_layout.addWidget(self._map_support_label, 1)
+        self._map_retry_btn = QPushButton("Retry")
+        self._map_retry_btn.clicked.connect(self._retry_map_render)
+        support_layout.addWidget(self._map_retry_btn)
+        self._map_reload_btn = QPushButton("Reload Data")
+        self._map_reload_btn.clicked.connect(self._reload_map_data)
+        support_layout.addWidget(self._map_reload_btn)
+        self._map_copy_summary_btn = QPushButton("Copy Diagnostics")
+        self._map_copy_summary_btn.clicked.connect(self._copy_map_diagnostics)
+        support_layout.addWidget(self._map_copy_summary_btn)
+        self._map_support_help_btn = QPushButton("Help")
+        self._map_support_help_btn.clicked.connect(lambda: self._open_context_help("tab.map"))
+        support_layout.addWidget(self._map_support_help_btn)
+        layout.addWidget(self._map_support_card)
 
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.setHandleWidth(14)
@@ -1213,10 +1491,14 @@ class StationsMapTab(QWidget):
         self._sitrep_status_button = QPushButton("SitRep Status")
         self._sitrep_status_button.setCheckable(True)
         self._update_sitrep_status_button_visual(False)
+        self._paths_help_button = QPushButton("Paths Help")
+        self._paths_help_button.setToolTip("Open focused help for Paths, Paths To, and Peer Sched Now.")
+        self._paths_help_button.clicked.connect(lambda: self._open_context_help("map.paths"))
         for button in (
             self._refresh_links_button,
             self._now_reachable_button,
             self._sitrep_status_button,
+            self._paths_help_button,
         ):
             try:
                 button.setMinimumWidth(button.sizeHint().width() + 6)
@@ -1235,24 +1517,25 @@ class StationsMapTab(QWidget):
         path_actions_layout.addWidget(self._refresh_links_button, 0)
         path_actions_layout.addWidget(self._now_reachable_button, 0)
         path_actions_layout.addWidget(self._sitrep_status_button, 0)
+        path_actions_layout.addWidget(self._paths_help_button, 0)
         filter_grid = QGridLayout(filter_bar)
         filter_grid.setContentsMargins(0, 0, 0, 0)
-        filter_grid.setHorizontalSpacing(8)
-        filter_grid.setVerticalSpacing(4)
+        filter_grid.setHorizontalSpacing(10)
+        filter_grid.setVerticalSpacing(8)
         filter_grid.addWidget(QLabel("Paths"), 0, 0)
         filter_grid.addWidget(self.link_mode_combo, 0, 1)
         filter_grid.addWidget(QLabel("Group"), 0, 2)
         filter_grid.addWidget(self.group_filter_combo, 0, 3)
         filter_grid.addWidget(QLabel("Region"), 0, 4)
         filter_grid.addWidget(self.region_filter_combo, 0, 5)
-        filter_grid.addWidget(QLabel("Band"), 0, 6)
-        filter_grid.addWidget(self.band_combo, 0, 7)
-        filter_grid.addWidget(QLabel("Recency"), 0, 8)
-        filter_grid.addWidget(self.recency_combo, 0, 9)
-        filter_grid.addWidget(QLabel("Paths to"), 1, 0)
-        filter_grid.addWidget(path_actions_row, 1, 1, 1, 10)
-        filter_grid.addWidget(self._now_reachable_label, 1, 11, alignment=Qt.AlignLeft)
-        filter_grid.setColumnStretch(11, 1)
+        filter_grid.addWidget(QLabel("Band"), 1, 0)
+        filter_grid.addWidget(self.band_combo, 1, 1)
+        filter_grid.addWidget(QLabel("Recency"), 1, 2)
+        filter_grid.addWidget(self.recency_combo, 1, 3)
+        filter_grid.addWidget(QLabel("Paths to"), 2, 0, alignment=Qt.AlignTop)
+        filter_grid.addWidget(path_actions_row, 2, 1, 1, 5)
+        filter_grid.addWidget(self._now_reachable_label, 3, 0, 1, 6, alignment=Qt.AlignLeft)
+        filter_grid.setColumnStretch(6, 1)
         map_layout.addWidget(filter_bar)
 
         if _ensure_webengine_imported():
@@ -1772,7 +2055,7 @@ class StationsMapTab(QWidget):
                 continue
             pts.append(StationPoint(callsign=cs, grid=grid, heard_by=heard_by, lat=lat, lon=lon))
         self.stations = pts
-        self._render_map()
+        self._request_map_refresh(level="full", reason="operator_history_loaded")
 
     def _daily_schedule_freqs(self) -> List[float]:
         """
@@ -2253,7 +2536,7 @@ class StationsMapTab(QWidget):
         self._update_now_reachable_button_visual(self._now_reachable_enabled)
         self._update_now_reachable_summary()
         self._refresh_relay_targets()
-        self._render_map()
+        self._request_map_refresh(level="medium", reason="reachable_toggle")
 
     def _on_sitrep_status_toggled(self, checked: bool) -> None:
         self._sitrep_status_only_enabled = bool(checked)
@@ -2277,7 +2560,7 @@ class StationsMapTab(QWidget):
             except Exception:
                 pass
         self._update_sitrep_status_button_visual(self._sitrep_status_only_enabled)
-        self._render_map()
+        self._request_map_refresh(level="medium", reason="sitrep_toggle")
 
     def _relay_target_callsign_from_text(self, text: str) -> str:
         txt = (text or "").strip()
@@ -4434,10 +4717,34 @@ class StationsMapTab(QWidget):
             url = QUrl.fromLocalFile(str(path))
             # Cache-bust while reusing the same local file path to avoid temp-file growth.
             url.setQuery(f"v={int(time.time() * 1000)}")
+            self._map_page_loading = True
+            self._map_load_ok = False
+            self._set_map_runtime_state("loading", "Loading the map surface.")
+            self._emit_map_event("page_load_started", source="file")
             self.web.setUrl(url)
             return True
         except Exception as e:
             log.error("StationsMap: failed loading map html in webview: %s", e)
+            self._map_page_loading = False
+            self._enter_map_degraded("Map file load failed before the preview was ready.", reason="file_load", exc=e)
+            return False
+
+    def _load_map_html_into_webview(self, html: str, path: Optional[Path] = None) -> bool:
+        if self.web is None:
+            return False
+        if path is not None and self._load_web_map_file(path):
+            return True
+        try:
+            self._map_page_loading = True
+            self._map_load_ok = False
+            self._set_map_runtime_state("loading", "Loading the map surface.")
+            self._emit_map_event("page_load_started", source="inline")
+            self.web.setHtml(html)
+            return True
+        except Exception as e:
+            log.error("StationsMap: failed loading inline map html in webview: %s", e)
+            self._map_page_loading = False
+            self._enter_map_degraded("Inline map preview load failed before the preview was ready.", reason="inline_load", exc=e)
             return False
 
     def _ensure_web_view(self) -> bool:
@@ -4477,6 +4784,10 @@ class StationsMapTab(QWidget):
         if not self._map_visible:
             self._map_dirty = True
             return
+        if self._map_page_loading:
+            self._map_dirty = True
+            self._render_requested_during_load = True
+            return
         self._map_dirty = False
         theme_key = ""
         try:
@@ -4500,15 +4811,6 @@ class StationsMapTab(QWidget):
             int(self.prop_window_hours or 6),
         )
         force_reload = self._map_initialized and self._last_map_config and config_sig != self._last_map_config
-        if force_reload and self.web is not None and preserve_view is True:
-            try:
-                self.web.page().runJavaScript(
-                    "(() => { if (window._leafletMap) { const c = window._leafletMap.getCenter(); return JSON.stringify({lat:c.lat, lon:c.lng, zoom: window._leafletMap.getZoom()}); } if (window._lastView) { return JSON.stringify(window._lastView); } return null; })();",
-                    lambda res: self._render_map(self._parse_view_state(res)),
-                )
-                return
-            except Exception:
-                pass
 
         view_state = None
         if isinstance(preserve_view, dict):
@@ -4521,6 +4823,8 @@ class StationsMapTab(QWidget):
             view_state = self._last_map_view
 
         if not self.stations:
+            self._map_marker_count = 0
+            self._map_link_count = 0
             html = "<html><body><h3>No station data to display.</h3></body></html>"
             if self.web is not None:
                 self._map_initialized = False
@@ -4531,10 +4835,9 @@ class StationsMapTab(QWidget):
                 path = self._write_map_html(html)
                 if path is not None:
                     self._map_file = path
-                    if not self._load_web_map_file(path):
-                        self.web.setHtml(html)
+                    self._load_map_html_into_webview(html, path)
                 else:
-                    self.web.setHtml(html)
+                    self._load_map_html_into_webview(html)
             else:
                 path = self._write_map_html(html)
                 if path is not None:
@@ -4834,6 +5137,9 @@ class StationsMapTab(QWidget):
                     }
                 )
 
+        self._map_marker_count = len(markers)
+        self._map_link_count = len(links)
+
         if self.web is not None and self._map_initialized and self._map_file and not force_reload:
             self._push_map_payload(markers, links, sitrep_state_summary=sitrep_state_summary, sitrep_summary_group=sitrep_summary_group)
             self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
@@ -4903,10 +5209,9 @@ class StationsMapTab(QWidget):
             path = self._write_map_html(html)
             if path is not None:
                 self._map_file = path
-                if not self._load_web_map_file(path):
-                    self.web.setHtml(html)
+                self._load_map_html_into_webview(html, path)
             else:
-                self.web.setHtml(html)
+                self._load_map_html_into_webview(html)
         else:
             path = self._write_map_html(html)
             if path is not None:
@@ -4915,8 +5220,10 @@ class StationsMapTab(QWidget):
         self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
 
     def _on_map_load_finished(self, ok: bool) -> None:
+        self._map_page_loading = False
         self._map_initialized = bool(ok)
         self._map_load_ok = bool(ok)
+        self._emit_map_event("page_load_finished", ok=bool(ok))
         if self._map_stack is not None:
             if ok:
                 self._map_stack.setCurrentIndex(1)
@@ -4924,8 +5231,16 @@ class StationsMapTab(QWidget):
                 self._map_stack.setCurrentIndex(0)
                 if self._map_loading_label is not None:
                     self._map_loading_label.setText("Map failed to load.")
+        if not ok:
+            self._enter_map_degraded("Map preview did not load successfully. You can retry without restarting FIO.", reason="load_finished")
+        else:
+            self._set_map_runtime_state(
+                "ready",
+                f"Map is ready with {int(self._map_marker_count)} station markers and {int(self._map_link_count)} links.",
+            )
         if not ok or self.web is None:
             return
+        self._maybe_start_map_ingest()
         if self._pending_map_payload:
             payload = self._pending_map_payload
             self._pending_map_payload = None
@@ -4939,26 +5254,30 @@ class StationsMapTab(QWidget):
                 payload.get("sitrep_state_summary", []),
                 payload.get("sitrep_summary_group", ""),
             )
-        if self._map_visible and self._map_dirty:
+        if self._map_visible and (self._map_dirty or self._render_requested_during_load):
+            self._render_requested_during_load = False
             self._map_dirty = False
-            self._schedule_render()
+            queued_level = self._refresh_level_name(max(int(self._render_requested_during_load_level or 0), 2))
+            self._render_requested_during_load_level = 0
+            self._request_map_refresh(level=queued_level, reason="post_load", preserve_view=True)
 
     def _on_map_visible_deferred(self) -> None:
         if not self._map_visible or self._is_shutting_down:
             return
         self._ensure_initial_data_loaded()
-        self._ensure_web_view()
+        if not self._ensure_web_view():
+            self._enter_map_degraded("Qt WebEngine is not available for the embedded map preview.", reason="webengine_missing")
+            return
         if not self._map_initialized:
             # First visible render: build/load the map HTML before waiting on loadFinished.
             # Clear dirty before first render to avoid an immediate duplicate render in
             # _on_map_load_finished(). Any real updates during load will set dirty again.
             self._map_dirty = False
-            with perf_span("map.render_call", settings=self.settings, meta={"source": "visible_init"}, min_ms=10.0):
-                self._render_map(preserve_view=True)
+            self._request_map_refresh(level="full", reason="visible_init", preserve_view=True)
             return
         if self._map_dirty:
             self._map_dirty = False
-            self._schedule_render()
+            self._request_map_refresh(level="medium", reason="visible_dirty", preserve_view=True)
 
     def _push_map_payload(
         self,
@@ -4969,6 +5288,19 @@ class StationsMapTab(QWidget):
         sitrep_summary_group: str = "",
     ) -> None:
         if self.web is None:
+            return
+        if self._map_page_loading or not self._map_initialized:
+            self._pending_map_payload = {
+                "markers": list(markers),
+                "links": list(links),
+                "now_reachable_enabled": (
+                    bool(self._now_reachable_enabled)
+                    if now_reachable_enabled is None
+                    else bool(now_reachable_enabled)
+                ),
+                "sitrep_state_summary": list(sitrep_state_summary or []),
+                "sitrep_summary_group": str(sitrep_summary_group or ""),
+            }
             return
         now_reachable_flag = (
             bool(self._now_reachable_enabled)
@@ -5441,6 +5773,10 @@ function addGridLabels(res, level, bounds, maxLabels) {
     updateCityVisibility();
             """
         dark_map_filter = "filter: brightness(0.75) saturate(0.85) contrast(1.05);" if is_dark else ""
+        ui_text_scale = resolve_ui_text_scale(self.settings)
+        label_font_px = max(10.0, 10.0 * float(ui_text_scale))
+        panel_font_px = max(11.0, 11.0 * float(ui_text_scale))
+        legend_font_px = max(12.0, 12.0 * float(ui_text_scale))
         return f"""
 <!DOCTYPE html>
 <html>
@@ -5455,17 +5791,17 @@ function addGridLabels(res, level, bounds, maxLabels) {
     #map-wrap {{ position: relative; flex: 1 1 auto; min-height: 0; }}
     #map {{ height: 100%; {dark_map_filter} }}
     #legendDock {{ flex: 0 0 auto; display: flex; justify-content: center; padding: 6px 10px 10px; }}
-    .label-text {{ font-size: 10px; color: {label_color}; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; text-shadow: 0 1px 2px #000; }}
+    .label-text {{ font-size: {label_font_px:.1f}px; color: {label_color}; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; text-shadow: 0 1px 2px #000; }}
     .label-text.no-border {{ background: transparent; border: none; box-shadow: none; pointer-events: none; }}
     .region-label {{ color: {region_label_color}; font-weight: 700; pointer-events: auto; }}
     .region-band-label {{ color: #000; font-weight: 400; pointer-events: none; }}
     .cs-tooltip {{ background: {tooltip_bg}; color: {tooltip_text}; border: 1px solid {tooltip_border}; padding: 5px 7px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.4); z-index: 10000; }}
     .leaflet-tooltip.cs-tooltip {{ z-index: 10000; pointer-events: none; }}
     .leaflet-popup.cs-tooltip {{ z-index: 10001; }}
-    .detail-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; min-width: 150px; max-width: 220px; font-size: 11px; }}
-    .zoom-display {{ padding: 4px 8px; font-size: 11px; background: {legend_bg}; color: {legend_text}; border: 1px solid {tooltip_border}; }}
-    .legend-box {{ background: {legend_bg}; color: {legend_text}; padding: 8px 12px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: 11px; line-height: 1.3; max-width: min(100%, 860px); box-sizing: border-box; }}
-    .summary-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: 11px; line-height: 1.35; min-width: 180px; max-width: 240px; }}
+    .detail-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; min-width: 150px; max-width: 220px; font-size: {panel_font_px:.1f}px; }}
+    .zoom-display {{ padding: 4px 8px; font-size: {panel_font_px:.1f}px; background: {legend_bg}; color: {legend_text}; border: 1px solid {tooltip_border}; }}
+    .legend-box {{ background: {legend_bg}; color: {legend_text}; padding: 8px 12px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {legend_font_px:.1f}px; line-height: 1.35; max-width: min(100%, 860px); box-sizing: border-box; }}
+    .summary-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {panel_font_px:.1f}px; line-height: 1.35; min-width: 180px; max-width: 240px; }}
     .summary-row {{ display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }}
     .summary-row + .summary-row {{ margin-top: 3px; }}
     .summary-state {{ font-weight: 700; }}
@@ -5795,20 +6131,20 @@ function addGridLabels(res, level, bounds, maxLabels) {
     def _on_show_calls_changed(self, state):
         self.show_callsigns = bool(state)
         self._save_display_preferences()
-        self._render_map()
+        self._request_map_refresh(level="light", reason="toggle_callsigns")
 
     def _on_show_states_changed(self, state):
         self.show_states = bool(state)
         self._sync_city_pop_enabled()
         self._save_display_preferences()
-        self._render_map()
+        self._request_map_refresh(level="light", reason="toggle_states")
 
     def _on_show_cities_changed(self, state):
         self.show_cities = bool(state)
         self._sync_city_pop_enabled()
         self.show_city_labels = self.show_cities
         self._save_display_preferences()
-        self._render_map()
+        self._request_map_refresh(level="light", reason="toggle_cities")
 
     def _on_show_grid_labels_changed(self, state):
         # Single toggle now controls both grid lines and labels
@@ -5816,12 +6152,12 @@ function addGridLabels(res, level, bounds, maxLabels) {
         self.show_grids = enabled
         self.show_grid_labels = enabled
         self._save_display_preferences()
-        self._render_map()
+        self._request_map_refresh(level="light", reason="toggle_grids")
 
     def _on_show_regions_changed(self, state):
         self.show_regions = bool(state)
         self._save_display_preferences()
-        self._render_map()
+        self._request_map_refresh(level="light", reason="toggle_regions")
 
     def _on_city_pop_changed(self, idx: int):
         try:
@@ -5830,7 +6166,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
             val = 100000
         self.city_pop_min = val
         if self.show_cities or self.show_states:
-            self._render_map()
+            self._request_map_refresh(level="light", reason="city_population")
         self._save_display_preferences()
 
     def _on_link_mode_changed(self, idx: int):
@@ -5857,17 +6193,17 @@ function addGridLabels(res, level, bounds, maxLabels) {
                     self.relay_target_combo.blockSignals(False)
                 except Exception:
                     pass
-        self._render_map()
+        self._request_map_refresh(level="medium", reason="link_mode")
 
     def _on_group_filter_changed(self, idx: int):
-        self._render_map()
+        self._request_map_refresh(level="medium", reason="group_filter")
 
     def _on_region_filter_changed(self, idx: int):
-        self._render_map()
+        self._request_map_refresh(level="medium", reason="region_filter")
 
     def _on_band_changed(self, idx: int):
         self.selected_band = self.band_combo.itemText(idx)
-        self._render_map()
+        self._request_map_refresh(level="medium", reason="band_filter")
 
     def _on_recency_changed(self, idx: int):
         val = self.recency_combo.itemText(idx)
@@ -5883,19 +6219,19 @@ function addGridLabels(res, level, bounds, maxLabels) {
             "7d": 7 * 24 * 60 * 60,
         }
         self.recency_seconds = mapping.get(val, None)
-        self._render_map()
+        self._request_map_refresh(level="medium", reason="recency_filter")
 
     def _on_relay_target_changed(self, text: str):
         normalized = self._relay_target_callsign_from_text(text)
         if normalized == self.relay_target:
             return
         self.relay_target = normalized
-        self._render_map()
+        self._request_map_refresh(level="medium", reason="relay_target")
 
     def _on_prop_overlay_changed(self, state):
         self.prop_overlay_enabled = bool(state)
         self._save_display_preferences()
-        self._render_map()
+        self._request_map_refresh(level="full", reason="prop_overlay")
 
     def _on_prop_mode_changed(self, _idx: int) -> None:
         if self.prop_mode_combo is None:
@@ -5908,7 +6244,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
             mode = "blended"
         self.prop_mode = mode
         self._save_display_preferences()
-        self._render_map()
+        self._request_map_refresh(level="full", reason="prop_mode")
 
     def _on_prop_window_changed(self, _idx: int) -> None:
         if self.prop_window_combo is None:
@@ -5919,7 +6255,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
             hours = 6
         self.prop_window_hours = hours
         self._save_display_preferences()
-        self._render_map()
+        self._request_map_refresh(level="full", reason="prop_window")
 
     def _on_prop_target_type_changed(self, _idx: int) -> None:
         if self._prop_target_syncing or self.prop_target_type_combo is None or not self.settings:
@@ -5939,7 +6275,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
             log.debug("StationsMap: propagation target type change failed: %s", e)
         finally:
             self._prop_target_syncing = False
-        self._render_map()
+        self._request_map_refresh(level="full", reason="prop_target_type")
 
     def _on_prop_target_value_changed(self, text: str) -> None:
         if self._prop_target_syncing or self.prop_target_type_combo is None or not self.settings:
@@ -5957,12 +6293,12 @@ function addGridLabels(res, level, bounds, maxLabels) {
             )
         except Exception as e:
             log.debug("StationsMap: propagation target value change failed: %s", e)
-        self._render_map()
+        self._request_map_refresh(level="full", reason="prop_target_value")
 
     def _on_prop_adaptive_changed(self, state):
         self.prop_adaptive_enabled = bool(state)
         self._save_display_preferences()
-        self._render_map()
+        self._request_map_refresh(level="full", reason="prop_adaptive")
     def _ensure_leaflet_assets(self) -> tuple[str, str]:
         """
         Resolve Leaflet asset URLs without blocking the UI thread.
