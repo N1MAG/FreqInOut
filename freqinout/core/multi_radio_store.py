@@ -77,6 +77,18 @@ MIRRORED_LEGACY_KEYS = frozenset(
         "varac_bbs_limit_access_enabled",
         "varac_bbs_allowed_callsigns",
         "varac_bbs_announce_enabled",
+        "varac_bbs_vault_enabled",
+        "varac_bbs_vault_managed_root",
+        "varac_bbs_vault_default_location_id",
+        "varac_bbs_vault_trigger_mode",
+        "varac_bbs_vault_return_mode",
+        "varac_bbs_vault_failed_attempt_limit",
+        "varac_bbs_vault_failed_attempt_window_seconds",
+        "varac_bbs_vault_cooldown_seconds",
+        "varac_bbs_vault_idle_timeout_seconds",
+        "varac_bbs_vault_locations_v1",
+        "varac_bbs_vault_runtime_state_v1",
+        "varac_bbs_vault_last_summary",
         "message_paths",
         "launch_control_enabled",
         "use_scheduler",
@@ -140,6 +152,18 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             varac_bbs_announce_enabled INTEGER NOT NULL DEFAULT 0,
             varac_bbs_auto_archive_enabled INTEGER NOT NULL DEFAULT 0,
             varac_bbs_auto_archive_days INTEGER NOT NULL DEFAULT 14,
+            varac_bbs_vault_enabled INTEGER NOT NULL DEFAULT 0,
+            varac_bbs_vault_managed_root TEXT,
+            varac_bbs_vault_default_location_id TEXT,
+            varac_bbs_vault_trigger_mode TEXT,
+            varac_bbs_vault_return_mode TEXT,
+            varac_bbs_vault_failed_attempt_limit INTEGER NOT NULL DEFAULT 3,
+            varac_bbs_vault_failed_attempt_window_seconds INTEGER NOT NULL DEFAULT 900,
+            varac_bbs_vault_cooldown_seconds INTEGER NOT NULL DEFAULT 1800,
+            varac_bbs_vault_idle_timeout_seconds INTEGER NOT NULL DEFAULT 600,
+            varac_bbs_vault_locations_v1 TEXT,
+            varac_bbs_vault_runtime_state_v1 TEXT,
+            varac_bbs_vault_last_summary TEXT,
             varac_cluster_member_enabled INTEGER DEFAULT 0,
             launch_enabled INTEGER NOT NULL DEFAULT 1,
             launch_path TEXT,
@@ -208,6 +232,18 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "varac_bbs_announce_enabled": "INTEGER NOT NULL DEFAULT 0",
             "varac_bbs_auto_archive_enabled": "INTEGER NOT NULL DEFAULT 0",
             "varac_bbs_auto_archive_days": "INTEGER NOT NULL DEFAULT 14",
+            "varac_bbs_vault_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "varac_bbs_vault_managed_root": "TEXT",
+            "varac_bbs_vault_default_location_id": "TEXT",
+            "varac_bbs_vault_trigger_mode": "TEXT",
+            "varac_bbs_vault_return_mode": "TEXT",
+            "varac_bbs_vault_failed_attempt_limit": "INTEGER NOT NULL DEFAULT 3",
+            "varac_bbs_vault_failed_attempt_window_seconds": "INTEGER NOT NULL DEFAULT 900",
+            "varac_bbs_vault_cooldown_seconds": "INTEGER NOT NULL DEFAULT 1800",
+            "varac_bbs_vault_idle_timeout_seconds": "INTEGER NOT NULL DEFAULT 600",
+            "varac_bbs_vault_locations_v1": "TEXT",
+            "varac_bbs_vault_runtime_state_v1": "TEXT",
+            "varac_bbs_vault_last_summary": "TEXT",
             "varac_cluster_member_enabled": "INTEGER DEFAULT 0",
             "launch_enabled": "INTEGER NOT NULL DEFAULT 1",
             "launch_path": "TEXT",
@@ -692,6 +728,26 @@ def _parse_string_list(value: Any) -> List[str]:
 
 def _coerce_json_array_text(value: Any) -> str:
     return json.dumps(_parse_string_list(value))
+
+
+def _parse_json_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if value in (None, ""):
+        return []
+    try:
+        loaded = json.loads(str(value))
+    except Exception:
+        return []
+    return list(loaded) if isinstance(loaded, list) else []
+
+
+def _coerce_json_list_text(value: Any) -> str:
+    if isinstance(value, list):
+        return json.dumps(value, sort_keys=True)
+    if value in (None, ""):
+        return "[]"
+    return json.dumps(_parse_json_list(value), sort_keys=True)
 
 
 def _normalize_varac_cluster_id(value: Any, fallback: str = "CLUSTER") -> str:
@@ -1960,6 +2016,61 @@ def _legacy_settings_projection_from_device(
         "varac_bbs_auto_archive_days": _coerce_optional_int(device_profile.get("varac_bbs_auto_archive_days"), 14)
         if use_varac
         else 14,
+        "varac_bbs_vault_enabled": bool(
+            _coerce_bool_int(device_profile.get("varac_bbs_vault_enabled", 0), False)
+        )
+        if use_varac
+        else False,
+        "varac_bbs_vault_managed_root": _coerce_text(device_profile.get("varac_bbs_vault_managed_root", ""), "")
+        if use_varac
+        else "",
+        "varac_bbs_vault_default_location_id": _coerce_text(
+            device_profile.get("varac_bbs_vault_default_location_id", ""),
+            "",
+        )
+        if use_varac
+        else "",
+        "varac_bbs_vault_trigger_mode": _coerce_text(device_profile.get("varac_bbs_vault_trigger_mode", ""), "")
+        if use_varac
+        else "",
+        "varac_bbs_vault_return_mode": _coerce_text(device_profile.get("varac_bbs_vault_return_mode", ""), "")
+        if use_varac
+        else "",
+        "varac_bbs_vault_failed_attempt_limit": _coerce_optional_int(
+            device_profile.get("varac_bbs_vault_failed_attempt_limit"),
+            3,
+        )
+        if use_varac
+        else 3,
+        "varac_bbs_vault_failed_attempt_window_seconds": _coerce_optional_int(
+            device_profile.get("varac_bbs_vault_failed_attempt_window_seconds"),
+            900,
+        )
+        if use_varac
+        else 900,
+        "varac_bbs_vault_cooldown_seconds": _coerce_optional_int(
+            device_profile.get("varac_bbs_vault_cooldown_seconds"),
+            1800,
+        )
+        if use_varac
+        else 1800,
+        "varac_bbs_vault_idle_timeout_seconds": _coerce_optional_int(
+            device_profile.get("varac_bbs_vault_idle_timeout_seconds"),
+            600,
+        )
+        if use_varac
+        else 600,
+        "varac_bbs_vault_locations_v1": _parse_json_list(device_profile.get("varac_bbs_vault_locations_v1", "[]"))
+        if use_varac
+        else [],
+        "varac_bbs_vault_runtime_state_v1": _parse_json_object(
+            device_profile.get("varac_bbs_vault_runtime_state_v1", "{}")
+        )
+        if use_varac
+        else {},
+        "varac_bbs_vault_last_summary": _coerce_text(device_profile.get("varac_bbs_vault_last_summary", ""), "")
+        if use_varac
+        else "",
         "js8_host": js8_host if use_js8call else "",
         "js8_port": _coerce_optional_int(device_profile.get("js8_port"), 2442) if use_js8call else None,
         "js8_offset_hz": (_coerce_optional_int(device_profile.get("js8_offset_hz"), 0) or 0) if use_js8call else 0,
@@ -2201,6 +2312,42 @@ def _seed_device_defaults(
             False,
         ),
         "varac_bbs_auto_archive_days": _settings_int(settings_values, "varac_bbs_auto_archive_days", 14),
+        "varac_bbs_vault_enabled": _coerce_bool_int(settings_values.get("varac_bbs_vault_enabled"), False),
+        "varac_bbs_vault_managed_root": _settings_text(settings_values, "varac_bbs_vault_managed_root", ""),
+        "varac_bbs_vault_default_location_id": _settings_text(
+            settings_values,
+            "varac_bbs_vault_default_location_id",
+            "",
+        ),
+        "varac_bbs_vault_trigger_mode": _settings_text(settings_values, "varac_bbs_vault_trigger_mode", ""),
+        "varac_bbs_vault_return_mode": _settings_text(settings_values, "varac_bbs_vault_return_mode", ""),
+        "varac_bbs_vault_failed_attempt_limit": _settings_int(
+            settings_values,
+            "varac_bbs_vault_failed_attempt_limit",
+            3,
+        ),
+        "varac_bbs_vault_failed_attempt_window_seconds": _settings_int(
+            settings_values,
+            "varac_bbs_vault_failed_attempt_window_seconds",
+            900,
+        ),
+        "varac_bbs_vault_cooldown_seconds": _settings_int(
+            settings_values,
+            "varac_bbs_vault_cooldown_seconds",
+            1800,
+        ),
+        "varac_bbs_vault_idle_timeout_seconds": _settings_int(
+            settings_values,
+            "varac_bbs_vault_idle_timeout_seconds",
+            600,
+        ),
+        "varac_bbs_vault_locations_v1": _coerce_json_list_text(
+            settings_values.get("varac_bbs_vault_locations_v1", [])
+        ),
+        "varac_bbs_vault_runtime_state_v1": _coerce_json_object_text(
+            settings_values.get("varac_bbs_vault_runtime_state_v1", {})
+        ),
+        "varac_bbs_vault_last_summary": _settings_text(settings_values, "varac_bbs_vault_last_summary", ""),
         "launch_enabled": _coerce_bool_int(settings_values.get("launch_control_enabled"), True),
         "launch_path": launch_path,
         "launch_cmd": _settings_text(settings_values, "varac_launch_cmd", ""),
@@ -2588,6 +2735,73 @@ class MultiRadioStore:
                     (existing or {}).get("varac_bbs_auto_archive_days", 14),
                 ),
                 14,
+            ),
+            "varac_bbs_vault_enabled": _coerce_bool_int(
+                payload.get("varac_bbs_vault_enabled", (existing or {}).get("varac_bbs_vault_enabled", 0)),
+                False,
+            ),
+            "varac_bbs_vault_managed_root": _coerce_text(
+                payload.get("varac_bbs_vault_managed_root", (existing or {}).get("varac_bbs_vault_managed_root", "")),
+                "",
+            ),
+            "varac_bbs_vault_default_location_id": _coerce_text(
+                payload.get(
+                    "varac_bbs_vault_default_location_id",
+                    (existing or {}).get("varac_bbs_vault_default_location_id", ""),
+                ),
+                "",
+            ),
+            "varac_bbs_vault_trigger_mode": _coerce_text(
+                payload.get("varac_bbs_vault_trigger_mode", (existing or {}).get("varac_bbs_vault_trigger_mode", "")),
+                "",
+            ),
+            "varac_bbs_vault_return_mode": _coerce_text(
+                payload.get("varac_bbs_vault_return_mode", (existing or {}).get("varac_bbs_vault_return_mode", "")),
+                "",
+            ),
+            "varac_bbs_vault_failed_attempt_limit": _coerce_optional_int(
+                payload.get(
+                    "varac_bbs_vault_failed_attempt_limit",
+                    (existing or {}).get("varac_bbs_vault_failed_attempt_limit", 3),
+                ),
+                3,
+            ),
+            "varac_bbs_vault_failed_attempt_window_seconds": _coerce_optional_int(
+                payload.get(
+                    "varac_bbs_vault_failed_attempt_window_seconds",
+                    (existing or {}).get("varac_bbs_vault_failed_attempt_window_seconds", 900),
+                ),
+                900,
+            ),
+            "varac_bbs_vault_cooldown_seconds": _coerce_optional_int(
+                payload.get(
+                    "varac_bbs_vault_cooldown_seconds",
+                    (existing or {}).get("varac_bbs_vault_cooldown_seconds", 1800),
+                ),
+                1800,
+            ),
+            "varac_bbs_vault_idle_timeout_seconds": _coerce_optional_int(
+                payload.get(
+                    "varac_bbs_vault_idle_timeout_seconds",
+                    (existing or {}).get("varac_bbs_vault_idle_timeout_seconds", 600),
+                ),
+                600,
+            ),
+            "varac_bbs_vault_locations_v1": _coerce_json_list_text(
+                payload.get(
+                    "varac_bbs_vault_locations_v1",
+                    (existing or {}).get("varac_bbs_vault_locations_v1", "[]"),
+                )
+            ),
+            "varac_bbs_vault_runtime_state_v1": _coerce_json_object_text(
+                payload.get(
+                    "varac_bbs_vault_runtime_state_v1",
+                    (existing or {}).get("varac_bbs_vault_runtime_state_v1", "{}"),
+                )
+            ),
+            "varac_bbs_vault_last_summary": _coerce_text(
+                payload.get("varac_bbs_vault_last_summary", (existing or {}).get("varac_bbs_vault_last_summary", "")),
+                "",
             ),
             "launch_enabled": _coerce_bool_int(payload.get("launch_enabled", (existing or {}).get("launch_enabled", 1)), True),
             "launch_path": _coerce_text(payload.get("launch_path", (existing or {}).get("launch_path", "")), ""),

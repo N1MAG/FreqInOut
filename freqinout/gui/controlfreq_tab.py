@@ -4309,6 +4309,12 @@ class ControlFreqTab(QWidget):
     def _collect_bbs_rows(self, search: str) -> List[List[str]]:
         bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
         bbs_dir = Path(bbs_dir_txt) if bbs_dir_txt else None
+        vault_enabled = bool(self.settings.get("varac_bbs_vault_enabled", False))
+        vault_summary = str(self.settings.get("varac_bbs_vault_last_summary", "") or "").strip()
+        vault_note = ""
+        if vault_enabled:
+            compact = vault_summary or "Managed Vault enabled"
+            vault_note = f"Vault: {compact}"
         auto_days_raw = self.settings.get("varac_bbs_auto_archive_days", 14)
         try:
             auto_days = max(1, int(auto_days_raw or 14))
@@ -4339,16 +4345,21 @@ class ControlFreqTab(QWidget):
                 aging_txt = ", ".join(aging_names[:6]) + f" +{len(aging_names) - 6} more"
             else:
                 aging_txt = ", ".join(aging_names)
+            if vault_note:
+                aging_txt = f"{aging_txt} | {vault_note}" if aging_txt else vault_note
             row = ["VarAC BBS", str(len(all_names)), aging_txt or "-"]
             search_hits = search and (
                 search in row[0].upper()
                 or any(search in name.upper() for name in aging_names)
                 or any(search in name.upper() for name in all_names)
+                or search in vault_note.upper()
             )
             if not search or search_hits:
                 return [row]
             return [["No matches", "0", "-"]]
         note = "Not configured" if not bbs_dir_txt else "Missing directory"
+        if vault_note:
+            note = f"{note} | {vault_note}"
         row = ["VarAC BBS", "0", note]
         if not search or search in row[0].upper() or search in note.upper():
             return [row]

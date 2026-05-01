@@ -1,6 +1,7 @@
 # Changelog
 
 ## [1.2.3]
+- Added: `Settings -> VarAC Settings` now includes a radio-scoped `Managed BBS Vault` workflow with named locations, hashed access codes, managed-root initialization/import, default-location reset, background trigger handling from the VarAC traffic log, and compact status visibility in `Settings`, `ControlFreq`, and `Messages`.
 - Changed: `Settings -> VarAC Settings` now manages BBS allowed callsigns through a lookup-assisted selected list with manual callsign fallback, reducing whitelist typos while preserving the existing VarAC.ini-compatible callsign format for both the station view and radio-scoped VarAC settings.
 - Changed: crowded Settings, ControlFreq, and Map control bands now use roomier grouped layouts, including calmer top-level settings rows, a less cramped radio software chooser, a stacked setup-review banner, and a less compressed map filter bar for a friendlier operator experience.
 - Fixed: multi-rig runtime readiness now respects explicit per-radio software participation more strictly, so an active/default radio can intentionally opt out of JS8, Fast Light, or VarAC without stale projected global paths keeping setup reminders or status LEDs alive.

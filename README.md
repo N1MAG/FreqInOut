@@ -143,6 +143,7 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 - Watch the Settings left-nav for warning highlights; they indicate partially configured sections that still need required companion fields.
 - When `JS8Call Install Folder` is set, also configure host, TCP port, and `DIRECTED.TXT`. If `JS8Spotter Launch Path` is set, also configure `JS8Spotter forms`.
 - When `VarAC Install Folder` is set, also configure `Incoming Files`.
+- When `Managed BBS Vault` is enabled under `Settings -> VarAC Settings`, also configure a live `BBS Directory`, initialize the managed root, and keep at least one valid `Default Location` in the selected Station Default radio bundle. Access codes are operational controls, not strong secrets.
 - Populate Operator History before expecting the Map tab to show full results.
 - JS8 live ingest is used when available; log parsing is used as a fallback.
 - Set your operator Grid (Grid 6 recommended) in Settings to enable full propagation forecast output in ControlFreq.

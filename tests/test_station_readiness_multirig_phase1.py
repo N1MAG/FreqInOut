@@ -97,6 +97,28 @@ def test_build_station_readiness_report_accepts_saved_varac_auto_archive_key() -
     assert "VarAC auto archive requires both BBS directories" in messages
 
 
+def test_build_station_readiness_report_tracks_managed_vault_setup_gaps() -> None:
+    from freqinout.core.station_readiness import build_station_readiness_report
+
+    report = build_station_readiness_report(
+        {
+            "operator_callsign": "N1MAG",
+            "operator_grid6": "DM79QJ",
+            "varac_path": "/tmp/VarAC",
+            "message_paths": {"varac": "/tmp/VarAC/Inbox"},
+            "varac_bbs_vault_enabled": True,
+            "varac_bbs_vault_managed_root": "/tmp/FIO_BBS_Vault",
+            "varac_bbs_vault_locations_v1": [],
+        },
+        device_profiles=[],
+        operating_groups=[{"name": "@MAGNET"}],
+    )
+
+    messages = {issue.message for issue in report.issues}
+    assert "Managed BBS Vault has no live BBS directory" in messages
+    assert "Managed BBS Vault has no locations" in messages
+
+
 def test_visible_status_programs_prefers_active_radio_software_flags() -> None:
     from freqinout.core.station_readiness import visible_status_programs
 
@@ -323,11 +345,13 @@ def test_multirig_controlfreq_and_sop_sources_include_readiness_copy_and_activat
     ).read_text(encoding="utf-8")
 
     assert "Copy Summary" in controlfreq_source
+    assert "Managed Vault" in controlfreq_source
     assert "def set_tab_active(self, active: bool) -> None:" in sop_source
     assert "_request_map_refresh" in map_source
     assert "_map_support_card" in map_source
     assert "Copy Diagnostics" in map_source
     assert "messages_copy_summary_btn" in messages_source
+    assert "Manage VarAC BBS & Vault" in messages_source
     assert "build_support_summary" in support_source
     assert "fetch_all" in sqlite_source
 
