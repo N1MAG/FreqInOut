@@ -15,6 +15,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sitrep_fusion import fuse_sitreps
 from freqinout.core.sitrep_ingest import ingest_sitreps
 from freqinout.core.varac_ingest import ingest_varac
+from freqinout.core.varac_bbs_vault import run_varac_bbs_vault
 from freqinout.core.varac_guard import run_varac_guard
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 
@@ -226,6 +227,14 @@ class BackgroundIngestController(QObject):
 
     def _run_varac_guard_job(self) -> None:
         worker_settings = self._new_worker_settings()
+        try:
+            vault_result = run_varac_bbs_vault(worker_settings)
+            if bool(vault_result.enabled) and (
+                int(vault_result.processed_events or 0) > 0 or bool(vault_result.published)
+            ):
+                log.debug("BackgroundIngest: VarAC vault %s", vault_result.summary)
+        except Exception as e:
+            log.debug("BackgroundIngest: VarAC vault failed: %s", e)
         try:
             result = run_varac_guard(worker_settings)
             if int(result.scanned_events or 0) > 0:

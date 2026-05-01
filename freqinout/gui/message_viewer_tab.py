@@ -3457,8 +3457,10 @@ class MessageViewerTab(QWidget):
         self.messages_bbs_help_btn = QPushButton("BBS Help")
         self.messages_bbs_help_btn.setToolTip("Open focused help for VarAC BBS copy and archive behavior.")
         self.messages_bbs_help_btn.clicked.connect(lambda: self._open_context_help("messages.bbs"))
-        self.messages_manage_bbs_btn = QPushButton("Manage VarAC BBS")
-        self.messages_manage_bbs_btn.setToolTip("Open VarAC Settings to review BBS access and folder configuration.")
+        self.messages_manage_bbs_btn = QPushButton("Manage VarAC BBS & Vault")
+        self.messages_manage_bbs_btn.setToolTip(
+            "Open VarAC Settings to review BBS access, Managed BBS Vault, and folder configuration."
+        )
         self.messages_manage_bbs_btn.clicked.connect(self._open_varac_bbs_manager)
         self.messages_copy_summary_btn = QPushButton("Copy Summary")
         self.messages_copy_summary_btn.setToolTip("Copy a concise Messages support summary for the current mode.")
@@ -4381,7 +4383,10 @@ class MessageViewerTab(QWidget):
         )
         bbs_dir = str(self.settings.get("varac_bbs_dir", "") or "").strip()
         suffix = f" Directory: {bbs_dir}" if bbs_dir else " Directory not configured."
-        text = f"VarAC BBS: {summary}.{suffix}"
+        vault_enabled = bool(self.settings.get("varac_bbs_vault_enabled", False))
+        vault_summary = str(self.settings.get("varac_bbs_vault_last_summary", "") or "").strip()
+        vault_suffix = f" Managed Vault: {vault_summary}." if vault_enabled and vault_summary else ""
+        text = f"VarAC BBS: {summary}.{suffix}{vault_suffix}"
         self.messages_bbs_status_label.setText(text)
         self.messages_bbs_status_label.setToolTip(text)
 

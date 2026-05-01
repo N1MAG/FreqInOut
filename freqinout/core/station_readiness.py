@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from hashlib import sha1
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from freqinout.core.varac_bbs_vault import load_vault_locations
+
 
 STATUS_DISPLAY_ITEMS: Sequence[Tuple[str, str]] = (
     ("FLRig", "FLRig"),
@@ -660,6 +662,11 @@ def build_station_readiness_report(
     varac_guard_enabled = _truthy(settings, "varac_guard_enabled")
     varac_guard_mode = _text(settings, "varac_guard_mode", "Log only")
     varac_guard_quarantine = _text(settings, "varac_guard_quarantine_dir")
+    varac_bbs_vault_enabled = _truthy(settings, "varac_bbs_vault_enabled")
+    varac_bbs_vault_root = _text(settings, "varac_bbs_vault_managed_root")
+    varac_bbs_vault_default_location_id = _text(settings, "varac_bbs_vault_default_location_id", "default")
+    varac_bbs_vault_summary = _text(settings, "varac_bbs_vault_last_summary")
+    varac_bbs_vault_locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
     varac_engaged = varac_enabled
     if varac_enabled and not varac_incoming:
         issues.append(
@@ -765,6 +772,86 @@ def build_station_readiness_report(
                 resolution_hint="Set a quarantine folder before using VGuard quarantine mode.",
                 deep_link_target=_issue_deep_link("varac"),
                 state_key="needs_setup",
+            )
+        )
+    if varac_enabled and varac_bbs_vault_enabled and not varac_bbs_dir:
+        issues.append(
+            ReadinessIssue(
+                severity="required",
+                section_key="varac",
+                scope="global",
+                integration_key="varac_bbs_vault",
+                message="Managed BBS Vault has no live BBS directory",
+                resolution_hint="Set the VarAC BBS directory before enabling Managed BBS Vault.",
+                deep_link_target=_issue_deep_link("varac"),
+                state_key="needs_setup",
+            )
+        )
+    if varac_enabled and varac_bbs_vault_enabled and not varac_bbs_vault_root:
+        issues.append(
+            ReadinessIssue(
+                severity="required",
+                section_key="varac",
+                scope="global",
+                integration_key="varac_bbs_vault",
+                message="Managed BBS Vault has no managed root",
+                resolution_hint="Choose or initialize a managed root for Managed BBS Vault.",
+                deep_link_target=_issue_deep_link("varac"),
+                state_key="needs_setup",
+            )
+        )
+    if varac_enabled and varac_bbs_vault_enabled and not varac_bbs_vault_locations:
+        issues.append(
+            ReadinessIssue(
+                severity="required",
+                section_key="varac",
+                scope="global",
+                integration_key="varac_bbs_vault",
+                message="Managed BBS Vault has no locations",
+                resolution_hint="Initialize the vault or add at least one location before using Managed BBS Vault.",
+                deep_link_target=_issue_deep_link("varac"),
+                state_key="needs_setup",
+            )
+        )
+    if varac_enabled and varac_bbs_vault_enabled and varac_bbs_vault_locations:
+        default_location = next((loc for loc in varac_bbs_vault_locations if loc.id == varac_bbs_vault_default_location_id), None)
+        if default_location is None:
+            issues.append(
+                ReadinessIssue(
+                    severity="required",
+                    section_key="varac",
+                    scope="global",
+                    integration_key="varac_bbs_vault",
+                    message="Managed BBS Vault default location is missing",
+                    resolution_hint="Choose a valid default location for Managed BBS Vault.",
+                    deep_link_target=_issue_deep_link("varac"),
+                    state_key="needs_setup",
+                )
+            )
+        elif not str(default_location.source_dir or "").strip():
+            issues.append(
+                ReadinessIssue(
+                    severity="required",
+                    section_key="varac",
+                    scope="global",
+                    integration_key="varac_bbs_vault",
+                    message="Managed BBS Vault default location has no source folder",
+                    resolution_hint="Set a valid source folder for the default Managed BBS Vault location.",
+                    deep_link_target=_issue_deep_link("varac"),
+                    state_key="needs_setup",
+                )
+            )
+    if varac_enabled and varac_bbs_vault_enabled and "degraded" in varac_bbs_vault_summary.lower():
+        issues.append(
+            ReadinessIssue(
+                severity="recommended",
+                section_key="varac",
+                scope="global",
+                integration_key="varac_bbs_vault",
+                message="Managed BBS Vault reported a degraded runtime state",
+                resolution_hint="Review the Managed BBS Vault status in VarAC Settings and reconcile unmanaged files or publish errors.",
+                deep_link_target=_issue_deep_link("varac"),
+                state_key="degraded",
             )
         )
 

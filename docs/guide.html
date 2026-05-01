@@ -211,7 +211,7 @@
   <h3 id="messages-bbs-archive">BBS Archive and Auto-Archive</h3>
   <p>Use this to keep your BBS folder clean without deleting files.</p>
   <ul class="section-list">
-    <li><strong>Manage VarAC BBS</strong>: opens <code>Settings &gt; VarAC Settings</code>, which is the authoritative place to configure BBS folders, access controls, and INI sync.</li>
+    <li><strong>Manage VarAC BBS &amp; Vault</strong>: opens <code>Settings &gt; VarAC Settings</code>, which is the authoritative place to configure BBS folders, access controls, Managed BBS Vault, and INI sync.</li>
     <li><strong>Manual archive</strong>: click <code>Archive</code> on a BBS row to move just that file now.</li>
     <li><strong>Auto-archive timing</strong>: with <code>Enable Auto-Archive</code> on, checks run when you first open Messages after startup, then about once per day.</li>
     <li><strong>Age rule</strong>: files older than <code>After &lt;days&gt; days</code> are moved.</li>
@@ -694,6 +694,12 @@
     <li><strong>BBS Directory</strong>: where incoming BBS files are read from.</li>
     <li><strong>BBS Archive</strong>: where archived BBS files are moved to.</li>
     <li><strong>BBS Access</strong>: <code>Enable BBS</code>, <code>Limit Access To Callsigns</code>, <code>Announce</code>, and <code>Allowed Callsigns</code> mirror the authoritative <code>[BBS]</code> settings in <code>VarAC.ini</code>.</li>
+    <li><strong>Managed BBS Vault</strong>: publishes one named location into the live VarAC BBS directory at a time while keeping the live folder stable for VarAC.</li>
+    <li><strong>Managed Root</strong>: FreqInOut-managed storage for named locations, audit state, and publish manifests. Initialize this once and then keep the live BBS directory pointed at VarAC's normal BBS path.</li>
+    <li><strong>Default Location</strong>: the normal published BBS set. FreqInOut can return to this automatically on disconnect or timeout, or manually when you click <code>Reset To Default</code>.</li>
+    <li><strong>Access Code</strong>: operational code used to open a non-default location. FreqInOut stores only a salted hash and shows only <code>Code configured</code> in the UI. This is workflow control, not strong secrecy.</li>
+    <li><strong>Trigger Format</strong>: first release supports either <code>BBS OPEN &lt;code&gt;</code> or an exact-code-only message body.</li>
+    <li><strong>Vault runtime status</strong>: <code>Settings</code>, <code>ControlFreq</code>, and the <code>Messages</code> BBS summary surface the last vault action so operators can tell whether the vault is enabled, active, reset, or degraded without opening logs.</li>
     <li><strong>Sync From VarAC.ini</strong>: reads the <code>[BBS]</code> section and applies BBS enablement, directory, access rules, and announcement behavior to the current FreqInOut settings view.</li>
     <li><strong>VarAC Launch Command</strong>: advanced override. Recommended: leave blank so FreqInOut auto-launches from <code>VarAC Install Folder</code>. On Linux, set this only if default launch fails or you need a custom Wine prefix/command (use absolute paths, for example <code>env WINEPREFIX=/home/user/.wine wine-stable C:\VarAC\VarAC.exe</code>).</li>
     <li><strong>Enable Auto-Archive</strong>: turns on background checks (first Messages open after startup, then about daily).</li>

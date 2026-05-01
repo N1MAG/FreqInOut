@@ -15,6 +15,7 @@ if sys.platform == "darwin":
 import freqinout.core.background_ingest as background_ingest
 from freqinout.core.background_ingest import BackgroundIngestController
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.varac_bbs_vault import VaracBbsVaultRunResult
 
 
 def _wait_until(predicate, timeout: float = 2.0) -> bool:
@@ -134,3 +135,49 @@ def test_background_ingest_skips_duplicate_message_submission(monkeypatch, tmp_p
         controller.stop()
         controller.deleteLater()
         app.processEvents()
+
+
+def test_background_ingest_varac_policy_job_runs_vault_even_when_guard_is_disabled(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    controller = BackgroundIngestController(SettingsManager())
+    calls = []
+
+    def fake_vault(worker_settings):
+        calls.append(("vault", id(worker_settings)))
+        return VaracBbsVaultRunResult(
+            enabled=True,
+            scanned_events=1,
+            processed_events=1,
+            published=True,
+            active_location_id="default",
+            current_session_callsign="W8UFO",
+            summary="Managed Vault Default | Session W8UFO",
+        )
+
+    class GuardResult:
+        scanned_events = 0
+        summary = "VGuard disabled"
+
+    def fake_guard(worker_settings):
+        calls.append(("guard", id(worker_settings)))
+        return GuardResult()
+
+    monkeypatch.setattr(background_ingest, "run_varac_bbs_vault", fake_vault)
+    monkeypatch.setattr(background_ingest, "run_varac_guard", fake_guard)
+
+    controller.start(initial_stagger=False)
+    try:
+        controller._ingest_varac_guard()
+        assert _wait_until(lambda: "varac_guard" not in controller._job_futures)
+    finally:
+        controller.stop()
+        controller.deleteLater()
+        app.processEvents()
+
+    assert [name for name, _settings_id in calls] == ["vault", "guard"]
+    assert calls[0][1] == calls[1][1]

@@ -1,6 +1,7 @@
 # Changelog
 
 ## [1.2.3]
+- Added: `Settings -> VarAC Settings` now includes a `Managed BBS Vault` workflow with named locations, hashed access codes, managed-root initialization/import, default-location reset, background trigger handling from the VarAC traffic log, and compact status visibility in `Settings`, `ControlFreq`, and `Messages`.
 - Changed: `Settings -> VarAC Settings` now manages BBS allowed callsigns through a lookup-assisted selected list with manual callsign fallback, reducing whitelist typos while preserving the existing VarAC.ini-compatible callsign format.
 - Changed: crowded Settings, ControlFreq, and Map control bands now use roomier grouped layouts, including a clearer `Software Used` block, stacked timer controls, a calmer setup-review banner, and a less compressed map filter bar for a friendlier day-to-day UI.
 - Added: `Settings -> FreqInOut Settings` now includes explicit `Software Used` choices for FLRig, Fast Light, JS8, companion tools, and VarAC so setup review and status LEDs can respect software the operator intentionally does not run instead of repeatedly nagging about missing configuration.
