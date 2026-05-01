@@ -12,8 +12,10 @@ import datetime
 import platform
 import shutil
 import subprocess
+import tempfile
 import xml.dom.minidom
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -48,6 +50,10 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionButton,
     QMenu,
+    QStackedWidget,
+    QFormLayout,
+    QScrollArea,
+    QCheckBox,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -56,6 +62,8 @@ from reportlab.pdfgen import canvas
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
+from freqinout.core.sqlite_utils import fetch_all
+from freqinout.core.support_reporting import build_support_summary, bullet_lines
 from freqinout.core.sitrep_metadata import (
     parse_filter_subtype_label,
     source_family_display_label,
@@ -66,9 +74,12 @@ from freqinout.core.sitrep_metadata import (
 )
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_ingest import ingest_varac
+from freqinout.core.varac_bbs_config import bbs_summary_text
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
+    clearsign_file,
     find_detached_signature,
+    is_detached_signature_file,
     normalize_fingerprint,
     normalize_fingerprints,
     normalize_signature_name_suffixes,
@@ -80,12 +91,54 @@ from freqinout.core.hash_tools import (
     verify_file_hash_against_registry,
     verify_file_hash_with_discovery,
 )
+from freqinout.core.launch_orchestrator import LaunchOrchestrator
+from freqinout.core.nbems_compose import (
+    ComposeDestinationPlan,
+    ComposeFieldDefinition,
+    ComposeFormFamily,
+    ComposeFormTemplate,
+    build_compose_filename,
+    build_signed_filename,
+    discover_form_families,
+    discover_forms_for_family,
+    extract_compose_menu_item,
+    extract_compose_template_title,
+    format_compose_zulu,
+    parse_compose_template_fields,
+    plan_compose_destinations,
+    sanitize_report_name,
+    safe_varac_bbs_filename,
+    serialize_custom_form_message,
+    serialize_standard_blank_message,
+    standard_blank_field_definitions,
+    suggest_field_value,
+    split_varac_bbs_safe_suffix,
+    unique_destination,
+)
+from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import resolve_theme, button_style
 from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".raw"}
 IMAGE_PREVIEW_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
+VARAC_BBS_SAFE_SUFFIXES = (
+    ".k2s.sig",
+    ".b2s.sig",
+    ".k2s.asc",
+    ".b2s.asc",
+    ".k2s.gpg",
+    ".b2s.gpg",
+    ".k2s",
+    ".b2s",
+    ".txt",
+    ".rtf",
+    ".html",
+    ".htm",
+    ".sig",
+    ".asc",
+    ".gpg",
+)
 SUPPORTED_EXT = {
     ".b2s",
     ".k2s",
@@ -100,11 +153,11 @@ SUPPORTED_EXT = {
 }
 ORIGIN_EXTS = {
     "flmsg": {".b2s", ".k2s", ".txt", ".rtf", *IMAGE_EXTS},
-    "flamp": {".b2s", ".k2s", ".txt", ".rtf"},
+    "flamp": {".b2s", ".k2s", ".txt", ".rtf", ".sig", ".asc", ".gpg"},
     "varac": {".txt", ".html", ".htm", ".b2s", ".k2s", *IMAGE_EXTS},
     "bbs": set(SUPPORTED_EXT),
 }
-FLAMP_AUTH_EXTS = {".b2s", ".k2s"}
+FLAMP_AUTH_EXTS = {".b2s", ".k2s", ".sig", ".asc", ".gpg"}
 
 DEFAULT_WATCH_DIRS = [
     {"path": r"C:\VarAC", "origin": "varac"},
@@ -1275,7 +1328,9 @@ class _SignatureVerifyWorker(QObject):
                 hash_result = None
                 local_hash_result = None
 
-            sig_path = Path(sig_result.signature_path) if sig_result and sig_result.signature_path else find_detached_signature(rec.path)
+            sig_path = Path(sig_result.signature_path) if sig_result and sig_result.signature_path else None
+            if sig_path is None:
+                sig_path = rec.path if is_detached_signature_file(rec.path) else find_detached_signature(rec.path)
             sig_mtime = 0.0
             sig_size = 0
             sig_path_str = ""
@@ -1624,6 +1679,12 @@ class MessageTableModel(QAbstractTableModel):
             return ("varac", source, msg_id) if msg_id > 0 and source else None
         if isinstance(payload, FileRecord):
             return ("file", payload.origin, str(payload.path), float(payload.mtime), int(payload.size))
+        if isinstance(payload, SitrepMessage):
+            event_id = int(getattr(payload, "event_id", 0) or 0)
+            if event_id > 0:
+                return ("sitrep", event_id)
+            report_key = str(getattr(payload, "report_key", "") or "").strip().lower()
+            return ("sitrep", report_key) if report_key else None
         return None
 
 
@@ -1724,6 +1785,11 @@ class MessageActionDelegate(QStyledItemDelegate):
                 or parent_widget._is_row_bbs_copy_action_enabled(row)
             )
         )
+        bbs_copy_present = bool(
+            bbs_copy_row
+            and hasattr(parent_widget, "_is_row_already_in_varac_bbs")
+            and parent_widget._is_row_already_in_varac_bbs(row)
+        )
         view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(
             rect,
             fm,
@@ -1745,6 +1811,13 @@ class MessageActionDelegate(QStyledItemDelegate):
             painter.restore()
             return
 
+        if isinstance(row.payload, SitrepMessage):
+            painter.setPen(self._danger)
+            painter.setFont(option.font)
+            painter.drawText(del_rect, Qt.AlignVCenter | Qt.AlignLeft, "Delete")
+            painter.restore()
+            return
+
         if isinstance(row.payload, (JS8Message, FileRecord, VarACMessage, SpotterMessage)):
             flag_state = getattr(row.payload, "flag_state", 0)
             if flag_state == 1:
@@ -1759,7 +1832,9 @@ class MessageActionDelegate(QStyledItemDelegate):
             painter.drawText(aux_rect, Qt.AlignVCenter | Qt.AlignLeft, "\u2691")
 
             if bbs_copy_row:
-                if bbs_copy_enabled:
+                if bbs_copy_present:
+                    painter.setPen(self._flag_color_green)
+                elif bbs_copy_enabled:
                     painter.setPen(link_color)
                 else:
                     painter.setPen(option.palette.color(QPalette.Disabled, QPalette.Text))
@@ -1840,6 +1915,11 @@ class MessageActionDelegate(QStyledItemDelegate):
                 self.parent()._cycle_flag_state(row.payload)
             elif del_rect.contains(pos):
                 self.parent()._delete_varac_message(row.payload)
+            else:
+                self.parent()._on_view_message(row)
+        elif isinstance(row.payload, SitrepMessage):
+            if del_rect.contains(pos):
+                self.parent()._delete_sitrep_message(row.payload)
             else:
                 self.parent()._on_view_message(row)
         else:
@@ -1996,12 +2076,31 @@ class MessageViewerTab(QWidget):
         self.varac_messages: List[VarACMessage] = []
         self.sitrep_messages: List[SitrepMessage] = []
         self.current_js8: JS8Message | None = None
+        self.current_sitrep: SitrepMessage | None = None
         self._js8_timer: QTimer | None = None
         self._pending_timer: QTimer | None = None
+        self._clock_timer: QTimer | None = None
         self._pending_rows: List[Dict[str, str | float]] = []
+        self._pending_rows_signature: str = ""
         self._form_cache: Dict[str, List[Dict]] = {}
         self._form_title_cache: Dict[str, str] = {}
         self.forms_path = (self.settings.get("js8_forms_path", "") or "").strip()
+        self._messages_mode: str = str(cfg.get("mode", "Inbox") or "Inbox").strip().title()
+        if self._messages_mode not in {"Inbox", "Compose"}:
+            self._messages_mode = "Inbox"
+        self._compose_templates: List[ComposeFormTemplate] = []
+        self._compose_template_kind: str = "custom"
+        self._compose_field_widgets: Dict[str, QWidget] = {}
+        self._compose_field_rows: List[ComposeFieldDefinition] = []
+        self._compose_last_smart_defaults: Dict[str, str] = {}
+        self._compose_template_title: str = ""
+        self._compose_template_menu_item: str = ""
+        self._compose_active_form_key: str = ""
+        self._compose_last_stage_paths: List[Path] = []
+        self._compose_last_source_dir: Optional[Path] = None
+        self._compose_launch_orchestrator = LaunchOrchestrator(self.settings, self)
+        self._compose_timestamp_utc: datetime.datetime = datetime.datetime.now(datetime.timezone.utc)
+        self._compose_status_role: str = "info"
         self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
         self._filters_initialized = False
@@ -2031,6 +2130,8 @@ class MessageViewerTab(QWidget):
         self._loading_timer: QTimer | None = None
         self._loading_text: str = "Getting messages..."
         self._loading_progress: QProgressBar | None = None
+        self.utc_label: QLabel | None = None
+        self.local_label: QLabel | None = None
         self._persist_timer: QTimer | None = None
         self._pending_persist_ops: List[Tuple[str, Tuple]] = []
         self._activation_refresh_pending: bool = False
@@ -2953,7 +3054,7 @@ class MessageViewerTab(QWidget):
             return True
         if not isinstance(state, FileSignatureState):
             return False
-        sig = find_detached_signature(rec.path)
+        sig = rec.path if is_detached_signature_file(rec.path) else find_detached_signature(rec.path)
         if sig is None:
             if str(state.signature_path or "").strip():
                 return False
@@ -3024,6 +3125,8 @@ class MessageViewerTab(QWidget):
         out: List[FileRecord] = []
         for rec in self.files.get("flamp", []):
             if not self._is_flamp_auth_file(rec):
+                continue
+            if is_detached_signature_file(rec.path) and not self._is_signature_verification_enabled():
                 continue
             key = self._signature_cache_key(rec)
             state = self._signature_state_map.get(key)
@@ -3253,7 +3356,16 @@ class MessageViewerTab(QWidget):
         if success_parts:
             detail = success_parts[0]
         else:
-            detail = "Signature: No Signatures or Hash Matches"
+            sig_detail = str(state.detail or "").strip()
+            sig_detail_lc = sig_detail.lower()
+            if sig_enabled and "payload" in sig_detail_lc and "not found" in sig_detail_lc:
+                detail = "Signature: Missing payload"
+            elif sig_enabled and sig_status == "invalid":
+                detail = f"Signature: Invalid ({sig_detail or 'verification failed'})"
+            elif sig_enabled and sig_status == "error":
+                detail = f"Signature: Error ({sig_detail or 'verification failed'})"
+            else:
+                detail = "Signature: No Signatures or Hash Matches"
         return overall, detail, bool(state.trusted)
 
     def _format_signature_detail(self, state: FileSignatureState) -> str:
@@ -3316,57 +3428,137 @@ class MessageViewerTab(QWidget):
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Message Viewer</h3>"))
-        header.addSpacing(8)
+        header.addStretch()
+        self.utc_label = QLabel()
+        self.local_label = QLabel()
+        self.time_toggle_btn = QPushButton("Showing: Local" if self._show_local_time else "Showing: UTC")
+        self.time_toggle_btn.setStyleSheet(button_style("primary", resolve_theme(self.settings)))
+        self.time_toggle_btn.clicked.connect(self._toggle_time_view)
+        header.addWidget(self.utc_label)
+        header.addWidget(self.local_label)
+        header.addWidget(self.time_toggle_btn)
+        layout.addLayout(header)
+
+        loading_row = QHBoxLayout()
         self.loading_label = QLabel("Getting messages...")
         self.loading_label.setStyleSheet("color: #888;")
         self.loading_label.setVisible(False)
-        header.addWidget(self.loading_label)
+        loading_row.addWidget(self.loading_label)
         self._loading_progress = QProgressBar()
         self._loading_progress.setRange(0, 0)
         self._loading_progress.setFixedWidth(140)
         self._loading_progress.setVisible(False)
-        header.addWidget(self._loading_progress)
-        header.addStretch()
+        loading_row.addWidget(self._loading_progress)
+        loading_row.addStretch()
+        layout.addLayout(loading_row)
+        self.messages_help_btn = QPushButton("Inbox Help")
+        self.messages_help_btn.setToolTip("Open focused help for the current Messages mode.")
+        self.messages_help_btn.clicked.connect(self._open_messages_help)
+        self.messages_bbs_help_btn = QPushButton("BBS Help")
+        self.messages_bbs_help_btn.setToolTip("Open focused help for VarAC BBS copy and archive behavior.")
+        self.messages_bbs_help_btn.clicked.connect(lambda: self._open_context_help("messages.bbs"))
+        self.messages_manage_bbs_btn = QPushButton("Manage VarAC BBS")
+        self.messages_manage_bbs_btn.setToolTip("Open VarAC Settings to review BBS access and folder configuration.")
+        self.messages_manage_bbs_btn.clicked.connect(self._open_varac_bbs_manager)
+        self.messages_copy_summary_btn = QPushButton("Copy Summary")
+        self.messages_copy_summary_btn.setToolTip("Copy a concise Messages support summary for the current mode.")
+        self.messages_copy_summary_btn.clicked.connect(self._copy_messages_support_summary)
+        self.messages_inbox_mode_btn = QPushButton("Inbox")
+        self.messages_inbox_mode_btn.clicked.connect(lambda: self._set_messages_mode("Inbox"))
+        self.messages_compose_mode_btn = QPushButton("Compose")
+        self.messages_compose_mode_btn.clicked.connect(lambda: self._set_messages_mode("Compose"))
 
-        header.addWidget(QLabel("Scan every:"))
+        self.compose_refresh_forms_btn = QPushButton("Refresh Forms")
+        self.compose_refresh_forms_btn.clicked.connect(self._refresh_compose_forms)
+        self.compose_reset_btn = QPushButton("Reset Draft")
+        self.compose_reset_btn.clicked.connect(self._reset_compose_draft)
+        self.compose_open_source_btn = QPushButton("Open Source Folder")
+        self.compose_open_source_btn.clicked.connect(self._open_compose_source_folder)
+
         self.scan_combo = QComboBox()
         for m in SCAN_CHOICES:
             self.scan_combo.addItem(f"{m} min", m)
         self.scan_combo.setCurrentText(f"{self.scan_minutes} min")
         self.scan_combo.currentIndexChanged.connect(self._on_scan_changed)
-        header.addWidget(self.scan_combo)
 
         self.refresh_btn = QPushButton("Refresh Now")
         self.refresh_btn.clicked.connect(self._on_refresh_now)
-        header.addWidget(self.refresh_btn)
 
         self.export_btn = QPushButton("Export to PDF")
         self.export_btn.clicked.connect(self._export_pdf)
-        header.addWidget(self.export_btn)
 
         self.delete_selected_btn = QPushButton("Delete Selected")
         self.delete_selected_btn.clicked.connect(self._delete_selected_messages)
         self.delete_selected_btn.setEnabled(False)
         self.delete_selected_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
-        header.addWidget(self.delete_selected_btn)
 
         self.mark_all_read_btn = QPushButton("Mark All as Read")
         self.mark_all_read_btn.setMinimumWidth(160)
         self.mark_all_read_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.mark_all_read_btn.clicked.connect(self._mark_all_filtered_read)
         self.mark_all_read_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
-        header.addWidget(self.mark_all_read_btn)
 
-        self.time_toggle_btn = QPushButton("Showing: Local" if self._show_local_time else "Showing: UTC")
-        self.time_toggle_btn.setStyleSheet(button_style("primary", resolve_theme(self.settings)))
-        self.time_toggle_btn.clicked.connect(self._toggle_time_view)
-        header.addWidget(self.time_toggle_btn)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        mode_row.addWidget(QLabel("Mode:"))
+        mode_row.addWidget(self.messages_inbox_mode_btn)
+        mode_row.addWidget(self.messages_compose_mode_btn)
+        mode_row.addStretch()
 
-        layout.addLayout(header)
+        help_row = QHBoxLayout()
+        help_row.setSpacing(8)
+        help_row.addWidget(QLabel("Help & BBS:"))
+        help_row.addWidget(self.messages_help_btn)
+        help_row.addWidget(self.messages_bbs_help_btn)
+        help_row.addWidget(self.messages_manage_bbs_btn)
+        help_row.addWidget(self.messages_copy_summary_btn)
+        help_row.addStretch()
 
-        # Main layout
-        body = QVBoxLayout()
-        layout.addLayout(body)
+        compose_row = QHBoxLayout()
+        compose_row.setSpacing(8)
+        compose_row.addWidget(QLabel("Compose Tools:"))
+        compose_row.addWidget(self.compose_refresh_forms_btn)
+        compose_row.addWidget(self.compose_reset_btn)
+        compose_row.addWidget(self.compose_open_source_btn)
+        compose_row.addStretch()
+
+        inbox_row = QHBoxLayout()
+        inbox_row.setSpacing(8)
+        inbox_row.addWidget(QLabel("Inbox Actions:"))
+        inbox_row.addWidget(QLabel("Scan every:"))
+        inbox_row.addWidget(self.scan_combo)
+        inbox_row.addWidget(self.refresh_btn)
+        inbox_row.addWidget(self.export_btn)
+        inbox_row.addWidget(self.delete_selected_btn)
+        inbox_row.addWidget(self.mark_all_read_btn)
+        inbox_row.addStretch()
+
+        compose_wrap = QWidget()
+        compose_wrap.setLayout(compose_row)
+        self._compose_tools_row = compose_wrap
+        inbox_wrap = QWidget()
+        inbox_wrap.setLayout(inbox_row)
+        self._inbox_actions_row = inbox_wrap
+
+        header_stack = QVBoxLayout()
+        header_stack.setSpacing(6)
+        header_stack.addLayout(mode_row)
+        header_stack.addLayout(help_row)
+        header_stack.addWidget(compose_wrap)
+        header_stack.addWidget(inbox_wrap)
+        layout.addLayout(header_stack)
+
+        self.messages_bbs_status_label = QLabel("")
+        self.messages_bbs_status_label.setWordWrap(True)
+        self.messages_bbs_status_label.setVisible(True)
+        layout.addWidget(self.messages_bbs_status_label)
+
+        self.messages_mode_stack = QStackedWidget()
+        layout.addWidget(self.messages_mode_stack, 1)
+        self.inbox_page = QWidget()
+        body = QVBoxLayout(self.inbox_page)
+        body.setContentsMargins(0, 0, 0, 0)
+        self.messages_mode_stack.addWidget(self.inbox_page)
 
         pending_box = QGroupBox("Pending JS8 MSGs")
         pending_layout = QVBoxLayout()
@@ -3497,6 +3689,929 @@ class MessageViewerTab(QWidget):
         self._apply_accessibility_width_guards()
         QTimer.singleShot(0, self._set_initial_splitter_sizes)
         self._messages_model.dataChanged.connect(self._update_bulk_delete_buttons)
+        self.compose_page = self._build_compose_page()
+        self.messages_mode_stack.addWidget(self.compose_page)
+        self._set_messages_mode(self._messages_mode, save=False)
+        self._setup_clock_timer()
+
+    def _setup_clock_timer(self) -> None:
+        if self._clock_timer is not None:
+            self._clock_timer.stop()
+        self._clock_timer = QTimer(self)
+        self._clock_timer.timeout.connect(self._on_clock_tick)
+        self._clock_timer.start(1000)
+        self._update_clock_labels()
+
+    def _on_clock_tick(self) -> None:
+        self._update_clock_labels()
+
+    def _update_clock_labels(self) -> None:
+        if not hasattr(self, "utc_label") or not hasattr(self, "local_label"):
+            return
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        utc_day = now_utc.strftime("%a")
+        self.utc_label.setText(now_utc.strftime(f"<b>UTC ({utc_day}):</b> %y%m%d %H:%M:%S Z"))
+
+        tz_name = self.settings.get("timezone", "UTC") or "UTC"
+        tz = get_timezone(tz_name)
+        now_local = now_utc.astimezone(tz)
+        fallback = now_local.tzname() or tz_name
+        local_abbr = fallback or tz_name
+        local_day = now_local.strftime("%a")
+        self.local_label.setText(now_local.strftime(f"<b>Local ({local_day}):</b> %y%m%d %H:%M:%S {local_abbr}"))
+        if hasattr(self, "time_toggle_btn"):
+            self.time_toggle_btn.setText("Showing: Local" if self._show_local_time else "Showing: UTC")
+
+    def _build_compose_page(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        self.compose_summary_label = QLabel()
+        self.compose_summary_label.setWordWrap(True)
+        root.addWidget(self.compose_summary_label)
+        compose_help_row = QHBoxLayout()
+        compose_help_row.addStretch()
+        self.compose_setup_help_btn = QPushButton("Compose Setup Help")
+        self.compose_setup_help_btn.setToolTip("Open help for compose setup, VarAC copy targets, and FLAmp signing.")
+        self.compose_setup_help_btn.clicked.connect(lambda: self._open_context_help("messages.compose-setup"))
+        compose_help_row.addWidget(self.compose_setup_help_btn)
+        root.addLayout(compose_help_row)
+
+        setup_box = QGroupBox("Compose Setup")
+        setup_layout = QVBoxLayout(setup_box)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Form Family"))
+        self.compose_family_combo = QComboBox()
+        self.compose_family_combo.currentIndexChanged.connect(self._on_compose_family_changed)
+        row1.addWidget(self.compose_family_combo, 1)
+        row1.addWidget(QLabel("Form"))
+        self.compose_form_combo = QComboBox()
+        self.compose_form_combo.currentIndexChanged.connect(self._on_compose_form_changed)
+        row1.addWidget(self.compose_form_combo, 2)
+        setup_layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Priority"))
+        self.compose_priority_combo = QComboBox()
+        self.compose_priority_combo.addItems(["RR", "PP"])
+        self._configure_compose_combo_width(self.compose_priority_combo, floor=96)
+        self.compose_priority_combo.currentIndexChanged.connect(self._on_compose_priority_changed)
+        row2.addWidget(self.compose_priority_combo)
+        row2.addWidget(QLabel("Report Title"))
+        self.compose_report_title_edit = QLineEdit()
+        self.compose_report_title_edit.setPlaceholderText("Report")
+        self.compose_report_title_edit.textChanged.connect(self._on_compose_report_title_changed)
+        row2.addWidget(self.compose_report_title_edit, 1)
+        row2.addWidget(QLabel("Zulu"))
+        self.compose_zulu_value = QLabel()
+        row2.addWidget(self.compose_zulu_value)
+        self.compose_refresh_time_btn = QPushButton("Refresh Time")
+        self.compose_refresh_time_btn.clicked.connect(self._refresh_compose_timestamp)
+        row2.addWidget(self.compose_refresh_time_btn)
+        setup_layout.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Callsign"))
+        self.compose_callsign_value = QLabel()
+        row3.addWidget(self.compose_callsign_value)
+        row3.addSpacing(12)
+        row3.addWidget(QLabel("State"))
+        self.compose_state_value = QLabel()
+        row3.addWidget(self.compose_state_value)
+        row3.addSpacing(12)
+        row3.addWidget(QLabel("Grid"))
+        self.compose_grid_value = QLabel()
+        row3.addWidget(self.compose_grid_value)
+        row3.addStretch()
+        setup_layout.addLayout(row3)
+
+        row4 = QHBoxLayout()
+        row4.addWidget(QLabel("Send Target"))
+        self.compose_send_target_combo = QComboBox()
+        self.compose_send_target_combo.addItems(["FLMsg", "FLAmp", "Both"])
+        self._configure_compose_combo_width(self.compose_send_target_combo, floor=118)
+        self.compose_send_target_combo.currentIndexChanged.connect(self._update_compose_preview)
+        row4.addWidget(self.compose_send_target_combo)
+        row4.addWidget(QLabel("VarAC Copy"))
+        self.compose_varac_target_combo = QComboBox()
+        self.compose_varac_target_combo.addItems(["None", "Outbox", "BBS", "Both"])
+        self._configure_compose_combo_width(self.compose_varac_target_combo, floor=118)
+        self.compose_varac_target_combo.currentIndexChanged.connect(self._update_compose_preview)
+        row4.addWidget(self.compose_varac_target_combo)
+        self.compose_sign_flamp_chk = QCheckBox("Sign FLAmp Copy")
+        self.compose_sign_flamp_chk.stateChanged.connect(self._update_compose_preview)
+        row4.addWidget(self.compose_sign_flamp_chk)
+        row4.addStretch()
+        setup_layout.addLayout(row4)
+
+        root.addWidget(setup_box)
+
+        splitter = QSplitter(Qt.Horizontal)
+        field_box = QGroupBox("Form Fields")
+        field_layout = QVBoxLayout(field_box)
+        self.compose_field_scroll = QScrollArea()
+        self.compose_field_scroll.setWidgetResizable(True)
+        field_layout.addWidget(self.compose_field_scroll)
+        splitter.addWidget(field_box)
+
+        preview_box = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(preview_box)
+        self.compose_preview = QTextEdit()
+        self.compose_preview.setReadOnly(True)
+        preview_layout.addWidget(self.compose_preview)
+        splitter.addWidget(preview_box)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        root.addWidget(splitter, 1)
+
+        output_box = QGroupBox("Staging Output")
+        output_layout = QVBoxLayout(output_box)
+        self.compose_destinations_label = QLabel()
+        self.compose_destinations_label.setWordWrap(True)
+        output_layout.addWidget(self.compose_destinations_label)
+        self.compose_status_label = QLabel("Compose is ready.")
+        self.compose_status_label.setWordWrap(True)
+        output_layout.addWidget(self.compose_status_label)
+        action_row = QHBoxLayout()
+        self.compose_stage_btn = QPushButton("Stage Files")
+        self.compose_stage_btn.clicked.connect(self._stage_compose_files)
+        action_row.addWidget(self.compose_stage_btn)
+        self.compose_open_flmsg_btn = QPushButton("Open FLMsg")
+        self.compose_open_flmsg_btn.clicked.connect(lambda: self._launch_compose_app("FLMsg"))
+        action_row.addWidget(self.compose_open_flmsg_btn)
+        self.compose_open_flamp_btn = QPushButton("Open FLAmp")
+        self.compose_open_flamp_btn.clicked.connect(lambda: self._launch_compose_app("FLAmp"))
+        action_row.addWidget(self.compose_open_flamp_btn)
+        self.compose_open_folder_btn = QPushButton("Open Folder")
+        self.compose_open_folder_btn.clicked.connect(self._open_compose_output_folder)
+        action_row.addWidget(self.compose_open_folder_btn)
+        self.compose_copy_paths_btn = QPushButton("Copy Path")
+        self.compose_copy_paths_btn.clicked.connect(self._copy_compose_output_paths)
+        action_row.addWidget(self.compose_copy_paths_btn)
+        action_row.addStretch()
+        output_layout.addLayout(action_row)
+        root.addWidget(output_box)
+
+        self._refresh_compose_forms()
+        return page
+
+    def _configure_compose_combo_width(self, combo: QComboBox, *, floor: int = 110) -> None:
+        try:
+            fm = combo.fontMetrics()
+            item_w = 0
+            for i in range(combo.count()):
+                item_w = max(item_w, int(fm.horizontalAdvance(combo.itemText(i))))
+            target = max(int(floor), item_w + 56)
+        except Exception:
+            target = int(floor)
+        combo.setMinimumWidth(target)
+        combo.setMinimumContentsLength(6)
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._fit_filter_combo_popup(combo)
+
+    def _compose_operator_callsign(self) -> str:
+        return str(
+            (self.settings.get("operator_callsign", "") or self.settings.get("callsign", "") or "")
+        ).strip().upper()
+
+    def _compose_operator_state(self) -> str:
+        return str(self.settings.get("operator_state", "") or "").strip().upper()
+
+    def _compose_operator_grid(self) -> str:
+        return str(self.settings.get("operator_grid6", "") or "").strip().upper()
+
+    def _compose_zulu_text(self) -> str:
+        return format_compose_zulu(self._compose_timestamp_utc)
+
+    def _compose_blank_field_rows(self) -> List[ComposeFieldDefinition]:
+        return standard_blank_field_definitions()
+
+    def _compose_family_entries(self) -> List[dict]:
+        entries: List[dict] = [{"kind": "standard", "key": "STANDARD", "label": "Standard Blank"}]
+        for family in discover_form_families(self.settings):
+            entries.append({"kind": "family", "key": family.key, "label": family.label, "family": family})
+        return entries
+
+    def _refresh_compose_forms(self) -> None:
+        if not hasattr(self, "compose_family_combo"):
+            return
+        previous_key = ""
+        if self.compose_family_combo.count():
+            previous = self.compose_family_combo.currentData()
+            if isinstance(previous, dict):
+                previous_key = str(previous.get("key", "") or "")
+        entries = self._compose_family_entries()
+        self.compose_family_combo.blockSignals(True)
+        self.compose_family_combo.clear()
+        selected_index = 0
+        fallback_custom_index = -1
+        for idx, entry in enumerate(entries):
+            self.compose_family_combo.addItem(str(entry.get("label", "")), entry)
+            if str(entry.get("key", "")) == "CUSTOM" and fallback_custom_index < 0:
+                fallback_custom_index = idx
+            if previous_key and str(entry.get("key", "")) == previous_key:
+                selected_index = idx
+        if not previous_key and fallback_custom_index >= 0:
+            selected_index = fallback_custom_index
+        self.compose_family_combo.setCurrentIndex(max(0, selected_index))
+        self.compose_family_combo.blockSignals(False)
+        self._on_compose_family_changed()
+
+    def _on_compose_family_changed(self) -> None:
+        if not hasattr(self, "compose_form_combo"):
+            return
+        data = self.compose_family_combo.currentData()
+        self.compose_form_combo.blockSignals(True)
+        self.compose_form_combo.clear()
+        self._compose_templates = []
+        self._compose_last_source_dir = None
+        if isinstance(data, dict) and data.get("kind") == "standard":
+            self.compose_form_combo.addItem("Standard Blank Form (.b2s)", {"kind": "standard"})
+        elif isinstance(data, dict) and isinstance(data.get("family"), ComposeFormFamily):
+            family = data.get("family")
+            self._compose_last_source_dir = family.path
+            self._compose_templates = discover_forms_for_family(family)
+            if self._compose_templates:
+                for template in self._compose_templates:
+                    self.compose_form_combo.addItem(
+                        template.display_name,
+                        {"kind": "custom", "path": str(template.path), "label": template.display_name},
+                    )
+            else:
+                self.compose_form_combo.addItem("No editable forms found", None)
+        else:
+            self.compose_form_combo.addItem("No forms available", None)
+        self.compose_form_combo.blockSignals(False)
+        self._on_compose_form_changed()
+
+    def _on_compose_form_changed(self) -> None:
+        if not hasattr(self, "compose_form_combo"):
+            return
+        data = self.compose_form_combo.currentData()
+        form_identity = self._compose_form_identity(data)
+        current_values = self._compose_field_values() if form_identity == self._compose_active_form_key else {}
+        rows: List[ComposeFieldDefinition] = []
+        defaults: Dict[str, str] = {}
+        smart_defaults: Dict[str, str] = {}
+        self._compose_template_kind = "custom"
+        self._compose_template_title = ""
+        self._compose_template_menu_item = ""
+        if isinstance(data, dict) and data.get("kind") == "standard":
+            self._compose_template_kind = "blank"
+            rows = self._compose_blank_field_rows()
+            smart_defaults = self._compose_smart_defaults(rows)
+            defaults = {
+                field.key: current_values.get(field.key, smart_defaults.get(field.key, ""))
+                for field in rows
+            }
+        elif isinstance(data, dict) and data.get("kind") == "custom":
+            template_path = Path(str(data.get("path", "") or ""))
+            self._compose_last_source_dir = template_path.parent
+            try:
+                template_text = template_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                template_text = ""
+            self._compose_template_title = extract_compose_template_title(template_text)
+            self._compose_template_menu_item = extract_compose_menu_item(template_text)
+            rows = parse_compose_template_fields(template_text)
+            smart_defaults = self._compose_smart_defaults(rows)
+            defaults = {
+                field.key: current_values.get(field.key, smart_defaults.get(field.key, ""))
+                for field in rows
+            }
+        self._rebuild_compose_field_editor(rows, defaults)
+        self._compose_last_smart_defaults = smart_defaults
+        self._compose_active_form_key = form_identity
+        self._update_compose_preview()
+
+    @staticmethod
+    def _compose_form_identity(data) -> str:
+        if isinstance(data, dict):
+            kind = str(data.get("kind", "") or "")
+            if kind == "standard":
+                return "standard"
+            if kind == "custom":
+                return str(data.get("path", "") or "")
+        return ""
+
+    def _compose_smart_defaults(self, rows: Sequence[ComposeFieldDefinition]) -> Dict[str, str]:
+        defaults: Dict[str, str] = {}
+        family_data = self.compose_family_combo.currentData() if hasattr(self, "compose_family_combo") else None
+        family_key = ""
+        if isinstance(family_data, dict):
+            family_key = str(family_data.get("key", "") or "")
+        form_data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
+        template_name = ""
+        if isinstance(form_data, dict):
+            template_name = Path(str(form_data.get("path", "") or "")).name
+        for field in rows:
+            defaults[field.key] = suggest_field_value(
+                field.key,
+                field.label,
+                description=field.description,
+                placeholder=field.placeholder,
+                options=field.options,
+                family_key=family_key,
+                template_name=template_name,
+                template_title=self._compose_template_title,
+                menu_item=self._compose_template_menu_item,
+                callsign=self._compose_operator_callsign(),
+                state=self._compose_operator_state(),
+                grid=self._compose_operator_grid(),
+                zulu_timestamp=self._compose_zulu_text(),
+                report_title=self.compose_report_title_edit.text().strip() if hasattr(self, "compose_report_title_edit") else "",
+                priority_code=self.compose_priority_combo.currentText() if hasattr(self, "compose_priority_combo") else "RR",
+            )
+        return defaults
+
+    def _compose_set_widget_value(self, key: str, value: str) -> None:
+        widget = self._compose_field_widgets.get(key)
+        if widget is None:
+            return
+        text = str(value or "")
+        if isinstance(widget, QTextEdit):
+            widget.blockSignals(True)
+            widget.setPlainText(text)
+            widget.blockSignals(False)
+            return
+        if isinstance(widget, QLineEdit):
+            widget.blockSignals(True)
+            widget.setText(text)
+            widget.blockSignals(False)
+            return
+        if isinstance(widget, QComboBox):
+            widget.blockSignals(True)
+            match_index = -1
+            for idx in range(widget.count()):
+                item_data = widget.itemData(idx)
+                if item_data is not None and str(item_data) == text:
+                    match_index = idx
+                    break
+                if widget.itemText(idx).strip().upper() == text.strip().upper():
+                    match_index = idx
+                    break
+            if match_index >= 0:
+                widget.setCurrentIndex(match_index)
+            elif widget.isEditable():
+                widget.setEditText(text)
+            elif not text and widget.count():
+                widget.setCurrentIndex(0)
+            widget.blockSignals(False)
+
+    def _refresh_compose_smart_defaults(self) -> None:
+        if not self._compose_field_rows:
+            return
+        new_defaults = self._compose_smart_defaults(self._compose_field_rows)
+        current_values = self._compose_field_values()
+        previous_defaults = dict(self._compose_last_smart_defaults)
+        for field in self._compose_field_rows:
+            key = field.key
+            current_value = str(current_values.get(key, "") or "")
+            previous_value = str(previous_defaults.get(key, "") or "")
+            new_value = str(new_defaults.get(key, "") or "")
+            if not current_value or current_value == previous_value:
+                self._compose_set_widget_value(key, new_value)
+        self._compose_last_smart_defaults = new_defaults
+
+    def _on_compose_priority_changed(self) -> None:
+        self._refresh_compose_smart_defaults()
+        self._update_compose_preview()
+
+    def _on_compose_report_title_changed(self) -> None:
+        self._refresh_compose_smart_defaults()
+        self._update_compose_preview()
+
+    def _rebuild_compose_field_editor(self, rows: List[ComposeFieldDefinition], values: Dict[str, str]) -> None:
+        self._compose_field_rows = list(rows)
+        self._compose_field_widgets = {}
+        container = QWidget()
+        container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+        long_labels = {"MESSAGE", "NARRATIVE", "REMARK", "REMARKS", "SUMMARY", "BODY", "DETAILS", "COMMENTS"}
+        for field in rows:
+            initial = str(values.get(field.key, "") or "")
+            upper_label = f"{field.label} {field.description}".upper()
+            field_wrap = QWidget()
+            field_layout = QVBoxLayout(field_wrap)
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.setSpacing(4)
+            label_widget = QLabel(field.label or field.key)
+            field_layout.addWidget(label_widget)
+            if field.description:
+                desc_widget = QLabel(field.description)
+                desc_widget.setWordWrap(True)
+                desc_widget.setStyleSheet("color: #666666; font-size: 11px;")
+                field_layout.addWidget(desc_widget)
+            if field.field_type == "select":
+                widget = QComboBox()
+                if field.allow_custom:
+                    widget.setEditable(True)
+                for option in field.options:
+                    widget.addItem(option.label or option.value, option.value)
+                if field.placeholder and widget.isEditable() and widget.lineEdit() is not None:
+                    widget.lineEdit().setPlaceholderText(field.placeholder)
+                self._configure_compose_combo_width(widget, floor=160)
+                widget.currentIndexChanged.connect(self._update_compose_preview)
+                if widget.isEditable():
+                    widget.editTextChanged.connect(self._update_compose_preview)
+            elif field.field_type == "textarea" or field.key == "MESSAGE" or any(token in upper_label for token in long_labels):
+                widget = QTextEdit()
+                widget.setFixedHeight(max(140, int(field.rows or 0) * 18))
+                widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                widget.setPlaceholderText(field.placeholder)
+                widget.setPlainText(initial)
+                widget.textChanged.connect(self._update_compose_preview)
+            else:
+                widget = QLineEdit()
+                widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                widget.setPlaceholderText(field.placeholder)
+                widget.setText(initial)
+                widget.textChanged.connect(self._update_compose_preview)
+            if not isinstance(widget, QComboBox):
+                field_layout.addWidget(widget)
+            else:
+                field_layout.addWidget(widget)
+            self._compose_field_widgets[field.key] = widget
+            self._compose_set_widget_value(field.key, initial)
+            layout.addWidget(field_wrap)
+        layout.addStretch()
+        self.compose_field_scroll.setWidget(container)
+
+    def _compose_field_values(self) -> Dict[str, str]:
+        values: Dict[str, str] = {}
+        for key, widget in self._compose_field_widgets.items():
+            if isinstance(widget, QTextEdit):
+                values[key] = widget.toPlainText()
+            elif isinstance(widget, QLineEdit):
+                values[key] = widget.text()
+            elif isinstance(widget, QComboBox):
+                data = widget.currentData()
+                if widget.isEditable():
+                    idx = widget.currentIndex()
+                    if idx >= 0 and data is not None and widget.currentText().strip() == widget.itemText(idx).strip():
+                        values[key] = str(data)
+                    else:
+                        values[key] = widget.currentText().strip()
+                elif data is not None:
+                    values[key] = str(data)
+                else:
+                    values[key] = widget.currentText().strip()
+        return values
+
+    def _compose_output_extension(self) -> str:
+        return ".b2s" if self._compose_template_kind == "blank" else ".k2s"
+
+    def _compose_base_filename(self) -> str:
+        return build_compose_filename(
+            self._compose_operator_callsign(),
+            self._compose_operator_state(),
+            self.compose_priority_combo.currentText() if hasattr(self, "compose_priority_combo") else "RR",
+            self._compose_timestamp_utc,
+            self.compose_report_title_edit.text() if hasattr(self, "compose_report_title_edit") else "Report",
+            extension=self._compose_output_extension(),
+        )
+
+    def _compose_current_payload(self) -> str:
+        values = self._compose_field_values()
+        callsign = self._compose_operator_callsign()
+        if self._compose_template_kind == "blank":
+            return serialize_standard_blank_message(
+                callsign=callsign,
+                created_utc=self._compose_timestamp_utc,
+                subject=values.get("SUBJECT", ""),
+                message=values.get("MESSAGE", ""),
+                to_name=values.get("TO", ""),
+                from_name=callsign,
+                precedence=self.compose_priority_combo.currentText(),
+                dtg=self._compose_zulu_text(),
+            )
+        form_data = self.compose_form_combo.currentData()
+        template_name = Path(str(form_data.get("path", "") or "")).name if isinstance(form_data, dict) else ""
+        field_pairs = [(field.key, values.get(field.key, "")) for field in self._compose_field_rows]
+        return serialize_custom_form_message(
+            template_name,
+            field_pairs,
+            callsign=callsign,
+            created_utc=self._compose_timestamp_utc,
+        )
+
+    def _compose_has_valid_form_selection(self) -> bool:
+        data = self.compose_form_combo.currentData() if hasattr(self, "compose_form_combo") else None
+        if isinstance(data, dict) and data.get("kind") == "standard":
+            return True
+        if isinstance(data, dict) and data.get("kind") == "custom":
+            return bool(str(data.get("path", "") or "").strip())
+        return False
+
+    def _compose_destination_plans(self) -> List[ComposeDestinationPlan]:
+        msg_paths = self.settings.get("message_paths", {}) or {}
+        return plan_compose_destinations(
+            self._compose_base_filename(),
+            send_target=self.compose_send_target_combo.currentText() if hasattr(self, "compose_send_target_combo") else "FLMsg",
+            varac_target=self.compose_varac_target_combo.currentText() if hasattr(self, "compose_varac_target_combo") else "None",
+            flmsg_dir=str(msg_paths.get("flmsg", "") or "").strip(),
+            flamp_dir=str(msg_paths.get("flamp", "") or "").strip(),
+            varac_outbox_dir=self._compose_varac_outbox_dir(),
+            varac_bbs_dir=str(self.settings.get("varac_bbs_dir", "") or "").strip(),
+            sign_flamp_copy=bool(
+                hasattr(self, "compose_sign_flamp_chk")
+                and self.compose_sign_flamp_chk.isChecked()
+                and self.compose_sign_flamp_chk.isEnabled()
+            ),
+        )
+
+    def _compose_varac_outbox_dir(self) -> str:
+        configured = str(self.settings.get("varac_outbox_dir", "") or "").strip()
+        if configured:
+            return configured
+        install_txt = str(
+            self.settings.get("varac_path", "")
+            or self.settings.get("varac_install_path", "")
+            or ""
+        ).strip()
+        install_path = Path(install_txt).expanduser() if install_txt else None
+        if install_path is not None and install_path.exists() and install_path.is_file():
+            install_path = install_path.parent
+        candidates: List[Path] = []
+        if install_path is not None:
+            candidates.extend(
+                [
+                    install_path / "Outbox",
+                    install_path / "OUTBOX",
+                    install_path / "outbox",
+                    install_path / "Outgoing",
+                    install_path / "Outgoing Files",
+                    install_path / "OutgoingFiles",
+                ]
+            )
+        incoming_txt = str((self.settings.get("message_paths", {}) or {}).get("varac", "") or "").strip()
+        if incoming_txt:
+            incoming_path = Path(incoming_txt).expanduser()
+            parent = incoming_path.parent
+            for name in ("Outbox", "OUTBOX", "outbox", "Outgoing", "Outgoing Files", "OutgoingFiles"):
+                candidates.append(parent / name)
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.exists() and candidate.is_dir():
+                return str(candidate)
+        return ""
+
+    def _set_messages_mode(self, mode: str, *, save: bool = True) -> None:
+        mode_txt = str(mode or "Inbox").strip().title()
+        if mode_txt not in {"Inbox", "Compose"}:
+            mode_txt = "Inbox"
+        self._messages_mode = mode_txt
+        self._update_messages_mode_ui()
+        if save:
+            self._save_settings()
+
+    def _update_messages_mode_ui(self) -> None:
+        if not hasattr(self, "messages_mode_stack"):
+            return
+        compose_active = self._messages_mode == "Compose"
+        theme = resolve_theme(self.settings)
+        self.messages_mode_stack.setCurrentIndex(1 if compose_active else 0)
+        if hasattr(self, "messages_help_btn"):
+            self.messages_help_btn.setText("Compose Help" if compose_active else "Inbox Help")
+            self.messages_help_btn.setStyleSheet(button_style("secondary", theme))
+        if hasattr(self, "messages_bbs_help_btn"):
+            self.messages_bbs_help_btn.setVisible(not compose_active)
+            self.messages_bbs_help_btn.setStyleSheet(button_style("secondary", theme))
+        if hasattr(self, "messages_manage_bbs_btn"):
+            self.messages_manage_bbs_btn.setVisible(not compose_active)
+            self.messages_manage_bbs_btn.setStyleSheet(button_style("secondary", theme))
+        self.messages_inbox_mode_btn.setStyleSheet(button_style("primary" if not compose_active else "muted", theme))
+        self.messages_compose_mode_btn.setStyleSheet(button_style("primary" if compose_active else "muted", theme))
+        for widget in (self.messages_bbs_help_btn, self.messages_manage_bbs_btn):
+            widget.setVisible(not compose_active)
+            widget.setStyleSheet(button_style("secondary", theme))
+        for widget in (self.compose_refresh_forms_btn, self.compose_reset_btn, self.compose_open_source_btn):
+            widget.setVisible(compose_active)
+            widget.setStyleSheet(button_style("muted", theme))
+        if hasattr(self, "_compose_tools_row"):
+            self._compose_tools_row.setVisible(compose_active)
+        for widget in (self.scan_combo, self.refresh_btn, self.export_btn, self.delete_selected_btn, self.mark_all_read_btn, self.time_toggle_btn):
+            widget.setVisible(not compose_active)
+        if hasattr(self, "_inbox_actions_row"):
+            self._inbox_actions_row.setVisible(not compose_active)
+        if hasattr(self, "messages_help_btn"):
+            self.messages_help_btn.setVisible(True)
+        if hasattr(self, "messages_bbs_status_label"):
+            self.messages_bbs_status_label.setVisible(not compose_active)
+            self._refresh_varac_bbs_status_label()
+        self._update_compose_preview()
+
+    def _open_messages_help(self) -> None:
+        context_key = "messages.compose" if self._messages_mode == "Compose" else "tab.messages"
+        self._open_context_help(context_key)
+
+    def _messages_support_summary(self) -> str:
+        mode = str(self._messages_mode or "Inbox")
+        top_lines = [
+            f"Mode: {mode}",
+            f"Watch directories: {len(self.watch_dirs)}",
+            f"Pending backlog: {self.pending_count.text() if hasattr(self, 'pending_count') else '0 pending'}",
+        ]
+        if mode == "Inbox":
+            top_lines.append(f"Scan cadence: every {int(self.scan_minutes)} minute(s)")
+            sections = (
+                (
+                    "Inbox Detail",
+                    bullet_lines(
+                        [
+                            self.loading_label.text() if getattr(self, "loading_label", None) and self.loading_label.isVisible() else "",
+                            f"Visible rows: {self.messages_table.rowCount()}" if hasattr(self, "messages_table") else "",
+                            f"Status filter: {self.status_filter.currentText()}" if hasattr(self, "status_filter") else "",
+                            f"Type filter: {self.type_filter.currentText()}" if hasattr(self, "type_filter") else "",
+                        ]
+                    ),
+                ),
+            )
+        else:
+            sections = (
+                (
+                    "Compose Detail",
+                    bullet_lines(
+                        [
+                            f"Family: {self.compose_family_combo.currentText()}" if hasattr(self, "compose_family_combo") else "",
+                            f"Form: {self.compose_form_combo.currentText()}" if hasattr(self, "compose_form_combo") else "",
+                            f"Send target: {self.compose_send_target_combo.currentText()}" if hasattr(self, "compose_send_target_combo") else "",
+                            f"VarAC copy: {self.compose_varac_target_combo.currentText()}" if hasattr(self, "compose_varac_target_combo") else "",
+                            self.compose_status_label.text() if hasattr(self, "compose_status_label") else "",
+                            self.compose_destinations_label.text() if hasattr(self, "compose_destinations_label") else "",
+                        ]
+                    ),
+                ),
+            )
+        return build_support_summary("FreqInOut Messages Summary", top_lines, sections=sections)
+
+    def _copy_messages_support_summary(self) -> None:
+        QApplication.clipboard().setText(self._messages_support_summary())
+        if hasattr(self, "messages_copy_summary_btn"):
+            self.messages_copy_summary_btn.setText("Copied")
+            QTimer.singleShot(1500, lambda: self.messages_copy_summary_btn.setText("Copy Summary"))
+
+    def _open_varac_bbs_manager(self) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_settings_section"):
+            try:
+                host.open_settings_section("varac")
+            except Exception:
+                pass
+
+    def _refresh_varac_bbs_status_label(self) -> None:
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
+        summary = bbs_summary_text(
+            {
+                "enable_bbs": bool(self.settings.get("varac_bbs_enabled", False)),
+                "limit_access": bool(self.settings.get("varac_bbs_limit_access_enabled", False)),
+                "announce": bool(self.settings.get("varac_bbs_announce_enabled", False)),
+                "allowed_callsigns": str(self.settings.get("varac_bbs_allowed_callsigns", "") or ""),
+            }
+        )
+        bbs_dir = str(self.settings.get("varac_bbs_dir", "") or "").strip()
+        suffix = f" Directory: {bbs_dir}" if bbs_dir else " Directory not configured."
+        text = f"VarAC BBS: {summary}.{suffix}"
+        self.messages_bbs_status_label.setText(text)
+        self.messages_bbs_status_label.setToolTip(text)
+
+    def _open_context_help(self, context_key: str) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help(context_key)
+            except Exception:
+                pass
+
+    def _refresh_compose_timestamp(self) -> None:
+        self._compose_timestamp_utc = datetime.datetime.now(datetime.timezone.utc)
+        self._refresh_compose_smart_defaults()
+        self._update_compose_preview()
+
+    def _reset_compose_draft(self) -> None:
+        self._compose_timestamp_utc = datetime.datetime.now(datetime.timezone.utc)
+        if hasattr(self, "compose_priority_combo"):
+            self.compose_priority_combo.setCurrentText("RR")
+        if hasattr(self, "compose_send_target_combo"):
+            self.compose_send_target_combo.setCurrentText("FLMsg")
+        if hasattr(self, "compose_varac_target_combo"):
+            self.compose_varac_target_combo.setCurrentText("None")
+        if hasattr(self, "compose_sign_flamp_chk"):
+            self.compose_sign_flamp_chk.setChecked(False)
+        if hasattr(self, "compose_report_title_edit"):
+            self.compose_report_title_edit.clear()
+        self._compose_last_stage_paths = []
+        self._compose_active_form_key = ""
+        self._on_compose_form_changed()
+        self._set_compose_status("Compose draft reset.", role="info")
+
+    def _open_compose_source_folder(self) -> None:
+        if self._compose_last_source_dir is None:
+            self._set_compose_status("No compose source folder is available for the current selection.", role="warning")
+            return
+        self._open_path_in_shell(self._compose_last_source_dir)
+
+    def _open_compose_output_folder(self) -> None:
+        if not self._compose_last_stage_paths:
+            plans = [p for p in self._compose_destination_plans() if p.ready]
+            if not plans:
+                self._set_compose_status("No ready staging folder is available.", role="warning")
+                return
+            self._open_path_in_shell(Path(plans[0].path).parent)
+            return
+        self._open_path_in_shell(self._compose_last_stage_paths[0].parent)
+
+    def _copy_compose_output_paths(self) -> None:
+        paths = self._compose_last_stage_paths or [Path(p.path) for p in self._compose_destination_plans() if p.ready]
+        if not paths:
+            self._set_compose_status("No compose paths are available to copy.", role="warning")
+            return
+        QApplication.clipboard().setText("\n".join(str(path) for path in paths))
+        self._set_compose_status("Compose output path copied to clipboard.", role="success")
+
+    def _launch_compose_app(self, app_name: str) -> None:
+        if not self._compose_launch_orchestrator.is_configured(app_name):
+            self._set_compose_status(f"{app_name} is not configured in Settings.", role="warning")
+            return
+        started = self._compose_launch_orchestrator.start_manual_sequence(
+            [{"name": app_name, "enabled": True, "startup": False}]
+        )
+        if started:
+            self._set_compose_status(f"Launching {app_name}...", role="info")
+            return
+        self._set_compose_status(f"{app_name} launch is already active or unavailable.", role="warning")
+
+    def _open_path_in_shell(self, path: Path) -> None:
+        try:
+            if platform.system() == "Darwin":
+                subprocess.Popen(["open", str(path)])
+            elif os.name == "nt":
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as e:
+            self._set_compose_status(f"Could not open path: {e}", role="warning")
+
+    def _set_compose_status(self, text: str, *, role: str = "info") -> None:
+        if not hasattr(self, "compose_status_label"):
+            return
+        self._compose_status_role = str(role or "info")
+        theme = resolve_theme(self.settings)
+        role_map = {
+            "info": theme.get("info", theme.get("accent", "#2563eb")),
+            "success": theme.get("success", "#2e7d32"),
+            "warning": theme.get("warning", "#b26a00"),
+            "danger": theme.get("danger", "#b42318"),
+        }
+        color = role_map.get(role, theme.get("text", "#222222"))
+        border = theme.get("border", "#cccccc")
+        bg = theme.get("surface_alt", theme.get("surface", "#f5f5f5"))
+        self.compose_status_label.setText(text)
+        self.compose_status_label.setStyleSheet(
+            f"padding: 6px 8px; border-radius: 4px; background: {bg}; color: {color}; border: 1px solid {border};"
+        )
+
+    def _update_compose_preview(self) -> None:
+        if not hasattr(self, "compose_summary_label"):
+            return
+        flamp_selected = (
+            hasattr(self, "compose_send_target_combo")
+            and self.compose_send_target_combo.currentText() in {"FLAmp", "Both"}
+        )
+        self.compose_sign_flamp_chk.setEnabled(bool(flamp_selected))
+        if not flamp_selected and self.compose_sign_flamp_chk.isChecked():
+            self.compose_sign_flamp_chk.setChecked(False)
+        self.compose_zulu_value.setText(self._compose_zulu_text())
+        self.compose_callsign_value.setText(self._compose_operator_callsign() or "Not set")
+        self.compose_state_value.setText(self._compose_operator_state() or "Not set")
+        self.compose_grid_value.setText(self._compose_operator_grid() or "Not set")
+        filename = self._compose_base_filename()
+        report_component = sanitize_report_name(self.compose_report_title_edit.text())
+        self.compose_summary_label.setText(
+            "Stage only: FreqInOut creates files. The operator sends manually from FLMsg, FLAmp, or VarAC.\n"
+            f"Filename preview: {filename}\n"
+            f"Report name component: {report_component}"
+        )
+        plans = self._compose_destination_plans()
+        destination_lines: List[str] = []
+        for plan in plans:
+            if plan.ready:
+                detail = plan.note or plan.path
+                destination_lines.append(f"{plan.label}: {detail}")
+            else:
+                destination_lines.append(f"{plan.label}: {plan.note}")
+        if not destination_lines:
+            destination_lines.append("No stage destinations selected yet.")
+        self.compose_destinations_label.setText("\n".join(destination_lines))
+
+        field_values = self._compose_field_values()
+        if self._compose_template_kind == "blank":
+            preview_rows = list(self._compose_blank_field_rows())
+            title = "Standard Blank Form (.b2s)"
+        else:
+            preview_rows = list(self._compose_field_rows)
+            title = self._compose_template_title or self.compose_form_combo.currentText()
+        preview_html = self._render_custom_form_fields(field_values, preview_rows, title=title)
+        metadata = [
+            f"<div><b>Filename:</b> {html.escape(filename)}</div>",
+            f"<div><b>Send Target:</b> {html.escape(self.compose_send_target_combo.currentText())}</div>",
+            f"<div><b>VarAC Copy:</b> {html.escape(self.compose_varac_target_combo.currentText())}</div>",
+        ]
+        if self.compose_sign_flamp_chk.isEnabled() and self.compose_sign_flamp_chk.isChecked():
+            metadata.append(
+                f"<div><b>Signed FLAmp Name:</b> {html.escape(build_signed_filename(filename))}</div>"
+            )
+        self.compose_preview.setHtml("".join(metadata) + "<hr/>" + preview_html)
+
+        ready_plans = [plan for plan in plans if plan.ready]
+        can_stage = bool(ready_plans) and self._compose_has_valid_form_selection()
+        self.compose_stage_btn.setEnabled(can_stage)
+        theme = resolve_theme(self.settings)
+        self.compose_stage_btn.setStyleSheet(button_style("primary" if can_stage else "muted", theme))
+        for btn in (
+            self.compose_open_flmsg_btn,
+            self.compose_open_flamp_btn,
+            self.compose_open_folder_btn,
+            self.compose_copy_paths_btn,
+            self.compose_refresh_time_btn,
+        ):
+            btn.setStyleSheet(button_style("muted", theme))
+        self.compose_open_flmsg_btn.setEnabled(self._compose_launch_orchestrator.is_configured("FLMsg"))
+        self.compose_open_flamp_btn.setEnabled(self._compose_launch_orchestrator.is_configured("FLAmp"))
+        has_paths = bool(self._compose_last_stage_paths or ready_plans)
+        self.compose_open_folder_btn.setEnabled(has_paths)
+        self.compose_copy_paths_btn.setEnabled(has_paths)
+
+    def _stage_compose_files(self) -> None:
+        if not self._compose_has_valid_form_selection():
+            self._set_compose_status("Select a compose form before staging files.", role="warning")
+            return
+        plans = self._compose_destination_plans()
+        payload = self._compose_current_payload()
+        ready_plans = [plan for plan in plans if plan.ready]
+        if not ready_plans:
+            self._set_compose_status("No ready compose destinations are available.", role="warning")
+            return
+        skipped = [plan.note for plan in plans if plan.requested and not plan.ready and plan.note]
+        outputs: List[Path] = []
+        problems: List[str] = []
+        gpg_path = str(self.settings.get("gpg_executable_path", "") or "").strip()
+        trusted_fingerprints = self.settings.get("gpg_trusted_fingerprints", []) or []
+        sign_flamp = bool(self.compose_sign_flamp_chk.isEnabled() and self.compose_sign_flamp_chk.isChecked())
+        unsigned_name = self._compose_base_filename()
+        for plan in ready_plans:
+            dst = Path(plan.path)
+            try:
+                if plan.key == "flamp" and sign_flamp:
+                    with tempfile.TemporaryDirectory(prefix="fio-compose-") as tmpdir:
+                        temp_src = Path(tmpdir) / unsigned_name
+                        temp_src.write_text(payload, encoding="utf-8")
+                        ok, detail = clearsign_file(temp_src, output_path=dst, configured_path=gpg_path)
+                    if ok:
+                        outputs.append(dst)
+                        verify_result = verify_file_with_discovery(
+                            dst,
+                            configured_path=gpg_path,
+                            trusted_fingerprints=trusted_fingerprints,
+                            allow_inline_clearsigned=True,
+                        )
+                        if verify_result.status != "valid":
+                            problems.append(f"FLAmp signature verification: {verify_result.detail}")
+                    else:
+                        fallback = unique_destination(dst.parent / unsigned_name)
+                        if fallback is None:
+                            fallback = dst.parent / unsigned_name
+                        fallback.write_text(payload, encoding="utf-8")
+                        outputs.append(fallback)
+                        problems.append(f"FLAmp signing failed; staged unsigned file instead. {detail}")
+                    continue
+                dst.write_text(payload, encoding="utf-8")
+                outputs.append(dst)
+            except Exception as e:
+                problems.append(f"{plan.label}: {e}")
+        self._compose_last_stage_paths = outputs
+        lines: List[str] = []
+        if outputs:
+            lines.append(f"Staged {len(outputs)} compose file(s).")
+            for path in outputs:
+                lines.append(str(path))
+        else:
+            lines.append("No compose files were staged.")
+        lines.extend(skipped)
+        lines.extend(problems)
+        role = "success" if outputs and not problems and not skipped else "warning"
+        self._set_compose_status("\n".join(lines), role=role)
+        self._update_compose_preview()
 
     @staticmethod
     def _normalize_excluded_msg_types(values) -> set[str]:
@@ -3766,6 +4881,10 @@ class MessageViewerTab(QWidget):
     def set_tab_active(self, active: bool) -> None:
         self._has_active_view = bool(active)
         if active:
+            if self._clock_timer is None:
+                self._setup_clock_timer()
+            elif not self._clock_timer.isActive():
+                self._clock_timer.start(1000)
             self._setup_timer()
             self._setup_js8_timer()
             self._setup_pending_timer()
@@ -3774,7 +4893,7 @@ class MessageViewerTab(QWidget):
                 self._signature_verify_deferred_until_active = False
                 QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
             return
-        for timer in (self._timer, self._js8_timer, self._pending_timer, self._bbs_auto_archive_timer):
+        for timer in (self._clock_timer, self._timer, self._js8_timer, self._pending_timer, self._bbs_auto_archive_timer):
             if timer:
                 timer.stop()
 
@@ -4567,18 +5686,18 @@ class MessageViewerTab(QWidget):
             self._pending_rows = []
             return []
         try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
+            rows = fetch_all(
+                db_path,
                 """
                 SELECT callsign, msg_id, status, last_attempt_ts, created_ts
                 FROM autoquery_backlog
                 WHERE kind='MSG'
                 ORDER BY created_ts DESC
-                """
+                """,
+                timeout=1.5,
+                busy_timeout_ms=1500,
+                span_name="messages.load_pending_backlog",
             )
-            rows = cur.fetchall()
-            conn.close()
         except Exception as e:
             log.debug("MessageViewer: failed to load pending backlog: %s", e)
             self._pending_rows = []
@@ -4600,6 +5719,10 @@ class MessageViewerTab(QWidget):
         rows = self._load_pending_rows()
         pending_count = sum(1 for row in rows if str(row.get("status", "")).upper() != "RETRIEVED")
         self.pending_count.setText(f"{pending_count} pending")
+        rows_signature = json.dumps(rows, sort_keys=True, default=str)
+        if rows_signature == self._pending_rows_signature:
+            return
+        self._pending_rows_signature = rows_signature
         self.pending_table.setRowCount(0)
         for idx, row in enumerate(rows):
             self.pending_table.insertRow(idx)
@@ -4691,6 +5814,15 @@ class MessageViewerTab(QWidget):
         self._update_mark_all_read_style()
         self._apply_accessibility_width_guards()
         self._update_pending_table()
+        if hasattr(self, "messages_inbox_mode_btn"):
+            self._update_messages_mode_ui()
+        if hasattr(self, "compose_status_label"):
+            self._set_compose_status(
+                self.compose_status_label.text() or "Compose is ready.",
+                role=getattr(self, "_compose_status_role", "info"),
+            )
+        if hasattr(self, "compose_setup_help_btn"):
+            self.compose_setup_help_btn.setStyleSheet(button_style("secondary", theme))
 
     def shutdown(self) -> None:
         self._is_shutting_down = True
@@ -5617,6 +6749,7 @@ class MessageViewerTab(QWidget):
             self.viewer.clear()
             self.current_record = None
             self.current_js8 = None
+            self.current_sitrep = None
         self.messages_table.setUpdatesEnabled(True)
         self._update_bulk_delete_buttons()
         self._update_mark_all_read_style()
@@ -5699,6 +6832,10 @@ class MessageViewerTab(QWidget):
                 self.varac_messages = [
                     m for m in self.varac_messages if m.msg_id != msg_id or m.source != payload.source
                 ]
+                if self.current_record is None and self.current_js8 is None and self.current_sitrep is None:
+                    self._has_active_view = False
+                    self.info_label.setText("No message selected")
+                    self.viewer.clear()
                 deleted += 1
             elif isinstance(payload, SpotterMessage):
                 msg_id = int(getattr(payload, "spotter_id", 0) or 0)
@@ -5709,7 +6846,20 @@ class MessageViewerTab(QWidget):
                     failed += 1
                     continue
                 self.spotter_messages = [m for m in self.spotter_messages if m.spotter_id != msg_id]
-                if self.current_js8 is None and self.current_record is None:
+                if self.current_js8 is None and self.current_record is None and self.current_sitrep is None:
+                    self._has_active_view = False
+                    self.info_label.setText("No message selected")
+                    self.viewer.clear()
+                deleted += 1
+            elif isinstance(payload, SitrepMessage):
+                if not self._delete_sitrep_row(payload):
+                    failed += 1
+                    continue
+                self.sitrep_messages = [
+                    m for m in self.sitrep_messages if self._sitrep_message_key(m) != self._sitrep_message_key(payload)
+                ]
+                if self.current_sitrep and self._sitrep_message_key(self.current_sitrep) == self._sitrep_message_key(payload):
+                    self.current_sitrep = None
                     self._has_active_view = False
                     self.info_label.setText("No message selected")
                     self.viewer.clear()
@@ -6159,6 +7309,14 @@ class MessageViewerTab(QWidget):
         # Prevent control label clipping at larger text sizes.
         max_w = 360
         buttons = [
+            getattr(self, "messages_help_btn", None),
+            getattr(self, "messages_bbs_help_btn", None),
+            getattr(self, "messages_manage_bbs_btn", None),
+            getattr(self, "messages_inbox_mode_btn", None),
+            getattr(self, "messages_compose_mode_btn", None),
+            getattr(self, "compose_refresh_forms_btn", None),
+            getattr(self, "compose_reset_btn", None),
+            getattr(self, "compose_open_source_btn", None),
             getattr(self, "refresh_btn", None),
             getattr(self, "export_btn", None),
             getattr(self, "delete_selected_btn", None),
@@ -6618,26 +7776,31 @@ class MessageViewerTab(QWidget):
             self._set_open_external_path(None)
             if isinstance(row.payload, JS8Message):
                 self.current_record = None
+                self.current_sitrep = None
                 self.current_js8 = row.payload
                 self._load_js8_content(row.payload)
                 self._mark_js8_read(row.payload, row_ref=row)
             elif isinstance(row.payload, SpotterMessage):
                 self.current_record = None
                 self.current_js8 = None
+                self.current_sitrep = None
                 self._load_js8_content(row.payload)
                 self._mark_spotter_read(row.payload, row_ref=row)
             elif isinstance(row.payload, FileRecord):
                 self.current_js8 = None
+                self.current_sitrep = None
                 self.current_record = row.payload
                 self._load_content(row.payload)
                 self._set_read_state(row.payload, "READ", row_ref=row)
             elif isinstance(row.payload, VarACMessage):
                 self.current_js8 = None
                 self.current_record = None
+                self.current_sitrep = None
                 self._load_varac_content(row.payload, row_ref=row)
             elif isinstance(row.payload, SitrepMessage):
                 self.current_js8 = None
                 self.current_record = None
+                self.current_sitrep = row.payload
                 self._load_sitrep_content(row.payload)
 
     def _read_file_head(self, path: Path, limit: int = 4096) -> str:
@@ -6756,7 +7919,7 @@ class MessageViewerTab(QWidget):
                 continue
             key, val = line.split(",", 1)
             key = key.strip().upper()
-            if re.fullmatch(r"L\d{1,2}", key):
+            if re.fullmatch(r"L\d{1,2}[A-Z]?", key):
                 fields[key] = val.strip()
         return fields
 
@@ -6866,69 +8029,49 @@ class MessageViewerTab(QWidget):
 
     @staticmethod
     def _extract_template_labels(template: str) -> List[Tuple[str, str]]:
-        if not template:
-            return []
-        field_re = re.compile(
-            r"<(input|select|textarea)[^>]*\bname=\"(L\d{1,2})\"[^>]*>",
-            re.IGNORECASE,
-        )
-        label_re = re.compile(r"<label[^>]*>(.*?)</label>", re.IGNORECASE | re.DOTALL)
-        container_re = re.compile(r"<(td|div)[^>]*>", re.IGNORECASE)
-        labels: List[Tuple[str, str]] = []
-        seen = set()
-        for match in field_re.finditer(template):
-            name = match.group(2).upper()
-            if name in seen:
-                continue
-            start = max(0, match.start() - 1200)
-            window = template[start:match.start()]
-            label_text = ""
-            for label_match in label_re.finditer(window):
-                label_text = label_match.group(1)
-            if not label_text:
-                container_pos = window.lower().rfind("<td")
-                if container_pos == -1:
-                    container_pos = window.lower().rfind("<div")
-                if container_pos != -1:
-                    container = window[container_pos:]
-                    label_text = MessageViewerTab._strip_html(container)
-                    if label_text:
-                        parts = [p.strip() for p in label_text.splitlines() if p.strip()]
-                        if parts:
-                            label_text = parts[-1]
-            label_text = MessageViewerTab._strip_html(label_text) or name
-            labels.append((name, label_text))
-            seen.add(name)
-        return labels
+        return [(field.key, field.label) for field in parse_compose_template_fields(template)]
 
     @staticmethod
-    def _render_custom_form_fields(fields: Dict[str, str], labels: List[Tuple[str, str]], title: str = "") -> str:
+    def _render_custom_form_fields(
+        fields: Dict[str, str],
+        labels: Sequence[Tuple[str, str] | ComposeFieldDefinition],
+        title: str = "",
+    ) -> str:
         rows = []
         if labels:
-            for key, label in labels:
+            for entry in labels:
+                if isinstance(entry, ComposeFieldDefinition):
+                    key = entry.key
+                    label = entry.label
+                    description = entry.description
+                else:
+                    key, label = entry
+                    description = ""
                 value = MessageViewerTab._normalize_field_value(fields.get(key, ""))
-                rows.append((label, value))
+                rows.append((label, description, value))
         else:
             for key in sorted(fields.keys()):
-                rows.append((key, MessageViewerTab._normalize_field_value(fields.get(key, ""))))
+                rows.append((key, "", MessageViewerTab._normalize_field_value(fields.get(key, ""))))
         html_out = [
             "<style>",
-            ".field-table { width: 100%; border-collapse: collapse; }",
-            ".field-row { border-bottom: 1px solid; }",
-            ".field-cell { padding: 6px; vertical-align: top; }",
-            ".label { font-weight: bold; }",
+            ".field-stack { width: 100%; }",
+            ".field-block { padding: 8px 0; border-bottom: 1px solid; }",
+            ".label { font-weight: bold; margin-bottom: 2px; }",
+            ".description { color: #666666; font-size: 11px; margin-bottom: 4px; }",
             ".value { white-space: pre-wrap; }",
             "</style>",
         ]
         if title:
             html_out.append(f"<div class='label' style='font-size: 16px; margin-bottom: 8px;'>{html.escape(title)}</div>")
-        html_out.append("<table class='field-table'>")
-        for label, value in rows:
-            html_out.append("<tr class='field-row'>")
-            html_out.append(f"<td class='field-cell label'>{html.escape(label)}</td>")
-            html_out.append(f"<td class='field-cell value'>{html.escape(value)}</td>")
-            html_out.append("</tr>")
-        html_out.append("</table>")
+        html_out.append("<div class='field-stack'>")
+        for label, description, value in rows:
+            html_out.append("<div class='field-block'>")
+            html_out.append(f"<div class='label'>{html.escape(label)}</div>")
+            if description:
+                html_out.append(f"<div class='description'>{html.escape(description)}</div>")
+            html_out.append(f"<div class='value'>{html.escape(value)}</div>")
+            html_out.append("</div>")
+        html_out.append("</div>")
         return "".join(html_out)
 
     @staticmethod
@@ -7267,10 +8410,77 @@ class MessageViewerTab(QWidget):
 
     def _bbs_copy_session_key_for_row(self, row: UnifiedMessage | None) -> tuple[str, float, int] | None:
         payload = getattr(row, "payload", None) if row is not None else None
-        return self._bbs_copy_session_key_for_record(payload if isinstance(payload, FileRecord) else None)
+        return MessageViewerTab._bbs_copy_session_key_for_record(payload if isinstance(payload, FileRecord) else None)
+
+    @staticmethod
+    def _split_varac_bbs_safe_suffix(name: str) -> tuple[str, str]:
+        return split_varac_bbs_safe_suffix(name)
+
+    @staticmethod
+    def _safe_varac_bbs_filename(name: str, *, max_len: int = 180) -> str:
+        return safe_varac_bbs_filename(name, max_len=max_len)
+
+    @staticmethod
+    def _unique_varac_bbs_destination(dst: Path) -> Path | None:
+        return unique_destination(dst)
+
+    @staticmethod
+    def _file_record_matches_path(rec: FileRecord, path_obj: Path) -> bool:
+        try:
+            st = path_obj.stat()
+        except Exception:
+            return False
+        try:
+            if int(st.st_size) != int(rec.size or 0):
+                return False
+        except Exception:
+            return False
+        try:
+            return abs(float(st.st_mtime) - float(rec.mtime or 0.0)) <= 1e-6
+        except Exception:
+            return False
+
+    def _varac_bbs_destination_for_row(self, row: UnifiedMessage | None, *, unique: bool = False) -> Path | None:
+        if not self._can_copy_row_to_varac_bbs(row):
+            return None
+        payload = getattr(row, "payload", None)
+        if not isinstance(payload, FileRecord):
+            return None
+        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
+        if not bbs_dir_txt:
+            return None
+        bbs_dir = Path(bbs_dir_txt)
+        if not bbs_dir.exists() or not bbs_dir.is_dir():
+            return None
+        safe_name = MessageViewerTab._safe_varac_bbs_filename(payload.path.name)
+        dst = bbs_dir / safe_name
+        if not unique:
+            return dst
+        return MessageViewerTab._unique_varac_bbs_destination(dst)
+
+    def _is_row_already_in_varac_bbs(self, row: UnifiedMessage | None) -> bool:
+        dst = self._varac_bbs_destination_for_row(row)
+        payload = getattr(row, "payload", None) if row is not None else None
+        if dst is None or not isinstance(payload, FileRecord):
+            return False
+        key = self._bbs_copy_session_key_for_row(row)
+        if key is not None and key in self._bbs_copied_session_keys:
+            return True
+        try:
+            if payload.path.resolve() == dst.resolve():
+                return True
+        except Exception:
+            pass
+        if not dst.exists():
+            return False
+        if dst.name == payload.path.name:
+            return True
+        return MessageViewerTab._file_record_matches_path(payload, dst)
 
     def _is_row_bbs_copy_action_enabled(self, row: UnifiedMessage | None) -> bool:
         if not self._can_copy_row_to_varac_bbs(row):
+            return False
+        if self._is_row_already_in_varac_bbs(row):
             return False
         key = self._bbs_copy_session_key_for_row(row)
         if key is None:
@@ -7295,41 +8505,38 @@ class MessageViewerTab(QWidget):
         if not src.exists() or not src.is_file():
             QMessageBox.warning(self, "Copy to VarAC BBS", "The selected source file no longer exists.")
             return
-        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
-        if not bbs_dir_txt:
-            QMessageBox.warning(self, "Copy to VarAC BBS", "Configure VarAC BBS directory in Settings first.")
+        base_dst = self._varac_bbs_destination_for_row(row)
+        dst = self._varac_bbs_destination_for_row(row, unique=True)
+        if dst is None:
+            if base_dst is None:
+                QMessageBox.warning(self, "Copy to VarAC BBS", "Configured VarAC BBS directory is not valid.")
+            else:
+                QMessageBox.warning(self, "Copy to VarAC BBS", "Could not create a unique VarAC BBS filename.")
             return
-        bbs_dir = Path(bbs_dir_txt)
-        if not bbs_dir.exists() or not bbs_dir.is_dir():
-            QMessageBox.warning(self, "Copy to VarAC BBS", "Configured VarAC BBS directory is not valid.")
+        if self._is_row_already_in_varac_bbs(row):
             return
-        dst = bbs_dir / src.name
         try:
             if src.resolve() == dst.resolve():
-                QMessageBox.information(self, "Copy to VarAC BBS", "File is already in the VarAC BBS folder.")
                 return
         except Exception:
             pass
         if dst.exists():
-            resp = QMessageBox.question(
-                self,
-                "Copy to VarAC BBS",
-                f"File already exists in BBS folder:\n{dst}\n\nOverwrite existing file?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if resp != QMessageBox.Yes:
-                return
+            return
         try:
             shutil.copy2(str(src), str(dst))
         except Exception as e:
             QMessageBox.warning(self, "Copy to VarAC BBS", f"Copy failed:\n{e}")
             return
         self._mark_row_copied_to_varac_bbs_session(row)
+        extra = ""
+        if dst.name != payload.path.name:
+            extra = f"\n\nFilename cleaned from:\n{payload.path.name}"
+            if base_dst is not None and dst != base_dst:
+                extra += f"\n\nExisting BBS filename avoided; copied as:\n{dst.name}"
         QMessageBox.information(
             self,
             "Copy to VarAC BBS",
-            f"Copied file to VarAC BBS folder:\n{dst}",
+            f"Copied file to VarAC BBS folder:\n{dst}{extra}",
         )
         self._unfreeze_table()
         self._populate_messages_table(force=True)
@@ -7361,6 +8568,64 @@ class MessageViewerTab(QWidget):
             self._has_active_view = False
             self.info_label.setText("No file selected")
             self.viewer.clear()
+
+    @staticmethod
+    def _sitrep_message_key(msg: SitrepMessage | None) -> tuple[str, int | str] | None:
+        if not isinstance(msg, SitrepMessage):
+            return None
+        event_id = int(getattr(msg, "event_id", 0) or 0)
+        if event_id > 0:
+            return ("sitrep", event_id)
+        report_key = str(getattr(msg, "report_key", "") or "").strip().lower()
+        return ("sitrep", report_key) if report_key else None
+
+    def _delete_sitrep_row(self, msg: SitrepMessage) -> bool:
+        db_path = self._db_path()
+        if not db_path or not db_path.exists():
+            return False
+        key = self._sitrep_message_key(msg)
+        if key is None:
+            return False
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            if isinstance(key[1], int):
+                cur.execute("DELETE FROM sitrep_events WHERE id=?", (int(key[1]),))
+            else:
+                cur.execute("DELETE FROM sitrep_events WHERE report_key=?", (str(key[1]),))
+            deleted = int(cur.rowcount or 0) > 0
+            conn.commit()
+            conn.close()
+            return deleted
+        except Exception as e:
+            log.debug("MessageViewer: failed to delete SitRep %s: %s", key, e)
+            return False
+
+    def _delete_sitrep_message(self, msg: SitrepMessage) -> None:
+        if not msg:
+            return
+        label = str(getattr(msg, "report_key", "") or "").strip() or f"event {int(getattr(msg, 'event_id', 0) or 0)}"
+        resp = QMessageBox.question(
+            self,
+            "Delete Message",
+            f"Delete SitRep {label}?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        if not self._delete_sitrep_row(msg):
+            QMessageBox.warning(self, "Delete Message", f"Failed to delete SitRep {label}.")
+            return
+        msg_key = self._sitrep_message_key(msg)
+        self.sitrep_messages = [m for m in self.sitrep_messages if self._sitrep_message_key(m) != msg_key]
+        if self.current_sitrep and self._sitrep_message_key(self.current_sitrep) == msg_key:
+            self.current_sitrep = None
+            self._has_active_view = False
+            self.info_label.setText("No message selected")
+            self.viewer.clear()
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+        QMessageBox.information(self, "Delete Message", f"SitRep {label} deleted")
 
     def _delete_js8_message(self, msg: JS8Message) -> None:
         if not msg:
@@ -7402,7 +8667,7 @@ class MessageViewerTab(QWidget):
             return
         self._delete_varac_local_row(msg)
         self.varac_messages = [m for m in self.varac_messages if m.msg_id != msg_id or m.source != msg.source]
-        if self.current_record is None and self.current_js8 is None:
+        if self.current_record is None and self.current_js8 is None and self.current_sitrep is None:
             self._has_active_view = False
             self.info_label.setText("No message selected")
             self.viewer.clear()
@@ -7428,7 +8693,7 @@ class MessageViewerTab(QWidget):
             QMessageBox.warning(self, "Delete Message", f"Failed to delete Message {msg_id}.")
             return
         self.spotter_messages = [m for m in self.spotter_messages if m.spotter_id != msg_id]
-        if self.current_js8 is None and self.current_record is None:
+        if self.current_js8 is None and self.current_record is None and self.current_sitrep is None:
             self._has_active_view = False
             self.info_label.setText("No message selected")
             self.viewer.clear()
@@ -9112,6 +10377,7 @@ class MessageViewerTab(QWidget):
             # Persist only legacy scan interval; paths now come from Settings tab
             data["scan_minutes"] = self.scan_minutes
             data["excluded_msg_types"] = sorted(self._excluded_msg_types)
+            data["mode"] = self._messages_mode
             if hasattr(self.settings, "set"):
                 self.settings.set("message_viewer", data)
                 if hasattr(self.settings, "save"):

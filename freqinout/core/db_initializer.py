@@ -1048,7 +1048,9 @@ def _ensure_nets_db() -> None:
                 mode TEXT NOT NULL,
                 frequency TEXT NOT NULL,
                 meta_json TEXT,
-                imported_at TEXT
+                imported_at TEXT,
+                source_type TEXT DEFAULT 'IMPORTED',
+                updated_at TEXT
             )
             """
         )
@@ -1065,6 +1067,8 @@ def _ensure_nets_db() -> None:
                 "frequency": "TEXT",
                 "meta_json": "TEXT",
                 "imported_at": "TEXT",
+                "source_type": "TEXT DEFAULT 'IMPORTED'",
+                "updated_at": "TEXT",
             },
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_hf_owner ON peer_hf_schedule(owner_callsign)")
@@ -1131,7 +1135,7 @@ def _ensure_nets_db() -> None:
                 band,
                 mode,
                 frequency,
-                'IMPORTED' AS source_type,
+                COALESCE(NULLIF(TRIM(source_type), ''), 'IMPORTED') AS source_type,
                 NULL AS confidence,
                 NULL AS sample_count,
                 NULL AS weeks_seen,
@@ -1333,6 +1337,22 @@ def ensure_all_tables() -> None:
     """
     Public entry point to ensure both DBs are initialized.
     """
-    _ensure_settings_db()
-    _ensure_nets_db()
+    ensure_settings_tables()
+    ensure_nets_tables()
     log.info("DB init: ensured core tables (settings and nets).")
+
+
+def ensure_settings_tables() -> None:
+    """
+    Public entry point to ensure settings DB tables and migrations are applied.
+    """
+    _ensure_settings_db()
+    log.info("DB init: ensured settings tables.")
+
+
+def ensure_nets_tables() -> None:
+    """
+    Public entry point to ensure nets DB tables and migrations are applied.
+    """
+    _ensure_nets_db()
+    log.info("DB init: ensured nets tables.")

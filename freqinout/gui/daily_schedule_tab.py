@@ -39,7 +39,8 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.sop_manager import SOPManager
 from freqinout.utils.timezones import get_timezone
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.help_registry import resolve_help_host
+from freqinout.gui.theme import resolve_theme, button_style, font_css
 from freqinout.gui.qsy_helper import (
     load_operating_groups as qsy_load_operating_groups,
     snapshot_operating_groups as qsy_snapshot_operating_groups,
@@ -202,6 +203,7 @@ class DailyScheduleTab(QWidget):
         self._dirty: bool = False
         self._suspend_dirty_tracking: bool = False
         self._saved_rows_signature: str = ""
+        self._active: bool = False
 
         self._clock_timer: Optional[QTimer] = None
         self._sop_panel_timer: Optional[QTimer] = None
@@ -247,6 +249,10 @@ class DailyScheduleTab(QWidget):
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>HF Frequency Schedule</h3>"))
+        self.help_btn = QPushButton("Help")
+        self.help_btn.setToolTip("Open HF Frequency Schedule help.")
+        self.help_btn.clicked.connect(lambda: self._open_context_help("tab.hf-daily"))
+        header.addWidget(self.help_btn)
         header.addStretch()
 
         # UTC / Local labels like net_schedule_tab
@@ -383,6 +389,7 @@ class DailyScheduleTab(QWidget):
         self.import_export_btn = QToolButton()
         self.import_export_btn.setText("Import/Export")
         self.import_export_btn.setPopupMode(QToolButton.InstantPopup)
+        self.import_export_btn.setFont(self.add_row_btn.font())
         self.import_export_menu = QMenu(self.import_export_btn)
         self.import_hf_schedule_action = self.import_export_menu.addAction("Import HF Schedule")
         self.export_hf_schedule_action = self.import_export_menu.addAction("Export HF Schedule")
@@ -409,16 +416,18 @@ class DailyScheduleTab(QWidget):
         filters_row.addWidget(QLabel("Filter:"))
         self.resources_group_filter = QLineEdit()
         self.resources_group_filter.setPlaceholderText("Search set/group/band/frequency...")
+        self.resources_group_filter.setMaximumWidth(360)
         filters_row.addWidget(self.resources_group_filter, 1)
         self.add_to_schedule_btn = QToolButton()
         self.add_to_schedule_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        self.add_to_schedule_btn.setFont(self.add_row_btn.font())
         add_menu = QMenu(self.add_to_schedule_btn)
-        self.add_selected_resource_action = QAction("Add Selected to Active Schedule", self)
-        self.add_filtered_resource_action = QAction("Add Filtered to Active Schedule", self)
+        self.add_selected_resource_action = QAction("Move Selected to Active", self)
+        self.add_filtered_resource_action = QAction("Move Filtered to Active", self)
         add_menu.addAction(self.add_selected_resource_action)
         add_menu.addAction(self.add_filtered_resource_action)
         self.add_to_schedule_btn.setMenu(add_menu)
-        self.add_to_schedule_default_action = QAction("Add to Active Schedule", self)
+        self.add_to_schedule_default_action = QAction("Move Selected to Active", self)
         self.add_to_schedule_btn.setDefaultAction(self.add_to_schedule_default_action)
         filters_row.addWidget(self.add_to_schedule_btn)
         self.resources_delete_btn = QPushButton("Delete Selected")
@@ -497,6 +506,14 @@ class DailyScheduleTab(QWidget):
         self._update_delete_button_state()
         self._update_resource_action_state()
 
+    def _open_context_help(self, context_key: str) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help(context_key)
+            except Exception:
+                pass
+
     def _load_operating_groups(self) -> List[Dict]:
         return qsy_load_operating_groups(self.settings)
 
@@ -508,14 +525,12 @@ class DailyScheduleTab(QWidget):
     def _setup_clock_timer(self):
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._update_clock_labels)
-        self._clock_timer.start(1000)
 
     def _setup_sop_panel_timer(self) -> None:
         self._sop_panel_timer = QTimer(self)
         self._sop_panel_timer.timeout.connect(lambda: self._refresh_sop_profiles_panel(force=False))
         self._sop_panel_timer.timeout.connect(lambda: self._refresh_schedule_resources(force=False))
         self._sop_panel_timer.timeout.connect(self._refresh_sop_overlay_rows_in_table)
-        self._sop_panel_timer.start(30_000)
 
     def _refresh_group_band_cells(self):
         """
@@ -2317,16 +2332,17 @@ class DailyScheduleTab(QWidget):
         self.add_selected_resource_action.setEnabled(has_selected)
         self.add_filtered_resource_action.setEnabled(has_rows)
         self.add_to_schedule_default_action.setEnabled(has_selected)
-        self.add_to_schedule_default_action.setText("Add to Active Schedule")
-        self.add_selected_resource_action.setText("Add Selected to Active Schedule")
-        self.add_filtered_resource_action.setText("Add Filtered to Active Schedule")
+        self.add_to_schedule_default_action.setText("Move Selected to Active")
+        self.add_selected_resource_action.setText("Move Selected to Active")
+        self.add_filtered_resource_action.setText("Move Filtered to Active")
         self.add_to_schedule_btn.setEnabled(has_selected)
         self.add_to_schedule_btn.setToolTip(
-            "Add selected Schedule Resources rows to Active Schedule."
+            "Move selected Schedule Resources rows to Active Schedule."
             if has_selected
-            else "Select one or more Schedule Resources rows to add."
+            else "Select one or more Schedule Resources rows to move."
         )
-        self.add_to_schedule_btn.setText("Add to Active Schedule")
+        self.add_to_schedule_btn.setText("Move Selected to Active")
+        self.add_to_schedule_btn.setFont(self.add_row_btn.font())
         self.add_to_schedule_btn.setStyleSheet(
             button_style(
                 "eligible_warning" if has_selected and has_conflicts else ("eligible_info" if has_selected else "muted"),
@@ -2562,7 +2578,7 @@ class DailyScheduleTab(QWidget):
             return
         confirm = QMessageBox.question(
             self,
-            "Add to Active Schedule",
+            "Move Selected to Active",
             f"Add {len(candidates)} row(s) from {origin}?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
@@ -5301,6 +5317,20 @@ class DailyScheduleTab(QWidget):
             self._update_suspend_state()
             self._refresh_schedule_resources(force=False)
 
+    def set_tab_active(self, active: bool) -> None:
+        self._active = bool(active)
+        if self._active:
+            if self._clock_timer and not self._clock_timer.isActive():
+                self._clock_timer.start(1000)
+            if self._sop_panel_timer and not self._sop_panel_timer.isActive():
+                self._sop_panel_timer.start(30_000)
+            QTimer.singleShot(0, self.on_tab_activated)
+            return
+        if self._clock_timer and self._clock_timer.isActive():
+            self._clock_timer.stop()
+        if self._sop_panel_timer and self._sop_panel_timer.isActive():
+            self._sop_panel_timer.stop()
+
     def _on_suspend_clicked(self):
         if self._suspend_active():
             resume_schedule_hold(self.window(), self.settings)
@@ -5324,6 +5354,7 @@ class DailyScheduleTab(QWidget):
 
     def _apply_theme(self, *, refresh_dynamic: bool = True) -> None:
         theme = resolve_theme(self.settings)
+        self.help_btn.setStyleSheet(button_style("secondary", theme))
         self._update_time_toggle_style(theme)
         self._update_effective_source_label(theme)
         self.sop_runtime_box.setStyleSheet(
@@ -5331,7 +5362,11 @@ class DailyScheduleTab(QWidget):
         )
         self.add_row_btn.setStyleSheet(button_style("primary", theme))
         self._refresh_save_button_state(theme)
-        self.import_export_btn.setStyleSheet(button_style("info", theme))
+        menu_font_css = font_css(self.add_row_btn.font())
+        self.import_export_btn.setStyleSheet(button_style("info", theme) + menu_font_css)
+        self.import_export_btn.setFont(self.add_row_btn.font())
+        self.add_to_schedule_btn.setStyleSheet(button_style("muted", theme) + menu_font_css)
+        self.add_to_schedule_btn.setFont(self.add_row_btn.font())
         self.resources_refresh_btn.setStyleSheet(button_style("muted", theme))
         self._update_suspend_state()
         self._update_delete_button_state()

@@ -13,6 +13,7 @@ from freqinout.core.logger import log
 from freqinout.core import updater
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.startup_lock import try_acquire_single_instance_lock
+from freqinout.gui.dialog_notifications import install_auto_closing_information_dialogs
 
 
 def _set_windows_app_user_model_id() -> None:
@@ -65,6 +66,7 @@ def main():
     if not try_acquire_single_instance_lock(lockfile):
         QMessageBox.information(None, "FreqInOut", "FreqInOut is already running.")
         return
+    install_auto_closing_information_dialogs()
     app._single_instance = lockfile  # type: ignore[attr-defined]
     win = MainWindow()
     win.show()

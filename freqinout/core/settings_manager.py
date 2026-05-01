@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.system_timezone import detect_system_timezone_name
 
 APP_NAME = "FreqInOut"
 
@@ -29,11 +31,13 @@ class SettingsManager:
         self._conn: Optional[sqlite3.Connection] = None
         self._data: Dict[str, Any] = {}
         self._thread_id = threading.get_ident()
+        self._last_timezone_sync_monotonic = 0.0
 
         self._init_db()
         self._maybe_migrate_from_json()
         self.reload()
         self._purge_legacy_autoquery_keys()
+        self._sync_system_timezone(force=True)
 
     # ---------- internal I/O ---------- #
 
@@ -127,8 +131,33 @@ class SettingsManager:
             f"(created={self._thread_id}, current={current_thread_id})"
         )
 
+    def _sync_system_timezone(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - self._last_timezone_sync_monotonic) < 30.0:
+            return
+        self._last_timezone_sync_monotonic = now
+
+        current = str(self._data.get("timezone") or "").strip() or "UTC"
+        detected = detect_system_timezone_name(current)
+        if detected == current:
+            return
+
+        self._data["timezone"] = detected
+        try:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)",
+                    ("timezone", json.dumps(detected)),
+                )
+            log.info("SettingsManager: synced timezone to %s (was %s)", detected, current)
+        except Exception as e:
+            log.error("SettingsManager: failed to sync timezone %s: %s", detected, e)
+            raise
+
     def get(self, key: str, default: Any = None) -> Any:
         self._assert_thread_affinity()
+        if key == "timezone":
+            self._sync_system_timezone()
         return self._data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:

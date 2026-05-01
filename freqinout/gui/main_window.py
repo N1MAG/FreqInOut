@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QSpacerItem,
     QScrollArea,
     QFrame,
+    QStyle,
     QToolButton,
 )
 from PySide6.QtGui import QPixmap, QIcon
@@ -64,8 +65,11 @@ from freqinout.gui.stations_map_tab import (
 )
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.peer_sched_tab import PeerSchedTab
+from freqinout.gui.context_help_dialog import ContextHelpDialog
 from freqinout.gui.help_tab import HelpTab
+from freqinout.gui.help_registry import get_help_context
 from freqinout.gui.controlfreq_tab import ControlFreqTab
+from freqinout.gui.dialog_notifications import install_auto_closing_information_dialogs
 from freqinout.gui.qsy_helper import (
     refresh_hold_duration_combo,
     selected_hold_duration,
@@ -99,6 +103,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        install_auto_closing_information_dialogs()
         self._shutting_down = False
 
         self.settings = SettingsManager()
@@ -128,6 +133,7 @@ class MainWindow(QMainWindow):
         self._log_dialog: QDialog | None = None
         self.peer_sched_tab = PeerSchedTab(self)
         self.help_tab = HelpTab(self)
+        self._context_help_dialog: ContextHelpDialog | None = None
         self.controlfreq_tab = ControlFreqTab(self)
         self._sop_data_refresh_pending = False
         self._sop_data_refresh_timer = QTimer(self)
@@ -227,7 +233,7 @@ class MainWindow(QMainWindow):
         self._map_nav_index = None
         self._ncs_nav_indices: dict[str, int] = {}
         self._ncs_net_active: dict[str, bool] = {"FLDIGI": False, "JS8": False, "LOCAL": False}
-        self._nav_group_headers: dict[str, QToolButton] = {}
+        self._nav_group_headers: dict[str, QPushButton] = {}
         self._nav_group_bodies: dict[str, QWidget] = {}
         self._nav_group_layouts: dict[str, QVBoxLayout] = {}
         self._nav_group_sections: dict[str, QWidget] = {}
@@ -635,13 +641,30 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.debug("MainWindow: fldigi_tab local refresh failed: %s", e)
 
+    def on_peer_schedule_data_changed(self) -> None:
+        try:
+            if hasattr(self, "controlfreq_tab") and self.controlfreq_tab is not None:
+                if hasattr(self.controlfreq_tab, "on_peer_schedule_data_changed"):
+                    self.controlfreq_tab.on_peer_schedule_data_changed()
+        except Exception as e:
+            log.debug("MainWindow: controlfreq peer schedule refresh failed: %s", e)
+        try:
+            if self.stations_map_tab is not None:
+                map_visible = bool(getattr(self.stations_map_tab, "_map_visible", False))
+                if map_visible and hasattr(self.stations_map_tab, "_schedule_render"):
+                    self.stations_map_tab._schedule_render()
+                elif hasattr(self.stations_map_tab, "_map_dirty"):
+                    self.stations_map_tab._map_dirty = True
+        except Exception as e:
+            log.debug("MainWindow: stations_map_tab peer schedule refresh failed: %s", e)
+
     def _update_log_indicator(self) -> None:
         try:
             try:
                 self.settings.reload()
             except Exception:
                 pass
-            level = (self.settings.get("log_level", "") or "INFO").upper()
+            level = (self.settings.get("log_level", "") or "DISABLED").upper()
             if level == "DISABLED":
                 self.logs_active_btn.setVisible(False)
             else:
@@ -710,9 +733,9 @@ class MainWindow(QMainWindow):
             now_utc = datetime.datetime.now(datetime.timezone.utc)
             if now_utc < until_dt:
                 return
-            prev = (self.settings.get("timed_debug_prev_level", "") or "INFO").strip().upper()
+            prev = (self.settings.get("timed_debug_prev_level", "") or "DISABLED").strip().upper()
             if prev not in {"DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"}:
-                prev = "INFO"
+                prev = "DISABLED"
             self.settings.set_many(
                 {
                     "log_level": prev,
@@ -1045,8 +1068,8 @@ class MainWindow(QMainWindow):
         # Persist and redraw
         if hasattr(tab, "_save_display_preferences"):
             tab._save_display_preferences()
-        if hasattr(tab, "_render_map"):
-            tab._render_map()
+        if hasattr(tab, "_request_map_refresh"):
+            tab._request_map_refresh(level="medium", reason="sidebar_layers")
 
     def _on_sidebar_prop_changed(self, _=None) -> None:
         tab = getattr(self, "stations_map_tab", None)
@@ -1058,8 +1081,8 @@ class MainWindow(QMainWindow):
             tab.prop_mode = str(mode)
         if hasattr(tab, "_save_display_preferences"):
             tab._save_display_preferences()
-        if hasattr(tab, "_render_map"):
-            tab._render_map()
+        if hasattr(tab, "_request_map_refresh"):
+            tab._request_map_refresh(level="full", reason="sidebar_prop_overlay")
 
     def _on_sidebar_prop_mode_changed(self, _=None) -> None:
         tab = getattr(self, "stations_map_tab", None)
@@ -1070,8 +1093,8 @@ class MainWindow(QMainWindow):
             tab.prop_mode = str(mode)
         if hasattr(tab, "_save_display_preferences"):
             tab._save_display_preferences()
-        if hasattr(tab, "_render_map"):
-            tab._render_map()
+        if hasattr(tab, "_request_map_refresh"):
+            tab._request_map_refresh(level="full", reason="sidebar_prop_mode")
 
     def _on_sidebar_prop_window_changed(self, _=None) -> None:
         tab = getattr(self, "stations_map_tab", None)
@@ -1084,8 +1107,8 @@ class MainWindow(QMainWindow):
         tab.prop_window_hours = hours
         if hasattr(tab, "_save_display_preferences"):
             tab._save_display_preferences()
-        if hasattr(tab, "_render_map"):
-            tab._render_map()
+        if hasattr(tab, "_request_map_refresh"):
+            tab._request_map_refresh(level="full", reason="sidebar_prop_window")
 
     def _on_sidebar_prop_target_type_changed(self, _=None) -> None:
         if self._map_prop_target_syncing:
@@ -1106,8 +1129,8 @@ class MainWindow(QMainWindow):
         finally:
             self._map_prop_target_syncing = False
         tab = getattr(self, "stations_map_tab", None)
-        if tab is not None and hasattr(tab, "_render_map"):
-            tab._render_map()
+        if tab is not None and hasattr(tab, "_request_map_refresh"):
+            tab._request_map_refresh(level="full", reason="sidebar_prop_target_type")
 
     def _on_sidebar_prop_target_value_changed(self, text: str) -> None:
         if self._map_prop_target_syncing:
@@ -1126,8 +1149,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.debug("MainWindow: propagation target value change failed: %s", e)
         tab = getattr(self, "stations_map_tab", None)
-        if tab is not None and hasattr(tab, "_render_map"):
-            tab._render_map()
+        if tab is not None and hasattr(tab, "_request_map_refresh"):
+            tab._request_map_refresh(level="full", reason="sidebar_prop_target_value")
 
     def _update_map_filters_visibility(self, index: int) -> None:
         """
@@ -2081,6 +2104,42 @@ class MainWindow(QMainWindow):
                 self.nav_buttons[idx].setText(lbl)
         self._update_nav_layout_metrics()
 
+    def open_help_anchor(self, anchor: str | None, *, title: str | None = None) -> None:
+        help_index = next((idx for idx, (label, _) in enumerate(self._screens) if label == "Help"), -1)
+        if help_index >= 0:
+            self._set_screen(help_index)
+        try:
+            self.help_tab.open_anchor(anchor)
+        except Exception:
+            pass
+        if title:
+            try:
+                self.help_tab.setWindowTitle(str(title))
+            except Exception:
+                pass
+
+    def open_context_help(self, context_key: str | None) -> None:
+        context = get_help_context(context_key)
+        if self._context_help_dialog is None:
+            self._context_help_dialog = ContextHelpDialog(self.settings, self)
+        try:
+            self._context_help_dialog.apply_theme()
+        except Exception:
+            pass
+        self._context_help_dialog.show_help_for(context.key)
+
+    def open_settings_section(self, health_key: str = "freqinout", radio_id: int | None = None) -> None:
+        del radio_id
+        idx = self._screen_index_by_label.get("Settings", -1)
+        if idx < 0:
+            return
+        self._set_screen(idx)
+        if hasattr(self.settings_tab, "focus_section_by_health_key"):
+            QTimer.singleShot(
+                0,
+                lambda key=str(health_key or "freqinout"): self.settings_tab.focus_section_by_health_key(key),
+            )
+
     def _apply_app_theme(self):
         app = QApplication.instance()
         try:
@@ -2092,6 +2151,11 @@ class MainWindow(QMainWindow):
         apply_app_theme(app, theme, ui_text_scale=ui_text_scale)
         self._set_logo_pixmap()
         self._update_log_indicator()
+        if self._context_help_dialog is not None:
+            try:
+                self._context_help_dialog.apply_theme()
+            except Exception:
+                pass
         try:
             if hasattr(self, "condition_levels_edit_btn"):
                 self._style_condition_levels_edit_action(theme)
@@ -2653,14 +2717,14 @@ class MainWindow(QMainWindow):
         section_layout.setContentsMargins(0, 0, 0, 0)
         section_layout.setSpacing(2)
 
-        header = QToolButton(section)
+        header = QPushButton(section)
         header.setText(key)
         header.setCheckable(True)
         expanded = bool(self._nav_group_states.get(key, True))
         header.setChecked(expanded)
-        header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        header.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
         header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._sync_nav_group_header_font(header)
+        self._set_nav_group_header_visual_state(header, expanded)
         header.toggled.connect(lambda checked, g=key: self._on_nav_group_toggled(g, checked))
         section_layout.addWidget(header)
 
@@ -2685,7 +2749,7 @@ class MainWindow(QMainWindow):
         if body is not None:
             body.setVisible(bool(expanded))
         if header is not None:
-            header.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+            self._set_nav_group_header_visual_state(header, expanded)
         self._nav_group_states[key] = bool(expanded)
         self._persist_nav_group_states()
         try:
@@ -2700,16 +2764,34 @@ class MainWindow(QMainWindow):
             header = self._nav_group_headers.get(key)
             if header is None:
                 continue
+            self._sync_nav_group_header_font(header)
             expanded = bool(self._nav_group_states.get(key, True))
             role = "secondary" if expanded else "muted"
             # If NCS group is collapsed while any net is active, keep an explicit
             # reminder on the accordion header.
             if key == "NCS" and (not expanded) and any(bool(v) for v in self._ncs_net_active.values()):
                 role = "warning"
+            self._set_nav_group_header_visual_state(header, expanded)
             try:
                 header.setStyleSheet(button_style(role, theme) + align_style)
             except Exception:
                 pass
+
+    def _sync_nav_group_header_font(self, header: QPushButton) -> None:
+        try:
+            source = self.nav_buttons[0] if getattr(self, "nav_buttons", None) else self
+            header.setFont(source.font())
+        except Exception:
+            pass
+
+    def _set_nav_group_header_visual_state(self, header: QPushButton, expanded: bool) -> None:
+        try:
+            style = header.style() or QApplication.style()
+            if style is not None:
+                icon_kind = QStyle.SP_ArrowDown if expanded else QStyle.SP_ArrowRight
+                header.setIcon(style.standardIcon(icon_kind))
+        except Exception:
+            pass
 
     def _group_has_active_nav_context(self, key: str) -> bool:
         key_txt = str(key or "").strip()

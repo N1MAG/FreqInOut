@@ -41,13 +41,13 @@ def test_settings_section_health_marks_only_core_sections_warn_on_fresh_profile(
         tab.deleteLater()
         app.processEvents()
 
-    assert freqinout_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert freqinout_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "Callsign missing" in str(freqinout_item.toolTip())
-    assert groups_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert groups_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "No HF operating groups configured" in str(groups_item.toolTip())
-    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "neutral"
-    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "neutral"
-    assert varac_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "neutral"
+    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "not_enabled"
+    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "not_enabled"
+    assert varac_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "not_enabled"
 
 
 def test_settings_section_health_warns_for_partial_js8_spotter_setup(monkeypatch, tmp_path):
@@ -73,7 +73,7 @@ def test_settings_section_health_warns_for_partial_js8_spotter_setup(monkeypatch
         tab.deleteLater()
         app.processEvents()
 
-    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "JS8Spotter forms path missing" in str(js8_item.toolTip())
 
 
@@ -100,7 +100,7 @@ def test_settings_section_health_warns_when_directed_txt_missing_after_js8_setup
         tab.deleteLater()
         app.processEvents()
 
-    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "JS8Call DIRECTED.TXT path missing" in str(js8_item.toolTip())
 
 
@@ -128,7 +128,7 @@ def test_settings_section_health_warns_when_js8call_install_folder_missing_host(
         tab.deleteLater()
         app.processEvents()
 
-    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "JS8Call TCP host missing" in str(js8_item.toolTip())
 
 
@@ -163,9 +163,14 @@ def test_settings_section_health_warns_when_js8call_install_folder_missing_tcp_p
         header_btn = tab._section_meta[js8_group]["header_btn"]
         header_style = header_btn.styleSheet()
         warning_color = resolve_theme(tab.settings)["warning"].lower()
-        selected_visuals = tab._section_nav_visuals("warn", selected=True, hovered=False, theme=resolve_theme(tab.settings))
+        selected_visuals = tab._section_nav_visuals(
+            "needs_setup",
+            selected=True,
+            hovered=False,
+            theme=resolve_theme(tab.settings),
+        )
         unselected_visuals = tab._section_nav_visuals(
-            "warn",
+            "needs_setup",
             selected=False,
             hovered=False,
             theme=resolve_theme(tab.settings),
@@ -174,7 +179,7 @@ def test_settings_section_health_warns_when_js8call_install_folder_missing_tcp_p
         tab.deleteLater()
         app.processEvents()
 
-    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "JS8Call TCP port missing" in str(js8_item.toolTip())
     assert warning_color in header_style.lower()
     assert selected_visuals["border"].name().lower() == warning_color
@@ -207,7 +212,7 @@ def test_settings_section_health_allows_js8spotter_with_forms_without_directed(m
         tab.deleteLater()
         app.processEvents()
 
-    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) != "warn"
+    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) != "needs_setup"
     assert "JS8Call DIRECTED.TXT path missing" not in str(js8_item.toolTip())
     assert "JS8Spotter forms path missing" not in str(js8_item.toolTip())
 
@@ -235,7 +240,7 @@ def test_settings_section_health_allows_commstat_without_forms(monkeypatch, tmp_
         tab.deleteLater()
         app.processEvents()
 
-    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) != "warn"
+    assert js8_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) != "needs_setup"
     assert "JS8Spotter forms path missing for CommStat" not in str(js8_item.toolTip())
     assert "JS8Call DIRECTED.TXT path missing" not in str(js8_item.toolTip())
 
@@ -263,7 +268,7 @@ def test_settings_section_health_warns_for_partial_varac_setup(monkeypatch, tmp_
         tab.deleteLater()
         app.processEvents()
 
-    assert varac_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert varac_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "Install folder or launch override missing" in str(varac_item.toolTip())
 
 
@@ -290,7 +295,7 @@ def test_settings_section_health_warns_when_varac_install_folder_missing_incomin
         tab.deleteLater()
         app.processEvents()
 
-    assert varac_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert varac_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "VarAC incoming files path missing" in str(varac_item.toolTip())
 
 
@@ -317,7 +322,7 @@ def test_settings_section_health_warns_for_partial_fast_light_message_setup(monk
         tab.deleteLater()
         app.processEvents()
 
-    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "FLMsg executable path missing" in str(fast_light_item.toolTip())
 
 
@@ -344,7 +349,7 @@ def test_settings_section_health_warns_when_flmsg_executable_missing_message_pat
         tab.deleteLater()
         app.processEvents()
 
-    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "FLMsg ICS/Messages path missing" in str(fast_light_item.toolTip())
 
 
@@ -371,7 +376,7 @@ def test_settings_section_health_warns_when_flamp_executable_missing_rx_path(mon
         tab.deleteLater()
         app.processEvents()
 
-    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "FLAmp FLAMP/rx path missing" in str(fast_light_item.toolTip())
 
 
@@ -399,7 +404,7 @@ def test_settings_section_health_warns_when_flrig_executable_missing_xmlrpc_port
         tab.deleteLater()
         app.processEvents()
 
-    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "FLRig XML-RPC port missing" in str(fast_light_item.toolTip())
 
 
@@ -427,7 +432,7 @@ def test_settings_section_health_warns_when_fldigi_executable_missing_host(monke
         tab.deleteLater()
         app.processEvents()
 
-    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "FLDigi XML-RPC host missing" in str(fast_light_item.toolTip())
 
 
@@ -455,7 +460,7 @@ def test_settings_section_health_warns_when_fldigi_executable_missing_port(monke
         tab.deleteLater()
         app.processEvents()
 
-    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "warn"
+    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) == "needs_setup"
     assert "FLDigi XML-RPC port missing" in str(fast_light_item.toolTip())
 
 
@@ -482,7 +487,7 @@ def test_settings_section_health_allows_fldigi_log_path_without_fldigi_exe(monke
         tab.deleteLater()
         app.processEvents()
 
-    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) != "warn"
+    assert fast_light_item.data(SettingsTab.SECTION_HEALTH_STATE_ROLE) != "needs_setup"
     assert "FLDigi executable path missing" not in str(fast_light_item.toolTip())
 
 

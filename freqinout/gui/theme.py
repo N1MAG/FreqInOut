@@ -200,6 +200,31 @@ def _dual_button_rules(
     return _rules_for("QPushButton") + _rules_for("QToolButton")
 
 
+def font_css(font: QFont) -> str:
+    parts: list[str] = []
+    try:
+        family = str(font.family() or "").strip()
+    except Exception:
+        family = ""
+    if family:
+        family = family.replace("\\", "\\\\").replace('"', '\\"')
+        parts.append(f'font-family: "{family}";')
+    try:
+        point_size = float(font.pointSizeF())
+    except Exception:
+        point_size = -1.0
+    if point_size > 0:
+        parts.append(f"font-size: {point_size:.2f}pt;")
+    else:
+        try:
+            pixel_size = int(font.pixelSize())
+        except Exception:
+            pixel_size = -1
+        if pixel_size > 0:
+            parts.append(f"font-size: {pixel_size}px;")
+    return " ".join(parts)
+
+
 def button_style(role: str, theme: Dict[str, str]) -> str:
     role = (role or "primary").strip().lower()
     if role == "primary":
@@ -349,19 +374,19 @@ def app_stylesheet(theme: Dict[str, str]) -> str:
         f" border: 1px solid {theme['border']};"
         " border-radius: 4px; padding: 2px 4px;"
         "}"
-        "QPushButton {"
+        "QPushButton, QToolButton {"
         f" background-color: {theme['surface_alt']};"
         f" color: {theme['text']};"
         f" border: 1px solid {theme['border']};"
         " border-radius: 6px; padding: 4px 10px;"
         "}"
-        "QPushButton:hover {"
+        "QPushButton:hover, QToolButton:hover {"
         f" background-color: {theme['surface']};"
         "}"
-        "QPushButton:pressed {"
+        "QPushButton:pressed, QToolButton:pressed {"
         f" background-color: {theme['surface_alt']};"
         "}"
-        "QPushButton:disabled {"
+        "QPushButton:disabled, QToolButton:disabled {"
         f" background-color: {theme['surface_alt']};"
         f" color: {theme['text_muted']};"
         f" border-color: {theme['border']};"

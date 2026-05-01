@@ -15,6 +15,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sitrep_fusion import fuse_sitreps
 from freqinout.core.sitrep_ingest import ingest_sitreps
 from freqinout.core.varac_ingest import ingest_varac
+from freqinout.core.varac_guard import run_varac_guard
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 
 
@@ -29,6 +30,7 @@ class BackgroundIngestController(QObject):
         self._js8_links_timer: Optional[QTimer] = None
         self._messages_timer: Optional[QTimer] = None
         self._varac_timer: Optional[QTimer] = None
+        self._varac_guard_timer: Optional[QTimer] = None
         self._sitrep_timer: Optional[QTimer] = None
         self._prop_outcome_timer: Optional[QTimer] = None
         self._peer_sched_timer: Optional[QTimer] = None
@@ -60,6 +62,11 @@ class BackgroundIngestController(QObject):
         self._varac_timer.timeout.connect(self._ingest_varac)
         self._varac_timer.start()
 
+        self._varac_guard_timer = QTimer(self)
+        self._varac_guard_timer.setInterval(90 * 1000)  # 90 seconds
+        self._varac_guard_timer.timeout.connect(self._ingest_varac_guard)
+        self._varac_guard_timer.start()
+
         # Unified SitRep source ingest: moderate cadence
         self._sitrep_timer = QTimer(self)
         self._sitrep_timer.setInterval(2 * 60 * 1000)  # 2 minutes
@@ -83,9 +90,10 @@ class BackgroundIngestController(QObject):
             QTimer.singleShot(2000, self._ingest_js8_links)
             QTimer.singleShot(4000, self._ingest_messages)
             QTimer.singleShot(6000, self._ingest_varac)
-            QTimer.singleShot(7000, self._ingest_sitreps)
-            QTimer.singleShot(8000, self._ingest_prop_outcomes)
-            QTimer.singleShot(9000, self._infer_peer_schedules)
+            QTimer.singleShot(7000, self._ingest_varac_guard)
+            QTimer.singleShot(8000, self._ingest_sitreps)
+            QTimer.singleShot(9000, self._ingest_prop_outcomes)
+            QTimer.singleShot(10000, self._infer_peer_schedules)
 
     def stop(self) -> None:
         self._running = False
@@ -93,6 +101,7 @@ class BackgroundIngestController(QObject):
             self._js8_links_timer,
             self._messages_timer,
             self._varac_timer,
+            self._varac_guard_timer,
             self._sitrep_timer,
             self._prop_outcome_timer,
             self._peer_sched_timer,
@@ -205,12 +214,24 @@ class BackgroundIngestController(QObject):
     def _ingest_varac(self) -> None:
         self._submit_job("varac", self._run_varac_job)
 
+    def _ingest_varac_guard(self) -> None:
+        self._submit_job("varac_guard", self._run_varac_guard_job)
+
     def _run_varac_job(self) -> None:
         worker_settings = self._new_worker_settings()
         try:
             ingest_varac(worker_settings)
         except Exception as e:
             log.debug("BackgroundIngest: VarAC ingest failed: %s", e)
+
+    def _run_varac_guard_job(self) -> None:
+        worker_settings = self._new_worker_settings()
+        try:
+            result = run_varac_guard(worker_settings)
+            if int(result.scanned_events or 0) > 0:
+                log.debug("BackgroundIngest: VarAC guard %s", result.summary)
+        except Exception as e:
+            log.debug("BackgroundIngest: VarAC guard failed: %s", e)
 
     def _ingest_sitreps(self) -> None:
         self._submit_job("sitreps", self._run_sitreps_job)

@@ -19,25 +19,46 @@ Usage examples (run from repo root):
 
 import argparse
 from datetime import datetime
+import importlib
+from pathlib import Path
 import shutil
 import sqlite3
+import sys
 from typing import Dict, Iterable, List, Tuple
 
-from db_schema import ALL_TABLES, CONFIG_DIR, GROUPS
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from db_schema import ALL_TABLES, CONFIG_DIR, GROUPS, NETS_DB, SETTINGS_DB
+from freqinout.core import db_initializer as runtime_db_initializer
+
+
+def _runtime_initializer():
+    return importlib.reload(runtime_db_initializer)
 
 
 def ensure_tables(tables: Iterable[str]) -> None:
+    unique = []
+    seen = set()
     for name in tables:
+        if name not in ALL_TABLES or name in seen:
+            continue
+        seen.add(name)
+        unique.append(name)
+
+    need_settings = any(ALL_TABLES[name].db == SETTINGS_DB for name in unique)
+    need_nets = any(ALL_TABLES[name].db == NETS_DB for name in unique)
+    initializer = _runtime_initializer()
+
+    if need_settings:
+        initializer.ensure_settings_tables()
+    if need_nets:
+        initializer.ensure_nets_tables()
+
+    for name in unique:
         tbl = ALL_TABLES[name]
-        tbl.db.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(tbl.db)
-        try:
-            if tbl.ddl.strip():
-                conn.executescript(tbl.ddl)
-            conn.commit()
-            print(f"[init] ensured {name} in {tbl.db}")
-        finally:
-            conn.close()
+        print(f"[init] ensured {name} in {tbl.db}")
 
 
 def backup_databases_for_tables(tables: Iterable[str]) -> None:

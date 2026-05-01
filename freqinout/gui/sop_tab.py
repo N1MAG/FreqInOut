@@ -340,6 +340,7 @@ class _LegacySOPTab(QWidget):
         self._hf_schedule_slots_cache_token: Tuple[str, float] | None = None
         self._hf_schedule_slots_index: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
         self._row_dynamic_refresh_timers: Dict[int, QTimer] = {}
+        self._active = False
         self._sop_data_changed_emit_pending = False
         self._sop_data_changed_emit_timer = QTimer(self)
         self._sop_data_changed_emit_timer.setSingleShot(True)
@@ -355,12 +356,10 @@ class _LegacySOPTab(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(30_000)
         self._timer.timeout.connect(self.refresh_upcoming)
-        self._timer.start()
 
         self._clock_timer = QTimer(self)
         self._clock_timer.setInterval(1000)
         self._clock_timer.timeout.connect(self._update_clock_labels)
-        self._clock_timer.start()
         self._update_clock_labels()
 
         self._layer_sync_timer = QTimer(self)
@@ -4026,6 +4025,26 @@ class _LegacySOPTab(QWidget):
         self._invalidate_layer_sync_cache()
         self._schedule_layer_sync_refresh()
         self.refresh_upcoming()
+
+    def set_tab_active(self, active: bool) -> None:
+        self._active = bool(active)
+        if active:
+            if not self._timer.isActive():
+                self._timer.start()
+            if not self._clock_timer.isActive():
+                self._clock_timer.start()
+            self.on_tab_activated()
+            return
+        for timer_name in (
+            "_timer",
+            "_clock_timer",
+            "_layer_sync_timer",
+            "_realtime_conflict_timer",
+            "_conflict_workbench_suggest_timer",
+        ):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
 
     def on_sop_profiles_updated(self) -> None:
         current_id = self._selected_profile_id

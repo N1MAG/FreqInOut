@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import freqinout
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.system_timezone import normalize_supported_timezone_name
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.startup_lock import try_acquire_single_instance_lock
 from freqinout.radio_interface.rigctl_client import flrig_client_from_settings
@@ -62,6 +63,29 @@ def test_tool_db_schema_uses_runtime_config_dir(monkeypatch, tmp_path):
 def test_top_level_timezone_helper_delegates_to_shared_utils(monkeypatch):
     monkeypatch.setenv("FREQINOUT_TZ", "America/Denver")
     assert str(freqinout.get_timezone()) == str(importlib.import_module("freqinout.utils").get_timezone())
+
+
+def test_timezone_normalizer_maps_daylight_abbreviations():
+    assert normalize_supported_timezone_name("MDT") == "America/Denver"
+    assert normalize_supported_timezone_name("CDT") == "America/Chicago"
+
+
+def test_settings_manager_resyncs_stale_timezone(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    import freqinout.core.settings_manager as settings_manager_module
+
+    settings = SettingsManager()
+    settings.set("timezone", "America/Chicago")
+    monkeypatch.setattr(
+        settings_manager_module,
+        "detect_system_timezone_name",
+        lambda fallback="UTC": "America/Denver",
+    )
+
+    refreshed = SettingsManager()
+    assert refreshed.get("timezone") == "America/Denver"
 
 
 def test_flrig_client_from_settings_uses_saved_port(monkeypatch, tmp_path):

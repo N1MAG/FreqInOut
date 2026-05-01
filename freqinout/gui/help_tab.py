@@ -123,6 +123,32 @@ class HelpTab(QWidget):
                 headings.append((level, anchor, text_clean))
         return headings
 
+    def open_anchor(self, anchor: str | None) -> None:
+        if not self._doc_path.exists():
+            return
+        anchor_txt = str(anchor or "").strip().lstrip("#")
+        base_url = QUrl.fromLocalFile(str(self._doc_path))
+        if anchor_txt:
+            self.viewer.setSource(QUrl(f"{base_url.toString()}#{anchor_txt}"))
+            self._select_toc_anchor(anchor_txt)
+            return
+        self.viewer.setSource(base_url)
+
+    def _select_toc_anchor(self, anchor: str) -> None:
+        if not hasattr(self, "toc_list"):
+            return
+        target = str(anchor or "").strip().lstrip("#")
+        if not target:
+            return
+        for idx in range(self.toc_list.count()):
+            item = self.toc_list.item(idx)
+            if item is None:
+                continue
+            stored = str(item.data(Qt.UserRole) or "").strip().lstrip("#")
+            if stored == target:
+                self.toc_list.setCurrentRow(idx)
+                break
+
     def _build_toc(self):
         """
         Parse headings from the guide to build a formatted index.
@@ -154,12 +180,9 @@ class HelpTab(QWidget):
             return
         if target.startswith("#"):
             target = target.lstrip("#")
-        base_url = QUrl.fromLocalFile(str(self._doc_path))
-        if "#" in base_url.toString():
-            base_url = QUrl.fromLocalFile(str(self._doc_path))
         # Try anchor if we have one
         if target and not target.strip().isspace() and "#" not in target and re.match(r"^[A-Za-z0-9_-]+$", target):
-            self.viewer.setSource(QUrl(f"{base_url.toString()}#{target}"))
+            self.open_anchor(str(target))
         else:
             # Fallback: find text in document
             doc = self.viewer.document()

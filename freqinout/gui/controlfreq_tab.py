@@ -12,7 +12,9 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QFontMetrics, QShortcut, QKeySequence, QColor
 from PySide6.QtWidgets import (
+    QApplication,
     QWidget,
+    QGridLayout,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
@@ -35,7 +37,17 @@ from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.propagation_service import PropagationService
+from freqinout.core.sqlite_utils import connect_sqlite, fetch_all, rows_to_dicts, table_exists
 from freqinout.core.software_status_service import SoftwareStatusService, PROGRAM_PATH_KEYS
+from freqinout.core.station_readiness import (
+    build_station_readiness_report,
+    format_readiness_issue,
+    readiness_report_detail_text,
+    readiness_report_overall_text,
+    readiness_state_label,
+    should_show_startup_review,
+    visible_status_programs,
+)
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
 from freqinout.utils.timezones import get_timezone
@@ -65,7 +77,9 @@ from freqinout.gui.stations_map_tab import (
     US_STATE_ABBR_FROM_NAME,
     maidenhead_to_latlon,
 )
+from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import resolve_theme, button_style, led_style
+from freqinout.version import __version__
 
 
 class ControlFreqTab(QWidget):
@@ -96,6 +110,7 @@ class ControlFreqTab(QWidget):
         self._saved_left_sizes: List[int] = []
         self._saved_right_sizes: List[int] = []
         self._schedule_entries_by_row: Dict[int, Dict[str, Any]] = {}
+        self._next_schedule_outlook_preview: Optional[Dict[str, Any]] = None
         self._force_hero_resync = False
         self._message_summary_target_height = 0
         self._freq_meta_full_text = "Scheduled: -- | Active: --"
@@ -142,8 +157,13 @@ class ControlFreqTab(QWidget):
         self._card_expanded_heights: Dict[str, int] = {}
         self._card_animations: Dict[str, QPropertyAnimation] = {}
         self.status_labels: Dict[str, QLabel] = {}
+        self._status_text_labels: Dict[str, QLabel] = {}
         self._status_checked_at: Dict[str, str] = {}
         self._status_service = SoftwareStatusService(self.settings)
+        self._readiness_banner_dismissed = False
+        self._readiness_banner_digest = ""
+        self._readiness_dismissed_digest = str(self.settings.get("readiness_review_dismissed_digest", "") or "").strip()
+        self._readiness_suppressed_version = str(self.settings.get("readiness_review_suppressed_version", "") or "").strip()
         self._sop_window_cache: Dict[Tuple[Any, ...], Tuple[float, List[Dict[str, Any]]]] = {}
         self._sop_today_cache_ttl_sec = 30.0
         self._sop_tomorrow_cache_ttl_sec = 180.0
@@ -184,6 +204,10 @@ class ControlFreqTab(QWidget):
         header = QHBoxLayout()
         title = QLabel("<h3>ControlFreq</h3>")
         header.addWidget(title)
+        self.help_btn = QPushButton("Help")
+        self.help_btn.setToolTip("Open ControlFreq help.")
+        self.help_btn.clicked.connect(lambda: self._open_context_help("tab.controlfreq"))
+        header.addWidget(self.help_btn)
 
         header.addStretch(1)
 
@@ -217,32 +241,41 @@ class ControlFreqTab(QWidget):
 
         root.addLayout(header)
 
+        self.readiness_review_widget = QWidget()
+        readiness_layout = QVBoxLayout(self.readiness_review_widget)
+        readiness_layout.setContentsMargins(10, 8, 10, 8)
+        readiness_layout.setSpacing(8)
+        self.readiness_review_label = QLabel()
+        self.readiness_review_label.setWordWrap(True)
+        readiness_layout.addWidget(self.readiness_review_label)
+        readiness_actions = QGridLayout()
+        readiness_actions.setContentsMargins(0, 0, 0, 0)
+        readiness_actions.setHorizontalSpacing(8)
+        readiness_actions.setVerticalSpacing(8)
+        self.readiness_review_now_btn = QPushButton("Review Now")
+        self.readiness_review_now_btn.clicked.connect(self._review_readiness_now)
+        readiness_actions.addWidget(self.readiness_review_now_btn, 0, 0)
+        self.readiness_review_copy_btn = QPushButton("Copy Summary")
+        self.readiness_review_copy_btn.clicked.connect(self._copy_readiness_review_summary)
+        readiness_actions.addWidget(self.readiness_review_copy_btn, 0, 1)
+        self.readiness_review_dismiss_btn = QPushButton("Dismiss")
+        self.readiness_review_dismiss_btn.clicked.connect(self._dismiss_readiness_review)
+        readiness_actions.addWidget(self.readiness_review_dismiss_btn, 0, 2)
+        self.readiness_review_suppress_btn = QPushButton("Do Not Remind Again For This Version")
+        self.readiness_review_suppress_btn.clicked.connect(self._suppress_readiness_review_for_version)
+        readiness_actions.addWidget(self.readiness_review_suppress_btn, 1, 0, 1, 3)
+        readiness_actions.setColumnStretch(3, 1)
+        readiness_layout.addLayout(readiness_actions)
+        self.readiness_review_widget.setVisible(False)
+        root.addWidget(self.readiness_review_widget)
+
         updated_row = QHBoxLayout()
 
         self.status_group = QGroupBox("Operating Status")
         self.status_group.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        status_layout = QHBoxLayout()
-        self.status_group.setLayout(status_layout)
-        theme = resolve_theme(self.settings)
-        status_items = [
-            ("FLRig", "FLRig"),
-            ("FLDigi", "FLDigi"),
-            ("FLMsg", "FLMsg"),
-            ("FLAmp", "FLAmp"),
-            ("JS8Call_API", "JS8"),
-            ("VarAC", "VarAC"),
-            ("JS8Spotter", "JS8Spotter"),
-            ("CommStat", "CommStat"),
-        ]
-        for key, label in status_items:
-            led = QLabel()
-            led.setFixedSize(14, 14)
-            led.setStyleSheet(led_style("idle", theme))
-            self.status_labels[key] = led
-            status_layout.addWidget(led)
-            status_layout.addWidget(QLabel(label))
-            status_layout.addSpacing(12)
-        status_layout.addStretch(1)
+        self.status_layout = QHBoxLayout()
+        self.status_group.setLayout(self.status_layout)
+        self._rebuild_status_indicators()
         updated_row.addWidget(self.status_group)
         right_status_col = QVBoxLayout()
         right_status_col.setContentsMargins(0, 0, 0, 0)
@@ -626,7 +659,7 @@ class ControlFreqTab(QWidget):
                 "controlfreq_search": (self.search_edit.text() or "").strip(),
                 "controlfreq_group_filter": (self.group_combo.currentData() or "").strip().upper(),
                 "controlfreq_activity_window_min": int(self.activity_window_combo.currentData() or 120),
-                "controlfreq_view_preset": str(self._view_preset or "All"),
+                "controlfreq_view_preset": str(self._view_preset or "Schedule"),
                 "controlfreq_view_cards": dict(self._view_cards or {}),
                 "controlfreq_top_splitter_sizes": list(self._saved_top_sizes),
                 "controlfreq_left_splitter_sizes": list(self._saved_left_sizes),
@@ -643,9 +676,12 @@ class ControlFreqTab(QWidget):
             self._pending_group_filter = (
                 str(self.settings.get("controlfreq_group_filter", "") or "").strip().upper()
             )
-            saved_view_cards = self.settings.get("controlfreq_view_cards", {}) or {}
-            self._view_cards = self._normalized_view_cards(saved_view_cards)
-            saved_preset = str(self.settings.get("controlfreq_view_preset", "All") or "All").strip()
+            saved_view_cards = self.settings.get("controlfreq_view_cards", None)
+            if isinstance(saved_view_cards, dict) and saved_view_cards:
+                self._view_cards = self._normalized_view_cards(saved_view_cards)
+            else:
+                self._view_cards = dict(self._view_presets().get("Schedule", {}))
+            saved_preset = str(self.settings.get("controlfreq_view_preset", "Schedule") or "Schedule").strip()
             self._view_preset = self._preset_for_view_cards(self._view_cards)
             if saved_preset == "Custom":
                 self._view_preset = "Custom"
@@ -1027,6 +1063,13 @@ class ControlFreqTab(QWidget):
     def _apply_theme(self) -> None:
         try:
             theme = resolve_theme(self.settings)
+            self.help_btn.setStyleSheet(button_style("secondary", theme))
+            if hasattr(self, "readiness_review_now_btn"):
+                self.readiness_review_now_btn.setStyleSheet(button_style("secondary", theme))
+            if hasattr(self, "readiness_review_dismiss_btn"):
+                self.readiness_review_dismiss_btn.setStyleSheet(button_style("muted", theme))
+            if hasattr(self, "readiness_review_suppress_btn"):
+                self.readiness_review_suppress_btn.setStyleSheet(button_style("muted", theme))
             self.refresh_btn.setStyleSheet(button_style("muted", theme))
             self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
             self.freq_action_btn.setStyleSheet(button_style("muted", theme))
@@ -1050,6 +1093,147 @@ class ControlFreqTab(QWidget):
         self._apply_focus_mode()
         self._on_freq_selection_changed()
         self._refresh_running_status()
+
+    def _open_context_help(self, context_key: str) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help(context_key)
+            except Exception:
+                pass
+
+    def _settings_snapshot_for_readiness(self) -> Dict[str, Any]:
+        data = dict(self.settings.all())
+        message_paths = data.get("message_paths", {})
+        if not isinstance(message_paths, dict):
+            message_paths = {}
+        data["message_paths"] = message_paths
+        data.setdefault("default_fldigi_checkin_dir", "")
+        return data
+
+    def _current_readiness_report(self):
+        try:
+            operating_groups = load_operating_groups(self.settings)
+        except Exception:
+            operating_groups = []
+        return build_station_readiness_report(
+            self._settings_snapshot_for_readiness(),
+            operating_groups=operating_groups,
+        )
+
+    def _clear_status_layout(self, layout: QHBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            child_layout = item.layout()
+            widget = item.widget()
+            if child_layout is not None:
+                self._clear_status_layout(child_layout)  # type: ignore[arg-type]
+                continue
+            if widget is not None:
+                widget.deleteLater()
+
+    def _rebuild_status_indicators(self) -> None:
+        if not hasattr(self, "status_layout"):
+            return
+        self._clear_status_layout(self.status_layout)
+        self.status_labels = {}
+        self._status_text_labels = {}
+        theme = resolve_theme(self.settings)
+        visible_items = visible_status_programs(self._settings_snapshot_for_readiness())
+        self.status_group.setVisible(bool(visible_items))
+        for key, label in visible_items:
+            led = QLabel()
+            led.setFixedSize(14, 14)
+            led.setStyleSheet(led_style("idle", theme))
+            text_label = QLabel(label)
+            self.status_labels[key] = led
+            self._status_text_labels[key] = text_label
+            self.status_layout.addWidget(led)
+            self.status_layout.addWidget(text_label)
+            self.status_layout.addSpacing(12)
+        self.status_layout.addStretch(1)
+
+    def _dismiss_readiness_review(self) -> None:
+        self._readiness_banner_dismissed = True
+        self._readiness_dismissed_digest = str(self._readiness_banner_digest or "").strip()
+        try:
+            self.settings.set("readiness_review_dismissed_digest", self._readiness_dismissed_digest)
+        except Exception:
+            pass
+        self._update_readiness_review_banner()
+
+    def _suppress_readiness_review_for_version(self) -> None:
+        self._readiness_banner_dismissed = True
+        self._readiness_suppressed_version = __version__
+        try:
+            self.settings.set("readiness_review_suppressed_version", self._readiness_suppressed_version)
+        except Exception:
+            pass
+        self._update_readiness_review_banner()
+
+    def _review_readiness_now(self) -> None:
+        issue = self._current_readiness_report().first_actionable_issue()
+        section_key = str(issue.section_key if issue else "freqinout")
+        window = self.window()
+        if hasattr(window, "open_settings_section"):
+            try:
+                window.open_settings_section(section_key)
+                return
+            except Exception:
+                pass
+
+    def _copy_readiness_review_summary(self) -> None:
+        QApplication.clipboard().setText(
+            readiness_report_detail_text(self._current_readiness_report(), title="FreqInOut Setup Review")
+        )
+        if hasattr(self, "readiness_review_copy_btn"):
+            self.readiness_review_copy_btn.setText("Copied")
+            QTimer.singleShot(1500, lambda: self.readiness_review_copy_btn.setText("Copy Summary"))
+
+    def _update_readiness_review_banner(self) -> None:
+        if not hasattr(self, "readiness_review_widget"):
+            return
+        report = self._current_readiness_report()
+        if report.digest != self._readiness_banner_digest:
+            self._readiness_banner_digest = report.digest
+            self._readiness_banner_dismissed = False
+        if not should_show_startup_review(
+            report,
+            dismissed_digest=self._readiness_dismissed_digest,
+            suppressed_version=self._readiness_suppressed_version,
+            current_version=__version__,
+        ) or self._readiness_banner_dismissed:
+            self.readiness_review_widget.setVisible(False)
+            return
+        first_issue = report.first_actionable_issue()
+        detail = f" First item: {format_readiness_issue(first_issue)}." if first_issue else ""
+        theme = resolve_theme(self.settings)
+        self.readiness_review_label.setText(
+            f"Setup review: {readiness_report_overall_text(report)}{detail}"
+        )
+        border = theme.get("warning", "#C99700")
+        bg = theme.get("surface_alt", theme.get("surface", "#f7f7f7"))
+        fg = theme.get("text", "#222222")
+        self.readiness_review_widget.setStyleSheet(
+            "QWidget {"
+            f" background: {bg};"
+            f" border: 1px solid {border};"
+            " border-radius: 6px;"
+            "}"
+            " QLabel {"
+            f" color: {fg};"
+            " border: none;"
+            " background: transparent;"
+            "}"
+        )
+        self.readiness_review_now_btn.setStyleSheet(button_style("warning", theme))
+        self.readiness_review_copy_btn.setStyleSheet(button_style("secondary", theme))
+        self.readiness_review_dismiss_btn.setStyleSheet(button_style("muted", theme))
+        self.readiness_review_suppress_btn.setStyleSheet(button_style("muted", theme))
+        self.readiness_review_widget.setToolTip(
+            readiness_report_detail_text(report, title=f"Current readiness state: {readiness_state_label(report.overall_state)}")
+        )
+        self.readiness_review_widget.setVisible(True)
 
     def _apply_frequency_display_style(self) -> None:
         try:
@@ -1289,6 +1473,14 @@ class ControlFreqTab(QWidget):
             QTimer.singleShot(0, self._refresh_schedule_outlook)
             QTimer.singleShot(0, self._refresh_scheduler_strip)
 
+    def on_peer_schedule_data_changed(self) -> None:
+        self._peer_schedule_rows_cache = []
+        self._peer_schedule_rows_cache_ts = 0.0
+        self._peer_schedule_rows_cache_mtime = 0.0
+        self._last_secondary_refresh_ts = 0.0
+        if self._active:
+            QTimer.singleShot(0, self._refresh_intersections)
+
     def _reload_sop_manager_settings(self) -> None:
         try:
             mgr_settings = getattr(self._sop_manager, "settings", None)
@@ -1471,6 +1663,7 @@ class ControlFreqTab(QWidget):
 
     def _refresh_running_status(self) -> None:
         theme = resolve_theme(self.settings)
+        self._rebuild_status_indicators()
         snapshot = self._status_service.status_snapshot()
         checked_at = dt.datetime.now().strftime("%H:%M:%S")
         for program_name, lbl in self.status_labels.items():
@@ -1487,6 +1680,7 @@ class ControlFreqTab(QWidget):
             lbl.setStyleSheet(led_style(state, theme))
             lbl.setToolTip("\n".join(lines))
             self._status_checked_at[program_name] = checked_at
+        self._update_readiness_review_banner()
 
     def _refresh_scheduler_strip(self, status: Optional[Dict[str, Any]] = None) -> None:
         try:
@@ -1556,7 +1750,17 @@ class ControlFreqTab(QWidget):
             self._apply_frequency_action_busy_override(self._frequency_action_busy_reason(status))
 
             next_change = getattr(sched, "next_change_utc", None)
+            fallback_preview = self._next_schedule_outlook_preview if isinstance(self._next_schedule_outlook_preview, dict) else None
+            fallback_freq = None
+            if isinstance(fallback_preview, dict):
+                fallback_freq = fallback_preview.get("freq_mhz")
+                if not isinstance(fallback_freq, (int, float)):
+                    fallback_freq = None
             next_text = "Next Change: --"
+            if not isinstance(next_change, dt.datetime) and isinstance(fallback_preview, dict):
+                preview_when = fallback_preview.get("when_utc")
+                if isinstance(preview_when, dt.datetime):
+                    next_change = preview_when
             if isinstance(next_change, dt.datetime):
                 if next_change.tzinfo is None:
                     next_change = next_change.replace(tzinfo=dt.timezone.utc)
@@ -1566,6 +1770,8 @@ class ControlFreqTab(QWidget):
                 mins = int(max(0.0, (next_change - now_utc).total_seconds()) // 60)
                 display_dt = next_change.astimezone(self._get_display_tz()) if self._show_local else next_change
                 next_freq = status.get("next_frequency_mhz")
+                if not isinstance(next_freq, (int, float)) and isinstance(fallback_freq, (int, float)):
+                    next_freq = float(fallback_freq)
                 if isinstance(next_freq, (int, float)):
                     freq_txt = f"{float(next_freq):.3f}"
                 else:
@@ -1580,6 +1786,15 @@ class ControlFreqTab(QWidget):
                 elif next_source_change and next_source and next_source != source:
                     next_label = next_net_kind or next_source
                     self.next_change_label.setToolTip(f"Next source transition: {source} -> {next_label}.")
+                elif isinstance(fallback_preview, dict) and next_change == fallback_preview.get("when_utc"):
+                    preview_type = str(fallback_preview.get("type") or "").strip().upper()
+                    preview_group = str(fallback_preview.get("group") or "").strip()
+                    note_parts = ["Using Schedule Outlook fallback"]
+                    if preview_type:
+                        note_parts.append(preview_type)
+                    if preview_group:
+                        note_parts.append(preview_group)
+                    self.next_change_label.setToolTip(" | ".join(note_parts))
                 else:
                     self.next_change_label.setToolTip("")
                 if mins <= 15:
@@ -1647,18 +1862,23 @@ class ControlFreqTab(QWidget):
         if not db_path.exists():
             return out
         try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
+            rows = fetch_all(
+                db_path,
                 """
                 SELECT
                     IFNULL(callsign,''),
                     IFNULL(state,''),
                     IFNULL(grid,'')
                 FROM operator_checkins
-                """
+                """,
+                timeout=1.5,
+                row_factory=sqlite3.Row,
+                span_name="controlfreq.load_prop_operator_geo",
             )
-            for callsign, state, grid in cur.fetchall():
+            for row in rows:
+                callsign = row[0]
+                state = row[1]
+                grid = row[2]
                 cs = (callsign or "").strip().upper()
                 if not cs:
                     continue
@@ -1666,7 +1886,6 @@ class ControlFreqTab(QWidget):
                     "state": self._normalize_state_abbr(state),
                     "grid": (grid or "").strip().upper(),
                 }
-            conn.close()
         except Exception as e:
             log.debug("ControlFreq: failed to load propagation target operators: %s", e)
         return out
@@ -1797,17 +2016,12 @@ class ControlFreqTab(QWidget):
             return []
         conn = None
         try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
+            conn = connect_sqlite(db_path, timeout=1.5, row_factory=sqlite3.Row, busy_timeout_ms=1500)
             cur = conn.cursor()
-            has_table = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                (table_name,),
-            ).fetchone()
-            if not has_table:
+            if not table_exists(conn, table_name):
                 return []
             cur.execute(f"SELECT * FROM {table_name}")
-            return [dict(r) for r in cur.fetchall()]
+            return rows_to_dicts(cur.fetchall())
         except Exception as e:
             log.debug("ControlFreq: failed to load %s from %s: %s", table_name, db_path, e)
             return []
@@ -1865,11 +2079,8 @@ class ControlFreqTab(QWidget):
         rows: List[Dict[str, Any]] = []
         conn = None
         try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            has_effective_view = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='view' AND name='peer_hf_schedule_effective'"
-            ).fetchone()
+            conn = connect_sqlite(db_path, timeout=1.5, row_factory=sqlite3.Row, busy_timeout_ms=1500)
+            has_effective_view = table_exists(conn, "peer_hf_schedule_effective")
             if has_effective_view:
                 query = """
                     SELECT owner_callsign, day_utc, start_utc, end_utc, band, frequency
@@ -1880,7 +2091,7 @@ class ControlFreqTab(QWidget):
                     SELECT owner_callsign, day_utc, start_utc, end_utc, band, frequency
                     FROM peer_hf_schedule
                 """
-            rows = [dict(r) for r in conn.execute(query).fetchall()]
+            rows = rows_to_dicts(conn.execute(query).fetchall())
         except Exception as e:
             log.debug("ControlFreq: failed to load peer schedule rows: %s", e)
             rows = []
@@ -1963,14 +2174,13 @@ class ControlFreqTab(QWidget):
         if not db_path.exists():
             return mapping
         try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT callsign, group1, group2, group3, groups_json FROM operator_checkins"
+            rows = fetch_all(
+                db_path,
+                "SELECT callsign, group1, group2, group3, groups_json FROM operator_checkins",
+                timeout=1.5,
+                row_factory=sqlite3.Row,
+                span_name="controlfreq.load_operator_group_map",
             )
-            rows = cur.fetchall()
-            conn.close()
         except Exception as e:
             log.debug("ControlFreq: failed to load operator groups: %s", e)
             return mapping
@@ -3055,6 +3265,7 @@ class ControlFreqTab(QWidget):
             if not isinstance(r.get("when_utc"), dt.datetime)
             or (tomorrow_start <= r.get("when_utc") <= tomorrow_end)
         ]
+        self._next_schedule_outlook_preview = self._next_schedule_outlook_entry(now_utc, today_rows + week_rows)
         self.schedule_table.setRowCount(0)
         self._schedule_entries_by_row.clear()
         self._append_section_row_to(self.schedule_table, "Today")
@@ -3091,6 +3302,33 @@ class ControlFreqTab(QWidget):
             )
         self._apply_elide_tooltips(self.schedule_table, 2)
         self._apply_elide_tooltips(self.schedule_table, 3)
+        self._refresh_scheduler_strip()
+
+    def _next_schedule_outlook_entry(
+        self,
+        now_utc: dt.datetime,
+        rows: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        for row in rows:
+            when_utc = row.get("when_utc")
+            if not isinstance(when_utc, dt.datetime):
+                continue
+            if when_utc.tzinfo is None:
+                when_utc = when_utc.replace(tzinfo=dt.timezone.utc)
+            else:
+                when_utc = when_utc.astimezone(dt.timezone.utc)
+            if when_utc < now_utc:
+                continue
+            freq_mhz = row.get("freq_mhz")
+            if not isinstance(freq_mhz, (int, float)):
+                freq_mhz = self._parse_freq_label(str(row.get("band_freq") or ""))
+            if not isinstance(freq_mhz, (int, float)):
+                continue
+            preview = dict(row)
+            preview["when_utc"] = when_utc
+            preview["freq_mhz"] = float(freq_mhz)
+            return preview
+        return None
 
     def _append_schedule_data_row(self, entry: Dict[str, Any]) -> None:
         row = self.schedule_table.rowCount()

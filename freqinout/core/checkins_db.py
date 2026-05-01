@@ -230,6 +230,42 @@ def _ensure_table(conn: sqlite3.Connection):
     ensure_operator_checkins_schema(conn)
 
 
+def lookup_operator_identity(callsign: str) -> Dict[str, str]:
+    """
+    Return the canonical operator identity from operator_checkins only.
+
+    This intentionally avoids local-history stores so FLDigi log-assisted intake
+    uses the same shared source-of-truth everywhere.
+    """
+    cs = _canonical_callsign(callsign)
+    if not cs:
+        return {}
+
+    db_path = _db_path()
+    if not db_path.exists():
+        return {}
+
+    try:
+        conn = sqlite3.connect(db_path)
+        _ensure_table(conn)
+        cur = conn.cursor()
+        cur.execute("SELECT name, state FROM operator_checkins WHERE callsign=?", (cs,))
+        row = cur.fetchone()
+        conn.close()
+    except Exception as e:
+        log.error("checkins_db: lookup_operator_identity failed for %s: %s", cs, e)
+        return {}
+
+    if not row:
+        return {}
+
+    return {
+        "callsign": cs,
+        "name": (row[0] or "").strip(),
+        "state": (row[1] or "").strip().upper(),
+    }
+
+
 def upsert_checkins(entries: List[Dict[str, Any]]):
     """
     Inserts or updates operator check-ins.
@@ -368,6 +404,186 @@ def upsert_checkins(entries: List[Dict[str, Any]]):
 
     except Exception as e:
         log.error("checkin_db: upsert failed: %s", e)
+
+
+def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connection | None = None):
+    """
+    Insert or update operator identity metadata without incrementing check-in counts.
+
+    This is used by workflows such as manual peer schedule entry where we want
+    operator identity and group data to become available across the UI, but we
+    do not want to imply a received check-in event.
+    """
+    if not entries:
+        return
+
+    owns_conn = conn is None
+    if owns_conn:
+        db_path = _db_path()
+        try:
+            conn = sqlite3.connect(db_path)
+        except Exception as e:
+            log.error("checkins_db: metadata upsert open failed: %s", e)
+            return
+
+    try:
+        assert conn is not None
+        _ensure_table(conn)
+        cur = conn.cursor()
+
+        for entry in entries:
+            cs = _canonical_callsign(entry.get("callsign"))
+            if not cs:
+                continue
+
+            name = str(entry.get("name") or "").strip()
+            state = str(entry.get("state") or "").strip().upper()
+            grid = str(entry.get("grid") or "").strip().upper()
+            group_role = _normalize_group_role(entry.get("group_role"))
+            last_seen = str(entry.get("last_seen_utc") or "").strip()
+            first_seen = str(entry.get("first_seen_utc") or "").strip()
+            trusted_raw = entry.get("trusted")
+
+            provided_groups: List[str] = []
+            groups_json_raw = entry.get("groups_json")
+            if groups_json_raw is not None:
+                try:
+                    parsed = json.loads(groups_json_raw) if isinstance(groups_json_raw, str) else groups_json_raw
+                    if isinstance(parsed, list):
+                        provided_groups.extend(parsed)
+                except Exception:
+                    pass
+            provided_groups.extend(
+                [
+                    entry.get("group1"),
+                    entry.get("group2"),
+                    entry.get("group3"),
+                ]
+            )
+            normalized_groups = _normalize_groups_list(provided_groups)
+            group1 = normalized_groups[0] if len(normalized_groups) > 0 else ""
+            group2 = normalized_groups[1] if len(normalized_groups) > 1 else ""
+            group3 = normalized_groups[2] if len(normalized_groups) > 2 else ""
+            groups_json = json.dumps(normalized_groups) if normalized_groups else None
+
+            cur.execute(
+                """
+                SELECT name, state, grid, group1, group2, group3, group_role,
+                       first_seen_utc, last_seen_utc, checkin_count, groups_json, trusted
+                FROM operator_checkins
+                WHERE callsign=?
+                """,
+                (cs,),
+            )
+            existing = cur.fetchone()
+            if existing:
+                (
+                    existing_name,
+                    existing_state,
+                    existing_grid,
+                    existing_g1,
+                    existing_g2,
+                    existing_g3,
+                    existing_role,
+                    existing_first,
+                    existing_last,
+                    existing_count,
+                    existing_groups_json,
+                    existing_trusted,
+                ) = existing
+            else:
+                existing_name = ""
+                existing_state = ""
+                existing_grid = ""
+                existing_g1 = existing_g2 = existing_g3 = ""
+                existing_role = ""
+                existing_first = ""
+                existing_last = ""
+                existing_count = 0
+                existing_groups_json = None
+                existing_trusted = 0
+
+            name_out = name or str(existing_name or "").strip()
+            state_out = state or str(existing_state or "").strip().upper()
+            grid_out = grid or str(existing_grid or "").strip().upper()
+            role_out = group_role or str(existing_role or "").strip().upper()
+
+            groups_json_out = groups_json if groups_json is not None else existing_groups_json
+            if groups_json is not None:
+                g1_out = group1
+                g2_out = group2
+                g3_out = group3
+            else:
+                g1_out = str(existing_g1 or "").strip()
+                g2_out = str(existing_g2 or "").strip()
+                g3_out = str(existing_g3 or "").strip()
+
+            first_seen_out = str(existing_first or "").strip() or first_seen or last_seen
+            last_seen_out = newer_timestamp_text(str(existing_last or "").strip(), last_seen)
+            if not last_seen_out:
+                last_seen_out = str(existing_last or "").strip() or last_seen
+
+            try:
+                existing_trusted_int = int(existing_trusted or 0)
+            except Exception:
+                existing_trusted_int = 0
+            trusted_out = existing_trusted_int
+            if trusted_raw is not None:
+                try:
+                    trusted_out = max(existing_trusted_int, int(trusted_raw))
+                except Exception:
+                    trusted_out = existing_trusted_int
+
+            cur.execute(
+                """
+                INSERT INTO operator_checkins
+                    (callsign, name, state, grid, group1, group2, group3, group_role,
+                     first_seen_utc, last_seen_utc, last_net, last_role,
+                     checkin_count, groups_json, trusted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(callsign) DO UPDATE SET
+                    name=excluded.name,
+                    state=excluded.state,
+                    grid=excluded.grid,
+                    group1=excluded.group1,
+                    group2=excluded.group2,
+                    group3=excluded.group3,
+                    group_role=excluded.group_role,
+                    first_seen_utc=excluded.first_seen_utc,
+                    last_seen_utc=excluded.last_seen_utc,
+                    last_net=excluded.last_net,
+                    last_role=excluded.last_role,
+                    checkin_count=excluded.checkin_count,
+                    groups_json=excluded.groups_json,
+                    trusted=excluded.trusted
+                """,
+                (
+                    cs,
+                    name_out,
+                    state_out,
+                    grid_out,
+                    g1_out,
+                    g2_out,
+                    g3_out,
+                    role_out,
+                    first_seen_out,
+                    last_seen_out,
+                    "",
+                    "",
+                    int(existing_count or 0),
+                    groups_json_out,
+                    trusted_out,
+                ),
+            )
+    except Exception as e:
+        log.error("checkin_db: metadata upsert failed: %s", e)
+    finally:
+        try:
+            if owns_conn and conn is not None:
+                conn.commit()
+                conn.close()
+        except Exception:
+            pass
 
 
 def get_all_operators() -> List[Dict[str, Any]]:

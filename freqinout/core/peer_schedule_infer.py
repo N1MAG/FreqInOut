@@ -112,6 +112,30 @@ def _ensure_inferred_tables(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS peer_hf_schedule (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_callsign TEXT NOT NULL,
+            day_utc TEXT NOT NULL,
+            start_utc TEXT NOT NULL,
+            end_utc TEXT NOT NULL,
+            band TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            frequency TEXT NOT NULL,
+            meta_json TEXT,
+            imported_at TEXT,
+            source_type TEXT DEFAULT 'IMPORTED',
+            updated_at TEXT
+        )
+        """
+    )
+    cur.execute("PRAGMA table_info(peer_hf_schedule)")
+    explicit_cols = {row[1] for row in cur.fetchall()}
+    if "source_type" not in explicit_cols:
+        cur.execute("ALTER TABLE peer_hf_schedule ADD COLUMN source_type TEXT DEFAULT 'IMPORTED'")
+    if "updated_at" not in explicit_cols:
+        cur.execute("ALTER TABLE peer_hf_schedule ADD COLUMN updated_at TEXT")
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS peer_hf_schedule_inferred (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             owner_callsign TEXT NOT NULL,
@@ -155,7 +179,7 @@ def _ensure_inferred_tables(conn: sqlite3.Connection) -> None:
             band,
             mode,
             frequency,
-            'IMPORTED' AS source_type,
+            COALESCE(NULLIF(TRIM(source_type), ''), 'IMPORTED') AS source_type,
             NULL AS confidence,
             NULL AS sample_count,
             NULL AS weeks_seen,

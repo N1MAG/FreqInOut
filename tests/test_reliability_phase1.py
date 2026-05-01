@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -39,6 +40,54 @@ def test_tool_db_schema_uses_runtime_config_dir(monkeypatch, tmp_path):
     assert db_schema.CONFIG_DIR == cfg_root / "config"
     assert db_schema.SETTINGS_DB == cfg_root / "config" / "freqinout.db"
     assert db_schema.NETS_DB == cfg_root / "config" / "freqinout_nets.db"
+
+
+def test_db_admin_init_upgrades_existing_js8_links_schema(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    nets_db = config_dir / "freqinout_nets.db"
+    conn = sqlite3.connect(nets_db)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE js8_links (
+                ts REAL,
+                origin TEXT,
+                destination TEXT,
+                snr REAL,
+                band TEXT,
+                freq_hz REAL,
+                is_relay INTEGER DEFAULT 0,
+                relay_via TEXT,
+                is_spotter INTEGER DEFAULT 0
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    tools_dir = Path(__file__).resolve().parents[1] / "tools"
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+
+    import db_admin
+
+    db_admin = importlib.reload(db_admin)
+    db_admin.ensure_tables(["js8_links"])
+
+    conn = sqlite3.connect(nets_db)
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(js8_links)").fetchall()}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(js8_links)").fetchall()}
+    finally:
+        conn.close()
+
+    assert "last_seen_utc" in cols
+    assert "idx_js8_links_ts" in indexes
 
 
 def test_flrig_client_from_settings_uses_saved_port(monkeypatch, tmp_path):

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QGroupBox,
+    QFrame,
     QFormLayout,
     QApplication,
     QDialog,
@@ -38,7 +39,9 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QHeaderView,
     QSizePolicy,
+    QAbstractItemView,
     QAbstractScrollArea,
+    QScrollArea,
     QCompleter,
     QToolButton,
     QListWidget,
@@ -50,11 +53,34 @@ from PySide6.QtWidgets import (
 
 from freqinout.core.logger import log, set_log_level, get_log_level, _get_log_file
 from freqinout.core.perf_metrics import emit_span, span as perf_span
-from freqinout.core.checkins_db import ensure_operator_checkins_schema
+from freqinout.core.checkins_db import ensure_operator_checkins_schema, get_all_operators as get_shared_operators
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.local_ops_store import get_all_operators as get_local_operators
 from freqinout.core.config_paths import get_fldigi_checkin_dir, get_config_dir
+from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.launch_orchestrator import LaunchOrchestrator, LAUNCH_APP_ORDER
+from freqinout.core.software_path_detector import SoftwarePathDetector, PathDetectionResult
+from freqinout.core.station_readiness import (
+    build_station_readiness_report,
+    format_readiness_issue,
+    readiness_report_detail_text,
+    readiness_report_overall_text,
+    readiness_state_card_level,
+    readiness_state_description,
+    readiness_state_label,
+    visible_status_programs,
+)
 from freqinout.core.software_status_service import SoftwareStatusService
+from freqinout.core.varac_bbs_config import (
+    bbs_summary_text,
+    format_callsign_list,
+    get_varac_ini_sync_state,
+    load_varac_bbs_config,
+    locate_varac_ini_path,
+    varac_ini_sync_state_matches,
+    varac_ini_sync_state_to_json,
+    write_varac_bbs_config,
+)
 from freqinout.core.gpg_tools import (
     gpg_available,
     import_public_key_file,
@@ -72,7 +98,7 @@ from freqinout.core.hash_tools import (
 from freqinout.core.mode_utils import normalize_operating_group_mode, voice_sideband_for_band
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
-from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
+from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import (
     resolve_theme,
     normalize_ui_text_size,
@@ -116,6 +142,33 @@ class _SettingsSectionNavDelegate(QStyledItemDelegate):
         painter.drawText(rect.adjusted(10, 1, -8, -1), Qt.AlignVCenter | Qt.AlignLeft, str(index.data() or ""))
 
         painter.restore()
+
+
+class _CustomToolDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None, *, name: str = "", command: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Custom Tool")
+        layout = QVBoxLayout(self)
+        hint = QLabel("Set a display name and the launch command FreqInOut should run for this tool.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        self.name_edit = QLineEdit(name)
+        self.command_edit = QLineEdit(command)
+        self.command_edit.setPlaceholderText("python /path/to/tool.py or /path/to/script.sh")
+        form.addRow("Tool Name", self.name_edit)
+        form.addRow("Launch Command", self.command_edit)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(560, self.sizeHint().height())
+
+    def values(self) -> tuple[str, str]:
+        return self.name_edit.text().strip(), self.command_edit.text().strip()
 
 
 TIMEZONE_CHOICES = [
@@ -334,6 +387,7 @@ class SettingsTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self.software_path_detector = SoftwarePathDetector(self.settings)
         self._settings_dirty = False
         self._loading_settings = False
         self._op_group_condition_sync = False
@@ -352,7 +406,9 @@ class SettingsTab(QWidget):
 
         self.radio_checkboxes: Dict[str, QCheckBox] = {}
         self.status_labels: Dict[str, QLabel] = {}
+        self._status_text_labels: Dict[str, QLabel] = {}
         self.path_edits: Dict[str, QLineEdit] = {}
+        self._autofill_status_labels: Dict[str, QLabel] = {}
         self.js8_groups_edits: List[QLineEdit] = []
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
@@ -361,9 +417,14 @@ class SettingsTab(QWidget):
         self._accordion_groups: List[QGroupBox] = []
         self._section_meta: Dict[QGroupBox, Dict[str, object]] = {}
         self._section_nav_items: Dict[QGroupBox, QListWidgetItem] = {}
+        self._context_help_buttons: List[QPushButton] = []
+        self._custom_tool_items_cache: List[Dict[str, str]] = []
+        self._custom_tools_table_loading = False
         self._launch_items_cache: List[Dict[str, object]] = []
         self._launch_visible_names: List[str] = []
         self._launch_table_loading = False
+        self._varac_bbs_lookup_rows: List[Dict[str, str]] = []
+        self._varac_bbs_lookup_by_callsign: Dict[str, Dict[str, str]] = {}
         self._gpg_keys_table_loading = False
         self._gpg_keys_loaded = False
         self._gpg_keys_auto_probe_attempted = False
@@ -414,9 +475,370 @@ class SettingsTab(QWidget):
             ):
                 return
             self._last_activation_refresh_ts = now_ts
+            self._reload_varac_bbs_operator_lookup()
             self._refresh_running_status()
 
+    def _normalize_varac_bbs_callsign(self, token: object) -> str:
+        text = str(token or "").strip().upper()
+        if not text:
+            return ""
+        if "/" in text:
+            text = text.split("/", 1)[0].strip()
+        else:
+            text = text.split()[0].strip()
+        return re.sub(r"[^A-Z0-9/]", "", text)
+
+    def _varac_bbs_operator_display(self, callsign: str, name: str, state: str) -> str:
+        parts = [str(callsign or "").strip().upper()]
+        clean_name = str(name or "").strip()
+        clean_state = str(state or "").strip().upper()
+        if clean_name:
+            parts.append(clean_name)
+        if clean_state:
+            parts.append(clean_state)
+        return " / ".join([part for part in parts if part])
+
+    def _reload_varac_bbs_operator_lookup(self) -> None:
+        merged: Dict[str, Dict[str, str]] = {}
+        for loader in (get_shared_operators, get_local_operators):
+            try:
+                rows = loader()
+            except Exception:
+                rows = []
+            for row in rows:
+                callsign = self._normalize_varac_bbs_callsign(row.get("callsign", ""))
+                if not callsign:
+                    continue
+                name = str(row.get("name", "") or "").strip()
+                if not name:
+                    first_name = str(row.get("first_name", "") or "").strip()
+                    last_name = str(row.get("last_name", "") or "").strip()
+                    name = " ".join([part for part in (first_name, last_name) if part]).strip()
+                state = str(row.get("state", "") or "").strip().upper()
+                current = merged.get(callsign, {"callsign": callsign, "name": "", "state": ""})
+                if name and (not current.get("name") or len(name) > len(str(current.get("name") or ""))):
+                    current["name"] = name
+                if state and not current.get("state"):
+                    current["state"] = state
+                merged[callsign] = current
+        self._varac_bbs_lookup_by_callsign = {
+            callsign: merged[callsign] for callsign in sorted(merged.keys())
+        }
+        self._varac_bbs_lookup_rows = list(self._varac_bbs_lookup_by_callsign.values())
+        if hasattr(self, "varac_bbs_callsign_lookup_edit"):
+            entries = [
+                self._varac_bbs_operator_display(
+                    row.get("callsign", ""),
+                    row.get("name", ""),
+                    row.get("state", ""),
+                )
+                for row in self._varac_bbs_lookup_rows
+            ]
+            completer = QCompleter(entries, self.varac_bbs_callsign_lookup_edit)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+            completer.setCompletionMode(QCompleter.PopupCompletion)
+            self.varac_bbs_callsign_lookup_edit.setCompleter(completer)
+
+    def _varac_bbs_selected_callsigns_text(self) -> str:
+        if not hasattr(self, "varac_bbs_callsigns_list"):
+            return ""
+        values: List[str] = []
+        for idx in range(self.varac_bbs_callsigns_list.count()):
+            item = self.varac_bbs_callsigns_list.item(idx)
+            if not item:
+                continue
+            callsign = self._normalize_varac_bbs_callsign(item.data(Qt.UserRole) or item.text())
+            if callsign:
+                values.append(callsign)
+        return format_callsign_list(values)
+
+    def _refresh_varac_bbs_callsign_actions(self) -> None:
+        has_text = bool(
+            hasattr(self, "varac_bbs_callsign_lookup_edit")
+            and self._normalize_varac_bbs_callsign(self.varac_bbs_callsign_lookup_edit.text())
+        )
+        has_selection = bool(
+            hasattr(self, "varac_bbs_callsigns_list")
+            and self.varac_bbs_callsigns_list.selectedItems()
+        )
+        if hasattr(self, "varac_bbs_add_callsign_btn"):
+            self.varac_bbs_add_callsign_btn.setEnabled(has_text)
+        if hasattr(self, "varac_bbs_remove_callsign_btn"):
+            self.varac_bbs_remove_callsign_btn.setEnabled(has_selection)
+
+    def _set_varac_bbs_allowed_callsigns(self, value: object) -> None:
+        if not hasattr(self, "varac_bbs_callsigns_list"):
+            return
+        selected_callsigns = {
+            self._normalize_varac_bbs_callsign(item.data(Qt.UserRole) or item.text())
+            for item in self.varac_bbs_callsigns_list.selectedItems()
+        }
+        self.varac_bbs_callsigns_list.clear()
+        for callsign in format_callsign_list(value).split(","):
+            normalized = self._normalize_varac_bbs_callsign(callsign)
+            if not normalized:
+                continue
+            meta = self._varac_bbs_lookup_by_callsign.get(normalized, {})
+            item = QListWidgetItem(
+                self._varac_bbs_operator_display(
+                    normalized,
+                    str(meta.get("name", "") or ""),
+                    str(meta.get("state", "") or ""),
+                )
+            )
+            item.setData(Qt.UserRole, normalized)
+            item.setToolTip(
+                "Known operator" if normalized in self._varac_bbs_lookup_by_callsign else "Manual callsign entry"
+            )
+            self.varac_bbs_callsigns_list.addItem(item)
+            if normalized in selected_callsigns:
+                item.setSelected(True)
+        self._refresh_varac_bbs_callsign_actions()
+
+    def _add_varac_bbs_allowed_callsign(self) -> None:
+        if not hasattr(self, "varac_bbs_callsign_lookup_edit"):
+            return
+        callsign = self._normalize_varac_bbs_callsign(self.varac_bbs_callsign_lookup_edit.text())
+        if not callsign:
+            self._refresh_varac_bbs_callsign_actions()
+            return
+        current = self._varac_bbs_selected_callsigns_text()
+        values = [entry.strip() for entry in current.split(",") if entry.strip()]
+        values.append(callsign)
+        self._set_varac_bbs_allowed_callsigns(values)
+        self.varac_bbs_callsign_lookup_edit.clear()
+        self._mark_settings_dirty()
+
+    def _remove_selected_varac_bbs_allowed_callsigns(self) -> None:
+        if not hasattr(self, "varac_bbs_callsigns_list"):
+            return
+        selected_rows = sorted(
+            [self.varac_bbs_callsigns_list.row(item) for item in self.varac_bbs_callsigns_list.selectedItems()],
+            reverse=True,
+        )
+        if not selected_rows:
+            self._refresh_varac_bbs_callsign_actions()
+            return
+        for row in selected_rows:
+            self.varac_bbs_callsigns_list.takeItem(row)
+        self._refresh_varac_bbs_callsign_actions()
+        self._mark_settings_dirty()
+
+    def _settings_snapshot_for_readiness(self) -> Dict[str, object]:
+        message_paths: Dict[str, str] = {}
+        for origin, edit in getattr(self, "msg_paths_edits", {}).items():
+            try:
+                message_paths[str(origin)] = edit.text().strip()
+            except Exception:
+                message_paths[str(origin)] = ""
+        return {
+            "callsign": self.callsign_edit.text().strip() if hasattr(self, "callsign_edit") else "",
+            "operator_callsign": self.callsign_edit.text().strip() if hasattr(self, "callsign_edit") else "",
+            "grid": self.grid6_edit.text().strip() if hasattr(self, "grid6_edit") else "",
+            "operator_grid6": self.grid6_edit.text().strip() if hasattr(self, "grid6_edit") else "",
+            "use_flrig": bool(hasattr(self, "use_flrig_chk") and self.use_flrig_chk.isChecked()),
+            "use_fldigi": bool(hasattr(self, "use_fldigi_chk") and self.use_fldigi_chk.isChecked()),
+            "use_flmsg": bool(hasattr(self, "use_flmsg_chk") and self.use_flmsg_chk.isChecked()),
+            "use_flamp": bool(hasattr(self, "use_flamp_chk") and self.use_flamp_chk.isChecked()),
+            "use_js8call": bool(hasattr(self, "use_js8call_chk") and self.use_js8call_chk.isChecked()),
+            "use_js8spotter": bool(hasattr(self, "use_js8spotter_chk") and self.use_js8spotter_chk.isChecked()),
+            "use_commstat": bool(hasattr(self, "use_commstat_chk") and self.use_commstat_chk.isChecked()),
+            "use_varac": bool(hasattr(self, "use_varac_chk") and self.use_varac_chk.isChecked()),
+            "freq_enforcement_mode": (
+                self.freq_enforce_combo.currentText().strip() if hasattr(self, "freq_enforce_combo") else ""
+            ),
+            "frequency_enforcement_mode": (
+                self.freq_enforce_combo.currentText().strip() if hasattr(self, "freq_enforce_combo") else ""
+            ),
+            "freq_prompt_interval": (
+                self.freq_prompt_combo.currentText().strip() if hasattr(self, "freq_prompt_combo") else ""
+            ),
+            "frequency_prompt_interval": (
+                self.freq_prompt_combo.currentText().strip() if hasattr(self, "freq_prompt_combo") else ""
+            ),
+            "fldigi_enforcement_mode": (
+                self.fldigi_enforce_combo.currentText().strip() if hasattr(self, "fldigi_enforce_combo") else ""
+            ),
+            "fldigi_prompt_interval": (
+                self.fldigi_prompt_combo.currentText().strip() if hasattr(self, "fldigi_prompt_combo") else ""
+            ),
+            "js8_enforcement_mode": (
+                self.js8_enforce_combo.currentText().strip() if hasattr(self, "js8_enforce_combo") else ""
+            ),
+            "js8_prompt_interval": (
+                self.js8_prompt_combo.currentText().strip() if hasattr(self, "js8_prompt_combo") else ""
+            ),
+            "path_js8call": self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else "",
+            "js8_host": self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else "",
+            "js8_port": self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else "",
+            "js8_directed_path": self.js8_directed_edit.text().strip() if hasattr(self, "js8_directed_edit") else "",
+            "js8_forms_path": self.js8_forms_edit.text().strip() if hasattr(self, "js8_forms_edit") else "",
+            "path_js8spotter": (
+                self.js8spotter_path_edit.text().strip() if hasattr(self, "js8spotter_path_edit") else ""
+            ),
+            "path_commstat": self.commstat_path_edit.text().strip() if hasattr(self, "commstat_path_edit") else "",
+            "path_flrig": self.path_edits.get("FLRig").text().strip() if self.path_edits.get("FLRig") else "",
+            "flrig_port": self.flrig_port_edit.text().strip() if hasattr(self, "flrig_port_edit") else "",
+            "path_fldigi": self.path_edits.get("FLDigi").text().strip() if self.path_edits.get("FLDigi") else "",
+            "fldigi_host": self.fldigi_host_edit.text().strip() if hasattr(self, "fldigi_host_edit") else "",
+            "fldigi_port": self.fldigi_port_edit.text().strip() if hasattr(self, "fldigi_port_edit") else "",
+            "fldigi_log_path": self.fldigi_log_path_edit.text().strip() if hasattr(self, "fldigi_log_path_edit") else "",
+            "fldigi_checkin_dir": (
+                self.fldigi_checkin_dir_edit.text().strip() if hasattr(self, "fldigi_checkin_dir_edit") else ""
+            ),
+            "default_fldigi_checkin_dir": str(get_fldigi_checkin_dir()),
+            "path_flmsg": self.path_edits.get("FLMsg").text().strip() if self.path_edits.get("FLMsg") else "",
+            "path_flamp": self.path_edits.get("FLAmp").text().strip() if self.path_edits.get("FLAmp") else "",
+            "varac_path": self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else "",
+            "varac_launch_cmd": (
+                self.varac_launch_cmd_edit.text().strip() if hasattr(self, "varac_launch_cmd_edit") else ""
+            ),
+            "varac_outbox_dir": (
+                self.varac_outbox_dir_edit.text().strip() if hasattr(self, "varac_outbox_dir_edit") else ""
+            ),
+            "varac_bbs_dir": self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else "",
+            "varac_bbs_archive_dir": (
+                self.varac_bbs_archive_dir_edit.text().strip() if hasattr(self, "varac_bbs_archive_dir_edit") else ""
+            ),
+            "varac_bbs_auto_archive": bool(
+                hasattr(self, "varac_bbs_auto_archive_chk") and self.varac_bbs_auto_archive_chk.isChecked()
+            ),
+            "varac_bbs_limit_access": bool(
+                hasattr(self, "varac_bbs_limit_access_chk") and self.varac_bbs_limit_access_chk.isChecked()
+            ),
+            "varac_bbs_allowed_callsigns": self._varac_bbs_selected_callsigns_text(),
+            "varac_guard_enabled": bool(
+                hasattr(self, "varac_guard_enabled_chk") and self.varac_guard_enabled_chk.isChecked()
+            ),
+            "varac_guard_mode": (
+                self.varac_guard_mode_combo.currentText().strip()
+                if hasattr(self, "varac_guard_mode_combo")
+                else "Log only"
+            ),
+            "varac_guard_quarantine_dir": (
+                self.varac_guard_quarantine_dir_edit.text().strip()
+                if hasattr(self, "varac_guard_quarantine_dir_edit")
+                else ""
+            ),
+            "message_paths": message_paths,
+        }
+
+    def _current_station_readiness_report(self):
+        return build_station_readiness_report(
+            self._settings_snapshot_for_readiness(),
+            operating_groups=self.operating_groups,
+        )
+
+    def _clear_status_layout(self, layout: QHBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            child_layout = item.layout()
+            widget = item.widget()
+            if child_layout is not None:
+                self._clear_status_layout(child_layout)  # type: ignore[arg-type]
+                continue
+            if widget is not None:
+                widget.deleteLater()
+
+    def _rebuild_status_indicators(self) -> None:
+        if not hasattr(self, "status_layout"):
+            return
+        self._clear_status_layout(self.status_layout)
+        self.status_labels = {}
+        self._status_text_labels = {}
+        theme = resolve_theme(self.settings)
+        visible_items = visible_status_programs(self._settings_snapshot_for_readiness())
+        if hasattr(self, "status_group"):
+            self.status_group.setVisible(bool(visible_items))
+        for key, label in visible_items:
+            led = QLabel()
+            led.setFixedSize(14, 14)
+            led.setStyleSheet(led_style("idle", theme))
+            text_label = QLabel(label)
+            self.status_labels[key] = led
+            self._status_text_labels[key] = text_label
+            self.status_layout.addWidget(led)
+            self.status_layout.addWidget(text_label)
+            self.status_layout.addSpacing(12)
+        self.status_layout.addStretch()
+
+    def _readiness_card_styles(self, level: str) -> tuple[str, str]:
+        theme = resolve_theme(self.settings)
+        border = theme.get("border", "#cccccc")
+        bg = theme.get("surface_alt", theme.get("surface", "#f7f7f7"))
+        if level == "danger":
+            border = theme.get("danger", "#b3261e")
+        elif level == "warning":
+            border = theme.get("warning", "#c99700")
+        elif level == "success":
+            border = theme.get("success", theme.get("accent", "#2a6fd3"))
+        elif level == "info":
+            border = theme.get("accent", "#2a6fd3")
+        return border, bg
+
+    def _build_readiness_summary_text(self) -> str:
+        report = self._current_station_readiness_report()
+        return readiness_report_detail_text(report)
+
+    def _copy_readiness_summary(self) -> None:
+        QApplication.clipboard().setText(self._build_readiness_summary_text())
+        if hasattr(self, "copy_readiness_summary_btn"):
+            self.copy_readiness_summary_btn.setText("Copied")
+            QTimer.singleShot(1500, lambda: self.copy_readiness_summary_btn.setText("Copy Readiness Summary"))
+
+    def _update_readiness_summary_card(self) -> None:
+        if not hasattr(self, "readiness_summary_card"):
+            return
+        report = self._current_station_readiness_report()
+        first_issue = report.first_actionable_issue()
+        detail = f" Next item: {format_readiness_issue(first_issue)}." if first_issue else ""
+        self.readiness_summary_status_label.setText(f"{readiness_report_overall_text(report)}{detail}")
+        self.readiness_summary_status_label.setToolTip(self._build_readiness_summary_text())
+        level = readiness_state_card_level(report.overall_state)
+        border, bg = self._readiness_card_styles(level)
+        fg = resolve_theme(self.settings).get("text", "#222222")
+        self.readiness_summary_card.setStyleSheet(
+            "QFrame {"
+            f" background: {bg};"
+            f" border: 1px solid {border};"
+            " border-radius: 6px;"
+            "}"
+            " QLabel {"
+            f" color: {fg};"
+            " border: none;"
+            " background: transparent;"
+            "}"
+        )
+
     # ---------- UI ---------- #
+
+    def _open_context_help(self, context_key: str) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help(context_key)
+            except Exception:
+                pass
+
+    def _make_context_help_button(
+        self,
+        context_key: str,
+        *,
+        text: str = "Help",
+        tooltip: str | None = None,
+    ) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setToolTip(tooltip or "Open focused help for this part of FreqInOut.")
+        btn.clicked.connect(lambda _checked=False, key=context_key: self._open_context_help(key))
+        btn.setProperty("context_help_key", context_key)
+        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._context_help_buttons.append(btn)
+        try:
+            btn.setStyleSheet(button_style("secondary", resolve_theme(self.settings)))
+        except Exception:
+            pass
+        return btn
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -430,6 +852,12 @@ class SettingsTab(QWidget):
         self.loading_label.setStyleSheet("padding: 2px 6px; border-radius: 4px;")
         header_layout.addWidget(self.loading_label)
         header_layout.addStretch()
+        self.settings_help_btn = self._make_context_help_button(
+            "tab.settings",
+            text="Settings Help",
+            tooltip="Open the Settings help overview.",
+        )
+        header_layout.addWidget(self.settings_help_btn)
 
         self.utc_label = QLabel()
         self.local_label = QLabel()
@@ -449,26 +877,34 @@ class SettingsTab(QWidget):
         self.grid6_edit = QLineEdit()
         self.grid6_edit.setMaxLength(6)
         self.grid6_edit.setFixedWidth(90)
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Callsign:"))
-        row1.addWidget(self.callsign_edit)
-        row1.addSpacing(12)
-        row1.addWidget(QLabel("Name:"))
-        row1.addWidget(self.name_edit)
-        row1.addSpacing(12)
-        row1.addWidget(QLabel("State:"))
-        row1.addWidget(self.state_edit)
-        row1.addSpacing(12)
-        row1.addWidget(QLabel("Grid 6:"))
-        row1.addWidget(self.grid6_edit)
-        row1.addStretch()
-        callsign_layout.addLayout(row1)
+        operator_grid = QGridLayout()
+        operator_grid.setContentsMargins(0, 0, 0, 0)
+        operator_grid.setHorizontalSpacing(12)
+        operator_grid.setVerticalSpacing(10)
+        operator_grid.addWidget(QLabel("Callsign:"), 0, 0)
+        operator_grid.addWidget(self.callsign_edit, 0, 1)
+        operator_grid.addWidget(QLabel("Name:"), 0, 2)
+        operator_grid.addWidget(self.name_edit, 0, 3)
+        operator_grid.addWidget(QLabel("State:"), 1, 0)
+        operator_grid.addWidget(self.state_edit, 1, 1)
+        operator_grid.addWidget(QLabel("Grid 6:"), 1, 2)
+        operator_grid.addWidget(self.grid6_edit, 1, 3)
+        operator_grid.setColumnStretch(4, 1)
+        callsign_layout.addLayout(operator_grid)
         callsign_container = QWidget()
         callsign_container.setLayout(callsign_layout)
         callsign_group = QGroupBox("Operator Information")
         callsign_group_layout = QVBoxLayout()
         callsign_group_layout.setContentsMargins(10, 10, 10, 12)
         callsign_group_layout.setSpacing(6)
+        callsign_help_row = QHBoxLayout()
+        callsign_help_row.addStretch()
+        self.operator_info_help_btn = self._make_context_help_button(
+            "settings.operator",
+            tooltip="Open help for Operator Information.",
+        )
+        callsign_help_row.addWidget(self.operator_info_help_btn)
+        callsign_group_layout.addLayout(callsign_help_row)
         callsign_group_layout.addWidget(callsign_container)
         callsign_group.setLayout(callsign_group_layout)
         callsign_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -478,29 +914,28 @@ class SettingsTab(QWidget):
         op_layout = QVBoxLayout()
 
         # control mode (no timezone dropdown anymore)
-        ctrl_row = QHBoxLayout()
-        ctrl_row.addWidget(QLabel("Theme:"))
+        top_preferences_grid = QGridLayout()
+        top_preferences_grid.setContentsMargins(0, 0, 0, 0)
+        top_preferences_grid.setHorizontalSpacing(12)
+        top_preferences_grid.setVerticalSpacing(10)
+        top_preferences_grid.addWidget(QLabel("Theme:"), 0, 0)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Light", "Dark"])
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
-        ctrl_row.addWidget(self.theme_combo)
-        ctrl_row.addSpacing(12)
-        ctrl_row.addWidget(QLabel("Text Size:"))
+        top_preferences_grid.addWidget(self.theme_combo, 0, 1)
+        top_preferences_grid.addWidget(QLabel("Text Size:"), 0, 2)
         self.text_size_combo = QComboBox()
         self.text_size_combo.addItems(["Normal", "Medium", "Large"])
         self.text_size_combo.currentIndexChanged.connect(self._on_text_size_changed)
-        ctrl_row.addWidget(self.text_size_combo)
-        ctrl_row.addSpacing(12)
-        ctrl_row.addWidget(QLabel("Frequency Control:"))
+        top_preferences_grid.addWidget(self.text_size_combo, 0, 3)
+        top_preferences_grid.addWidget(QLabel("Frequency Control:"), 1, 0)
         self.control_combo = QComboBox()
         self.control_combo.addItems(["FLRig", "JS8Call", "Manual"])
-        ctrl_row.addWidget(self.control_combo)
-        ctrl_row.addSpacing(12)
+        top_preferences_grid.addWidget(self.control_combo, 1, 1)
         self.use_scheduler_chk = QCheckBox("Use FreqInOut Scheduler")
         self.use_scheduler_chk.setToolTip("Enable automatic schedule-driven frequency changes.")
-        ctrl_row.addWidget(self.use_scheduler_chk)
-        ctrl_row.addSpacing(12)
-        ctrl_row.addStretch()
+        top_preferences_grid.addWidget(self.use_scheduler_chk, 1, 2, 1, 2)
+        top_preferences_grid.setColumnStretch(5, 1)
 
         enforcement_choices = ["On Schedule Change", "Prompt"]
         prompt_choices = [
@@ -513,68 +948,114 @@ class SettingsTab(QWidget):
         ]
 
         left_column_layout = QVBoxLayout()
-        left_column_layout.setSpacing(6)
-        left_column_layout.addLayout(ctrl_row)
+        left_column_layout.setSpacing(10)
+        left_column_layout.addLayout(top_preferences_grid)
 
-        freq_row = QHBoxLayout()
-        self.freq_timer_label = QLabel("Frequency Timer:")
-        freq_row.addWidget(self.freq_timer_label)
+        software_used_container = QWidget()
+        software_used_layout = QVBoxLayout(software_used_container)
+        software_used_layout.setContentsMargins(0, 0, 0, 0)
+        software_used_layout.setSpacing(8)
+        software_used_header = QHBoxLayout()
+        software_used_header.setContentsMargins(0, 0, 0, 0)
+        software_used_header.addWidget(QLabel("Software Used"))
+        software_used_header.addStretch()
+        self.software_used_help_btn = self._make_context_help_button(
+            "settings.software_used",
+            tooltip="Open help for selecting which software this station actually uses.",
+        )
+        software_used_header.addWidget(self.software_used_help_btn)
+        software_used_layout.addLayout(software_used_header)
+        software_used_grid = QGridLayout()
+        software_used_grid.setContentsMargins(0, 0, 0, 0)
+        software_used_grid.setHorizontalSpacing(24)
+        software_used_grid.setVerticalSpacing(10)
+        self.use_flrig_chk = QCheckBox("FLRig")
+        self.use_fldigi_chk = QCheckBox("FLDigi")
+        self.use_flmsg_chk = QCheckBox("FLMsg")
+        self.use_flamp_chk = QCheckBox("FLAmp")
+        self.use_js8call_chk = QCheckBox("JS8Call")
+        self.use_js8spotter_chk = QCheckBox("JS8Spotter")
+        self.use_commstat_chk = QCheckBox("CommStat")
+        self.use_varac_chk = QCheckBox("VarAC")
+        software_used_grid.addWidget(self.use_flrig_chk, 0, 0)
+        software_used_grid.addWidget(self.use_fldigi_chk, 0, 1)
+        software_used_grid.addWidget(self.use_flmsg_chk, 1, 0)
+        software_used_grid.addWidget(self.use_flamp_chk, 1, 1)
+        software_used_grid.addWidget(self.use_js8call_chk, 2, 0)
+        software_used_grid.addWidget(self.use_js8spotter_chk, 2, 1)
+        software_used_grid.addWidget(self.use_commstat_chk, 3, 0)
+        software_used_grid.addWidget(self.use_varac_chk, 3, 1)
+        software_used_grid.setColumnStretch(2, 1)
+        software_used_layout.addLayout(software_used_grid)
+        left_column_layout.addWidget(software_used_container)
+
+        def build_timer_row(title_label: QLabel, heading_text: str, enforce_combo: QComboBox, prompt_combo: QComboBox) -> QWidget:
+            wrapper = QWidget()
+            wrapper_layout = QVBoxLayout(wrapper)
+            wrapper_layout.setContentsMargins(0, 0, 0, 0)
+            wrapper_layout.setSpacing(6)
+            title_label.setText(heading_text)
+            wrapper_layout.addWidget(title_label)
+            controls_row = QHBoxLayout()
+            controls_row.setContentsMargins(0, 0, 0, 0)
+            controls_row.setSpacing(10)
+            controls_row.addWidget(QLabel("Mode"))
+            controls_row.addWidget(enforce_combo, 0)
+            controls_row.addWidget(QLabel("Prompt Interval"))
+            controls_row.addWidget(prompt_combo, 0)
+            controls_row.addStretch()
+            wrapper_layout.addLayout(controls_row)
+            return wrapper
+
+        self.freq_timer_label = QLabel("Frequency Timer")
         self.freq_enforce_combo = QComboBox()
         self.freq_enforce_combo.addItems(enforcement_choices)
         self.freq_enforce_combo.setMinimumWidth(150)
         self.freq_enforce_combo.currentIndexChanged.connect(self._on_enforcement_changed)
-        freq_row.addWidget(self.freq_enforce_combo)
-        freq_row.addSpacing(12)
-        self.freq_prompt_label = QLabel("Prompt Interval:")
-        freq_row.addWidget(self.freq_prompt_label)
+        self.freq_prompt_label = QLabel("Prompt Interval")
         self.freq_prompt_combo = QComboBox()
         self.freq_prompt_combo.addItems(prompt_choices)
         self.freq_prompt_combo.setMinimumWidth(170)
         self.freq_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         self._disable_prompt_hint_item(self.freq_prompt_combo)
-        freq_row.addWidget(self.freq_prompt_combo)
-        freq_row.addStretch()
-        left_column_layout.addLayout(freq_row)
+        left_column_layout.addWidget(
+            build_timer_row(self.freq_timer_label, "Frequency Timer", self.freq_enforce_combo, self.freq_prompt_combo)
+        )
 
-        fldigi_row = QHBoxLayout()
-        self.fldigi_timer_label = QLabel("FLDigi Mode Timer:")
-        fldigi_row.addWidget(self.fldigi_timer_label)
+        self.fldigi_timer_label = QLabel("FLDigi Mode Timer")
         self.fldigi_enforce_combo = QComboBox()
         self.fldigi_enforce_combo.addItems(enforcement_choices)
         self.fldigi_enforce_combo.setMinimumWidth(150)
         self.fldigi_enforce_combo.currentIndexChanged.connect(self._on_enforcement_changed)
-        fldigi_row.addWidget(self.fldigi_enforce_combo)
-        fldigi_row.addSpacing(12)
-        self.fldigi_prompt_label = QLabel("Prompt Interval:")
-        fldigi_row.addWidget(self.fldigi_prompt_label)
+        self.fldigi_prompt_label = QLabel("Prompt Interval")
         self.fldigi_prompt_combo = QComboBox()
         self.fldigi_prompt_combo.addItems(prompt_choices)
         self.fldigi_prompt_combo.setMinimumWidth(170)
         self.fldigi_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         self._disable_prompt_hint_item(self.fldigi_prompt_combo)
-        fldigi_row.addWidget(self.fldigi_prompt_combo)
-        fldigi_row.addStretch()
-        left_column_layout.addLayout(fldigi_row)
+        left_column_layout.addWidget(
+            build_timer_row(
+                self.fldigi_timer_label,
+                "FLDigi Mode Timer",
+                self.fldigi_enforce_combo,
+                self.fldigi_prompt_combo,
+            )
+        )
 
-        js8_row = QHBoxLayout()
-        self.js8_timer_label = QLabel("JS8 Offset Timer:")
-        js8_row.addWidget(self.js8_timer_label)
+        self.js8_timer_label = QLabel("JS8 Offset Timer")
         self.js8_enforce_combo = QComboBox()
         self.js8_enforce_combo.addItems(enforcement_choices)
         self.js8_enforce_combo.setMinimumWidth(150)
         self.js8_enforce_combo.currentIndexChanged.connect(self._on_enforcement_changed)
-        js8_row.addWidget(self.js8_enforce_combo)
-        js8_row.addSpacing(12)
-        self.js8_prompt_label = QLabel("Prompt Interval:")
-        js8_row.addWidget(self.js8_prompt_label)
+        self.js8_prompt_label = QLabel("Prompt Interval")
         self.js8_prompt_combo = QComboBox()
         self.js8_prompt_combo.addItems(prompt_choices)
         self.js8_prompt_combo.setMinimumWidth(170)
         self.js8_prompt_combo.currentIndexChanged.connect(self._on_enforcement_changed)
         self._disable_prompt_hint_item(self.js8_prompt_combo)
-        js8_row.addWidget(self.js8_prompt_combo)
-        js8_row.addStretch()
-        left_column_layout.addLayout(js8_row)
+        left_column_layout.addWidget(
+            build_timer_row(self.js8_timer_label, "JS8 Offset Timer", self.js8_enforce_combo, self.js8_prompt_combo)
+        )
         left_column_layout.addStretch()
 
         log_warn_tip = (
@@ -652,38 +1133,40 @@ class SettingsTab(QWidget):
         self._update_logging_actions_layout()
 
         # Operating status indicators
-        status_layout = QHBoxLayout()
-
-        theme = resolve_theme(self.settings)
-        status_items = [
-            ("JS8Call_API", "JS8"),
-            ("FLRig", "FLRig"),
-            ("FLDigi", "FLDigi"),
-            ("FLMsg", "FLMsg"),
-            ("FLAmp", "FLAmp"),
-            ("VarAC", "VarAC"),
-            ("JS8Spotter", "JS8Spotter"),
-            ("CommStat", "CommStat"),
-        ]
-        for key, label in status_items:
-            led = QLabel()
-            led.setFixedSize(14, 14)
-            led.setStyleSheet(led_style("idle", theme))
-            self.status_labels[key] = led
-            status_layout.addWidget(led)
-            status_layout.addWidget(QLabel(label))
-            status_layout.addSpacing(12)
-        status_layout.addStretch()
         status_container = QWidget()
-        status_container.setLayout(status_layout)
-        status_group = QGroupBox("Operating Status")
+        self.status_layout = QHBoxLayout()
+        status_container.setLayout(self.status_layout)
+        self.status_group = QGroupBox("Operating Status")
         status_group_layout = QVBoxLayout()
         status_group_layout.setContentsMargins(10, 10, 10, 12)
         status_group_layout.setSpacing(6)
         status_group_layout.addWidget(status_container)
-        status_group.setLayout(status_group_layout)
-        status_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        main_layout.addWidget(status_group)
+        self.status_group.setLayout(status_group_layout)
+        self.status_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._rebuild_status_indicators()
+        main_layout.addWidget(self.status_group)
+
+        self.readiness_summary_card = QFrame()
+        self.readiness_summary_card.setFrameShape(QFrame.StyledPanel)
+        readiness_layout = QVBoxLayout(self.readiness_summary_card)
+        readiness_layout.setContentsMargins(12, 10, 12, 10)
+        readiness_layout.setSpacing(6)
+        readiness_title = QLabel("Setup Readiness")
+        readiness_title_font = readiness_title.font()
+        readiness_title_font.setBold(True)
+        readiness_title.setFont(readiness_title_font)
+        readiness_layout.addWidget(readiness_title)
+        self.readiness_summary_status_label = QLabel("Reviewing current setup...")
+        self.readiness_summary_status_label.setWordWrap(True)
+        readiness_layout.addWidget(self.readiness_summary_status_label)
+        readiness_actions = QHBoxLayout()
+        readiness_actions.setContentsMargins(0, 0, 0, 0)
+        readiness_actions.addStretch()
+        self.copy_readiness_summary_btn = QPushButton("Copy Readiness Summary")
+        self.copy_readiness_summary_btn.clicked.connect(self._copy_readiness_summary)
+        readiness_actions.addWidget(self.copy_readiness_summary_btn)
+        readiness_layout.addLayout(readiness_actions)
+        main_layout.addWidget(self.readiness_summary_card)
 
         sections_row = QHBoxLayout()
         sections_row.setSpacing(10)
@@ -701,7 +1184,13 @@ class SettingsTab(QWidget):
         sections_row.addWidget(self.sections_nav_list, 0, Qt.AlignTop)
 
         self.sections_stack = QStackedWidget()
-        sections_row.addWidget(self.sections_stack, 1)
+        self.sections_scroll = QScrollArea()
+        self.sections_scroll.setWidgetResizable(True)
+        self.sections_scroll.setFrameShape(QFrame.NoFrame)
+        self.sections_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.sections_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.sections_scroll.setWidget(self.sections_stack)
+        sections_row.addWidget(self.sections_scroll, 1)
         main_layout.addLayout(sections_row, 1)
 
         op_container = QWidget()
@@ -711,6 +1200,7 @@ class SettingsTab(QWidget):
             op_container,
             checked=True,
             fit_content=True,
+            help_context_key="settings.freqinout",
         )
         self._register_collapsible_group(op_group, self._summary_freqinout_settings)
         self._set_section_health_key(op_group, "freqinout")
@@ -729,6 +1219,7 @@ class SettingsTab(QWidget):
             logging_container,
             checked=True,
             fit_content=True,
+            help_context_key="settings.logging",
         )
         self._register_collapsible_group(logging_section, self._summary_logging_settings)
         logging_section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -791,7 +1282,13 @@ class SettingsTab(QWidget):
         ops_layout.addWidget(self.op_groups_table)
         ops_container = QWidget()
         ops_container.setLayout(ops_layout)
-        ops_group = self._make_collapsible_group("HF Operating Groups", ops_container, checked=True, fit_content=False)
+        ops_group = self._make_collapsible_group(
+            "HF Operating Groups",
+            ops_container,
+            checked=True,
+            fit_content=False,
+            help_context_key="settings.hf-groups",
+        )
         self._register_collapsible_group(ops_group, self._summary_operating_groups)
         self._set_section_health_key(ops_group, "operating_groups")
         ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -847,7 +1344,13 @@ class SettingsTab(QWidget):
         local_layout.addWidget(self.local_net_table)
         local_container = QWidget()
         local_container.setLayout(local_layout)
-        local_group = self._make_collapsible_group("Local Comms Groups", local_container, checked=True, fit_content=False)
+        local_group = self._make_collapsible_group(
+            "Local Comms Groups",
+            local_container,
+            checked=True,
+            fit_content=False,
+            help_context_key="settings.local-comms",
+        )
         self._register_collapsible_group(local_group, self._summary_local_net_profiles)
         local_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(local_group)
@@ -892,17 +1395,22 @@ class SettingsTab(QWidget):
         self.js8_offset_edit.setFixedWidth(80)
         self.js8_offset_edit.setText("0")
         js8_port_row.addWidget(self.js8_offset_edit)
-        js8_port_row.addSpacing(8)
+        js8_port_row.addStretch()
+        js8_v.addLayout(js8_port_row)
+
+        js8_mark_row = QHBoxLayout()
+        js8_mark_row.setSpacing(8)
+        js8_mark_row.setContentsMargins(0, 0, 0, 0)
         js8_mark_label = QLabel("Mark JS8Call MSG Read?")
-        js8_mark_label.setFixedWidth(165)
-        js8_port_row.addWidget(js8_mark_label)
+        js8_mark_label.setFixedWidth(js8_label_width)
+        js8_mark_row.addWidget(js8_mark_label)
         self.js8_mark_retrieved_chk = QCheckBox()
         self.js8_mark_retrieved_chk.setToolTip(
             "When enabled, clicking 'Mark Retrieved' in Message Viewer will set JS8Call inbox entries to READ."
         )
-        js8_port_row.addWidget(self.js8_mark_retrieved_chk)
-        js8_port_row.addStretch()
-        js8_v.addLayout(js8_port_row)
+        js8_mark_row.addWidget(self.js8_mark_retrieved_chk)
+        js8_mark_row.addStretch()
+        js8_v.addLayout(js8_mark_row)
 
         def build_js8_path_row(label: str, edit: QLineEdit, browse_cb) -> QWidget:
             row = QHBoxLayout()
@@ -921,41 +1429,36 @@ class SettingsTab(QWidget):
             w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             return w
 
-        js8_exec_row = QHBoxLayout()
         self.js8call_path_edit = QLineEdit()
         self.js8call_path_edit.setPlaceholderText("Folder containing JS8Call")
         js8_v.addWidget(
             build_js8_path_row("JS8Call Install Folder:", self.js8call_path_edit, self._choose_js8call_install_path)
         )
 
-        directed_forms_row = QHBoxLayout()
         self.js8_directed_edit = QLineEdit()
         js8_v.addWidget(
             build_js8_path_row("JS8Call DIRECTED.TXT:", self.js8_directed_edit, self._choose_js8_directed_path)
         )
 
-        forms_row = QHBoxLayout()
         self.js8_forms_edit = QLineEdit()
         js8_v.addWidget(
             build_js8_path_row("JS8Spotter forms:", self.js8_forms_edit, self._choose_js8_forms_path)
         )
 
-        js8spotter_exec_row = QHBoxLayout()
         self.js8spotter_path_edit = QLineEdit()
         self.js8spotter_path_edit.setPlaceholderText("Executable/script/.desktop path")
         js8_v.addWidget(
             build_js8_path_row(
-                "JS8Spotter Launch Path:",
-                self.js8spotter_path_edit,
-                self._choose_js8spotter_launch_path,
+                "JS8Spotter Script/Launcher:", self.js8spotter_path_edit, self._choose_js8spotter_launch_path
             )
         )
 
-        commstat_exec_row = QHBoxLayout()
         self.commstat_path_edit = QLineEdit()
         self.commstat_path_edit.setPlaceholderText("Executable/script/.desktop path")
         js8_v.addWidget(
-            build_js8_path_row("CommStat Launch Path:", self.commstat_path_edit, self._choose_commstat_launch_path)
+            build_js8_path_row(
+                "CommStat Script/Launcher:", self.commstat_path_edit, self._choose_commstat_launch_path
+            )
         )
 
         self.js8_directed_edit.textChanged.connect(self._refresh_section_titles)
@@ -966,6 +1469,28 @@ class SettingsTab(QWidget):
         self.js8call_path_edit.textChanged.connect(self._on_launch_paths_changed)
         self.js8spotter_path_edit.textChanged.connect(self._on_launch_paths_changed)
         self.commstat_path_edit.textChanged.connect(self._on_launch_paths_changed)
+
+        js8_autofill_row = QHBoxLayout()
+        js8_autofill_row.setSpacing(8)
+        js8_autofill_row.setContentsMargins(0, 0, 0, 0)
+        js8_autofill_label = QLabel("Auto-Fill")
+        js8_autofill_label.setFixedWidth(js8_label_width)
+        js8_autofill_row.addWidget(js8_autofill_label)
+        self.js8_autofill_btn = QPushButton("Attempt Auto-Fill")
+        self.js8_autofill_btn.clicked.connect(self._attempt_js8_autofill)
+        js8_autofill_row.addWidget(self.js8_autofill_btn)
+        js8_autofill_row.addStretch()
+        js8_v.addLayout(js8_autofill_row)
+
+        js8_autofill_status_row = QHBoxLayout()
+        js8_autofill_status_row.setSpacing(8)
+        js8_autofill_status_row.setContentsMargins(0, 0, 0, 0)
+        js8_autofill_status_row.addSpacing(js8_label_width)
+        self.js8_autofill_status_label = QLabel("No auto-fill attempt yet.")
+        self.js8_autofill_status_label.setWordWrap(True)
+        self._autofill_status_labels["js8"] = self.js8_autofill_status_label
+        js8_autofill_status_row.addWidget(self.js8_autofill_status_label, 1)
+        js8_v.addLayout(js8_autofill_status_row)
 
         load_links_row = QHBoxLayout()
         load_links_row.setSpacing(8)
@@ -991,7 +1516,13 @@ class SettingsTab(QWidget):
 
         js8_container = QWidget()
         js8_container.setLayout(js8_v)
-        js8_group = self._make_collapsible_group("JS8Call Settings", js8_container, checked=True, fit_content=True)
+        js8_group = self._make_collapsible_group(
+            "JS8Call Settings",
+            js8_container,
+            checked=True,
+            fit_content=True,
+            help_context_key="settings.js8call",
+        )
         self._register_collapsible_group(js8_group, self._summary_js8_settings)
         self._set_section_health_key(js8_group, "js8call")
         js8_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -1144,6 +1675,28 @@ class SettingsTab(QWidget):
             )
         )
 
+        fast_light_autofill_row = QHBoxLayout()
+        fast_light_autofill_row.setContentsMargins(0, 0, 0, 0)
+        fast_light_autofill_row.setSpacing(8)
+        fast_light_autofill_label = QLabel("Auto-Fill")
+        fast_light_autofill_label.setFixedWidth(msg_label_width)
+        fast_light_autofill_row.addWidget(fast_light_autofill_label)
+        self.fast_light_autofill_btn = QPushButton("Attempt Auto-Fill")
+        self.fast_light_autofill_btn.clicked.connect(self._attempt_fast_light_autofill)
+        fast_light_autofill_row.addWidget(self.fast_light_autofill_btn)
+        fast_light_autofill_row.addStretch()
+        fast_light_v.addLayout(fast_light_autofill_row)
+
+        fast_light_autofill_status_row = QHBoxLayout()
+        fast_light_autofill_status_row.setContentsMargins(0, 0, 0, 0)
+        fast_light_autofill_status_row.setSpacing(8)
+        fast_light_autofill_status_row.addSpacing(msg_label_width)
+        self.fast_light_autofill_status_label = QLabel("No auto-fill attempt yet.")
+        self.fast_light_autofill_status_label.setWordWrap(True)
+        self._autofill_status_labels["fast_light"] = self.fast_light_autofill_status_label
+        fast_light_autofill_status_row.addWidget(self.fast_light_autofill_status_label, 1)
+        fast_light_v.addLayout(fast_light_autofill_status_row)
+
         # Check-in log file copy helpers
         launch_row = QHBoxLayout()
         launch_row.setContentsMargins(0, 0, 0, 0)
@@ -1167,6 +1720,7 @@ class SettingsTab(QWidget):
             fast_light_container,
             checked=True,
             fit_content=True,
+            help_context_key="settings.fast-light",
         )
         self._register_collapsible_group(fast_light_group, self._summary_fast_light_settings)
         self._set_section_health_key(fast_light_group, "fast_light")
@@ -1180,10 +1734,10 @@ class SettingsTab(QWidget):
         gpg_v.setAlignment(Qt.AlignTop)
         gpg_group.setLayout(gpg_v)
 
-        self.gpg_verify_enabled_chk = QCheckBox("Verify FLAMP .k2s/.b2s signatures")
+        self.gpg_verify_enabled_chk = QCheckBox("Verify FLAMP .k2s/.b2s signatures and signature sidecars")
         self.gpg_verify_enabled_chk.setToolTip(
             "When enabled, Message Viewer verifies detached sidecars and embedded clearsigned content "
-            "for configured '-sig' filename patterns."
+            "for FLAmp .k2s/.b2s files, canonical '-sig' files, and .sig/.asc/.gpg sidecars."
         )
         gpg_v.addWidget(self.gpg_verify_enabled_chk)
 
@@ -1332,6 +1886,7 @@ class SettingsTab(QWidget):
             gpg_container,
             checked=True,
             fit_content=True,
+            help_context_key="settings.message-auth",
         )
         self._register_collapsible_group(gpg_group, self._summary_gpg_settings)
         gpg_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -1389,6 +1944,21 @@ class SettingsTab(QWidget):
         varac_launch_hint_row.addWidget(varac_launch_hint, 1)
         varac_v.addLayout(varac_launch_hint_row)
 
+        varac_ini_row = QHBoxLayout()
+        varac_ini_row.setContentsMargins(0, 0, 0, 0)
+        varac_ini_row.setSpacing(8)
+        varac_ini_label = QLabel("VarAC INI File")
+        varac_ini_label.setFixedWidth(msg_label_width)
+        varac_ini_row.addWidget(varac_ini_label)
+        self.varac_ini_path_edit = QLineEdit()
+        self.varac_ini_path_edit.setPlaceholderText("VarAC.ini path")
+        varac_ini_row.addWidget(self.varac_ini_path_edit, 1)
+        varac_ini_browse = QPushButton("Browse")
+        varac_ini_browse.setFixedWidth(70)
+        varac_ini_browse.clicked.connect(self._choose_varac_ini_path)
+        varac_ini_row.addWidget(varac_ini_browse)
+        varac_v.addLayout(varac_ini_row)
+
         varac_v.addWidget(
             build_msg_row(
                 "VarAC Incoming Files",
@@ -1396,6 +1966,21 @@ class SettingsTab(QWidget):
                 lambda: self._choose_msg_path("varac", varac_edit),
             )
         )
+
+        outbox_dir_row = QHBoxLayout()
+        outbox_dir_row.setContentsMargins(0, 0, 0, 0)
+        outbox_dir_row.setSpacing(8)
+        outbox_dir_label = QLabel("VarAC Outbox Directory")
+        outbox_dir_label.setFixedWidth(msg_label_width)
+        outbox_dir_row.addWidget(outbox_dir_label)
+        self.varac_outbox_dir_edit = QLineEdit()
+        self.varac_outbox_dir_edit.setPlaceholderText("VarAC Outbox directory")
+        outbox_dir_row.addWidget(self.varac_outbox_dir_edit, 1)
+        outbox_dir_browse = QPushButton("Browse")
+        outbox_dir_browse.setFixedWidth(70)
+        outbox_dir_browse.clicked.connect(self._choose_varac_outbox_dir)
+        outbox_dir_row.addWidget(outbox_dir_browse)
+        varac_v.addLayout(outbox_dir_row)
 
         bbs_dir_row = QHBoxLayout()
         bbs_dir_row.setContentsMargins(0, 0, 0, 0)
@@ -1430,12 +2015,8 @@ class SettingsTab(QWidget):
         bbs_policy_row = QHBoxLayout()
         bbs_policy_row.setContentsMargins(0, 0, 0, 0)
         bbs_policy_row.setSpacing(8)
-        bbs_policy_label = QLabel("Auto-Archive Policy")
-        bbs_policy_label.setFixedWidth(msg_label_width)
-        bbs_policy_row.addWidget(bbs_policy_label)
         self.varac_bbs_auto_archive_chk = QCheckBox("Enable Auto-Archive")
         bbs_policy_row.addWidget(self.varac_bbs_auto_archive_chk)
-        bbs_policy_row.addSpacing(12)
         bbs_policy_row.addWidget(QLabel("After"))
         self.varac_bbs_archive_days_combo = QComboBox()
         for day in (1, 3, 5, 7, 10, 14, 21, 30):
@@ -1449,25 +2030,267 @@ class SettingsTab(QWidget):
         varac_hint.setWordWrap(True)
         varac_hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         varac_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        policy_wrap = QVBoxLayout()
-        policy_wrap.setSpacing(3)
+        policy_inner = QVBoxLayout()
+        policy_inner.setSpacing(4)
+        policy_inner.setContentsMargins(0, 0, 0, 0)
+        policy_inner.addLayout(bbs_policy_row)
+        policy_inner.addWidget(varac_hint)
+        policy_wrap = QHBoxLayout()
         policy_wrap.setContentsMargins(0, 0, 0, 0)
-        policy_wrap.addLayout(bbs_policy_row)
-        hint_row = QHBoxLayout()
-        hint_row.setContentsMargins(0, 0, 0, 0)
-        hint_row.addSpacing(msg_label_width)
-        hint_row.addWidget(varac_hint, 1)
-        policy_wrap.addLayout(hint_row)
+        policy_wrap.setSpacing(8)
+        bbs_policy_label = QLabel("Auto-Archive Policy")
+        bbs_policy_label.setFixedWidth(msg_label_width)
+        policy_wrap.addWidget(bbs_policy_label)
+        policy_wrap.addLayout(policy_inner, 1)
         varac_v.addLayout(policy_wrap)
+
+        bbs_access_checks_row = QHBoxLayout()
+        bbs_access_checks_row.setContentsMargins(0, 0, 0, 0)
+        bbs_access_checks_row.setSpacing(16)
+        self.varac_bbs_enabled_chk = QCheckBox("Enable BBS")
+        bbs_access_checks_row.addWidget(self.varac_bbs_enabled_chk)
+        self.varac_bbs_limit_access_chk = QCheckBox("Limit Access To Callsigns")
+        bbs_access_checks_row.addWidget(self.varac_bbs_limit_access_chk)
+        self.varac_bbs_announce_chk = QCheckBox("Announce")
+        bbs_access_checks_row.addWidget(self.varac_bbs_announce_chk)
+        bbs_access_checks_row.addStretch()
+        bbs_access_actions_row = QHBoxLayout()
+        bbs_access_actions_row.setContentsMargins(0, 0, 0, 0)
+        bbs_access_actions_row.setSpacing(8)
+        self.varac_bbs_sync_btn = QPushButton("Sync From VarAC.ini")
+        self.varac_bbs_sync_btn.clicked.connect(self._sync_varac_bbs_from_ini)
+        bbs_access_actions_row.addWidget(self.varac_bbs_sync_btn)
+        self.varac_bbs_write_btn = QPushButton("Write to VarAC.ini")
+        self.varac_bbs_write_btn.clicked.connect(self._sync_varac_bbs_to_ini)
+        bbs_access_actions_row.addWidget(self.varac_bbs_write_btn)
+        bbs_access_actions_row.addStretch()
+        bbs_access_inner = QVBoxLayout()
+        bbs_access_inner.setSpacing(6)
+        bbs_access_inner.setContentsMargins(0, 0, 0, 0)
+        bbs_access_inner.addLayout(bbs_access_checks_row)
+        bbs_access_inner.addLayout(bbs_access_actions_row)
+        bbs_access_wrap = QHBoxLayout()
+        bbs_access_wrap.setContentsMargins(0, 0, 0, 0)
+        bbs_access_wrap.setSpacing(8)
+        bbs_access_label = QLabel("BBS Access")
+        bbs_access_label.setFixedWidth(msg_label_width)
+        bbs_access_wrap.addWidget(bbs_access_label)
+        bbs_access_wrap.addLayout(bbs_access_inner, 1)
+        varac_v.addLayout(bbs_access_wrap)
+
+        bbs_callsigns_row = QHBoxLayout()
+        bbs_callsigns_row.setContentsMargins(0, 0, 0, 0)
+        bbs_callsigns_row.setSpacing(8)
+        bbs_callsigns_label = QLabel("Allowed Callsigns")
+        bbs_callsigns_label.setFixedWidth(msg_label_width)
+        bbs_callsigns_row.addWidget(bbs_callsigns_label)
+        bbs_callsigns_wrap = QWidget()
+        bbs_callsigns_layout = QVBoxLayout(bbs_callsigns_wrap)
+        bbs_callsigns_layout.setContentsMargins(0, 0, 0, 0)
+        bbs_callsigns_layout.setSpacing(6)
+        bbs_callsigns_lookup_row = QHBoxLayout()
+        bbs_callsigns_lookup_row.setContentsMargins(0, 0, 0, 0)
+        bbs_callsigns_lookup_row.setSpacing(8)
+        self.varac_bbs_callsign_lookup_edit = QLineEdit()
+        self.varac_bbs_callsign_lookup_edit.setPlaceholderText("Search known operators or enter a callsign")
+        bbs_callsigns_lookup_row.addWidget(self.varac_bbs_callsign_lookup_edit, 1)
+        self.varac_bbs_add_callsign_btn = QPushButton("Add")
+        bbs_callsigns_lookup_row.addWidget(self.varac_bbs_add_callsign_btn)
+        self.varac_bbs_remove_callsign_btn = QPushButton("Remove Selected")
+        bbs_callsigns_lookup_row.addWidget(self.varac_bbs_remove_callsign_btn)
+        bbs_callsigns_layout.addLayout(bbs_callsigns_lookup_row)
+        self.varac_bbs_callsigns_list = QListWidget()
+        self.varac_bbs_callsigns_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.varac_bbs_callsigns_list.setMaximumHeight(108)
+        bbs_callsigns_layout.addWidget(self.varac_bbs_callsigns_list)
+        bbs_callsigns_hint = QLabel(
+            "Lookup uses known operators when available. Manual callsign entry is still allowed."
+        )
+        bbs_callsigns_hint.setWordWrap(True)
+        bbs_callsigns_layout.addWidget(bbs_callsigns_hint)
+        self.varac_bbs_callsign_lookup_edit.textChanged.connect(lambda _text: self._refresh_varac_bbs_callsign_actions())
+        self.varac_bbs_callsign_lookup_edit.returnPressed.connect(self._add_varac_bbs_allowed_callsign)
+        self.varac_bbs_add_callsign_btn.clicked.connect(self._add_varac_bbs_allowed_callsign)
+        self.varac_bbs_remove_callsign_btn.clicked.connect(self._remove_selected_varac_bbs_allowed_callsigns)
+        self.varac_bbs_callsigns_list.itemSelectionChanged.connect(self._refresh_varac_bbs_callsign_actions)
+        self._reload_varac_bbs_operator_lookup()
+        self._refresh_varac_bbs_callsign_actions()
+        bbs_callsigns_row.addWidget(bbs_callsigns_wrap, 1)
+        varac_v.addLayout(bbs_callsigns_row)
+
+        bbs_sync_status_row = QHBoxLayout()
+        bbs_sync_status_row.setContentsMargins(0, 0, 0, 0)
+        bbs_sync_status_row.addSpacing(msg_label_width)
+        self.varac_bbs_sync_status_label = QLabel("No VarAC.ini BBS sync yet.")
+        self.varac_bbs_sync_status_label.setWordWrap(True)
+        bbs_sync_status_row.addWidget(self.varac_bbs_sync_status_label, 1)
+        varac_v.addLayout(bbs_sync_status_row)
+
+        varac_autofill_row = QHBoxLayout()
+        varac_autofill_row.setContentsMargins(0, 0, 0, 0)
+        varac_autofill_row.setSpacing(8)
+        varac_autofill_label = QLabel("Auto-Fill")
+        varac_autofill_label.setFixedWidth(msg_label_width)
+        varac_autofill_row.addWidget(varac_autofill_label)
+        self.varac_autofill_btn = QPushButton("Attempt Auto-Fill")
+        self.varac_autofill_btn.clicked.connect(self._attempt_varac_autofill)
+        varac_autofill_row.addWidget(self.varac_autofill_btn)
+        varac_autofill_row.addStretch()
+        varac_v.addLayout(varac_autofill_row)
+
+        varac_autofill_status_row = QHBoxLayout()
+        varac_autofill_status_row.setContentsMargins(0, 0, 0, 0)
+        varac_autofill_status_row.setSpacing(8)
+        varac_autofill_status_row.addSpacing(msg_label_width)
+        self.varac_autofill_status_label = QLabel("No auto-fill attempt yet.")
+        self.varac_autofill_status_label.setWordWrap(True)
+        self._autofill_status_labels["varac"] = self.varac_autofill_status_label
+        varac_autofill_status_row.addWidget(self.varac_autofill_status_label, 1)
+        varac_v.addLayout(varac_autofill_status_row)
+
+        varac_sync_note_row = QHBoxLayout()
+        varac_sync_note_row.setContentsMargins(0, 0, 0, 0)
+        varac_sync_note_row.addSpacing(msg_label_width)
+        self.varac_bbs_sync_note_label = QLabel(
+            "VarAC remains the source of truth; FreqInOut can sync only the [BBS] section with explicit confirmation."
+        )
+        self.varac_bbs_sync_note_label.setWordWrap(True)
+        varac_sync_note_row.addWidget(self.varac_bbs_sync_note_label, 1)
+        varac_v.addLayout(varac_sync_note_row)
+
+        self._varac_bbs_ini_sync_state = ""
+
+        guard_row = QHBoxLayout()
+        guard_row.setContentsMargins(0, 0, 0, 0)
+        guard_row.setSpacing(8)
+        guard_label = QLabel("File Protection")
+        guard_label.setFixedWidth(msg_label_width)
+        guard_row.addWidget(guard_label)
+        self.varac_guard_enabled_chk = QCheckBox("Enable VGuard File Protection")
+        guard_row.addWidget(self.varac_guard_enabled_chk)
+        self.varac_guard_mode_combo = QComboBox()
+        self.varac_guard_mode_combo.addItems(
+            ["Log only", "Delete unauthorized files", "Quarantine unauthorized files"]
+        )
+        self.varac_guard_mode_combo.setMinimumWidth(230)
+        guard_row.addWidget(self.varac_guard_mode_combo)
+        guard_row.addStretch()
+        varac_v.addLayout(guard_row)
+
+        guard_dir_row = QHBoxLayout()
+        guard_dir_row.setContentsMargins(0, 0, 0, 0)
+        guard_dir_row.setSpacing(8)
+        guard_dir_label = QLabel("Quarantine Dir")
+        guard_dir_label.setFixedWidth(msg_label_width)
+        guard_dir_row.addWidget(guard_dir_label)
+        self.varac_guard_quarantine_dir_edit = QLineEdit()
+        self.varac_guard_quarantine_dir_edit.setPlaceholderText("Optional quarantine folder for unauthorized files")
+        guard_dir_row.addWidget(self.varac_guard_quarantine_dir_edit, 1)
+        guard_dir_browse = QPushButton("Browse")
+        guard_dir_browse.setFixedWidth(70)
+        guard_dir_browse.clicked.connect(self._choose_varac_guard_quarantine_dir)
+        guard_dir_row.addWidget(guard_dir_browse)
+        self.varac_guard_retry_combo = QComboBox()
+        self.varac_guard_retry_combo.addItems(["30", "60", "120", "300", "600"])
+        self.varac_guard_retry_combo.setFixedWidth(92)
+        guard_dir_row.addWidget(QLabel("Retry"))
+        guard_dir_row.addWidget(self.varac_guard_retry_combo)
+        guard_dir_row.addWidget(QLabel("sec"))
+        guard_dir_row.addStretch()
+        varac_v.addLayout(guard_dir_row)
+
+        guard_note_row = QHBoxLayout()
+        guard_note_row.setContentsMargins(0, 0, 0, 0)
+        guard_note_row.addSpacing(msg_label_width)
+        self.varac_guard_note_label = QLabel(
+            "VGuard watches VarAC incoming files and uses the allowed BBS callsigns list. It is separate from BBS access control."
+        )
+        self.varac_guard_note_label.setWordWrap(True)
+        guard_note_row.addWidget(self.varac_guard_note_label, 1)
+        varac_v.addLayout(guard_note_row)
+
+        guard_status_row = QHBoxLayout()
+        guard_status_row.setContentsMargins(0, 0, 0, 0)
+        guard_status_row.addSpacing(msg_label_width)
+        self.varac_guard_status_label = QLabel("No VGuard scan yet.")
+        self.varac_guard_status_label.setWordWrap(True)
+        guard_status_row.addWidget(self.varac_guard_status_label, 1)
+        varac_v.addLayout(guard_status_row)
 
         varac_container = QWidget()
         varac_container.setLayout(varac_v)
-        varac_group = self._make_collapsible_group("VarAC Settings", varac_container, checked=True, fit_content=True)
+        varac_group = self._make_collapsible_group(
+            "VarAC Settings",
+            varac_container,
+            checked=True,
+            fit_content=True,
+            help_context_key="settings.varac",
+        )
         self._register_collapsible_group(varac_group, self._summary_varac_settings)
         self._set_section_health_key(varac_group, "varac")
         varac_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(varac_group)
         self._add_settings_section(gpg_group)
+
+        custom_tools_group = QGroupBox("Custom Tools")
+        custom_tools_v = QVBoxLayout()
+        custom_tools_v.setSpacing(6)
+        custom_tools_group.setLayout(custom_tools_v)
+
+        custom_tools_hint = QLabel(
+            "Add named launch commands for helper scripts and tools. "
+            "Configured custom tools also appear in Launch Control."
+        )
+        custom_tools_hint.setWordWrap(True)
+        custom_tools_v.addWidget(custom_tools_hint)
+
+        self.custom_tools_table = QTableWidget(0, 2)
+        self.custom_tools_table.setHorizontalHeaderLabels(["Name", "Launch Command"])
+        self.custom_tools_table.verticalHeader().setVisible(False)
+        self.custom_tools_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.custom_tools_table.setSelectionMode(QTableWidget.SingleSelection)
+        custom_tools_header = self.custom_tools_table.horizontalHeader()
+        custom_tools_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        custom_tools_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        custom_tools_v.addWidget(self.custom_tools_table)
+
+        custom_tools_btn_row = QHBoxLayout()
+        self.custom_tool_add_btn = QPushButton("Add")
+        self.custom_tool_edit_btn = QPushButton("Edit")
+        self.custom_tool_remove_btn = QPushButton("Remove")
+        self.custom_tool_up_btn = QPushButton("Up")
+        self.custom_tool_down_btn = QPushButton("Down")
+        custom_tools_btn_row.addWidget(self.custom_tool_add_btn)
+        custom_tools_btn_row.addWidget(self.custom_tool_edit_btn)
+        custom_tools_btn_row.addWidget(self.custom_tool_remove_btn)
+        custom_tools_btn_row.addSpacing(12)
+        custom_tools_btn_row.addWidget(self.custom_tool_up_btn)
+        custom_tools_btn_row.addWidget(self.custom_tool_down_btn)
+        custom_tools_btn_row.addStretch()
+        custom_tools_v.addLayout(custom_tools_btn_row)
+
+        self.custom_tools_summary_label = QLabel("No custom tools configured.")
+        custom_tools_v.addWidget(self.custom_tools_summary_label)
+
+        self.custom_tool_add_btn.clicked.connect(self._add_custom_tool)
+        self.custom_tool_edit_btn.clicked.connect(self._edit_custom_tool)
+        self.custom_tool_remove_btn.clicked.connect(self._remove_custom_tool)
+        self.custom_tool_up_btn.clicked.connect(lambda: self._move_custom_tool(-1))
+        self.custom_tool_down_btn.clicked.connect(lambda: self._move_custom_tool(1))
+        self.custom_tools_table.itemSelectionChanged.connect(self._update_custom_tool_buttons)
+        self.custom_tools_table.itemDoubleClicked.connect(lambda *_args: self._edit_custom_tool())
+
+        custom_tools_container = QWidget()
+        custom_tools_container.setLayout(custom_tools_v)
+        custom_tools_group = self._make_collapsible_group(
+            "Custom Tools",
+            custom_tools_container,
+            checked=True,
+            fit_content=True,
+        )
+        self._register_collapsible_group(custom_tools_group, self._summary_custom_tools)
+        custom_tools_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._add_settings_section(custom_tools_group)
 
         # Launch Control
         launch_group = QGroupBox("Launch Control")
@@ -1528,7 +2351,13 @@ class SettingsTab(QWidget):
 
         launch_container = QWidget()
         launch_container.setLayout(launch_v)
-        launch_group = self._make_collapsible_group("Launch Control", launch_container, checked=True, fit_content=True)
+        launch_group = self._make_collapsible_group(
+            "Launch Control",
+            launch_container,
+            checked=True,
+            fit_content=True,
+            help_context_key="settings.launch-control",
+        )
         self._register_collapsible_group(launch_group, self._summary_launch_control)
         launch_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(launch_group)
@@ -1599,6 +2428,7 @@ class SettingsTab(QWidget):
         *,
         checked: bool,
         fit_content: bool,
+        help_context_key: str | None = None,
     ) -> QGroupBox:
         group = QGroupBox()
         group.setMinimumHeight(0)
@@ -1617,6 +2447,13 @@ class SettingsTab(QWidget):
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.addWidget(header_btn)
+        if help_context_key:
+            header_row.addWidget(
+                self._make_context_help_button(
+                    help_context_key,
+                    tooltip=f"Open help for {title}.",
+                )
+            )
         header_row.addStretch()
 
         layout = QVBoxLayout()
@@ -1633,6 +2470,7 @@ class SettingsTab(QWidget):
             "title": title,
             "header_btn": header_btn,
             "content": content,
+            "help_context_key": str(help_context_key or "").strip().lower(),
         }
         self._apply_collapsed_state(group, content, checked)
         QTimer.singleShot(0, lambda g=group, w=content: self._apply_collapsed_state(g, w, header_btn.isChecked()))
@@ -1663,14 +2501,43 @@ class SettingsTab(QWidget):
         meta["health_key"] = str(health_key or "").strip().lower()
         self._section_meta[group] = meta
 
+    def focus_section_by_health_key(self, health_key: str, radio_id: int | None = None) -> bool:
+        del radio_id
+        target = str(health_key or "").strip().lower()
+        if not target or not hasattr(self, "sections_nav_list"):
+            return False
+        for row in range(self.sections_nav_list.count()):
+            item = self.sections_nav_list.item(row)
+            if not item:
+                continue
+            item_key = str(item.data(self.SECTION_HEALTH_KEY_ROLE) or "").strip().lower()
+            if item_key != target:
+                continue
+            self.sections_nav_list.setCurrentRow(row)
+            self.sections_nav_list.scrollToItem(item)
+            return True
+        return False
+
     def _section_header_style(self, state: str, theme: Dict[str, str]) -> str:
         state = str(state or "neutral").strip().lower()
-        if state == "warn":
+        if state in {"warn", "needs_setup"}:
             border = theme.get("warning", "#C99700")
             fg = border
             bg = theme.get("surface", "#ffffff")
             hover_bg = theme.get("surface_alt", bg)
             font_weight = "700"
+        elif state == "degraded":
+            border = theme.get("warning", "#C99700")
+            fg = theme.get("text", "#222222")
+            bg = theme.get("surface", "#ffffff")
+            hover_bg = theme.get("surface_alt", bg)
+            font_weight = "700"
+        elif state in {"not_enabled", "external_manual"}:
+            border = theme.get("border", "#cccccc")
+            fg = theme.get("text_muted", theme.get("text", "#666666"))
+            bg = theme.get("surface", "#ffffff")
+            hover_bg = theme.get("surface_alt", bg)
+            font_weight = "600"
         else:
             border = "transparent"
             fg = theme.get("text", "#222222")
@@ -1689,7 +2556,7 @@ class SettingsTab(QWidget):
             "}"
             " QToolButton:hover {"
             f" background: {hover_bg};"
-            f" border: 1px solid {border if state == 'warn' else theme.get('border', '#cccccc')};"
+            f" border: 1px solid {border if state in {'warn', 'needs_setup', 'degraded'} else theme.get('border', '#cccccc')};"
             "}"
         )
 
@@ -1705,11 +2572,24 @@ class SettingsTab(QWidget):
         text_color = QColor(theme.get("text", "#222222"))
         transparent = QColor(0, 0, 0, 0)
 
-        if state == "warn":
+        if state in {"warn", "needs_setup"}:
             border = QColor(theme.get("warning", "#C99700"))
             bg = QColor(border)
             bg.setAlpha(120 if selected else (84 if hovered else 58))
             return {"bg": bg, "border": border, "fg": text_color, "bold": True}
+
+        if state == "degraded":
+            border = QColor(theme.get("warning", "#C99700"))
+            bg = QColor(border)
+            bg.setAlpha(88 if selected else (64 if hovered else 44))
+            return {"bg": bg, "border": border, "fg": text_color, "bold": True}
+
+        if state in {"not_enabled", "external_manual"}:
+            border = QColor(theme.get("border", "#cccccc"))
+            bg = QColor(theme.get("surface", "#ffffff"))
+            bg.setAlpha(68 if selected else (44 if hovered else 22))
+            muted = QColor(theme.get("text_muted", theme.get("text", "#666666")))
+            return {"bg": bg, "border": border, "fg": muted, "bold": False}
 
         if selected:
             border = QColor(theme.get("accent", "#2a6fd3"))
@@ -1773,6 +2653,7 @@ class SettingsTab(QWidget):
             return
         with perf_span("settings.section_switch", settings=self.settings, min_ms=10.0):
             self.sections_stack.setCurrentIndex(row)
+            self._sync_current_section_scroll_size()
             self._apply_sections_nav_style()
             try:
                 page = self.sections_stack.currentWidget()
@@ -1797,6 +2678,19 @@ class SettingsTab(QWidget):
                         QTimer.singleShot(0, lambda: self._refresh_gpg_keys_table(show_dialog_on_error=False))
             except Exception:
                 pass
+
+    def _sync_current_section_scroll_size(self) -> None:
+        if not hasattr(self, "sections_stack"):
+            return
+        page = self.sections_stack.currentWidget()
+        if page is None:
+            return
+        try:
+            target_h = max(0, int(page.sizeHint().height()))
+            page.setMinimumHeight(target_h)
+            self.sections_stack.setMinimumHeight(target_h)
+        except Exception:
+            pass
 
     def _on_section_toggled(self, group: QGroupBox, content: QWidget, checked: bool) -> None:
         stacked_mode = hasattr(self, "sections_stack") and self.sections_stack.count() > 0
@@ -1858,65 +2752,47 @@ class SettingsTab(QWidget):
     def _build_section_health_entry(self, *, engaged: bool, issues: List[str]) -> Dict[str, str]:
         detail = "; ".join(str(issue).strip() for issue in issues if str(issue).strip())
         if detail:
-            return {"state": "warn", "detail": detail}
+            return {"state": "needs_setup", "detail": detail}
         if engaged:
-            return {"state": "ok", "detail": ""}
-        return {"state": "neutral", "detail": ""}
+            return {"state": "ready", "detail": ""}
+        return {"state": "not_enabled", "detail": ""}
+
+    def _section_readiness_entry(self, report, *, section_key: str, engaged: bool) -> Dict[str, str]:
+        section_issues = [issue for issue in report.issues if issue.section_key == section_key]
+        detail = "; ".join(format_readiness_issue(issue, include_resolution=False) for issue in section_issues)
+        if any(issue.severity == "required" for issue in section_issues):
+            return {"state": "needs_setup", "detail": detail}
+        if any(issue.severity == "recommended" for issue in section_issues):
+            return {"state": "degraded", "detail": detail}
+        if any(issue.severity == "informational" for issue in section_issues):
+            state_key = next((issue.state_key for issue in section_issues if issue.state_key), "not_enabled")
+            return {"state": state_key, "detail": detail}
+        if engaged:
+            return {"state": "ready", "detail": ""}
+        return {"state": "not_enabled", "detail": ""}
 
     def _build_section_health_snapshot(self) -> Dict[str, Dict[str, str]]:
         snapshot: Dict[str, Dict[str, str]] = {}
+        report = self._current_station_readiness_report()
+        snapshot["freqinout"] = self._section_readiness_entry(report, section_key="freqinout", engaged=True)
+        snapshot["operating_groups"] = self._section_readiness_entry(
+            report,
+            section_key="operating_groups",
+            engaged=True,
+        )
 
-        freqinout_issues: List[str] = []
-        callsign = self.callsign_edit.text().strip().upper() if hasattr(self, "callsign_edit") else ""
-        grid = self.grid6_edit.text().strip().upper() if hasattr(self, "grid6_edit") else ""
-        if not callsign:
-            freqinout_issues.append("Callsign missing")
-        if not grid:
-            freqinout_issues.append("Grid missing")
-        prompt_pairs = [
-            ("Frequency", getattr(self, "freq_enforce_combo", None), getattr(self, "freq_prompt_combo", None)),
-            ("FLDigi", getattr(self, "fldigi_enforce_combo", None), getattr(self, "fldigi_prompt_combo", None)),
-            ("JS8Call", getattr(self, "js8_enforce_combo", None), getattr(self, "js8_prompt_combo", None)),
-        ]
-        for label, mode_combo, prompt_combo in prompt_pairs:
-            try:
-                mode_txt = mode_combo.currentText().strip() if mode_combo else ""
-                prompt_txt = prompt_combo.currentText().strip() if prompt_combo else ""
-            except Exception:
-                mode_txt = ""
-                prompt_txt = ""
-            if mode_txt == "Prompt" and prompt_txt == "Select Interval":
-                freqinout_issues.append(f"{label} prompt interval missing")
-        snapshot["freqinout"] = self._build_section_health_entry(engaged=True, issues=freqinout_issues)
-
-        op_group_issues = [] if self.operating_groups else ["No HF operating groups configured"]
-        snapshot["operating_groups"] = self._build_section_health_entry(engaged=True, issues=op_group_issues)
-
-        js8_directed = self.js8_directed_edit.text().strip() if hasattr(self, "js8_directed_edit") else ""
-        js8_forms = self.js8_forms_edit.text().strip() if hasattr(self, "js8_forms_edit") else ""
-        js8_host = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
-        js8_port = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
-        js8call_path = self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else ""
-        js8spotter_path = self.js8spotter_path_edit.text().strip() if hasattr(self, "js8spotter_path_edit") else ""
-        commstat_path = self.commstat_path_edit.text().strip() if hasattr(self, "commstat_path_edit") else ""
-        js8_engaged = any([js8_directed, js8_forms, js8call_path, js8spotter_path, commstat_path])
-        js8_issues: List[str] = []
-        if js8call_path and not js8_host:
-            js8_issues.append("JS8Call TCP host missing")
-        if js8call_path and not js8_port:
-            js8_issues.append("JS8Call TCP port missing")
-        if js8call_path and not js8_directed:
-            js8_issues.append("JS8Call DIRECTED.TXT path missing")
-        if js8spotter_path and not js8_forms:
-            js8_issues.append("JS8Spotter forms path missing")
-        snapshot["js8call"] = self._build_section_health_entry(engaged=js8_engaged, issues=js8_issues)
+        js8_engaged = any(
+            [
+                hasattr(self, "use_js8call_chk") and self.use_js8call_chk.isChecked(),
+                hasattr(self, "use_js8spotter_chk") and self.use_js8spotter_chk.isChecked(),
+                hasattr(self, "use_commstat_chk") and self.use_commstat_chk.isChecked(),
+            ]
+        )
+        snapshot["js8call"] = self._section_readiness_entry(report, section_key="js8call", engaged=js8_engaged)
 
         default_fldigi_checkin_dir = str(get_fldigi_checkin_dir())
         flrig_path = self.path_edits.get("FLRig").text().strip() if self.path_edits.get("FLRig") else ""
-        flrig_port = self.flrig_port_edit.text().strip() if hasattr(self, "flrig_port_edit") else ""
         fldigi_path = self.path_edits.get("FLDigi").text().strip() if self.path_edits.get("FLDigi") else ""
-        fldigi_host = self.fldigi_host_edit.text().strip() if hasattr(self, "fldigi_host_edit") else ""
-        fldigi_port = self.fldigi_port_edit.text().strip() if hasattr(self, "fldigi_port_edit") else ""
         flmsg_path = self.path_edits.get("FLMsg").text().strip() if self.path_edits.get("FLMsg") else ""
         flamp_path = self.path_edits.get("FLAmp").text().strip() if self.path_edits.get("FLAmp") else ""
         fldigi_log_path = self.fldigi_log_path_edit.text().strip() if hasattr(self, "fldigi_log_path_edit") else ""
@@ -1928,63 +2804,44 @@ class SettingsTab(QWidget):
         flamp_msg_path = self.msg_paths_edits.get("flamp").text().strip() if self.msg_paths_edits.get("flamp") else ""
         fast_light_engaged = any(
             [
-                flrig_path,
-                fldigi_path,
-                flmsg_path,
-                flamp_path,
-                fldigi_log_path,
-                fldigi_has_custom_checkin_dir,
-                flmsg_msg_path,
-                flamp_msg_path,
+                hasattr(self, "use_flrig_chk") and self.use_flrig_chk.isChecked(),
+                hasattr(self, "use_fldigi_chk") and self.use_fldigi_chk.isChecked(),
+                hasattr(self, "use_flmsg_chk") and self.use_flmsg_chk.isChecked(),
+                hasattr(self, "use_flamp_chk") and self.use_flamp_chk.isChecked(),
             ]
         )
-        fast_light_issues: List[str] = []
-        if flrig_path and not flrig_port:
-            fast_light_issues.append("FLRig XML-RPC port missing")
-        if fldigi_path and not fldigi_host:
-            fast_light_issues.append("FLDigi XML-RPC host missing")
-        if fldigi_path and not fldigi_port:
-            fast_light_issues.append("FLDigi XML-RPC port missing")
-        if flmsg_path and not flmsg_msg_path:
-            fast_light_issues.append("FLMsg ICS/Messages path missing")
-        if flamp_path and not flamp_msg_path:
-            fast_light_issues.append("FLAmp FLAMP/rx path missing")
-        if fldigi_has_custom_checkin_dir and not fldigi_path:
-            fast_light_issues.append("FLDigi executable path missing")
-        if flmsg_msg_path and not flmsg_path:
-            fast_light_issues.append("FLMsg executable path missing")
-        if flamp_msg_path and not flamp_path:
-            fast_light_issues.append("FLAmp executable path missing")
-        snapshot["fast_light"] = self._build_section_health_entry(
+        snapshot["fast_light"] = self._section_readiness_entry(
+            report,
+            section_key="fast_light",
             engaged=fast_light_engaged,
-            issues=fast_light_issues,
         )
 
         varac_install = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
         varac_launch = self.varac_launch_cmd_edit.text().strip() if hasattr(self, "varac_launch_cmd_edit") else ""
         varac_incoming = self.msg_paths_edits.get("varac").text().strip() if self.msg_paths_edits.get("varac") else ""
+        varac_outbox = self.varac_outbox_dir_edit.text().strip() if hasattr(self, "varac_outbox_dir_edit") else ""
         varac_bbs_dir = self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
         varac_bbs_archive = (
             self.varac_bbs_archive_dir_edit.text().strip() if hasattr(self, "varac_bbs_archive_dir_edit") else ""
         )
+        varac_bbs_limit_access = bool(
+            hasattr(self, "varac_bbs_limit_access_chk") and self.varac_bbs_limit_access_chk.isChecked()
+        )
+        varac_bbs_allowed_callsigns = self._varac_bbs_selected_callsigns_text()
         varac_auto_archive = bool(
             hasattr(self, "varac_bbs_auto_archive_chk") and self.varac_bbs_auto_archive_chk.isChecked()
         )
-        varac_engaged = any(
-            [varac_install, varac_launch, varac_incoming, varac_bbs_dir, varac_bbs_archive, varac_auto_archive]
+        varac_engaged = bool(hasattr(self, "use_varac_chk") and self.use_varac_chk.isChecked())
+        varac_guard_enabled = bool(
+            hasattr(self, "varac_guard_enabled_chk") and self.varac_guard_enabled_chk.isChecked()
         )
-        varac_issues: List[str] = []
-        if varac_install and not varac_incoming:
-            varac_issues.append("VarAC incoming files path missing")
-        if (varac_incoming or varac_bbs_dir or varac_bbs_archive or varac_auto_archive) and not (
-            varac_install or varac_launch
-        ):
-            varac_issues.append("Install folder or launch override missing")
-        if bool(varac_bbs_dir) != bool(varac_bbs_archive):
-            varac_issues.append("BBS directory/archive setup incomplete")
-        if varac_auto_archive and not (varac_bbs_dir and varac_bbs_archive):
-            varac_issues.append("Auto-archive requires both BBS directories")
-        snapshot["varac"] = self._build_section_health_entry(engaged=varac_engaged, issues=varac_issues)
+        varac_guard_quarantine = (
+            self.varac_guard_quarantine_dir_edit.text().strip()
+            if hasattr(self, "varac_guard_quarantine_dir_edit")
+            else ""
+        )
+        varac_engaged = any([varac_engaged, varac_guard_enabled, varac_guard_quarantine])
+        snapshot["varac"] = self._section_readiness_entry(report, section_key="varac", engaged=varac_engaged)
         return snapshot
 
     def _apply_section_nav_item_health(
@@ -1998,15 +2855,15 @@ class SettingsTab(QWidget):
     ) -> None:
         state = str(state or "neutral").strip().lower()
         item.setData(self.SECTION_HEALTH_STATE_ROLE, state)
-        item.setToolTip(base_title if not detail else f"{base_title}\nNeeds Setup: {detail}")
+        state_label = readiness_state_label(state)
+        item.setToolTip(base_title if not detail else f"{base_title}\n{state_label}: {detail}")
         font = item.font()
-        font.setBold(state == "warn")
+        font.setBold(state in {"warn", "needs_setup", "degraded"})
         item.setFont(font)
-        if state == "warn":
-            bg = QColor(theme.get("warning", "#C99700"))
-            bg.setAlpha(58 if theme.get("bg") == "#E6E8EA" else 78)
-            item.setBackground(QBrush(bg))
-            item.setForeground(QBrush(QColor(theme.get("text", "#222222"))))
+        if state in {"warn", "needs_setup", "degraded", "not_enabled", "external_manual"}:
+            visuals = self._section_nav_visuals(state, selected=False, hovered=False, theme=theme)
+            item.setBackground(QBrush(visuals["bg"]))
+            item.setForeground(QBrush(visuals["fg"]))
             return
         item.setData(Qt.BackgroundRole, None)
         item.setData(Qt.ForegroundRole, None)
@@ -2039,6 +2896,7 @@ class SettingsTab(QWidget):
                 header_btn.setStyleSheet(self._section_header_style(state, theme))
         self._apply_sections_nav_style()
         self._update_sections_nav_size()
+        self._update_readiness_summary_card()
 
     def _apply_collapsed_state(self, group: QGroupBox, content: QWidget, expanded: bool) -> None:
         content.setVisible(expanded)
@@ -2101,7 +2959,7 @@ class SettingsTab(QWidget):
         return f"Control {ctrl}, Scheduler {scheduler}"
 
     def _summary_logging_settings(self) -> str:
-        log_level = self.log_level_combo.currentText().strip() if hasattr(self, "log_level_combo") else "INFO"
+        log_level = self.log_level_combo.currentText().strip() if hasattr(self, "log_level_combo") else "DISABLED"
         return f"Level {log_level}"
 
     def _summary_operating_groups(self) -> str:
@@ -2146,6 +3004,7 @@ class SettingsTab(QWidget):
         install_set = bool(hasattr(self, "varac_path_edit") and self.varac_path_edit.text().strip())
         launch_cmd_set = bool(hasattr(self, "varac_launch_cmd_edit") and self.varac_launch_cmd_edit.text().strip())
         incoming_set = bool(self.msg_paths_edits.get("varac") and self.msg_paths_edits["varac"].text().strip())
+        outbox_set = bool(hasattr(self, "varac_outbox_dir_edit") and self.varac_outbox_dir_edit.text().strip())
         bbs_set = bool(
             hasattr(self, "varac_bbs_dir_edit")
             and self.varac_bbs_dir_edit.text().strip()
@@ -2153,13 +3012,31 @@ class SettingsTab(QWidget):
             and self.varac_bbs_archive_dir_edit.text().strip()
         )
         archive_on = bool(hasattr(self, "varac_bbs_auto_archive_chk") and self.varac_bbs_auto_archive_chk.isChecked())
+        access_summary = bbs_summary_text(
+            {
+                "enable_bbs": self.varac_bbs_enabled_chk.isChecked() if hasattr(self, "varac_bbs_enabled_chk") else False,
+                "limit_access": (
+                    self.varac_bbs_limit_access_chk.isChecked() if hasattr(self, "varac_bbs_limit_access_chk") else False
+                ),
+                "announce": self.varac_bbs_announce_chk.isChecked() if hasattr(self, "varac_bbs_announce_chk") else False,
+                "allowed_callsigns": self._varac_bbs_selected_callsigns_text(),
+            }
+        )
         return (
             f"Install {'set' if install_set else 'missing'}, "
             f"Launch {'override' if launch_cmd_set else 'auto'}, "
             f"Incoming {'set' if incoming_set else 'missing'}, "
+            f"Outbox {'set' if outbox_set else 'missing'}, "
             f"BBS {'set' if bbs_set else 'missing'}, "
-            f"Archive {'on' if archive_on else 'off'}"
+            f"Archive {'on' if archive_on else 'off'}, "
+            f"{access_summary}"
         )
+
+    def _summary_custom_tools(self) -> str:
+        total = len(self._custom_tool_items_cache)
+        if total <= 0:
+            return "No custom tools"
+        return f"{total} custom tool{'s' if total != 1 else ''} configured"
 
     def _summary_launch_control(self) -> str:
         total = len(self._launch_items_cache)
@@ -2213,6 +3090,178 @@ class SettingsTab(QWidget):
         except Exception:
             pass
 
+    def _attempt_fast_light_autofill(self) -> None:
+        self._apply_autofill_results("fast_light", self.software_path_detector.detect_fast_light())
+
+    def _attempt_js8_autofill(self) -> None:
+        self._apply_autofill_results("js8", self.software_path_detector.detect_js8())
+
+    def _attempt_varac_autofill(self) -> None:
+        self._apply_autofill_results("varac", self.software_path_detector.detect_varac())
+
+    def _apply_autofill_results(self, section: str, results: Dict[str, PathDetectionResult]) -> None:
+        filled: List[str] = []
+        preserved: List[str] = []
+        missing: List[str] = []
+        detail_lines: List[str] = []
+        for result in results.values():
+            edit = self._autofill_target_edit(result.key)
+            if edit is None:
+                continue
+            current = edit.text().strip()
+            if not result.path or result.confidence == "not_found":
+                missing.append(result.label)
+                detail_lines.append(f"{result.label}: not found — {result.reason}")
+                continue
+            if current:
+                if self._normalized_path_text(current) == self._normalized_path_text(result.path):
+                    preserved.append(f"{result.label} already matches")
+                    detail_lines.append(
+                        f"{result.label}: kept existing value ({result.confidence}) — {result.reason}"
+                    )
+                else:
+                    preserved.append(result.label)
+                    detail_lines.append(
+                        f"{result.label}: kept existing value; suggested {result.path} ({result.confidence}) — {result.reason}"
+                    )
+                continue
+            edit.setText(result.path)
+            filled.append(f"{result.label} ({result.confidence})")
+            detail_lines.append(f"{result.label}: filled {result.path} ({result.confidence}) — {result.reason}")
+        summary_parts: List[str] = []
+        if filled:
+            summary_parts.append(f"Filled {len(filled)} field(s).")
+        if preserved:
+            summary_parts.append(f"Preserved {len(preserved)} existing field(s).")
+        if missing:
+            summary_parts.append(f"Not found: {len(missing)}.")
+        if not summary_parts:
+            summary_parts.append("No auto-fill changes were available.")
+        self._set_autofill_status(section, " ".join(summary_parts), "\n".join(detail_lines))
+        self._refresh_section_titles()
+        self._refresh_section_nav_health()
+
+    def _set_autofill_status(self, section: str, text: str, tooltip: str) -> None:
+        label = self._autofill_status_labels.get(section)
+        if label is None:
+            return
+        label.setText(text)
+        label.setToolTip(tooltip or text)
+
+    def _autofill_target_edit(self, key: str) -> Optional[QLineEdit]:
+        if key.startswith("message_paths."):
+            origin = key.split(".", 1)[1]
+            return self.msg_paths_edits.get(origin)
+        if key == "fldigi_log_path":
+            return self.fldigi_log_path_edit if hasattr(self, "fldigi_log_path_edit") else None
+        if key == "js8_directed_path":
+            return self.js8_directed_edit if hasattr(self, "js8_directed_edit") else None
+        if key == "js8_forms_path":
+            return self.js8_forms_edit if hasattr(self, "js8_forms_edit") else None
+        if key == "path_js8call":
+            return self.js8call_path_edit if hasattr(self, "js8call_path_edit") else None
+        if key == "path_js8spotter":
+            return self.js8spotter_path_edit if hasattr(self, "js8spotter_path_edit") else None
+        if key == "path_commstat":
+            return self.commstat_path_edit if hasattr(self, "commstat_path_edit") else None
+        if key == "varac_path":
+            return self.varac_path_edit if hasattr(self, "varac_path_edit") else None
+        if key == "varac_ini_path":
+            return self.varac_ini_path_edit if hasattr(self, "varac_ini_path_edit") else None
+        if key == "varac_outbox_dir":
+            return self.varac_outbox_dir_edit if hasattr(self, "varac_outbox_dir_edit") else None
+        if key == "varac_bbs_dir":
+            return self.varac_bbs_dir_edit if hasattr(self, "varac_bbs_dir_edit") else None
+        if key == "varac_bbs_archive_dir":
+            return self.varac_bbs_archive_dir_edit if hasattr(self, "varac_bbs_archive_dir_edit") else None
+        for prog_name, meta in self.PROGRAMS.items():
+            if meta.get("setting_key") == key:
+                return self.path_edits.get(prog_name)
+        return None
+
+    @staticmethod
+    def _normalized_path_text(value: str) -> str:
+        txt = os.path.expanduser(os.path.expandvars(str(value or "").strip()))
+        if not txt:
+            return ""
+        return os.path.normcase(os.path.normpath(txt))
+
+    @staticmethod
+    def _coerce_boolish_setting(value: object) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        txt = str(value or "").strip().lower()
+        if not txt:
+            return None
+        if txt in {"1", "true", "yes", "on"}:
+            return True
+        if txt in {"0", "false", "no", "off"}:
+            return False
+        return None
+
+    def _single_software_used_value(self, data: Dict[str, object], key: str) -> bool:
+        normalized = str(key or "").strip().lower()
+        explicit = self._coerce_boolish_setting(data.get(f"use_{normalized}"))
+        if explicit is not None:
+            return explicit
+        message_paths = data.get("message_paths", {})
+        if not isinstance(message_paths, dict):
+            message_paths = {}
+        if normalized == "flrig":
+            return any(
+                [
+                    str(data.get("path_flrig", "") or "").strip(),
+                    str(data.get("flrig_host", "") or "").strip(),
+                    str(data.get("flrig_port", "") or "").strip(),
+                    str(data.get("control_via", "") or "").strip().upper() == "FLRIG",
+                ]
+            )
+        if normalized == "fldigi":
+            return any(
+                [
+                    str(data.get("path_fldigi", "") or "").strip(),
+                    str(data.get("fldigi_host", "") or "").strip(),
+                    str(data.get("fldigi_port", "") or "").strip(),
+                    str(data.get("fldigi_log_path", "") or "").strip(),
+                    str(data.get("fldigi_checkin_dir", "") or "").strip(),
+                ]
+            )
+        if normalized == "flmsg":
+            return any([str(data.get("path_flmsg", "") or "").strip(), str(message_paths.get("flmsg", "") or "").strip()])
+        if normalized == "flamp":
+            return any([str(data.get("path_flamp", "") or "").strip(), str(message_paths.get("flamp", "") or "").strip()])
+        if normalized == "js8call":
+            return any(
+                [
+                    str(data.get("path_js8call", "") or "").strip(),
+                    str(data.get("js8_host", "") or "").strip(),
+                    str(data.get("js8_port", "") or "").strip(),
+                    str(data.get("js8_directed_path", "") or "").strip(),
+                    str(data.get("js8_forms_path", "") or "").strip(),
+                    str(data.get("control_via", "") or "").strip().upper() == "JS8CALL",
+                ]
+            )
+        if normalized == "js8spotter":
+            return any([str(data.get("path_js8spotter", "") or "").strip(), str(data.get("js8_forms_path", "") or "").strip()])
+        if normalized == "commstat":
+            return bool(str(data.get("path_commstat", "") or "").strip())
+        if normalized == "varac":
+            return any(
+                [
+                    str(data.get("varac_path", "") or "").strip(),
+                    str(data.get("varac_launch_cmd", "") or "").strip(),
+                    str(message_paths.get("varac", "") or "").strip(),
+                    str(data.get("varac_outbox_dir", "") or "").strip(),
+                    str(data.get("varac_bbs_dir", "") or "").strip(),
+                    str(data.get("varac_bbs_archive_dir", "") or "").strip(),
+                ]
+            )
+        return False
+
     # ---------- LOAD/SAVE ---------- #
 
     def _load_settings(self):
@@ -2245,12 +3294,28 @@ class SettingsTab(QWidget):
         if ctrl not in allowed_ctrl:
             ctrl = "FLRig"
         self.control_combo.setCurrentText(ctrl)
-        log_level = (data.get("log_level", "") or "INFO").strip().upper()
+        if hasattr(self, "use_flrig_chk"):
+            self.use_flrig_chk.setChecked(self._single_software_used_value(data, "flrig"))
+        if hasattr(self, "use_fldigi_chk"):
+            self.use_fldigi_chk.setChecked(self._single_software_used_value(data, "fldigi"))
+        if hasattr(self, "use_flmsg_chk"):
+            self.use_flmsg_chk.setChecked(self._single_software_used_value(data, "flmsg"))
+        if hasattr(self, "use_flamp_chk"):
+            self.use_flamp_chk.setChecked(self._single_software_used_value(data, "flamp"))
+        if hasattr(self, "use_js8call_chk"):
+            self.use_js8call_chk.setChecked(self._single_software_used_value(data, "js8call"))
+        if hasattr(self, "use_js8spotter_chk"):
+            self.use_js8spotter_chk.setChecked(self._single_software_used_value(data, "js8spotter"))
+        if hasattr(self, "use_commstat_chk"):
+            self.use_commstat_chk.setChecked(self._single_software_used_value(data, "commstat"))
+        if hasattr(self, "use_varac_chk"):
+            self.use_varac_chk.setChecked(self._single_software_used_value(data, "varac"))
+        log_level = (data.get("log_level", "") or "DISABLED").strip().upper()
         if log_level not in {"DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"}:
-            log_level = "INFO"
+            log_level = "DISABLED"
         if hasattr(self, "log_level_combo"):
             idx = self.log_level_combo.findText(log_level)
-            self.log_level_combo.setCurrentIndex(idx if idx >= 0 else self.log_level_combo.findText("INFO"))
+            self.log_level_combo.setCurrentIndex(idx if idx >= 0 else self.log_level_combo.findText("DISABLED"))
         self.use_scheduler_chk.setChecked(bool(data.get("use_scheduler", True)))
         freq_mode = (data.get("freq_enforcement_mode", "On Schedule Change") or "On Schedule Change").strip()
         fldigi_mode = (data.get("fldigi_enforcement_mode", "On Schedule Change") or "On Schedule Change").strip()
@@ -2362,8 +3427,15 @@ class SettingsTab(QWidget):
                     varac_path = legacy_db
         if hasattr(self, "varac_path_edit"):
             self.varac_path_edit.setText(varac_path)
+        if hasattr(self, "varac_ini_path_edit"):
+            ini_guess = (data.get("varac_ini_path", "") or "").strip()
+            if not ini_guess and varac_path:
+                ini_guess = locate_varac_ini_path(varac_path)
+            self.varac_ini_path_edit.setText(ini_guess)
         if hasattr(self, "varac_launch_cmd_edit"):
             self.varac_launch_cmd_edit.setText((data.get("varac_launch_cmd", "") or "").strip())
+        if hasattr(self, "varac_outbox_dir_edit"):
+            self.varac_outbox_dir_edit.setText((data.get("varac_outbox_dir", "") or "").strip())
         if hasattr(self, "varac_bbs_dir_edit"):
             self.varac_bbs_dir_edit.setText((data.get("varac_bbs_dir", "") or "").strip())
         if hasattr(self, "varac_bbs_archive_dir_edit"):
@@ -2376,6 +3448,31 @@ class SettingsTab(QWidget):
             if day_val not in allowed_days:
                 day_val = "14"
             self.varac_bbs_archive_days_combo.setCurrentText(day_val)
+        if hasattr(self, "varac_bbs_enabled_chk"):
+            self.varac_bbs_enabled_chk.setChecked(bool(data.get("varac_bbs_enabled", False)))
+        if hasattr(self, "varac_bbs_limit_access_chk"):
+            self.varac_bbs_limit_access_chk.setChecked(bool(data.get("varac_bbs_limit_access_enabled", False)))
+        if hasattr(self, "varac_bbs_announce_chk"):
+            self.varac_bbs_announce_chk.setChecked(bool(data.get("varac_bbs_announce_enabled", False)))
+        if hasattr(self, "varac_bbs_callsigns_list"):
+            self._set_varac_bbs_allowed_callsigns(data.get("varac_bbs_allowed_callsigns", ""))
+        if hasattr(self, "varac_guard_enabled_chk"):
+            self.varac_guard_enabled_chk.setChecked(bool(data.get("varac_guard_enabled", False)))
+        if hasattr(self, "varac_guard_mode_combo"):
+            guard_mode = str(data.get("varac_guard_mode", "Log only") or "Log only").strip()
+            if guard_mode not in {"Log only", "Delete unauthorized files", "Quarantine unauthorized files"}:
+                guard_mode = "Log only"
+            self.varac_guard_mode_combo.setCurrentText(guard_mode)
+        if hasattr(self, "varac_guard_quarantine_dir_edit"):
+            self.varac_guard_quarantine_dir_edit.setText(str(data.get("varac_guard_quarantine_dir", "") or "").strip())
+        if hasattr(self, "varac_guard_retry_combo"):
+            retry_txt = str(data.get("varac_guard_retry_seconds", 120) or 120).strip()
+            if retry_txt not in {"30", "60", "120", "300", "600"}:
+                retry_txt = "120"
+            self.varac_guard_retry_combo.setCurrentText(retry_txt)
+        if hasattr(self, "varac_guard_status_label"):
+            guard_summary = str(data.get("varac_guard_last_summary", "") or "").strip()
+            self.varac_guard_status_label.setText(guard_summary or "No VGuard scan yet.")
         if hasattr(self, "sop_export_preamble_edit"):
             self.sop_export_preamble_edit.setPlainText(str(data.get("sop_export_preamble", "") or ""))
         if hasattr(self, "sop_export_postamble_edit"):
@@ -2469,6 +3566,8 @@ class SettingsTab(QWidget):
             if path_key:
                 self.path_edits[prog_name].setText(data.get(path_key, "") or "")
 
+        self._custom_tool_items_cache = self.launch_orchestrator.get_custom_tools()
+        self._refresh_custom_tools_table()
         self._launch_items_cache = self.launch_orchestrator.get_launch_items()
         launch_all = bool(self.settings.get("launch_control_enabled", data.get("launch_control_enabled", True)))
         self.launch_all_with_startup_chk.setChecked(launch_all)
@@ -2560,9 +3659,17 @@ class SettingsTab(QWidget):
 
         data["control_via"] = self.control_combo.currentText().strip()
         data["log_level"] = (
-            self.log_level_combo.currentText().strip().upper() if hasattr(self, "log_level_combo") else "INFO"
+            self.log_level_combo.currentText().strip().upper() if hasattr(self, "log_level_combo") else "DISABLED"
         )
         data["use_scheduler"] = bool(self.use_scheduler_chk.isChecked())
+        data["use_flrig"] = bool(self.use_flrig_chk.isChecked()) if hasattr(self, "use_flrig_chk") else False
+        data["use_fldigi"] = bool(self.use_fldigi_chk.isChecked()) if hasattr(self, "use_fldigi_chk") else False
+        data["use_flmsg"] = bool(self.use_flmsg_chk.isChecked()) if hasattr(self, "use_flmsg_chk") else False
+        data["use_flamp"] = bool(self.use_flamp_chk.isChecked()) if hasattr(self, "use_flamp_chk") else False
+        data["use_js8call"] = bool(self.use_js8call_chk.isChecked()) if hasattr(self, "use_js8call_chk") else False
+        data["use_js8spotter"] = bool(self.use_js8spotter_chk.isChecked()) if hasattr(self, "use_js8spotter_chk") else False
+        data["use_commstat"] = bool(self.use_commstat_chk.isChecked()) if hasattr(self, "use_commstat_chk") else False
+        data["use_varac"] = bool(self.use_varac_chk.isChecked()) if hasattr(self, "use_varac_chk") else False
         freq_mode = self.freq_enforce_combo.currentText().strip()
         fldigi_mode = self.fldigi_enforce_combo.currentText().strip()
         js8_mode = self.js8_enforce_combo.currentText().strip()
@@ -2572,9 +3679,9 @@ class SettingsTab(QWidget):
         missing = []
         if freq_mode == "Prompt" and freq_prompt == "Select Interval":
             missing.append("Frequency Prompt Interval")
-        if fldigi_mode == "Prompt" and fldigi_prompt == "Select Interval":
+        if any([data["use_flrig"], data["use_fldigi"], data["use_flmsg"], data["use_flamp"]]) and fldigi_mode == "Prompt" and fldigi_prompt == "Select Interval":
             missing.append("FLDigi Prompt Interval")
-        if js8_mode == "Prompt" and js8_prompt == "Select Interval":
+        if any([data["use_js8call"], data["use_js8spotter"], data["use_commstat"]]) and js8_mode == "Prompt" and js8_prompt == "Select Interval":
             missing.append("JS8 Prompt Interval")
         if missing:
             QMessageBox.warning(self, "Settings", f"Please select: {', '.join(missing)}.")
@@ -2658,8 +3765,14 @@ class SettingsTab(QWidget):
         varac_path = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
         data["varac_path"] = varac_path
         data["varac_db_path"] = str(Path(varac_path) / "VarAC.db") if varac_path else ""
+        data["varac_ini_path"] = (
+            self.varac_ini_path_edit.text().strip() if hasattr(self, "varac_ini_path_edit") else ""
+        )
         data["varac_launch_cmd"] = (
             self.varac_launch_cmd_edit.text().strip() if hasattr(self, "varac_launch_cmd_edit") else ""
+        )
+        data["varac_outbox_dir"] = (
+            self.varac_outbox_dir_edit.text().strip() if hasattr(self, "varac_outbox_dir_edit") else ""
         )
         data["varac_bbs_dir"] = (
             self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
@@ -2678,6 +3791,36 @@ class SettingsTab(QWidget):
             self.varac_bbs_auto_archive_chk.isChecked() if hasattr(self, "varac_bbs_auto_archive_chk") else False
         )
         data["varac_bbs_auto_archive_days"] = int(days_text)
+        data["varac_bbs_enabled"] = bool(
+            self.varac_bbs_enabled_chk.isChecked() if hasattr(self, "varac_bbs_enabled_chk") else False
+        )
+        data["varac_bbs_limit_access_enabled"] = bool(
+            self.varac_bbs_limit_access_chk.isChecked() if hasattr(self, "varac_bbs_limit_access_chk") else False
+        )
+        data["varac_bbs_announce_enabled"] = bool(
+            self.varac_bbs_announce_chk.isChecked() if hasattr(self, "varac_bbs_announce_chk") else False
+        )
+        data["varac_bbs_allowed_callsigns"] = self._varac_bbs_selected_callsigns_text()
+        data["varac_guard_enabled"] = bool(
+            self.varac_guard_enabled_chk.isChecked() if hasattr(self, "varac_guard_enabled_chk") else False
+        )
+        data["varac_guard_mode"] = (
+            self.varac_guard_mode_combo.currentText().strip() if hasattr(self, "varac_guard_mode_combo") else "Log only"
+        )
+        retry_txt = self.varac_guard_retry_combo.currentText().strip() if hasattr(self, "varac_guard_retry_combo") else "120"
+        if retry_txt not in {"30", "60", "120", "300", "600"}:
+            retry_txt = "120"
+        data["varac_guard_retry_seconds"] = int(retry_txt)
+        data["varac_guard_quarantine_dir"] = (
+            self.varac_guard_quarantine_dir_edit.text().strip() if hasattr(self, "varac_guard_quarantine_dir_edit") else ""
+        )
+        try:
+            if hasattr(self, "varac_ini_path_edit") and self.varac_ini_path_edit.text().strip():
+                self._varac_bbs_ini_sync_state = varac_ini_sync_state_to_json(
+                    get_varac_ini_sync_state(self.varac_ini_path_edit.text().strip())
+                )
+        except Exception:
+            pass
         data["sop_export_preamble"] = (
             self.sop_export_preamble_edit.toPlainText() if hasattr(self, "sop_export_preamble_edit") else ""
         )
@@ -2713,6 +3856,13 @@ class SettingsTab(QWidget):
                     return
             except Exception:
                 pass
+        if data["varac_bbs_limit_access_enabled"] and not data["varac_bbs_allowed_callsigns"]:
+            QMessageBox.warning(
+                self,
+                "Settings",
+                "Limit Access To Callsigns is enabled, but no allowed callsigns are configured.",
+            )
+            return
         data["fldigi_log_path"] = (
             self.fldigi_log_path_edit.text().strip() if hasattr(self, "fldigi_log_path_edit") else ""
         )
@@ -2736,7 +3886,11 @@ class SettingsTab(QWidget):
 
         # Launch Control settings
         self._sync_launch_cache_from_table()
-        data["launch_control_items"] = [dict(item) for item in self._launch_items_cache]
+        data["custom_tool_items"] = [dict(item) for item in self._custom_tool_items_cache]
+        data["launch_control_items"] = self.launch_orchestrator.build_default_items(
+            [dict(item) for item in self._launch_items_cache],
+            custom_tools=self._custom_tool_items_cache,
+        )
         data["launch_control_enabled"] = bool(self.launch_all_with_startup_chk.isChecked())
         data["launch_control_migrated_v1"] = True
         data["launch_readiness_timeout_sec"] = int(self.settings.get("launch_readiness_timeout_sec", 30) or 30)
@@ -2766,6 +3920,13 @@ class SettingsTab(QWidget):
             "JS8Spotter": str(data.get("path_js8spotter", "") or "").strip(),
             "CommStat": str(data.get("path_commstat", "") or "").strip(),
         }
+        for item in data.get("custom_tool_items", []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            command = str(item.get("command", "")).strip()
+            if name and command:
+                launch_target_by_name[name] = command
         self_target_apps = [
             name
             for name, target in launch_target_by_name.items()
@@ -2785,7 +3946,7 @@ class SettingsTab(QWidget):
         data["operating_groups"] = self._table_to_operating_groups()
         data["local_net_profiles"] = self._table_to_local_net_profiles()
         try:
-            set_log_level(str(data.get("log_level", "INFO") or "INFO"))
+            set_log_level(str(data.get("log_level", "DISABLED") or "DISABLED"))
         except Exception:
             pass
 
@@ -2798,8 +3959,16 @@ class SettingsTab(QWidget):
                 "operator_grid6": data["operator_grid6"],
                 "timezone": data["timezone"],
                 "control_via": data["control_via"],
-                "log_level": data.get("log_level", "INFO"),
+                "log_level": data.get("log_level", "DISABLED"),
                 "use_scheduler": data["use_scheduler"],
+                "use_flrig": data.get("use_flrig", False),
+                "use_fldigi": data.get("use_fldigi", False),
+                "use_flmsg": data.get("use_flmsg", False),
+                "use_flamp": data.get("use_flamp", False),
+                "use_js8call": data.get("use_js8call", False),
+                "use_js8spotter": data.get("use_js8spotter", False),
+                "use_commstat": data.get("use_commstat", False),
+                "use_varac": data.get("use_varac", False),
                 "freq_enforcement_mode": data.get("freq_enforcement_mode", "On Schedule Change"),
                 "freq_prompt_interval": data.get("freq_prompt_interval", "Hourly"),
                 "fldigi_enforcement_mode": data.get("fldigi_enforcement_mode", "On Schedule Change"),
@@ -2829,6 +3998,7 @@ class SettingsTab(QWidget):
                 "varac_path": data.get("varac_path", ""),
                 "varac_db_path": data.get("varac_db_path", ""),
                 "varac_launch_cmd": data.get("varac_launch_cmd", ""),
+                "varac_outbox_dir": data.get("varac_outbox_dir", ""),
                 "varac_bbs_dir": data.get("varac_bbs_dir", ""),
                 "varac_bbs_archive_dir": data.get("varac_bbs_archive_dir", ""),
                 "varac_bbs_auto_archive_enabled": data.get("varac_bbs_auto_archive_enabled", False),
@@ -2837,6 +4007,7 @@ class SettingsTab(QWidget):
                 "sop_export_postamble": data.get("sop_export_postamble", ""),
                 "fldigi_log_path": data.get("fldigi_log_path", ""),
                 "fldigi_checkin_dir": data.get("fldigi_checkin_dir", ""),
+                "custom_tool_items": data.get("custom_tool_items", []),
                 "launch_control_items": data.get("launch_control_items", []),
                 "launch_control_enabled": data.get("launch_control_enabled", True),
                 "launch_control_migrated_v1": data.get("launch_control_migrated_v1", True),
@@ -2860,8 +4031,16 @@ class SettingsTab(QWidget):
             self.settings.set("operator_grid6", data["operator_grid6"])
             self.settings.set("timezone", data["timezone"])
             self.settings.set("control_via", data["control_via"])
-            self.settings.set("log_level", data.get("log_level", "INFO"))
+            self.settings.set("log_level", data.get("log_level", "DISABLED"))
             self.settings.set("ui_theme", data.get("ui_theme", "light"))
+            self.settings.set("use_flrig", data.get("use_flrig", False))
+            self.settings.set("use_fldigi", data.get("use_fldigi", False))
+            self.settings.set("use_flmsg", data.get("use_flmsg", False))
+            self.settings.set("use_flamp", data.get("use_flamp", False))
+            self.settings.set("use_js8call", data.get("use_js8call", False))
+            self.settings.set("use_js8spotter", data.get("use_js8spotter", False))
+            self.settings.set("use_commstat", data.get("use_commstat", False))
+            self.settings.set("use_varac", data.get("use_varac", False))
             self.settings.set("freq_enforcement_mode", data.get("freq_enforcement_mode", "On Schedule Change"))
             self.settings.set("freq_prompt_interval", data.get("freq_prompt_interval", "Hourly"))
             self.settings.set("fldigi_enforcement_mode", data.get("fldigi_enforcement_mode", "On Schedule Change"))
@@ -2892,15 +4071,25 @@ class SettingsTab(QWidget):
             self.settings.set("trusted_file_hashes", data.get("trusted_file_hashes", []))
             self.settings.set("varac_path", data.get("varac_path", ""))
             self.settings.set("varac_db_path", data.get("varac_db_path", ""))
+            self.settings.set("varac_ini_path", data.get("varac_ini_path", ""))
             self.settings.set("varac_launch_cmd", data.get("varac_launch_cmd", ""))
+            self.settings.set("varac_outbox_dir", data.get("varac_outbox_dir", ""))
             self.settings.set("varac_bbs_dir", data.get("varac_bbs_dir", ""))
             self.settings.set("varac_bbs_archive_dir", data.get("varac_bbs_archive_dir", ""))
             self.settings.set("varac_bbs_auto_archive_enabled", data.get("varac_bbs_auto_archive_enabled", False))
             self.settings.set("varac_bbs_auto_archive_days", data.get("varac_bbs_auto_archive_days", 14))
+            self.settings.set("varac_bbs_enabled", data.get("varac_bbs_enabled", False))
+            self.settings.set(
+                "varac_bbs_limit_access_enabled",
+                data.get("varac_bbs_limit_access_enabled", False),
+            )
+            self.settings.set("varac_bbs_announce_enabled", data.get("varac_bbs_announce_enabled", False))
+            self.settings.set("varac_bbs_allowed_callsigns", data.get("varac_bbs_allowed_callsigns", ""))
             self.settings.set("sop_export_preamble", data.get("sop_export_preamble", ""))
             self.settings.set("sop_export_postamble", data.get("sop_export_postamble", ""))
             self.settings.set("fldigi_log_path", data.get("fldigi_log_path", ""))
             self.settings.set("fldigi_checkin_dir", data.get("fldigi_checkin_dir", ""))
+            self.settings.set("custom_tool_items", data.get("custom_tool_items", []))
             self.settings.set("launch_control_items", data.get("launch_control_items", []))
             self.settings.set("launch_control_enabled", data.get("launch_control_enabled", True))
             self.settings.set("launch_control_migrated_v1", data.get("launch_control_migrated_v1", True))
@@ -2990,15 +4179,15 @@ class SettingsTab(QWidget):
     def _on_log_level_changed(self, level: str) -> None:
         if self._loading_settings:
             return
-        level = (level or "INFO").strip().upper()
+        level = (level or "DISABLED").strip().upper()
         if level not in {"DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"}:
-            level = "INFO"
-        prev_level = (self.settings.get("log_level", "") or "INFO").strip().upper()
+            level = "DISABLED"
+        prev_level = (self.settings.get("log_level", "") or "DISABLED").strip().upper()
         if not prev_level:
             try:
                 prev_level = get_log_level().strip().upper()
             except Exception:
-                prev_level = "INFO"
+                prev_level = "DISABLED"
         if level == prev_level:
             return
         if level == "DEBUG":
@@ -3012,7 +4201,7 @@ class SettingsTab(QWidget):
             if confirm != QMessageBox.Yes:
                 self.log_level_combo.blockSignals(True)
                 idx = self.log_level_combo.findText(prev_level)
-                self.log_level_combo.setCurrentIndex(idx if idx >= 0 else self.log_level_combo.findText("INFO"))
+                self.log_level_combo.setCurrentIndex(idx if idx >= 0 else self.log_level_combo.findText("DISABLED"))
                 self.log_level_combo.blockSignals(False)
                 return
         try:
@@ -3036,10 +4225,10 @@ class SettingsTab(QWidget):
         minutes = int(self.debug_duration_combo.currentData() or 30)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         until = now_utc + datetime.timedelta(minutes=minutes)
-        current = (self.settings.get("log_level", "") or "INFO").strip().upper()
+        current = (self.settings.get("log_level", "") or "DISABLED").strip().upper()
         if current not in {"DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"}:
-            current = "INFO"
-        prev_level = current if current != "DEBUG" else "INFO"
+            current = "DISABLED"
+        prev_level = current if current != "DEBUG" else "DISABLED"
         try:
             set_log_level("DEBUG")
             self.settings.set_many(
@@ -3109,7 +4298,7 @@ class SettingsTab(QWidget):
                     f"FreqInOut version: {__version__}\n"
                     f"Exported: {datetime.datetime.now(datetime.timezone.utc).isoformat()}\n"
                     f"Platform: {platform.platform()}\n"
-                    f"Log level: {(self.settings.get('log_level', 'INFO') or 'INFO')}\n"
+                    f"Log level: {(self.settings.get('log_level', 'DISABLED') or 'DISABLED')}\n"
                 )
                 zf.writestr("diagnostics_info.txt", info)
         except Exception as e:
@@ -3289,9 +4478,8 @@ class SettingsTab(QWidget):
                 min_w = int(combo.minimumWidth())
                 max_curr = int(combo.maximumWidth())
             except Exception:
-                continue
-            if min_w <= 0 or min_w != max_curr:
-                continue
+                min_w = 0
+                max_curr = 16777215
             try:
                 item_w = max((int(combo.fontMetrics().horizontalAdvance(combo.itemText(i))) for i in range(combo.count())), default=0)
             except Exception:
@@ -3300,15 +4488,17 @@ class SettingsTab(QWidget):
             try:
                 base_w = int(base)
             except Exception:
-                base_w = min_w
+                base_w = max(min_w, int(combo.sizeHint().width()))
                 try:
                     combo.setProperty("_fio_base_min_width", base_w)
                 except Exception:
                     pass
             target = max(base_w, min(max_w, item_w + 44))
             try:
-                combo.setMaximumWidth(16777215)
+                if max_curr < 16777215 and target > max_curr:
+                    combo.setMaximumWidth(16777215)
                 combo.setMinimumWidth(target)
+                combo.view().setMinimumWidth(target)
             except Exception:
                 pass
 
@@ -3365,9 +4555,11 @@ class SettingsTab(QWidget):
             self.fldigi_checkin_dir_edit,
             self.fldigi_log_path_edit,
             self.varac_bbs_dir_edit,
+            self.varac_outbox_dir_edit,
             self.varac_bbs_archive_dir_edit,
             self.varac_path_edit,
             self.varac_launch_cmd_edit,
+            self.varac_guard_quarantine_dir_edit,
             self.flrig_port_edit,
         ]
         edits.extend(self.msg_paths_edits.values())
@@ -3386,14 +4578,25 @@ class SettingsTab(QWidget):
             self.js8_enforce_combo,
             self.js8_prompt_combo,
             self.varac_bbs_archive_days_combo,
+            self.varac_guard_mode_combo,
+            self.varac_guard_retry_combo,
         ]
         for combo in combos:
             combo.currentIndexChanged.connect(self._mark_settings_dirty)
 
         checks = [
             self.use_scheduler_chk,
+            self.use_flrig_chk,
+            self.use_fldigi_chk,
+            self.use_flmsg_chk,
+            self.use_flamp_chk,
+            self.use_js8call_chk,
+            self.use_js8spotter_chk,
+            self.use_commstat_chk,
+            self.use_varac_chk,
             self.js8_mark_retrieved_chk,
             self.varac_bbs_auto_archive_chk,
+            self.varac_guard_enabled_chk,
             self.launch_all_with_startup_chk,
         ]
         checks.extend(self.radio_checkboxes.values())
@@ -3438,7 +4641,160 @@ class SettingsTab(QWidget):
             return True
         return False
 
+    def _custom_tool_command(self, name: str) -> str:
+        target = str(name or "").strip().lower()
+        if not target:
+            return ""
+        for item in self._custom_tool_items_cache:
+            item_name = str(item.get("name", "")).strip().lower()
+            if item_name == target:
+                return str(item.get("command", "")).strip()
+        return ""
+
+    def _refresh_custom_tools_table(self) -> None:
+        if not hasattr(self, "custom_tools_table"):
+            return
+        current_row = self.custom_tools_table.currentRow()
+        self._custom_tools_table_loading = True
+        self.custom_tools_table.blockSignals(True)
+        self.custom_tools_table.setRowCount(len(self._custom_tool_items_cache))
+        for row, item in enumerate(self._custom_tool_items_cache):
+            name_item = QTableWidgetItem(str(item.get("name", "")).strip())
+            name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.custom_tools_table.setItem(row, 0, name_item)
+
+            cmd_item = QTableWidgetItem(str(item.get("command", "")).strip())
+            cmd_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.custom_tools_table.setItem(row, 1, cmd_item)
+        self.custom_tools_table.blockSignals(False)
+        self._custom_tools_table_loading = False
+        if self.custom_tools_table.rowCount() > 0:
+            self.custom_tools_table.selectRow(min(max(current_row, 0), self.custom_tools_table.rowCount() - 1))
+        if hasattr(self, "custom_tools_summary_label"):
+            self.custom_tools_summary_label.setText(self._summary_custom_tools())
+        self._update_custom_tool_buttons()
+        self._refresh_section_titles()
+
+    def _update_custom_tool_buttons(self) -> None:
+        row = self.custom_tools_table.currentRow() if hasattr(self, "custom_tools_table") else -1
+        has_rows = bool(hasattr(self, "custom_tools_table") and self.custom_tools_table.rowCount() > 0)
+        can_select = has_rows and row >= 0
+        if hasattr(self, "custom_tool_edit_btn"):
+            self.custom_tool_edit_btn.setEnabled(can_select)
+        if hasattr(self, "custom_tool_remove_btn"):
+            self.custom_tool_remove_btn.setEnabled(can_select)
+        if hasattr(self, "custom_tool_up_btn"):
+            self.custom_tool_up_btn.setEnabled(bool(can_select and row > 0))
+        if hasattr(self, "custom_tool_down_btn"):
+            self.custom_tool_down_btn.setEnabled(bool(can_select and row < self.custom_tools_table.rowCount() - 1))
+
+    def _validate_custom_tool(self, name: str, command: str, *, previous_name: str = "") -> str:
+        name_txt = str(name or "").strip()
+        command_txt = str(command or "").strip()
+        if not name_txt:
+            return "Tool Name is required."
+        if not command_txt:
+            return "Launch Command is required."
+        if name_txt.lower() in {name.lower() for name in LAUNCH_APP_ORDER} and name_txt.lower() != previous_name.lower():
+            return f"{name_txt} is already a built-in Launch Control app name."
+        target = name_txt.lower()
+        previous = str(previous_name or "").strip().lower()
+        for item in self._custom_tool_items_cache:
+            existing_name = str(item.get("name", "")).strip()
+            if existing_name.lower() == target and existing_name.lower() != previous:
+                return f"A custom tool named {name_txt} already exists."
+        return ""
+
+    def _add_custom_tool(self) -> None:
+        dialog = _CustomToolDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        name, command = dialog.values()
+        issue = self._validate_custom_tool(name, command)
+        if issue:
+            QMessageBox.warning(self, "Custom Tools", issue)
+            return
+        self._custom_tool_items_cache.append({"name": name, "command": command})
+        self._launch_items_cache = self.launch_orchestrator.build_default_items(
+            self._launch_items_cache,
+            custom_tools=self._custom_tool_items_cache,
+        )
+        self._refresh_custom_tools_table()
+        self._refresh_launch_control_table()
+        if self.custom_tools_table.rowCount() > 0:
+            self.custom_tools_table.selectRow(self.custom_tools_table.rowCount() - 1)
+        self._mark_settings_dirty()
+
+    def _edit_custom_tool(self) -> None:
+        if not hasattr(self, "custom_tools_table"):
+            return
+        row = self.custom_tools_table.currentRow()
+        if row < 0 or row >= len(self._custom_tool_items_cache):
+            return
+        existing = self._custom_tool_items_cache[row]
+        dialog = _CustomToolDialog(
+            self,
+            name=str(existing.get("name", "")).strip(),
+            command=str(existing.get("command", "")).strip(),
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        name, command = dialog.values()
+        previous_name = str(existing.get("name", "")).strip()
+        issue = self._validate_custom_tool(name, command, previous_name=previous_name)
+        if issue:
+            QMessageBox.warning(self, "Custom Tools", issue)
+            return
+        self._custom_tool_items_cache[row] = {"name": name, "command": command}
+        self._launch_items_cache = self.launch_orchestrator.build_default_items(
+            self._launch_items_cache,
+            custom_tools=self._custom_tool_items_cache,
+        )
+        self._refresh_custom_tools_table()
+        self._refresh_launch_control_table()
+        if row < self.custom_tools_table.rowCount():
+            self.custom_tools_table.selectRow(row)
+        self._mark_settings_dirty()
+
+    def _remove_custom_tool(self) -> None:
+        if not hasattr(self, "custom_tools_table"):
+            return
+        row = self.custom_tools_table.currentRow()
+        if row < 0 or row >= len(self._custom_tool_items_cache):
+            return
+        del self._custom_tool_items_cache[row]
+        self._launch_items_cache = self.launch_orchestrator.build_default_items(
+            self._launch_items_cache,
+            custom_tools=self._custom_tool_items_cache,
+        )
+        self._refresh_custom_tools_table()
+        self._refresh_launch_control_table()
+        self._mark_settings_dirty()
+
+    def _move_custom_tool(self, direction: int) -> None:
+        if direction == 0 or not hasattr(self, "custom_tools_table"):
+            return
+        row = self.custom_tools_table.currentRow()
+        target_row = row + direction
+        if row < 0 or target_row < 0 or target_row >= len(self._custom_tool_items_cache):
+            return
+        self._custom_tool_items_cache[row], self._custom_tool_items_cache[target_row] = (
+            self._custom_tool_items_cache[target_row],
+            self._custom_tool_items_cache[row],
+        )
+        self._launch_items_cache = self.launch_orchestrator.build_default_items(
+            self._launch_items_cache,
+            custom_tools=self._custom_tool_items_cache,
+        )
+        self._refresh_custom_tools_table()
+        self._refresh_launch_control_table()
+        if target_row < self.custom_tools_table.rowCount():
+            self.custom_tools_table.selectRow(target_row)
+        self._mark_settings_dirty()
+
     def _is_launch_item_configured(self, name: str) -> bool:
+        if self._custom_tool_command(name):
+            return True
         if name == "VarAC":
             path_val = self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else ""
             launch_cmd = self.varac_launch_cmd_edit.text().strip() if hasattr(self, "varac_launch_cmd_edit") else ""
@@ -3484,8 +4840,9 @@ class SettingsTab(QWidget):
             name = str(item.get("name", "")).strip()
             if name:
                 existing_map[name] = item
+        catalog = self.launch_orchestrator.launch_catalog_order(self._custom_tool_items_cache)
         if not existing_map:
-            for name in LAUNCH_APP_ORDER:
+            for name in catalog:
                 existing_map[name] = {"name": name, "enabled": True, "startup": False}
         ordered: List[Dict[str, object]] = []
         seen: set[str] = set()
@@ -3493,7 +4850,7 @@ class SettingsTab(QWidget):
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name", "")).strip()
-            if name not in LAUNCH_APP_ORDER or name in seen:
+            if name not in catalog or name in seen:
                 continue
             seen.add(name)
             ordered.append(
@@ -3503,7 +4860,7 @@ class SettingsTab(QWidget):
                     "startup": bool(item.get("startup", False)),
                 }
             )
-        for name in LAUNCH_APP_ORDER:
+        for name in catalog:
             if name in seen:
                 continue
             item = existing_map.get(name, {"name": name, "enabled": True, "startup": False})
@@ -3593,7 +4950,7 @@ class SettingsTab(QWidget):
             if isinstance(item, dict)
         }
         reset_items: List[Dict[str, object]] = []
-        for name in LAUNCH_APP_ORDER:
+        for name in self.launch_orchestrator.launch_catalog_order(self._custom_tool_items_cache):
             prev = existing_map.get(name, {})
             reset_items.append(
                 {
@@ -3615,6 +4972,8 @@ class SettingsTab(QWidget):
 
     def _launch_configured_now(self) -> None:
         self._sync_launch_cache_from_table()
+        if hasattr(self.settings, "set"):
+            self.settings.set("custom_tool_items", [dict(item) for item in self._custom_tool_items_cache])
         started = self.launch_orchestrator.start_manual_sequence(self._launch_items_cache)
         if not started:
             QMessageBox.information(self, "Launch Control", "No enabled configured applications to launch.")
@@ -3683,39 +5042,10 @@ class SettingsTab(QWidget):
 
     def _detect_system_timezone(self) -> str:
         """
-        Detect a reasonable default timezone from the system clock.
-        Returns a value in TIMEZONE_CHOICES when possible; otherwise 'UTC'.
+        Detect the current system timezone using OS-specific identifiers when
+        available, then normalize that result into one of TIMEZONE_CHOICES.
         """
-        try:
-            local_dt = datetime.datetime.now().astimezone()
-            tzinfo = local_dt.tzinfo
-            if tzinfo is None:
-                return "UTC"
-
-            # zoneinfo-based tz will have .key
-            tz_key = getattr(tzinfo, "key", None)
-            if tz_key and tz_key in TIMEZONE_CHOICES:
-                return tz_key
-
-            # Windows-style sometimes uses 'Central Standard Time', etc.
-            # We just approximate based on offset if we can.
-            offset = tzinfo.utcoffset(local_dt) or datetime.timedelta(0)
-            hours = int(offset.total_seconds() // 3600)
-
-            # Simple offset-based map (approximate)
-            if hours == -5:
-                return "America/New_York"
-            if hours == -6:
-                return "America/Chicago"
-            if hours == -7:
-                return "America/Denver"
-            if hours == -8:
-                return "America/Los_Angeles"
-
-            # Fallback
-            return "UTC"
-        except Exception:
-            return "UTC"
+        return detect_system_timezone_name("UTC")
 
     def _ui_tz_abbr(self, tz_name: str, fallback: str) -> str:
         mapping = {
@@ -3893,6 +5223,7 @@ class SettingsTab(QWidget):
     def _refresh_running_status(self):
         _perf_t0 = time.perf_counter()
         theme = resolve_theme(self.settings)
+        self._rebuild_status_indicators()
         port_override: Optional[int] = None
         flrig_port_override: Optional[int] = None
         fldigi_host_override: Optional[str] = None
@@ -3940,6 +5271,7 @@ class SettingsTab(QWidget):
         if hasattr(self, "varac_path_edit"):
             varac_info = snapshot.get("VarAC", {})
             self.varac_path_edit.setToolTip(str(varac_info.get("tooltip", "Not running")))
+        self._update_readiness_summary_card()
         emit_span(
             "settings.refresh_running_status",
             (time.perf_counter() - _perf_t0) * 1000.0,
@@ -3958,11 +5290,14 @@ class SettingsTab(QWidget):
                     f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
                 )
                 self.loading_label.setVisible(False)
+            self._rebuild_status_indicators()
             self._refresh_running_status()
             self._update_launch_selected_state()
             self._update_op_group_action_buttons()
             self._update_local_net_action_buttons()
             self._set_save_button_state("info" if self._settings_dirty else "success")
+            if hasattr(self, "copy_readiness_summary_btn"):
+                self.copy_readiness_summary_btn.setStyleSheet(button_style("secondary", theme))
             if hasattr(self, "open_logs_btn"):
                 self.open_logs_btn.setStyleSheet(button_style("primary", theme))
             if hasattr(self, "open_log_folder_btn"):
@@ -3976,6 +5311,11 @@ class SettingsTab(QWidget):
             if hasattr(self, "sections_nav_list"):
                 self._apply_sections_nav_style()
                 self._refresh_section_nav_health()
+            for btn in getattr(self, "_context_help_buttons", []):
+                try:
+                    btn.setStyleSheet(button_style("secondary", theme))
+                except Exception:
+                    continue
             self._update_enforcement_visibility()
             self._update_logging_actions_layout()
             self._apply_accessibility_width_guards()
@@ -4045,12 +5385,16 @@ class SettingsTab(QWidget):
 
         mode_combo = QComboBox()
         mode_combo.addItems(["Digi", "SSB"])
+        mode_combo.setMinimumWidth(110)
+        mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         form.addRow("Mode:", mode_combo)
 
         band_combo = QComboBox()
         band_combo.addItems([
             "20M", "40M", "80M", "2M", "6M", "10M", "12M", "15M", "17M", "30M", "60M",
         ])
+        band_combo.setMinimumWidth(110)
+        band_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         form.addRow("Band:", band_combo)
 
         freq_edit = QLineEdit()
@@ -4059,6 +5403,8 @@ class SettingsTab(QWidget):
 
         vfo_combo = QComboBox()
         vfo_combo.addItems(["A", "B"])
+        vfo_combo.setMinimumWidth(110)
+        vfo_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         form.addRow("VFO:", vfo_combo)
 
         fldigi_mode_combo = QComboBox()
@@ -4608,6 +5954,8 @@ class SettingsTab(QWidget):
 
         mode_combo = QComboBox()
         mode_combo.addItems(["Digi", "SSB"])
+        mode_combo.setMinimumWidth(110)
+        mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         mode_val = normalize_operating_group_mode(mode, band)
         if mode_val in ["Digi", "SSB"]:
             mode_combo.setCurrentText(mode_val)
@@ -4629,6 +5977,8 @@ class SettingsTab(QWidget):
                 "60M",
             ]
         )
+        band_combo.setMinimumWidth(110)
+        band_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         if band and band_combo.findText(band) >= 0:
             band_combo.setCurrentText(band)
         form.addRow("Band:", band_combo)
@@ -4638,6 +5988,8 @@ class SettingsTab(QWidget):
 
         vfo_combo = QComboBox()
         vfo_combo.addItems(["A", "B"])
+        vfo_combo.setMinimumWidth(110)
+        vfo_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         vfo_val = vfo_txt.strip().upper()
         if vfo_val in ("A", "B"):
             vfo_combo.setCurrentText(vfo_val)
@@ -5584,15 +6936,61 @@ class SettingsTab(QWidget):
             return
         if hasattr(self, "varac_path_edit"):
             self.varac_path_edit.setText(fn)
+        if hasattr(self, "varac_ini_path_edit") and not self.varac_ini_path_edit.text().strip():
+            ini_guess = locate_varac_ini_path(fn)
+            if ini_guess:
+                self.varac_ini_path_edit.setText(ini_guess)
         data = self.settings.all() if hasattr(self.settings, "all") else {}
         if isinstance(data, dict):
             data["varac_path"] = fn
             data["varac_db_path"] = str(Path(fn) / "VarAC.db")
+            if hasattr(self, "varac_ini_path_edit"):
+                data["varac_ini_path"] = self.varac_ini_path_edit.text().strip()
             if hasattr(self.settings, "_data"):
                 self.settings._data = data  # type: ignore[attr-defined]
         if hasattr(self.settings, "set"):
             self.settings.set("varac_path", fn)
             self.settings.set("varac_db_path", str(Path(fn) / "VarAC.db"))
+            if hasattr(self, "varac_ini_path_edit"):
+                self.settings.set("varac_ini_path", self.varac_ini_path_edit.text().strip())
+        self._settings_dirty = False
+        self._set_save_button_state("success")
+
+    def _choose_varac_ini_path(self):
+        start = self.varac_ini_path_edit.text().strip() if hasattr(self, "varac_ini_path_edit") else ""
+        if not start and hasattr(self, "varac_path_edit"):
+            start = self.varac_path_edit.text().strip()
+        fn, _ = QFileDialog.getOpenFileName(self, "Select VarAC.ini file", start, "INI Files (*.ini);;All Files (*)")
+        if not fn:
+            return
+        self.varac_ini_path_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("varac_ini_path", fn)
+        else:
+            data = self.settings.all()
+            data["varac_ini_path"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        try:
+            self._varac_bbs_ini_sync_state = varac_ini_sync_state_to_json(get_varac_ini_sync_state(fn))
+        except Exception:
+            self._varac_bbs_ini_sync_state = ""
+        self._settings_dirty = False
+        self._set_save_button_state("success")
+
+    def _choose_varac_outbox_dir(self):
+        start = self.varac_outbox_dir_edit.text().strip() if hasattr(self, "varac_outbox_dir_edit") else ""
+        fn = QFileDialog.getExistingDirectory(self, "Select VarAC Outbox directory", start)
+        if not fn:
+            return
+        self.varac_outbox_dir_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("varac_outbox_dir", fn)
+        else:
+            data = self.settings.all()
+            data["varac_outbox_dir"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
         self._settings_dirty = False
         self._set_save_button_state("success")
 
@@ -5627,6 +7025,170 @@ class SettingsTab(QWidget):
                 self.settings._data = data  # type: ignore[attr-defined]
         self._settings_dirty = False
         self._set_save_button_state("success")
+
+    def _choose_varac_guard_quarantine_dir(self):
+        start = (
+            self.varac_guard_quarantine_dir_edit.text().strip()
+            if hasattr(self, "varac_guard_quarantine_dir_edit")
+            else ""
+        )
+        fn = QFileDialog.getExistingDirectory(self, "Select VGuard quarantine directory", start)
+        if not fn:
+            return
+        self.varac_guard_quarantine_dir_edit.setText(fn)
+        if hasattr(self.settings, "set"):
+            self.settings.set("varac_guard_quarantine_dir", fn)
+        else:
+            data = self.settings.all()
+            data["varac_guard_quarantine_dir"] = fn
+            if hasattr(self.settings, "_data"):
+                self.settings._data = data  # type: ignore[attr-defined]
+        self._settings_dirty = False
+        self._set_save_button_state("success")
+
+    def _sync_varac_bbs_from_ini(self) -> None:
+        ini_path = locate_varac_ini_path(
+            self.varac_ini_path_edit.text().strip() if hasattr(self, "varac_ini_path_edit") else "",
+            self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else "",
+        )
+        if not ini_path:
+            QMessageBox.warning(self, "VarAC BBS", "Set VarAC INI File or VarAC Install Folder before syncing BBS settings.")
+            return
+        try:
+            bbs_cfg = load_varac_bbs_config(ini_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "VarAC BBS", f"Could not read VarAC BBS settings:\n{exc}")
+            return
+        if hasattr(self, "varac_ini_path_edit"):
+            self.varac_ini_path_edit.setText(str(bbs_cfg.get("ini_path", "") or ""))
+        if hasattr(self, "varac_bbs_enabled_chk"):
+            self.varac_bbs_enabled_chk.setChecked(bool(bbs_cfg.get("enable_bbs", False)))
+        if hasattr(self, "varac_bbs_limit_access_chk"):
+            self.varac_bbs_limit_access_chk.setChecked(bool(bbs_cfg.get("limit_access", False)))
+        if hasattr(self, "varac_bbs_announce_chk"):
+            self.varac_bbs_announce_chk.setChecked(bool(bbs_cfg.get("announce", False)))
+        if hasattr(self, "varac_bbs_callsigns_list"):
+            self._set_varac_bbs_allowed_callsigns(bbs_cfg.get("allowed_callsigns", []))
+        bbs_dir = str(bbs_cfg.get("bbs_directory", "") or "").strip()
+        bbs_dir_changed = False
+        if bbs_dir and hasattr(self, "varac_bbs_dir_edit"):
+            current_bbs_dir = self.varac_bbs_dir_edit.text().strip()
+            bbs_dir_changed = current_bbs_dir != bbs_dir
+            self.varac_bbs_dir_edit.setText(bbs_dir)
+        summary = f"Synced [BBS] from {ini_path}. {bbs_summary_text(bbs_cfg)}."
+        if bbs_dir:
+            summary += f" BBS Directory applied from INI{' (updated)' if bbs_dir_changed else ''}."
+        self.varac_bbs_sync_status_label.setText(summary)
+        self.varac_bbs_sync_status_label.setToolTip(summary)
+        try:
+            self._varac_bbs_ini_sync_state = varac_ini_sync_state_to_json(get_varac_ini_sync_state(ini_path))
+        except Exception:
+            self._varac_bbs_ini_sync_state = ""
+        self._refresh_section_titles()
+
+    def _sync_varac_bbs_to_ini(self) -> None:
+        ini_path = locate_varac_ini_path(
+            self.varac_ini_path_edit.text().strip() if hasattr(self, "varac_ini_path_edit") else "",
+            self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else "",
+        )
+        if not ini_path:
+            QMessageBox.warning(self, "VarAC BBS", "Set VarAC INI File or VarAC Install Folder before writing BBS settings.")
+            return
+        try:
+            current_state = get_varac_ini_sync_state(ini_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "VarAC BBS", f"Could not inspect VarAC.ini before saving:\n{exc}")
+            return
+        if self._varac_bbs_ini_sync_state and not varac_ini_sync_state_matches(self._varac_bbs_ini_sync_state, current_state):
+            response = QMessageBox.warning(
+                self,
+                "VarAC BBS",
+                "VarAC.ini changed since the last sync. Reload from disk before overwriting, or continue to overwrite only the [BBS] section?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if response == QMessageBox.Cancel:
+                return
+            if response == QMessageBox.Yes:
+                self._sync_varac_bbs_from_ini()
+                return
+        try:
+            updated_state = write_varac_bbs_config(
+                ini_path,
+                enable_bbs=bool(self.varac_bbs_enabled_chk.isChecked()) if hasattr(self, "varac_bbs_enabled_chk") else False,
+                bbs_directory=self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else "",
+                limit_access=bool(self.varac_bbs_limit_access_chk.isChecked()) if hasattr(self, "varac_bbs_limit_access_chk") else False,
+                allowed_callsigns=self._varac_bbs_selected_callsigns_text(),
+                announce=bool(self.varac_bbs_announce_chk.isChecked()) if hasattr(self, "varac_bbs_announce_chk") else False,
+                expected_sync_state=current_state,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "VarAC BBS", f"Could not write VarAC BBS settings:\n{exc}")
+            return
+        self._varac_bbs_ini_sync_state = varac_ini_sync_state_to_json(updated_state)
+        summary_payload = {
+            "enable_bbs": self.varac_bbs_enabled_chk.isChecked() if hasattr(self, "varac_bbs_enabled_chk") else False,
+            "limit_access": self.varac_bbs_limit_access_chk.isChecked() if hasattr(self, "varac_bbs_limit_access_chk") else False,
+            "announce": self.varac_bbs_announce_chk.isChecked() if hasattr(self, "varac_bbs_announce_chk") else False,
+            "allowed_callsigns": self._varac_bbs_selected_callsigns_text(),
+        }
+        summary = f"Wrote [BBS] to {ini_path}. {bbs_summary_text(summary_payload)}."
+        self.varac_bbs_sync_status_label.setText(summary)
+        self.varac_bbs_sync_status_label.setToolTip(summary)
+        self._mark_settings_dirty()
+        self._refresh_section_titles()
+
+    def _sync_varac_bbs_to_ini(self) -> None:
+        ini_path = locate_varac_ini_path(
+            self.varac_ini_path_edit.text().strip() if hasattr(self, "varac_ini_path_edit") else "",
+            self.varac_path_edit.text().strip() if hasattr(self, "varac_path_edit") else "",
+        )
+        if not ini_path:
+            QMessageBox.warning(self, "VarAC BBS", "Set VarAC INI File or VarAC Install Folder before writing BBS settings.")
+            return
+        try:
+            current_state = get_varac_ini_sync_state(ini_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "VarAC BBS", f"Could not inspect VarAC.ini before saving:\n{exc}")
+            return
+        if self._varac_bbs_ini_sync_state and not varac_ini_sync_state_matches(self._varac_bbs_ini_sync_state, current_state):
+            response = QMessageBox.warning(
+                self,
+                "VarAC BBS",
+                "VarAC.ini changed since the last sync. Reload from disk before overwriting, or continue to overwrite only the [BBS] section?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if response == QMessageBox.Cancel:
+                return
+            if response == QMessageBox.Yes:
+                self._sync_varac_bbs_from_ini()
+                return
+        try:
+            updated_state = write_varac_bbs_config(
+                ini_path,
+                enable_bbs=bool(self.varac_bbs_enabled_chk.isChecked()) if hasattr(self, "varac_bbs_enabled_chk") else False,
+                bbs_directory=self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else "",
+                limit_access=bool(self.varac_bbs_limit_access_chk.isChecked()) if hasattr(self, "varac_bbs_limit_access_chk") else False,
+                allowed_callsigns=self._varac_bbs_selected_callsigns_text(),
+                announce=bool(self.varac_bbs_announce_chk.isChecked()) if hasattr(self, "varac_bbs_announce_chk") else False,
+                expected_sync_state=current_state,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "VarAC BBS", f"Could not write VarAC BBS settings:\n{exc}")
+            return
+        self._varac_bbs_ini_sync_state = varac_ini_sync_state_to_json(updated_state)
+        summary_payload = {
+            "enable_bbs": self.varac_bbs_enabled_chk.isChecked() if hasattr(self, "varac_bbs_enabled_chk") else False,
+            "limit_access": self.varac_bbs_limit_access_chk.isChecked() if hasattr(self, "varac_bbs_limit_access_chk") else False,
+            "announce": self.varac_bbs_announce_chk.isChecked() if hasattr(self, "varac_bbs_announce_chk") else False,
+            "allowed_callsigns": self._varac_bbs_selected_callsigns_text(),
+        }
+        summary = f"Wrote [BBS] to {ini_path}. {bbs_summary_text(summary_payload)}."
+        self.varac_bbs_sync_status_label.setText(summary)
+        self.varac_bbs_sync_status_label.setToolTip(summary)
+        self._mark_settings_dirty()
+        self._refresh_section_titles()
 
     def _choose_fldigi_checkin_dir(self):
         fn = QFileDialog.getExistingDirectory(self, "Select FLDigi check-in folder")
