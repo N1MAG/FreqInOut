@@ -216,7 +216,9 @@
 
   <h2 id="messages">Messages</h2>
   <p><strong>Purpose</strong>: unified traffic review, filtering, read state, and file-level actions.</p>
-  <p><strong>SitRep note</strong>: CommStat and JS8Spotter sitreps are shown under the shared <code>SitRep</code> message family. CommStat rows can surface source family, receipt path (<code>JS8</code>, <code>Internet</code>, or both), remarks, and brevity decode in the message detail view.</p>
+  <p><strong>CommStat and SitRep note</strong>: status-bearing CommStat and JS8Spotter traffic still feeds the shared <code>SitRep</code> model used by Map, Operator History, and latest-status views. The Messages tab now also surfaces first-class CommStat artifact rows as <code>CommStat StatRep</code>, <code>CommStat Message</code>, and <code>CommStat Alert</code>. This means operators can review the original CommStat artifact without losing the normalized shared SitRep view used for pinning and rollups.</p>
+  <p><strong>CommStat filtering</strong>: use <code>MSG Type</code> for <code>CommStat</code>, <code>CommStat/StatRep</code>, <code>CommStat/Message</code>, and <code>CommStat/Alert</code>. Use the <code>To</code> filter to narrow by report group or target, including groups discovered from live CommStat traffic even when they are not part of your configured operating groups.</p>
+  <p><strong>CommStat dedupe</strong>: FIO now merges near-time mirrored CommStat status artifacts so the same real report is not shown twice when it is seen through CommStat tables and JS8Spotter-adjacent paths. The fused SitRep model stays responsible for map pinning and latest status by callsign.</p>
 
   <h3 id="messages-header-actions">Header Actions</h3>
   <table>
@@ -277,7 +279,12 @@
   <h3 id="messages-bbs-archive">BBS Archive and Auto-Archive</h3>
   <p>Use this to keep your BBS folder clean without deleting files.</p>
   <ul class="section-list">
+    <li><strong>BBS concept</strong>: in VarAC, the <code>BBS Directory</code> is the live folder remote stations can browse and pull from. It is not the same as <code>Incoming Files</code>, which is where files addressed to you arrive, and it is not the same as <code>Outbox</code>, which is where files you want to send directly are staged.</li>
+    <li><strong>Ordinary workflow</strong>: use <code>+BBS</code> or a compose-stage copy choice when you want a file offered through the VarAC BBS. Use <code>Outbox</code> when you want VarAC to send a file directly to a station instead of publishing it for later pickup.</li>
     <li><strong>Manage VarAC BBS &amp; Vault</strong>: opens <code>Settings &gt; VarAC Settings</code>, which is the authoritative place to configure BBS folders, access controls, Managed BBS Vault, and INI sync for the current Station Default radio context.</li>
+    <li><strong>Managed BBS Services concept</strong>: FreqInOut keeps the live BBS path stable for VarAC while publishing a virtual menu and selected file set into that folder. Think of it as changing what the BBS is offering without changing the BBS directory path itself.</li>
+    <li><strong>Virtual folders</strong>: menu names such as <code>DOCDROP</code>, <code>INTEL</code>, <code>MISC</code>, and <code>ROOT</code> are virtual aliases, not real nested folders inside the live BBS directory.</li>
+    <li><strong>When to use Managed BBS Services</strong>: use the normal BBS workflow when one shared BBS folder is enough. Use Managed BBS Services when you need controlled alternate file sets, menu-style browsing, callsign-aware visibility, or FLAMP relay block support.</li>
     <li><strong>Manual archive</strong>: click <code>Archive</code> on a BBS row to move just that file now.</li>
     <li><strong>Auto-archive timing</strong>: with <code>Enable Auto-Archive</code> on, checks run when you first open Messages after startup, then about once per day.</li>
     <li><strong>Age rule</strong>: files older than <code>After &lt;days&gt; days</code> are moved.</li>
@@ -813,21 +820,56 @@
   </ul>
 
   <h3 id="settings-varac-details">VarAC Settings Details</h3>
+  <p><strong>Concept of use</strong>: treat the VarAC paths as three different jobs. <code>Incoming Files</code> is where files addressed to you arrive. <code>VarAC Outbox Directory</code> is where FreqInOut stages files that VarAC should transmit directly. <code>BBS Directory</code> is the live published file shelf remote stations can browse and pull from. In multi-rig, the section shows the current Station Default projection, so always confirm which radio bundle you are editing.</p>
   <ul class="section-list">
+    <li><strong>VarAC Install Folder</strong>: the VarAC program location for the selected radio bundle. FreqInOut uses this for launch/orchestration and to help infer other VarAC resources.</li>
+    <li><strong>VarAC Launch Command</strong>: advanced override. Leave this blank unless you need a special launch method, most often on Linux/Wine.</li>
+    <li><strong>Incoming Files</strong>: VarAC's receive folder for files delivered to you. This is not your BBS folder.</li>
+    <li><strong>VarAC Outbox Directory</strong>: where FreqInOut stages files that VarAC should send directly. Use this for operator-to-operator delivery, not public BBS publication.</li>
     <li><strong>VarAC INI File</strong>: direct path to the selected radio's <code>VarAC.ini</code>. Use this when auto-detection is not enough or when you want to sync BBS policy from the authoritative INI.</li>
-    <li><strong>BBS Directory</strong>: where incoming BBS files are read from.</li>
-    <li><strong>BBS Archive</strong>: where archived BBS files are moved to.</li>
-    <li><strong>BBS Access</strong>: <code>Enable BBS</code>, <code>Limit Access To Callsigns</code>, <code>Announce</code>, and <code>Allowed Callsigns</code> mirror the authoritative <code>[BBS]</code> settings in <code>VarAC.ini</code> for the selected radio.</li>
-    <li><strong>Managed BBS Vault</strong>: publishes one named location into the live VarAC BBS directory at a time while keeping the live folder stable for VarAC.</li>
-    <li><strong>Managed Root</strong>: FreqInOut-managed storage for named locations, audit state, and publish manifests. Initialize this once and then keep the live BBS directory pointed at VarAC's normal BBS path.</li>
-    <li><strong>Default Location</strong>: the normal published BBS set for the selected Station Default radio. FreqInOut can return to this automatically on disconnect or timeout, or manually when you click <code>Reset To Default</code>.</li>
-    <li><strong>Access Code</strong>: operational code used to open a non-default location. FreqInOut stores only a salted hash and shows only <code>Code configured</code> in the UI. This is workflow control, not strong secrecy.</li>
-    <li><strong>Trigger Format</strong>: first release supports either <code>BBS OPEN &lt;code&gt;</code> or an exact-code-only message body.</li>
-    <li><strong>Vault runtime status</strong>: <code>Settings</code>, <code>ControlFreq</code>, and the <code>Messages</code> BBS summary surface the last vault action so operators can tell whether the vault is enabled, active, reset, or degraded without opening logs.</li>
+    <li><strong>BBS Directory</strong>: the live published VarAC BBS folder for the selected radio. Remote stations see the files in this directory when they browse your BBS.</li>
+    <li><strong>BBS Archive</strong>: where archived BBS files are moved. This keeps the live BBS tidy without deleting older files.</li>
+    <li><strong>Enable BBS</strong>: turns VarAC BBS service on or off in FreqInOut's BBS policy view for the current radio projection.</li>
+    <li><strong>Limit Access To Callsigns</strong>: restricts BBS access to a defined allow-list. This is strongly recommended if you want a controlled BBS.</li>
+    <li><strong>Allowed Callsigns</strong>: the allow-list used when access limiting is enabled. FreqInOut supports lookup-assisted management to reduce typos. In multi-rig, this list belongs to the selected radio's VarAC bundle.</li>
+    <li><strong>Announce</strong>: mirrors VarAC's BBS announcement behavior so users can choose whether the BBS is advertised.</li>
     <li><strong>Sync From VarAC.ini</strong>: reads the <code>[BBS]</code> section and applies BBS enablement, directory, access rules, and announcement behavior to the current radio-scoped VarAC view.</li>
-    <li><strong>VarAC Launch Command</strong>: advanced override. Recommended: leave blank so FreqInOut auto-launches from <code>VarAC Install Folder</code>. On Linux, set this only if default launch fails or you need a custom Wine prefix/command (use absolute paths, for example <code>env WINEPREFIX=/home/user/.wine wine-stable C:\VarAC\VarAC.exe</code>).</li>
+    <li><strong>Write to VarAC.ini</strong>: pushes the current BBS policy values back into <code>VarAC.ini</code> when you want FreqInOut's view to become the authoritative one.</li>
     <li><strong>Enable Auto-Archive</strong>: turns on background checks (first Messages open after startup, then about daily).</li>
     <li><strong>After &lt;days&gt; days</strong>: older files are moved from <code>BBS Directory</code> to <code>BBS Archive</code>.</li>
+    <li><strong>Managed BBS Services</strong>: the combined virtual-folder vault and FLAMP relay workflow. It publishes one selected view into the live VarAC BBS directory at a time while keeping the live folder stable for VarAC.</li>
+    <li><strong>Enable Managed BBS Vault</strong>: turns on the virtual-folder and relay service processing for the projected radio bundle. Only enable it after you have a valid live <code>BBS Directory</code>, a managed root, and at least one location.</li>
+    <li><strong>Initialize Managed Vault</strong>: creates the managed vault folder structure and imports the current live BBS contents into the default location so you can start from your existing BBS instead of rebuilding it by hand.</li>
+    <li><strong>Reset To Default</strong>: republishes the default location into the live BBS folder. Use this if you want to end a special-access session immediately.</li>
+    <li><strong>Managed Root</strong>: FreqInOut-managed storage for named locations, audit state, and publish manifests. Keep this on stable local storage and let FreqInOut manage its structure.</li>
+    <li><strong>Default Location</strong>: the normal published BBS set for the selected Station Default radio. FreqInOut returns to this location on the selected return rule, or when you click <code>Reset To Default</code>.</li>
+    <li><strong>Global Code Policy</strong>: decides whether alternate locations may stay public, whether non-default locations should normally require codes, or whether all restricted locations must require codes.</li>
+    <li><strong>Request Parsing</strong>: <code>VarAC session commands</code> is the primary mode and reads BBS requests from <code>VarAC.db</code> session data. Compatibility modes keep support for command-prefix and exact-code-only patterns.</li>
+    <li><strong>Return Mode</strong>: decides when the BBS should go back to the default location. <code>On disconnect</code> is the most direct. <code>After inactivity timeout</code> is useful when disconnect lines are unreliable. <code>Manual operator reset only</code> keeps the special location active until you explicitly reset it.</li>
+    <li><strong>Idle Timeout</strong>: used with inactivity-based return mode. Choose a value long enough to avoid interrupting a legitimate session.</li>
+    <li><strong>Failed Attempts</strong>: how many bad codes are tolerated before cooldown is applied.</li>
+    <li><strong>Cooldown</strong>: how long FreqInOut will ignore more bad-code attempts from that sender after the failure threshold is reached.</li>
+    <li><strong>Enable FLAMP relay service</strong>: allows remote queue browsing and block requests using commands such as <code>LIST Q</code>, <code>LIST BLKS F277</code>, and <code>BLK 0,1 F277</code>.</li>
+    <li><strong>FLAMP relay folder</strong>: the source folder where FreqInOut looks for relay queue files to advertise and serve as temporary synthetic BBS responses for the selected radio.</li>
+    <li><strong>Locations</strong>: named virtual folders that can be published into the live BBS. The <code>Default</code> location is your normal BBS. Other locations are optional controlled alternatives.</li>
+    <li><strong>Location Name</strong>: operator-friendly label for the file set, such as <code>Default</code>, <code>Logistics</code>, or <code>Exercises</code>.</li>
+    <li><strong>Alias</strong>: the short command a remote station types, such as <code>INTEL</code> or <code>DOCDROP</code>.</li>
+    <li><strong>Description</strong>: the helper text shown in the root menu entry so the remote operator knows what the alias is for.</li>
+    <li><strong>Source Folder</strong>: the real folder whose files will be published when that location is active. In the first release, nested subfolders are ignored.</li>
+    <li><strong>Enabled</strong>: whether that location can be published.</li>
+    <li><strong>List In Root Menu</strong>: controls whether the alias is advertised in the root menu. Hidden locations can still exist for controlled direct access workflows.</li>
+    <li><strong>Visibility</strong>: controls whether everyone sees the alias, only allowed callsigns see it, or it stays hidden from the generated root menu.</li>
+    <li><strong>Open Rule</strong>: controls whether the location is public, callsign-limited, or requires both an allowed callsign and a code.</li>
+    <li><strong>Inherit Global Allowed Callsigns</strong>: applies the normal BBS allow-list to that location. This is the safest default.</li>
+    <li><strong>Location Allowed Callsigns</strong>: optional stricter subset for that location. Use this when a special location should be opened only by certain stations even if the main BBS allow-list is broader.</li>
+    <li><strong>Access Code / Confirm Code</strong>: write-only operational code used to open a non-default location. FreqInOut stores only a salted hash and shows only <code>Code configured</code> in the UI. This is workflow control, not strong secrecy.</li>
+    <li><strong>Remote workflow</strong>: a caller usually sends <code>&lt;BLR&gt;</code> to refresh the root view, then types an alias such as <code>INTEL</code> or <code>INTEL BLUEBELL</code> depending on the location policy, and then refreshes again. <code>ROOT</code> returns them to the main menu.</li>
+    <li><strong>Callsign-aware menus</strong>: root menu entries can be filtered by the requestor's callsign, so a station may only see the aliases it is allowed to use.</li>
+    <li><strong>FLAMP relay workflow</strong>: remote stations can ask for queue listings, available blocks, and individual block payloads without you manually swapping files in and out of the live BBS folder.</li>
+    <li><strong>Save Location</strong>: stores the location definition in FreqInOut so it can be published later.</li>
+    <li><strong>Remove</strong>: deletes the selected non-default location definition from FreqInOut. The <code>Default</code> location cannot be removed.</li>
+    <li><strong>Vault runtime status</strong>: <code>Settings</code>, <code>ControlFreq</code>, and the <code>Messages</code> BBS summary surface the last vault action so operators can tell whether the vault is enabled, active, reset, or degraded without opening logs.</li>
+    <li><strong>Recommended first setup</strong>: start with normal BBS folders and verify BBS copy/archive behavior first. Then initialize the Managed Vault, confirm the imported default location looks right, and only after that add protected alternate locations.</li>
     <li><strong>Credit</strong>: advanced VarAC BBS management in FreqInOut is being shaped with explicit credit to KG5RKW for the operational ideas behind Vault and VGuard.</li>
   </ul>
 

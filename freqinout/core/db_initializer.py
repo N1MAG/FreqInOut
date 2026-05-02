@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Set
 
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
+from freqinout.core.commstat_artifacts import ensure_commstat_artifact_tables
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.multi_radio_store import ensure_multi_radio_settings_schema
@@ -509,6 +510,7 @@ def _ensure_sitrep_ingest_tables(conn: sqlite3.Connection) -> None:
             ON sitrep_ingest_checkpoint(updated_ts)
         """
     )
+    ensure_commstat_artifact_tables(conn)
 
 
 def _ensure_sitrep_fusion_tables(conn: sqlite3.Connection) -> None:

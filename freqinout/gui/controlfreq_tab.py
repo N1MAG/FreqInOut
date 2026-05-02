@@ -1353,6 +1353,10 @@ class ControlFreqTab(QWidget):
 
     def _current_visible_status_items(self) -> List[Tuple[str, str]]:
         try:
+            self.settings.reload()
+        except Exception:
+            pass
+        try:
             profiles = list(self._multi_radio_store.list_device_profiles())
         except Exception:
             profiles = []
@@ -1380,6 +1384,10 @@ class ControlFreqTab(QWidget):
         self.status_layout.addStretch(1)
 
     def _current_readiness_report(self):
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
         try:
             profiles = list(self._multi_radio_store.list_device_profiles())
         except Exception:

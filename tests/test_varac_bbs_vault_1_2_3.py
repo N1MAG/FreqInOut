@@ -1,21 +1,23 @@
 from __future__ import annotations
 
-import datetime as dt
-import os
+import sqlite3
 import sys
 from pathlib import Path
 
 from freqinout.core.varac_bbs_vault import (
+    DEFAULT_GLOBAL_CODE_POLICY,
     DEFAULT_LOCATION_ID,
+    DEFAULT_LOCATION_NAME,
+    FlampRelayStore,
     VaultLocation,
     VaultRuntimeState,
-    apply_unlock_request,
-    build_publish_manifest,
     compute_default_managed_root,
     hash_access_code,
     import_live_bbs_to_default_location,
     initialize_managed_root,
-    publish_location,
+    load_vault_runtime_state,
+    publish_flamp_block_overlay_view,
+    publish_root_view,
     run_varac_bbs_vault,
     verify_access_code,
 )
@@ -32,9 +34,56 @@ class _Settings:
         self._data[key] = value
 
 
-def _event_stamp() -> tuple[str, float]:
-    when = dt.datetime.now(dt.timezone.utc)
-    return when.strftime("%m/%d/%Y %H:%M:%S"), when.timestamp()
+def _create_varac_db(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE qso (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guid TEXT NOT NULL,
+            callsign TEXT NOT NULL,
+            my_callsign TEXT NOT NULL,
+            starttime DATETIME NOT NULL,
+            endtime DATETIME NOT NULL
+        );
+        CREATE TABLE datastream (
+            id INTEGER PRIMARY KEY,
+            guid TEXT NOT NULL,
+            datastream_entry_type_id INTEGER NOT NULL,
+            qso_guid TEXT,
+            callsign TEXT,
+            entry TEXT,
+            creation_time DATETIME NOT NULL,
+            is_deleted BOOLEAN NOT NULL DEFAULT 0
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_qso(path: Path, *, guid: str, remote: str, mine: str = "N1MAG") -> None:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO qso (guid, callsign, my_callsign, starttime, endtime) VALUES (?, ?, ?, ?, ?)",
+        (guid, remote, mine, "2026-05-02 14:09:08", "2026-05-02 14:35:29"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_datastream(path: Path, rows) -> None:
+    conn = sqlite3.connect(path)
+    conn.executemany(
+        """
+        INSERT INTO datastream
+            (id, guid, datastream_entry_type_id, qso_guid, callsign, entry, creation_time, is_deleted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+        """,
+        rows,
+    )
+    conn.commit()
+    conn.close()
 
 
 def test_hash_and_verify_access_code_round_trip() -> None:
@@ -69,176 +118,251 @@ def test_initialize_and_import_live_bbs(tmp_path: Path) -> None:
     assert compute_default_managed_root(live_bbs).endswith("FIO_BBS_Vault")
 
 
-def test_publish_location_removes_only_previously_managed_files(tmp_path: Path) -> None:
-    live_bbs = tmp_path / "BBS"
-    live_bbs.mkdir()
-    managed_root = tmp_path / "FIO_BBS_Vault"
-    created = initialize_managed_root(managed_root)
-    location_a = Path(created["locations"]) / "A"
-    location_b = Path(created["locations"]) / "B"
-    location_a.mkdir(parents=True, exist_ok=True)
-    location_b.mkdir(parents=True, exist_ok=True)
-    (location_a / "Alpha.k2s").write_text("alpha", encoding="utf-8")
-    (location_b / "Bravo.k2s").write_text("bravo", encoding="utf-8")
-    unmanaged = live_bbs / "OperatorDrop.k2s"
-    unmanaged.write_text("manual", encoding="utf-8")
-
-    publish_location(
-        VaultLocation(id="a", name="A", source_dir=str(location_a)),
-        live_bbs_dir=live_bbs,
-        managed_root=managed_root,
-    )
-    assert (live_bbs / "Alpha.k2s").exists()
-    assert unmanaged.exists()
-
-    publish_location(
-        VaultLocation(id="b", name="B", source_dir=str(location_b)),
-        live_bbs_dir=live_bbs,
-        managed_root=managed_root,
-    )
-    assert not (live_bbs / "Alpha.k2s").exists()
-    assert (live_bbs / "Bravo.k2s").exists()
-    assert unmanaged.exists()
-
-
-def test_build_publish_manifest_ignores_nested_directories(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "Visible.k2s").write_text("payload", encoding="utf-8")
-    nested = source / "Nested"
-    nested.mkdir()
-    (nested / "Hidden.k2s").write_text("payload", encoding="utf-8")
-
-    manifest, ignored_dirs = build_publish_manifest(source)
-
-    assert len(manifest) == 1
-    assert manifest[0].live_name == "Visible.k2s"
-    assert ignored_dirs == 1
-
-
-def test_apply_unlock_request_publishes_matching_location(tmp_path: Path) -> None:
+def test_publish_root_view_respects_callsign_visibility(tmp_path: Path) -> None:
     live_bbs = tmp_path / "BBS"
     live_bbs.mkdir()
     managed_root = tmp_path / "FIO_BBS_Vault"
     created = initialize_managed_root(managed_root)
     default_dir = Path(created["default"])
-    restricted_dir = Path(created["locations"]) / "Restricted"
-    restricted_dir.mkdir(parents=True, exist_ok=True)
-    (default_dir / "Default.k2s").write_text("default", encoding="utf-8")
-    (restricted_dir / "Restricted.k2s").write_text("restricted", encoding="utf-8")
+    intel_dir = Path(created["locations"]) / "Intel"
+    docs_dir = Path(created["locations"]) / "DocDrop"
+    intel_dir.mkdir(parents=True)
+    docs_dir.mkdir(parents=True)
+    (default_dir / "Main.txt").write_text("root", encoding="utf-8")
+    (intel_dir / "Intel-1.b2s").write_text("intel", encoding="utf-8")
+    (docs_dir / "DocDrop-1.k2s").write_text("docs", encoding="utf-8")
 
-    code_payload = hash_access_code("BLUEBELL")
     locations = [
-        VaultLocation(id=DEFAULT_LOCATION_ID, name="Default", source_dir=str(default_dir)),
+        VaultLocation(id=DEFAULT_LOCATION_ID, name=DEFAULT_LOCATION_NAME, source_dir=str(default_dir), alias="ROOT"),
         VaultLocation(
-            id="restricted",
-            name="Restricted",
-            source_dir=str(restricted_dir),
-            access_code_hash=str(code_payload["access_code_hash"]),
-            access_code_salt=str(code_payload["access_code_salt"]),
-            access_code_iterations=int(code_payload["access_code_iterations"]),
+            id="docdrop",
+            name="DocDrop",
+            source_dir=str(docs_dir),
+            alias="DOCDROP",
+            description="For latest DocDrop files",
+            open_rule="Public",
+        ),
+        VaultLocation(
+            id="intel",
+            name="Intel",
+            source_dir=str(intel_dir),
+            alias="INTEL",
+            description="For latest Magnet S2 reports",
+            open_rule="Allowed callsigns + access code",
+            visibility_rule="Allowed callsigns only",
+            allowed_callsigns=("W5TTA",),
         ),
     ]
 
-    result = apply_unlock_request(
-        "W8UFO",
-        "BLUEBELL",
+    publish_root_view(
+        sender="W5TTA",
         locations=locations,
+        default_location_id=DEFAULT_LOCATION_ID,
+        global_allowed_callsigns=("W5TTA",),
+        limit_access_enabled=True,
+        global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
         live_bbs_dir=live_bbs,
         managed_root=managed_root,
-        default_location_id=DEFAULT_LOCATION_ID,
-        global_allowed_callsigns=["W8UFO"],
-        limit_access_enabled=True,
-        runtime_state=VaultRuntimeState(),
+        flamp_enabled=False,
     )
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert any("DOCDROP" in name for name in names)
+    assert any("INTEL" in name for name in names)
 
-    assert result.success
-    assert result.runtime_state.current_location_id == "restricted"
-    assert result.runtime_state.current_session_callsign == "W8UFO"
-    assert (live_bbs / "Restricted.k2s").exists()
+    publish_root_view(
+        sender="KX9ZZZ",
+        locations=locations,
+        default_location_id=DEFAULT_LOCATION_ID,
+        global_allowed_callsigns=("W5TTA",),
+        limit_access_enabled=True,
+        global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
+        live_bbs_dir=live_bbs,
+        managed_root=managed_root,
+        flamp_enabled=False,
+    )
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert any("DOCDROP" in name for name in names)
+    assert not any("INTEL" in name for name in names)
 
 
-def test_run_varac_bbs_vault_processes_unlock_and_disconnect(tmp_path: Path) -> None:
+def test_run_varac_bbs_vault_processes_alias_navigation_from_varac_db(tmp_path: Path) -> None:
     varac_root = tmp_path / "varac"
     varac_root.mkdir()
+    varac_db = varac_root / "VarAC.db"
+    _create_varac_db(varac_db)
+    qso_guid = "dce9b400-546c-401b-9876-d62f03c6ca74"
+    _insert_qso(varac_db, guid=qso_guid, remote="W5TTA")
+    _insert_datastream(
+        varac_db,
+        [
+            (1, "a", 1, qso_guid, "W5TTA", "<BLR>", "2026-05-02 14:10:18.7762304Z"),
+            (2, "b", 1, qso_guid, "W5TTA", "INTEL BLUEBELL", "2026-05-02 14:12:49.963574Z"),
+        ],
+    )
+
     live_bbs = tmp_path / "BBS"
     live_bbs.mkdir()
     managed_root = tmp_path / "FIO_BBS_Vault"
     created = initialize_managed_root(managed_root)
     default_dir = Path(created["default"])
-    ops_dir = Path(created["locations"]) / "Ops"
-    ops_dir.mkdir(parents=True, exist_ok=True)
-    (default_dir / "Default.k2s").write_text("default", encoding="utf-8")
-    (ops_dir / "Ops.k2s").write_text("ops", encoding="utf-8")
-    publish_location(
-        VaultLocation(id=DEFAULT_LOCATION_ID, name="Default", source_dir=str(default_dir)),
-        live_bbs_dir=live_bbs,
-        managed_root=managed_root,
-    )
-
-    code_payload = hash_access_code("REDROCK")
-    locations = [
-        {
-            "id": DEFAULT_LOCATION_ID,
-            "name": "Default",
-            "source_dir": str(default_dir),
-            "enabled": True,
-            "inherit_global_allowed_callsigns": True,
-            "allowed_callsigns": [],
-            "access_code_hash": "",
-            "access_code_salt": "",
-            "access_code_iterations": 310000,
-        },
-        {
-            "id": "ops",
-            "name": "Ops",
-            "source_dir": str(ops_dir),
-            "enabled": True,
-            "inherit_global_allowed_callsigns": True,
-            "allowed_callsigns": [],
-            "access_code_hash": str(code_payload["access_code_hash"]),
-            "access_code_salt": str(code_payload["access_code_salt"]),
-            "access_code_iterations": int(code_payload["access_code_iterations"]),
-        },
-    ]
-
-    stamp_text, stamp_ts = _event_stamp()
-    log_path = varac_root / "VarAC_traffic.log"
-    log_path.write_text(
-        (
-            f"{stamp_text} - FROM: W8UFO MESSAGE: BBS OPEN REDROCK\n"
-            f"{stamp_text} - DISCONNECTED FROM W8UFO\n"
-        ),
-        encoding="utf-8",
-    )
-    os.utime(log_path, (stamp_ts, stamp_ts))
+    intel_dir = Path(created["locations"]) / "Intel"
+    intel_dir.mkdir(parents=True)
+    (default_dir / "RootInfo.txt").write_text("root", encoding="utf-8")
+    (intel_dir / "MAGNET_S2_WEEKLY_SNAPSHOT-260426.b2s").write_text("intel", encoding="utf-8")
+    code_payload = hash_access_code("BLUEBELL")
 
     settings = _Settings(
         varac_bbs_vault_enabled=True,
         varac_bbs_dir=str(live_bbs),
+        varac_db_path=str(varac_db),
         varac_path=str(varac_root),
         varac_bbs_vault_managed_root=str(managed_root),
         varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
-        varac_bbs_vault_trigger_mode="Command prefix",
+        varac_bbs_vault_global_code_policy="Require for non-default locations",
+        varac_bbs_vault_trigger_mode="VarAC session commands",
         varac_bbs_vault_return_mode="On disconnect",
         varac_bbs_vault_failed_attempt_limit=3,
         varac_bbs_vault_failed_attempt_window_seconds=900,
         varac_bbs_vault_cooldown_seconds=1800,
         varac_bbs_vault_idle_timeout_seconds=600,
-        varac_bbs_vault_locations_v1=locations,
+        varac_bbs_vault_flamp_enabled=False,
+        varac_bbs_vault_flamp_relay_dir="",
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+            {
+                "id": "intel",
+                "name": "Intel",
+                "alias": "INTEL",
+                "description": "For latest Magnet S2 reports",
+                "source_dir": str(intel_dir),
+                "enabled": True,
+                "list_in_root_menu": True,
+                "visibility_rule": "Allowed callsigns only",
+                "open_rule": "Allowed callsigns + access code",
+                "inherit_global_allowed_callsigns": False,
+                "allowed_callsigns": ["W5TTA"],
+                "access_code_hash": str(code_payload["access_code_hash"]),
+                "access_code_salt": str(code_payload["access_code_salt"]),
+                "access_code_iterations": int(code_payload["access_code_iterations"]),
+            },
+        ],
         varac_bbs_vault_runtime_state_v1={},
-        varac_bbs_allowed_callsigns="W8UFO",
+        varac_bbs_allowed_callsigns="W5TTA",
         varac_bbs_limit_access_enabled=True,
     )
 
     result = run_varac_bbs_vault(settings)
 
     assert result.enabled
-    assert result.scanned_events >= 2
-    state = settings.get("varac_bbs_vault_runtime_state_v1", {})
-    assert state.get("current_location_id") == DEFAULT_LOCATION_ID
-    assert state.get("current_session_callsign", "") == ""
-    assert (live_bbs / "Default.k2s").exists()
+    assert result.processed_events >= 2
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    assert state.current_location_id == "intel"
+    assert state.current_session_callsign == "W5TTA"
+    assert state.current_view_mode == "location"
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert "MAGNET_S2_WEEKLY_SNAPSHOT-260426.b2s" in names
+    assert any("ROOT" in name for name in names)
+
+
+def test_run_varac_bbs_vault_processes_flamp_commands(tmp_path: Path) -> None:
+    varac_root = tmp_path / "varac"
+    varac_root.mkdir()
+    varac_db = varac_root / "VarAC.db"
+    _create_varac_db(varac_db)
+    qso_guid = "qso-flamp-1"
+    _insert_qso(varac_db, guid=qso_guid, remote="W5TTA")
+    _insert_datastream(
+        varac_db,
+        [
+            (1, "a", 1, qso_guid, "W5TTA", "<BLR>", "2026-05-02 14:10:18.7762304Z"),
+            (2, "b", 1, qso_guid, "W5TTA", "LIST Q", "2026-05-02 14:10:21.0000000Z"),
+            (3, "c", 1, qso_guid, "W5TTA", "LIST BLKS F277", "2026-05-02 14:10:24.0000000Z"),
+            (4, "d", 1, qso_guid, "W5TTA", "BLK 0,1 F277", "2026-05-02 14:10:27.0000000Z"),
+        ],
+    )
+
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir()
+    relay_path = relay_dir / "F277_MAGNET-S2-RR-260502.sig.b2s"
+    relay_path.write_text(
+        "<PROG 1.0>{F277}\n<SIZE xx>{F277}2119 2 1024\n{F277:1}BLOCK1\n{F277:2}BLOCK2\n",
+        encoding="utf-8",
+    )
+    store = FlampRelayStore(relay_dir)
+    assert "F277" in store.queue_index()
+
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    (default_dir / "RootInfo.txt").write_text("root", encoding="utf-8")
+
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_db_path=str(varac_db),
+        varac_path=str(varac_root),
+        varac_bbs_vault_managed_root=str(managed_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_global_code_policy="Allow public locations",
+        varac_bbs_vault_trigger_mode="VarAC session commands",
+        varac_bbs_vault_return_mode="On disconnect",
+        varac_bbs_vault_failed_attempt_limit=3,
+        varac_bbs_vault_failed_attempt_window_seconds=900,
+        varac_bbs_vault_cooldown_seconds=1800,
+        varac_bbs_vault_idle_timeout_seconds=600,
+        varac_bbs_vault_flamp_enabled=True,
+        varac_bbs_vault_flamp_relay_dir=str(relay_dir),
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            }
+        ],
+        varac_bbs_vault_runtime_state_v1={},
+        varac_bbs_allowed_callsigns="W5TTA",
+        varac_bbs_limit_access_enabled=True,
+    )
+
+    result = run_varac_bbs_vault(settings)
+    assert result.enabled
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    assert state.current_view_mode == "flamp-block-overlay"
+    assert state.current_overlay_file.startswith("BBS_F277_BLK_0_1")
+    assert (live_bbs / state.current_overlay_file).exists()
+
+    (live_bbs / state.current_overlay_file).unlink()
+    result = run_varac_bbs_vault(settings)
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    assert state.current_view_mode in {"root", "location"}
 
 
 def test_settings_tab_persists_managed_vault_configuration(monkeypatch, tmp_path: Path) -> None:
@@ -258,43 +382,40 @@ def test_settings_tab_persists_managed_vault_configuration(monkeypatch, tmp_path
 
     from PySide6.QtWidgets import QApplication
 
-    from freqinout.core.settings_manager import SettingsManager
+    app = QApplication.instance() or QApplication([])
+
     from freqinout.gui.settings_tab import SettingsTab
 
-    app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(SettingsTab, "_maybe_backfill_js8_geo", lambda self: None)
     tab = SettingsTab()
-    try:
-        tab.varac_bbs_dir_edit.setText(str(live_bbs))
-        tab.varac_bbs_vault_enabled_chk_main.setChecked(True)
-        tab.varac_bbs_vault_root_edit.setText(str(managed_root))
-        tab._set_varac_bbs_vault_locations(
-            [
-                {
-                    "id": DEFAULT_LOCATION_ID,
-                    "name": "Default",
-                    "source_dir": str(default_dir),
-                    "enabled": True,
-                    "inherit_global_allowed_callsigns": True,
-                    "allowed_callsigns": [],
-                    "access_code_hash": "",
-                    "access_code_salt": "",
-                    "access_code_iterations": 310000,
-                }
-            ]
-        )
-        idx = tab.varac_bbs_vault_default_location_combo.findData(DEFAULT_LOCATION_ID)
-        if idx >= 0:
-            tab.varac_bbs_vault_default_location_combo.setCurrentIndex(idx)
-        tab._save_settings(show_message=False)
-    finally:
-        tab.deleteLater()
-        app.processEvents()
+    tab.varac_bbs_dir_edit.setText(str(live_bbs))
+    tab.varac_bbs_vault_enabled_chk_main.setChecked(True)
+    tab.varac_bbs_vault_root_edit.setText(str(managed_root))
+    tab._set_varac_bbs_vault_locations(
+        [
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            }
+        ]
+    )
+    tab.varac_bbs_vault_global_code_policy_combo.setCurrentText("Require for non-default locations")
+    tab.varac_bbs_vault_flamp_enabled_chk.setChecked(True)
+    tab.varac_bbs_vault_flamp_relay_dir_edit.setText(str(tmp_path / "relay"))
 
-    settings = SettingsManager()
-    assert settings.get("varac_bbs_vault_enabled") is True
-    assert settings.get("varac_bbs_vault_managed_root") == str(managed_root)
-    assert settings.get("varac_bbs_vault_default_location_id") == DEFAULT_LOCATION_ID
-    stored_locations = settings.get("varac_bbs_vault_locations_v1", [])
-    assert isinstance(stored_locations, list)
-    assert stored_locations and stored_locations[0]["id"] == DEFAULT_LOCATION_ID
+    snap = tab._settings_snapshot_for_readiness()
+    assert snap["varac_bbs_vault_enabled"] is True
+    assert snap["varac_bbs_vault_global_code_policy"] == "Require for non-default locations"
+    assert snap["varac_bbs_vault_flamp_enabled"] is True
+    assert snap["varac_bbs_vault_flamp_relay_dir"] == str(tmp_path / "relay")

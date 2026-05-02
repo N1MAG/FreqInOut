@@ -88,6 +88,7 @@ tests/*
 !tests/test_auto_closing_information_dialogs_1_2_3.py
 !tests/test_flamp_signature_verification_1_2_3.py
 !tests/test_nbems_compose_stage_1_2_3.py
+!tests/test_commstat_artifacts_1_2_3.py
 !tests/test_varac_bbs_filename_normalization_1_2_3.py
 !tests/test_release_1_2_2_followup.py
 !tests/test_station_readiness_multirig_phase1.py

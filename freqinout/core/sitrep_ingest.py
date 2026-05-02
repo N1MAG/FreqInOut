@@ -16,6 +16,17 @@ from freqinout.core.commstat_sitrep import (
     report_group_for_target,
     transport_mode_for_source,
 )
+from freqinout.core.commstat_artifacts import (
+    KIND_ALERT,
+    KIND_MESSAGE,
+    KIND_STATREP,
+    build_alert_artifact_key,
+    build_message_artifact_key,
+    build_statrep_artifact_key,
+    ensure_commstat_artifact_tables,
+    normalize_status_label,
+    upsert_commstat_artifact,
+)
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
 
@@ -225,6 +236,7 @@ def _ensure_local_tables(conn: sqlite3.Connection) -> None:
             ON sitrep_ingest_checkpoint(updated_ts)
         """
     )
+    ensure_commstat_artifact_tables(conn)
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
@@ -560,6 +572,214 @@ def _commstat_metadata(
     }
 
 
+def _status_code_char(value: object) -> str:
+    txt = str(value or "").strip().upper()
+    if txt in {"3", "R", "RED"}:
+        return "R"
+    if txt in {"2", "Y", "YELLOW"}:
+        return "Y"
+    if txt in {"1", "G", "GREEN"}:
+        return "G"
+    if txt in {"4", "5", "U", "UNKNOWN"}:
+        return "U"
+    return "N"
+
+
+def _commstat_status_signature(status_payload: Dict) -> str:
+    status_txt = str((status_payload or {}).get("status") or "").strip()
+    if len(status_txt) >= 12:
+        chars = [_status_code_char(ch) for ch in status_txt[:12]]
+        return "".join(chars)
+    dims = (
+        "overall_status",
+        "power",
+        "water",
+        "medical",
+        "communications",
+        "travel",
+        "internet",
+        "fuel",
+        "food",
+        "crime",
+        "civil_unrest",
+        "political",
+    )
+    return "".join(_status_code_char((status_payload or {}).get(dim)) for dim in dims)
+
+
+def _commstat_status_label(status_payload: Dict) -> str:
+    status_txt = str((status_payload or {}).get("status") or "").strip()
+    if status_txt:
+        return normalize_status_label(status_txt[:1])
+    return normalize_status_label((status_payload or {}).get("overall_status"))
+
+
+def _preview_title(text: str, *, fallback: str, limit: int = 60) -> str:
+    normalized = " ".join(str(text or "").split()).strip()
+    if not normalized:
+        normalized = str(fallback or "").strip()
+    if len(normalized) > limit:
+        return normalized[: limit - 3].rstrip() + "..."
+    return normalized
+
+
+def _upsert_commstat_statrep_artifact(
+    local_conn: sqlite3.Connection,
+    *,
+    source: str,
+    source_table: str,
+    source_id: int,
+    event_ts: float,
+    event_ts_utc: str,
+    from_call: str,
+    target: str,
+    report_group: str,
+    grid: str,
+    state_code: str,
+    scope: str,
+    transport_mode: str,
+    status_payload: Dict,
+    remarks_text: str,
+    payload: Dict,
+    subtype: str = "COMMSTAT_12",
+    external_ids: Iterable[str] | None = None,
+) -> None:
+    status_signature = _commstat_status_signature(status_payload)
+    status_label = _commstat_status_label(status_payload)
+    scope_txt = str(scope or "").strip()
+    title_parts = ["CommStat StatRep"]
+    if scope_txt:
+        title_parts.append(scope_txt)
+    if status_label and status_label != "NOT REPORTED":
+        title_parts.append(status_label)
+    title = " | ".join(title_parts)
+    upsert_commstat_artifact(
+        local_conn,
+        artifact_key=build_statrep_artifact_key(
+            from_call=from_call,
+            target=target,
+            grid=grid,
+            scope=scope_txt,
+            status_signature=status_signature,
+            event_ts=event_ts,
+        ),
+        artifact_kind=KIND_STATREP,
+        subtype=subtype,
+        event_ts=event_ts,
+        event_ts_utc=event_ts_utc,
+        from_call=from_call,
+        target=target,
+        report_group=report_group,
+        grid=grid,
+        state_code=state_code,
+        scope=scope_txt,
+        transport_mode=transport_mode,
+        status_label=status_label,
+        title=title,
+        body_text=str(remarks_text or "").strip(),
+        remarks_text=str(remarks_text or "").strip(),
+        source=source,
+        source_ref=f"{source_table}:{int(source_id or 0)}",
+        external_ids=external_ids or [],
+        payload=payload,
+    )
+
+
+def _upsert_commstat_message_artifact(
+    local_conn: sqlite3.Connection,
+    *,
+    source: str,
+    source_table: str,
+    source_id: int,
+    event_ts: float,
+    event_ts_utc: str,
+    from_call: str,
+    target: str,
+    report_group: str,
+    transport_mode: str,
+    body_text: str,
+    payload: Dict,
+    external_ids: Iterable[str] | None = None,
+) -> None:
+    body = str(body_text or "").strip()
+    title = _preview_title(body, fallback="CommStat Message")
+    upsert_commstat_artifact(
+        local_conn,
+        artifact_key=build_message_artifact_key(
+            from_call=from_call,
+            target=target,
+            body_text=body,
+            event_ts=event_ts,
+        ),
+        artifact_kind=KIND_MESSAGE,
+        subtype="COMMSTAT_TEXT",
+        event_ts=event_ts,
+        event_ts_utc=event_ts_utc,
+        from_call=from_call,
+        target=target,
+        report_group=report_group,
+        transport_mode=transport_mode,
+        status_label="INFO",
+        title=title,
+        body_text=body,
+        source=source,
+        source_ref=f"{source_table}:{int(source_id or 0)}",
+        external_ids=external_ids or [],
+        payload=payload,
+    )
+
+
+def _upsert_commstat_alert_artifact(
+    local_conn: sqlite3.Connection,
+    *,
+    source: str,
+    source_table: str,
+    source_id: int,
+    event_ts: float,
+    event_ts_utc: str,
+    from_call: str,
+    target: str,
+    report_group: str,
+    transport_mode: str,
+    alert_color: str,
+    title: str,
+    body_text: str,
+    payload: Dict,
+    external_ids: Iterable[str] | None = None,
+) -> None:
+    color_txt = str(alert_color or "").strip().upper()
+    title_txt = _preview_title(title, fallback="CommStat Alert")
+    body = str(body_text or "").strip()
+    visible_title = f"{color_txt} ALERT | {title_txt}" if color_txt else f"ALERT | {title_txt}"
+    upsert_commstat_artifact(
+        local_conn,
+        artifact_key=build_alert_artifact_key(
+            from_call=from_call,
+            target=target,
+            alert_color=color_txt,
+            title=title_txt,
+            body_text=body,
+            event_ts=event_ts,
+        ),
+        artifact_kind=KIND_ALERT,
+        subtype="COMMSTAT_ALERT",
+        event_ts=event_ts,
+        event_ts_utc=event_ts_utc,
+        from_call=from_call,
+        target=target,
+        report_group=report_group,
+        transport_mode=transport_mode,
+        status_label=color_txt or "ALERT",
+        alert_color=color_txt,
+        title=visible_title,
+        body_text=body,
+        source=source,
+        source_ref=f"{source_table}:{int(source_id or 0)}",
+        external_ids=external_ids or [],
+        payload=payload,
+    )
+
+
 def _ingest_local_spotter_backfill(
     local_conn: sqlite3.Connection,
     settings,
@@ -848,6 +1068,29 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
                         source_value=row[5],
                         asset_dir=asset_dir,
                     )
+                    status_payload = {
+                        "overall_status": str(row[11] or ""),
+                        "power": str(row[12] or ""),
+                        "water": str(row[13] or ""),
+                        "medical": str(row[14] or ""),
+                        "communications": str(row[15] or ""),
+                        "travel": str(row[16] or ""),
+                        "internet": str(row[17] or ""),
+                        "fuel": str(row[18] or ""),
+                        "food": str(row[19] or ""),
+                        "crime": str(row[20] or ""),
+                        "civil_unrest": str(row[21] or ""),
+                        "political": str(row[22] or ""),
+                    }
+                    raw_payload = {
+                        "datetime": str(row[1] or ""),
+                        "date": str(row[2] or ""),
+                        "freq": row[3],
+                        "db": row[4],
+                        "source": row[5],
+                        "sr_id": str(row[6] or ""),
+                        "comments": remarks_text,
+                    }
                     inserted = _insert_source_event(
                         local_conn,
                         source=source,
@@ -867,34 +1110,37 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
                         state_code=metadata["state_code"],
                         state_confidence=metadata["state_confidence"],
                         geo_confidence=metadata["geo_confidence"],
-                        status_payload={
-                            "overall_status": str(row[11] or ""),
-                            "power": str(row[12] or ""),
-                            "water": str(row[13] or ""),
-                            "medical": str(row[14] or ""),
-                            "communications": str(row[15] or ""),
-                            "travel": str(row[16] or ""),
-                            "internet": str(row[17] or ""),
-                            "fuel": str(row[18] or ""),
-                            "food": str(row[19] or ""),
-                            "crime": str(row[20] or ""),
-                            "civil_unrest": str(row[21] or ""),
-                            "political": str(row[22] or ""),
-                        },
-                        raw_payload={
-                            "datetime": str(row[1] or ""),
-                            "date": str(row[2] or ""),
-                            "freq": row[3],
-                            "db": row[4],
-                            "source": row[5],
-                            "sr_id": str(row[6] or ""),
-                            "comments": remarks_text,
-                        },
+                        status_payload=status_payload,
+                        raw_payload=raw_payload,
                         event_ts=event_ts,
                         event_ts_utc=event_ts_utc,
                     )
                     if inserted:
                         out["events_inserted"] += 1
+                    _upsert_commstat_statrep_artifact(
+                        local_conn,
+                        source=source,
+                        source_table=table,
+                        source_id=rid,
+                        event_ts=event_ts,
+                        event_ts_utc=event_ts_utc,
+                        from_call=str(row[7] or ""),
+                        target=target,
+                        report_group=metadata["report_group"],
+                        grid=grid,
+                        state_code=metadata["state_code"],
+                        scope=str(row[10] or ""),
+                        transport_mode=metadata["transport_mode"],
+                        status_payload=status_payload,
+                        remarks_text=remarks_text,
+                        external_ids=[str(row[6] or "").strip()],
+                        payload={
+                            "source": source,
+                            "source_table": table,
+                            "source_value": row[5],
+                            **raw_payload,
+                        },
+                    )
                 _set_last_id(local_conn, source, table, source_db_path, max_seen)
         except Exception as e:
             out["errors"] += 1
@@ -924,55 +1170,109 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
                     max_seen = max(max_seen, rid)
                     out["rows_scanned"] += 1
                     message_text = str(row[9] or "")
-                    if not _is_sitrep_like_message(message_text):
-                        continue
-                    parsed = parse_commstat_message(
-                        message_text,
-                        target_hint=row[8],
-                        source_value=row[5],
-                        asset_dir=asset_dir,
-                    )
-                    if not parsed:
-                        continue
                     event_ts, event_ts_utc = _parse_ts(row[1], fallback=str(row[2] or ""))
-                    metadata = dict(parsed.get("metadata") or {})
-                    raw_payload = dict(parsed.get("raw_payload") or {})
-                    raw_payload.update(
-                        {
-                            "datetime": str(row[1] or ""),
-                            "date": str(row[2] or ""),
-                            "freq": row[3],
-                            "db": row[4],
-                            "source": row[5],
-                            "msg_id": str(row[6] or ""),
-                        }
-                    )
-                    inserted = _insert_source_event(
-                        local_conn,
-                        source=source,
-                        source_table=table,
-                        source_db_path=source_db_path,
-                        source_id=rid,
-                        subtype=str(parsed.get("subtype") or ""),
-                        from_call=str(row[7] or ""),
-                        target=str(row[8] or ""),
-                        report_group=metadata.get("report_group", ""),
-                        grid=str(parsed.get("grid") or ""),
-                        scope=str(parsed.get("scope") or ""),
-                        transport_mode=metadata.get("transport_mode", ""),
-                        remarks_text=metadata.get("remarks_text", ""),
-                        brevity_code=metadata.get("brevity_code", ""),
-                        brevity_summary=metadata.get("brevity_summary", ""),
-                        state_code=metadata.get("state_code", ""),
-                        state_confidence=metadata.get("state_confidence", ""),
-                        geo_confidence=metadata.get("geo_confidence", ""),
-                        status_payload=dict(parsed.get("status_payload") or {}),
-                        raw_payload=raw_payload,
-                        event_ts=event_ts,
-                        event_ts_utc=event_ts_utc,
-                    )
-                    if inserted:
-                        out["events_inserted"] += 1
+                    target = str(row[8] or "")
+                    parsed = None
+                    if _is_sitrep_like_message(message_text):
+                        parsed = parse_commstat_message(
+                            message_text,
+                            target_hint=row[8],
+                            source_value=row[5],
+                            asset_dir=asset_dir,
+                        )
+                    if parsed:
+                        metadata = dict(parsed.get("metadata") or {})
+                        raw_payload = dict(parsed.get("raw_payload") or {})
+                        raw_payload.update(
+                            {
+                                "datetime": str(row[1] or ""),
+                                "date": str(row[2] or ""),
+                                "freq": row[3],
+                                "db": row[4],
+                                "source": row[5],
+                                "msg_id": str(row[6] or ""),
+                            }
+                        )
+                        inserted = _insert_source_event(
+                            local_conn,
+                            source=source,
+                            source_table=table,
+                            source_db_path=source_db_path,
+                            source_id=rid,
+                            subtype=str(parsed.get("subtype") or ""),
+                            from_call=str(row[7] or ""),
+                            target=target,
+                            report_group=metadata.get("report_group", ""),
+                            grid=str(parsed.get("grid") or ""),
+                            scope=str(parsed.get("scope") or ""),
+                            transport_mode=metadata.get("transport_mode", ""),
+                            remarks_text=metadata.get("remarks_text", ""),
+                            brevity_code=metadata.get("brevity_code", ""),
+                            brevity_summary=metadata.get("brevity_summary", ""),
+                            state_code=metadata.get("state_code", ""),
+                            state_confidence=metadata.get("state_confidence", ""),
+                            geo_confidence=metadata.get("geo_confidence", ""),
+                            status_payload=dict(parsed.get("status_payload") or {}),
+                            raw_payload=raw_payload,
+                            event_ts=event_ts,
+                            event_ts_utc=event_ts_utc,
+                        )
+                        if inserted:
+                            out["events_inserted"] += 1
+                        _upsert_commstat_statrep_artifact(
+                            local_conn,
+                            source=source,
+                            source_table=table,
+                            source_id=rid,
+                            event_ts=event_ts,
+                            event_ts_utc=event_ts_utc,
+                            from_call=str(row[7] or ""),
+                            target=target,
+                            report_group=metadata.get("report_group", ""),
+                            grid=str(parsed.get("grid") or ""),
+                            state_code=metadata.get("state_code", ""),
+                            scope=str(parsed.get("scope") or ""),
+                            transport_mode=metadata.get("transport_mode", ""),
+                            status_payload=dict(parsed.get("status_payload") or {}),
+                            remarks_text=metadata.get("remarks_text", ""),
+                            subtype=str(parsed.get("subtype") or ""),
+                            external_ids=[str(row[6] or "").strip()],
+                            payload=raw_payload,
+                        )
+                    else:
+                        metadata = _commstat_metadata(
+                            target=target,
+                            grid="",
+                            remarks_text="",
+                            source_value=row[5],
+                            raw_message=message_text,
+                            asset_dir=asset_dir,
+                        )
+                        _upsert_commstat_message_artifact(
+                            local_conn,
+                            source=source,
+                            source_table=table,
+                            source_id=rid,
+                            event_ts=event_ts,
+                            event_ts_utc=event_ts_utc,
+                            from_call=str(row[7] or ""),
+                            target=target,
+                            report_group=metadata.get("report_group", ""),
+                            transport_mode=metadata.get("transport_mode", ""),
+                            body_text=message_text,
+                            external_ids=[str(row[6] or "").strip()],
+                            payload={
+                                "source": source,
+                                "source_table": table,
+                                "datetime": str(row[1] or ""),
+                                "date": str(row[2] or ""),
+                                "freq": row[3],
+                                "db": row[4],
+                                "source_value": row[5],
+                                "msg_id": str(row[6] or ""),
+                                "message": message_text,
+                            },
+                        )
                 _set_last_id(local_conn, source, table, source_db_path, max_seen)
         except Exception as e:
             out["errors"] += 1
@@ -987,7 +1287,7 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
                 cur = src.cursor()
                 cur.execute(
                     """
-                    SELECT id
+                    SELECT id, datetime, date, freq, db, source, alert_id, from_callsign, target, color, title, message
                     FROM alerts
                     WHERE id > ?
                     ORDER BY id ASC
@@ -1001,6 +1301,45 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
                     rid = int(row[0] or 0)
                     max_seen = max(max_seen, rid)
                     out["rows_scanned"] += 1
+                    event_ts, event_ts_utc = _parse_ts(row[1], fallback=str(row[2] or ""))
+                    target = str(row[8] or "")
+                    metadata = _commstat_metadata(
+                        target=target,
+                        grid="",
+                        remarks_text="",
+                        source_value=row[5],
+                        raw_message=str(row[11] or ""),
+                        asset_dir=asset_dir,
+                    )
+                    _upsert_commstat_alert_artifact(
+                        local_conn,
+                        source=source,
+                        source_table=table,
+                        source_id=rid,
+                        event_ts=event_ts,
+                        event_ts_utc=event_ts_utc,
+                        from_call=str(row[7] or ""),
+                        target=target,
+                        report_group=metadata.get("report_group", ""),
+                        transport_mode=metadata.get("transport_mode", ""),
+                        alert_color=str(row[9] or ""),
+                        title=str(row[10] or ""),
+                        body_text=str(row[11] or ""),
+                        external_ids=[str(row[6] or "").strip()],
+                        payload={
+                            "source": source,
+                            "source_table": table,
+                            "datetime": str(row[1] or ""),
+                            "date": str(row[2] or ""),
+                            "freq": row[3],
+                            "db": row[4],
+                            "source_value": row[5],
+                            "alert_id": str(row[6] or ""),
+                            "color": str(row[9] or ""),
+                            "title": str(row[10] or ""),
+                            "message": str(row[11] or ""),
+                        },
+                    )
                 _set_last_id(local_conn, source, table, source_db_path, max_seen)
         except Exception as e:
             out["errors"] += 1
@@ -1104,6 +1443,47 @@ def _ingest_commstat23(local_conn: sqlite3.Connection, source_db: Path, *, max_r
             )
             if inserted:
                 out["events_inserted"] += 1
+            _upsert_commstat_statrep_artifact(
+                local_conn,
+                source=source,
+                source_table=table,
+                source_id=rid,
+                event_ts=event_ts,
+                event_ts_utc=event_ts_utc,
+                from_call=str(row[4] or ""),
+                target=target,
+                report_group=metadata["report_group"],
+                grid=grid,
+                state_code=metadata["state_code"],
+                scope="",
+                transport_mode=metadata["transport_mode"],
+                status_payload={
+                    "overall_status": str(row[9] or ""),
+                    "power": str(row[10] or ""),
+                    "water": str(row[11] or ""),
+                    "medical": str(row[12] or ""),
+                    "communications": str(row[13] or ""),
+                    "travel": str(row[14] or ""),
+                    "internet": str(row[15] or ""),
+                    "fuel": str(row[16] or ""),
+                    "food": str(row[17] or ""),
+                    "crime": str(row[18] or ""),
+                    "civil_unrest": str(row[19] or ""),
+                    "political": str(row[20] or ""),
+                },
+                remarks_text=remarks_text,
+                external_ids=[str(row[7] or "").strip()],
+                payload={
+                    "source": source,
+                    "source_table": table,
+                    "datetime": str(row[1] or ""),
+                    "date": str(row[2] or ""),
+                    "freq": row[3],
+                    "sr_id": str(row[7] or ""),
+                    "precedence": str(row[8] or ""),
+                    "comments": remarks_text,
+                },
+            )
         _set_last_id(local_conn, source, table, source_db_path, max_seen)
     except Exception as e:
         out["errors"] += 1
