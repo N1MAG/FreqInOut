@@ -1,6 +1,13 @@
 # Changelog
 
 ## [1.2.3]
+- Fixed: `ControlFreq` now reloads saved settings before rebuilding software status visibility, so the radio-software LEDs stay aligned with the current saved `Software Used` selections instead of lagging behind the Settings tab.
+- Changed: `Map` now groups the `SitRep State Summary` panel by FEMA region, making the status rollup easier to scan operationally while still showing the same state-level counts inside each region.
+- Changed: `Settings -> FreqInOut Settings` now groups `FLRig`, `FLDigi`, `FLMsg`, and `FLAmp` on one cleaner software-used row, keeps `JS8Call`, `JS8Spotter`, and `CommStat` together on the next row, keeps `VarAC` on its own row, hides the setup-readiness card when the station is already `Ready`, and reshapes `VarAC Settings` into clearer `Paths and Launch`, `BBS Settings`, and `Vault / VGuard Settings` subsections.
+- Fixed: `VarAC.ini` BBS allowed-callsign sync now writes comma-separated callsigns without added spaces, matching VarAC's expected list style more closely.
+- Added: `Settings -> VarAC Settings` now supports a fuller `Managed BBS Services` workflow on top of the Managed Vault foundation, including alias-driven virtual folders, callsign-aware root-menu visibility, radio-safe root resets, VarAC.db session parsing, optional FLAMP relay queue/block responses, and clearer help for menu-style BBS exchanges.
+- Added: CommStat now has first-class `Messages` tab artifacts for `CommStat StatRep`, `CommStat Message`, and `CommStat Alert`, with local staging, first-pass merged provenance, and filter entries for `CommStat`, `CommStat/StatRep`, `CommStat/Message`, and `CommStat/Alert`.
+- Changed: CommStat status artifacts now use stronger near-time semantic dedupe across CommStat and JS8Spotter-adjacent paths, reducing duplicate report rows in `Messages` while preserving the unified SitRep model used by `Map`, `Operator History`, and status rollups.
 - Added: `Settings -> VarAC Settings` now includes a `Managed BBS Vault` workflow with named locations, hashed access codes, managed-root initialization/import, default-location reset, background trigger handling from the VarAC traffic log, and compact status visibility in `Settings`, `ControlFreq`, and `Messages`.
 - Changed: `Settings -> VarAC Settings` now manages BBS allowed callsigns through a lookup-assisted selected list with manual callsign fallback, reducing whitelist typos while preserving the existing VarAC.ini-compatible callsign format.
 - Changed: crowded Settings, ControlFreq, and Map control bands now use roomier grouped layouts, including a clearer `Software Used` block, stacked timer controls, a calmer setup-review banner, and a less compressed map filter bar for a friendlier day-to-day UI.

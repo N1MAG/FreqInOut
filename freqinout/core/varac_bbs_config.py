@@ -40,7 +40,7 @@ def parse_callsign_list(value: object) -> List[str]:
 
 
 def format_callsign_list(value: object) -> str:
-    return ", ".join(parse_callsign_list(value))
+    return ",".join(parse_callsign_list(value))
 
 
 def locate_varac_ini_path(*candidates: object) -> str:

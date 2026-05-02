@@ -844,6 +844,52 @@ NETS_TABLES: Dict[str, TableDef] = {
             ON sitrep_state_rollup(report_group, latest_event_ts DESC, state_code);
         """,
     ),
+    "commstat_artifacts": TableDef(
+        name="commstat_artifacts",
+        db=NETS_DB,
+        description="Deduped operator-facing CommStat artifacts for Messages (StatRep, Message, Alert) with merged source and transport metadata.",
+        ddl="""
+        CREATE TABLE IF NOT EXISTS commstat_artifacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            artifact_key TEXT NOT NULL UNIQUE,
+            artifact_kind TEXT NOT NULL,
+            subtype TEXT,
+            event_ts REAL,
+            event_ts_utc TEXT,
+            from_call TEXT,
+            target TEXT,
+            report_group TEXT,
+            grid TEXT,
+            state_code TEXT,
+            scope TEXT,
+            transport_mode TEXT,
+            status_label TEXT,
+            alert_color TEXT,
+            title TEXT,
+            body_text TEXT,
+            remarks_text TEXT,
+            source_first TEXT,
+            source_last TEXT,
+            sources_json TEXT,
+            source_count INTEGER DEFAULT 1,
+            source_refs_json TEXT,
+            external_ids_json TEXT,
+            payload_json TEXT,
+            inserted_ts REAL NOT NULL,
+            updated_ts REAL NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_commstat_artifacts_key
+            ON commstat_artifacts(artifact_key);
+        CREATE INDEX IF NOT EXISTS idx_commstat_artifacts_recent
+            ON commstat_artifacts(event_ts DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_commstat_artifacts_kind_recent
+            ON commstat_artifacts(artifact_kind, event_ts DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_commstat_artifacts_call_recent
+            ON commstat_artifacts(from_call, event_ts DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_commstat_artifacts_group_recent
+            ON commstat_artifacts(report_group, event_ts DESC, id DESC);
+        """,
+    ),
 }
 
 ALL_TABLES: Dict[str, TableDef] = {**SETTINGS_TABLES, **NETS_TABLES}

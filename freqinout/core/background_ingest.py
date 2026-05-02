@@ -31,6 +31,7 @@ class BackgroundIngestController(QObject):
         self._js8_links_timer: Optional[QTimer] = None
         self._messages_timer: Optional[QTimer] = None
         self._varac_timer: Optional[QTimer] = None
+        self._varac_vault_timer: Optional[QTimer] = None
         self._varac_guard_timer: Optional[QTimer] = None
         self._sitrep_timer: Optional[QTimer] = None
         self._prop_outcome_timer: Optional[QTimer] = None
@@ -38,6 +39,9 @@ class BackgroundIngestController(QObject):
         self._executor: Optional[ThreadPoolExecutor] = None
         self._executor_lock = threading.RLock()
         self._job_futures: Dict[str, Future] = {}
+        self._realtime_executor: Optional[ThreadPoolExecutor] = None
+        self._realtime_executor_lock = threading.RLock()
+        self._realtime_job_futures: Dict[str, Future] = {}
         self._running = False
 
     def start(self, *, initial_stagger: bool = True) -> None:
@@ -62,6 +66,11 @@ class BackgroundIngestController(QObject):
         self._varac_timer.setInterval(2 * 60 * 1000)  # 2 minutes
         self._varac_timer.timeout.connect(self._ingest_varac)
         self._varac_timer.start()
+
+        self._varac_vault_timer = QTimer(self)
+        self._varac_vault_timer.setInterval(1200)
+        self._varac_vault_timer.timeout.connect(self._ingest_varac_vault)
+        self._varac_vault_timer.start()
 
         self._varac_guard_timer = QTimer(self)
         self._varac_guard_timer.setInterval(90 * 1000)  # 90 seconds
@@ -91,6 +100,7 @@ class BackgroundIngestController(QObject):
             QTimer.singleShot(2000, self._ingest_js8_links)
             QTimer.singleShot(4000, self._ingest_messages)
             QTimer.singleShot(6000, self._ingest_varac)
+            QTimer.singleShot(6500, self._ingest_varac_vault)
             QTimer.singleShot(7000, self._ingest_varac_guard)
             QTimer.singleShot(8000, self._ingest_sitreps)
             QTimer.singleShot(9000, self._ingest_prop_outcomes)
@@ -102,6 +112,7 @@ class BackgroundIngestController(QObject):
             self._js8_links_timer,
             self._messages_timer,
             self._varac_timer,
+            self._varac_vault_timer,
             self._varac_guard_timer,
             self._sitrep_timer,
             self._prop_outcome_timer,
@@ -110,6 +121,7 @@ class BackgroundIngestController(QObject):
             if t:
                 t.stop()
         self._shutdown_executor()
+        self._shutdown_realtime_executor()
 
     def _ensure_executor(self) -> ThreadPoolExecutor:
         with self._executor_lock:
@@ -139,6 +151,35 @@ class BackgroundIngestController(QObject):
             executor.shutdown(wait=False)
         except Exception as e:
             log.debug("BackgroundIngest: executor shutdown failed: %s", e)
+
+    def _ensure_realtime_executor(self) -> ThreadPoolExecutor:
+        with self._realtime_executor_lock:
+            if self._realtime_executor is None:
+                self._realtime_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="freqinout-realtime",
+                )
+            return self._realtime_executor
+
+    def _shutdown_realtime_executor(self) -> None:
+        with self._realtime_executor_lock:
+            futures = list(self._realtime_job_futures.values())
+            self._realtime_job_futures.clear()
+            executor = self._realtime_executor
+            self._realtime_executor = None
+        for future in futures:
+            try:
+                future.cancel()
+            except Exception:
+                pass
+        if executor is None:
+            return
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            executor.shutdown(wait=False)
+        except Exception as e:
+            log.debug("BackgroundIngest: realtime executor shutdown failed: %s", e)
 
     def _new_worker_settings(self) -> SettingsManager:
         return SettingsManager()
@@ -176,6 +217,28 @@ class BackgroundIngestController(QObject):
             future.result()
         except Exception as e:
             log.debug("BackgroundIngest: %s future failed: %s", job_name, e)
+
+    def _submit_realtime_job(self, job_name: str, job_func: Callable[[], None]) -> None:
+        if not self._running:
+            return
+        with self._realtime_executor_lock:
+            future = self._realtime_job_futures.get(job_name)
+            if future is not None and not future.done():
+                return
+            executor = self._ensure_realtime_executor()
+            future = executor.submit(self._run_job, job_name, job_func)
+            self._realtime_job_futures[job_name] = future
+        future.add_done_callback(lambda done, name=job_name: self._on_realtime_job_done(name, done))
+
+    def _on_realtime_job_done(self, job_name: str, future: Future) -> None:
+        with self._realtime_executor_lock:
+            current = self._realtime_job_futures.get(job_name)
+            if current is future:
+                self._realtime_job_futures.pop(job_name, None)
+        try:
+            future.result()
+        except Exception as e:
+            log.debug("BackgroundIngest: realtime %s future failed: %s", job_name, e)
 
     def _ingest_js8_links(self) -> None:
         self._submit_job("js8_links", self._run_js8_links_job)
@@ -215,6 +278,9 @@ class BackgroundIngestController(QObject):
     def _ingest_varac(self) -> None:
         self._submit_job("varac", self._run_varac_job)
 
+    def _ingest_varac_vault(self) -> None:
+        self._submit_realtime_job("varac_vault", self._run_varac_vault_job)
+
     def _ingest_varac_guard(self) -> None:
         self._submit_job("varac_guard", self._run_varac_guard_job)
 
@@ -225,7 +291,7 @@ class BackgroundIngestController(QObject):
         except Exception as e:
             log.debug("BackgroundIngest: VarAC ingest failed: %s", e)
 
-    def _run_varac_guard_job(self) -> None:
+    def _run_varac_vault_job(self) -> None:
         worker_settings = self._new_worker_settings()
         try:
             vault_result = run_varac_bbs_vault(worker_settings)
@@ -235,6 +301,9 @@ class BackgroundIngestController(QObject):
                 log.debug("BackgroundIngest: VarAC vault %s", vault_result.summary)
         except Exception as e:
             log.debug("BackgroundIngest: VarAC vault failed: %s", e)
+
+    def _run_varac_guard_job(self) -> None:
+        worker_settings = self._new_worker_settings()
         try:
             result = run_varac_guard(worker_settings)
             if int(result.scanned_events or 0) > 0:

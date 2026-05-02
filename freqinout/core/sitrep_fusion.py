@@ -743,7 +743,8 @@ def _build_report_key(
 ) -> str:
     external_id = _report_external_id(raw_payload)
     sig = _status_signature(fields)
-    if external_id:
+    subtype_txt = str(subtype or "").strip().upper()
+    if external_id and subtype_txt not in {"COMMSTAT_12", "COMMSTAT_FWD"}:
         base = "|".join([from_call, external_id.upper(), subtype, sig])
     else:
         minute_bucket = int(event_ts // 60.0) if event_ts > 0 else 0

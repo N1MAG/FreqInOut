@@ -64,6 +64,7 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.sqlite_utils import fetch_all
 from freqinout.core.support_reporting import build_support_summary, bullet_lines
+from freqinout.core.commstat_artifacts import artifact_filter_label, artifact_kind_label
 from freqinout.core.sitrep_metadata import (
     parse_filter_subtype_label,
     source_family_display_label,
@@ -662,6 +663,7 @@ class _RowsBuildWorker(QObject):
         spotter_messages: List[SpotterMessage],
         varac_messages: List["VarACMessage"],
         sitrep_messages: List["SitrepMessage"],
+        commstat_messages: List["CommStatArtifact"],
         files: Dict[str, List[FileRecord]],
         read_state_map: Dict[tuple, tuple[str, float, int]],
         signature_state_map: Dict[tuple, Dict[str, object]],
@@ -679,6 +681,7 @@ class _RowsBuildWorker(QObject):
         self._spotter_messages = list(spotter_messages)
         self._varac_messages = list(varac_messages)
         self._sitrep_messages = list(sitrep_messages)
+        self._commstat_messages = list(commstat_messages)
         self._files = {
             "varac": list(files.get("varac", [])),
             "flmsg": list(files.get("flmsg", [])),
@@ -1202,6 +1205,53 @@ class _RowsBuildWorker(QObject):
                 )
             )
 
+        for msg in self._commstat_messages:
+            rcv_ts = float(msg.event_ts or 0.0)
+            rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
+            from_call = (msg.from_call or "").strip().upper()
+            to_call = (msg.target or "").strip().upper()
+            msg_type = artifact_kind_label(msg.artifact_kind)
+            status = str(msg.status_label or "INFO").strip().upper() or "INFO"
+            title = str(msg.title or "").strip() or msg_type
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+            rows.append(
+                UnifiedMessage(
+                    msg_type=msg_type,
+                    status=status,
+                    from_call=from_call,
+                    to_call=to_call,
+                    rcv_ts=rcv_ts,
+                    rcv_display=rcv_display,
+                    title=title,
+                    origin="commstat",
+                    payload=msg,
+                    search_text=self._compose_search_text(
+                        msg_type,
+                        status,
+                        from_call,
+                        to_call,
+                        rcv_display,
+                        " ".join(
+                            part
+                            for part in (
+                                title,
+                                msg.report_group,
+                                msg.transport_label,
+                                msg.source_family_label,
+                                msg.body_text,
+                                msg.remarks_text,
+                                msg.alert_color,
+                                msg.status_label,
+                                msg.grid,
+                                msg.state_code,
+                            )
+                            if part
+                        ),
+                    ),
+                )
+            )
+
         for origin, recs in self._files.items():
             for rec in recs:
                 status = self._file_status(rec)
@@ -1456,6 +1506,38 @@ class SitrepMessage:
 
 
 @dataclass
+class CommStatArtifact:
+    artifact_id: int
+    artifact_key: str
+    artifact_kind: str
+    subtype: str
+    event_ts: float
+    event_ts_utc: str
+    from_call: str
+    target: str
+    report_group: str
+    grid: str
+    state_code: str
+    scope: str
+    transport_mode: str
+    transport_label: str
+    status_label: str
+    alert_color: str
+    title: str
+    body_text: str
+    remarks_text: str
+    source_family_label: str
+    source_first: str
+    source_last: str
+    source_count: int
+    sources_json: str
+    source_refs_json: str
+    external_ids_json: str
+    payload_json: str
+    updated_ts: float
+
+
+@dataclass
 class UnifiedMessage:
     msg_type: str
     status: str
@@ -1539,8 +1621,25 @@ class MessageTableModel(QAbstractTableModel):
             detail = str(getattr(row, "auth_detail", "") or "").strip()
             if detail:
                 return detail
-        if role == Qt.ForegroundRole and col == 2 and row.status == "NEW":
-            return QColor(Qt.red)
+        if role == Qt.ForegroundRole and col == 2:
+            if row.status == "NEW":
+                return QColor(Qt.red)
+            payload = row.payload
+            if isinstance(payload, CommStatArtifact):
+                color = str(payload.alert_color or "").strip().lower()
+                if color == "red":
+                    return QColor("#d32f2f")
+                if color == "yellow":
+                    return QColor("#ed8b00")
+                if color == "green":
+                    return QColor("#2e7d32")
+                status = str(payload.status_label or "").strip().upper()
+                if status == "RED":
+                    return QColor("#d32f2f")
+                if status == "YELLOW":
+                    return QColor("#ed8b00")
+                if status == "GREEN":
+                    return QColor("#2e7d32")
         return None
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
@@ -2075,8 +2174,10 @@ class MessageViewerTab(QWidget):
         self.spotter_messages: List[SpotterMessage] = []
         self.varac_messages: List[VarACMessage] = []
         self.sitrep_messages: List[SitrepMessage] = []
+        self.commstat_messages: List[CommStatArtifact] = []
         self.current_js8: JS8Message | None = None
         self.current_sitrep: SitrepMessage | None = None
+        self.current_commstat: CommStatArtifact | None = None
         self._js8_timer: QTimer | None = None
         self._pending_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
@@ -4634,6 +4735,15 @@ class MessageViewerTab(QWidget):
         type_sel = str(type_sel or "").strip()
         if type_sel in ("", "MSG Type..."):
             return True
+        if type_sel == "CommStat":
+            return bool((row.origin or "").strip().lower() == "commstat")
+        if type_sel.startswith("CommStat/"):
+            if (row.origin or "").strip().lower() != "commstat":
+                return False
+            payload = getattr(row, "payload", None)
+            row_kind = str(getattr(payload, "artifact_kind", "") or "").strip().upper()
+            label = artifact_filter_label(row_kind)
+            return label == type_sel
         if type_sel == "Spotter":
             return bool((row.msg_type or "").startswith("F!"))
         if type_sel == "SitRep":
@@ -5355,6 +5465,10 @@ class MessageViewerTab(QWidget):
                 self._load_sitrep_from_local(force=force, rebuild=False)
             except Exception as e:
                 log.debug("MessageViewer: sitrep load failed: %s", e)
+            try:
+                self._load_commstat_from_local(force=force, rebuild=False)
+            except Exception as e:
+                log.debug("MessageViewer: CommStat local load failed: %s", e)
             if rebuild:
                 self._populate_messages_table(force=force)
 
@@ -5365,6 +5479,10 @@ class MessageViewerTab(QWidget):
             self._load_sitrep_from_local(force=force, rebuild=False)
         except Exception as e:
             log.debug("MessageViewer: sitrep refresh failed: %s", e)
+        try:
+            self._load_commstat_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: CommStat refresh failed: %s", e)
         if rebuild:
             self._populate_messages_table(force=force)
 
@@ -5674,6 +5792,74 @@ class MessageViewerTab(QWidget):
             )
             msgs.append(msg)
         self.sitrep_messages = msgs
+        if rebuild:
+            self._populate_messages_table(force=force)
+
+    def _load_commstat_from_local(self, force: bool = False, rebuild: bool = True) -> None:
+        db_path = self._db_path()
+        msgs: List[CommStatArtifact] = []
+        if not db_path or not db_path.exists():
+            self.commstat_messages = msgs
+            if rebuild:
+                self._populate_messages_table(force=force)
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, artifact_key, artifact_kind, subtype, event_ts, event_ts_utc,
+                       from_call, target, report_group, grid, state_code, scope,
+                       transport_mode, status_label, alert_color, title, body_text, remarks_text,
+                       source_first, source_last, source_count, sources_json, source_refs_json,
+                       external_ids_json, payload_json, updated_ts
+                FROM commstat_artifacts
+                ORDER BY event_ts DESC, id DESC
+                LIMIT 5000
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("MessageViewer: failed to load CommStat artifacts: %s", e)
+            rows = []
+        for r in rows:
+            sources_json = str(r[21] or "")
+            source_candidates = self._safe_json_array_loads(sources_json)
+            if not source_candidates:
+                source_candidates = [str(r[18] or "").strip().upper(), str(r[19] or "").strip().upper()]
+            msg = CommStatArtifact(
+                artifact_id=int(r[0] or 0),
+                artifact_key=str(r[1] or ""),
+                artifact_kind=str(r[2] or "").strip().upper(),
+                subtype=str(r[3] or "").strip().upper(),
+                event_ts=float(r[4] or 0.0),
+                event_ts_utc=str(r[5] or ""),
+                from_call=str(r[6] or "").strip().upper(),
+                target=str(r[7] or "").strip().upper(),
+                report_group=str(r[8] or "").strip().upper(),
+                grid=str(r[9] or "").strip().upper(),
+                state_code=str(r[10] or "").strip().upper(),
+                scope=str(r[11] or "").strip(),
+                transport_mode=str(r[12] or "").strip().lower(),
+                transport_label=transport_label(r[12]),
+                status_label=str(r[13] or "").strip().upper(),
+                alert_color=str(r[14] or "").strip().upper(),
+                title=str(r[15] or "").strip(),
+                body_text=str(r[16] or "").strip(),
+                remarks_text=str(r[17] or "").strip(),
+                source_family_label=source_family_display_label(source_families_from_sources(source_candidates)),
+                source_first=str(r[18] or "").strip().upper(),
+                source_last=str(r[19] or "").strip().upper(),
+                source_count=int(r[20] or 0),
+                sources_json=sources_json,
+                source_refs_json=str(r[22] or ""),
+                external_ids_json=str(r[23] or ""),
+                payload_json=str(r[24] or ""),
+                updated_ts=float(r[25] or 0.0),
+            )
+            msgs.append(msg)
+        self.commstat_messages = msgs
         if rebuild:
             self._populate_messages_table(force=force)
 
@@ -6357,6 +6543,7 @@ class MessageViewerTab(QWidget):
             "spotter_messages": list(self.spotter_messages),
             "varac_messages": list(self.varac_messages),
             "sitrep_messages": list(self.sitrep_messages),
+            "commstat_messages": list(self.commstat_messages),
             "files": {k: list(v) for k, v in self.files.items()},
             "read_state_map": dict(self._read_state_map),
             "signature_state_map": signature_map,
@@ -6395,6 +6582,7 @@ class MessageViewerTab(QWidget):
             spotter_messages=snapshot.get("spotter_messages", []),  # type: ignore[arg-type]
             varac_messages=snapshot.get("varac_messages", []),  # type: ignore[arg-type]
             sitrep_messages=snapshot.get("sitrep_messages", []),  # type: ignore[arg-type]
+            commstat_messages=snapshot.get("commstat_messages", []),  # type: ignore[arg-type]
             files=snapshot.get("files", {}),  # type: ignore[arg-type]
             read_state_map=snapshot.get("read_state_map", {}),  # type: ignore[arg-type]
             signature_state_map=snapshot.get("signature_state_map", {}),  # type: ignore[arg-type]
@@ -6472,7 +6660,16 @@ class MessageViewerTab(QWidget):
         from_vals = sorted({r.from_call for r in rows if r.from_call})
         to_vals = sorted({r.to_call for r in rows if r.to_call})
         spotter_forms = sorted({t for t in type_vals if re.match(r"^F!\d+$", t)})
-        base_types = sorted([t for t in type_vals if t not in spotter_forms])
+        commstat_kinds = sorted(
+            {
+                str(getattr(r.payload, "artifact_kind", "") or "").strip().upper()
+                for r in rows
+                if (r.origin or "").strip().lower() == "commstat"
+            }
+        )
+        commstat_kinds = [k for k in commstat_kinds if k]
+        commstat_type_labels = {artifact_kind_label(k) for k in commstat_kinds}
+        base_types = sorted([t for t in type_vals if t not in spotter_forms and t not in commstat_type_labels])
         sitrep_subtypes = sorted(
             {
                 str(getattr(r.payload, "subtype", "") or "").strip().upper()
@@ -6493,6 +6690,15 @@ class MessageViewerTab(QWidget):
                 idx = len(type_vals)
             sitrep_filters = [subtype_filter_label(s) for s in sitrep_subtypes]
             type_vals[idx:idx] = sitrep_filters
+        if commstat_kinds:
+            if "CommStat" not in type_vals:
+                type_vals.append("CommStat")
+            commstat_filters = [artifact_filter_label(k) for k in commstat_kinds]
+            if "CommStat" in type_vals:
+                insert_at = type_vals.index("CommStat") + 1
+            else:
+                insert_at = len(type_vals)
+            type_vals[insert_at:insert_at] = commstat_filters
         if any(getattr(r.payload, "flag_state", 0) == 1 for r in rows):
             if "Action Needed" not in status_vals:
                 status_vals.append("Action Needed")
@@ -6755,6 +6961,7 @@ class MessageViewerTab(QWidget):
             self.current_record = None
             self.current_js8 = None
             self.current_sitrep = None
+            self.current_commstat = None
         self.messages_table.setUpdatesEnabled(True)
         self._update_bulk_delete_buttons()
         self._update_mark_all_read_style()
@@ -6837,7 +7044,12 @@ class MessageViewerTab(QWidget):
                 self.varac_messages = [
                     m for m in self.varac_messages if m.msg_id != msg_id or m.source != payload.source
                 ]
-                if self.current_record is None and self.current_js8 is None and self.current_sitrep is None:
+                if (
+                    self.current_record is None
+                    and self.current_js8 is None
+                    and self.current_sitrep is None
+                    and self.current_commstat is None
+                ):
                     self._has_active_view = False
                     self.info_label.setText("No message selected")
                     self.viewer.clear()
@@ -6851,7 +7063,12 @@ class MessageViewerTab(QWidget):
                     failed += 1
                     continue
                 self.spotter_messages = [m for m in self.spotter_messages if m.spotter_id != msg_id]
-                if self.current_js8 is None and self.current_record is None and self.current_sitrep is None:
+                if (
+                    self.current_js8 is None
+                    and self.current_record is None
+                    and self.current_sitrep is None
+                    and self.current_commstat is None
+                ):
                     self._has_active_view = False
                     self.info_label.setText("No message selected")
                     self.viewer.clear()
@@ -7712,6 +7929,26 @@ class MessageViewerTab(QWidget):
                 )
             )
 
+        for msg in self.commstat_messages:
+            rcv_ts = msg.event_ts or 0.0
+            rcv_display = self._format_rcv_display(rcv_ts, msg.event_ts_utc)
+            title = str(msg.title or "").strip() or artifact_kind_label(msg.artifact_kind)
+            if len(title) > 60:
+                title = title[:57].rstrip() + "..."
+            rows.append(
+                UnifiedMessage(
+                    msg_type=artifact_kind_label(msg.artifact_kind),
+                    status=str(msg.status_label or "INFO").strip().upper() or "INFO",
+                    from_call=(msg.from_call or "").strip().upper(),
+                    to_call=(msg.target or "").strip().upper(),
+                    rcv_ts=rcv_ts,
+                    rcv_display=rcv_display,
+                    title=title,
+                    origin="commstat",
+                    payload=msg,
+                )
+            )
+
         for origin, recs in self.files.items():
             for rec in recs:
                 status = self._get_read_state(rec)
@@ -7782,6 +8019,7 @@ class MessageViewerTab(QWidget):
             if isinstance(row.payload, JS8Message):
                 self.current_record = None
                 self.current_sitrep = None
+                self.current_commstat = None
                 self.current_js8 = row.payload
                 self._load_js8_content(row.payload)
                 self._mark_js8_read(row.payload, row_ref=row)
@@ -7789,11 +8027,13 @@ class MessageViewerTab(QWidget):
                 self.current_record = None
                 self.current_js8 = None
                 self.current_sitrep = None
+                self.current_commstat = None
                 self._load_js8_content(row.payload)
                 self._mark_spotter_read(row.payload, row_ref=row)
             elif isinstance(row.payload, FileRecord):
                 self.current_js8 = None
                 self.current_sitrep = None
+                self.current_commstat = None
                 self.current_record = row.payload
                 self._load_content(row.payload)
                 self._set_read_state(row.payload, "READ", row_ref=row)
@@ -7801,12 +8041,20 @@ class MessageViewerTab(QWidget):
                 self.current_js8 = None
                 self.current_record = None
                 self.current_sitrep = None
+                self.current_commstat = None
                 self._load_varac_content(row.payload, row_ref=row)
             elif isinstance(row.payload, SitrepMessage):
                 self.current_js8 = None
                 self.current_record = None
+                self.current_commstat = None
                 self.current_sitrep = row.payload
                 self._load_sitrep_content(row.payload)
+            elif isinstance(row.payload, CommStatArtifact):
+                self.current_js8 = None
+                self.current_record = None
+                self.current_sitrep = None
+                self.current_commstat = row.payload
+                self._load_commstat_content(row.payload)
 
     def _read_file_head(self, path: Path, limit: int = 4096) -> str:
         try:
@@ -8672,7 +8920,12 @@ class MessageViewerTab(QWidget):
             return
         self._delete_varac_local_row(msg)
         self.varac_messages = [m for m in self.varac_messages if m.msg_id != msg_id or m.source != msg.source]
-        if self.current_record is None and self.current_js8 is None and self.current_sitrep is None:
+        if (
+            self.current_record is None
+            and self.current_js8 is None
+            and self.current_sitrep is None
+            and self.current_commstat is None
+        ):
             self._has_active_view = False
             self.info_label.setText("No message selected")
             self.viewer.clear()
@@ -8698,7 +8951,12 @@ class MessageViewerTab(QWidget):
             QMessageBox.warning(self, "Delete Message", f"Failed to delete Message {msg_id}.")
             return
         self.spotter_messages = [m for m in self.spotter_messages if m.spotter_id != msg_id]
-        if self.current_js8 is None and self.current_record is None and self.current_sitrep is None:
+        if (
+            self.current_js8 is None
+            and self.current_record is None
+            and self.current_sitrep is None
+            and self.current_commstat is None
+        ):
             self._has_active_view = False
             self.info_label.setText("No message selected")
             self.viewer.clear()
@@ -9176,6 +9434,8 @@ class MessageViewerTab(QWidget):
         payload = row.payload
         if isinstance(payload, SitrepMessage):
             return str(getattr(payload, "source_family_label", "") or "").strip() or "SitRep"
+        if isinstance(payload, CommStatArtifact):
+            return str(getattr(payload, "source_family_label", "") or "").strip() or "CommStat"
         if isinstance(payload, FileRecord):
             return self._file_origin_label(payload)
         return ""
@@ -9244,6 +9504,67 @@ class MessageViewerTab(QWidget):
             ]
             self.info_label.setText(
                 f"SitRep {msg.subtype_label} {msg.from_call} -> {msg.target}"
+                + (f" | {msg.source_family_label}" if msg.source_family_label else "")
+                + (f" | {msg.transport_label}" if msg.transport_label else "")
+            )
+            self.viewer.setAcceptRichText(False)
+            self.viewer.setPlainText("\n".join(lines))
+
+    def _load_commstat_content(self, msg: CommStatArtifact) -> None:
+        with perf_span(
+            "messages.load_commstat_content",
+            settings=self.settings,
+            meta={"kind": msg.artifact_kind},
+            min_ms=2.0,
+        ):
+            mode = self._current_time_mode()
+            label = "UTC" if mode == "UTC" else "Local"
+            ts_display = self._format_rcv_display(msg.event_ts or 0.0, msg.event_ts_utc)
+            source_list = self._safe_json_pretty(msg.sources_json)
+            source_refs = self._safe_json_pretty(msg.source_refs_json)
+            external_ids = self._safe_json_pretty(msg.external_ids_json)
+            payload = self._safe_json_pretty(msg.payload_json)
+            lines = [
+                artifact_kind_label(msg.artifact_kind),
+                "",
+                f"CALLSIGN: {msg.from_call}",
+                f"TO:       {msg.target}",
+                f"GROUP:    {msg.report_group or '--'}",
+                f"GRID:     {msg.grid or '--'}",
+                f"STATE:    {msg.state_code or '--'}",
+                f"SCOPE:    {msg.scope or '--'}",
+                f"SOURCE:   {msg.source_family_label or 'CommStat'}",
+                f"RECEIPT:  {msg.transport_label or '--'}",
+                f"{label}:  {ts_display}",
+                f"STATUS:   {msg.status_label or '--'}",
+                f"ALERT:    {msg.alert_color or '--'}",
+                f"SUBTYPE:  {msg.subtype or '--'}",
+                "",
+                f"TITLE: {msg.title or '--'}",
+                "",
+                "BODY",
+                msg.body_text or "--",
+                "",
+                "DETAILS",
+                f"  Remarks:      {msg.remarks_text or '--'}",
+                f"  First Source: {msg.source_first or 'Unknown'}",
+                f"  Last Source:  {msg.source_last or 'Unknown'}",
+                f"  Sources:      {msg.source_count}",
+                "",
+                "Source List JSON:",
+                source_list,
+                "",
+                "Source Refs JSON:",
+                source_refs,
+                "",
+                "External IDs JSON:",
+                external_ids,
+                "",
+                "Payload JSON:",
+                payload,
+            ]
+            self.info_label.setText(
+                f"{artifact_kind_label(msg.artifact_kind)} {msg.from_call} -> {msg.target}"
                 + (f" | {msg.source_family_label}" if msg.source_family_label else "")
                 + (f" | {msg.transport_label}" if msg.transport_label else "")
             )

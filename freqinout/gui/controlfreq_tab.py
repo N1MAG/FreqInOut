@@ -1103,6 +1103,10 @@ class ControlFreqTab(QWidget):
                 pass
 
     def _settings_snapshot_for_readiness(self) -> Dict[str, Any]:
+        try:
+            self.settings.reload()
+        except Exception:
+            pass
         data = dict(self.settings.all())
         message_paths = data.get("message_paths", {})
         if not isinstance(message_paths, dict):

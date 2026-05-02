@@ -5796,6 +5796,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .zoom-display {{ padding: 4px 8px; font-size: {panel_font_px:.1f}px; background: {legend_bg}; color: {legend_text}; border: 1px solid {tooltip_border}; }}
     .legend-box {{ background: {legend_bg}; color: {legend_text}; padding: 8px 12px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {legend_font_px:.1f}px; line-height: 1.35; max-width: min(100%, 860px); box-sizing: border-box; }}
     .summary-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {panel_font_px:.1f}px; line-height: 1.35; min-width: 180px; max-width: 240px; }}
+    .summary-region {{ margin-top: 6px; }}
+    .summary-region:first-of-type {{ margin-top: 4px; }}
+    .summary-region-header {{ font-weight: 700; color: {legend_text}; opacity: 0.95; margin-bottom: 3px; }}
     .summary-row {{ display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }}
     .summary-row + .summary-row {{ margin-top: 3px; }}
     .summary-state {{ font-weight: 700; }}
@@ -5899,21 +5902,59 @@ function addGridLabels(res, level, bounds, maxLabels) {
         return '<b>SitRep State Summary</b><br/>No current state rollups.';
       }}
       const header = '<b>SitRep State Summary</b><br/>' + (groupName ? ('Group: ' + groupName + '<br/>') : 'All Groups<br/>');
-      const body = rows.map(r => {{
+      const regionBuckets = new Map();
+      (rows || []).forEach(r => {{
+        const stateCode = String(r.state_code || '').toUpperCase();
+        const regionCode = window.FEMA_LOOKUP[stateCode] ? ('R' + window.FEMA_LOOKUP[stateCode]) : 'OTHER';
+        if (!regionBuckets.has(regionCode)) {{
+          regionBuckets.set(regionCode, []);
+        }}
+        regionBuckets.get(regionCode).push(r);
+      }});
+      const orderedRegions = Array.from(regionBuckets.keys()).sort((a, b) => {{
+        if (a === 'OTHER') return 1;
+        if (b === 'OTHER') return -1;
+        return a.localeCompare(b);
+      }});
+      const body = orderedRegions.map(regionCode => {{
+        const label = regionCode === 'OTHER' ? 'Other / Non-FEMA' : ('Region ' + regionCode.replace(/^R/, ''));
+        const totals = (regionBuckets.get(regionCode) || []).reduce((acc, r) => {{
+          acc.callsign_count += (r.callsign_count || 0);
+          acc.red_count += (r.red_count || 0);
+          acc.yellow_count += (r.yellow_count || 0);
+          acc.green_count += (r.green_count || 0);
+          acc.unknown_count += (r.unknown_count || 0);
+          acc.js8_count += (r.js8_count || 0);
+          acc.internet_count += (r.internet_count || 0);
+          acc.mixed_transport_count += (r.mixed_transport_count || 0);
+          return acc;
+        }}, {{
+          callsign_count: 0,
+          red_count: 0,
+          yellow_count: 0,
+          green_count: 0,
+          unknown_count: 0,
+          js8_count: 0,
+          internet_count: 0,
+          mixed_transport_count: 0
+        }});
         const counts = [
-          'R' + (r.red_count || 0),
-          'Y' + (r.yellow_count || 0),
-          'G' + (r.green_count || 0),
-          'U' + (r.unknown_count || 0)
+          'R' + totals.red_count,
+          'Y' + totals.yellow_count,
+          'G' + totals.green_count,
+          'U' + totals.unknown_count
         ].join(' ');
         const receipt = [
-          (r.js8_count || 0) ? ('JS8 ' + r.js8_count) : '',
-          (r.internet_count || 0) ? ('Net ' + r.internet_count) : '',
-          (r.mixed_transport_count || 0) ? ('Mix ' + r.mixed_transport_count) : ''
+          totals.js8_count ? ('JS8 ' + totals.js8_count) : '',
+          totals.internet_count ? ('Net ' + totals.internet_count) : '',
+          totals.mixed_transport_count ? ('Mix ' + totals.mixed_transport_count) : ''
         ].filter(Boolean).join(' | ');
-        return '<div class="summary-row">' +
-          '<span class="summary-state">' + r.state_code + ' (' + (r.callsign_count || 0) + ')</span>' +
+        return '<div class="summary-region">' +
+          '<div class="summary-region-header">' + label + '</div>' +
+          '<div class="summary-row">' +
+          '<span class="summary-state">' + totals.callsign_count + ' reporting</span>' +
           '<span class="summary-counts">' + counts + (receipt ? ('<br/>' + receipt) : '') + '</span>' +
+          '</div>' +
           '</div>';
       }}).join('');
       return header + body;
