@@ -486,8 +486,11 @@ class StationsMapTab(QWidget):
         self._map_initialized = False
         self._pending_map_payload: Optional[Dict[str, List[Dict]]] = None
         self._last_map_payload_sig: Optional[str] = None
+        self._map_query_cache: Dict[tuple[str, str], tuple[float, object]] = {}
+        self._last_map_render_input_sig: Optional[tuple] = None
         self._last_map_config: Optional[tuple] = None
         self._last_map_render_ts: float = 0.0
+        self._stations_revision: int = 0
         self._render_pending: bool = False
         self._pending_refresh_level: int = 0
         self._pending_refresh_reason: str = ""
@@ -763,6 +766,72 @@ class StationsMapTab(QWidget):
         except Exception:
             log.info("MAP|%s", payload)
         self._map_last_event_ts = time.time()
+
+    def _cached_map_value(
+        self,
+        cache_name: str,
+        cache_key: object,
+        loader,
+        *,
+        ttl_sec: float,
+        force: bool = False,
+    ):
+        if force or ttl_sec <= 0:
+            value = loader()
+            try:
+                key_sig = json.dumps(cache_key, sort_keys=True, default=str)
+                self._map_query_cache[(str(cache_name or ""), key_sig)] = (time.time(), value)
+            except Exception:
+                pass
+            return value
+        try:
+            key_sig = json.dumps(cache_key, sort_keys=True, default=str)
+        except Exception:
+            key_sig = str(cache_key)
+        cache_key_tuple = (str(cache_name or ""), key_sig)
+        now_ts = time.time()
+        cached = self._map_query_cache.get(cache_key_tuple)
+        if cached is not None:
+            cached_ts, cached_value = cached
+            if (now_ts - float(cached_ts or 0.0)) <= float(ttl_sec):
+                return cached_value
+        value = loader()
+        self._map_query_cache[cache_key_tuple] = (now_ts, value)
+        return value
+
+    @staticmethod
+    def _path_stat_fingerprint(path: str | Path | None) -> Tuple[str, int, int]:
+        try:
+            p = Path(path) if path is not None else None
+        except Exception:
+            p = None
+        if p is None:
+            return ("", 0, 0)
+        try:
+            stat = p.stat()
+            return (str(p), int(stat.st_size), int(stat.st_mtime_ns))
+        except Exception:
+            return (str(p), 0, 0)
+
+    @staticmethod
+    def _map_band_filter_signature(band_filter: object) -> Tuple[Tuple[str, str], ...]:
+        if isinstance(band_filter, dict):
+            try:
+                return tuple(sorted((str(k), str(v)) for k, v in band_filter.items()))
+            except Exception:
+                return tuple()
+        return (("value", str(band_filter or "")),)
+
+    def _nets_db_fingerprint(self) -> Tuple[str, int, int]:
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return ("", 0, 0)
+        return self._path_stat_fingerprint(db_path)
+
+    def _set_station_points(self, points: List[StationPoint]) -> None:
+        self.stations = list(points)
+        self._stations_revision += 1
 
     def _set_map_runtime_state(self, state: str, detail: str = "", *, error: str = "") -> None:
         normalized = str(state or "cold").strip().lower() or "cold"
@@ -1862,7 +1931,7 @@ class StationsMapTab(QWidget):
             db_path = get_config_dir() / "config" / "freqinout_nets.db"
         except Exception as e:
             log.error("StationsMap: failed to resolve DB path: %s", e)
-            self.stations = pts
+            self._set_station_points(pts)
             emit_span(
                 "map.load_operator_history",
                 (time.perf_counter() - perf_start) * 1000.0,
@@ -1872,7 +1941,7 @@ class StationsMapTab(QWidget):
             )
             return
         if not db_path.exists():
-            self.stations = pts
+            self._set_station_points(pts)
             emit_span(
                 "map.load_operator_history",
                 (time.perf_counter() - perf_start) * 1000.0,
@@ -1905,7 +1974,7 @@ class StationsMapTab(QWidget):
             conn.close()
         except Exception as e:
             log.error("StationsMap: failed to load operator history: %s", e)
-            self.stations = pts
+            self._set_station_points(pts)
             emit_span(
                 "map.load_operator_history",
                 (time.perf_counter() - perf_start) * 1000.0,
@@ -1989,7 +2058,7 @@ class StationsMapTab(QWidget):
                 )
             )
 
-        self.stations = pts
+        self._set_station_points(pts)
         # store raw operator rows for path filters
         op_rows = []
         for r in rows:
@@ -2054,7 +2123,7 @@ class StationsMapTab(QWidget):
             if not self._is_usa_canada(lat, lon):
                 continue
             pts.append(StationPoint(callsign=cs, grid=grid, heard_by=heard_by, lat=lat, lon=lon))
-        self.stations = pts
+        self._set_station_points(pts)
         self._request_map_refresh(level="full", reason="operator_history_loaded")
 
     def _daily_schedule_freqs(self) -> List[float]:
@@ -3610,7 +3679,6 @@ class StationsMapTab(QWidget):
                 FROM sitrep_state_rollup
                 WHERE report_group=?
                 ORDER BY callsign_count DESC, latest_event_ts DESC, state_code
-                LIMIT 8
                 """,
                 (report_group_key,),
             )
@@ -3781,6 +3849,11 @@ class StationsMapTab(QWidget):
             self.link_mode_combo.currentData() if hasattr(self, "link_mode_combo") else ("off", "")
         )
         return bool(combo_mode and combo_mode.lower() != "off")
+
+    def _display_links_for_mode(self, links: List[Dict], sitrep_mode: bool) -> List[Dict]:
+        if sitrep_mode:
+            return []
+        return list(links or [])
 
     def _load_prop_target_operator_callsigns(self) -> list[str]:
         out: list[str] = []
@@ -4884,13 +4957,25 @@ class StationsMapTab(QWidget):
         prop_state_scores: Dict[str, Dict] = {}
         if self.prop_overlay_enabled:
             # Keep overlay data broad; link filters are independent from propagation target.
-            prop_region_scores = _timed_map_call(
-                "map.compute_region_scores",
-                lambda: self._compute_region_scores(""),
+            prop_region_scores = self._cached_map_value(
+                "prop_region_scores",
+                {"region_filter": "", "window_hours": int(self.prop_window_hours or 6), "mode": str(self._effective_prop_mode())},
+                lambda: _timed_map_call(
+                    "map.compute_region_scores",
+                    lambda: self._compute_region_scores(""),
+                ),
+                ttl_sec=20.0,
+                force=bool(force_reload),
             )
-            prop_state_scores = _timed_map_call(
-                "map.compute_state_scores",
-                self._compute_state_scores,
+            prop_state_scores = self._cached_map_value(
+                "prop_state_scores",
+                {"window_hours": int(self.prop_window_hours or 6), "mode": str(self._effective_prop_mode())},
+                lambda: _timed_map_call(
+                    "map.compute_state_scores",
+                    self._compute_state_scores,
+                ),
+                ttl_sec=20.0,
+                force=bool(force_reload),
             )
             best_band, best_score = self._best_band_for_target(target_ctx, prop_region_scores, prop_state_scores)
             self._update_prop_badge(target_label, best_band, best_score)
@@ -4901,10 +4986,6 @@ class StationsMapTab(QWidget):
             self._update_prop_badge(target_label, "", 0.0)
             target_sig = f"{target_ctx.get('type','')}:{target_ctx.get('value','')}"
         self._last_prop_region_filter = target_sig
-
-        # init stats and links
-        stats_lookup: Dict[str, Dict] = {}
-        links: List[Dict] = []
         sitrep_mode = bool(self._sitrep_status_only_enabled)
         band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
         my_call = ""
@@ -4912,6 +4993,38 @@ class StationsMapTab(QWidget):
             my_call = (self.settings.get("operator_callsign", "") or "").upper()
         except Exception:
             my_call = ""
+
+        map_input_sig = (
+            config_sig,
+            bool(self._links_active()),
+            bool(sitrep_mode),
+            tuple(sorted(selection.items())) if isinstance(selection, dict) else str(selection),
+            str(group_filter or "").strip().upper(),
+            str(region_filter or "").strip().upper(),
+            self._map_band_filter_signature(band_filter),
+            int(self.recency_seconds or 0),
+            str(my_call or "").strip().upper(),
+            bool(self._now_reachable_enabled),
+            len(self._now_reachable_callsigns),
+            hash("|".join(sorted(self._now_reachable_callsigns))) if self._now_reachable_callsigns else 0,
+            str(target_sig or ""),
+            self._nets_db_fingerprint(),
+            int(self._stations_revision or 0),
+        )
+        if (
+            not force_reload
+            and self.web is not None
+            and self._map_initialized
+            and bool(self._last_map_payload_sig)
+            and map_input_sig == self._last_map_render_input_sig
+        ):
+            self._emit_map_event("render_skipped_unchanged", reason="input_signature_match")
+            self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
+            return
+
+        # init stats and links
+        stats_lookup: Dict[str, Dict] = {}
+        links: List[Dict] = []
         if self._links_active():
             relay_target = (self.relay_target or "").strip().upper()
             reachable_filter = self._now_reachable_callsigns if self._now_reachable_enabled else None
@@ -4948,35 +5061,68 @@ class StationsMapTab(QWidget):
             if view_state:
                 self._last_map_view = view_state
 
-        varac_stats = _timed_map_call(
-            "map.load_varac_stats_recent",
-            lambda: self._load_varac_stats(max_age_sec=self.recency_seconds),
+        varac_stats = self._cached_map_value(
+            "varac_stats_recent",
+            {"max_age_sec": self.recency_seconds},
+            lambda: _timed_map_call(
+                "map.load_varac_stats_recent",
+                lambda: self._load_varac_stats(max_age_sec=self.recency_seconds),
+            ),
+            ttl_sec=8.0,
         )
-        varac_all = _timed_map_call("map.load_varac_stats_all", lambda: self._load_varac_stats(max_age_sec=None))
-        activity_lookup = _timed_map_call("map.load_operator_activity_summary", self._load_operator_activity_summary)
-        direct_contact_lookup = _timed_map_call(
-            "map.load_js8_direct_contact_summary",
-            lambda: self._load_js8_direct_contact_summary(my_call),
+        varac_all = self._cached_map_value(
+            "varac_stats_all",
+            {"max_age_sec": None},
+            lambda: _timed_map_call("map.load_varac_stats_all", lambda: self._load_varac_stats(max_age_sec=None)),
+            ttl_sec=12.0,
         )
-        js8_all = _timed_map_call("map.load_js8_presence", self._load_js8_presence)
-        fldigi_calls = _timed_map_call("map.load_fldigi_presence", self._load_fldigi_presence)
-        spotter_status_lookup = _timed_map_call("map.load_spotter_station_status", self._load_spotter_station_status)
+        activity_lookup = self._cached_map_value(
+            "operator_activity_summary",
+            {"recency_seconds": self.recency_seconds},
+            lambda: _timed_map_call("map.load_operator_activity_summary", self._load_operator_activity_summary),
+            ttl_sec=8.0,
+        )
+        direct_contact_lookup = self._cached_map_value(
+            "js8_direct_contact_summary",
+            {"my_call": my_call},
+            lambda: _timed_map_call(
+                "map.load_js8_direct_contact_summary",
+                lambda: self._load_js8_direct_contact_summary(my_call),
+            ),
+            ttl_sec=8.0,
+        )
+        js8_all = self._cached_map_value(
+            "js8_presence",
+            {"recency_seconds": self.recency_seconds},
+            lambda: _timed_map_call("map.load_js8_presence", self._load_js8_presence),
+            ttl_sec=8.0,
+        )
+        fldigi_calls = self._cached_map_value(
+            "fldigi_presence",
+            {"recency_seconds": self.recency_seconds},
+            lambda: _timed_map_call("map.load_fldigi_presence", self._load_fldigi_presence),
+            ttl_sec=8.0,
+        )
+        spotter_status_lookup = self._cached_map_value(
+            "spotter_station_status",
+            {"group_filter": str(group_filter or "").strip().upper(), "region_filter": str(region_filter or "").strip().upper()},
+            lambda: _timed_map_call("map.load_spotter_station_status", self._load_spotter_station_status),
+            ttl_sec=6.0,
+        )
         sitrep_state_summary: List[Dict[str, object]] = []
         sitrep_summary_group = ""
         if sitrep_mode:
             sitrep_summary_group = str(group_filter or "").strip().upper()
-            sitrep_state_summary = _timed_map_call(
-                "map.load_sitrep_state_rollup",
-                lambda: self._load_sitrep_state_rollup(sitrep_summary_group),
+            sitrep_state_summary = self._cached_map_value(
+                "sitrep_state_rollup",
+                {"group": sitrep_summary_group},
+                lambda: _timed_map_call(
+                    "map.load_sitrep_state_rollup",
+                    lambda: self._load_sitrep_state_rollup(sitrep_summary_group),
+                ),
+                ttl_sec=6.0,
             )
-        if sitrep_mode and links:
-            allowed = {"red", "yellow", "green"}
-            links = [
-                link
-                for link in links
-                if str(spotter_status_lookup.get((link.get("origin") or "").strip().upper(), {}).get("status_key") or "").strip().lower() in allowed
-                and str(spotter_status_lookup.get((link.get("destination") or "").strip().upper(), {}).get("status_key") or "").strip().lower() in allowed
-            ]
+        links = self._display_links_for_mode(links, sitrep_mode)
 
         # Spread overlapping stations with the same base lat/lon
         markers = []
@@ -4999,9 +5145,14 @@ class StationsMapTab(QWidget):
         recent_calls: Set[str] = set()
         if show_all_stations and self.recency_seconds and not sitrep_mode:
             band_filter = self.band_combo.currentData() if hasattr(self, "band_combo") else {"type": "all"}
-            recent_calls = _timed_map_call(
-                "map.load_recent_calls",
-                lambda: self._load_recent_calls(self.recency_seconds, band_filter=band_filter),
+            recent_calls = self._cached_map_value(
+                "recent_calls",
+                {"recency_seconds": self.recency_seconds, "band_filter": band_filter},
+                lambda: _timed_map_call(
+                    "map.load_recent_calls",
+                    lambda: self._load_recent_calls(self.recency_seconds, band_filter=band_filter),
+                ),
+                ttl_sec=6.0,
             )
         for pt in self.stations:
             cs_upper = pt.callsign.upper()
@@ -5139,6 +5290,7 @@ class StationsMapTab(QWidget):
 
         self._map_marker_count = len(markers)
         self._map_link_count = len(links)
+        self._last_map_render_input_sig = map_input_sig
 
         if self.web is not None and self._map_initialized and self._map_file and not force_reload:
             self._push_map_payload(markers, links, sitrep_state_summary=sitrep_state_summary, sitrep_summary_group=sitrep_summary_group)
@@ -5199,6 +5351,7 @@ class StationsMapTab(QWidget):
             # New page context: force first payload push even if content hash matches
             # the prior page's payload.
             self._last_map_payload_sig = None
+            self._last_map_render_input_sig = None
             self._pending_map_payload = {
                 "markers": markers,
                 "links": links,

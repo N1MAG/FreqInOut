@@ -1,8 +1,17 @@
 # Changelog
 
 ## [1.2.3]
+- Changed: the in-app Help guide now teaches the major FreqInOut tabs more explicitly, expanding the purpose, workflow, and cross-tab interaction notes for ControlFreq, Messages, Map, schedules, operators, SOP Builder, and Settings so operators can learn not only how controls work, but why those screens matter and how related settings influence them.
+- Fixed: VarAC schedule protection now also watches recent `VarAC.db` transfer lifecycle events, so scheduler-driven frequency changes are more reliably deferred during inbound or outbound file transfers even when log-tail visibility is incomplete.
+- Changed: `Map` now skips no-op refresh rebuilds when its lightweight input signature has not changed, reducing repeated redraw work during clustered filter and visibility activity while keeping full reloads for real config changes.
+- Changed: multi-rig `Settings` now throttles repeated VarAC BBS operator-lookup rebuilds and avoids redundant section height relayouts during repeated visits, while `HF Daily` reuses its last activation token so unchanged schedule views do not pay the full activation-refresh cost.
+- Changed: `Messages` now fingerprints its JS8/local message stores and skips redundant JS8, JS8Spotter, CommStat, and unified SitRep reload passes when the backing DB files have not changed, reducing repeat activation churn.
+- Changed: `Map` now reuses short-lived query snapshots for repeated propagation, operator-activity, recent-calls, and status rollup lookups during clustered refresh bursts instead of immediately re-querying every source on each refresh request.
+- Fixed: multi-rig `Settings` now tolerates radio-scoped VarAC Managed BBS runtime/cache values when they are loaded back from storage as JSON text, preventing startup failures while opening the selected radio software view.
 - Fixed: `ControlFreq` now reloads saved settings before rebuilding software status visibility and readiness context, so radio-software LEDs stay aligned with the currently saved radio/software selections instead of lagging behind the Settings tab.
 - Changed: `Map` now groups the `SitRep State Summary` panel by FEMA region, making the status rollup easier to scan operationally while still showing the same state-level counts inside each region.
+- Fixed: `Map` SitRep summary now rolls up all matching active states instead of truncating the summary source to the busiest eight state rows, keeping the visible region summary aligned with the pins shown on the map.
+- Fixed: `Map` `SitRep Status` mode now suppresses station-to-station links entirely, so recency changes and active link selections no longer clutter the status-only situational view.
 - Changed: `Settings` now hides focused radio readiness guidance once the selected radio or dialog draft is already `Ready`, groups radio software-used choices into cleaner Fast Light and JS8 rows with `VarAC` on its own row, and reshapes `VarAC Settings` into clearer `Paths and Launch`, `BBS Settings`, and `Vault / VGuard Settings` subsections for the selected radio.
 - Fixed: `VarAC.ini` BBS allowed-callsign sync now writes comma-separated callsigns without added spaces, matching VarAC's expected list style more closely.
 - Added: radio-scoped `Managed BBS Services` now extends the Managed Vault workflow with alias-driven virtual folders, callsign-aware root-menu visibility, VarAC.db session parsing, optional FLAMP relay queue/block responses, and clearer help for menu-style BBS exchanges while keeping each radio's live BBS directory stable for VarAC.

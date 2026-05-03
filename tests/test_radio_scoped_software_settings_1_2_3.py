@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from freqinout.gui.settings_tab import _coerce_json_mapping
 from freqinout.core.multi_radio_store import (
     MultiRadioStore,
     _legacy_settings_projection_from_device,
@@ -100,6 +101,13 @@ def test_device_profile_persists_radio_owned_software_fields(monkeypatch, tmp_pa
     assert saved["varac_bbs_dir"] == "/varac/bbs"
     assert saved["varac_bbs_archive_dir"] == "/varac/archive"
     assert int(saved["varac_bbs_auto_archive_days"]) == 30
+
+
+def test_coerce_json_mapping_accepts_stored_json_text() -> None:
+    assert _coerce_json_mapping("") == {}
+    assert _coerce_json_mapping("{}") == {}
+    assert _coerce_json_mapping('{"active_request":"INTEL"}') == {"active_request": "INTEL"}
+    assert _coerce_json_mapping("[]") == {}
 
 
 def test_settings_tab_source_mentions_radio_scoped_software_view() -> None:

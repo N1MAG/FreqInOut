@@ -2246,6 +2246,7 @@ class MessageViewerTab(QWidget):
         self._last_varac_ingest_ts: float = 0.0
         self._js8_ingest_interval_sec: float = 20.0
         self._last_js8_ingest_ts: float = 0.0
+        self._js8_display_snapshot_fp: Optional[Tuple[Tuple[str, int, int], ...]] = None
         self._file_refresh_interval_sec: float = 60.0
         self._last_file_refresh_ts: float = 0.0
         self._sender_cache: Dict[tuple, str] = {}
@@ -5235,6 +5236,31 @@ class MessageViewerTab(QWidget):
     def _norm_scan_path(path: str | Path) -> str:
         return os.path.normcase(os.path.normpath(str(path)))
 
+    @staticmethod
+    def _path_stat_fingerprint(path: str | Path | None) -> Tuple[str, int, int]:
+        if not path:
+            return ("", 0, 0)
+        try:
+            path_obj = Path(path)
+            stat = path_obj.stat()
+            return (
+                os.path.normcase(os.path.normpath(str(path_obj))),
+                int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+                int(stat.st_size),
+            )
+        except Exception:
+            return (os.path.normcase(os.path.normpath(str(path))), 0, 0)
+
+    def _js8_display_fingerprint(self) -> Tuple[Tuple[str, int, int], ...]:
+        return tuple(
+            sorted(
+                {
+                    self._path_stat_fingerprint(self._db_path()),
+                    self._path_stat_fingerprint(self._local_js8_db()),
+                }
+            )
+        )
+
     def _bbs_archive_roots(self) -> set[str]:
         archive_dir = (self.settings.get("varac_bbs_archive_dir", "") or "").strip()
         if not archive_dir:
@@ -5441,6 +5467,7 @@ class MessageViewerTab(QWidget):
             should_ingest = bool(force) or (
                 now - float(self._last_js8_ingest_ts) >= self._js8_ingest_interval_sec
             )
+            display_fp_before = self._js8_display_fingerprint()
             # First ingest any new messages into local cache, then load from local cache for display
             if should_ingest:
                 try:
@@ -5452,6 +5479,14 @@ class MessageViewerTab(QWidget):
                 except Exception as e:
                     log.debug("MessageViewer: spotter ingest failed: %s", e)
                 self._last_js8_ingest_ts = now
+            display_fp_after = self._js8_display_fingerprint()
+            if (
+                not force
+                and self._js8_display_snapshot_fp is not None
+                and display_fp_after == self._js8_display_snapshot_fp
+                and display_fp_after == display_fp_before
+            ):
+                return
             try:
                 self._load_js8_from_local(force=force, rebuild=False)
             except Exception as e:
@@ -5468,6 +5503,7 @@ class MessageViewerTab(QWidget):
                 self._load_commstat_from_local(force=force, rebuild=False)
             except Exception as e:
                 log.debug("MessageViewer: CommStat local load failed: %s", e)
+            self._js8_display_snapshot_fp = display_fp_after
             if rebuild:
                 self._populate_messages_table(force=force)
 

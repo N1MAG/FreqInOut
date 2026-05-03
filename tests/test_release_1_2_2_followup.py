@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import os
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -282,3 +283,71 @@ def test_map_controls_keep_action_buttons_readable(monkeypatch, tmp_path):
         assert tab._sitrep_status_button.minimumWidth() >= tab._sitrep_status_button.sizeHint().width()
     finally:
         tab.deleteLater()
+
+
+def test_sitrep_mode_suppresses_link_render_payload():
+    dummy = SimpleNamespace()
+
+    assert StationsMapTab._display_links_for_mode(dummy, [{"origin": "A", "destination": "B"}], True) == []
+    assert StationsMapTab._display_links_for_mode(dummy, [{"origin": "A", "destination": "B"}], False) == [
+        {"origin": "A", "destination": "B"}
+    ]
+
+
+def test_sitrep_state_rollup_returns_all_matching_states(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE sitrep_state_rollup (
+                report_group TEXT NOT NULL,
+                state_code TEXT NOT NULL,
+                callsign_count INTEGER NOT NULL DEFAULT 0,
+                red_count INTEGER NOT NULL DEFAULT 0,
+                yellow_count INTEGER NOT NULL DEFAULT 0,
+                green_count INTEGER NOT NULL DEFAULT 0,
+                unknown_count INTEGER NOT NULL DEFAULT 0,
+                js8_count INTEGER NOT NULL DEFAULT 0,
+                internet_count INTEGER NOT NULL DEFAULT 0,
+                mixed_transport_count INTEGER NOT NULL DEFAULT 0,
+                latest_event_ts REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
+        rows = [
+            ("__ALL__", "CT", 9, 1, 0, 8, 0, 9, 0, 0, 1009.0),
+            ("__ALL__", "NY", 8, 1, 0, 7, 0, 8, 0, 0, 1008.0),
+            ("__ALL__", "PA", 7, 1, 0, 6, 0, 7, 0, 0, 1007.0),
+            ("__ALL__", "FL", 6, 1, 0, 5, 0, 6, 0, 0, 1006.0),
+            ("__ALL__", "OH", 5, 1, 0, 4, 0, 5, 0, 0, 1005.0),
+            ("__ALL__", "TX", 4, 1, 0, 3, 0, 4, 0, 0, 1004.0),
+            ("__ALL__", "CO", 3, 1, 0, 2, 0, 3, 0, 0, 1003.0),
+            ("__ALL__", "CA", 2, 1, 0, 1, 0, 2, 0, 0, 1002.0),
+            ("__ALL__", "WA", 1, 1, 0, 0, 0, 1, 0, 0, 1001.0),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO sitrep_state_rollup (
+                report_group, state_code, callsign_count, red_count, yellow_count, green_count,
+                unknown_count, js8_count, internet_count, mixed_transport_count, latest_event_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    dummy = SimpleNamespace(_query_cache_ttl_sec=300.0, _query_cache={})
+    dummy._query_cache_get = lambda key, ttl_sec=None: StationsMapTab._query_cache_get(dummy, key, ttl_sec)
+    dummy._query_cache_set = lambda key, value: StationsMapTab._query_cache_set(dummy, key, value)
+
+    rollup = StationsMapTab._load_sitrep_state_rollup(dummy, "")
+
+    assert [row["state_code"] for row in rollup] == ["CT", "NY", "PA", "FL", "OH", "TX", "CO", "CA", "WA"]

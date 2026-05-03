@@ -27,24 +27,39 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.2.2</p>
+  <p><strong>Current version</strong>: 1.2.3</p>
   <p>This guide is a complete reference for the current FreqInOut interface. It documents each main-menu area, tab, button, table, and nested action so both new and advanced operators can move quickly and confidently.</p>
   <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
+  <p><strong>How to use this guide</strong>: if you are new, read the sections in operational order instead of treating this as a pure control catalog. Start with <a href="#settings">Settings</a> and <a href="#multi-rig-configuration">Multi-Rig Configuration</a>, then the schedule tabs, then the live operating tabs such as <a href="#controlfreq">ControlFreq</a>, <a href="#messages">Messages</a>, and <a href="#map">Map</a>. If you are already operating, use the guide as a workflow map: when one tab seems confusing, the answer is often explained in a related tab or settings section.</p>
+  <ul class="section-list">
+    <li><strong>How</strong>: each section explains what the controls do.</li>
+    <li><strong>Why</strong>: each major tab also explains what operational problem it solves so you know when to use it.</li>
+    <li><strong>Where it interacts</strong>: FreqInOut is intentionally cross-connected. In multi-rig, many surfaces also depend on which device is currently the <code>Station Default</code> shell.</li>
+  </ul>
 
   <div class="callout">
     Tip: if a button appears muted, it usually means no eligible action is available yet. Select a row, start a net, or complete required fields to enable the next step.
   </div>
 
   <h2 id="quick-start">Quick Start</h2>
+  <p><strong>Goal</strong>: build a multi-radio station in the same order the application expects to reason about it. Multi-rig becomes much easier to use when you think in layers: operator identity first, then device definitions, then operating profiles, then assignments, then schedules, then operating tabs. Quick Start is intentionally explanatory so a new user understands not only what to click, but why the sequence matters.</p>
   <ol class="section-list">
-    <li>Open <a href="#settings">Settings</a>, enter your operator identity, set required software/file paths, and click <em>Save Settings</em>.</li>
-    <li>If you are using more than one radio, read <a href="#multi-rig-configuration">Multi-Rig Configuration</a> next and complete the multi-rig Settings sections before editing schedules.</li>
-    <li>Build your baseline station plan in <a href="#settings-hf-groups">HF Operating Groups</a>, <a href="#hf-daily">HF Daily</a>, and <a href="#hf-nets">HF Nets</a>.</li>
-    <li>Open <a href="#station-overview">Station Overview</a> to confirm which device is the current <code>Station Default</code>, which profiles are active, and whether warnings need attention.</li>
-    <li>Validate the plan in <a href="#freqplanner">FreqPlanner</a> and <a href="#controlfreq">ControlFreq</a>.</li>
-    <li>If running net operations, use <a href="#ncs-fldigi-ssb">FLDigi / SSB</a>, <a href="#ncs-js8call">JS8Call</a>, or <a href="#ncs-vhf-uhf">VHF/UHF</a>.</li>
-    <li>Use <a href="#sop-builder">SOP Builder</a> for condition-driven action plans and <a href="#messages">Messages</a> for traffic review and message actions.</li>
+    <li><strong>1) Begin with <a href="#settings-operator-info">Operator Information</a></strong>: callsign, name, state, and grid still matter globally in multi-rig. These values drive filenames, compose defaults, operator matching, map context, and several station-level workflows even though device control is split across profiles.</li>
+    <li><strong>2) Read <a href="#multi-rig-configuration">Multi-Rig Configuration</a> before building anything else</strong>: this section explains the most important concept in the current design, which is that one device acts as the <code>Station Default</code> compatibility shell even while other devices may be active. If you understand that idea early, the rest of Settings becomes much more intuitive.</li>
+    <li><strong>3) Build <a href="#settings-device-profiles">Device Profiles</a> first</strong>: define each radio or observer endpoint, its control method, launch behavior, shared RF/PTT groups, and device-local VarAC data. Device Profiles are the source of truth for what each radio actually is.</li>
+    <li><strong>4) Build <a href="#settings-operating-profiles">Operating Profiles</a> next</strong>: decide how each device should behave when it becomes the Station Default shell. This is where you choose whether scheduler automation, Messages, Map, Launch Control, and other major surfaces are active for that operating style.</li>
+    <li><strong>5) Apply <a href="#settings-device-assignments">Device Assignments</a> and choose the <code>Station Default</code></strong>: assignments connect devices to operating intent. The Station Default selection determines which radio the legacy/core tabs are currently projecting. This is why a user can have several active radios but still see one primary shell in ControlFreq, Messages, and most operating tabs.</li>
+    <li><strong>6) Configure projected software sections only after the Station Default is understood</strong>: review <a href="#settings-js8call-details">JS8Call Settings Details</a>, <a href="#settings-fast-light-details">Fast Light Settings Details</a>, and <a href="#settings-varac-details">VarAC Settings Details</a> as the current projection of the Station Default device. These sections are still important, but in multi-rig they are easier to understand after the device/profile/assignment model is clear.</li>
+    <li><strong>7) Add optional station-wide helpers only after the primary device model works</strong>: use <a href="#settings-custom-tools-details">Custom Tools Details</a> for scripts and helper launchers that are not radio-specific integrations, then review <a href="#settings-launch-control">Launch Control</a> if you want FIO to launch software for the current shell.</li>
+    <li><strong>8) Build your operating plan</strong>: define your shared operating logic in <a href="#settings-hf-groups">HF Operating Groups</a>, then create schedules in <a href="#hf-daily">HF Daily</a> and <a href="#hf-nets">HF Nets</a>. In multi-rig, schedules only make good sense after the Station Default and assignment logic are settled.</li>
+    <li><strong>9) Use <a href="#station-overview">Station Overview</a> as your truth-check</strong>: confirm which device is the current <code>Station Default</code>, which profiles are active, whether temporary overrides are in effect, and whether RF/PTT or VarAC cluster warnings need attention. This tab is one of the most important “why does the app look this way right now?” tools in multi-rig.</li>
+    <li><strong>10) Validate the live operating picture in <a href="#freqplanner">FreqPlanner</a> and <a href="#controlfreq">ControlFreq</a></strong>: FreqPlanner helps verify plan logic; ControlFreq shows what the current Station Default shell believes it should do now. If either looks wrong, revisit Settings and Station Overview before assuming the scheduler is incorrect.</li>
+    <li><strong>11) Move into operating tabs only after the shell is trustworthy</strong>: use <a href="#messages">Messages</a>, <a href="#map">Map</a>, and <a href="#sop-builder">SOP Builder</a> once the device and assignment model is stable. These tabs are powerful, but they are much easier to interpret when you already know which radio/profile shell they are following.</li>
+    <li><strong>12) Use the NCS tabs only for active role-based operation</strong>: <a href="#ncs-fldigi-ssb">FLDigi / SSB</a>, <a href="#ncs-js8call">JS8Call</a>, and <a href="#ncs-vhf-uhf">VHF/UHF</a> assume you already have a coherent multi-rig station definition and now need operating support for a specific net-control role.</li>
   </ol>
+  <div class="callout">
+    Recommended first-run mindset: in multi-rig, do not start with the schedule tabs. Start by teaching FreqInOut what radios exist, how they behave, and which one currently owns the compatibility shell. Once that foundation is correct, schedule behavior and operating tabs become much easier to trust.
+  </div>
 
   <h2 id="multi-rig-configuration">Multi-Rig Configuration</h2>
   <p><strong>Purpose</strong>: configure multiple device profiles while keeping the current <code>1.2.2</code> compatibility shell predictable.</p>
@@ -130,6 +145,12 @@
 
   <h2 id="controlfreq">ControlFreq</h2>
   <p><strong>Purpose</strong>: primary operating dashboard for station state, schedule actions, and near-term decision support.</p>
+  <p><strong>Why you use it</strong>: ControlFreq is the best first tab to watch during live operation. It answers the practical questions “What should the current Station Default radio be doing now?”, “What is changing next?”, “Am I on schedule?”, and “Is software activity making an immediate QSY unsafe?”</p>
+  <ul class="section-list">
+    <li><strong>What belongs here</strong>: short-horizon operating decisions, temporary holds, schedule confidence, and quick status review for the current shell.</li>
+    <li><strong>What does not belong here</strong>: building schedules, maintaining rosters, or deep device configuration. Use the schedule tabs, Operators tabs, Station Overview, and Settings for that work.</li>
+    <li><strong>Cross-tab interaction</strong>: ControlFreq reflects results from Settings, Device Profiles, Device Assignments, HF Daily, HF Nets, SOP Builder, Messages, and the software status providers.</li>
+  </ul>
 
   <h3 id="controlfreq-actions">Actions</h3>
   <table>
@@ -178,6 +199,7 @@
 
   <h2 id="station-overview">Station Overview</h2>
   <p><strong>Purpose</strong>: read-only multi-rig dashboard for all runtime-active device profiles.</p>
+  <p><strong>Why you use it</strong>: Station Overview is the fastest way to understand which radios are active, which one currently owns the compatibility shell, and whether shared-resource or cluster warnings need attention before you trust the rest of the UI.</p>
   <table>
     <thead>
       <tr><th>Area</th><th>What It Shows</th></tr>
@@ -201,6 +223,11 @@
 
   <h2 id="freqplanner">FreqPlanner</h2>
   <p><strong>Purpose</strong>: read-only visual planner for HF, Net, and SOP-effective schedule coverage.</p>
+  <p><strong>Why you use it</strong>: FreqPlanner is the easiest place to sanity-check the overall plan at a glance once you know which device owns the current Station Default shell.</p>
+  <ul class="section-list">
+    <li><strong>Best use</strong>: validate structure after editing HF Daily, HF Nets, or SOP Builder and after changing assignments that affect which device is Station Default.</li>
+    <li><strong>Important limit</strong>: this tab is intentionally read-only. If something is wrong here, fix it in the schedule, SOP, or Settings surfaces that feed it.</li>
+  </ul>
   <table>
     <thead>
       <tr><th>Control</th><th>What It Does</th></tr>
@@ -216,7 +243,14 @@
 
   <h2 id="messages">Messages</h2>
   <p><strong>Purpose</strong>: unified traffic review, filtering, read state, and file-level actions.</p>
+  <p><strong>Why you use it</strong>: Messages is where FreqInOut turns many traffic sources into one operational inbox. In multi-rig, it still follows the Station Default shell, so this tab answers “What traffic belongs to the radio bundle I am currently operating?”</p>
+  <ul class="section-list">
+    <li><strong>Traffic model</strong>: some rows are files, some are software-originated message artifacts, and some are reporting artifacts that also influence Map and operator-history views.</li>
+    <li><strong>Cross-tab interaction</strong>: if a report changes Map pins or SitRep rollups, the original artifact is usually visible here. If a BBS or compose workflow seems confusing, pair this section with <a href="#settings-varac-details">VarAC Settings Details</a>.</li>
+    <li><strong>Best habit</strong>: use filtering aggressively. As traffic volume grows, focused views are more useful than trying to interpret the full combined inbox all at once.</li>
+  </ul>
   <p><strong>CommStat and SitRep note</strong>: status-bearing CommStat and JS8Spotter traffic still feeds the shared <code>SitRep</code> model used by Map, Operator History, and latest-status views. The Messages tab now also surfaces first-class CommStat artifact rows as <code>CommStat StatRep</code>, <code>CommStat Message</code>, and <code>CommStat Alert</code>. This means operators can review the original CommStat artifact without losing the normalized shared SitRep view used for pinning and rollups.</p>
+  <p><strong>Concept note</strong>: a <code>SitRep</code> in FreqInOut is the normalized operational-status view, not necessarily the original message format. CommStat, JS8Spotter, local NCS inputs, and other sources may all describe status differently. FreqInOut preserves the original artifact here in Messages, but Map and rollup surfaces often use the normalized SitRep layer so operators can compare status consistently across sources.</p>
   <p><strong>CommStat filtering</strong>: use <code>MSG Type</code> for <code>CommStat</code>, <code>CommStat/StatRep</code>, <code>CommStat/Message</code>, and <code>CommStat/Alert</code>. Use the <code>To</code> filter to narrow by report group or target, including groups discovered from live CommStat traffic even when they are not part of your configured operating groups.</p>
   <p><strong>CommStat dedupe</strong>: FIO now merges near-time mirrored CommStat status artifacts so the same real report is not shown twice when it is seen through CommStat tables and JS8Spotter-adjacent paths. The fused SitRep model stays responsible for map pinning and latest status by callsign.</p>
 
@@ -295,6 +329,12 @@
 
   <h2 id="map">Map</h2>
   <p><strong>Purpose</strong>: map-based station, path, and propagation context.</p>
+  <p><strong>Why you use it</strong>: Map is a decision-support surface, not just a picture. It helps you compare who is active, which regions are reporting, who may be reachable now, and where a relay path may be plausible based on recent evidence and schedules for the current shell owner.</p>
+  <ul class="section-list">
+    <li><strong>Best use</strong>: pair Map with ControlFreq when deciding where to spend time next, and pair it with Messages when you want geographic context for a report or operator.</li>
+    <li><strong>Cross-tab interaction</strong>: Map consumes operator data, schedule data, JS8/VarAC/CommStat evidence, and SitRep summaries. In multi-rig, it also depends on which radio currently owns the Station Default shell.</li>
+    <li><strong>Operational caution</strong>: path overlays and peer schedule overlays are aids, not guarantees. Treat them as clues that help you make a better radio decision, not as proof that a path is available right now.</li>
+  </ul>
 
   <h3 id="map-top-controls">Top Map Controls</h3>
   <table>
@@ -337,24 +377,85 @@
   <p><strong>Multi-rig scope</strong>: Map remains tied to the current <code>Station Default</code> shell. It does not select the active device for you, and it can be hidden by the Station Default operating profile or Minimal deployment mode. Use <a href="#station-overview">Station Overview</a> to confirm which device currently owns the shell before you trust map context during a swap.</p>
 
   <h2 id="ncs-fldigi-ssb">NCS: FLDigi / SSB</h2>
-  <p><strong>Purpose</strong>: FLDigi/SSB net control workflow and check-in log operations.</p>
+  <p><strong>Purpose</strong>: FLDigi/SSB net-control workflow for building and maintaining a working net roster from manual operator entry, FLDigi macro discipline, and optional log-assisted intake.</p>
+  <p><strong>Why you use it</strong>: this tab is for a live net where you need a disciplined local roster, structured category buckets such as <code>TFC</code> and <code>QRU</code>, and a controlled way to compare outside check-in lists against your local picture.</p>
+  <ul class="section-list">
+    <li><strong>Best use</strong>: use this during an active FLDigi or voice-supported net when one operator is managing the roster and wants help keeping categories, late check-ins, and references organized.</li>
+    <li><strong>What it is not for</strong>: this is not a general-purpose message browser and not a replacement for the schedule tabs. Build the net plan elsewhere, then use this tab to run the live session.</li>
+    <li><strong>Cross-tab interaction</strong>: this tab depends on Settings for macro-profile paths and optional log-assisted behavior, on Operators data for lookup and enrichment, on the shared QSY/hold helpers used elsewhere in FIO, and in multi-rig it follows the current <code>Station Default</code> shell.</li>
+  </ul>
   <table>
     <thead>
       <tr><th>Area</th><th>Actions</th></tr>
     </thead>
     <tbody>
-      <tr><td>Session setup</td><td><code>Role</code> (NCS/ANCS/JOINER), Net Name selector, QSY dropdown, <code>Hold</code> selector, <code>QSY + Hold</code>, <code>Ad Hoc Net</code>.</td></tr>
-      <tr><td>Operator lookup</td><td><code>Add to Main</code>, <code>Add to New/Late</code>, <code>Compare NCS Lists</code>.</td></tr>
-      <tr><td>Check-in logs</td><td>Main and New/Late text panels, each with <code>Copy</code>.</td></tr>
-      <tr><td>Net lifecycle</td><td><code>Start Net</code>, <code>Save Check-ins</code>, <code>Merge Check-ins</code>, <code>End Net</code>.</td></tr>
-      <tr><td>Compare dialog (nested)</td><td><code>Compare</code>, <code>Copy Missing</code>, <code>Close</code>.</td></tr>
+      <tr><td>Session bar</td><td><code>Role</code> (NCS/ANCS/Joiner), Net Name selector, next scheduled net indicator, QSY dropdown, <code>Hold</code>, <code>QSY + Hold</code>, <code>Ad Hoc Net</code>.</td></tr>
+      <tr><td>Macro workspace</td><td><code>Macro Set</code>, <code>Refresh</code>, <code>Mappings...</code>, <code>Details</code>, macro-status chips, macro-file picker, and log-assisted intake controls.</td></tr>
+      <tr><td>Operator lookup</td><td>Lookup field plus <code>Add to TFC</code>, <code>Add to QRU</code>, <code>Add to LATE</code>, and <code>Add to Seen Locally</code>.</td></tr>
+      <tr><td>Local roster</td><td>Roster table with category/source tracking and copy actions such as <code>Copy TFC</code>, <code>Copy QRU</code>, <code>Copy LATE</code>, <code>Copy Seen Locally</code>, and <code>Copy Summary</code>.</td></tr>
+      <tr><td>Compare / Reference workspace</td><td>Expandable tabbed workspace with <code>Reference</code>, <code>Compare Results</code>, and <code>Review</code>.</td></tr>
+      <tr><td>Net lifecycle</td><td><code>Start Net</code>, <code>Save Check-ins</code>, and <code>End Net</code>.</td></tr>
     </tbody>
   </table>
-  <p><strong>Lookup table columns</strong>: <code>Select</code>, <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Grid</code>, <code>Group</code>, <code>Trusted</code>, <code>Last Seen</code>.</p>
-  <p><strong>Multi-rig scope</strong>: FLDigi / SSB net control remains bound to the current <code>Station Default</code> device. If you need a different active radio to own the shell for a net, switch the Station Default or use <code>Temporary Swap...</code> in <a href="#settings-device-assignments">Device Assignments</a> before starting the session.</p>
+  <p><strong>Operator lookup concept</strong>: the lookup field is not just a search bar. It is a staging point for inserting known operators into the live local roster with the right category, which is why the add buttons matter operationally.</p>
+
+  <h3 id="ncs-fldigi-session-workspace">Session and Macro Workspace</h3>
+  <ul class="section-list">
+    <li><strong>Role</strong>: choose <code>NCS</code>, <code>ANCS</code>, or <code>Joiner</code> based on your current duty in the net. This affects the workspace defaults and how some compare/reference helpers are framed.</li>
+    <li><strong>Net Name</strong>: identifies the current net session and helps the tab keep your local activity organized.</li>
+    <li><strong>QSY tools</strong>: the shared QSY/hold controls let you move the station and temporarily suspend scheduler control in the same way other operating tabs do.</li>
+    <li><strong>Macro Set</strong>: choose the FLDigi macro profile you want this session to follow. This matters because the macro map helps FIO understand which files and labels belong to which operational function.</li>
+    <li><strong>Mappings...</strong>: opens the macro discovery and mapping dialog, which is where you review detected macros, enable or disable rows, and give operational meaning to each mapped item.</li>
+    <li><strong>Details</strong>: expands the setup panel so you can inspect the macro file path, browse for another profile, clear a legacy path, and manage log-assisted intake settings.</li>
+    <li><strong>Status chips</strong>: the chips summarize the current macro-mode state, whether log intake is active, whether uncertain decodes are being held for review, and whether transmitted text is being used as decode context only.</li>
+    <li><strong>Log-assisted intake</strong>: <code>Auto-add from FLDigi log</code> lets FIO watch likely check-ins from the FLDigi log; <code>Hold uncertain decodes for review</code> keeps questionable candidates out of the roster until checked; <code>Use sent TX as context</code> allows sent text to improve interpretation without turning TX lines into check-ins themselves.</li>
+    <li><strong>Multi-rig note</strong>: in multi-rig, this NCS workflow follows the current <code>Station Default</code> device shell, so verify that shell in <a href="#station-overview">Station Overview</a> if the tab seems to be looking at the wrong radio context.</li>
+  </ul>
+
+  <h3 id="ncs-fldigi-roster">Local Roster and Categories</h3>
+  <ul class="section-list">
+    <li><strong>Category model</strong>: <code>TFC</code>, <code>QRU</code>, <code>LATE</code>, and <code>Seen Locally</code> are operational buckets that help you track who has traffic, who has none, who arrived late, and who has been observed locally but not necessarily merged into the main roster picture.</li>
+    <li><strong>Roster table columns</strong>: <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Traffic</code>, <code>Category</code>, and <code>Source</code>. This is the primary operator-facing working surface for the current net.</li>
+    <li><strong>Copy actions</strong>: the copy buttons produce roster slices or a summary you can paste elsewhere without manually rebuilding the list.</li>
+    <li><strong>Source awareness</strong>: the roster keeps track of where an entry came from so you can distinguish direct operator lookup insertion, reference imports, review merges, or other local workflow paths.</li>
+  </ul>
+
+  <h3 id="ncs-fldigi-compare-workspace">Compare, Reference, and Review Workspace</h3>
+  <p>The expandable <code>Compare / Reference</code> area is a tabbed workspace for reconciling your local roster with outside lists and lower-confidence intake.</p>
+  <ul class="section-list">
+    <li><strong>Reference tab</strong>: a place to paste or maintain an outside NCS list. From here you can compare that reference against your local roster and add missing entries when appropriate.</li>
+    <li><strong>Compare Results tab</strong>: shows what is missing between the compared lists, lets you copy those differences, and supports merging missing entries into the local roster when that is operationally appropriate.</li>
+    <li><strong>Review tab</strong>: holds lower-confidence log-assisted candidates so they can be inspected before they become real roster entries. This is a protection feature, not just a convenience surface.</li>
+    <li><strong>Show/Hide</strong>: the compare workspace is collapsible so you can keep the net roster dominant when you are not actively reconciling lists.</li>
+  </ul>
+
+  <h3 id="ncs-fldigi-macro-mapping">Macro Discovery and Mapping Dialog</h3>
+  <p><strong>Purpose</strong>: translate an FLDigi macro file into an operational map FIO can reason about.</p>
+  <ul class="section-list">
+    <li><strong>Confidence filter</strong>: the default view shows high-confidence discovered rows first. Use this when you want a clean starting point instead of every ambiguous match.</li>
+    <li><strong>Mapping columns</strong>: <code>Enabled</code>, <code>Scope</code>, <code>Function</code>, <code>Custom Name</code>, <code>Macro ID</code>, <code>Macro Label</code>, <code>Source File</code>, <code>Confidence</code>, and <code>Read Only</code>.</li>
+    <li><strong>Rescan</strong>: re-runs discovery against the selected profile.</li>
+    <li><strong>Add Manual Row</strong>: use this when the macro exists operationally but cannot be discovered confidently from the profile alone.</li>
+    <li><strong>Browse Selected Source...</strong>: opens the selected source reference so you can inspect the underlying file or location.</li>
+    <li><strong>Save Mappings</strong>: stores the mapping model so later sessions can work from the curated interpretation instead of rediscovering everything from scratch.</li>
+    <li><strong>Why this matters</strong>: macro mapping is not just labeling. It is how FIO learns enough structure to support the net workflow cleanly and avoid treating every macro profile as an undifferentiated file.</li>
+  </ul>
+
+  <h3 id="ncs-fldigi-lifecycle">Net Lifecycle</h3>
+  <ul class="section-list">
+    <li><strong>Start Net</strong>: begins the live session state for this tab and activates the intended workflow.</li>
+    <li><strong>Save Check-ins</strong>: persists the current local roster/check-in state so the session can be reviewed or continued with confidence.</li>
+    <li><strong>End Net</strong>: closes the working session and performs the end-of-net save/log behavior. Use this when the roster is final enough to close out the event.</li>
+  </ul>
 
   <h2 id="ncs-js8call">NCS: JS8Call</h2>
-  <p><strong>Purpose</strong>: JS8Call-directed net control, check-in handling, and query/ack workflows.</p>
+  <p><strong>Purpose</strong>: JS8Call-directed net control with group-targeted and callsign-targeted acknowledgement/query workflows, live check-in tracking, and structured follow-up support around expected query forms.</p>
+  <p><strong>Why you use it</strong>: this tab helps an NCS manage JS8-driven participation where check-ins, acknowledgements, query requests, and follow-up message retrieval all happen in a more structured directed-message environment than FLDigi/SSB.</p>
+  <ul class="section-list">
+    <li><strong>Best use</strong>: use this when the net is operating through JS8Call and you want one place to manage group intent, expected forms, check-in state, and acknowledgement/query actions.</li>
+    <li><strong>Cross-tab interaction</strong>: this tab depends on JS8Call paths and refresh settings from Settings, shares QSY/hold logic with other operating tabs, can enrich later Messages/Map interpretation through the operator data it collects, and in multi-rig it follows the current <code>Station Default</code> shell.</li>
+    <li><strong>Operational caution</strong>: follow-up query handling is still operator-driven in the visible workflow. Use the acknowledgement and <code>E?</code> actions intentionally instead of assuming every missing detail will be gathered automatically.</li>
+  </ul>
   <table>
     <thead>
       <tr><th>Area</th><th>Actions</th></tr>
@@ -368,8 +469,46 @@
   <p><strong>Check-in table columns</strong>: <code>CALLSIGN</code>, <code>NAME</code>, <code>ST</code>, <code>GRID</code>, <code>REGION</code>, <code>MODE</code>, <code>SNR</code>, <code>OFFSET</code>, <code>STATUS</code>, action column.</p>
   <p><strong>Multi-rig scope</strong>: JS8Call net control follows the current <code>Station Default</code> JS8 endpoint and can be hidden by the assigned operating profile. Multi-rig device and endpoint changes are configured in <a href="#settings-device-profiles">Device Profiles</a>, not inside this tab.</p>
 
+  <h3 id="ncs-js8-session-controls">Session, Group, and Expect-Query Controls</h3>
+  <ul class="section-list">
+    <li><strong>Role and Net Name</strong>: establish the current operator role and the net identity the tab should manage.</li>
+    <li><strong>Refresh (sec)</strong>: controls how often the tab polls for updated JS8 activity.</li>
+    <li><strong>Set Group</strong>: sets the group target used for group-oriented actions. This is a core operational step, not just a label field.</li>
+    <li><strong>Set Expect Query</strong>: chooses which expected spotter/query form the tab should use for later <code>E?</code> actions.</li>
+    <li><strong>QSY + Hold</strong> and <code>Ad Hoc Net</code>: use the shared scheduler-hold tools when the net requires moving the station outside the normal schedule flow.</li>
+  </ul>
+
+  <h3 id="ncs-js8-checkins">Check-ins and Status Tracking</h3>
+  <ul class="section-list">
+    <li><strong>Check-in Filter</strong>: <code>F!103 / F!104</code> focuses on the standard expected forms, <code>Any Spotter</code> broadens to other spotter-style form activity, and <code>All Callsigns</code> shows the widest received-participation view.</li>
+    <li><strong>Status column</strong>: use it to understand where each station stands in the workflow, such as newly seen, form-tagged, or acknowledged. This is the quickest way to see who still needs attention.</li>
+    <li><strong>Selection matters</strong>: some actions, especially callsign-specific acknowledgement or query operations, depend on a selected table row.</li>
+  </ul>
+
+  <h3 id="ncs-js8-actions">ACK and Query Actions</h3>
+  <ul class="section-list">
+    <li><strong>ACK GROUP</strong>: acknowledges all qualifying new check-ins as a group.</li>
+    <li><strong>ACK CALLSIGN</strong>: acknowledges the selected station individually.</li>
+    <li><strong>E? GROUP</strong>: sends the currently selected expected-query request to the group target.</li>
+    <li><strong>E? Callsign</strong>: sends that expected-query request to the selected station only.</li>
+    <li><strong>Save Checkins</strong>: persists the current net picture.</li>
+    <li><strong>End Net</strong>: closes the active session and performs the end-of-net save/log behavior.</li>
+  </ul>
+
+  <h3 id="ncs-js8-query-notes">Query Workflow Notes</h3>
+  <ul class="section-list">
+    <li><strong>Current operator-facing model</strong>: the supported workflow in this release is the visible manual one built around <code>Set Expect Query</code>, <code>E? GROUP</code>, and <code>E? Callsign</code>.</li>
+    <li><strong>Why this matters</strong>: JS8 nets often need a disciplined way to ask for a specific form or follow-up response, but the operator should understand that this release does not expose a user-configurable automatic query workflow in Settings.</li>
+    <li><strong>Good practice</strong>: treat this tab as the place to decide when to send follow-up requests, not as a background recovery engine that will silently gather all missing details for you.</li>
+  </ul>
+
   <h2 id="ncs-vhf-uhf">NCS: VHF/UHF (Local NCS)</h2>
-  <p><strong>Purpose</strong>: local net session control, check-in logging, and persistent local situational notes.</p>
+  <p><strong>Purpose</strong>: local net session control, check-in logging, and persistent local situational notes for VHF/UHF or other nearby operator workflows.</p>
+  <p><strong>Why you use it</strong>: this tab is designed for local nets where you want a structured session log, lightweight SitRep handling, and notes that can be updated as the local situation changes.</p>
+  <ul class="section-list">
+    <li><strong>Best use</strong>: use this when the radio workflow is local and operator-driven rather than driven by JS8 or FLDigi message parsing.</li>
+    <li><strong>Cross-tab interaction</strong>: the lookup field depends on Local Callsigns/operator data, while saved session context and exported CSV outputs support later review outside the tab. In multi-rig, this tab still follows the current <code>Station Default</code> shell for the broader operating context.</li>
+  </ul>
   <table>
     <thead>
       <tr><th>Area</th><th>Actions</th></tr>
@@ -386,8 +525,38 @@
   <p><strong>Session behavior</strong>: each net is a unique session. <code>End Net</code> clears session check-in rows while keeping roster/operator data.</p>
   <p><strong>Multi-rig scope</strong>: the Local NCS workflow remains part of the current Station Default shell. It does not create a second independently targeted shell for another active device.</p>
 
+  <h3 id="ncs-vhf-session-workflow">Session Workflow</h3>
+  <ul class="section-list">
+    <li><strong>Net Name and Channels</strong>: these fields capture the local context of the session and are persisted so the tab can reopen with the same operational framing later.</li>
+    <li><strong>Start Net</strong>: opens a fresh local session.</li>
+    <li><strong>Join Net</strong>: joins an existing local session context instead of assuming you are starting from nothing.</li>
+    <li><strong>End Net</strong>: closes the active session while preserving the broader operator roster data used by the tab.</li>
+  </ul>
+
+  <h3 id="ncs-vhf-entry-management">Lookup, Filters, and Entry Management</h3>
+  <ul class="section-list">
+    <li><strong>Operator Lookup/Add</strong>: search known operators or type a callsign directly, then add that check-in to the current session.</li>
+    <li><strong>Refresh</strong>: reloads the current check-in list from storage.</li>
+    <li><strong>Export CSV</strong>: writes the current session view to a CSV file for sharing or later record-keeping.</li>
+    <li><strong>Search and SitRep filters</strong>: narrow the current table by callsign/name/location text or by <code>GREEN</code>, <code>YELLOW</code>, and <code>RED</code> status.</li>
+  </ul>
+
+  <h3 id="ncs-vhf-editor">Selected Entry Editor and Autosave</h3>
+  <ul class="section-list">
+    <li><strong>Selected Check-in</strong>: when you pick a row, the lower editor becomes the working area for that one operator's current local status.</li>
+    <li><strong>SitRep dropdown</strong>: choose the local readiness or concern level for that operator.</li>
+    <li><strong>Persistent notes</strong>: use the notes box to record evolving local context that should remain attached to that check-in.</li>
+    <li><strong>Save Entry</strong> and <code>Autosave</code>: the tab supports both explicit save and background autosave so local updates are less likely to be lost during a busy net.</li>
+  </ul>
+
   <h2 id="hf-daily">Schedules: HF Daily</h2>
   <p><strong>Purpose</strong>: manage active HF daily schedule rows and resource-backed schedule candidates.</p>
+  <p><strong>Why you use it</strong>: HF Daily defines the backbone of routine HF operation for the current compatibility shell. This is where you decide what the scheduler should normally follow when no special SOP or net priority rule is taking precedence.</p>
+  <ul class="section-list">
+    <li><strong>Think of it as baseline intent</strong>: if SOP Builder expresses a temporary operational posture, HF Daily expresses the normal everyday HF plan that the shell returns to.</li>
+    <li><strong>Cross-tab interaction</strong>: rows saved here influence ControlFreq, FreqPlanner, Map schedule context, and scheduler-driven QSY behavior for the current Station Default device.</li>
+    <li><strong>Common mistake</strong>: when operators see a mismatch in ControlFreq, they often adjust the radio first. Usually it is better to confirm the HF Daily row, the active SOP state, and which radio currently owns the shell.</li>
+  </ul>
 
   <h3 id="hf-daily-active">Active Schedule Section</h3>
   <table>
@@ -448,6 +617,12 @@
 
   <h2 id="hf-nets">Schedules: HF Nets</h2>
   <p><strong>Purpose</strong>: manage net schedule rows and the net resource catalog.</p>
+  <p><strong>Why you use it</strong>: HF Nets is where you define structured scheduled net activity, especially when that activity has its own timing, FLDigi expectations, targeting, and conflict rules that should not be treated as generic baseline HF presence.</p>
+  <ul class="section-list">
+    <li><strong>Best use</strong>: use HF Nets for recurring organized activity that needs its own identity, offsets, targeting, and optional priority decisions against SOP windows.</li>
+    <li><strong>Cross-tab interaction</strong>: saved net rows influence ControlFreq outlook, scheduler decisions, net-control workflows, and policy prompts when SOP windows overlap.</li>
+    <li><strong>Why a separate tab exists</strong>: net operations usually need more structure than ordinary HF presence, so FreqInOut keeps the planning surface separate from HF Daily on purpose.</li>
+  </ul>
 
   <h3 id="hf-nets-schedule">Net Schedule Section</h3>
   <table>
@@ -499,6 +674,11 @@
 
   <h2 id="hf-peers">Schedules: HF Peers</h2>
   <p><strong>Purpose</strong>: import and review peer HF schedules with overlap visibility.</p>
+  <p><strong>Why you use it</strong>: HF Peers gives your station awareness of what other operators expect to be doing. This lets FreqInOut support decisions like “who is likely on now?” instead of only showing your own plan.</p>
+  <ul class="section-list">
+    <li><strong>Best use</strong>: review peer schedules after importing updates and before relying on <code>Peer Sched Now</code> in Map or overlap cues in planning.</li>
+    <li><strong>Cross-tab interaction</strong>: HF Peers drives peer-schedule overlays in Map and contributes to general operator decision support. It does not replace real traffic evidence.</li>
+  </ul>
   <table>
     <thead>
       <tr><th>Control</th><th>What It Does</th></tr>
@@ -512,9 +692,15 @@
     </tbody>
   </table>
   <p><strong>Peer table columns</strong>: <code>CALLSIGN</code>, <code>NAME</code>, <code>STATE</code>, <code>GROUPS</code>, <code>DAY</code>, <code>START</code>, <code>END</code>, <code>BAND</code>, <code>MODE</code>, <code>FREQ</code>, <code>OVERLAP</code>.</p>
+  <p><strong>Concept note</strong>: peer schedules are intent data, not evidence data. They tell FreqInOut when another operator expects to be on a band or frequency. That is valuable for planning and relay thinking, but it should always be weighed against actual recent traffic shown in Messages, Map links, and ControlFreq activity.</p>
 
   <h2 id="hf-callsigns">Operators: HF Callsigns</h2>
   <p><strong>Purpose</strong>: maintain HF operator roster, trust state, group mapping, and check-in history.</p>
+  <p><strong>Why you use it</strong>: this tab gives FreqInOut a station memory. It lets the rest of the app show names, states, groups, trust hints, and exports instead of leaving every callsign as an isolated raw string.</p>
+  <ul class="section-list">
+    <li><strong>Cross-tab interaction</strong>: roster data appears in Messages, Map, NCS lookups, exports, and VarAC callsign tagging. Good operator data makes the whole app more useful.</li>
+    <li><strong>Operational value</strong>: trusted rosters and group tagging improve filtering, reporting, and situational interpretation during busy nets and message-heavy events.</li>
+  </ul>
 
   <h3 id="hf-callsigns-actions">Actions</h3>
   <table>
@@ -539,6 +725,11 @@
 
   <h2 id="local-callsigns">Operators: Local Callsigns</h2>
   <p><strong>Purpose</strong>: maintain local VHF/UHF/GMRS/MURS/FRS operator roster and local context.</p>
+  <p><strong>Why you use it</strong>: Local Callsigns does for local comms what HF Callsigns does for HF. It gives the local NCS and local reporting workflows a real roster instead of a scratch pad.</p>
+  <ul class="section-list">
+    <li><strong>Cross-tab interaction</strong>: this roster feeds the local NCS workflow, local reporting context, and any future local-operator exports or summaries.</li>
+    <li><strong>Best practice</strong>: keep categories and notes consistent so the local net workflow stays readable under pressure.</li>
+  </ul>
   <table>
     <thead>
       <tr><th>Control</th><th>What It Does</th></tr>
@@ -556,6 +747,11 @@
   <p><strong>Purpose</strong>: build and activate one HF SOP and one Local Comms SOP with conflict-aware HF activation.</p>
   <p><strong>Model</strong>: SOP action rows are daily by design (no periodic row mode in SOP Builder).</p>
   <p><strong>If you are new</strong>: build the SOP here first, then use HF Daily and HF Nets to confirm the runtime schedule and any priority decisions.</p>
+  <p><strong>Why you use it</strong>: SOP Builder is where you describe how the current shell should pivot when conditions change. The scheduler tabs define the standing plan; SOP Builder defines the alternate operational posture that may temporarily override parts of that plan.</p>
+  <ul class="section-list">
+    <li><strong>Cross-tab interaction</strong>: activating an HF SOP affects HF Daily effective schedule, can trigger Net/SOP conflict handling, and changes what ControlFreq treats as the current intended operating posture.</li>
+    <li><strong>Why separate from schedules</strong>: SOPs are not just another schedule list. They represent an operational state change, so FreqInOut keeps them in a dedicated builder with versioning and conflict handling.</li>
+  </ul>
   <p><strong>Multi-rig scope</strong>: SOP Builder remains a Station Default compatibility-shell tool in this branch. Use HF Daily/HF Nets target scoping plus <a href="#station-overview">Station Overview</a> to verify which active device currently owns the shell before you trust the live runtime result.</p>
 
   <h3 id="sop-builder-actions">Top-Level Actions</h3>
@@ -657,6 +853,12 @@
   <p><strong>Purpose</strong>: configure station identity, scheduler behavior, integration paths, data trust, and launch behavior.</p>
   <p>The Settings tab uses a left section list and collapsible section cards. Select a section in the list to jump directly.</p>
   <p><strong>Warning highlights</strong>: the left section list uses warning highlighting to call out incomplete setup for the current <code>Station Default</code> compatibility shell. Multi-rig sections also surface contextual hints for active profiles, temporary swaps, shared PTT / RF groups, and VarAC cluster safety.</p>
+  <p><strong>Why you use it</strong>: Settings is where you teach FreqInOut what kind of multi-radio station you are running. Almost every other tab depends on this information, and many apparent “app issues” are really about which device owns the Station Default shell or which operating profile is in effect.</p>
+  <ul class="section-list">
+    <li><strong>Good setup order</strong>: start with Operator Information, then Device Profiles, Operating Profiles, Device Assignments, software paths, schedules, and finally advanced areas like clusters, Managed BBS Services, Launch Control, and message-auth trust.</li>
+    <li><strong>Cross-tab interaction</strong>: scheduler behavior, message actions, map evidence, launch readiness, BBS management, and shell visibility all draw from what is configured here.</li>
+    <li><strong>How to read warnings</strong>: a warning highlight usually means “this projected workflow is incomplete for the current shell,” not “every device in the station must run this software.”</li>
+  </ul>
 
   <h3 id="settings-sections">Settings Sections</h3>
   <table>
@@ -723,6 +925,10 @@
       <tr>
         <td>VarAC Settings</td>
         <td>Station Default VarAC projection: install path, optional Linux launch command (Wine), incoming files path, BBS directory/archive, auto-archive policy</td>
+      </tr>
+      <tr>
+        <td>Custom Tools</td>
+        <td>Named helper-tool launch commands, ordering controls, and Launch Control integration for operator-defined scripts or external utilities</td>
       </tr>
       <tr>
         <td>Launch Control</td>
@@ -811,6 +1017,7 @@
     <li><strong>FLDigi Offset meaning</strong>: this is the expected/scheduled FLDigi carrier offset for the group row (for example <code>900</code>). If a schedule row omits FLDigi offset, the matching Operating Group value is used as the expected offset.</li>
     <li><strong>Drift behavior</strong>: FLDigi offset may drift during operation and appear as off-schedule. Whether it is auto-corrected immediately or waits for a prompt depends on the FLDigi enforcement mode; active net operation can also suppress scheduler corrections.</li>
     <li><strong>Condition levels</strong>: group-scoped; toggling one row applies to all rows for the same Group.</li>
+    <li><strong>Condition-level concept</strong>: condition levels let you pre-stage several operational postures without rewriting the whole schedule every time conditions change. Instead of editing frequency plans during an event, you can move the station's active level and let FreqInOut reveal only the rows meant for that level.</li>
   </ul>
 
   <h3 id="settings-local-comms-details">Local Comms Groups Details</h3>
@@ -850,6 +1057,7 @@
     <li><strong>Failed Attempts</strong>: how many bad codes are tolerated before cooldown is applied.</li>
     <li><strong>Cooldown</strong>: how long FreqInOut will ignore more bad-code attempts from that sender after the failure threshold is reached.</li>
     <li><strong>Enable FLAMP relay service</strong>: allows remote queue browsing and block requests using commands such as <code>LIST Q</code>, <code>LIST BLKS F277</code>, and <code>BLK 0,1 F277</code>.</li>
+    <li><strong>FLAMP relay concept</strong>: this is not ordinary file browsing. It is a command-driven assist for block-based FLAMP transfer workflows. FreqInOut temporarily publishes helper files that let a remote operator discover queues, inspect available blocks, and request only the blocks they need.</li>
     <li><strong>FLAMP relay folder</strong>: the source folder where FreqInOut looks for relay queue files to advertise and serve as temporary synthetic BBS responses for the selected radio.</li>
     <li><strong>Locations</strong>: named virtual folders that can be published into the live BBS. The <code>Default</code> location is your normal BBS. Other locations are optional controlled alternatives.</li>
     <li><strong>Location Name</strong>: operator-friendly label for the file set, such as <code>Default</code>, <code>Logistics</code>, or <code>Exercises</code>.</li>
@@ -874,13 +1082,41 @@
   </ul>
 
   <h3 id="settings-message-auth">Message Auth (Key/Hash) Details</h3>
+  <p><strong>Concept of use</strong>: Message authentication answers two different questions. First, “Did this file come from the signer I expected?” Second, “Did the contents change after that file was created?” FreqInOut supports both signature-based verification and hash-based verification because different operators and software workflows use different trust methods.</p>
   <ul class="section-list">
-    <li><strong>Signature verification</strong>: <code>Verify FLAMP .k2s/.b2s signatures</code>.</li>
-    <li><strong>Checksum verification</strong>: <code>Verify FLAMP .k2s/.b2s checksum sidecars</code>.</li>
-    <li><strong>Trusted hash actions</strong>: <code>Add</code>, <code>Import Hash File</code>, <code>Remove Selected</code>.</li>
-    <li><strong>GPG actions</strong>: <code>Browse</code>, <code>Test</code>, <code>Refresh Keys</code>, <code>Import Key File</code>, <code>Import Armored Key</code>, <code>Local-Sign Selected</code>.</li>
-    <li><strong>Key table columns</strong>: <code>Trusted</code>, <code>Fingerprint</code>, <code>User IDs</code>.</li>
-    <li><strong>Trusted hash table columns</strong>: <code>Use</code>, <code>Algorithm</code>, <code>Hash</code>, <code>Label</code>.</li>
+    <li><strong>Signature vs checksum</strong>: a signature tries to prove both integrity and signer identity, as long as you trust the signing key. A checksum or hash proves only that the bytes match the expected digest; by itself it does not identify who created the file.</li>
+    <li><strong>What a sidecar is</strong>: a sidecar is a separate helper file that travels next to the main file. For example, a message file may be accompanied by a separate signature file or checksum file instead of embedding that information inside the main payload.</li>
+    <li><strong>Common sidecar patterns</strong>: in FreqInOut, a signed or verified FLAMP-related file might appear as the main payload plus a companion such as <code>.sig</code>, <code>.sig.k2s</code>, <code>.sig.b2s</code>, <code>.k2s.sig</code>, or <code>.b2s.sig</code>. The naming is not always consistent in the field, so FreqInOut tries to verify the content relationship rather than trusting only one naming style.</li>
+    <li><strong>Why this matters operationally</strong>: if a file will drive action, planning, or reporting, operators should know whether they are trusting authorship, file integrity, or both. A successfully opened file is not the same thing as a verified file.</li>
+    <li><strong>Trust model</strong>: verification is only as good as the trust decisions behind it. If a key is not trusted, a technically valid signature may still be operationally untrusted. Likewise, a matching checksum is useful only if you trust the source of the checksum.</li>
+    <li><strong>Recommended habit</strong>: use signatures when possible for operator-to-operator trust, and use hashes as an additional integrity check or fallback when a signature workflow is not available.</li>
+  </ul>
+  <ul class="section-list">
+    <li><strong>Signature verification</strong>: <code>Verify FLAMP .k2s/.b2s signatures</code> tells FreqInOut to look for supported signature patterns around FLAMP-style payloads and verify them against the available trusted keys.</li>
+    <li><strong>Checksum verification</strong>: <code>Verify FLAMP .k2s/.b2s checksum sidecars</code> tells FreqInOut to compare a payload against a separate digest sidecar when one exists. This is about file integrity, not signer identity.</li>
+    <li><strong>Trusted hash actions</strong>: <code>Add</code>, <code>Import Hash File</code>, and <code>Remove Selected</code> manage hashes you want FreqInOut to treat as known-good reference values.</li>
+    <li><strong>GPG executable path</strong>: this tells FreqInOut which local GPG implementation to use for key and signature operations. On some systems this may be <code>gpg</code>; on others it may be a full path.</li>
+    <li><strong>GPG actions</strong>: <code>Browse</code>, <code>Test</code>, <code>Refresh Keys</code>, <code>Import Key File</code>, <code>Import Armored Key</code>, and <code>Local-Sign Selected</code> manage the local trust environment used for signature verification.</li>
+    <li><strong>What an armored key is</strong>: an armored key is a text-form public key block, usually starting with <code>-----BEGIN PGP PUBLIC KEY BLOCK-----</code>. It is easier to share in email or plain text than a binary key file.</li>
+    <li><strong>What local-sign means</strong>: locally signing a key does not change the original sender's file. It records that your local trust store considers that public key verified enough for your own operational use.</li>
+    <li><strong>Key table columns</strong>: <code>Trusted</code> shows whether the key is currently trusted for your station, <code>Fingerprint</code> is the unique long-form identifier you should compare carefully, and <code>User IDs</code> are the human-readable identities attached to that key.</li>
+    <li><strong>Trusted hash table columns</strong>: <code>Use</code> enables or disables that reference hash, <code>Algorithm</code> identifies the digest type, <code>Hash</code> is the expected digest value, and <code>Label</code> is your human-readable reminder of what that hash represents.</li>
+    <li><strong>Operational caution</strong>: do not treat a matching name or callsign in a key's user ID as sufficient proof by itself. The fingerprint is the safer identity anchor.</li>
+  </ul>
+
+  <h3 id="settings-custom-tools-details">Custom Tools Details</h3>
+  <p><strong>Concept of use</strong>: Custom Tools let you teach FreqInOut about helper programs that are specific to your station workflow but are not one of the built-in supported radio applications. Most often these are Python scripts, shell scripts, wrappers, emulators, or small utility launchers you want available from the same operational surface as the rest of the station tools.</p>
+  <ul class="section-list">
+    <li><strong>Name</strong>: the operator-facing label FreqInOut shows in Settings and Launch Control. Use a short, recognizable name that tells you what the tool is for.</li>
+    <li><strong>Launch Command</strong>: the exact command FreqInOut should run. This can be a script path, an executable, or a full command line with arguments if your workflow requires it.</li>
+    <li><strong>What this is for</strong>: use Custom Tools for station-specific helpers that you want to launch intentionally from FIO, such as emulators, monitoring helpers, conversion scripts, or other repeat-use operational utilities.</li>
+    <li><strong>What this is not for</strong>: do not use Custom Tools to replace the built-in FLRig, FLDigi, JS8Call, VarAC, or other first-class integrations unless you deliberately need a custom wrapper. Built-in integrations carry their own readiness checks and cross-tab behavior that generic tools do not.</li>
+    <li><strong>Ordering</strong>: <code>Up</code> and <code>Down</code> control the order Custom Tools appear when surfaced in Launch Control.</li>
+    <li><strong>Add / Edit / Remove</strong>: these manage the saved Custom Tool definitions only. They do not automatically start the tool.</li>
+    <li><strong>Cross-tab interaction</strong>: configured Custom Tools also appear in <code>Launch Control</code>, so the same named helper can be launched alongside your station software instead of living only as an external script on disk.</li>
+    <li><strong>Multi-rig scope</strong>: Custom Tools are global helpers, not radio-bound device profiles. They remain available as station utilities even though built-in software projections follow the current Station Default shell.</li>
+    <li><strong>Best practice</strong>: if a command depends on a specific working directory, interpreter, virtual environment, or shell wrapper, include that intentionally in the command so the tool behaves the same way every time FIO launches it.</li>
+    <li><strong>Operational caution</strong>: FreqInOut can launch a Custom Tool, but it does not automatically understand that tool's internal readiness or state unless you build a separate integration for it. Treat Custom Tools as assisted launch helpers, not as full protocol integrations.</li>
   </ul>
 
   <h3 id="settings-launch-control">Launch Control Details</h3>
@@ -888,6 +1124,7 @@
     <li><strong>Per-app enablement</strong>: decides which supported tools FreqInOut will launch and manage.</li>
     <li><strong>Startup toggles</strong>: controls which enabled tools should auto-start with the application.</li>
     <li><strong>Order management</strong>: use <code>Up</code>, <code>Down</code>, and <code>Reset Default Order</code> to control startup sequencing.</li>
+    <li><strong>Custom Tool crossover</strong>: Custom Tools configured in <code>Settings &gt; Custom Tools</code> also appear here, which lets you keep station-specific helpers near the same launch workflow as your built-in software stack.</li>
   </ul>
 
   <h3 id="settings-logging-diagnostics">Logging and Diagnostics Details</h3>
@@ -903,6 +1140,8 @@
     <li><strong>Table of Contents</strong> (left): click headings to navigate.</li>
     <li><strong>Guide viewer</strong> (right): renders <code>docs/guide.html</code>.</li>
     <li><strong>Export to PDF</strong>: exports the displayed guide.</li>
+    <li><strong>How to use it well</strong>: if a help button opens a specific section, read at least the purpose text and the nearby workflow notes, not only the control list. Those notes usually explain why the screen exists and what other tabs or settings it depends on.</li>
+    <li><strong>When something feels wrong</strong>: use Help as a relationship map. In multi-rig especially, many questions are really about Station Default ownership, assignment state, or projected settings rather than the tab you are currently viewing.</li>
   </ul>
   <p><strong>Off-schedule prompt note</strong>: When enforcement is set to <code>Prompt</code>, the scheduler can raise an off-schedule prompt for items such as <code>Frequency</code>, <code>FLDigi Mode</code>, and <code>FLDigi Offset</code> (these may appear separately). <code>Apply</code> corrects the selected items, <code>Ignore/Skip</code> leaves them off-schedule for now, and <code>Suspend/Pause</code> temporarily suspends scheduler corrections.</p>
 

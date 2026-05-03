@@ -5,6 +5,7 @@ import sqlite3
 import platform
 import subprocess
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Any, List, Dict, Optional, Set, Tuple
@@ -249,6 +250,9 @@ class DailyScheduleTab(QWidget):
         self._sop_return_to_normal_prompt_active: bool = False
         self._pending_table_conflict_refresh: bool = False
         self._table_conflict_refresh_timer: Optional[QTimer] = None
+        self._last_tab_activation_refresh_ts: float = 0.0
+        self._tab_activation_refresh_interval_sec: float = 10.0
+        self._last_activation_schedule_token: Tuple[Any, ...] | None = None
 
         self._build_ui()
         self._refresh_qsy_options()
@@ -5572,9 +5576,23 @@ class DailyScheduleTab(QWidget):
             meta={"rows": int(self.table.rowCount())},
             min_ms=5.0,
         ):
+            now_ts = time.time()
+            if (now_ts - float(self._last_tab_activation_refresh_ts or 0.0)) < float(
+                self._tab_activation_refresh_interval_sec
+            ):
+                self._update_suspend_state()
+                return
+            self._last_tab_activation_refresh_ts = now_ts
+            activation_token = self._schedule_state_token()
+            if self._last_activation_schedule_token == activation_token:
+                self._update_effective_source_label()
+                self._update_suspend_state()
+                self._refresh_schedule_resources(force=False)
+                return
+            self._last_activation_schedule_token = activation_token
             self._refresh_schedule_target_widgets()
             self._refresh_sop_overlay_rows_in_table()
-            self._refresh_sop_profiles_panel(force=True)
+            self._refresh_sop_profiles_panel(force=False)
             self._update_effective_source_label()
             self._update_suspend_state()
             self._refresh_schedule_resources(force=False)

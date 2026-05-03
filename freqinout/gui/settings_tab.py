@@ -11,7 +11,7 @@ import time
 import zipfile
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Mapping
 
 from PySide6.QtCore import Qt, QTimer, Signal, QSize
 from PySide6.QtGui import QIntValidator, QColor, QBrush, QPainter, QPen
@@ -207,6 +207,22 @@ class _CustomToolDialog(QDialog):
 
     def values(self) -> tuple[str, str]:
         return self.name_edit.text().strip(), self.command_edit.text().strip()
+
+
+def _coerce_json_mapping(value: Any) -> Dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return {}
+        if isinstance(parsed, Mapping):
+            return dict(parsed)
+    return {}
 
 
 TIMEZONE_CHOICES = [
@@ -508,6 +524,13 @@ class SettingsTab(QWidget):
         self._active = False
         self._last_activation_refresh_ts = 0.0
         self._activation_refresh_interval_sec = 30.0
+        self._last_running_status_refresh_ts = 0.0
+        self._running_status_refresh_interval_sec = 2.0
+        self._last_running_status_sig: Optional[Tuple[object, ...]] = None
+        self._last_varac_bbs_lookup_reload_ts = 0.0
+        self._varac_bbs_lookup_reload_interval_sec = 20.0
+        self._last_section_stack_index = -1
+        self._last_section_target_height = 0
 
         self._build_ui()
         self._load_settings()
@@ -574,7 +597,15 @@ class SettingsTab(QWidget):
             parts.append(clean_state)
         return " / ".join([part for part in parts if part])
 
-    def _reload_varac_bbs_operator_lookup(self) -> None:
+    def _reload_varac_bbs_operator_lookup(self, *, force: bool = False) -> None:
+        now_ts = time.time()
+        if (
+            not force
+            and self._varac_bbs_lookup_rows
+            and (now_ts - float(self._last_varac_bbs_lookup_reload_ts or 0.0))
+            < float(self._varac_bbs_lookup_reload_interval_sec)
+        ):
+            return
         merged: Dict[str, Dict[str, str]] = {}
         for loader in (get_shared_operators, get_local_operators):
             try:
@@ -615,6 +646,7 @@ class SettingsTab(QWidget):
             completer.setFilterMode(Qt.MatchContains)
             completer.setCompletionMode(QCompleter.PopupCompletion)
             self.varac_bbs_callsign_lookup_edit.setCompleter(completer)
+        self._last_varac_bbs_lookup_reload_ts = now_ts
 
     def _varac_bbs_selected_callsigns_text(self) -> str:
         if not hasattr(self, "varac_bbs_callsigns_list"):
@@ -3916,8 +3948,12 @@ class SettingsTab(QWidget):
             return
         try:
             target_h = max(0, int(page.sizeHint().height()))
-            page.setMinimumHeight(target_h)
-            self.sections_stack.setMinimumHeight(target_h)
+            row = int(self.sections_stack.currentIndex())
+            if row != int(self._last_section_stack_index) or target_h != int(self._last_section_target_height):
+                page.setMinimumHeight(target_h)
+                self.sections_stack.setMinimumHeight(target_h)
+                self._last_section_stack_index = row
+                self._last_section_target_height = target_h
         except Exception:
             pass
 
@@ -6597,7 +6633,9 @@ class SettingsTab(QWidget):
             "varac_bbs_vault_flamp_enabled": bool(int(profile.get("varac_bbs_vault_flamp_enabled", 0) or 0) == 1),
             "varac_bbs_vault_flamp_relay_dir": str(profile.get("varac_bbs_vault_flamp_relay_dir", "") or "").strip(),
             "varac_bbs_vault_locations_v1": profile.get("varac_bbs_vault_locations_v1", []) or [],
-            "varac_bbs_vault_runtime_state_v1": profile.get("varac_bbs_vault_runtime_state_v1", {}) or {},
+            "varac_bbs_vault_runtime_state_v1": _coerce_json_mapping(
+                profile.get("varac_bbs_vault_runtime_state_v1", {})
+            ),
             "varac_bbs_vault_last_summary": str(profile.get("varac_bbs_vault_last_summary", "") or "").strip(),
         }
 
@@ -6759,7 +6797,9 @@ class SettingsTab(QWidget):
                 idx = 0
             if idx >= 0:
                 self.varac_bbs_vault_default_location_combo.setCurrentIndex(idx)
-            self._varac_bbs_vault_runtime_state_cache = dict(state.get("varac_bbs_vault_runtime_state_v1", {}) or {})
+            self._varac_bbs_vault_runtime_state_cache = _coerce_json_mapping(
+                state.get("varac_bbs_vault_runtime_state_v1", {})
+            )
             self._varac_bbs_vault_last_summary_cache = str(state.get("varac_bbs_vault_last_summary", "") or "").strip()
         finally:
             self._loading_settings = previous_loading
@@ -10016,7 +10056,7 @@ class SettingsTab(QWidget):
         self._update_operating_profile_action_buttons()
         self._update_device_assignment_action_buttons()
         self._refresh_section_titles()
-        self._refresh_running_status()
+        self._refresh_running_status(force=True)
         if emit_saved:
             try:
                 self.settings_saved.emit()
@@ -11395,7 +11435,7 @@ class SettingsTab(QWidget):
         except Exception:
             return None
 
-    def _refresh_running_status(self):
+    def _refresh_running_status(self, force: bool = False):
         _perf_t0 = time.perf_counter()
         theme = resolve_theme(self.settings)
         visible_keys = [key for key, _label in self._current_visible_status_items()]
@@ -11431,6 +11471,22 @@ class SettingsTab(QWidget):
             fldigi_port_override = int(txt) if txt else None
         except Exception:
             fldigi_port_override = None
+        status_sig: Tuple[object, ...] = (
+            tuple(visible_keys),
+            host_override,
+            port_override,
+            flrig_port_override,
+            fldigi_host_override,
+            fldigi_port_override,
+        )
+        now_ts = time.time()
+        if (
+            not force
+            and self._last_running_status_sig == status_sig
+            and (now_ts - float(self._last_running_status_refresh_ts or 0.0))
+            < float(self._running_status_refresh_interval_sec)
+        ):
+            return
         snapshot = self._status_service.status_snapshot(
             port_override=port_override,
             host_override=host_override,
@@ -11438,6 +11494,8 @@ class SettingsTab(QWidget):
             fldigi_host_override=fldigi_host_override,
             fldigi_port_override=fldigi_port_override,
         )
+        self._last_running_status_sig = status_sig
+        self._last_running_status_refresh_ts = now_ts
         for program_name, lbl in self.status_labels.items():
             info = snapshot.get(program_name, {})
             state = str(info.get("state", "idle"))
@@ -11467,7 +11525,7 @@ class SettingsTab(QWidget):
                     f"padding: 2px 6px; border-radius: 4px; background: {bg}; color: {fg}; border: 1px solid {border};"
                 )
                 self.loading_label.setVisible(False)
-            self._refresh_running_status()
+            self._refresh_running_status(force=True)
             self._update_launch_selected_state()
             self._update_device_profile_action_buttons()
             self._update_op_group_action_buttons()
