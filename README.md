@@ -143,7 +143,10 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 - Watch the Settings left-nav for warning highlights; they indicate partially configured sections that still need required companion fields.
 - When `JS8Call Install Folder` is set, also configure host, TCP port, and `DIRECTED.TXT`. If `JS8Spotter Launch Path` is set, also configure `JS8Spotter forms`.
 - When `VarAC Install Folder` is set, also configure `Incoming Files`.
-- When `Managed BBS Vault` is enabled under `Settings -> VarAC Settings`, also configure a live `BBS Directory`, initialize the managed root, and keep at least one valid `Default Location`. Access codes are operational controls, not strong secrets.
+- When `Managed BBS Vault` is enabled under `Settings -> VarAC Settings`, also configure a live `BBS Directory`, initialize the vault, and keep at least one valid `Default Location`. Access codes are operational controls, not strong secrets.
+- In the current release, the vault root is automatic: if your live VarAC BBS is `/path/to/VarAC_files/BBS`, FreqInOut creates the managed vault next to it as `/path/to/VarAC_files/FIO_BBS_Vault`.
+- New vault location content belongs under `FIO_BBS_Vault/locations/<Location Name>`. That is where you place files from your computer when you want a vault location to publish them into the live BBS.
+- Remote Vault workflow is: caller refreshes the BBS root, reads the helper entry, sends the location alias like `TEST_A` or `TEST_A <code>`, then refreshes again to see that location's files. `ROOT`, `BACK`, `EXIT`, or `LOCK` returns to the main menu.
 - Populate Operator History before expecting the Map tab to show full results.
 - JS8 live ingest is used when available; log parsing is used as a fallback.
 - Set your operator Grid (Grid 6 recommended) in Settings to enable full propagation forecast output in ControlFreq.
