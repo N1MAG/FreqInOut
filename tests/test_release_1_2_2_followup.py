@@ -351,3 +351,52 @@ def test_sitrep_state_rollup_returns_all_matching_states(monkeypatch, tmp_path):
     rollup = StationsMapTab._load_sitrep_state_rollup(dummy, "")
 
     assert [row["state_code"] for row in rollup] == ["CT", "NY", "PA", "FL", "OH", "TX", "CO", "CA", "WA"]
+
+
+def test_sitrep_state_rollup_legacy_schema_falls_back_cleanly(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db_path = config_dir / "freqinout_nets.db"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE sitrep_state_rollup (
+                report_group TEXT NOT NULL,
+                state_code TEXT NOT NULL,
+                callsign_count INTEGER NOT NULL DEFAULT 0,
+                red_count INTEGER NOT NULL DEFAULT 0,
+                yellow_count INTEGER NOT NULL DEFAULT 0,
+                green_count INTEGER NOT NULL DEFAULT 0,
+                unknown_count INTEGER NOT NULL DEFAULT 0,
+                latest_event_ts REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO sitrep_state_rollup (
+                report_group, state_code, callsign_count, red_count, yellow_count, green_count,
+                unknown_count, latest_event_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("__ALL__", "CO", 3, 1, 1, 1, 0, 1003.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    dummy = SimpleNamespace(_query_cache_ttl_sec=300.0, _query_cache={})
+    dummy._query_cache_get = lambda key, ttl_sec=None: StationsMapTab._query_cache_get(dummy, key, ttl_sec)
+    dummy._query_cache_set = lambda key, value: StationsMapTab._query_cache_set(dummy, key, value)
+
+    rollup = StationsMapTab._load_sitrep_state_rollup(dummy, "")
+
+    assert len(rollup) == 1
+    assert rollup[0]["state_code"] == "CO"
+    assert rollup[0]["js8_count"] == 0
+    assert rollup[0]["internet_count"] == 0
+    assert rollup[0]["mixed_transport_count"] == 0
