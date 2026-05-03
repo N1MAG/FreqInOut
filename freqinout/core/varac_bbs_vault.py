@@ -1951,7 +1951,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         return VaracBbsVaultRunResult(False, 0, 0, False, DEFAULT_LOCATION_ID, "", "Managed Vault disabled")
 
     live_bbs_dir = str(settings.get("varac_bbs_dir", "") or "").strip() if settings is not None else ""
-    managed_root = str(settings.get("varac_bbs_vault_managed_root", "") or "").strip() if settings is not None else ""
+    managed_root = compute_default_managed_root(live_bbs_dir)
     default_location_id = str(settings.get("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID) or DEFAULT_LOCATION_ID).strip() or DEFAULT_LOCATION_ID
     trigger_mode = str(settings.get("varac_bbs_vault_trigger_mode", DEFAULT_TRIGGER_MODE) or DEFAULT_TRIGGER_MODE).strip() or DEFAULT_TRIGGER_MODE
     return_mode = str(settings.get("varac_bbs_vault_return_mode", DEFAULT_RETURN_MODE) or DEFAULT_RETURN_MODE).strip() or DEFAULT_RETURN_MODE
