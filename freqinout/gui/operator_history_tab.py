@@ -220,6 +220,8 @@ class OperatorHistoryTab(QWidget):
         self._varac_ingest_interval_sec: float = 60.0
         self._last_backfill_ts: float = 0.0
         self._backfill_interval_sec: float = 600.0
+        self._maintenance_inflight = False
+        self._activation_maintenance_pending = False
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.setInterval(300)
@@ -906,14 +908,44 @@ class OperatorHistoryTab(QWidget):
         g3 = groups[2] if len(groups) > 2 else ""
         return groups, g1, g2, g3
 
-    def _load_data(self, *, show_toast: bool = False):
+    def _maintenance_due(self, now: Optional[float] = None) -> bool:
+        ts = float(now if now is not None else time.time())
+        return (
+            (ts - float(self._last_varac_ingest_ts or 0.0) >= self._varac_ingest_interval_sec)
+            or (ts - float(self._last_backfill_ts or 0.0) >= self._backfill_interval_sec)
+        )
+
+    def _run_operator_maintenance(self, *, now: Optional[float] = None) -> bool:
+        if self._maintenance_inflight:
+            return False
+        ts = float(now if now is not None else time.time())
+        ran_any = False
+        self._maintenance_inflight = True
+        try:
+            if ts - float(self._last_varac_ingest_ts or 0.0) >= self._varac_ingest_interval_sec:
+                try:
+                    ingest_varac(self.settings)
+                    self._last_varac_ingest_ts = ts
+                    ran_any = True
+                except Exception:
+                    pass
+
+            if ts - float(self._last_backfill_ts or 0.0) >= self._backfill_interval_sec:
+                self._backfill_first_seen_from_logs()
+                self._last_backfill_ts = ts
+                ran_any = True
+        finally:
+            self._maintenance_inflight = False
+        return ran_any
+
+    def _load_data(self, *, show_toast: bool = False, run_maintenance: bool = True):
         """
         Load operator_checkins table into self._rows.
         """
         with perf_span(
             "operators.load_data",
             settings=self.settings,
-            meta={"show_toast": bool(show_toast)},
+            meta={"show_toast": bool(show_toast), "run_maintenance": bool(run_maintenance)},
             min_ms=5.0,
         ):
             if show_toast:
@@ -921,12 +953,6 @@ class OperatorHistoryTab(QWidget):
             else:
                 self._set_loading(False)
             now = time.time()
-            if now - float(self._last_varac_ingest_ts) >= self._varac_ingest_interval_sec:
-                try:
-                    ingest_varac(self.settings)
-                    self._last_varac_ingest_ts = now
-                except Exception:
-                    pass
             db_path = self._db_path()
             if not db_path or not db_path.exists():
                 self._rows = []
@@ -938,10 +964,8 @@ class OperatorHistoryTab(QWidget):
                     self._set_loading(False)
                 return
 
-            # One-time backfill: hydrate first_seen_utc from DIRECTED/ALL logs if earlier than stored
-            if now - float(self._last_backfill_ts) >= self._backfill_interval_sec:
-                self._backfill_first_seen_from_logs()
-                self._last_backfill_ts = now
+            if run_maintenance:
+                self._run_operator_maintenance(now=now)
 
             rows: List[Dict] = []
             try:
@@ -1589,9 +1613,30 @@ class OperatorHistoryTab(QWidget):
 
     def _run_activation_refresh(self) -> None:
         try:
-            self._load_data(show_toast=True)
+            due = self._maintenance_due()
+            self._load_data(show_toast=True, run_maintenance=False)
+            if due:
+                self._schedule_activation_maintenance()
         finally:
             self._nav_refresh_inflight = False
+
+    def _schedule_activation_maintenance(self) -> None:
+        if self._activation_maintenance_pending:
+            return
+        self._activation_maintenance_pending = True
+        QTimer.singleShot(120, self._run_deferred_activation_maintenance)
+
+    def _run_deferred_activation_maintenance(self) -> None:
+        self._activation_maintenance_pending = False
+        if self._maintenance_inflight:
+            self._schedule_activation_maintenance()
+            return
+        self._set_loading(True, "Refreshing operator sources...")
+        try:
+            if self._run_operator_maintenance():
+                self._load_data(show_toast=False, run_maintenance=False)
+        finally:
+            self._set_loading(False)
 
     def show_loading_toast(self) -> None:
         self._set_loading(True)

@@ -123,3 +123,40 @@ def test_add_operator_dialog_triggers_varac_sync_after_success() -> None:
     OperatorHistoryTab._add_operator_dialog(tab)
 
     assert seen == ["load", "schedule", "sync"]
+
+
+def test_activation_refresh_loads_immediately_then_schedules_deferred_maintenance() -> None:
+    tab = OperatorHistoryTab.__new__(OperatorHistoryTab)
+    seen: list[tuple[str, object]] = []
+    tab._nav_refresh_inflight = True
+    tab._maintenance_due = lambda: True
+    tab._load_data = lambda **kwargs: seen.append(("load", dict(kwargs)))
+    tab._schedule_activation_maintenance = lambda: seen.append(("schedule", None))
+
+    OperatorHistoryTab._run_activation_refresh(tab)
+
+    assert seen == [
+        ("load", {"show_toast": True, "run_maintenance": False}),
+        ("schedule", None),
+    ]
+    assert tab._nav_refresh_inflight is False
+
+
+def test_deferred_activation_maintenance_reloads_after_source_refresh() -> None:
+    tab = OperatorHistoryTab.__new__(OperatorHistoryTab)
+    seen: list[tuple[str, object]] = []
+    tab._activation_maintenance_pending = True
+    tab._maintenance_inflight = False
+    tab._schedule_activation_maintenance = lambda: seen.append(("reschedule", None))
+    tab._set_loading = lambda active, text="Brewing it fresh...": seen.append(("loading", (bool(active), str(text))))
+    tab._run_operator_maintenance = lambda: True
+    tab._load_data = lambda **kwargs: seen.append(("load", dict(kwargs)))
+
+    OperatorHistoryTab._run_deferred_activation_maintenance(tab)
+
+    assert tab._activation_maintenance_pending is False
+    assert seen == [
+        ("loading", (True, "Refreshing operator sources...")),
+        ("load", {"show_toast": False, "run_maintenance": False}),
+        ("loading", (False, "Brewing it fresh...")),
+    ]

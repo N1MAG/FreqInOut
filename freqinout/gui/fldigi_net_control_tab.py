@@ -140,6 +140,8 @@ class FldigiNetControlTab(QWidget):
         self._log_assisted_session_tx_context: str = ""
         self._log_assisted_seen_normalized: set[str] = set()
         self._log_assisted_candidates_by_callsign: Dict[str, Dict[str, object]] = {}
+        self._activation_secondary_refresh_pending: bool = False
+        self._activation_secondary_refresh_inflight: bool = False
 
         self._build_ui()
         self._apply_theme()
@@ -1832,9 +1834,27 @@ class FldigiNetControlTab(QWidget):
             self._update_clock_labels()
             self._update_suspend_state()
             self._update_next_change_display()
+            self._schedule_activation_secondary_refresh()
+
+    def _schedule_activation_secondary_refresh(self) -> None:
+        if self._activation_secondary_refresh_pending:
+            return
+        self._activation_secondary_refresh_pending = True
+        QTimer.singleShot(120, self._run_activation_secondary_refresh)
+
+    def _run_activation_secondary_refresh(self) -> None:
+        if self._activation_secondary_refresh_inflight:
+            self._activation_secondary_refresh_pending = False
+            self._schedule_activation_secondary_refresh()
+            return
+        self._activation_secondary_refresh_pending = False
+        self._activation_secondary_refresh_inflight = True
+        try:
             self._maybe_reload_operating_groups()
             self._refresh_macro_profile_choices()
             self._poll_log_assisted_intake()
+        finally:
+            self._activation_secondary_refresh_inflight = False
 
     def set_tab_active(self, active: bool) -> None:
         self._active = bool(active)

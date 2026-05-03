@@ -2236,6 +2236,8 @@ class MessageViewerTab(QWidget):
         self._persist_timer: QTimer | None = None
         self._pending_persist_ops: List[Tuple[str, Tuple]] = []
         self._activation_refresh_pending: bool = False
+        self._activation_maintenance_pending: bool = False
+        self._activation_maintenance_inflight: bool = False
         self._activation_refresh_interval_sec: float = 60.0
         self._last_activation_refresh_ts: float = 0.0
         self._bbs_auto_archive_timer: QTimer | None = None
@@ -4979,20 +4981,84 @@ class MessageViewerTab(QWidget):
         ):
             try:
                 self._load_paths_lists()
-                now = time.time()
-                should_refresh_files = bool(force) or (
-                    now - float(self._last_file_refresh_ts) >= self._file_refresh_interval_sec
-                )
-                if should_refresh_files:
-                    self._refresh_files(force=force)
-                self._refresh_js8_messages(force=force, rebuild=False)
-                self._refresh_varac_messages(force=force, rebuild=False)
-                self._populate_messages_table(force=force)
-                self._refresh_pending_backlog()
-                self._last_activation_refresh_ts = time.time()
+                if force:
+                    self._run_message_activation_maintenance(force=True)
+                else:
+                    due = self._activation_maintenance_due()
+                    self._load_message_sources_from_local(force=False)
+                    self._populate_messages_table(force=False)
+                    self._refresh_pending_backlog()
+                    self._last_activation_refresh_ts = time.time()
+                    if due:
+                        self._schedule_activation_maintenance()
             finally:
                 self._activation_refresh_pending = False
                 self._set_loading(False)
+
+    def _activation_maintenance_due(self, now: Optional[float] = None) -> bool:
+        ts_now = float(now if now is not None else time.time())
+        return any(
+            (
+                ts_now - float(self._last_file_refresh_ts) >= self._file_refresh_interval_sec,
+                ts_now - float(self._last_js8_ingest_ts) >= self._js8_ingest_interval_sec,
+                ts_now - float(self._last_varac_ingest_ts) >= self._varac_ingest_interval_sec,
+            )
+        )
+
+    def _load_message_sources_from_local(self, *, force: bool = False) -> None:
+        try:
+            self._load_js8_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: JS8 local activation load failed: %s", e)
+        try:
+            self._load_spotter_from_db(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: spotter activation load failed: %s", e)
+        try:
+            self._load_sitrep_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: sitrep activation load failed: %s", e)
+        try:
+            self._load_commstat_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: CommStat activation load failed: %s", e)
+        try:
+            self._load_varac_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: VarAC activation load failed: %s", e)
+
+    def _schedule_activation_maintenance(self) -> None:
+        if self._activation_maintenance_pending:
+            return
+        self._activation_maintenance_pending = True
+        QTimer.singleShot(120, self._run_deferred_activation_maintenance)
+
+    def _run_deferred_activation_maintenance(self) -> None:
+        if self._activation_maintenance_inflight:
+            self._activation_maintenance_pending = False
+            self._schedule_activation_maintenance()
+            return
+        self._activation_maintenance_pending = False
+        self._activation_maintenance_inflight = True
+        self._set_loading(True, "Refreshing message sources...")
+        try:
+            self._run_message_activation_maintenance(force=False)
+        finally:
+            self._activation_maintenance_inflight = False
+            self._set_loading(False)
+
+    def _run_message_activation_maintenance(self, *, force: bool) -> None:
+        now = time.time()
+        should_refresh_files = bool(force) or (
+            now - float(self._last_file_refresh_ts) >= self._file_refresh_interval_sec
+        )
+        if should_refresh_files:
+            self._refresh_files(force=force)
+        self._refresh_js8_messages(force=force, rebuild=False)
+        self._refresh_varac_messages(force=force, rebuild=False)
+        self._populate_messages_table(force=force)
+        self._refresh_pending_backlog()
+        self._last_activation_refresh_ts = time.time()
 
     def set_tab_active(self, active: bool) -> None:
         self._has_active_view = bool(active)

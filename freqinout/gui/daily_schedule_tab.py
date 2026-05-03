@@ -228,6 +228,8 @@ class DailyScheduleTab(QWidget):
         self._sop_return_to_normal_prompt_active: bool = False
         self._pending_table_conflict_refresh: bool = False
         self._table_conflict_refresh_timer: Optional[QTimer] = None
+        self._activation_secondary_refresh_pending: bool = False
+        self._activation_secondary_refresh_inflight: bool = False
 
         self._build_ui()
         self._refresh_qsy_options()
@@ -5312,10 +5314,28 @@ class DailyScheduleTab(QWidget):
             min_ms=5.0,
         ):
             self._refresh_sop_overlay_rows_in_table()
-            self._refresh_sop_profiles_panel(force=True)
             self._update_effective_source_label()
             self._update_suspend_state()
+            self._schedule_activation_secondary_refresh()
+
+    def _schedule_activation_secondary_refresh(self) -> None:
+        if self._activation_secondary_refresh_pending:
+            return
+        self._activation_secondary_refresh_pending = True
+        QTimer.singleShot(120, self._run_activation_secondary_refresh)
+
+    def _run_activation_secondary_refresh(self) -> None:
+        if self._activation_secondary_refresh_inflight:
+            self._activation_secondary_refresh_pending = False
+            self._schedule_activation_secondary_refresh()
+            return
+        self._activation_secondary_refresh_pending = False
+        self._activation_secondary_refresh_inflight = True
+        try:
+            self._refresh_sop_profiles_panel(force=True)
             self._refresh_schedule_resources(force=False)
+        finally:
+            self._activation_secondary_refresh_inflight = False
 
     def set_tab_active(self, active: bool) -> None:
         self._active = bool(active)
