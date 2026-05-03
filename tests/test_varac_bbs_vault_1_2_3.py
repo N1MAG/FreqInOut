@@ -419,3 +419,149 @@ def test_settings_tab_persists_managed_vault_configuration(monkeypatch, tmp_path
     assert snap["varac_bbs_vault_global_code_policy"] == "Require for non-default locations"
     assert snap["varac_bbs_vault_flamp_enabled"] is True
     assert snap["varac_bbs_vault_flamp_relay_dir"] == str(tmp_path / "relay")
+
+
+def test_settings_tab_autofills_vault_location_defaults(tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    live_bbs = tmp_path / "bbs"
+    live_bbs.mkdir()
+    (live_bbs / "Logistics.txt").write_text("test", encoding="utf-8")
+    managed_root = tmp_path / "managed"
+
+    tab = SettingsTab()
+    tab.varac_bbs_dir_edit.setText(str(live_bbs))
+    tab.varac_bbs_vault_root_edit.setText(str(managed_root))
+    tab._new_varac_bbs_vault_location()
+    tab.varac_bbs_vault_location_name_edit.setText("Logistics")
+
+    assert tab.varac_bbs_vault_description_edit.text() == "to open Logistics"
+    assert tab.varac_bbs_vault_source_dir_edit.text() == str(managed_root / "locations" / "Logistics")
+    assert "Live BBS likely match: Logistics.txt" in tab.varac_bbs_vault_source_hint_label.text()
+
+
+def test_settings_tab_autofills_flamp_relay_dir_but_allows_override(tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    tab = SettingsTab()
+    first_rx = tmp_path / "FLAMP" / "rx"
+    second_rx = tmp_path / "ALT" / "rx"
+    custom_relay = tmp_path / "manual-relay"
+
+    tab.msg_paths_edits["flamp"].setText(str(first_rx))
+    assert tab.varac_bbs_vault_flamp_relay_dir_edit.text() == str(tmp_path / "FLAMP" / "relay")
+
+    tab.varac_bbs_vault_flamp_relay_dir_edit.setText(str(custom_relay))
+    tab.msg_paths_edits["flamp"].setText(str(second_rx))
+    assert tab.varac_bbs_vault_flamp_relay_dir_edit.text() == str(custom_relay)
+
+
+def test_settings_tab_syncs_default_managed_root_with_bbs_dir(tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    first_bbs = tmp_path / "station-a" / "BBS"
+    second_bbs = tmp_path / "station-b" / "BBS"
+    first_bbs.mkdir(parents=True)
+    second_bbs.mkdir(parents=True)
+
+    tab = SettingsTab()
+    tab.varac_bbs_dir_edit.setText(str(first_bbs))
+    first_default = str(first_bbs.parent / "FIO_BBS_Vault")
+    second_default = str(second_bbs.parent / "FIO_BBS_Vault")
+
+    assert tab.varac_bbs_vault_root_edit.text() == first_default
+    assert first_default in tab.varac_bbs_vault_root_hint_label.text()
+
+    tab.varac_bbs_dir_edit.setText(str(second_bbs))
+    assert tab.varac_bbs_vault_root_edit.text() == second_default
+    assert second_default in tab.varac_bbs_vault_root_hint_label.text()
+
+
+def test_settings_tab_forces_managed_root_into_bbs_area(tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    first_bbs = tmp_path / "station-a" / "BBS"
+    second_bbs = tmp_path / "station-b" / "BBS"
+    first_bbs.mkdir(parents=True)
+    second_bbs.mkdir(parents=True)
+    stale_root = tmp_path / "FreqInOut-single-rig" / "FIO_BBS_Vault"
+
+    tab = SettingsTab()
+    tab.varac_bbs_dir_edit.setText(str(first_bbs))
+    assert tab.varac_bbs_vault_root_edit.isReadOnly()
+    tab._set_varac_bbs_vault_root_text(str(stale_root))
+    tab.varac_bbs_dir_edit.setText(str(second_bbs))
+
+    expected_default = str(second_bbs.parent / "FIO_BBS_Vault")
+    assert tab.varac_bbs_vault_root_edit.text() == expected_default
+    assert expected_default in tab.varac_bbs_vault_root_hint_label.text()
+    assert "Automatic vault location" in tab.varac_bbs_vault_root_hint_label.text()
+
+
+def test_run_varac_bbs_vault_ignores_stale_managed_root_setting(tmp_path: Path) -> None:
+    live_bbs = tmp_path / "VarAC_files" / "BBS"
+    live_bbs.mkdir(parents=True)
+    managed_root = Path(compute_default_managed_root(live_bbs))
+    stale_root = tmp_path / "FreqInOut-single-rig" / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    (default_dir / "RootInfo.txt").write_text("root", encoding="utf-8")
+
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_bbs_vault_managed_root=str(stale_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
+        varac_bbs_vault_trigger_mode="VarAC session commands",
+        varac_bbs_vault_return_mode="On disconnect",
+        varac_bbs_vault_failed_attempt_limit=3,
+        varac_bbs_vault_failed_attempt_window_seconds=900,
+        varac_bbs_vault_cooldown_seconds=1800,
+        varac_bbs_vault_idle_timeout_seconds=600,
+        varac_bbs_vault_flamp_enabled=False,
+        varac_bbs_vault_flamp_relay_dir="",
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            }
+        ],
+        varac_bbs_limit_access_enabled=False,
+        varac_bbs_allowed_callsigns="",
+        varac_db_path="",
+        varac_path="",
+    )
+
+    result = run_varac_bbs_vault(settings)
+    assert result.enabled
+    assert managed_root.exists()
+    assert not stale_root.exists()
