@@ -3709,6 +3709,55 @@ class StationsMapTab(QWidget):
         self._query_cache_set(cache_key, list(out))
         return out
 
+    def _summarize_sitrep_markers(self, markers: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        buckets: Dict[str, Dict[str, object]] = {}
+        for marker in markers:
+            if not isinstance(marker, dict):
+                continue
+            status_key = str(marker.get("spotter_status_key") or "").strip().lower()
+            if status_key not in {"red", "yellow", "green", "unknown"}:
+                continue
+            state_code = self._normalize_state_abbr(
+                str(marker.get("spotter_status_state") or marker.get("station_state") or "")
+            )
+            if not state_code:
+                continue
+            bucket = buckets.setdefault(
+                state_code,
+                {
+                    "state_code": state_code,
+                    "callsign_count": 0,
+                    "red_count": 0,
+                    "yellow_count": 0,
+                    "green_count": 0,
+                    "unknown_count": 0,
+                    "js8_count": 0,
+                    "internet_count": 0,
+                    "mixed_transport_count": 0,
+                    "latest_event_ts": 0.0,
+                },
+            )
+            bucket["callsign_count"] = int(bucket.get("callsign_count", 0) or 0) + 1
+            bucket[f"{status_key}_count"] = int(bucket.get(f"{status_key}_count", 0) or 0) + 1
+            transport_label_txt = str(marker.get("spotter_status_transport") or "").strip().lower()
+            if transport_label_txt == "js8":
+                bucket["js8_count"] = int(bucket.get("js8_count", 0) or 0) + 1
+            elif transport_label_txt == "internet":
+                bucket["internet_count"] = int(bucket.get("internet_count", 0) or 0) + 1
+            elif transport_label_txt in {"js8 + internet", "js8+internet"}:
+                bucket["mixed_transport_count"] = int(bucket.get("mixed_transport_count", 0) or 0) + 1
+            latest_ts = self._safe_float(marker.get("spotter_status_ts_epoch"), 0.0)
+            if latest_ts > float(bucket.get("latest_event_ts", 0.0) or 0.0):
+                bucket["latest_event_ts"] = latest_ts
+        return sorted(
+            buckets.values(),
+            key=lambda row: (
+                -int(row.get("callsign_count", 0) or 0),
+                -float(row.get("latest_event_ts", 0.0) or 0.0),
+                str(row.get("state_code") or ""),
+            ),
+        )
+
     def _load_recent_calls(self, max_age_sec: Optional[int], band_filter=None) -> Set[str]:
         if not max_age_sec or max_age_sec <= 0:
             return set()
@@ -5115,17 +5164,9 @@ class StationsMapTab(QWidget):
         )
         sitrep_state_summary: List[Dict[str, object]] = []
         sitrep_summary_group = ""
+        sitrep_summary_enabled = bool(sitrep_mode)
         if sitrep_mode:
             sitrep_summary_group = str(group_filter or "").strip().upper()
-            sitrep_state_summary = self._cached_map_value(
-                "sitrep_state_rollup",
-                {"group": sitrep_summary_group},
-                lambda: _timed_map_call(
-                    "map.load_sitrep_state_rollup",
-                    lambda: self._load_sitrep_state_rollup(sitrep_summary_group),
-                ),
-                ttl_sec=6.0,
-            )
         links = self._display_links_for_mode(links, sitrep_mode)
 
         # Spread overlapping stations with the same base lat/lon
@@ -5289,7 +5330,22 @@ class StationsMapTab(QWidget):
                         "spotter_status_state_conf": spotter_status_state_conf,
                         "spotter_status_geo_conf": spotter_status_geo_conf,
                         "spotter_status_brevity": spotter_status_brevity,
+                        "spotter_status_ts_epoch": self._safe_float(spotter_data.get("updated_utc_ts"), 0.0),
+                        "station_state": self._normalize_state_abbr(pt.state or ""),
                     }
+                )
+
+        if sitrep_mode:
+            sitrep_state_summary = self._summarize_sitrep_markers(markers)
+            if not sitrep_state_summary:
+                sitrep_state_summary = self._cached_map_value(
+                    "sitrep_state_rollup",
+                    {"group": sitrep_summary_group},
+                    lambda: _timed_map_call(
+                        "map.load_sitrep_state_rollup",
+                        lambda: self._load_sitrep_state_rollup(sitrep_summary_group),
+                    ),
+                    ttl_sec=6.0,
                 )
 
         self._map_marker_count = len(markers)
@@ -5297,7 +5353,13 @@ class StationsMapTab(QWidget):
         self._last_map_render_input_sig = map_input_sig
 
         if self.web is not None and self._map_initialized and self._map_file and not force_reload:
-            self._push_map_payload(markers, links, sitrep_state_summary=sitrep_state_summary, sitrep_summary_group=sitrep_summary_group)
+            self._push_map_payload(
+                markers,
+                links,
+                sitrep_state_summary=sitrep_state_summary,
+                sitrep_summary_group=sitrep_summary_group,
+                sitrep_summary_enabled=sitrep_summary_enabled,
+            )
             self._last_map_view = view_state or self._last_map_view or {"lat": 45, "lon": -97, "zoom": 3}
             return
 
@@ -5337,6 +5399,7 @@ class StationsMapTab(QWidget):
             prop_state_scores=prop_state_scores,
             sitrep_state_summary=sitrep_state_summary,
             sitrep_summary_group=sitrep_summary_group,
+            sitrep_summary_enabled=sitrep_summary_enabled,
         )
 
         if self.web is not None:
@@ -5362,6 +5425,7 @@ class StationsMapTab(QWidget):
                 "now_reachable_enabled": bool(self._now_reachable_enabled),
                 "sitrep_state_summary": sitrep_state_summary,
                 "sitrep_summary_group": sitrep_summary_group,
+                "sitrep_summary_enabled": sitrep_summary_enabled,
             }
             path = self._write_map_html(html)
             if path is not None:
@@ -5410,6 +5474,7 @@ class StationsMapTab(QWidget):
                 payload.get("now_reachable_enabled"),
                 payload.get("sitrep_state_summary", []),
                 payload.get("sitrep_summary_group", ""),
+                payload.get("sitrep_summary_enabled"),
             )
         if self._map_visible and (self._map_dirty or self._render_requested_during_load):
             self._render_requested_during_load = False
@@ -5443,6 +5508,7 @@ class StationsMapTab(QWidget):
         now_reachable_enabled: Optional[bool] = None,
         sitrep_state_summary: Optional[List[Dict[str, object]]] = None,
         sitrep_summary_group: str = "",
+        sitrep_summary_enabled: Optional[bool] = None,
     ) -> None:
         if self.web is None:
             return
@@ -5457,12 +5523,20 @@ class StationsMapTab(QWidget):
                 ),
                 "sitrep_state_summary": list(sitrep_state_summary or []),
                 "sitrep_summary_group": str(sitrep_summary_group or ""),
+                "sitrep_summary_enabled": bool(self._sitrep_status_only_enabled)
+                if sitrep_summary_enabled is None
+                else bool(sitrep_summary_enabled),
             }
             return
         now_reachable_flag = (
             bool(self._now_reachable_enabled)
             if now_reachable_enabled is None
             else bool(now_reachable_enabled)
+        )
+        sitrep_summary_flag = (
+            bool(self._sitrep_status_only_enabled)
+            if sitrep_summary_enabled is None
+            else bool(sitrep_summary_enabled)
         )
         try:
             payload = json.dumps(
@@ -5472,12 +5546,14 @@ class StationsMapTab(QWidget):
                     "now_reachable_enabled": now_reachable_flag,
                     "sitrep_state_summary": list(sitrep_state_summary or []),
                     "sitrep_summary_group": str(sitrep_summary_group or ""),
+                    "sitrep_summary_enabled": sitrep_summary_flag,
                 }
             )
         except Exception:
             payload = (
                 '{"markers": [], "links": [], "sitrep_state_summary": [], "sitrep_summary_group": "", '
-                f'"now_reachable_enabled": {str(now_reachable_flag).lower()}}}'
+                f'"now_reachable_enabled": {str(now_reachable_flag).lower()}, '
+                f'"sitrep_summary_enabled": {str(sitrep_summary_flag).lower()}}}'
             )
         sig = str(hash(payload))
         if sig == self._last_map_payload_sig:
@@ -5527,6 +5603,7 @@ class StationsMapTab(QWidget):
         prop_state_scores: Optional[Dict[str, Dict]] = None,
         sitrep_state_summary: Optional[List[Dict[str, object]]] = None,
         sitrep_summary_group: str = "",
+        sitrep_summary_enabled: bool = False,
     ) -> str:
         theme = resolve_theme(self.settings)
         try:
@@ -5541,6 +5618,7 @@ class StationsMapTab(QWidget):
         links_json = json.dumps(links)
         sitrep_state_summary_json = json.dumps(sitrep_state_summary or [])
         sitrep_summary_group_json = json.dumps(str(sitrep_summary_group or "").strip().upper())
+        sitrep_summary_enabled_json = json.dumps(bool(sitrep_summary_enabled))
         init_lat = initial_view.get("lat") if initial_view else 45
         init_lon = initial_view.get("lon") if initial_view else -97
         init_zoom = initial_view.get("zoom") if initial_view else 3
@@ -5995,6 +6073,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     const links = {links_json};
     let sitrepStateSummary = {sitrep_state_summary_json};
     let sitrepSummaryGroup = {sitrep_summary_group_json};
+    let sitrepSummaryEnabled = {sitrep_summary_enabled_json};
     window.FEMA_LOOKUP_ABBR = {json.dumps({s:r[1:] for r,states in FEMA_REGIONS.items() for s in states})};
     window.FEMA_LOOKUP_NAME = {json.dumps({US_STATE_NAMES[s]:r[1:] for r,states in FEMA_REGIONS.items() for s in states if s in US_STATE_NAMES})};
     window.STATE_ABBR_FROM_NAME = {json.dumps({**US_STATE_ABBR_FROM_NAME, **CANADA_PROV_ABBR_FROM_NAME})};
@@ -6062,7 +6141,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
 
     function buildSitrepSummaryHtml(rows, groupName) {{
       if (!rows || !rows.length) {{
-        return '<b>SitRep State Summary</b><br/>No current state rollups.';
+        return '<b>SitRep State Summary</b><br/>' +
+          (groupName ? ('Group: ' + groupName + '<br/>') : 'All Groups<br/>') +
+          'No current SitRep status pins match the current filters.';
       }}
       const header = '<b>SitRep State Summary</b><br/>' + (groupName ? ('Group: ' + groupName + '<br/>') : 'All Groups<br/>');
       const regionBuckets = new Map();
@@ -6127,14 +6208,14 @@ function addGridLabels(res, level, bounds, maxLabels) {
     sitrepSummaryPanel.onAdd = function() {{
       this._div = L.DomUtil.create('div', 'summary-panel');
       this._div.innerHTML = buildSitrepSummaryHtml(sitrepStateSummary, sitrepSummaryGroup);
-      this._div.style.display = (sitrepStateSummary && sitrepStateSummary.length) ? 'block' : 'none';
+      this._div.style.display = sitrepSummaryEnabled ? 'block' : 'none';
       return this._div;
     }};
     sitrepSummaryPanel.addTo(map);
-    function updateSitrepSummaryPanel(rows, groupName) {{
+    function updateSitrepSummaryPanel(rows, groupName, enabled) {{
       const el = document.querySelector('.summary-panel');
       if (el) {{
-        el.style.display = (rows && rows.length) ? 'block' : 'none';
+        el.style.display = enabled ? 'block' : 'none';
         el.innerHTML = buildSitrepSummaryHtml(rows || [], groupName || '');
       }}
     }}
@@ -6315,9 +6396,18 @@ function addGridLabels(res, level, bounds, maxLabels) {
       if (Object.prototype.hasOwnProperty.call(payload, 'sitrep_summary_group')) {{
         sitrepSummaryGroup = payload.sitrep_summary_group || '';
       }}
-      updateSitrepSummaryPanel(sitrepStateSummary, sitrepSummaryGroup);
+      if (Object.prototype.hasOwnProperty.call(payload, 'sitrep_summary_enabled')) {{
+        sitrepSummaryEnabled = !!payload.sitrep_summary_enabled;
+      }}
+      updateSitrepSummaryPanel(sitrepStateSummary, sitrepSummaryGroup, sitrepSummaryEnabled);
     }};
-    window.updateMapData({{markers: markers, links: links, sitrep_state_summary: sitrepStateSummary, sitrep_summary_group: sitrepSummaryGroup}});
+    window.updateMapData({{
+      markers: markers,
+      links: links,
+      sitrep_state_summary: sitrepStateSummary,
+      sitrep_summary_group: sitrepSummaryGroup,
+      sitrep_summary_enabled: sitrepSummaryEnabled
+    }});
     window._mapReady = true;
     }}
     </script>

@@ -400,3 +400,49 @@ def test_sitrep_state_rollup_legacy_schema_falls_back_cleanly(monkeypatch, tmp_p
     assert rollup[0]["js8_count"] == 0
     assert rollup[0]["internet_count"] == 0
     assert rollup[0]["mixed_transport_count"] == 0
+
+
+def test_sitrep_summary_can_be_built_from_visible_markers():
+    dummy = SimpleNamespace()
+    dummy._normalize_state_abbr = lambda value: StationsMapTab._normalize_state_abbr(dummy, value)
+    dummy._safe_float = StationsMapTab._safe_float
+
+    summary = StationsMapTab._summarize_sitrep_markers(
+        dummy,
+        [
+            {
+                "spotter_status_key": "red",
+                "spotter_status_state": "",
+                "station_state": "Colorado",
+                "spotter_status_transport": "JS8",
+                "spotter_status_ts_epoch": 100.0,
+            },
+            {
+                "spotter_status_key": "yellow",
+                "spotter_status_state": "CO",
+                "station_state": "",
+                "spotter_status_transport": "Internet",
+                "spotter_status_ts_epoch": 120.0,
+            },
+            {
+                "spotter_status_key": "green",
+                "spotter_status_state": "CA",
+                "station_state": "",
+                "spotter_status_transport": "JS8 + Internet",
+                "spotter_status_ts_epoch": 110.0,
+            },
+        ],
+    )
+
+    assert [row["state_code"] for row in summary] == ["CO", "CA"]
+    assert summary[0]["callsign_count"] == 2
+    assert summary[0]["red_count"] == 1
+    assert summary[0]["yellow_count"] == 1
+    assert summary[0]["green_count"] == 0
+    assert summary[0]["js8_count"] == 1
+    assert summary[0]["internet_count"] == 1
+    assert summary[0]["mixed_transport_count"] == 0
+    assert summary[0]["latest_event_ts"] == 120.0
+    assert summary[1]["callsign_count"] == 1
+    assert summary[1]["green_count"] == 1
+    assert summary[1]["mixed_transport_count"] == 1
