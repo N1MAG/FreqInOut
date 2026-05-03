@@ -1,8 +1,16 @@
 # Changelog
 
 ## [1.2.3]
+- Changed: the in-app Help guide now teaches the major FreqInOut tabs more explicitly, expanding the purpose, workflow, and cross-tab interaction notes for ControlFreq, Messages, Map, schedules, operators, SOP Builder, and Settings so operators can learn not only how controls work, but why those screens matter and how related settings influence them.
+- Fixed: VarAC schedule protection now also watches recent `VarAC.db` transfer lifecycle events, so scheduler-driven frequency changes are more reliably deferred during inbound or outbound file transfers even when log-tail visibility is incomplete.
+- Changed: `Map` now skips no-op refresh rebuilds when its lightweight input signature has not changed, reducing repeated redraw work during clustered filter and visibility activity while keeping full reloads for real config changes.
+- Changed: `Settings` now throttles repeated VarAC BBS operator-lookup rebuilds during tab activation, reducing unnecessary completion-list reload churn when the operator revisits the tab frequently.
+- Changed: `Messages` now fingerprints its JS8/local message stores and skips redundant JS8, JS8Spotter, CommStat, and unified SitRep reload passes when the backing DB files have not changed, reducing repeat activation churn.
+- Changed: `Map` now reuses short-lived query snapshots for repeated propagation, operator-activity, recent-calls, and status rollup lookups during clustered refresh bursts instead of immediately re-querying every source on each refresh request.
 - Fixed: `ControlFreq` now reloads saved settings before rebuilding software status visibility, so the radio-software LEDs stay aligned with the current saved `Software Used` selections instead of lagging behind the Settings tab.
 - Changed: `Map` now groups the `SitRep State Summary` panel by FEMA region, making the status rollup easier to scan operationally while still showing the same state-level counts inside each region.
+- Fixed: `Map` SitRep summary now rolls up all matching active states instead of truncating the summary source to the busiest eight state rows, keeping the visible region summary aligned with the pins shown on the map.
+- Fixed: `Map` `SitRep Status` mode now suppresses station-to-station links entirely, so recency changes and active link selections no longer clutter the status-only situational view.
 - Changed: `Settings -> FreqInOut Settings` now groups `FLRig`, `FLDigi`, `FLMsg`, and `FLAmp` on one cleaner software-used row, keeps `JS8Call`, `JS8Spotter`, and `CommStat` together on the next row, keeps `VarAC` on its own row, hides the setup-readiness card when the station is already `Ready`, and reshapes `VarAC Settings` into clearer `Paths and Launch`, `BBS Settings`, and `Vault / VGuard Settings` subsections.
 - Fixed: `VarAC.ini` BBS allowed-callsign sync now writes comma-separated callsigns without added spaces, matching VarAC's expected list style more closely.
 - Added: `Settings -> VarAC Settings` now supports a fuller `Managed BBS Services` workflow on top of the Managed Vault foundation, including alias-driven virtual folders, callsign-aware root-menu visibility, radio-safe root resets, VarAC.db session parsing, optional FLAMP relay queue/block responses, and clearer help for menu-style BBS exchanges.

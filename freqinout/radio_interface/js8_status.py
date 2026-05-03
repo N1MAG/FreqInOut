@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import socket
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -223,9 +224,21 @@ class JS8ControlClient(JS8StatusClient):
 class VarACStatusClient:
     """VarAC busy check using VarAC traffic/main logs in the install folder."""
 
-    def __init__(self) -> None:
-        self.settings = SettingsManager()
+    _DB_TRANSFER_POLL_INTERVAL_S = 1.0
+    _DB_TRANSFER_COOLDOWN_S = 15.0
+    _DB_TRANSFER_SCAN_LIMIT = 64
+
+    def __init__(self, settings: Optional[object] = None) -> None:
+        self.settings = settings if settings is not None else SettingsManager()
         self._last_status: Dict[str, object] = {}
+        self._last_db_transfer_status: Dict[str, object] = {
+            "busy": False,
+            "reason": None,
+            "transfer_active": False,
+            "cooldown_active": False,
+        }
+        self._last_db_transfer_poll_monotonic: float = 0.0
+        self._last_db_transfer_path: str = ""
 
     def _operator_callsign(self) -> str:
         return (self.settings.get("operator_callsign", "") or "").strip().upper()
@@ -445,6 +458,163 @@ class VarACStatusClient:
                     out.append(p)
         return out
 
+    def _resolve_db_path(self) -> Optional[Path]:
+        raw_db = (self.settings.get("varac_db_path", "") or "").strip()
+        raw_install = (self.settings.get("varac_path", "") or "").strip()
+        if raw_db:
+            p = Path(raw_db)
+            if p.is_file():
+                return p
+            candidate = p / "VarAC.db"
+            if candidate.exists():
+                return candidate
+        if raw_install:
+            p = Path(raw_install)
+            if p.is_file() and p.name.lower() == "varac.db":
+                return p
+            candidate = p / "VarAC.db"
+            if candidate.exists():
+                return candidate
+        return None
+
+    @staticmethod
+    def _parse_db_event_ts(value: object) -> Optional[datetime.datetime]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        normalized = text.replace("Z", "+00:00")
+        try:
+            dt_val = datetime.datetime.fromisoformat(normalized)
+        except Exception:
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    dt_val = datetime.datetime.strptime(text, fmt)
+                    break
+                except Exception:
+                    dt_val = None
+            if dt_val is None:
+                return None
+        if dt_val.tzinfo is not None:
+            try:
+                return dt_val.astimezone().replace(tzinfo=None)
+            except Exception:
+                return dt_val.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        return dt_val
+
+    @staticmethod
+    def _db_event_matches_transfer(entry_txt: str) -> bool:
+        upper = entry_txt.upper()
+        return any(
+            token in upper
+            for token in (
+                "RECEIVING FILE TRANSFER DATA",
+                "FILE SENT. WAITING FOR CONFIRMATION OF RECEIPT",
+                "SENDFILE HEADER RECEIVED",
+                "INCOMING FILE PACKET",
+                "CONVERTING FILE",
+                "WRITING FILE TO DISK",
+                "FILE SUCCESSFULLY RECEIVED",
+                "FILE SUCCESSFULLY SENT",
+                "FILE TRANSFER ABORT",
+            )
+        )
+
+    def _db_transfer_status(self) -> Dict[str, object]:
+        db_path = self._resolve_db_path()
+        if db_path is None or not db_path.exists():
+            self._last_db_transfer_status = {
+                "busy": False,
+                "reason": None,
+                "transfer_active": False,
+                "cooldown_active": False,
+            }
+            self._last_db_transfer_path = ""
+            self._last_db_transfer_poll_monotonic = time.monotonic()
+            return dict(self._last_db_transfer_status)
+
+        now_mono = time.monotonic()
+        path_key = str(db_path)
+        if (
+            self._last_db_transfer_path == path_key
+            and (now_mono - self._last_db_transfer_poll_monotonic) < self._DB_TRANSFER_POLL_INTERVAL_S
+        ):
+            return dict(self._last_db_transfer_status)
+
+        self._last_db_transfer_poll_monotonic = now_mono
+        self._last_db_transfer_path = path_key
+        try:
+            uri = f"file:{db_path.as_posix()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=1.0)
+        except Exception as exc:
+            log.debug("VarACStatusClient: failed to open VarAC.db %s: %s", db_path, exc)
+            return dict(self._last_db_transfer_status)
+
+        last_transfer: Optional[datetime.datetime] = None
+        last_transfer_done: Optional[datetime.datetime] = None
+        last_transfer_abort: Optional[datetime.datetime] = None
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT d.creation_time, d.entry
+                FROM datastream d
+                WHERE COALESCE(d.is_deleted, 0) = 0
+                ORDER BY d.id DESC
+                LIMIT ?
+                """,
+                (int(self._DB_TRANSFER_SCAN_LIMIT),),
+            )
+            rows = cur.fetchall()
+        except Exception as exc:
+            log.debug("VarACStatusClient: failed to query VarAC.db transfer rows: %s", exc)
+            conn.close()
+            return dict(self._last_db_transfer_status)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        for ts_raw, entry_raw in reversed(rows):
+            entry_txt = str(entry_raw or "")
+            if not self._db_event_matches_transfer(entry_txt):
+                continue
+            ts_val = self._parse_db_event_ts(ts_raw) or datetime.datetime.now()
+            upper = entry_txt.upper()
+            if "FILE TRANSFER ABORT" in upper:
+                last_transfer_abort = ts_val
+                continue
+            if "FILE SUCCESSFULLY RECEIVED" in upper or "FILE SUCCESSFULLY SENT" in upper:
+                last_transfer_done = ts_val
+                continue
+            last_transfer = ts_val
+
+        def _is_newer(a: Optional[datetime.datetime], b: Optional[datetime.datetime]) -> bool:
+            return a is not None and (b is None or a > b)
+
+        last_terminal = last_transfer_done
+        if _is_newer(last_transfer_abort, last_terminal):
+            last_terminal = last_transfer_abort
+        transfer_active = _is_newer(last_transfer, last_terminal)
+        cooldown_active = False
+        if not transfer_active and last_transfer_done is not None:
+            cooldown_active = (
+                abs((datetime.datetime.now() - last_transfer_done).total_seconds())
+                <= self._DB_TRANSFER_COOLDOWN_S
+            )
+        reason = None
+        if transfer_active:
+            reason = "transfer"
+        elif cooldown_active:
+            reason = "transfer_cooldown"
+        self._last_db_transfer_status = {
+            "busy": bool(transfer_active or cooldown_active),
+            "reason": reason,
+            "transfer_active": bool(transfer_active),
+            "cooldown_active": bool(cooldown_active),
+        }
+        return dict(self._last_db_transfer_status)
+
     @staticmethod
     def _read_tail(path: Path, max_bytes: int = 16384) -> str:
         try:
@@ -459,21 +629,26 @@ class VarACStatusClient:
 
     def get_status(self) -> Dict[str, object]:
         log_paths = self._resolve_log_paths()
-        if not log_paths:
-            self._last_status = {"busy": False, "waiting_for_frequency": False, "reason": None}
-            return self._last_status
+        status = {"busy": False, "waiting_for_frequency": False, "reason": None}
         try:
-            # Read tails from available VarAC logs. Main and traffic logs carry
-            # different event types depending on VarAC version/settings.
-            chunks = [self._read_tail(p) for p in log_paths]
-            text = "\n".join([c for c in chunks if c])
-            status = self._evaluate_status(text)
-            self._last_status = status
-            return status
+            if log_paths:
+                # Read tails from available VarAC logs. Main and traffic logs carry
+                # different event types depending on VarAC version/settings.
+                chunks = [self._read_tail(p) for p in log_paths]
+                text = "\n".join([c for c in chunks if c])
+                status = self._evaluate_status(text)
         except Exception as e:
             log.debug("VarACStatusClient: failed to read log: %s", e)
-            self._last_status = {"busy": False, "waiting_for_frequency": False, "reason": None}
-            return self._last_status
+        db_status = self._db_transfer_status()
+        if bool(db_status.get("busy")):
+            status["busy"] = True
+            if not bool(status.get("waiting_for_frequency")):
+                status["reason"] = db_status.get("reason") or status.get("reason")
+        status["db_transfer_busy"] = bool(db_status.get("busy"))
+        status["db_transfer_active"] = bool(db_status.get("transfer_active"))
+        status["db_transfer_cooldown"] = bool(db_status.get("cooldown_active"))
+        self._last_status = status
+        return status
 
     def is_busy(self) -> bool:
         status = self.get_status()

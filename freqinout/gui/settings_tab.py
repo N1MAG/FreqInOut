@@ -528,7 +528,15 @@ class SettingsTab(QWidget):
             parts.append(clean_state)
         return " / ".join([part for part in parts if part])
 
-    def _reload_varac_bbs_operator_lookup(self) -> None:
+    def _reload_varac_bbs_operator_lookup(self, *, force: bool = False) -> None:
+        now_ts = time.time()
+        if (
+            not force
+            and self._varac_bbs_lookup_rows
+            and (now_ts - float(getattr(self, "_last_varac_bbs_lookup_reload_ts", 0.0) or 0.0))
+            < float(getattr(self, "_varac_bbs_lookup_reload_interval_sec", 20.0) or 20.0)
+        ):
+            return
         merged: Dict[str, Dict[str, str]] = {}
         for loader in (get_shared_operators, get_local_operators):
             try:
@@ -569,6 +577,7 @@ class SettingsTab(QWidget):
             completer.setFilterMode(Qt.MatchContains)
             completer.setCompletionMode(QCompleter.PopupCompletion)
             self.varac_bbs_callsign_lookup_edit.setCompleter(completer)
+        self._last_varac_bbs_lookup_reload_ts = now_ts
 
     def _varac_bbs_selected_callsigns_text(self) -> str:
         if not hasattr(self, "varac_bbs_callsigns_list"):
