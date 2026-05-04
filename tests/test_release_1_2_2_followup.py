@@ -16,6 +16,7 @@ from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.operator_history_tab import OperatorHistoryTab
 from freqinout.gui.stations_map_tab import StationsMapTab
+from freqinout.radio_interface.js8_status import VarACStatusClient
 
 
 class _MemorySettings:
@@ -226,6 +227,38 @@ def test_map_marker_group_filter_uses_merged_group_membership():
         my_call="",
         allow_self=False,
     )
+
+
+def test_varac_status_treats_qso_summary_as_terminal_without_disconnect_line():
+    client = VarACStatusClient(settings=None)
+    text = "\n".join(
+        [
+            "02/05/2026 14:09:08 - CONNECTED TO W5TTA (BANDWIDTH: 500 FREQUENCY: 7.115.000)",
+            "02/05/2026 14:10:18 - N1MAG> <BLR>",
+            "02/05/2026 14:35:30 - QSO SUMMARY: Frequency: 7.115.000 (40m) Duration: 00:26:20",
+        ]
+    )
+
+    status = client._evaluate_status(text)
+
+    assert status["busy"] is False
+    assert status["reason"] is None
+
+
+def test_varac_status_clears_waiting_state_after_qso_summary():
+    client = VarACStatusClient(settings=None)
+    text = "\n".join(
+        [
+            "02/05/2026 13:55:00 - WAITING FOR FREQUENCY TO CLEAR",
+            "02/05/2026 14:00:00 - CONNECTED TO TEST1 (BANDWIDTH: 500 FREQUENCY: 7.115.000)",
+            "02/05/2026 14:05:00 - QSO SUMMARY: Frequency: 7.115.000 (40m) Duration: 00:05:00",
+        ]
+    )
+
+    status = client._evaluate_status(text)
+
+    assert status["busy"] is False
+    assert status["waiting_for_frequency"] is False
 
 
 def test_map_html_uses_bottom_docked_inline_legend_rows():
