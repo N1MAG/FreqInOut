@@ -14,6 +14,7 @@ from freqinout.core.commstat_artifacts import ensure_commstat_artifact_tables
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.operator_activity import ensure_js8_callsign_stats
+from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.varac_ingest import ensure_varac_local_tables
 
 # Base config directory (user-writable)
@@ -26,7 +27,7 @@ def _ensure_settings_db() -> None:
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     db_path = CONFIG_DIR / "freqinout.db"
-    conn = sqlite3.connect(db_path)
+    conn = connect_sqlite(db_path)
     try:
         conn.execute(
             """
@@ -802,7 +803,7 @@ def _ensure_nets_db() -> None:
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     db_path = CONFIG_DIR / "freqinout_nets.db"
-    conn = sqlite3.connect(db_path)
+    conn = connect_sqlite(db_path)
     try:
         cur = conn.cursor()
         # Daily / Net schedules

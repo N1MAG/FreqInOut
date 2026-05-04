@@ -13,6 +13,7 @@ import freqinout
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.system_timezone import normalize_supported_timezone_name
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.startup_lock import try_acquire_single_instance_lock
 from freqinout.radio_interface.rigctl_client import flrig_client_from_settings
 
@@ -70,6 +71,11 @@ def test_timezone_normalizer_maps_daylight_abbreviations():
     assert normalize_supported_timezone_name("CDT") == "America/Chicago"
 
 
+def test_timezone_normalizer_accepts_valid_iana_names():
+    assert normalize_supported_timezone_name("Europe/London") == "Europe/London"
+    assert normalize_supported_timezone_name("Asia/Tokyo") == "Asia/Tokyo"
+
+
 def test_settings_manager_resyncs_stale_timezone(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
@@ -86,6 +92,21 @@ def test_settings_manager_resyncs_stale_timezone(monkeypatch, tmp_path):
 
     refreshed = SettingsManager()
     assert refreshed.get("timezone") == "America/Denver"
+
+
+def test_connect_sqlite_enables_wal_and_runtime_pragmas(tmp_path):
+    db_path = tmp_path / "sample.db"
+    conn = connect_sqlite(db_path)
+    try:
+        journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
+        synchronous = int(conn.execute("PRAGMA synchronous").fetchone()[0] or 0)
+        temp_store = int(conn.execute("PRAGMA temp_store").fetchone()[0] or 0)
+    finally:
+        conn.close()
+
+    assert journal_mode == "wal"
+    assert synchronous == 1
+    assert temp_store == 2
 
 
 def test_flrig_client_from_settings_uses_saved_port(monkeypatch, tmp_path):

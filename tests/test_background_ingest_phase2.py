@@ -181,3 +181,33 @@ def test_background_ingest_varac_policy_job_runs_vault_even_when_guard_is_disabl
 
     assert [name for name, _settings_id in calls] == ["vault", "guard"]
     assert calls[0][1] == calls[1][1]
+
+
+def test_background_ingest_refresh_runtime_settings_toggles_varac_vault_timer(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    settings = SettingsManager()
+    settings.set("varac_bbs_vault_enabled", False)
+    controller = BackgroundIngestController(settings)
+
+    controller.start(initial_stagger=False)
+    try:
+        assert controller._varac_vault_timer is not None
+        assert controller._varac_vault_timer.isActive() is False
+
+        settings.set("varac_bbs_vault_enabled", True)
+        controller.refresh_runtime_settings()
+        assert controller._varac_vault_timer.isActive() is True
+        assert controller._varac_vault_timer.interval() == controller._VARAC_VAULT_ENABLED_INTERVAL_MS
+
+        settings.set("varac_bbs_vault_enabled", False)
+        controller.refresh_runtime_settings()
+        assert controller._varac_vault_timer.isActive() is False
+    finally:
+        controller.stop()
+        controller.deleteLater()
+        app.processEvents()

@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 import psutil
 
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.varac_log_parser import parse_varac_event_timestamp
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 
 log = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ class JS8StatusClient:
             if now_ts - hub.last_rx_activity_ts() <= 12.0:
                 return True
             return False
-        except BaseException as e:
+        except Exception as e:
             log.debug("JS8Call status query failed (assuming not busy): %s", e)
             return False
 
@@ -160,7 +161,7 @@ class JS8ControlClient(JS8StatusClient):
             js8net.set_freq(dial_hz, off)
             log.info("JS8ControlClient set dial=%d Hz%s", dial_hz, "" if offset_hz is None else f" offset={off} Hz")
             return True
-        except BaseException as e:
+        except Exception as e:
             log.error("JS8ControlClient failed to set frequency: %s", e)
             return False
 
@@ -176,7 +177,7 @@ class JS8ControlClient(JS8StatusClient):
                 return None
             hz = resp.get("dial") or resp.get("freq")
             return int(hz) if hz else None
-        except BaseException as e:
+        except Exception as e:
             log.debug("JS8ControlClient get_frequency failed: %s", e)
             return None
 
@@ -192,7 +193,7 @@ class JS8ControlClient(JS8StatusClient):
                 return None
             off = resp.get("offset")
             return int(off) if off is not None else None
-        except BaseException as e:
+        except Exception as e:
             log.debug("JS8ControlClient get_offset failed: %s", e)
             return None
 
@@ -205,7 +206,7 @@ class JS8ControlClient(JS8StatusClient):
             if cur is None:
                 return False
             return self.set_frequency(cur, offset_hz)
-        except BaseException as e:
+        except Exception as e:
             log.error("JS8ControlClient failed to set offset: %s", e)
             return False
 
@@ -239,6 +240,9 @@ class VarACStatusClient:
         }
         self._last_db_transfer_poll_monotonic: float = 0.0
         self._last_db_transfer_path: str = ""
+        self._cached_log_paths: List[Path] = []
+        self._cached_log_paths_ts: float = 0.0
+        self._cached_log_paths_sig: tuple[str, str] = ("", "")
 
     def _operator_callsign(self) -> str:
         return (self.settings.get("operator_callsign", "") or "").strip().upper()
@@ -263,7 +267,7 @@ class VarACStatusClient:
         return events
 
     def _evaluate_status(self, text: str) -> Dict[str, object]:
-        now_local = datetime.datetime.now()
+        now_local = datetime.datetime.now(datetime.timezone.utc).astimezone()
         events = self._split_events(text)
         callsign = self._operator_callsign()
         last_connecting: Optional[datetime.datetime] = None
@@ -283,12 +287,9 @@ class VarACStatusClient:
 
         for raw in events:
             upper = raw.upper()
-            ts_val: Optional[datetime.datetime] = None
-            if len(raw) >= 19:
-                try:
-                    ts_val = datetime.datetime.strptime(raw[:19], "%d/%m/%Y %H:%M:%S")
-                except Exception:
-                    ts_val = None
+            ts_val: Optional[datetime.datetime] = (
+                parse_varac_event_timestamp(raw[:19]) if len(raw) >= 19 else None
+            )
 
             if "STARTING VARAC" in upper:
                 # Reset QSO state for a new app session so stale events in the
@@ -414,6 +415,14 @@ class VarACStatusClient:
     def _resolve_log_paths(self) -> List[Path]:
         raw_install = (self.settings.get("varac_path", "") or "").strip()
         raw_db = (self.settings.get("varac_db_path", "") or "").strip()
+        sig = (raw_install, raw_db)
+        now = time.monotonic()
+        if (
+            self._cached_log_paths
+            and sig == self._cached_log_paths_sig
+            and (now - float(self._cached_log_paths_ts or 0.0)) < 5.0
+        ):
+            return list(self._cached_log_paths)
         bases: List[Path] = []
         if raw_install:
             bases.append(Path(raw_install))
@@ -456,6 +465,9 @@ class VarACStatusClient:
                 p = base / name
                 if p.exists():
                     out.append(p)
+        self._cached_log_paths = list(out)
+        self._cached_log_paths_sig = sig
+        self._cached_log_paths_ts = now
         return out
 
     def _resolve_db_path(self) -> Optional[Path]:
