@@ -273,6 +273,7 @@ class VarACStatusClient:
         last_connecting: Optional[datetime.datetime] = None
         last_connected: Optional[datetime.datetime] = None
         last_disconnected: Optional[datetime.datetime] = None
+        last_session_terminal: Optional[datetime.datetime] = None
         last_incoming: Optional[datetime.datetime] = None
         last_no_luck: Optional[datetime.datetime] = None
         last_broadcast: Optional[datetime.datetime] = None
@@ -324,6 +325,15 @@ class VarACStatusClient:
             if "NO LUCK." in upper:
                 last_no_luck = ts_val or now_local
                 continue
+            if "QSO SUMMARY:" in upper:
+                last_session_terminal = ts_val or now_local
+                continue
+            if "DISCONNECTING " in upper:
+                last_session_terminal = ts_val or now_local
+                continue
+            if "LOGGING QSO TO DB:" in upper:
+                last_session_terminal = ts_val or now_local
+                continue
             if "CONNECTING " in upper:
                 last_connecting = ts_val or now_local
                 continue
@@ -332,6 +342,7 @@ class VarACStatusClient:
                 continue
             if "DISCONNECTED FROM" in upper:
                 last_disconnected = ts_val or now_local
+                last_session_terminal = ts_val or now_local
                 continue
             if "FILE SENT. WAITING FOR CONFIRMATION OF RECEIPT" in upper:
                 last_file_wait = ts_val or now_local
@@ -361,21 +372,31 @@ class VarACStatusClient:
                 if callsign and upper.rstrip().endswith(f"DE {callsign}"):
                     continue
 
-        waiting_for_frequency = _is_newer(last_wait_freq, last_disconnected) and _is_newer(
-            last_wait_freq, last_connected
+        waiting_for_frequency = (
+            _is_newer(last_wait_freq, last_disconnected)
+            and _is_newer(last_wait_freq, last_connected)
+            and _is_newer(last_wait_freq, last_session_terminal)
         )
-        connected_active = _is_newer(last_connected, last_disconnected)
+        connected_active = _is_newer(last_connected, last_disconnected) and _is_newer(
+            last_connected, last_session_terminal
+        )
         connecting_active = (
             _is_newer(last_connecting, last_disconnected)
             and _is_newer(last_connecting, last_connected)
+            and _is_newer(last_connecting, last_session_terminal)
         )
         incoming_active = (
             _is_newer(last_incoming, last_no_luck)
             and _is_newer(last_incoming, last_connected)
             and _is_newer(last_incoming, last_disconnected)
+            and _is_newer(last_incoming, last_session_terminal)
         )
-        file_wait_active = _is_newer(last_file_wait, last_disconnected)
-        transfer_active = _is_newer(last_transfer, last_disconnected)
+        file_wait_active = _is_newer(last_file_wait, last_disconnected) and _is_newer(
+            last_file_wait, last_session_terminal
+        )
+        transfer_active = _is_newer(last_transfer, last_disconnected) and _is_newer(
+            last_transfer, last_session_terminal
+        )
         broadcast_active = False
         if last_broadcast and last_broadcast_complete is False:
             delta = abs((now_local - last_broadcast).total_seconds())
