@@ -16,11 +16,14 @@ from freqinout.core.varac_bbs_vault import (
     import_live_bbs_to_default_location,
     initialize_managed_root,
     load_vault_runtime_state,
+    parse_vault_log_events,
     publish_flamp_block_overlay_view,
     publish_root_view,
     run_varac_bbs_vault,
     verify_access_code,
 )
+from freqinout.core.varac_guard import parse_varac_transfer_events
+from freqinout.core.varac_log_parser import parse_varac_event_timestamp
 
 
 class _Settings:
@@ -101,6 +104,34 @@ def test_hash_and_verify_access_code_round_trip() -> None:
         access_code_salt=str(payload["access_code_salt"]),
         access_code_iterations=int(payload["access_code_iterations"]),
     )
+
+
+def test_varac_log_parser_honors_day_first_and_month_first_inputs() -> None:
+    euro = parse_varac_event_timestamp("13/04/2025 04:07:31")
+    assert euro is not None
+    assert (euro.year, euro.month, euro.day) == (2025, 4, 13)
+
+    month_first = parse_varac_event_timestamp("04/03/2025 12:34:56", prefer_day_first=False)
+    day_first = parse_varac_event_timestamp("04/03/2025 12:34:56", prefer_day_first=True)
+    assert month_first is not None and day_first is not None
+    assert (month_first.month, month_first.day) == (4, 3)
+    assert (day_first.month, day_first.day) == (3, 4)
+
+
+def test_varac_guard_and_vault_timestamp_parsers_accept_day_first_logs() -> None:
+    guard_events = parse_varac_transfer_events(
+        "13/04/2025 04:07:31 - FILE SUCCESSFULLY RECEIVED: file://C:\\VarAC\\\\Report.k2s (Size: 284 Bytes)\n",
+        log_path="VarAC_traffic.log",
+    )
+    assert guard_events
+    assert guard_events[0].timestamp_utc > 0
+
+    vault_events = parse_vault_log_events(
+        "13/04/2025 04:07:31 - BBS OPEN TEST_A\n",
+        log_path="VarAC_traffic.log",
+    )
+    assert vault_events
+    assert vault_events[0].timestamp_utc > 0
 
 
 def test_initialize_and_import_live_bbs(tmp_path: Path) -> None:
@@ -500,7 +531,7 @@ def test_settings_tab_forces_managed_root_into_bbs_area(tmp_path: Path) -> None:
     second_bbs = tmp_path / "station-b" / "BBS"
     first_bbs.mkdir(parents=True)
     second_bbs.mkdir(parents=True)
-    stale_root = tmp_path / "FreqInOut-multi-rig" / "FIO_BBS_Vault"
+    stale_root = tmp_path / "FreqInOut-single-rig" / "FIO_BBS_Vault"
 
     tab = SettingsTab()
     tab.varac_bbs_dir_edit.setText(str(first_bbs))
@@ -518,7 +549,7 @@ def test_run_varac_bbs_vault_ignores_stale_managed_root_setting(tmp_path: Path) 
     live_bbs = tmp_path / "VarAC_files" / "BBS"
     live_bbs.mkdir(parents=True)
     managed_root = Path(compute_default_managed_root(live_bbs))
-    stale_root = tmp_path / "FreqInOut-multi-rig" / "FIO_BBS_Vault"
+    stale_root = tmp_path / "FreqInOut-single-rig" / "FIO_BBS_Vault"
     created = initialize_managed_root(managed_root)
     default_dir = Path(created["default"])
     (default_dir / "RootInfo.txt").write_text("root", encoding="utf-8")

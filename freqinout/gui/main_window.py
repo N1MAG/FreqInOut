@@ -72,7 +72,6 @@ from freqinout.gui.help_tab import HelpTab
 from freqinout.gui.help_registry import get_help_context
 from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.station_overview_tab import StationOverviewTab
-from freqinout.gui.dialog_notifications import install_auto_closing_information_dialogs
 from freqinout.gui.qsy_helper import (
     refresh_hold_duration_combo,
     selected_hold_duration,
@@ -107,7 +106,6 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        install_auto_closing_information_dialogs()
         self._shutting_down = False
 
         self.settings = SettingsManager()
@@ -452,8 +450,6 @@ class MainWindow(QMainWindow):
             self.nav_buttons[0].setChecked(True)
             first_screen_index = self.button_group.id(self.nav_buttons[0])
             self._set_screen(first_screen_index if first_screen_index >= 0 else 0)
-        if self._startup_webengine_prewarm_enabled:
-            QTimer.singleShot(150, self._prewarm_webengine)
         QTimer.singleShot(600, self._start_lazy_prewarm)
 
         # Optional: apply callsign to tab captions if already configured
@@ -646,6 +642,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self.settings_tab.settings_saved.connect(self.background_ingest.refresh_runtime_settings)
+        except Exception:
+            pass
+        try:
             self.settings_tab.open_logs_requested.connect(self._open_logs_window)
         except Exception:
             pass
@@ -746,10 +746,6 @@ class MainWindow(QMainWindow):
 
     def _update_log_indicator(self) -> None:
         try:
-            try:
-                self.settings.reload()
-            except Exception:
-                pass
             level = (self.settings.get("log_level", "") or "DISABLED").upper()
             if level == "DISABLED":
                 self.logs_active_btn.setVisible(False)

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from freqinout.core.logger import log
+from freqinout.core.varac_log_parser import parse_varac_event_timestamp_to_epoch
 from freqinout.core.varac_bbs_config import parse_callsign_list
 from freqinout.core.varac_file_action import delete_file, quarantine_file, VaracFileActionResult
 
@@ -118,10 +119,7 @@ def _read_tail(path: Path, max_bytes: int = 32768) -> str:
 
 
 def _parse_timestamp(stamp: str) -> float:
-    try:
-        return dt.datetime.strptime(stamp, "%m/%d/%Y %H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp()
-    except Exception:
-        return 0.0
+    return parse_varac_event_timestamp_to_epoch(stamp)
 
 
 def _split_events(text: str) -> List[str]:
@@ -324,7 +322,6 @@ def evaluate_varac_guard_event(
 
     candidates = _candidate_files(incoming_dir, filename)
     if not candidates and event.timestamp_utc > 0:
-        candidates = []
         fallback = _latest_recent_file(incoming_dir, since_ts=event.timestamp_utc, retry_seconds=retry_seconds)
         if fallback is not None:
             candidates = [fallback]
@@ -449,8 +446,6 @@ def run_varac_guard(settings, *, retry_seconds: Optional[int] = None) -> VaracGu
                     deleted += 1
                 elif decision.action == "quarantine":
                     quarantined += 1
-                elif decision.action == "log_only":
-                    pass
             if should_mark and decision.action != "pending":
                 seen.add(key)
                 processed_keys.append(key)

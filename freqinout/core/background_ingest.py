@@ -25,6 +25,9 @@ class BackgroundIngestController(QObject):
     Background, non-UI data ingest to keep DBs warm for fast tab activation.
     """
 
+    _VARAC_VAULT_ENABLED_INTERVAL_MS = 5_000
+    _VARAC_VAULT_DISABLED_INTERVAL_MS = 30_000
+
     def __init__(self, settings: SettingsManager):
         super().__init__()
         self.settings = settings
@@ -68,9 +71,8 @@ class BackgroundIngestController(QObject):
         self._varac_timer.start()
 
         self._varac_vault_timer = QTimer(self)
-        self._varac_vault_timer.setInterval(1200)
         self._varac_vault_timer.timeout.connect(self._ingest_varac_vault)
-        self._varac_vault_timer.start()
+        self._update_varac_vault_timer_state()
 
         self._varac_guard_timer = QTimer(self)
         self._varac_guard_timer.setInterval(90 * 1000)  # 90 seconds
@@ -100,7 +102,8 @@ class BackgroundIngestController(QObject):
             QTimer.singleShot(2000, self._ingest_js8_links)
             QTimer.singleShot(4000, self._ingest_messages)
             QTimer.singleShot(6000, self._ingest_varac)
-            QTimer.singleShot(6500, self._ingest_varac_vault)
+            if self._varac_vault_enabled():
+                QTimer.singleShot(6500, self._ingest_varac_vault)
             QTimer.singleShot(7000, self._ingest_varac_guard)
             QTimer.singleShot(8000, self._ingest_sitreps)
             QTimer.singleShot(9000, self._ingest_prop_outcomes)
@@ -184,6 +187,45 @@ class BackgroundIngestController(QObject):
     def _new_worker_settings(self) -> SettingsManager:
         return SettingsManager()
 
+    @staticmethod
+    def _truthy(value: object, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        txt = str(value or "").strip().lower()
+        if txt in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if txt in {"0", "false", "no", "off", "disabled"}:
+            return False
+        return bool(default)
+
+    def _varac_vault_enabled(self) -> bool:
+        try:
+            return self._truthy(self.settings.get("varac_bbs_vault_enabled", False), False)
+        except Exception:
+            return False
+
+    def _update_varac_vault_timer_state(self) -> None:
+        timer = self._varac_vault_timer
+        if timer is None:
+            return
+        enabled = self._varac_vault_enabled()
+        timer.setInterval(
+            self._VARAC_VAULT_ENABLED_INTERVAL_MS
+            if enabled
+            else self._VARAC_VAULT_DISABLED_INTERVAL_MS
+        )
+        if not self._running:
+            return
+        if enabled and not timer.isActive():
+            timer.start()
+        elif not enabled and timer.isActive():
+            timer.stop()
+
+    def refresh_runtime_settings(self) -> None:
+        self._update_varac_vault_timer_state()
+
     def _submit_job(self, job_name: str, job_func: Callable[[], None]) -> None:
         if not self._running:
             return
@@ -259,6 +301,8 @@ class BackgroundIngestController(QObject):
                 log.debug("BackgroundIngest: js8_links ingested=%s", count)
         except Exception as e:
             log.debug("BackgroundIngest: js8_links ingest failed: %s", e)
+        finally:
+            worker_settings.close()
 
     def _ingest_messages(self) -> None:
         self._submit_job("messages", self._run_messages_job)
@@ -274,11 +318,16 @@ class BackgroundIngestController(QObject):
             msg_ingest.ingest_spotter_from_directed()
         except Exception as e:
             log.debug("BackgroundIngest: spotter ingest failed: %s", e)
+        finally:
+            worker_settings.close()
 
     def _ingest_varac(self) -> None:
         self._submit_job("varac", self._run_varac_job)
 
     def _ingest_varac_vault(self) -> None:
+        self._update_varac_vault_timer_state()
+        if not self._varac_vault_enabled():
+            return
         self._submit_realtime_job("varac_vault", self._run_varac_vault_job)
 
     def _ingest_varac_guard(self) -> None:
@@ -290,6 +339,8 @@ class BackgroundIngestController(QObject):
             ingest_varac(worker_settings)
         except Exception as e:
             log.debug("BackgroundIngest: VarAC ingest failed: %s", e)
+        finally:
+            worker_settings.close()
 
     def _run_varac_vault_job(self) -> None:
         worker_settings = self._new_worker_settings()
@@ -301,6 +352,8 @@ class BackgroundIngestController(QObject):
                 log.debug("BackgroundIngest: VarAC vault %s", vault_result.summary)
         except Exception as e:
             log.debug("BackgroundIngest: VarAC vault failed: %s", e)
+        finally:
+            worker_settings.close()
 
     def _run_varac_guard_job(self) -> None:
         worker_settings = self._new_worker_settings()
@@ -310,6 +363,8 @@ class BackgroundIngestController(QObject):
                 log.debug("BackgroundIngest: VarAC guard %s", result.summary)
         except Exception as e:
             log.debug("BackgroundIngest: VarAC guard failed: %s", e)
+        finally:
+            worker_settings.close()
 
     def _ingest_sitreps(self) -> None:
         self._submit_job("sitreps", self._run_sitreps_job)
@@ -336,6 +391,8 @@ class BackgroundIngestController(QObject):
                 )
         except Exception as e:
             log.debug("BackgroundIngest: sitrep ingest failed: %s", e)
+        finally:
+            worker_settings.close()
 
     def _ingest_prop_outcomes(self) -> None:
         self._submit_job("prop_outcomes", self._run_prop_outcomes_job)
@@ -353,6 +410,8 @@ class BackgroundIngestController(QObject):
                 )
         except Exception as e:
             log.debug("BackgroundIngest: propagation outcome ingest failed: %s", e)
+        finally:
+            worker_settings.close()
 
     def _infer_peer_schedules(self) -> None:
         self._submit_job("peer_schedules", self._run_peer_schedule_job)
@@ -370,3 +429,5 @@ class BackgroundIngestController(QObject):
                 )
         except Exception as e:
             log.debug("BackgroundIngest: peer schedule inference failed: %s", e)
+        finally:
+            worker_settings.close()

@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.multi_radio_store import (
     ensure_default_multi_radio_records,
@@ -49,7 +50,7 @@ class SettingsManager:
     # ---------- internal I/O ---------- #
 
     def _init_db(self) -> None:
-        self._conn = sqlite3.connect(self.db_path)
+        self._conn = connect_sqlite(self.db_path)
         ensure_multi_radio_settings_schema(self._conn)
 
     def _maybe_migrate_from_json(self) -> None:
@@ -127,7 +128,8 @@ class SettingsManager:
             return
         raise sqlite3.ProgrammingError(
             "SettingsManager used from a different thread than it was created on "
-            f"(created={self._thread_id}, current={current_thread_id})"
+            f"(created={self._thread_id}, current={current_thread_id}). "
+            "Create a new SettingsManager in the worker thread instead of sharing this instance."
         )
 
     def _sync_system_timezone(self, *, force: bool = False) -> None:
@@ -232,3 +234,19 @@ class SettingsManager:
         """
         self._assert_thread_affinity()
         return self._data
+
+    def close(self) -> None:
+        conn = self._conn
+        self._conn = None
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

@@ -17,6 +17,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from freqinout.core.logger import log
 from freqinout.core.nbems_compose import safe_varac_bbs_filename
+from freqinout.core.varac_log_parser import parse_varac_event_timestamp_to_epoch
 from freqinout.core.varac_bbs_config import parse_callsign_list
 from freqinout.core.varac_guard import resolve_varac_traffic_log_paths
 
@@ -263,10 +264,7 @@ def _read_tail(path: Path, max_bytes: int = 65536) -> str:
 
 
 def _parse_timestamp(stamp: str) -> float:
-    try:
-        return dt.datetime.strptime(stamp, "%m/%d/%Y %H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp()
-    except Exception:
-        return 0.0
+    return parse_varac_event_timestamp_to_epoch(stamp)
 
 
 def _parse_db_timestamp(value: object) -> float:

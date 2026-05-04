@@ -3672,10 +3672,19 @@ class StationsMapTab(QWidget):
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
+            cols = {
+                str(row[1] or "").strip()
+                for row in conn.execute("PRAGMA table_info(sitrep_state_rollup)").fetchall()
+                if len(row) > 1 and str(row[1] or "").strip()
+            }
+            js8_expr = "js8_count" if "js8_count" in cols else "0 AS js8_count"
+            internet_expr = "internet_count" if "internet_count" in cols else "0 AS internet_count"
+            mixed_expr = "mixed_transport_count" if "mixed_transport_count" in cols else "0 AS mixed_transport_count"
+            latest_expr = "latest_event_ts" if "latest_event_ts" in cols else "0 AS latest_event_ts"
             cur.execute(
-                """
+                f"""
                 SELECT state_code, callsign_count, red_count, yellow_count, green_count, unknown_count,
-                       js8_count, internet_count, mixed_transport_count, latest_event_ts
+                       {js8_expr}, {internet_expr}, {mixed_expr}, {latest_expr}
                 FROM sitrep_state_rollup
                 WHERE report_group=?
                 ORDER BY callsign_count DESC, latest_event_ts DESC, state_code
@@ -3684,7 +3693,8 @@ class StationsMapTab(QWidget):
             )
             rows = cur.fetchall()
             conn.close()
-        except Exception:
+        except Exception as e:
+            log.debug("StationsMap: failed to load sitrep_state_rollup for %s: %s", report_group_key, e)
             return []
         out = [
             {

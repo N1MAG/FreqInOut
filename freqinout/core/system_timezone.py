@@ -6,7 +6,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Dict, Iterable, Optional
+from zoneinfo import ZoneInfo
 
 SUPPORTED_TIMEZONE_CHOICES = (
     "UTC",
@@ -14,6 +15,25 @@ SUPPORTED_TIMEZONE_CHOICES = (
     "America/Chicago",
     "America/Denver",
     "America/Los_Angeles",
+    "America/Anchorage",
+    "Pacific/Honolulu",
+    "America/Toronto",
+    "America/Vancouver",
+    "Europe/London",
+    "Europe/Berlin",
+    "Europe/Madrid",
+    "Europe/Rome",
+    "Europe/Athens",
+    "Europe/Helsinki",
+    "Europe/Moscow",
+    "Asia/Tokyo",
+    "Asia/Shanghai",
+    "Asia/Singapore",
+    "Asia/Seoul",
+    "Asia/Kolkata",
+    "Australia/Sydney",
+    "Australia/Melbourne",
+    "Pacific/Auckland",
 )
 
 WINDOWS_TO_IANA = {
@@ -46,6 +66,30 @@ ALIASES_TO_IANA = {
     "US/PACIFIC": "America/Los_Angeles",
 }
 
+_IANA_VALIDATION_CACHE: Dict[str, bool] = {}
+_DETECT_CACHE: Dict[str, object] = {
+    "value": None,
+    "ts": 0.0,
+    "env": ("", ""),
+    "fallback": "UTC",
+}
+
+
+def _is_valid_iana_timezone(value: str) -> bool:
+    txt = str(value or "").strip()
+    if not txt:
+        return False
+    cached = _IANA_VALIDATION_CACHE.get(txt)
+    if cached is not None:
+        return cached
+    try:
+        ZoneInfo(txt)
+        _IANA_VALIDATION_CACHE[txt] = True
+        return True
+    except Exception:
+        _IANA_VALIDATION_CACHE[txt] = False
+        return False
+
 
 def normalize_supported_timezone_name(value: object) -> Optional[str]:
     txt = str(value or "").strip()
@@ -63,6 +107,8 @@ def normalize_supported_timezone_name(value: object) -> Optional[str]:
     upper = normalized.upper()
     if upper in ALIASES_TO_IANA:
         return ALIASES_TO_IANA[upper]
+    if _is_valid_iana_timezone(normalized):
+        return normalized
     return None
 
 
@@ -127,13 +173,27 @@ def _platform_timezone_candidates() -> Iterable[str]:
 
 def detect_system_timezone_name(fallback: str = "UTC") -> str:
     normalized_fallback = normalize_supported_timezone_name(fallback) or "UTC"
+    env_sig = (
+        str(os.environ.get("FREQINOUT_TZ", "") or ""),
+        str(os.environ.get("TZ", "") or ""),
+    )
+    now = time.monotonic()
+    cached_value = _DETECT_CACHE.get("value")
+    if (
+        cached_value
+        and _DETECT_CACHE.get("env") == env_sig
+        and _DETECT_CACHE.get("fallback") == normalized_fallback
+        and (now - float(_DETECT_CACHE.get("ts") or 0.0)) < 300.0
+    ):
+        return str(cached_value)
 
     for candidate in (
-        os.environ.get("FREQINOUT_TZ"),
-        os.environ.get("TZ"),
+        env_sig[0],
+        env_sig[1],
     ):
         normalized = normalize_supported_timezone_name(candidate)
         if normalized:
+            _DETECT_CACHE.update({"value": normalized, "ts": now, "env": env_sig, "fallback": normalized_fallback})
             return normalized
 
     try:
@@ -146,6 +206,7 @@ def detect_system_timezone_name(fallback: str = "UTC") -> str:
         ):
             normalized = normalize_supported_timezone_name(candidate)
             if normalized:
+                _DETECT_CACHE.update({"value": normalized, "ts": now, "env": env_sig, "fallback": normalized_fallback})
                 return normalized
     except Exception:
         pass
@@ -153,6 +214,8 @@ def detect_system_timezone_name(fallback: str = "UTC") -> str:
     for candidate in _platform_timezone_candidates():
         normalized = normalize_supported_timezone_name(candidate)
         if normalized:
+            _DETECT_CACHE.update({"value": normalized, "ts": now, "env": env_sig, "fallback": normalized_fallback})
             return normalized
 
+    _DETECT_CACHE.update({"value": normalized_fallback, "ts": now, "env": env_sig, "fallback": normalized_fallback})
     return normalized_fallback

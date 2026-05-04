@@ -9,6 +9,22 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span
 
 
+def configure_connection(
+    conn: sqlite3.Connection,
+    *,
+    busy_timeout_ms: Optional[int] = None,
+) -> sqlite3.Connection:
+    busy_ms = int(busy_timeout_ms if busy_timeout_ms is not None else 2000)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={busy_ms}")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA temp_store=MEMORY")
+    except Exception as exc:
+        log.debug("SQLite PRAGMA setup failed: %s", exc)
+    return conn
+
+
 def connect_sqlite(
     db_path: str | Path,
     *,
@@ -21,11 +37,7 @@ def connect_sqlite(
     if row_factory is not None:
         conn.row_factory = row_factory
     busy_ms = int(busy_timeout_ms if busy_timeout_ms is not None else max(100, float(timeout) * 1000.0))
-    try:
-        conn.execute(f"PRAGMA busy_timeout={busy_ms}")
-    except Exception:
-        pass
-    return conn
+    return configure_connection(conn, busy_timeout_ms=busy_ms)
 
 
 def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
