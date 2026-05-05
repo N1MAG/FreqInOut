@@ -3,7 +3,7 @@
 This guide assumes a fresh Windows system. Adjust paths as needed.
 
 ## 1) Prerequisites
-- Python 3.9+ installed and on PATH (3.11 recommended)
+- Python 3.9 through 3.13 installed and on PATH (3.11 recommended; 3.14 is not yet supported)
 - Git (if cloning)
 - Optional: FLRig/FLDigi/JS8Call/VarAC installed if you plan to auto-launch them
 

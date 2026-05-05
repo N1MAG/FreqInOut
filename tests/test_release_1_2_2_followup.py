@@ -15,6 +15,7 @@ from freqinout.gui import qsy_helper
 from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.message_viewer_tab import MessageViewerTab
 from freqinout.gui.operator_history_tab import OperatorHistoryTab
+from freqinout.gui.settings_tab import _vault_location_requires_code_badge
 from freqinout.gui.stations_map_tab import StationsMapTab
 from freqinout.radio_interface.js8_status import VarACStatusClient
 
@@ -259,6 +260,21 @@ def test_varac_status_clears_waiting_state_after_qso_summary():
 
     assert status["busy"] is False
     assert status["waiting_for_frequency"] is False
+
+
+def test_vault_location_code_badge_tracks_effective_policy():
+    row = {"id": "intel", "open_rule": "Allowed callsigns only", "access_code_hash": "savedhash"}
+
+    assert _vault_location_requires_code_badge(
+        row,
+        default_location_id="default",
+        global_code_policy="Require for non-default locations",
+    )
+    assert not _vault_location_requires_code_badge(
+        row,
+        default_location_id="default",
+        global_code_policy="Allow public locations",
+    )
 
 
 def test_map_html_uses_bottom_docked_inline_legend_rows():

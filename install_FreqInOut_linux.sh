@@ -3,6 +3,8 @@ set -eEuo pipefail
 
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=9
+MAX_PYTHON_MAJOR=3
+MAX_PYTHON_MINOR=13
 
 REPO_URL="${REPO_URL:-https://github.com/N1MAG/FreqInOut.git}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/FreqInOut}"
@@ -665,7 +667,7 @@ manual_install_hint() {
     yum) echo "sudo yum install git python3 python3-pip python3-virtualenv" ;;
     pacman) echo "sudo pacman -Sy git python python-pip" ;;
     zypper) echo "sudo zypper install git python3 python3-pip python3-virtualenv" ;;
-    *) echo "Install git + Python 3.9+ + pip + venv with your distro package manager." ;;
+    *) echo "Install git + Python 3.9-3.13 + pip + venv with your distro package manager." ;;
   esac
 }
 
@@ -741,20 +743,23 @@ install_required_system_packages() {
   fi
 }
 
-python_meets_minimum() {
+python_version_supported() {
   command_exists python3 || return 1
-  python3 - "$MIN_PYTHON_MAJOR" "$MIN_PYTHON_MINOR" <<'PY'
+  python3 - "$MIN_PYTHON_MAJOR" "$MIN_PYTHON_MINOR" "$MAX_PYTHON_MAJOR" "$MAX_PYTHON_MINOR" <<'PY'
 import sys
 need_major = int(sys.argv[1])
 need_minor = int(sys.argv[2])
-raise SystemExit(0 if sys.version_info >= (need_major, need_minor) else 1)
+max_major = int(sys.argv[3])
+max_minor = int(sys.argv[4])
+version = sys.version_info[:2]
+raise SystemExit(0 if (need_major, need_minor) <= version <= (max_major, max_minor) else 1)
 PY
 }
 
 ensure_python_and_tools() {
   local need_packages=0
   command_exists git || need_packages=1
-  python_meets_minimum || need_packages=1
+  python_version_supported || need_packages=1
   command_exists python3 || need_packages=1
   python3 -m venv --help >/dev/null 2>&1 || need_packages=1
 
@@ -768,9 +773,9 @@ ensure_python_and_tools() {
     fi
   fi
 
-  if ! python_meets_minimum; then
+  if ! python_version_supported; then
     warn "Detected python version: $(python3 --version 2>/dev/null || echo unknown)"
-    die "Python $MIN_PYTHON_MAJOR.$MIN_PYTHON_MINOR+ is required."
+    die "Python $MIN_PYTHON_MAJOR.$MIN_PYTHON_MINOR through $MAX_PYTHON_MAJOR.$MAX_PYTHON_MINOR is supported."
   fi
 }
 
