@@ -227,7 +227,9 @@ class VarACStatusClient:
 
     _DB_TRANSFER_POLL_INTERVAL_S = 1.0
     _DB_TRANSFER_COOLDOWN_S = 15.0
+    _DB_TRANSFER_ACTIVE_STALE_S = 300.0
     _DB_TRANSFER_SCAN_LIMIT = 64
+    _TRANSIENT_EVENT_STALE_S = 300.0
 
     def __init__(self, settings: Optional[object] = None) -> None:
         self.settings = settings if settings is not None else SettingsManager()
@@ -285,6 +287,14 @@ class VarACStatusClient:
 
         def _is_newer(a: Optional[datetime.datetime], b: Optional[datetime.datetime]) -> bool:
             return a is not None and (b is None or a > b)
+
+        def _is_recent(ts_val: Optional[datetime.datetime], window_s: float) -> bool:
+            if ts_val is None:
+                return False
+            try:
+                return abs((now_local - ts_val).total_seconds()) <= float(window_s)
+            except Exception:
+                return False
 
         for raw in events:
             upper = raw.upper()
@@ -376,6 +386,7 @@ class VarACStatusClient:
             _is_newer(last_wait_freq, last_disconnected)
             and _is_newer(last_wait_freq, last_connected)
             and _is_newer(last_wait_freq, last_session_terminal)
+            and _is_recent(last_wait_freq, self._TRANSIENT_EVENT_STALE_S)
         )
         connected_active = _is_newer(last_connected, last_disconnected) and _is_newer(
             last_connected, last_session_terminal
@@ -384,19 +395,21 @@ class VarACStatusClient:
             _is_newer(last_connecting, last_disconnected)
             and _is_newer(last_connecting, last_connected)
             and _is_newer(last_connecting, last_session_terminal)
+            and _is_recent(last_connecting, self._TRANSIENT_EVENT_STALE_S)
         )
         incoming_active = (
             _is_newer(last_incoming, last_no_luck)
             and _is_newer(last_incoming, last_connected)
             and _is_newer(last_incoming, last_disconnected)
             and _is_newer(last_incoming, last_session_terminal)
+            and _is_recent(last_incoming, self._TRANSIENT_EVENT_STALE_S)
         )
         file_wait_active = _is_newer(last_file_wait, last_disconnected) and _is_newer(
             last_file_wait, last_session_terminal
-        )
+        ) and _is_recent(last_file_wait, self._TRANSIENT_EVENT_STALE_S)
         transfer_active = _is_newer(last_transfer, last_disconnected) and _is_newer(
             last_transfer, last_session_terminal
-        )
+        ) and _is_recent(last_transfer, self._TRANSIENT_EVENT_STALE_S)
         broadcast_active = False
         if last_broadcast and last_broadcast_complete is False:
             delta = abs((now_local - last_broadcast).total_seconds())
@@ -585,12 +598,17 @@ class VarACStatusClient:
         last_transfer: Optional[datetime.datetime] = None
         last_transfer_done: Optional[datetime.datetime] = None
         last_transfer_abort: Optional[datetime.datetime] = None
+        last_qso_end: Optional[datetime.datetime] = None
+
+        def _is_newer(a: Optional[datetime.datetime], b: Optional[datetime.datetime]) -> bool:
+            return a is not None and (b is None or a > b)
         try:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT d.creation_time, d.entry
+                SELECT d.creation_time, d.entry, COALESCE(q.endtime, '')
                 FROM datastream d
+                LEFT JOIN qso q ON q.guid = d.qso_guid
                 WHERE COALESCE(d.is_deleted, 0) = 0
                 ORDER BY d.id DESC
                 LIMIT ?
@@ -608,12 +626,15 @@ class VarACStatusClient:
             except Exception:
                 pass
 
-        for ts_raw, entry_raw in reversed(rows):
+        for ts_raw, entry_raw, qso_end_raw in reversed(rows):
             entry_txt = str(entry_raw or "")
             if not self._db_event_matches_transfer(entry_txt):
                 continue
             ts_val = self._parse_db_event_ts(ts_raw) or datetime.datetime.now()
+            qso_end_val = self._parse_db_event_ts(qso_end_raw)
             upper = entry_txt.upper()
+            if qso_end_val is not None and _is_newer(qso_end_val, last_qso_end):
+                last_qso_end = qso_end_val
             if "FILE TRANSFER ABORT" in upper:
                 last_transfer_abort = ts_val
                 continue
@@ -622,13 +643,17 @@ class VarACStatusClient:
                 continue
             last_transfer = ts_val
 
-        def _is_newer(a: Optional[datetime.datetime], b: Optional[datetime.datetime]) -> bool:
-            return a is not None and (b is None or a > b)
-
         last_terminal = last_transfer_done
         if _is_newer(last_transfer_abort, last_terminal):
             last_terminal = last_transfer_abort
+        if _is_newer(last_qso_end, last_terminal):
+            last_terminal = last_qso_end
         transfer_active = _is_newer(last_transfer, last_terminal)
+        if transfer_active and last_transfer is not None:
+            transfer_active = (
+                abs((datetime.datetime.now() - last_transfer).total_seconds())
+                <= self._DB_TRANSFER_ACTIVE_STALE_S
+            )
         cooldown_active = False
         if not transfer_active and last_transfer_done is not None:
             cooldown_active = (
@@ -647,7 +672,6 @@ class VarACStatusClient:
             "cooldown_active": bool(cooldown_active),
         }
         return dict(self._last_db_transfer_status)
-
     @staticmethod
     def _read_tail(path: Path, max_bytes: int = 16384) -> str:
         try:
