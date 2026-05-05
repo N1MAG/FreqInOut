@@ -31,7 +31,7 @@ When started with no arguments, the installer opens a guided prompt flow.
 ## 2) What the installer does
 
 It automatically:
-- checks required tools and Python support
+- checks required tools and supported Python version (3.9 through 3.13; 3.11 recommended; 3.14 is not yet supported)
 - installs missing dependencies when possible
 - clones or updates FreqInOut from GitHub
 - creates/repairs a virtual environment and installs `requirements.txt`
@@ -191,4 +191,3 @@ For **advanced users / automation**:
 - prefer explicit flags (`--dir`, `--repo`, `--branch`, `--yes`, policy flags)
 - use `--dry-run` before first unattended run
 - capture logs with `--log-file`
-

@@ -667,7 +667,7 @@ manual_install_hint() {
     yum) echo "sudo yum install git python3 python3-pip python3-virtualenv" ;;
     pacman) echo "sudo pacman -Sy git python python-pip" ;;
     zypper) echo "sudo zypper install git python3 python3-pip python3-virtualenv" ;;
-    *) echo "Install git + Python 3.9-3.13 + pip + venv with your distro package manager." ;;
+    *) echo "Install git + Python 3.9 through 3.13 (3.14 is not yet supported) + pip + venv with your distro package manager." ;;
   esac
 }
 

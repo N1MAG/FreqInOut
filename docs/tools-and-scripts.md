@@ -230,7 +230,7 @@ python release_builder.py --build-exe
 
 ## Troubleshooting
 
-- `Python not found`: activate venv or install a supported Python version (3.9 through 3.13).
+- `Python not found`: activate venv or install a supported Python version (3.9 through 3.13; 3.14 is not yet supported).
 - `Permission denied` on PowerShell wrapper: run with `-ExecutionPolicy Bypass` as shown above.
 - `PyInstaller build failed`: install PyInstaller in the active environment.
 - `DB not found`: confirm config/database path and that FreqInOut has run at least once.

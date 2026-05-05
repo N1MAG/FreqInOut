@@ -84,7 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/N1MAG/FreqInOut/main/install_FreqIn
 ```
 
 This installer:
-- Checks Python version (supported: 3.9 through 3.13; 3.11 recommended)
+- Checks Python version (supported: 3.9 through 3.13; 3.11 recommended; 3.14 is not yet supported)
 - Offers to install missing system dependencies automatically
 - Creates venv, installs requirements, and creates launcher + desktop icon
 - If already installed, asks for existing app location and lets you choose:
