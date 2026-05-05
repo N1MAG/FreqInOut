@@ -1525,6 +1525,94 @@ def _publish_root_action(
     return VaultActionResult(reason, True, summary, next_state, publish_result=publish_result)
 
 
+def _publish_refresh_action(
+    *,
+    sender: str,
+    qso_guid: str,
+    locations: Sequence[VaultLocation],
+    live_bbs_dir: object,
+    managed_root: object,
+    default_location_id: str,
+    global_allowed_callsigns: Sequence[str],
+    limit_access_enabled: bool,
+    global_code_policy: str,
+    runtime_state: VaultRuntimeState,
+    now_ts: float,
+    flamp_enabled: bool,
+    reason: str,
+) -> VaultActionResult:
+    state = load_vault_runtime_state(vault_runtime_state_to_data(runtime_state))
+    sender_norm = _normalize_callsign(sender)
+    qso_guid_text = str(qso_guid or "").strip()
+    same_session_location_refresh = (
+        state.current_view_mode == "location"
+        and bool(state.current_session_qso_guid)
+        and state.current_session_qso_guid == qso_guid_text
+        and (not state.current_session_callsign or state.current_session_callsign == sender_norm)
+    )
+    if not same_session_location_refresh:
+        return _publish_root_action(
+            sender=sender_norm,
+            qso_guid=qso_guid_text,
+            locations=locations,
+            live_bbs_dir=live_bbs_dir,
+            managed_root=managed_root,
+            default_location_id=default_location_id,
+            global_allowed_callsigns=global_allowed_callsigns,
+            limit_access_enabled=limit_access_enabled,
+            global_code_policy=global_code_policy,
+            runtime_state=state,
+            now_ts=now_ts,
+            flamp_enabled=flamp_enabled,
+            reason=reason,
+        )
+    current_location = _location_by_id(locations, state.current_location_id)
+    if current_location is None or not current_location.enabled:
+        return _publish_root_action(
+            sender=sender_norm,
+            qso_guid=qso_guid_text,
+            locations=locations,
+            live_bbs_dir=live_bbs_dir,
+            managed_root=managed_root,
+            default_location_id=default_location_id,
+            global_allowed_callsigns=global_allowed_callsigns,
+            limit_access_enabled=limit_access_enabled,
+            global_code_policy=global_code_policy,
+            runtime_state=state,
+            now_ts=now_ts,
+            flamp_enabled=flamp_enabled,
+            reason=reason,
+        )
+    publish_result = publish_location_view(current_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
+    summary = f"Managed Vault refreshed {current_location.name} for {sender_norm or 'public'}."
+    next_state = _update_state(
+        state,
+        current_location_id=current_location.id,
+        current_session_callsign=sender_norm,
+        current_session_qso_guid=qso_guid_text,
+        current_view_mode="location",
+        current_view_label=current_location.name,
+        current_overlay_file="",
+        last_publish_manifest_path=publish_result.manifest_path,
+        last_publish_ts=now_ts,
+        last_action=summary,
+        last_request_ts=now_ts,
+        last_error="",
+        unmanaged_live_files=list(publish_result.unmanaged_live_files),
+    )
+    _append_audit_event(
+        managed_root,
+        {
+            "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "action": "refresh_current_view",
+            "sender": sender_norm,
+            "qso_guid": qso_guid_text,
+            "location_id": current_location.id,
+        },
+    )
+    return VaultActionResult("refresh_current_view", True, summary, next_state, publish_result=publish_result)
+
+
 def apply_unlock_request(
     sender: str,
     code_text: str,
@@ -2044,7 +2132,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         if runtime_state.current_session_qso_guid and runtime_state.current_session_qso_guid != event.qso_guid:
             continue
         if event.kind == "root_request":
-            result = _publish_root_action(
+            result = _publish_refresh_action(
                 sender=event.remote_callsign,
                 qso_guid=event.qso_guid,
                 locations=locations,

@@ -228,6 +228,7 @@ def test_run_varac_bbs_vault_processes_alias_navigation_from_varac_db(tmp_path: 
         [
             (1, "a", 1, qso_guid, "W5TTA", "<BLR>", "2026-05-02 14:10:18.7762304Z"),
             (2, "b", 1, qso_guid, "W5TTA", "INTEL BLUEBELL", "2026-05-02 14:12:49.963574Z"),
+            (3, "c", 1, qso_guid, "W5TTA", "<BLR>", "2026-05-02 14:12:55.0000000Z"),
         ],
     )
 

@@ -10,7 +10,7 @@ description = "HF Radio Frequency and Net Control Utility"
 readme = "README.md"
 authors = [{ name = "Bill Daniel" }]
 license = { text = "GPL-3.0-only" }
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.14"
 dependencies = [
   "requests>=2.31.0",
   "pytz>=2023.3",

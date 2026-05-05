@@ -146,6 +146,25 @@ from freqinout.gui.theme import (
 from freqinout.version import __version__
 
 
+def _vault_location_requires_code_badge(
+    row: Dict[str, object],
+    *,
+    default_location_id: str,
+    global_code_policy: str,
+) -> bool:
+    location_id = str(row.get("id", "") or "").strip()
+    open_rule = str(row.get("open_rule", "Public") or "Public").strip() or "Public"
+    if location_id == default_location_id:
+        return False
+    if open_rule == "Allowed callsigns + access code":
+        return True
+    if global_code_policy == "Require for non-default locations" and open_rule != "Public":
+        return True
+    if global_code_policy == "Require for all restricted locations" and open_rule != "Public":
+        return True
+    return False
+
+
 class _SettingsSectionNavDelegate(QStyledItemDelegate):
     def __init__(self, owner: "SettingsTab") -> None:
         super().__init__(owner)
@@ -805,28 +824,35 @@ class SettingsTab(QWidget):
             return
         self.varac_bbs_vault_locations_list.blockSignals(True)
         self.varac_bbs_vault_locations_list.clear()
+        default_location_id = str(
+            self.varac_bbs_vault_default_location_combo.currentData()
+            if hasattr(self, "varac_bbs_vault_default_location_combo")
+            else DEFAULT_LOCATION_ID
+        ).strip() or DEFAULT_LOCATION_ID
+        global_code_policy = (
+            self.varac_bbs_vault_global_code_policy_combo.currentText().strip()
+            if hasattr(self, "varac_bbs_vault_global_code_policy_combo")
+            else DEFAULT_GLOBAL_CODE_POLICY
+        )
         for row in self._varac_bbs_vault_locations_cache:
             normalized = self._normalize_varac_bbs_vault_location(row)
             name = str(normalized.get("name", "") or "").strip()
             location_id = str(normalized.get("id", "") or "").strip()
             alias = str(normalized.get("alias", "") or "").strip()
-            default_marker = (
-                location_id
-                == (
-                    self.varac_bbs_vault_default_location_combo.currentData()
-                    if hasattr(self, "varac_bbs_vault_default_location_combo")
-                    else ""
-                )
-            )
+            default_marker = location_id == default_location_id
             enabled = bool(normalized.get("enabled", True))
-            code_set = bool(normalized.get("access_code_hash", ""))
+            requires_code = _vault_location_requires_code_badge(
+                normalized,
+                default_location_id=default_location_id,
+                global_code_policy=global_code_policy,
+            )
             label = f"{name or location_id or 'Location'} [{alias}]" if alias else (name or location_id or "Location")
             badges = []
             if default_marker:
                 badges.append("Default")
             if not enabled:
                 badges.append("Disabled")
-            if code_set:
+            if requires_code:
                 badges.append("Code")
             if badges:
                 label = f"{label} ({', '.join(badges)})"

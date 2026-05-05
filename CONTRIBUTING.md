@@ -4,7 +4,7 @@ Thanks for your interest in contributing. This guide covers how to set up the pr
 
 ## Quick Start
 
-- Python 3.9+ is required (3.11 recommended).
+- Python 3.9 through 3.13 is supported (3.11 recommended; 3.14 is not yet supported).
 - Clone the repo and set up a virtual environment:
 
 ```bash
