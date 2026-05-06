@@ -648,6 +648,91 @@ def scan_location_files(source_dir: object) -> Tuple[List[Path], int]:
     return files, ignored_dirs
 
 
+def _location_folder_candidates(location: VaultLocation, managed_root: object) -> List[Path]:
+    try:
+        locations_root = _managed_root_paths(managed_root)["locations"]
+    except Exception:
+        return []
+    names = [
+        str(location.name or "").strip(),
+        str(location.alias or "").strip(),
+        str(location.id or "").strip(),
+    ]
+    candidates: List[Path] = []
+    seen: set[str] = set()
+    for name in names:
+        if not name:
+            continue
+        candidate = locations_root / name
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
+def _effective_location_source_dir(location: VaultLocation, managed_root: object) -> object:
+    configured_files, _ignored = scan_location_files(location.source_dir)
+    if configured_files:
+        return location.source_dir
+    for candidate in _location_folder_candidates(location, managed_root):
+        candidate_files, _candidate_ignored = scan_location_files(candidate)
+        if candidate_files:
+            return candidate
+    return location.source_dir
+
+
+def _with_filesystem_location_fallbacks(
+    locations: Sequence[VaultLocation],
+    managed_root: object,
+    *,
+    default_location_id: str,
+) -> List[VaultLocation]:
+    merged = list(locations)
+    try:
+        locations_root = _managed_root_paths(managed_root)["locations"]
+    except Exception:
+        return merged
+    if not locations_root.exists() or not locations_root.is_dir():
+        return merged
+
+    existing_ids = [location.id for location in merged]
+    existing_aliases = {normalize_location_alias(location.alias, location.name) for location in merged}
+    existing_aliases.add("ROOT")
+    for child in sorted(locations_root.iterdir(), key=lambda item: item.name.lower()):
+        if not child.is_dir() or child.name == DEFAULT_LOCATION_NAME:
+            continue
+        alias = normalize_location_alias("", child.name)
+        if not alias or alias in existing_aliases:
+            continue
+        files, _ignored = scan_location_files(child)
+        if not files:
+            continue
+        location_id = _ensure_location_id(existing_ids, child.name, f"fs-{_location_id_from_name(child.name)}")
+        existing_ids.append(location_id)
+        existing_aliases.add(alias)
+        merged.append(
+            VaultLocation(
+                id=location_id,
+                name=child.name,
+                source_dir=str(child),
+                enabled=True,
+                inherit_global_allowed_callsigns=True,
+                allowed_callsigns=(),
+                access_code_hash="",
+                access_code_salt="",
+                access_code_iterations=DEFAULT_ACCESS_CODE_ITERATIONS,
+                alias=alias,
+                description=f"Open {child.name}",
+                list_in_root_menu=True,
+                visibility_rule="Public",
+                open_rule="Public",
+            )
+        )
+    return merged
+
+
 def build_publish_manifest(source_dir: object, *, virtual_files: Sequence[_VirtualFile] = ()) -> Tuple[List[VaultPublishManifestEntry], int]:
     files, ignored_dirs = scan_location_files(source_dir)
     manifest: List[VaultPublishManifestEntry] = []
@@ -805,10 +890,11 @@ def _publish_manifest_entries(
 
 
 def publish_location(location: VaultLocation, *, live_bbs_dir: object, managed_root: object) -> VaultPublishResult:
-    entries, ignored_dirs = build_publish_manifest(location.source_dir)
+    source_dir = _effective_location_source_dir(location, managed_root)
+    entries, ignored_dirs = build_publish_manifest(source_dir)
     result = _publish_manifest_entries(
         entries,
-        source_dir=location.source_dir,
+        source_dir=source_dir,
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
     )
@@ -1067,10 +1153,11 @@ def publish_location_view(
     managed_root: object,
 ) -> VaultPublishResult:
     virtual_files = _location_virtual_files(include_root=True)
-    manifest, ignored_dirs = build_publish_manifest(location.source_dir, virtual_files=virtual_files)
+    source_dir = _effective_location_source_dir(location, managed_root)
+    manifest, ignored_dirs = build_publish_manifest(source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
-        source_dir=location.source_dir,
+        source_dir=source_dir,
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         virtual_files=virtual_files,
@@ -2109,6 +2196,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     flamp_enabled = bool(settings.get("varac_bbs_vault_flamp_enabled", False) if settings is not None else False)
     flamp_relay_dir = str(settings.get("varac_bbs_vault_flamp_relay_dir", "") or "").strip() if settings is not None else ""
     locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
+    locations = _with_filesystem_location_fallbacks(locations, managed_root, default_location_id=default_location_id)
     runtime_state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
     global_allowed = parse_callsign_list(settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else "")
     limit_access_enabled = bool(settings.get("varac_bbs_limit_access_enabled", False) if settings is not None else False)
