@@ -943,6 +943,7 @@ def _root_virtual_files(
     limit_access_enabled: bool,
     global_code_policy: str,
     flamp_enabled: bool,
+    include_enabled_fallback: bool = False,
 ) -> List[_VirtualFile]:
     entries: List[_VirtualFile] = []
     for location in locations:
@@ -962,6 +963,19 @@ def _root_virtual_files(
         else:
             text = f"BBS MSG - Type {alias} {description} then refresh BBS"
         entries.append(_menu_instruction_entry(text))
+    if not entries and include_enabled_fallback:
+        for location in locations:
+            if not location.enabled or location.id == default_location_id:
+                continue
+            if str(location.visibility_rule or "Public").strip() == "Hidden":
+                continue
+            alias = normalize_location_alias(location.alias, location.name)
+            description = str(location.description or "").strip() or f"Open {location.name}"
+            if _location_requires_code(location, default_location_id=default_location_id, global_code_policy=global_code_policy):
+                text = f"BBS MSG - Type {alias} <code> {description} then refresh BBS"
+            else:
+                text = f"BBS MSG - Type {alias} {description} then refresh BBS"
+            entries.append(_menu_instruction_entry(text))
     if flamp_enabled:
         entries.append(
             _menu_instruction_entry(
@@ -989,6 +1003,7 @@ def publish_root_view(
     live_bbs_dir: object,
     managed_root: object,
     flamp_enabled: bool = False,
+    include_enabled_fallback: bool = False,
 ) -> VaultPublishResult:
     default_location = _location_by_id(locations, default_location_id)
     if default_location is None:
@@ -1001,6 +1016,7 @@ def publish_root_view(
         limit_access_enabled=limit_access_enabled,
         global_code_policy=global_code_policy,
         flamp_enabled=flamp_enabled,
+        include_enabled_fallback=include_enabled_fallback,
     )
     manifest, ignored_dirs = build_publish_manifest(default_location.source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
@@ -1504,6 +1520,7 @@ def _publish_root_action(
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         flamp_enabled=flamp_enabled,
+        include_enabled_fallback=True,
     )
     summary = f"Managed Vault published root menu for {sender or 'public'}."
     next_state = _update_state(
@@ -1873,6 +1890,7 @@ def reset_to_default_location(
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         flamp_enabled=flamp_enabled,
+        include_enabled_fallback=True,
     )
     summary = f"Managed Vault returned to {DEFAULT_LOCATION_NAME}."
     next_state = _update_state(

@@ -292,6 +292,52 @@ def test_reset_to_default_resolves_wine_bbs_paths(tmp_path: Path) -> None:
     assert any("INTEL" in name for name in names)
 
 
+def test_reset_to_default_falls_back_to_enabled_locations_when_root_menu_empty(tmp_path: Path) -> None:
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    intel_dir = Path(created["locations"]) / "Intel"
+    intel_dir.mkdir(parents=True)
+    locations = [
+        VaultLocation(id=DEFAULT_LOCATION_ID, name=DEFAULT_LOCATION_NAME, source_dir=str(default_dir), alias="ROOT"),
+        VaultLocation(
+            id="intel",
+            name="Intel",
+            source_dir=str(intel_dir),
+            alias="INTEL",
+            description="For latest Magnet S2 reports",
+            enabled=True,
+            list_in_root_menu=False,
+            visibility_rule="Public",
+            open_rule="Allowed callsigns + access code",
+        ),
+        VaultLocation(
+            id="hidden",
+            name="Hidden",
+            source_dir=str(tmp_path / "hidden"),
+            alias="HIDDEN",
+            enabled=True,
+            list_in_root_menu=False,
+            visibility_rule="Hidden",
+        ),
+    ]
+
+    reset_to_default_location(
+        locations=locations,
+        live_bbs_dir=live_bbs,
+        managed_root=managed_root,
+        default_location_id=DEFAULT_LOCATION_ID,
+        runtime_state=VaultRuntimeState(current_location_id="intel", current_session_callsign="W5TTA"),
+        global_code_policy="Allow public locations",
+    )
+
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert any("INTEL" in name for name in names)
+    assert not any("HIDDEN" in name for name in names)
+
+
 def test_run_varac_bbs_vault_processes_alias_navigation_from_varac_db(tmp_path: Path) -> None:
     varac_root = tmp_path / "varac"
     varac_root.mkdir()
