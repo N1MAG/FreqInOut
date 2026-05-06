@@ -1160,6 +1160,53 @@ def _location_virtual_files(*, include_root: bool = True) -> List[_VirtualFile]:
     return entries
 
 
+def _location_access_prompt_virtual_files(location: VaultLocation, *, reason: str = "code_required") -> List[_VirtualFile]:
+    alias = normalize_location_alias(location.alias, location.name)
+    if reason == "callsign_restricted":
+        lines = [
+            f"BBS MSG - {location.name} is restricted to allowed callsigns",
+            "BBS MSG - Type ROOT to return to main menu then refresh BBS",
+        ]
+    elif reason == "cooldown":
+        lines = [
+            f"BBS MSG - {location.name} access is temporarily locked after failed attempts",
+            "BBS MSG - Type ROOT to return to main menu then refresh BBS",
+        ]
+    else:
+        lines = [
+            f"BBS MSG - {location.name} requires an access code",
+            f"BBS MSG - Type {alias} _code_ then refresh BBS",
+            "BBS MSG - Type ROOT to return to main menu then refresh BBS",
+        ]
+    return [_menu_instruction_entry(line) for line in lines]
+
+
+def publish_location_access_prompt_view(
+    location: VaultLocation,
+    *,
+    live_bbs_dir: object,
+    managed_root: object,
+    reason: str = "code_required",
+) -> VaultPublishResult:
+    virtual_files = _location_access_prompt_virtual_files(location, reason=reason)
+    manifest, ignored_dirs = build_publish_manifest("", virtual_files=virtual_files)
+    result = _publish_manifest_entries(
+        manifest,
+        source_dir="",
+        live_bbs_dir=live_bbs_dir,
+        managed_root=managed_root,
+        virtual_files=virtual_files,
+    )
+    return VaultPublishResult(
+        changed=result.changed,
+        published_count=result.published_count,
+        removed_count=result.removed_count,
+        unmanaged_live_files=result.unmanaged_live_files,
+        manifest_path=result.manifest_path,
+        ignored_directories=ignored_dirs,
+    )
+
+
 def publish_root_view(
     *,
     sender: str,
@@ -1738,7 +1785,7 @@ def _publish_refresh_action(
     sender_norm = _normalize_callsign(sender)
     qso_guid_text = str(qso_guid or "").strip()
     same_session_location_refresh = (
-        state.current_view_mode == "location"
+        state.current_view_mode in {"location", "access-prompt"}
         and bool(state.current_session_qso_guid)
         and state.current_session_qso_guid == qso_guid_text
         and (not state.current_session_callsign or state.current_session_callsign == sender_norm)
@@ -1776,6 +1823,40 @@ def _publish_refresh_action(
             flamp_enabled=flamp_enabled,
             reason=reason,
         )
+    if state.current_view_mode == "access-prompt":
+        publish_result = publish_location_access_prompt_view(
+            current_location,
+            live_bbs_dir=live_bbs_dir,
+            managed_root=managed_root,
+            reason="code_required",
+        )
+        summary = f"Managed Vault refreshed access prompt for {current_location.name}."
+        next_state = _update_state(
+            state,
+            current_location_id=current_location.id,
+            current_session_callsign=sender_norm,
+            current_session_qso_guid=qso_guid_text,
+            current_view_mode="access-prompt",
+            current_view_label=f"{current_location.name} access",
+            current_overlay_file="",
+            last_publish_manifest_path=publish_result.manifest_path,
+            last_publish_ts=now_ts,
+            last_action=summary,
+            last_request_ts=now_ts,
+            last_error="",
+            unmanaged_live_files=list(publish_result.unmanaged_live_files),
+        )
+        _append_audit_event(
+            managed_root,
+            {
+                "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "action": "refresh_access_prompt",
+                "sender": sender_norm,
+                "qso_guid": qso_guid_text,
+                "location_id": current_location.id,
+            },
+        )
+        return VaultActionResult("refresh_access_prompt", True, summary, next_state, publish_result=publish_result)
     publish_result = publish_location_view(current_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
     summary = f"Managed Vault refreshed {current_location.name} for {sender_norm or 'public'}."
     next_state = _update_state(
@@ -1844,6 +1925,60 @@ def apply_unlock_request(
     )
 
 
+def _access_prompt_result(
+    *,
+    state: VaultRuntimeState,
+    location: VaultLocation,
+    sender: str,
+    qso_guid: str,
+    alias_text: str,
+    live_bbs_dir: object,
+    managed_root: object,
+    now_ts: float,
+    summary: str,
+    action: str,
+    reason: str,
+    cooldowns: Mapping[str, Mapping[str, float]],
+    failed_attempts: Mapping[str, Sequence[float]],
+) -> VaultActionResult:
+    publish_result = publish_location_access_prompt_view(
+        location,
+        live_bbs_dir=live_bbs_dir,
+        managed_root=managed_root,
+        reason=reason,
+    )
+    next_state = _update_state(
+        state,
+        current_location_id=location.id,
+        current_session_callsign=sender,
+        current_session_qso_guid=str(qso_guid or "").strip(),
+        current_view_mode="access-prompt",
+        current_view_label=f"{location.name} access",
+        cooldowns=cooldowns,
+        failed_attempts=failed_attempts,
+        current_overlay_file="",
+        last_publish_manifest_path=publish_result.manifest_path,
+        last_publish_ts=now_ts,
+        last_action=summary,
+        last_request_ts=now_ts,
+        last_error=action,
+        unmanaged_live_files=list(publish_result.unmanaged_live_files),
+    )
+    _append_audit_event(
+        managed_root,
+        {
+            "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "action": action,
+            "sender": sender,
+            "location_id": location.id,
+            "location_name": location.name,
+            "alias": alias_text,
+            "prompt_reason": reason,
+        },
+    )
+    return VaultActionResult(action, False, summary, next_state, publish_result=publish_result)
+
+
 def _apply_open_request(
     *,
     sender: str,
@@ -1883,6 +2018,22 @@ def _apply_open_request(
     if until_ts > now_ts:
         remaining = int(max(1.0, until_ts - now_ts))
         summary = f"Managed Vault cooldown active for {sender} ({remaining}s remaining)."
+        if requested_location is not None:
+            return _access_prompt_result(
+                state=state,
+                location=requested_location,
+                sender=sender,
+                qso_guid=qso_guid,
+                alias_text=alias_text,
+                live_bbs_dir=live_bbs_dir,
+                managed_root=managed_root,
+                now_ts=now_ts,
+                summary=summary,
+                action="cooldown_active",
+                reason="cooldown",
+                cooldowns=cooldowns,
+                failed_attempts={str(key): list(value) for key, value in state.failed_attempts.items()},
+            )
         return VaultActionResult("cooldown_active", False, summary, _update_state(state, last_action=summary, last_error="cooldown_active"))
 
     matched_location = requested_location
@@ -1946,18 +2097,21 @@ def _apply_open_request(
         limit_access_enabled=limit_access_enabled,
     ):
         summary = f"Managed Vault rejected {sender}; callsign is not allowed for {matched_location.name}."
-        next_state = _update_state(state, last_action=summary, last_error="rejected_callsign")
-        _append_audit_event(
-            managed_root,
-            {
-                "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "action": "rejected_callsign",
-                "sender": sender,
-                "location_id": matched_location.id,
-                "alias": alias_text,
-            },
+        return _access_prompt_result(
+            state=state,
+            location=matched_location,
+            sender=sender,
+            qso_guid=qso_guid,
+            alias_text=alias_text,
+            live_bbs_dir=live_bbs_dir,
+            managed_root=managed_root,
+            now_ts=now_ts,
+            summary=summary,
+            action="rejected_callsign",
+            reason="callsign_restricted",
+            cooldowns=cooldowns,
+            failed_attempts=failed_attempts,
         )
-        return VaultActionResult("rejected_callsign", False, summary, next_state)
 
     if _location_requires_code(matched_location, default_location_id=default_location_id, global_code_policy=global_code_policy):
         if not verify_access_code(
@@ -1977,24 +2131,21 @@ def _apply_open_request(
                 }
                 action = "cooldown_applied"
                 summary = f"Managed Vault rejected access code for {matched_location.name} from {sender}; cooldown applied."
-            next_state = _update_state(
-                state,
+            return _access_prompt_result(
+                state=state,
+                location=matched_location,
+                sender=sender,
+                qso_guid=qso_guid,
+                alias_text=alias_text,
+                live_bbs_dir=live_bbs_dir,
+                managed_root=managed_root,
+                now_ts=now_ts,
+                summary=summary,
+                action=action,
+                reason="cooldown" if action == "cooldown_applied" else "code_required",
                 cooldowns=cooldowns,
                 failed_attempts=failed_attempts,
-                last_action=summary,
-                last_error=action,
             )
-            _append_audit_event(
-                managed_root,
-                {
-                    "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "action": action,
-                    "sender": sender,
-                    "location_id": matched_location.id,
-                    "alias": alias_text,
-                },
-            )
-            return VaultActionResult(action, False, summary, next_state)
 
     publish_result = publish_location_view(matched_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
     failed_attempts.pop(sender, None)
@@ -2173,6 +2324,16 @@ def _reconcile_current_location(
             if current_location is None or not current_location.enabled:
                 return runtime_state, False
             publish_result = publish_location_view(current_location, live_bbs_dir=live_bbs_dir, managed_root=managed_root)
+        elif runtime_state.current_view_mode == "access-prompt":
+            current_location = _location_by_id(locations, runtime_state.current_location_id)
+            if current_location is None or not current_location.enabled:
+                return runtime_state, False
+            publish_result = publish_location_access_prompt_view(
+                current_location,
+                live_bbs_dir=live_bbs_dir,
+                managed_root=managed_root,
+                reason="code_required",
+            )
         elif runtime_state.current_view_mode == "flamp-block-overlay":
             overlay_name = str(runtime_state.current_overlay_file or "").strip()
             if overlay_name:

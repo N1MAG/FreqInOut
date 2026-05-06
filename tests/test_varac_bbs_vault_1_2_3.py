@@ -890,7 +890,9 @@ def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: 
     )
     run_varac_bbs_vault(settings)
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "NATL-RR-260427-1500Z-AIB-sig.k2s" in names
+    assert any("HUBS requires an access code" in name for name in names)
+    assert any("Type HUBS _code_" in name for name in names)
+    assert "NATL-RR-260427-1500Z-AIB-sig.k2s" not in names
     assert "N1MAG-20260429-OpNet-1.b2s" not in names
 
     settings.set("varac_bbs_vault_runtime_state_v1", {**settings.get("varac_bbs_vault_runtime_state_v1"), "last_datastream_id": 1})
