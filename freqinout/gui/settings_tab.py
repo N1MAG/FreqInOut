@@ -1684,6 +1684,22 @@ class SettingsTab(QWidget):
                 managed_root=root_txt,
                 default_location_id=default_id,
                 runtime_state=runtime_state,
+                global_allowed_callsigns=parse_callsign_list(self._varac_bbs_selected_callsigns_text()),
+                limit_access_enabled=(
+                    self.varac_bbs_limit_access_chk.isChecked()
+                    if hasattr(self, "varac_bbs_limit_access_chk")
+                    else False
+                ),
+                global_code_policy=(
+                    self.varac_bbs_vault_global_code_policy_combo.currentText().strip()
+                    if hasattr(self, "varac_bbs_vault_global_code_policy_combo")
+                    else DEFAULT_GLOBAL_CODE_POLICY
+                ),
+                flamp_enabled=(
+                    self.varac_bbs_vault_flamp_enabled_chk.isChecked()
+                    if hasattr(self, "varac_bbs_vault_flamp_enabled_chk")
+                    else False
+                ),
                 reason="manual_reset",
             )
         except Exception as exc:
@@ -2850,15 +2866,15 @@ class SettingsTab(QWidget):
         gpg_v.setAlignment(Qt.AlignTop)
         gpg_group.setLayout(gpg_v)
 
-        self.gpg_verify_enabled_chk = QCheckBox("Verify FLAMP .k2s/.b2s signatures and signature sidecars")
+        self.gpg_verify_enabled_chk = QCheckBox("Verify signed .k2s/.b2s message files and signature sidecars")
         self.gpg_verify_enabled_chk.setToolTip(
             "When enabled, Message Viewer verifies detached sidecars and embedded clearsigned content "
-            "for FLAmp .k2s/.b2s files, canonical '-sig' files, and .sig/.asc/.gpg sidecars."
+            "for FLAmp, VarAC, and BBS .k2s/.b2s files, canonical '-sig' files, and .sig/.asc/.gpg sidecars."
         )
         gpg_v.addWidget(self.gpg_verify_enabled_chk)
 
         self.hash_verify_enabled_chk = QCheckBox(
-            "Verify FLAMP .k2s/.b2s checksum sidecars (SHA-256/SHA-512 preferred)"
+            "Verify .k2s/.b2s checksum sidecars (SHA-256/SHA-512 preferred)"
         )
         self.hash_verify_enabled_chk.setToolTip(
             "When enabled, Message Viewer checks checksum sidecar files for tamper/corruption detection."
@@ -2913,7 +2929,8 @@ class SettingsTab(QWidget):
         th_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         th_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
         th_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.trusted_hash_table.setMinimumHeight(150)
+        self.trusted_hash_table.setMinimumHeight(72)
+        self.trusted_hash_table.setMaximumHeight(96)
         gpg_v.addWidget(self.trusted_hash_table)
 
         gpg_path_row = QHBoxLayout()
@@ -2974,7 +2991,8 @@ class SettingsTab(QWidget):
         gpg_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         gpg_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         gpg_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
-        self.gpg_keys_table.setMinimumHeight(180)
+        self.gpg_keys_table.setMinimumHeight(84)
+        self.gpg_keys_table.setMaximumHeight(116)
         gpg_v.addWidget(self.gpg_keys_table)
 
         self.gpg_verify_enabled_chk.stateChanged.connect(self._mark_settings_dirty)

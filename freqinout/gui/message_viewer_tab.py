@@ -123,6 +123,8 @@ from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".raw"}
 IMAGE_PREVIEW_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
+AUTH_FILE_EXTS = {".b2s", ".k2s", ".sig", ".asc", ".gpg"}
+AUTH_VERIFIABLE_ORIGINS = {"flamp", "varac", "bbs"}
 VARAC_BBS_SAFE_SUFFIXES = (
     ".k2s.sig",
     ".b2s.sig",
@@ -143,6 +145,9 @@ VARAC_BBS_SAFE_SUFFIXES = (
 SUPPORTED_EXT = {
     ".b2s",
     ".k2s",
+    ".sig",
+    ".asc",
+    ".gpg",
     ".txt",
     ".rtf",
     ".ff",
@@ -154,11 +159,11 @@ SUPPORTED_EXT = {
 }
 ORIGIN_EXTS = {
     "flmsg": {".b2s", ".k2s", ".txt", ".rtf", *IMAGE_EXTS},
-    "flamp": {".b2s", ".k2s", ".txt", ".rtf", ".sig", ".asc", ".gpg"},
-    "varac": {".txt", ".html", ".htm", ".b2s", ".k2s", *IMAGE_EXTS},
+    "flamp": {".txt", ".rtf", *AUTH_FILE_EXTS},
+    "varac": {".txt", ".html", ".htm", *AUTH_FILE_EXTS, *IMAGE_EXTS},
     "bbs": set(SUPPORTED_EXT),
 }
-FLAMP_AUTH_EXTS = {".b2s", ".k2s", ".sig", ".asc", ".gpg"}
+FLAMP_AUTH_EXTS = set(AUTH_FILE_EXTS)
 
 DEFAULT_WATCH_DIRS = [
     {"path": r"C:\VarAC", "origin": "varac"},
@@ -1024,14 +1029,18 @@ class _RowsBuildWorker(QObject):
         return (str(rec.origin or "").strip().lower(), str(rec.path), float(rec.mtime or 0.0), int(rec.size or 0))
 
     @staticmethod
-    def _is_flamp_auth_file(rec: FileRecord) -> bool:
+    def _is_auth_verifiable_file(rec: FileRecord) -> bool:
         return (
-            str(rec.origin or "").strip().lower() == "flamp"
+            str(rec.origin or "").strip().lower() in AUTH_VERIFIABLE_ORIGINS
             and str(rec.path.suffix or "").strip().lower() in FLAMP_AUTH_EXTS
         )
 
+    @staticmethod
+    def _is_flamp_auth_file(rec: FileRecord) -> bool:
+        return _RowsBuildWorker._is_auth_verifiable_file(rec)
+
     def _signature_row_state(self, rec: FileRecord) -> tuple[str, str, bool]:
-        if not self._is_flamp_auth_file(rec):
+        if not self._is_auth_verifiable_file(rec):
             return "", "", False
         key = self._signature_key(rec)
         state = self._signature_state_map.get(key, {}) if isinstance(self._signature_state_map, dict) else {}
@@ -3078,11 +3087,15 @@ class MessageViewerTab(QWidget):
         )
 
     @staticmethod
-    def _is_flamp_auth_file(rec: FileRecord) -> bool:
+    def _is_auth_verifiable_file(rec: FileRecord) -> bool:
         return (
-            str(rec.origin or "").strip().lower() == "flamp"
+            str(rec.origin or "").strip().lower() in AUTH_VERIFIABLE_ORIGINS
             and str(rec.path.suffix or "").strip().lower() in FLAMP_AUTH_EXTS
         )
+
+    @staticmethod
+    def _is_flamp_auth_file(rec: FileRecord) -> bool:
+        return MessageViewerTab._is_auth_verifiable_file(rec)
 
     def _is_signature_verification_enabled(self) -> bool:
         return bool(self.settings.get("gpg_verify_flamp_k2s_enabled", False))
@@ -3227,20 +3240,21 @@ class MessageViewerTab(QWidget):
         hash_set_sig = self._trusted_hash_set_signature()
         inline_sig_name_suffixes = self._inline_signature_name_suffixes()
         out: List[FileRecord] = []
-        for rec in self.files.get("flamp", []):
-            if not self._is_flamp_auth_file(rec):
-                continue
-            if is_detached_signature_file(rec.path) and not self._is_signature_verification_enabled():
-                continue
-            key = self._signature_cache_key(rec)
-            state = self._signature_state_map.get(key)
-            if (
-                force
-                or state is None
-                or not self._signature_cache_fresh(rec, state, inline_sig_name_suffixes)
-                or not self._hash_cache_fresh(rec, state, hash_set_sig)
-            ):
-                out.append(rec)
+        for origin in ("flamp", "varac", "bbs"):
+            for rec in self.files.get(origin, []):
+                if not self._is_auth_verifiable_file(rec):
+                    continue
+                if is_detached_signature_file(rec.path) and not self._is_signature_verification_enabled():
+                    continue
+                key = self._signature_cache_key(rec)
+                state = self._signature_state_map.get(key)
+                if (
+                    force
+                    or state is None
+                    or not self._signature_cache_fresh(rec, state, inline_sig_name_suffixes)
+                    or not self._hash_cache_fresh(rec, state, hash_set_sig)
+                ):
+                    out.append(rec)
         return out
 
     def _start_signature_verification(self, *, force: bool = False) -> None:
@@ -3372,7 +3386,7 @@ class MessageViewerTab(QWidget):
             return
         for row in self._message_rows:
             payload = getattr(row, "payload", None)
-            if not isinstance(payload, FileRecord) or not self._is_flamp_auth_file(payload):
+            if not isinstance(payload, FileRecord) or not self._is_auth_verifiable_file(payload):
                 continue
             key = self._signature_cache_key(payload)
             state = updates.get(key)
@@ -3390,7 +3404,7 @@ class MessageViewerTab(QWidget):
         changed_indices: List[int] = []
         for idx, row in enumerate(rows):
             payload = getattr(row, "payload", None)
-            if not isinstance(payload, FileRecord) or not self._is_flamp_auth_file(payload):
+            if not isinstance(payload, FileRecord) or not self._is_auth_verifiable_file(payload):
                 continue
             key = self._signature_cache_key(payload)
             state = updates.get(key)
@@ -3477,7 +3491,7 @@ class MessageViewerTab(QWidget):
         return detail
 
     def _signature_detail_for_record(self, rec: Optional[FileRecord]) -> str:
-        if rec is None or not self._is_flamp_auth_file(rec):
+        if rec is None or not self._is_auth_verifiable_file(rec):
             return ""
         state = self._signature_state_for_record(rec)
         detail = self._format_signature_detail(state)
@@ -3492,7 +3506,7 @@ class MessageViewerTab(QWidget):
 
     def _refresh_current_record_signature_info(self) -> None:
         rec = self.current_record
-        if rec is None or not self._is_flamp_auth_file(rec):
+        if rec is None or not self._is_auth_verifiable_file(rec):
             return
         info_txt = self.info_label.text() if hasattr(self, "info_label") else ""
         if not info_txt:
@@ -6624,10 +6638,11 @@ class MessageViewerTab(QWidget):
         signature_map: Dict[tuple, Dict[str, object]] = {}
         if self._is_any_auth_verification_enabled():
             current_sig_keys: set[tuple] = set()
-            for rec in self.files.get("flamp", []):
-                if not self._is_flamp_auth_file(rec):
-                    continue
-                current_sig_keys.add(self._signature_cache_key(rec))
+            for origin in ("flamp", "varac", "bbs"):
+                for rec in self.files.get(origin, []):
+                    if not self._is_auth_verifiable_file(rec):
+                        continue
+                    current_sig_keys.add(self._signature_cache_key(rec))
             for key in current_sig_keys:
                 state = self._signature_state_map.get(key)
                 if not isinstance(key, tuple) or len(key) != 4:
@@ -8067,7 +8082,7 @@ class MessageViewerTab(QWidget):
                 auth_state = ""
                 auth_detail = ""
                 auth_trusted = False
-                if self._is_flamp_auth_file(rec):
+                if self._is_auth_verifiable_file(rec):
                     sig_state = self._signature_state_for_record(rec)
                     auth_state, auth_detail, auth_trusted = self._derive_auth_ui(sig_state)
                 rows.append(

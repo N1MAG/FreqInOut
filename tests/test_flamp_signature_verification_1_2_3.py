@@ -12,7 +12,7 @@ from freqinout.core.gpg_tools import (
     signature_payload_candidates,
     verify_file_with_discovery,
 )
-from freqinout.gui.message_viewer_tab import FileRecord, MessageViewerTab
+from freqinout.gui.message_viewer_tab import ORIGIN_EXTS, SUPPORTED_EXT, FileRecord, MessageViewerTab
 
 
 def _valid_gpg_result() -> subprocess.CompletedProcess[str]:
@@ -109,16 +109,24 @@ def test_verify_file_with_discovery_reports_missing_payload_for_signature_record
     assert "payload not found" in result.detail.lower()
 
 
-def test_flamp_auth_candidates_are_origin_and_suffix_bounded(tmp_path: Path) -> None:
-    assert MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report.k2s", "flamp"))
-    assert MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report.b2s", "flamp"))
-    assert MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report-sig.k2s", "flamp"))
-    assert MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report.sig.k2s", "flamp"))
-    assert MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report.k2s.sig", "flamp"))
-    assert MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report.b2s.sig", "flamp"))
-    assert MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report.sig", "flamp"))
+def test_auth_candidates_are_origin_and_suffix_bounded(tmp_path: Path) -> None:
+    for origin in ("flamp", "varac", "bbs"):
+        assert MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report.k2s", origin))
+        assert MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report.b2s", origin))
+        assert MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report-sig.k2s", origin))
+        assert MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report.sig.k2s", origin))
+        assert MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report.k2s.sig", origin))
+        assert MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report.b2s.sig", origin))
+        assert MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report.sig", origin))
 
-    assert not MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report.pdf", "flamp"))
-    assert not MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report.k2s.old", "flamp"))
-    assert not MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report.sig.txt", "flamp"))
-    assert not MessageViewerTab._is_flamp_auth_file(FileRecord(tmp_path / "Report.k2s.sig", "flmsg"))
+    assert not MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report.pdf", "varac"))
+    assert not MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report.k2s.old", "varac"))
+    assert not MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report.sig.txt", "varac"))
+    assert not MessageViewerTab._is_auth_verifiable_file(FileRecord(tmp_path / "Report.k2s.sig", "flmsg"))
+
+
+def test_varac_and_bbs_scanners_allow_signature_sidecars() -> None:
+    for ext in (".sig", ".asc", ".gpg"):
+        assert ext in SUPPORTED_EXT
+        assert ext in ORIGIN_EXTS["varac"]
+        assert ext in ORIGIN_EXTS["bbs"]

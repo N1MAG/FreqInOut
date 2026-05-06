@@ -897,6 +897,8 @@ def _location_visible_in_root(
             global_allowed_callsigns=global_allowed_callsigns,
             limit_access_enabled=limit_access_enabled,
         )
+    if rule == "Public":
+        return True
     if open_rule == "Public":
         return True
     if _location_requires_code(location, default_location_id=default_location_id, global_code_policy=global_code_policy):
@@ -1845,6 +1847,10 @@ def reset_to_default_location(
     managed_root: object,
     default_location_id: str,
     runtime_state: VaultRuntimeState,
+    global_allowed_callsigns: Sequence[str] = (),
+    limit_access_enabled: bool = False,
+    global_code_policy: str = DEFAULT_GLOBAL_CODE_POLICY,
+    flamp_enabled: bool = False,
     reason: str = "manual_reset",
     now_ts: Optional[float] = None,
 ) -> VaultActionResult:
@@ -1854,12 +1860,12 @@ def reset_to_default_location(
         sender="",
         locations=locations,
         default_location_id=default_location_id,
-        global_allowed_callsigns=(),
-        limit_access_enabled=False,
-        global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
+        global_allowed_callsigns=global_allowed_callsigns,
+        limit_access_enabled=limit_access_enabled,
+        global_code_policy=global_code_policy,
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
-        flamp_enabled=False,
+        flamp_enabled=flamp_enabled,
     )
     summary = f"Managed Vault returned to {DEFAULT_LOCATION_NAME}."
     next_state = _update_state(
@@ -1913,6 +1919,10 @@ def _restore_previous_view(
                 managed_root=managed_root,
                 default_location_id=default_location_id,
                 runtime_state=runtime_state,
+                global_allowed_callsigns=global_allowed_callsigns,
+                limit_access_enabled=limit_access_enabled,
+                global_code_policy=global_code_policy,
+                flamp_enabled=flamp_enabled,
                 reason=reason,
                 now_ts=now_ts,
             )
@@ -2115,6 +2125,10 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         managed_root=managed_root,
                         default_location_id=default_location_id,
                         runtime_state=runtime_state,
+                        global_allowed_callsigns=global_allowed,
+                        limit_access_enabled=limit_access_enabled,
+                        global_code_policy=global_code_policy,
+                        flamp_enabled=flamp_enabled,
                         reason="disconnect",
                         now_ts=event.timestamp_utc or now_ts,
                     )
@@ -2371,6 +2385,10 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 managed_root=managed_root,
                 default_location_id=default_location_id,
                 runtime_state=runtime_state,
+                global_allowed_callsigns=global_allowed,
+                limit_access_enabled=limit_access_enabled,
+                global_code_policy=global_code_policy,
+                flamp_enabled=flamp_enabled,
                 reason="idle_timeout",
                 now_ts=now_ts,
             )
