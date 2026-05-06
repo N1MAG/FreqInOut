@@ -446,7 +446,7 @@ class FldigiNetControlTab(QWidget):
         self.copy_qru_btn = QPushButton("Copy QRU")
         self.copy_late_btn = QPushButton("Copy LATE")
         self.copy_seen_locally_btn = QPushButton("Copy Seen Locally")
-        self.copy_roster_summary_btn = QPushButton("Copy Summary")
+        self.copy_roster_summary_btn = QPushButton("Copy Check-ins")
         for btn in (
             self.copy_tfc_btn,
             self.copy_qru_btn,
@@ -907,6 +907,7 @@ class FldigiNetControlTab(QWidget):
                 self._write_file(main_path, main_text)
                 self._write_file(qru_path, qru_text)
                 self._write_file(late_path, late_text)
+                self._write_file(self._all_checkins_file_path(), self._roster_table_text())
         finally:
             self._roster_syncing = False
 
@@ -1073,10 +1074,11 @@ class FldigiNetControlTab(QWidget):
             QApplication.clipboard().setText(text)
 
     def _copy_roster_summary(self) -> None:
-        summary = " ".join(self._roster_unique_callsigns())
-        if summary:
-            QApplication.clipboard().setText(summary)
-            QMessageBox.information(self, "Copied", "Summary of check-in callsigns copied to clipboard.")
+        text = self._roster_table_text()
+        if text:
+            QApplication.clipboard().setText(text)
+            self._write_file(self._all_checkins_file_path(), text)
+            QMessageBox.information(self, "Copied", "Check-ins copied to clipboard.")
 
     def _workspace_custom_bucket_id(self, mapping: Dict[str, object], index: int) -> str:
         scope = str(mapping.get("scope") or "").strip().upper() or "SHARED"
@@ -3104,11 +3106,15 @@ class FldigiNetControlTab(QWidget):
             str(base / "new-late_checkins.txt"),
         )
 
+    def _all_checkins_file_path(self) -> str:
+        return str(self._resolve_checkin_dir() / "all_checkins.txt")
+
     def _ensure_checkin_files(self) -> tuple[str, str, str]:
         base = self._resolve_checkin_dir()
         main_path = base / "main_checkins.txt"
         qru_path = base / "qru_checkins.txt"
         late_path = base / "new-late_checkins.txt"
+        all_path = base / "all_checkins.txt"
         base.mkdir(parents=True, exist_ok=True)
         if not main_path.exists():
             main_path.touch()
@@ -3116,6 +3122,8 @@ class FldigiNetControlTab(QWidget):
             qru_path.touch()
         if not late_path.exists():
             late_path.touch()
+        if not all_path.exists():
+            all_path.touch()
         return str(main_path), str(qru_path), str(late_path)
 
     # ---------------- BUTTON LOGIC ---------------- #
@@ -3152,6 +3160,7 @@ class FldigiNetControlTab(QWidget):
         self._write_file(main_path, "")
         self._write_file(qru_path, "")
         self._write_file(late_path, "")
+        self._write_file(self._all_checkins_file_path(), "")
         self._roster_clear()
         self.main_text.setPlainText("")
         self.qru_text.setPlainText("")
@@ -3213,6 +3222,7 @@ class FldigiNetControlTab(QWidget):
         self._write_file(main_path, main_text)
         self._write_file(qru_path, qru_text)
         self._write_file(late_path, late_text)
+        self._write_file(self._all_checkins_file_path(), self._roster_table_text())
 
         QMessageBox.information(self, "Saved", "Check-in logs saved.")
         self._refresh_operator_history_views()
@@ -3248,12 +3258,13 @@ class FldigiNetControlTab(QWidget):
 
     def _copy_summary(self):
         """
-        Copy a summary of callsigns from the Main Check-in Log to the clipboard.
+        Copy the consolidated check-in log to the clipboard.
         """
-        summary = " ".join(self._roster_unique_callsigns())
-        if summary:
-            QApplication.clipboard().setText(summary)
-        QMessageBox.information(self, "Copied", "Summary of check-in callsigns copied to clipboard.")
+        text = self._roster_table_text()
+        if text:
+            QApplication.clipboard().setText(text)
+            self._write_file(self._all_checkins_file_path(), text)
+        QMessageBox.information(self, "Copied", "Check-ins copied to clipboard.")
 
     def _copy_text_to_clipboard(self, text: str):
         """
