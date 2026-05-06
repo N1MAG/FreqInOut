@@ -985,6 +985,28 @@ def _root_virtual_files(
     return entries
 
 
+def _filesystem_location_virtual_files(managed_root: object) -> List[_VirtualFile]:
+    try:
+        locations_root = _managed_root_paths(managed_root)["locations"]
+    except Exception:
+        return []
+    if not locations_root.exists() or not locations_root.is_dir():
+        return []
+    entries: List[_VirtualFile] = []
+    seen_aliases = {"ROOT"}
+    for child in sorted(locations_root.iterdir(), key=lambda item: item.name.lower()):
+        if not child.is_dir():
+            continue
+        if child.name == DEFAULT_LOCATION_NAME:
+            continue
+        alias = normalize_location_alias("", child.name)
+        if not alias or alias in seen_aliases:
+            continue
+        seen_aliases.add(alias)
+        entries.append(_menu_instruction_entry(f"BBS MSG - Type {alias} Open {child.name} then refresh BBS"))
+    return entries
+
+
 def _location_virtual_files(*, include_root: bool = True) -> List[_VirtualFile]:
     entries: List[_VirtualFile] = []
     if include_root:
@@ -1018,6 +1040,8 @@ def publish_root_view(
         flamp_enabled=flamp_enabled,
         include_enabled_fallback=include_enabled_fallback,
     )
+    if not virtual_files and include_enabled_fallback:
+        virtual_files = _filesystem_location_virtual_files(managed_root)
     manifest, ignored_dirs = build_publish_manifest(default_location.source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
