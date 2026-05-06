@@ -13,6 +13,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from pathlib import PureWindowsPath
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from freqinout.core.logger import log
@@ -220,6 +221,12 @@ def _resolve_path(value: object) -> Optional[Path]:
     if not txt:
         return None
     try:
+        win_match = re.match(r"^([A-Za-z]):[\\/](.*)$", txt)
+        if win_match and os.name != "nt":
+            drive = win_match.group(1).lower()
+            rest = PureWindowsPath(txt).parts[1:]
+            wine_prefix = Path(os.environ.get("WINEPREFIX", "~/.wine")).expanduser()
+            return wine_prefix / f"drive_{drive}" / Path(*rest)
         return Path(txt).expanduser()
     except Exception:
         return None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 from freqinout.core.varac_bbs_vault import (
     DEFAULT_GLOBAL_CODE_POLICY,
@@ -253,6 +254,42 @@ def test_reset_to_default_uses_configured_root_visibility_policy(tmp_path: Path)
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert any("INTEL" in name for name in names)
     assert any(name.endswith(".txt") for name in names)
+
+
+def test_reset_to_default_resolves_wine_bbs_paths(tmp_path: Path) -> None:
+    wineprefix = tmp_path / ".wine"
+    live_bbs = wineprefix / "drive_c" / "users" / "bill" / "Desktop" / "VaraFiles" / "BBS"
+    live_bbs.mkdir(parents=True)
+    managed_root = wineprefix / "drive_c" / "users" / "bill" / "Desktop" / "VaraFiles" / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    intel_dir = Path(created["locations"]) / "Intel"
+    intel_dir.mkdir(parents=True)
+    locations = [
+        VaultLocation(id=DEFAULT_LOCATION_ID, name=DEFAULT_LOCATION_NAME, source_dir=str(default_dir), alias="ROOT"),
+        VaultLocation(
+            id="intel",
+            name="Intel",
+            source_dir=str(intel_dir),
+            alias="INTEL",
+            description="For latest Magnet S2 reports",
+            open_rule="Public",
+            visibility_rule="Public",
+        ),
+    ]
+
+    with patch.dict("os.environ", {"WINEPREFIX": str(wineprefix)}):
+        reset_to_default_location(
+            locations=locations,
+            live_bbs_dir=r"C:\users\bill\Desktop\VaraFiles\BBS",
+            managed_root=str(managed_root),
+            default_location_id=DEFAULT_LOCATION_ID,
+            runtime_state=VaultRuntimeState(current_location_id="intel", current_session_callsign="W5TTA"),
+            global_code_policy="Allow public locations",
+        )
+
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert any("INTEL" in name for name in names)
 
 
 def test_run_varac_bbs_vault_processes_alias_navigation_from_varac_db(tmp_path: Path) -> None:
