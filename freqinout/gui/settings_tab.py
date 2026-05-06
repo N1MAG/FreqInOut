@@ -1322,6 +1322,21 @@ class SettingsTab(QWidget):
         )
         return bool(access_code or confirm_code)
 
+    def _sanitize_varac_bbs_vault_alias_text(self, text: str) -> None:
+        if not hasattr(self, "varac_bbs_vault_alias_edit"):
+            return
+        cleaned = normalize_location_alias(text, "")
+        if cleaned == text:
+            return
+        cursor = min(self.varac_bbs_vault_alias_edit.cursorPosition(), len(cleaned))
+        self.varac_bbs_vault_alias_edit.blockSignals(True)
+        try:
+            self.varac_bbs_vault_alias_edit.setText(cleaned)
+            self.varac_bbs_vault_alias_edit.setCursorPosition(cursor)
+        finally:
+            self.varac_bbs_vault_alias_edit.blockSignals(False)
+        self._mark_settings_dirty()
+
     def _save_varac_bbs_vault_location(self) -> bool:
         name = (
             self.varac_bbs_vault_location_name_edit.text().strip()
@@ -3490,6 +3505,8 @@ class SettingsTab(QWidget):
         vault_editor_grid.addWidget(QLabel("Alias"), 0, 2)
         self.varac_bbs_vault_alias_edit = QLineEdit()
         self.varac_bbs_vault_alias_edit.setPlaceholderText("Example: INTEL")
+        self.varac_bbs_vault_alias_edit.setMaxLength(32)
+        self.varac_bbs_vault_alias_edit.setToolTip("Alias is the VarAC command callers type. Spaces are removed.")
         vault_editor_grid.addWidget(self.varac_bbs_vault_alias_edit, 0, 3)
         vault_editor_grid.addWidget(QLabel("Description"), 1, 0)
         self.varac_bbs_vault_description_edit = QLineEdit()
@@ -3594,6 +3611,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_location_name_edit.textChanged.connect(
             lambda _text: self._refresh_varac_bbs_vault_source_hint()
         )
+        self.varac_bbs_vault_alias_edit.textChanged.connect(self._sanitize_varac_bbs_vault_alias_text)
         self.varac_bbs_vault_alias_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_description_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_source_dir_edit.textChanged.connect(self._mark_settings_dirty)
@@ -4945,7 +4963,9 @@ class SettingsTab(QWidget):
         if hasattr(self, "varac_bbs_vault_global_code_policy_combo"):
             code_policy = str(data.get("varac_bbs_vault_global_code_policy", DEFAULT_GLOBAL_CODE_POLICY) or DEFAULT_GLOBAL_CODE_POLICY).strip()
             idx = self.varac_bbs_vault_global_code_policy_combo.findText(code_policy)
-            self.varac_bbs_vault_global_code_policy_combo.setCurrentIndex(idx if idx >= 0 else 1)
+            if idx < 0:
+                idx = self.varac_bbs_vault_global_code_policy_combo.findText(DEFAULT_GLOBAL_CODE_POLICY)
+            self.varac_bbs_vault_global_code_policy_combo.setCurrentIndex(max(0, idx))
         if hasattr(self, "varac_bbs_vault_return_mode_combo"):
             return_mode = str(data.get("varac_bbs_vault_return_mode", DEFAULT_RETURN_MODE) or DEFAULT_RETURN_MODE).strip()
             if return_mode not in {"On disconnect", "After inactivity timeout", "Manual operator reset only"}:
