@@ -1016,6 +1016,32 @@ def _location_by_alias(locations: Sequence[VaultLocation], alias: str) -> Option
     return next((loc for loc in locations if normalize_location_alias(loc.alias, loc.name) == target), None)
 
 
+def _extract_alias_request(text: str, alias_map: Mapping[str, str]) -> Tuple[str, str]:
+    if not alias_map:
+        return "", ""
+    parts = " ".join(str(text or "").upper().split()).split()
+    if not parts:
+        return "", ""
+    starts: List[int] = [0]
+    if parts[0] in {"OPEN", "MSG", "TYPE"}:
+        starts.append(1)
+    if parts[0] == "BBS":
+        starts.append(1)
+        if len(parts) > 1 and parts[1] in {"OPEN", "MSG"}:
+            starts.append(2)
+        if len(parts) > 2 and parts[1] == "MSG" and parts[2] == "-":
+            starts.append(3)
+    for start in starts:
+        while start < len(parts) and parts[start] in {"-", "TYPE"}:
+            start += 1
+        if start >= len(parts):
+            continue
+        alias = normalize_location_alias(parts[start])
+        if alias and alias in alias_map:
+            return alias, " ".join(parts[start + 1 :]).strip()
+    return "", ""
+
+
 def _menu_instruction_entry(text: str) -> _VirtualFile:
     return _VirtualFile(name=f"{text}.txt", content=text + "\n")
 
@@ -1541,6 +1567,24 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
                 )
             )
             continue
+        alias, code_text = _extract_alias_request(upper, alias_map)
+        if alias:
+            events.append(
+                VaultDbEvent(
+                    row_id,
+                    timestamp_utc,
+                    qso_guid,
+                    remote_callsign,
+                    my_callsign,
+                    entry_callsign,
+                    entry_text,
+                    "open_alias",
+                    alias=alias,
+                    code_text=code_text,
+                )
+            )
+            continue
+
         match = COMMAND_RE.search(upper)
         if match:
             events.append(
@@ -1554,28 +1598,6 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
                     entry_text,
                     "legacy_code_open",
                     code_text=str(match.group(1) or "").strip(),
-                )
-            )
-            continue
-
-        parts = upper.split()
-        if not parts:
-            continue
-        alias = normalize_location_alias(parts[0])
-        if alias and alias in alias_map:
-            code_text = " ".join(parts[1:]).strip()
-            events.append(
-                VaultDbEvent(
-                    row_id,
-                    timestamp_utc,
-                    qso_guid,
-                    remote_callsign,
-                    my_callsign,
-                    entry_callsign,
-                    entry_text,
-                    "open_alias",
-                    alias=alias,
-                    code_text=code_text,
                 )
             )
     return events
