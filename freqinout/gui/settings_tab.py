@@ -77,6 +77,7 @@ from freqinout.core.varac_bbs_config import (
     get_varac_ini_sync_state,
     load_varac_bbs_config,
     locate_varac_ini_path,
+    parse_callsign_list,
     varac_ini_sync_state_matches,
     varac_ini_sync_state_to_json,
     write_varac_bbs_config,
