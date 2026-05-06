@@ -136,6 +136,7 @@ class VaultLogEvent:
     sender: str
     body: str
     code_text: str = ""
+    alias: str = ""
     raw_line: str = ""
     log_path: str = ""
 
@@ -252,6 +253,7 @@ def _state_key(event: VaultLogEvent) -> str:
             str(int(event.timestamp_utc or 0.0)),
             event.kind,
             event.sender,
+            event.alias.upper(),
             event.code_text.upper(),
         ]
     )
@@ -321,9 +323,27 @@ def _extract_sender(body: str) -> str:
     return ""
 
 
-def parse_vault_log_events(text: str, *, trigger_mode: str = DEFAULT_TRIGGER_MODE, log_path: str = "") -> List[VaultLogEvent]:
+def _extract_log_message_text(body: str) -> str:
+    payloads: List[str] = []
+    for line in str(body or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = re.search(r"\b[A-Z0-9/]{3,15}>\s*(.*)$", line, re.IGNORECASE)
+        payloads.append(str(match.group(1) if match else line).strip())
+    return " ".join(payloads).strip()
+
+
+def parse_vault_log_events(
+    text: str,
+    *,
+    trigger_mode: str = DEFAULT_TRIGGER_MODE,
+    log_path: str = "",
+    alias_map: Optional[Mapping[str, str]] = None,
+) -> List[VaultLogEvent]:
     events: List[VaultLogEvent] = []
     exact_mode = str(trigger_mode or DEFAULT_TRIGGER_MODE).strip().lower() == "exact code only"
+    aliases = alias_map or {}
     for block in _split_log_events(text):
         lines = [line for line in block.splitlines() if line.strip()]
         if not lines:
@@ -333,18 +353,27 @@ def parse_vault_log_events(text: str, *, trigger_mode: str = DEFAULT_TRIGGER_MOD
             continue
         body = "\n".join([match.group("body")] + lines[1:]).strip()
         sender = _extract_sender(body)
+        message_text = _extract_log_message_text(body)
         code_text = ""
+        alias = ""
         kind = ""
-        command_match = COMMAND_RE.search(body)
-        if command_match:
-            code_text = str(command_match.group(1) or "").strip()
-            kind = "unlock"
-        elif exact_mode:
-            stripped = " ".join(body.split())
-            if stripped:
+        alias, code_text = _extract_alias_request(message_text, aliases)
+        if alias:
+            kind = "open_alias"
+        else:
+            command_match = COMMAND_RE.search(body)
+            if command_match:
+                code_text = str(command_match.group(1) or "").strip()
+                kind = "unlock"
+        if not kind and exact_mode:
+            stripped = " ".join(message_text.split())
+            alias, code_text = _extract_alias_request(stripped, aliases)
+            if alias:
+                kind = "open_alias"
+            elif stripped:
                 code_text = stripped
                 kind = "unlock"
-        elif DISCONNECT_RE.search(body):
+        elif not kind and DISCONNECT_RE.search(body):
             kind = "disconnect"
         if not kind:
             continue
@@ -355,6 +384,7 @@ def parse_vault_log_events(text: str, *, trigger_mode: str = DEFAULT_TRIGGER_MOD
                 sender=sender,
                 body=body,
                 code_text=code_text,
+                alias=alias,
                 raw_line=block,
                 log_path=log_path,
             )
@@ -2485,56 +2515,85 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 runtime_state = _update_state(runtime_state, last_action=f"FLAMP block request failed: {exc}", last_error=str(exc))
             continue
 
-    if not events:
-        log_paths = resolve_varac_traffic_log_paths(settings)
-        seen_keys = set(runtime_state.processed_event_keys)
-        for log_path in log_paths:
-            log_events = parse_vault_log_events(_read_tail(log_path), trigger_mode=trigger_mode, log_path=str(log_path))
-            for event in log_events:
-                scanned += 1
-                key = _state_key(event)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                if event.kind == "unlock":
-                    result = _apply_open_request(
-                        sender=event.sender,
-                        qso_guid=runtime_state.current_session_qso_guid,
-                        requested_location=None,
-                        alias_text="",
-                        code_text=event.code_text,
+    log_paths = resolve_varac_traffic_log_paths(settings)
+    seen_keys = set(runtime_state.processed_event_keys)
+    for log_path in log_paths:
+        log_events = parse_vault_log_events(
+            _read_tail(log_path),
+            trigger_mode=trigger_mode,
+            log_path=str(log_path),
+            alias_map=alias_map,
+        )
+        for event in log_events:
+            scanned += 1
+            key = _state_key(event)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            if event.kind == "unlock":
+                result = _apply_open_request(
+                    sender=event.sender,
+                    qso_guid=runtime_state.current_session_qso_guid,
+                    requested_location=None,
+                    alias_text="",
+                    code_text=event.code_text,
+                    locations=locations,
+                    live_bbs_dir=live_bbs_dir,
+                    managed_root=managed_root,
+                    default_location_id=default_location_id,
+                    global_allowed_callsigns=global_allowed,
+                    limit_access_enabled=limit_access_enabled,
+                    runtime_state=runtime_state,
+                    now_ts=event.timestamp_utc or now_ts,
+                    failed_attempt_limit=failed_attempt_limit,
+                    failed_attempt_window_seconds=failed_attempt_window_seconds,
+                    cooldown_seconds=cooldown_seconds,
+                    global_code_policy=global_code_policy,
+                    action_reason="legacy_code_open",
+                )
+                runtime_state = result.runtime_state
+                published = published or bool(result.publish_result and result.publish_result.changed)
+                processed += 1
+            elif event.kind == "open_alias":
+                requested = _location_by_alias(locations, event.alias)
+                result = _apply_open_request(
+                    sender=event.sender,
+                    qso_guid=runtime_state.current_session_qso_guid,
+                    requested_location=requested,
+                    alias_text=event.alias,
+                    code_text=event.code_text,
+                    locations=locations,
+                    live_bbs_dir=live_bbs_dir,
+                    managed_root=managed_root,
+                    default_location_id=default_location_id,
+                    global_allowed_callsigns=global_allowed,
+                    limit_access_enabled=limit_access_enabled,
+                    runtime_state=runtime_state,
+                    now_ts=event.timestamp_utc or now_ts,
+                    failed_attempt_limit=failed_attempt_limit,
+                    failed_attempt_window_seconds=failed_attempt_window_seconds,
+                    cooldown_seconds=cooldown_seconds,
+                    global_code_policy=global_code_policy,
+                    action_reason="log_open_alias",
+                )
+                runtime_state = result.runtime_state
+                published = published or bool(result.publish_result and result.publish_result.changed)
+                processed += 1
+            elif event.kind == "disconnect" and runtime_state.current_session_callsign:
+                if return_mode != "Manual operator reset only":
+                    result = reset_to_default_location(
                         locations=locations,
                         live_bbs_dir=live_bbs_dir,
                         managed_root=managed_root,
                         default_location_id=default_location_id,
-                        global_allowed_callsigns=global_allowed,
-                        limit_access_enabled=limit_access_enabled,
                         runtime_state=runtime_state,
+                        reason="disconnect",
                         now_ts=event.timestamp_utc or now_ts,
-                        failed_attempt_limit=failed_attempt_limit,
-                        failed_attempt_window_seconds=failed_attempt_window_seconds,
-                        cooldown_seconds=cooldown_seconds,
-                        global_code_policy=global_code_policy,
-                        action_reason="legacy_code_open",
                     )
                     runtime_state = result.runtime_state
                     published = published or bool(result.publish_result and result.publish_result.changed)
-                    processed += 1
-                elif event.kind == "disconnect" and runtime_state.current_session_callsign:
-                    if return_mode != "Manual operator reset only":
-                        result = reset_to_default_location(
-                            locations=locations,
-                            live_bbs_dir=live_bbs_dir,
-                            managed_root=managed_root,
-                            default_location_id=default_location_id,
-                            runtime_state=runtime_state,
-                            reason="disconnect",
-                            now_ts=event.timestamp_utc or now_ts,
-                        )
-                        runtime_state = result.runtime_state
-                        published = published or bool(result.publish_result and result.publish_result.changed)
-                    processed += 1
-        runtime_state = _update_state(runtime_state, processed_event_keys=list(tuple(list(seen_keys)[-MAX_PROCESSED_EVENT_KEYS:])))
+                processed += 1
+    runtime_state = _update_state(runtime_state, processed_event_keys=list(tuple(list(seen_keys)[-MAX_PROCESSED_EVENT_KEYS:])))
 
     if processed == 0 and runtime_state.current_session_callsign and return_mode != "Manual operator reset only":
         last_request_ts = float(runtime_state.last_request_ts or 0.0)

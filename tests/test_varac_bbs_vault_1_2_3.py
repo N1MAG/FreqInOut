@@ -136,6 +136,16 @@ def test_varac_guard_and_vault_timestamp_parsers_accept_day_first_logs() -> None
     assert vault_events
     assert vault_events[0].timestamp_utc > 0
 
+    alias_events = parse_vault_log_events(
+        "06/05/2026 19:08:32 - W8UFO> INTEL\n",
+        log_path="VarAC_traffic.log",
+        alias_map={"INTEL": "intel"},
+    )
+    assert alias_events
+    assert alias_events[0].kind == "open_alias"
+    assert alias_events[0].sender == "W8UFO"
+    assert alias_events[0].alias == "INTEL"
+
 
 def test_initialize_and_import_live_bbs(tmp_path: Path) -> None:
     live_bbs = tmp_path / "BBS"
@@ -593,6 +603,107 @@ def test_run_varac_bbs_vault_processes_varac_bbs_msg_alias_command(tmp_path: Pat
 
     assert result.enabled
     assert result.processed_events == 3
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    assert state.current_location_id == "intel"
+    assert state.current_view_mode == "location"
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert "MAGNET_S2_WEEKLY_SNAPSHOT-260426.b2s" in names
+    assert any("ROOT" in name for name in names)
+    assert not any("Type INTEL" in name for name in names)
+
+
+def test_run_varac_bbs_vault_uses_log_alias_when_db_only_saw_refresh(tmp_path: Path) -> None:
+    varac_root = tmp_path / "varac"
+    varac_root.mkdir()
+    varac_db = varac_root / "VarAC.db"
+    _create_varac_db(varac_db)
+    qso_guid = "08709dda-8ea8-47e5-b8e4-1c7afd299866"
+    _insert_qso(varac_db, guid=qso_guid, remote="W8UFO")
+    _insert_datastream(
+        varac_db,
+        [
+            (1, "a", 1, qso_guid, "W8UFO", "<BLR>", "2026-05-06 19:04:49.0000000Z"),
+        ],
+    )
+    (varac_root / "VarAC_traffic.log").write_text(
+        "\n".join(
+            [
+                "06/05/2026 19:04:49 - W8UFO> <BLR>",
+                "06/05/2026 19:08:32 - W8UFO> INTEL",
+                "06/05/2026 19:08:51 - W8UFO> <BLR>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    intel_dir = Path(created["locations"]) / "Intel"
+    intel_dir.mkdir(parents=True)
+    (intel_dir / "MAGNET_S2_WEEKLY_SNAPSHOT-260426.b2s").write_text("intel", encoding="utf-8")
+
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_db_path=str(varac_db),
+        varac_path=str(varac_root),
+        varac_bbs_vault_managed_root=str(managed_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_global_code_policy="Allow public locations",
+        varac_bbs_vault_trigger_mode="VarAC session commands",
+        varac_bbs_vault_return_mode="On disconnect",
+        varac_bbs_vault_failed_attempt_limit=3,
+        varac_bbs_vault_failed_attempt_window_seconds=900,
+        varac_bbs_vault_cooldown_seconds=1800,
+        varac_bbs_vault_idle_timeout_seconds=600,
+        varac_bbs_vault_flamp_enabled=False,
+        varac_bbs_vault_flamp_relay_dir="",
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+            {
+                "id": "intel",
+                "name": "Intel",
+                "alias": "INTEL",
+                "description": "Open Intel",
+                "source_dir": str(intel_dir),
+                "enabled": True,
+                "list_in_root_menu": True,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+        ],
+        varac_bbs_vault_runtime_state_v1={},
+        varac_bbs_allowed_callsigns="",
+        varac_bbs_limit_access_enabled=False,
+    )
+
+    result = run_varac_bbs_vault(settings)
+
+    assert result.enabled
     state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
     assert state.current_location_id == "intel"
     assert state.current_view_mode == "location"
