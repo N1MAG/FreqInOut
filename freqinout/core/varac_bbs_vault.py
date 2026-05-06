@@ -2059,6 +2059,7 @@ def _reconcile_current_location(
                 live_bbs_dir=live_bbs_dir,
                 managed_root=managed_root,
                 flamp_enabled=flamp_enabled,
+                include_enabled_fallback=True,
             )
     except Exception as exc:
         summary = f"Managed Vault degraded: {exc}"

@@ -23,6 +23,7 @@ from freqinout.core.varac_bbs_vault import (
     reset_to_default_location,
     run_varac_bbs_vault,
     verify_access_code,
+    vault_runtime_state_to_data,
 )
 from freqinout.core.varac_guard import parse_varac_transfer_events
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp
@@ -364,6 +365,53 @@ def test_reset_to_default_falls_back_to_filesystem_locations(tmp_path: Path) -> 
     assert any("HUBS" in name for name in names)
     assert any("INTEL" in name for name in names)
     assert any("MR08" in name for name in names)
+
+
+def test_background_reconcile_keeps_filesystem_fallback_root_menu(tmp_path: Path) -> None:
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    for folder_name in ("AIB", "HUBS", "Intel", "MR08"):
+        (Path(created["locations"]) / folder_name).mkdir(parents=True)
+    locations = [
+        VaultLocation(id=DEFAULT_LOCATION_ID, name=DEFAULT_LOCATION_NAME, source_dir=str(default_dir), alias="ROOT"),
+    ]
+    reset_result = reset_to_default_location(
+        locations=locations,
+        live_bbs_dir=live_bbs,
+        managed_root=managed_root,
+        default_location_id=DEFAULT_LOCATION_ID,
+        runtime_state=VaultRuntimeState(current_location_id=DEFAULT_LOCATION_ID),
+        global_code_policy="Allow public locations",
+    )
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_bbs_vault_managed_root=str(managed_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_global_code_policy="Allow public locations",
+        varac_bbs_vault_trigger_mode="VarAC session commands",
+        varac_bbs_vault_return_mode="On disconnect",
+        varac_bbs_vault_failed_attempt_limit=3,
+        varac_bbs_vault_failed_attempt_window_seconds=900,
+        varac_bbs_vault_cooldown_seconds=1800,
+        varac_bbs_vault_idle_timeout_seconds=600,
+        varac_bbs_vault_flamp_enabled=False,
+        varac_bbs_vault_flamp_relay_dir="",
+        varac_bbs_vault_locations_v1=[
+            {"id": DEFAULT_LOCATION_ID, "name": DEFAULT_LOCATION_NAME, "source_dir": str(default_dir), "alias": "ROOT"},
+        ],
+        varac_bbs_vault_runtime_state_v1=vault_runtime_state_to_data(reset_result.runtime_state),
+        varac_db_path="",
+    )
+
+    run_varac_bbs_vault(settings)
+
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert any("AIB" in name for name in names)
+    assert any("INTEL" in name for name in names)
 
 
 def test_run_varac_bbs_vault_processes_alias_navigation_from_varac_db(tmp_path: Path) -> None:
