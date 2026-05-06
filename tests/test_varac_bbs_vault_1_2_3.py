@@ -252,6 +252,7 @@ def test_reset_to_default_uses_configured_root_visibility_policy(tmp_path: Path)
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert any("INTEL" in name for name in names)
+    assert any(name.endswith(".txt") for name in names)
 
 
 def test_run_varac_bbs_vault_processes_alias_navigation_from_varac_db(tmp_path: Path) -> None:

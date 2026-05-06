@@ -924,7 +924,7 @@ def _location_by_alias(locations: Sequence[VaultLocation], alias: str) -> Option
 
 
 def _menu_instruction_entry(text: str) -> _VirtualFile:
-    return _VirtualFile(name=text, content=text + "\n")
+    return _VirtualFile(name=f"{text}.txt", content=text + "\n")
 
 
 def _root_virtual_files(
