@@ -146,6 +146,15 @@ def test_varac_guard_and_vault_timestamp_parsers_accept_day_first_logs() -> None
     assert alias_events[0].sender == "W8UFO"
     assert alias_events[0].alias == "INTEL"
 
+    root_events = parse_vault_log_events(
+        "06/05/2026 19:51:12 - W8UFO> ROOT\n",
+        log_path="VarAC_traffic.log",
+        alias_map={"INTEL": "intel"},
+    )
+    assert root_events
+    assert root_events[0].kind == "root_return"
+    assert root_events[0].sender == "W8UFO"
+
 
 def test_initialize_and_import_live_bbs(tmp_path: Path) -> None:
     live_bbs = tmp_path / "BBS"
@@ -711,6 +720,202 @@ def test_run_varac_bbs_vault_uses_log_alias_when_db_only_saw_refresh(tmp_path: P
     assert "MAGNET_S2_WEEKLY_SNAPSHOT-260426.b2s" in names
     assert any("ROOT" in name for name in names)
     assert not any("Type INTEL" in name for name in names)
+
+
+def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: Path) -> None:
+    varac_root = tmp_path / "varac"
+    varac_root.mkdir()
+    varac_db = varac_root / "VarAC.db"
+    _create_varac_db(varac_db)
+    qso_guid = "428d19f8-4066-4a80-b2c2-fbe2983a77fa"
+    _insert_qso(varac_db, guid=qso_guid, remote="W8UFO")
+    _insert_datastream(
+        varac_db,
+        [
+            (1, "a", 1, qso_guid, "W8UFO", "<BLR>", "2026-05-06 19:44:18.0000000Z"),
+        ],
+    )
+
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    intel_dir = Path(created["locations"]) / "Intel"
+    intel_dir.mkdir(parents=True)
+    aib_dir = Path(created["locations"]) / "AIB"
+    aib_dir.mkdir(parents=True)
+    hubs_dir = Path(created["locations"]) / "HUBS"
+    hubs_dir.mkdir(parents=True)
+    (intel_dir / "MAGNET_S2_WEEKLY_SNAPSHOT-260426.b2s").write_text("intel", encoding="utf-8")
+    (aib_dir / "NATL-RR-260427-1500Z-AIB-sig.k2s").write_text("aib", encoding="utf-8")
+    (hubs_dir / "N1MAG-20260429-OpNet-1.b2s").write_text("hubs", encoding="utf-8")
+    hubs_code = hash_access_code("HUBCODE")
+
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_db_path=str(varac_db),
+        varac_path=str(varac_root),
+        varac_bbs_vault_managed_root=str(managed_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_global_code_policy="Allow public locations",
+        varac_bbs_vault_trigger_mode="VarAC session commands",
+        varac_bbs_vault_return_mode="On disconnect",
+        varac_bbs_vault_failed_attempt_limit=3,
+        varac_bbs_vault_failed_attempt_window_seconds=900,
+        varac_bbs_vault_cooldown_seconds=1800,
+        varac_bbs_vault_idle_timeout_seconds=600,
+        varac_bbs_vault_flamp_enabled=False,
+        varac_bbs_vault_flamp_relay_dir="",
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+            {
+                "id": "intel",
+                "name": "Intel",
+                "alias": "INTEL",
+                "description": "Open Intel",
+                "source_dir": str(intel_dir),
+                "enabled": True,
+                "list_in_root_menu": True,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+            {
+                "id": "aib",
+                "name": "AIB",
+                "alias": "AIB",
+                "description": "Open AIB",
+                "source_dir": str(aib_dir),
+                "enabled": True,
+                "list_in_root_menu": True,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+            {
+                "id": "hubs",
+                "name": "HUBS",
+                "alias": "HUBS",
+                "description": "Open HUBS",
+                "source_dir": str(hubs_dir),
+                "enabled": True,
+                "list_in_root_menu": True,
+                "visibility_rule": "Public",
+                "open_rule": "Allowed callsigns + access code",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": str(hubs_code["access_code_hash"]),
+                "access_code_salt": str(hubs_code["access_code_salt"]),
+                "access_code_iterations": int(hubs_code["access_code_iterations"]),
+            },
+        ],
+        varac_bbs_vault_runtime_state_v1={},
+        varac_bbs_allowed_callsigns="",
+        varac_bbs_limit_access_enabled=False,
+    )
+
+    (varac_root / "VarAC_traffic.log").write_text(
+        "\n".join(
+            [
+                "06/05/2026 19:44:18 - W8UFO> <BLR>",
+                "06/05/2026 19:45:05 - W8UFO> INTEL",
+                "06/05/2026 19:45:22 - W8UFO> <BLR>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_varac_bbs_vault(settings)
+    assert "MAGNET_S2_WEEKLY_SNAPSHOT-260426.b2s" in {p.name for p in live_bbs.iterdir() if p.is_file()}
+
+    settings.set("varac_bbs_vault_runtime_state_v1", {**settings.get("varac_bbs_vault_runtime_state_v1"), "last_datastream_id": 1})
+    (varac_root / "VarAC_traffic.log").write_text(
+        "\n".join(
+            [
+                "06/05/2026 19:44:18 - W8UFO> <BLR>",
+                "06/05/2026 19:45:05 - W8UFO> INTEL",
+                "06/05/2026 19:45:22 - W8UFO> <BLR>",
+                "06/05/2026 19:46:19 - W8UFO> AIB",
+                "06/05/2026 19:46:33 - W8UFO> <BLR>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_varac_bbs_vault(settings)
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert "NATL-RR-260427-1500Z-AIB-sig.k2s" in names
+    assert "MAGNET_S2_WEEKLY_SNAPSHOT-260426.b2s" not in names
+
+    settings.set("varac_bbs_vault_runtime_state_v1", {**settings.get("varac_bbs_vault_runtime_state_v1"), "last_datastream_id": 1})
+    (varac_root / "VarAC_traffic.log").write_text(
+        "\n".join(
+            [
+                "06/05/2026 19:44:18 - W8UFO> <BLR>",
+                "06/05/2026 19:45:05 - W8UFO> INTEL",
+                "06/05/2026 19:45:22 - W8UFO> <BLR>",
+                "06/05/2026 19:46:19 - W8UFO> AIB",
+                "06/05/2026 19:46:33 - W8UFO> <BLR>",
+                "06/05/2026 19:47:36 - W8UFO> HUBS",
+                "06/05/2026 19:47:58 - W8UFO> <BLR>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_varac_bbs_vault(settings)
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert "NATL-RR-260427-1500Z-AIB-sig.k2s" in names
+    assert "N1MAG-20260429-OpNet-1.b2s" not in names
+
+    settings.set("varac_bbs_vault_runtime_state_v1", {**settings.get("varac_bbs_vault_runtime_state_v1"), "last_datastream_id": 1})
+    (varac_root / "VarAC_traffic.log").write_text(
+        "\n".join(
+            [
+                "06/05/2026 19:44:18 - W8UFO> <BLR>",
+                "06/05/2026 19:45:05 - W8UFO> INTEL",
+                "06/05/2026 19:45:22 - W8UFO> <BLR>",
+                "06/05/2026 19:46:19 - W8UFO> AIB",
+                "06/05/2026 19:46:33 - W8UFO> <BLR>",
+                "06/05/2026 19:47:36 - W8UFO> HUBS",
+                "06/05/2026 19:47:58 - W8UFO> <BLR>",
+                "06/05/2026 19:51:12 - W8UFO> ROOT",
+                "06/05/2026 19:51:27 - W8UFO> <BLR>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_varac_bbs_vault(settings)
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert any("Type AIB" in name for name in names)
+    assert any("Type INTEL" in name for name in names)
+    assert "NATL-RR-260427-1500Z-AIB-sig.k2s" not in names
 
 
 def test_run_varac_bbs_vault_opens_filesystem_fallback_location_from_alias(tmp_path: Path) -> None:

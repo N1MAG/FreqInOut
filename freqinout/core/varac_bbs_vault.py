@@ -365,11 +365,15 @@ def parse_vault_log_events(
             if command_match:
                 code_text = str(command_match.group(1) or "").strip()
                 kind = "unlock"
+        if not kind and ROOT_CMD_RE.match(message_text):
+            kind = "root_return"
         if not kind and exact_mode:
             stripped = " ".join(message_text.split())
             alias, code_text = _extract_alias_request(stripped, aliases)
             if alias:
                 kind = "open_alias"
+            elif ROOT_CMD_RE.match(stripped):
+                kind = "root_return"
             elif stripped:
                 code_text = stripped
                 kind = "unlock"
@@ -2575,6 +2579,25 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     cooldown_seconds=cooldown_seconds,
                     global_code_policy=global_code_policy,
                     action_reason="log_open_alias",
+                )
+                runtime_state = result.runtime_state
+                published = published or bool(result.publish_result and result.publish_result.changed)
+                processed += 1
+            elif event.kind == "root_return":
+                result = _publish_root_action(
+                    sender=event.sender,
+                    qso_guid=runtime_state.current_session_qso_guid,
+                    locations=locations,
+                    live_bbs_dir=live_bbs_dir,
+                    managed_root=managed_root,
+                    default_location_id=default_location_id,
+                    global_allowed_callsigns=global_allowed,
+                    limit_access_enabled=limit_access_enabled,
+                    global_code_policy=global_code_policy,
+                    runtime_state=runtime_state,
+                    now_ts=event.timestamp_utc or now_ts,
+                    flamp_enabled=flamp_enabled,
+                    reason="log_root_return",
                 )
                 runtime_state = result.runtime_state
                 published = published or bool(result.publish_result and result.publish_result.changed)
