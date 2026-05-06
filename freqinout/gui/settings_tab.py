@@ -2888,7 +2888,8 @@ class SettingsTab(QWidget):
         # Message Authenticity (Key/Hash)
         gpg_group = QGroupBox("Message Auth (Key/Hash)")
         gpg_v = QVBoxLayout()
-        gpg_v.setSpacing(6)
+        gpg_v.setContentsMargins(0, 0, 0, 0)
+        gpg_v.setSpacing(4)
         gpg_v.setAlignment(Qt.AlignTop)
         gpg_group.setLayout(gpg_v)
 
@@ -2955,8 +2956,9 @@ class SettingsTab(QWidget):
         th_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         th_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
         th_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.trusted_hash_table.setMinimumHeight(72)
-        self.trusted_hash_table.setMaximumHeight(96)
+        self.trusted_hash_table.setMinimumHeight(58)
+        self.trusted_hash_table.setMaximumHeight(72)
+        self.trusted_hash_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         gpg_v.addWidget(self.trusted_hash_table)
 
         gpg_path_row = QHBoxLayout()
@@ -3003,6 +3005,7 @@ class SettingsTab(QWidget):
         gpg_status_row.addWidget(gpg_status_spacer)
         self.gpg_status_label = QLabel("GPG status: not checked")
         self.gpg_status_label.setWordWrap(True)
+        self.gpg_status_label.setMaximumHeight(40)
         gpg_status_row.addWidget(self.gpg_status_label, 1)
         gpg_v.addLayout(gpg_status_row)
 
@@ -3017,8 +3020,9 @@ class SettingsTab(QWidget):
         gpg_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         gpg_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         gpg_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
-        self.gpg_keys_table.setMinimumHeight(84)
-        self.gpg_keys_table.setMaximumHeight(116)
+        self.gpg_keys_table.setMinimumHeight(64)
+        self.gpg_keys_table.setMaximumHeight(84)
+        self.gpg_keys_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         gpg_v.addWidget(self.gpg_keys_table)
 
         self.gpg_verify_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
@@ -3041,6 +3045,7 @@ class SettingsTab(QWidget):
 
         gpg_container = QWidget()
         gpg_container.setLayout(gpg_v)
+        gpg_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         gpg_group = self._make_collapsible_group(
             "Message Auth (Key/Hash)",
             gpg_container,
@@ -3049,7 +3054,8 @@ class SettingsTab(QWidget):
             help_context_key="settings.message-auth",
         )
         self._register_collapsible_group(gpg_group, self._summary_gpg_settings)
-        gpg_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._section_meta[gpg_group]["fit_content_in_stack"] = True
+        self._apply_collapsed_state(gpg_group, gpg_container, True)
 
         # VarAC Settings
         varac_group = QGroupBox("VarAC Settings")
@@ -4350,7 +4356,7 @@ class SettingsTab(QWidget):
         content.setVisible(expanded)
         stacked_mode = hasattr(self, "sections_stack") and self.sections_stack.count() > 0
         fit_content = bool(self._section_meta.get(group, {}).get("fit_content", False))
-        if stacked_mode:
+        if stacked_mode and not bool(self._section_meta.get(group, {}).get("fit_content_in_stack", False)):
             fit_content = False
         header_btn = self._section_meta.get(group, {}).get("header_btn")
         if header_btn:
