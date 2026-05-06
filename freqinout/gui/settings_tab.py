@@ -8894,13 +8894,19 @@ class SettingsTab(QWidget):
             self.fldigi_checkin_dir_edit.setText(base)
         folder = Path(base)
         main_path = folder / "main_checkins.txt"
+        qru_path = folder / "qru_checkins.txt"
         late_path = folder / "new-late_checkins.txt"
+        all_path = folder / "all_checkins.txt"
         try:
             folder.mkdir(parents=True, exist_ok=True)
             if not main_path.exists():
                 main_path.touch()
+            if not qru_path.exists():
+                qru_path.touch()
             if not late_path.exists():
                 late_path.touch()
+            if not all_path.exists():
+                all_path.touch()
         except Exception as e:
             log.error("SettingsTab: failed to ensure FLDigi check-in files: %s", e)
         self._refresh_fldigi_checkin_file_labels()
