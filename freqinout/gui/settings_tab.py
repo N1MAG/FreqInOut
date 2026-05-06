@@ -1720,6 +1720,31 @@ class SettingsTab(QWidget):
         self._refresh_varac_bbs_vault_status_label()
         self._mark_settings_dirty()
         self._refresh_section_titles()
+        publish_result = result.publish_result
+        detail_lines = [
+            result.summary,
+            "",
+            f"Live BBS: {live_bbs_dir or '(not configured)'}",
+        ]
+        if publish_result is not None:
+            detail_lines.extend(
+                [
+                    f"Published/updated: {int(publish_result.published_count or 0)}",
+                    f"Removed stale projected files: {int(publish_result.removed_count or 0)}",
+                    f"Manifest: {publish_result.manifest_path or '(not written)'}",
+                ]
+            )
+            if publish_result.unmanaged_live_files:
+                preview = ", ".join(list(publish_result.unmanaged_live_files)[:5])
+                extra = len(publish_result.unmanaged_live_files) - 5
+                if extra > 0:
+                    preview += f" +{extra} more"
+                detail_lines.append(f"Unmanaged live files left in place: {preview}")
+        QMessageBox.information(
+            self,
+            "Managed BBS Vault",
+            "\n".join(detail_lines),
+        )
 
     def _settings_snapshot_for_readiness(self) -> Dict[str, object]:
         message_paths: Dict[str, str] = {}
