@@ -26,8 +26,8 @@ DEFAULT_ACCESS_CODE_ITERATIONS = 310_000
 DEFAULT_FAILED_ATTEMPT_LIMIT = 3
 DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS = 15 * 60
 DEFAULT_COOLDOWN_SECONDS = 30 * 60
-DEFAULT_IDLE_TIMEOUT_SECONDS = 10 * 60
-DEFAULT_TRIGGER_MODE = "Command prefix"
+DEFAULT_IDLE_TIMEOUT_SECONDS = 60
+DEFAULT_TRIGGER_MODE = "VarAC session commands"
 DEFAULT_RETURN_MODE = "On disconnect"
 DEFAULT_LOCATION_ID = "default"
 DEFAULT_LOCATION_NAME = "Default"
@@ -992,6 +992,8 @@ def _location_requires_code(location: VaultLocation, *, default_location_id: str
     open_rule = str(location.open_rule or "Public").strip()
     if open_rule == "Public":
         return False
+    if open_rule == "Access code required":
+        return True
     policy = str(global_code_policy or DEFAULT_GLOBAL_CODE_POLICY).strip()
     if open_rule == "Allowed callsigns + access code":
         return True
@@ -1017,7 +1019,16 @@ def _location_visible_in_root(
     open_rule = str(location.open_rule or "Public").strip()
     if rule == "Hidden":
         return False
+    if not _normalize_callsign(sender):
+        return rule == "Public" and open_rule == "Public"
     if rule == "Allowed callsigns only":
+        return _location_sender_allowed(
+            sender,
+            location=location,
+            global_allowed_callsigns=global_allowed_callsigns,
+            limit_access_enabled=limit_access_enabled,
+        )
+    if open_rule in {"Allowed callsigns only", "Allowed callsigns + access code"}:
         return _location_sender_allowed(
             sender,
             location=location,
@@ -1162,7 +1173,13 @@ def _location_virtual_files(*, include_root: bool = True) -> List[_VirtualFile]:
 
 def _location_access_prompt_virtual_files(location: VaultLocation, *, reason: str = "code_required") -> List[_VirtualFile]:
     alias = normalize_location_alias(location.alias, location.name)
-    if reason == "callsign_restricted":
+    if reason == "incorrect_code":
+        lines = [
+            f"BBS MSG - Incorrect code provided for {alias} - try again or return to ROOT",
+            f"BBS MSG - Type {alias} _code_ then refresh BBS",
+            "BBS MSG - Type ROOT to return to main menu then refresh BBS",
+        ]
+    elif reason == "callsign_restricted":
         lines = [
             f"BBS MSG - {location.name} is restricted to allowed callsigns",
             "BBS MSG - Type ROOT to return to main menu then refresh BBS",
@@ -1824,11 +1841,18 @@ def _publish_refresh_action(
             reason=reason,
         )
     if state.current_view_mode == "access-prompt":
+        prompt_reason = "code_required"
+        if state.last_error == "invalid_code":
+            prompt_reason = "incorrect_code"
+        elif state.last_error in {"cooldown_active", "cooldown_applied"}:
+            prompt_reason = "cooldown"
+        elif state.last_error == "rejected_callsign":
+            prompt_reason = "callsign_restricted"
         publish_result = publish_location_access_prompt_view(
             current_location,
             live_bbs_dir=live_bbs_dir,
             managed_root=managed_root,
-            reason="code_required",
+            reason=prompt_reason,
         )
         summary = f"Managed Vault refreshed access prompt for {current_location.name}."
         next_state = _update_state(
@@ -2123,7 +2147,7 @@ def _apply_open_request(
             sender_attempts.append(now_ts)
             failed_attempts[sender] = sender_attempts
             summary = f"Managed Vault rejected access code for {matched_location.name} from {sender}."
-            action = "invalid_code"
+            action = "invalid_code" if code_text else "missing_code"
             if len(sender_attempts) >= max(1, int(failed_attempt_limit)):
                 cooldowns[sender] = {
                     "until_ts": now_ts + max(1, int(cooldown_seconds)),
@@ -2142,7 +2166,11 @@ def _apply_open_request(
                 now_ts=now_ts,
                 summary=summary,
                 action=action,
-                reason="cooldown" if action == "cooldown_applied" else "code_required",
+                reason=(
+                    "cooldown"
+                    if action == "cooldown_applied"
+                    else ("incorrect_code" if action == "invalid_code" else "code_required")
+                ),
                 cooldowns=cooldowns,
                 failed_attempts=failed_attempts,
             )
@@ -2328,11 +2356,18 @@ def _reconcile_current_location(
             current_location = _location_by_id(locations, runtime_state.current_location_id)
             if current_location is None or not current_location.enabled:
                 return runtime_state, False
+            prompt_reason = "code_required"
+            if runtime_state.last_error == "invalid_code":
+                prompt_reason = "incorrect_code"
+            elif runtime_state.last_error in {"cooldown_active", "cooldown_applied"}:
+                prompt_reason = "cooldown"
+            elif runtime_state.last_error == "rejected_callsign":
+                prompt_reason = "callsign_restricted"
             publish_result = publish_location_access_prompt_view(
                 current_location,
                 live_bbs_dir=live_bbs_dir,
                 managed_root=managed_root,
-                reason="code_required",
+                reason=prompt_reason,
             )
         elif runtime_state.current_view_mode == "flamp-block-overlay":
             overlay_name = str(runtime_state.current_overlay_file or "").strip()
@@ -2403,13 +2438,13 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     live_bbs_dir = str(settings.get("varac_bbs_dir", "") or "").strip() if settings is not None else ""
     managed_root = compute_default_managed_root(live_bbs_dir)
     default_location_id = str(settings.get("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID) or DEFAULT_LOCATION_ID).strip() or DEFAULT_LOCATION_ID
-    trigger_mode = str(settings.get("varac_bbs_vault_trigger_mode", DEFAULT_TRIGGER_MODE) or DEFAULT_TRIGGER_MODE).strip() or DEFAULT_TRIGGER_MODE
-    return_mode = str(settings.get("varac_bbs_vault_return_mode", DEFAULT_RETURN_MODE) or DEFAULT_RETURN_MODE).strip() or DEFAULT_RETURN_MODE
+    trigger_mode = DEFAULT_TRIGGER_MODE
+    return_mode = DEFAULT_RETURN_MODE
     failed_attempt_limit = int(settings.get("varac_bbs_vault_failed_attempt_limit", DEFAULT_FAILED_ATTEMPT_LIMIT) or DEFAULT_FAILED_ATTEMPT_LIMIT)
     failed_attempt_window_seconds = int(settings.get("varac_bbs_vault_failed_attempt_window_seconds", DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS) or DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS)
     cooldown_seconds = int(settings.get("varac_bbs_vault_cooldown_seconds", DEFAULT_COOLDOWN_SECONDS) or DEFAULT_COOLDOWN_SECONDS)
     idle_timeout_seconds = int(settings.get("varac_bbs_vault_idle_timeout_seconds", DEFAULT_IDLE_TIMEOUT_SECONDS) or DEFAULT_IDLE_TIMEOUT_SECONDS)
-    global_code_policy = str(settings.get("varac_bbs_vault_global_code_policy", DEFAULT_GLOBAL_CODE_POLICY) or DEFAULT_GLOBAL_CODE_POLICY).strip() or DEFAULT_GLOBAL_CODE_POLICY
+    global_code_policy = DEFAULT_GLOBAL_CODE_POLICY
     flamp_enabled = bool(settings.get("varac_bbs_vault_flamp_enabled", False) if settings is not None else False)
     flamp_relay_dir = str(settings.get("varac_bbs_vault_flamp_relay_dir", "") or "").strip() if settings is not None else ""
     locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))

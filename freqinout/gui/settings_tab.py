@@ -147,7 +147,7 @@ def _vault_location_requires_code_badge(
     open_rule = str(row.get("open_rule", "Public") or "Public").strip() or "Public"
     if location_id == default_location_id:
         return False
-    if open_rule == "Allowed callsigns + access code":
+    if open_rule in {"Access code required", "Allowed callsigns + access code"}:
         return True
     if global_code_policy == "Require for non-default locations" and open_rule != "Public":
         return True
@@ -1421,7 +1421,7 @@ class SettingsTab(QWidget):
         requires_code = (
             location_id != DEFAULT_LOCATION_ID
             and (
-                open_rule == "Allowed callsigns + access code"
+                open_rule in {"Access code required", "Allowed callsigns + access code"}
                 or (global_code_policy == "Require for non-default locations" and open_rule != "Public")
                 or (global_code_policy == "Require for all restricted locations" and open_rule != "Public")
             )
@@ -3097,13 +3097,12 @@ class SettingsTab(QWidget):
             "Configure the VarAC application location, launch behavior, and the folders FreqInOut uses for file exchange.",
         )
         bbs_settings_v = _make_varac_subgroup(
-            "BBS Settings",
+            "BBS Management",
             "These settings control the live VarAC BBS folder, access policy, archive behavior, and allowed callsigns.",
         )
         vault_guard_v = _make_varac_subgroup(
-            "Vault / VGuard Settings",
-            "Managed BBS Vault publishes one controlled view into the live VarAC BBS while keeping source folders in a managed root. "
-            "VGuard is separate and watches inbound transfers for unauthorized senders or unsafe handling paths.",
+            "BBS Vault Settings",
+            "Managed BBS Vault publishes one controlled view into the live VarAC BBS while keeping source folders in a managed root.",
         )
 
         varac_row = QHBoxLayout()
@@ -3259,7 +3258,7 @@ class SettingsTab(QWidget):
         bbs_access_actions_row = QHBoxLayout()
         bbs_access_actions_row.setContentsMargins(0, 0, 0, 0)
         bbs_access_actions_row.setSpacing(8)
-        self.varac_bbs_sync_btn = QPushButton("Sync From VarAC.ini")
+        self.varac_bbs_sync_btn = QPushButton("Sync VarAC BBS Settings")
         self.varac_bbs_sync_btn.clicked.connect(self._sync_varac_bbs_from_ini)
         bbs_access_actions_row.addWidget(self.varac_bbs_sync_btn)
         self.varac_bbs_write_btn = QPushButton("Write to VarAC.ini")
@@ -3315,12 +3314,15 @@ class SettingsTab(QWidget):
         bbs_sync_status_row.addWidget(self.varac_bbs_sync_status_label, 1)
         bbs_settings_v.addLayout(bbs_sync_status_row)
 
-        varac_paths_v.addWidget(QLabel("Auto-Fill"))
+        varac_autofill_label = QLabel("Auto-Fill")
+        varac_autofill_label.hide()
+        varac_paths_v.addWidget(varac_autofill_label)
         varac_autofill_row = QHBoxLayout()
         varac_autofill_row.setContentsMargins(0, 0, 0, 0)
         varac_autofill_row.setSpacing(8)
         self.varac_autofill_btn = QPushButton("Attempt Auto-Fill")
         self.varac_autofill_btn.clicked.connect(self._attempt_varac_autofill)
+        self.varac_autofill_btn.hide()
         varac_autofill_row.addWidget(self.varac_autofill_btn)
         varac_autofill_row.addStretch()
         varac_paths_v.addLayout(varac_autofill_row)
@@ -3330,6 +3332,7 @@ class SettingsTab(QWidget):
         varac_autofill_status_row.setSpacing(8)
         self.varac_autofill_status_label = QLabel("No auto-fill attempt yet.")
         self.varac_autofill_status_label.setWordWrap(True)
+        self.varac_autofill_status_label.hide()
         self._autofill_status_labels["varac"] = self.varac_autofill_status_label
         varac_autofill_status_row.addWidget(self.varac_autofill_status_label, 1)
         varac_paths_v.addLayout(varac_autofill_status_row)
@@ -3397,7 +3400,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_root_hint_label.setWordWrap(True)
         vault_guard_v.addWidget(self.varac_bbs_vault_root_hint_label)
 
-        vault_guard_v.addWidget(QLabel("Vault Policy"))
+        vault_guard_v.addWidget(QLabel("Vault Session"))
         vault_policy_row = QHBoxLayout()
         vault_policy_row.setContentsMargins(0, 0, 0, 0)
         vault_policy_row.setSpacing(8)
@@ -3408,8 +3411,13 @@ class SettingsTab(QWidget):
         vault_policy_inner.addWidget(QLabel("Default Location"), 0, 0)
         self.varac_bbs_vault_default_location_combo = QComboBox()
         self.varac_bbs_vault_default_location_combo.setMinimumWidth(180)
+        self.varac_bbs_vault_default_location_combo.setEnabled(False)
+        self.varac_bbs_vault_default_location_combo.setToolTip(
+            "Default is the system-owned root menu and is not edited as a normal location."
+        )
         vault_policy_inner.addWidget(self.varac_bbs_vault_default_location_combo, 0, 1)
-        vault_policy_inner.addWidget(QLabel("Global Code Policy"), 0, 2)
+        global_code_policy_label = QLabel("Global Code Policy")
+        vault_policy_inner.addWidget(global_code_policy_label, 0, 2)
         self.varac_bbs_vault_global_code_policy_combo = QComboBox()
         self.varac_bbs_vault_global_code_policy_combo.addItems(
             [
@@ -3420,23 +3428,31 @@ class SettingsTab(QWidget):
         )
         self.varac_bbs_vault_global_code_policy_combo.setMinimumWidth(260)
         vault_policy_inner.addWidget(self.varac_bbs_vault_global_code_policy_combo, 0, 3)
-        vault_policy_inner.addWidget(QLabel("Return Mode"), 1, 0)
+        global_code_policy_label.hide()
+        self.varac_bbs_vault_global_code_policy_combo.hide()
+        return_mode_label = QLabel("Return Mode")
+        vault_policy_inner.addWidget(return_mode_label, 1, 0)
         self.varac_bbs_vault_return_mode_combo = QComboBox()
         self.varac_bbs_vault_return_mode_combo.addItems(
             ["On disconnect", "After inactivity timeout", "Manual operator reset only"]
         )
         self.varac_bbs_vault_return_mode_combo.setMinimumWidth(220)
         vault_policy_inner.addWidget(self.varac_bbs_vault_return_mode_combo, 1, 1)
+        return_mode_label.hide()
+        self.varac_bbs_vault_return_mode_combo.hide()
         vault_policy_inner.addWidget(QLabel("Idle Timeout"), 1, 2)
         self.varac_bbs_vault_idle_timeout_combo = QComboBox()
-        for seconds, label in ((300, "5 min"), (600, "10 min"), (900, "15 min"), (1800, "30 min")):
+        for seconds, label in ((60, "1 min"), (180, "3 min"), (300, "5 min")):
             self.varac_bbs_vault_idle_timeout_combo.addItem(label, seconds)
         vault_policy_inner.addWidget(self.varac_bbs_vault_idle_timeout_combo, 1, 3)
-        vault_policy_inner.addWidget(QLabel("Request Parsing"), 2, 0)
+        request_parsing_label = QLabel("Request Parsing")
+        vault_policy_inner.addWidget(request_parsing_label, 2, 0)
         self.varac_bbs_vault_trigger_mode_combo = QComboBox()
         self.varac_bbs_vault_trigger_mode_combo.addItems(["VarAC session commands", "Command prefix", "Exact code only"])
         self.varac_bbs_vault_trigger_mode_combo.setMinimumWidth(220)
         vault_policy_inner.addWidget(self.varac_bbs_vault_trigger_mode_combo, 2, 1)
+        request_parsing_label.hide()
+        self.varac_bbs_vault_trigger_mode_combo.hide()
         vault_policy_inner.addWidget(QLabel("Failed Attempts"), 2, 2)
         self.varac_bbs_vault_failed_attempt_limit_combo = QComboBox()
         for count in (2, 3, 4, 5):
@@ -3532,9 +3548,11 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_visibility_combo = QComboBox()
         self.varac_bbs_vault_visibility_combo.addItems(["Public", "Allowed callsigns only", "Hidden"])
         vault_editor_grid.addWidget(self.varac_bbs_vault_visibility_combo, 4, 3)
-        vault_editor_grid.addWidget(QLabel("Open Rule"), 5, 0)
+        vault_editor_grid.addWidget(QLabel("Access"), 5, 0)
         self.varac_bbs_vault_open_rule_combo = QComboBox()
-        self.varac_bbs_vault_open_rule_combo.addItems(["Public", "Allowed callsigns only", "Allowed callsigns + access code"])
+        self.varac_bbs_vault_open_rule_combo.addItems(
+            ["Public", "Allowed callsigns only", "Access code required", "Allowed callsigns + access code"]
+        )
         vault_editor_grid.addWidget(self.varac_bbs_vault_open_rule_combo, 5, 1, 1, 3)
         self.varac_bbs_vault_inherit_callsigns_chk = QCheckBox("Inherit Global Allowed Callsigns")
         vault_editor_grid.addWidget(self.varac_bbs_vault_inherit_callsigns_chk, 6, 0, 1, 4)
@@ -3628,7 +3646,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_access_code_confirm_edit.textChanged.connect(self._mark_settings_dirty)
         flamp_edit.textChanged.connect(lambda _text: self._maybe_autofill_varac_bbs_vault_flamp_relay_dir())
 
-        vault_guard_v.addWidget(QLabel("VGuard File Protection"))
+        vault_guard_v.addWidget(QLabel("BBS VGuard Settings"))
         guard_row = QHBoxLayout()
         guard_row.setContentsMargins(0, 0, 0, 0)
         guard_row.setSpacing(8)
@@ -5363,16 +5381,8 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_default_location_combo")
             else DEFAULT_LOCATION_ID
         ) or DEFAULT_LOCATION_ID
-        data["varac_bbs_vault_trigger_mode"] = (
-            self.varac_bbs_vault_trigger_mode_combo.currentText().strip()
-            if hasattr(self, "varac_bbs_vault_trigger_mode_combo")
-            else DEFAULT_TRIGGER_MODE
-        )
-        data["varac_bbs_vault_return_mode"] = (
-            self.varac_bbs_vault_return_mode_combo.currentText().strip()
-            if hasattr(self, "varac_bbs_vault_return_mode_combo")
-            else DEFAULT_RETURN_MODE
-        )
+        data["varac_bbs_vault_trigger_mode"] = "VarAC session commands"
+        data["varac_bbs_vault_return_mode"] = "On disconnect"
         data["varac_bbs_vault_failed_attempt_limit"] = int(
             self.varac_bbs_vault_failed_attempt_limit_combo.currentData()
             if hasattr(self, "varac_bbs_vault_failed_attempt_limit_combo")
@@ -5386,11 +5396,7 @@ class SettingsTab(QWidget):
             and self.varac_bbs_vault_cooldown_combo.currentData() is not None
             else DEFAULT_COOLDOWN_SECONDS
         )
-        data["varac_bbs_vault_global_code_policy"] = (
-            self.varac_bbs_vault_global_code_policy_combo.currentText().strip()
-            if hasattr(self, "varac_bbs_vault_global_code_policy_combo")
-            else DEFAULT_GLOBAL_CODE_POLICY
-        )
+        data["varac_bbs_vault_global_code_policy"] = DEFAULT_GLOBAL_CODE_POLICY
         data["varac_bbs_vault_idle_timeout_seconds"] = int(
             self.varac_bbs_vault_idle_timeout_combo.currentData()
             if hasattr(self, "varac_bbs_vault_idle_timeout_combo")

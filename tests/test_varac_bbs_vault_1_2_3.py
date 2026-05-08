@@ -238,6 +238,98 @@ def test_publish_root_view_respects_callsign_visibility(tmp_path: Path) -> None:
     assert not any("INTEL" in name for name in names)
 
 
+def test_publish_root_view_only_lists_helpers_available_to_caller(tmp_path: Path) -> None:
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    public_dir = Path(created["locations"]) / "Public"
+    restricted_dir = Path(created["locations"]) / "Restricted"
+    code_dir = Path(created["locations"]) / "CodeOnly"
+    public_dir.mkdir(parents=True)
+    restricted_dir.mkdir(parents=True)
+    code_dir.mkdir(parents=True)
+
+    locations = [
+        VaultLocation(id=DEFAULT_LOCATION_ID, name=DEFAULT_LOCATION_NAME, source_dir=str(default_dir), alias="ROOT"),
+        VaultLocation(
+            id="public",
+            name="Public",
+            source_dir=str(public_dir),
+            alias="PUBLIC",
+            open_rule="Public",
+            visibility_rule="Public",
+        ),
+        VaultLocation(
+            id="restricted",
+            name="Restricted",
+            source_dir=str(restricted_dir),
+            alias="RESTRICTED",
+            open_rule="Allowed callsigns only",
+            visibility_rule="Public",
+            inherit_global_allowed_callsigns=False,
+            allowed_callsigns=("W5TTA",),
+        ),
+        VaultLocation(
+            id="code",
+            name="CodeOnly",
+            source_dir=str(code_dir),
+            alias="CODE",
+            open_rule="Access code required",
+            visibility_rule="Public",
+        ),
+    ]
+
+    publish_root_view(
+        sender="",
+        locations=locations,
+        default_location_id=DEFAULT_LOCATION_ID,
+        global_allowed_callsigns=(),
+        limit_access_enabled=False,
+        global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
+        live_bbs_dir=live_bbs,
+        managed_root=managed_root,
+        flamp_enabled=False,
+    )
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert any("PUBLIC" in name for name in names)
+    assert not any("RESTRICTED" in name for name in names)
+    assert not any("CODE" in name for name in names)
+
+    publish_root_view(
+        sender="W5TTA",
+        locations=locations,
+        default_location_id=DEFAULT_LOCATION_ID,
+        global_allowed_callsigns=(),
+        limit_access_enabled=False,
+        global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
+        live_bbs_dir=live_bbs,
+        managed_root=managed_root,
+        flamp_enabled=False,
+    )
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert any("PUBLIC" in name for name in names)
+    assert any("RESTRICTED" in name for name in names)
+    assert any("CODE" in name for name in names)
+
+    publish_root_view(
+        sender="KX9ZZZ",
+        locations=locations,
+        default_location_id=DEFAULT_LOCATION_ID,
+        global_allowed_callsigns=(),
+        limit_access_enabled=False,
+        global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
+        live_bbs_dir=live_bbs,
+        managed_root=managed_root,
+        flamp_enabled=False,
+    )
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert any("PUBLIC" in name for name in names)
+    assert not any("RESTRICTED" in name for name in names)
+    assert any("CODE" in name for name in names)
+
+
 def test_reset_to_default_uses_configured_root_visibility_policy(tmp_path: Path) -> None:
     live_bbs = tmp_path / "BBS"
     live_bbs.mkdir()
@@ -893,6 +985,30 @@ def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: 
     assert any("HUBS requires an access code" in name for name in names)
     assert any("Type HUBS _code_" in name for name in names)
     assert "NATL-RR-260427-1500Z-AIB-sig.k2s" not in names
+    assert "N1MAG-20260429-OpNet-1.b2s" not in names
+
+    settings.set("varac_bbs_vault_runtime_state_v1", {**settings.get("varac_bbs_vault_runtime_state_v1"), "last_datastream_id": 1})
+    (varac_root / "VarAC_traffic.log").write_text(
+        "\n".join(
+            [
+                "06/05/2026 19:44:18 - W8UFO> <BLR>",
+                "06/05/2026 19:45:05 - W8UFO> INTEL",
+                "06/05/2026 19:45:22 - W8UFO> <BLR>",
+                "06/05/2026 19:46:19 - W8UFO> AIB",
+                "06/05/2026 19:46:33 - W8UFO> <BLR>",
+                "06/05/2026 19:47:36 - W8UFO> HUBS",
+                "06/05/2026 19:47:58 - W8UFO> <BLR>",
+                "06/05/2026 19:48:12 - W8UFO> HUBS WRONGCODE",
+                "06/05/2026 19:48:28 - W8UFO> <BLR>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_varac_bbs_vault(settings)
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert any("Incorrect code provided for HUBS" in name for name in names)
+    assert any("try again or return to ROOT" in name for name in names)
     assert "N1MAG-20260429-OpNet-1.b2s" not in names
 
     settings.set("varac_bbs_vault_runtime_state_v1", {**settings.get("varac_bbs_vault_runtime_state_v1"), "last_datastream_id": 1})
