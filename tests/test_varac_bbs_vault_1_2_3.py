@@ -1683,6 +1683,72 @@ def test_run_varac_bbs_vault_flamp_queue_and_block_commands_accept_prefixed_db_e
     assert (live_bbs / state.current_overlay_file).exists()
 
 
+def test_run_varac_bbs_vault_log_list_blocks_publishes_block_list(tmp_path: Path) -> None:
+    varac_root = tmp_path / "varac"
+    varac_root.mkdir()
+    (varac_root / "VarAC_traffic.log").write_text(
+        "06/05/2026 19:53:12 - W5TTA> LIST BLKS F277\n",
+        encoding="utf-8",
+    )
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir()
+    (relay_dir / "F277_MAGNET-S2-RR-260502.sig.b2s").write_text(
+        "<PROG 1.0>{F277}\n<SIZE xx>{F277}2119 2 1024\n{F277:1}BLOCK1\n{F277:2}BLOCK2\n",
+        encoding="utf-8",
+    )
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    (default_dir / "RootInfo.txt").write_text("root", encoding="utf-8")
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_db_path="",
+        varac_path=str(varac_root),
+        varac_bbs_vault_managed_root=str(managed_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_global_code_policy="Allow public locations",
+        varac_bbs_vault_trigger_mode="VarAC session commands",
+        varac_bbs_vault_return_mode="On disconnect",
+        varac_bbs_vault_failed_attempt_limit=3,
+        varac_bbs_vault_failed_attempt_window_seconds=900,
+        varac_bbs_vault_cooldown_seconds=1800,
+        varac_bbs_vault_idle_timeout_seconds=600,
+        varac_bbs_vault_flamp_enabled=True,
+        varac_bbs_vault_flamp_relay_dir=str(relay_dir),
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            }
+        ],
+        varac_bbs_vault_runtime_state_v1={},
+    )
+
+    result = run_varac_bbs_vault(settings)
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    block_list = live_bbs / "BBS_BLOCK_LIST_F277.txt"
+    assert result.enabled
+    assert state.current_view_mode == "flamp-blocks"
+    assert state.last_error == ""
+    assert block_list.exists()
+    assert "AVAILABLE 1,2" in block_list.read_text(encoding="utf-8")
+
+
 def test_flamp_queue_listing_filters_age_and_unassigned_files(tmp_path: Path) -> None:
     relay_dir = tmp_path / "relay"
     relay_dir.mkdir()
