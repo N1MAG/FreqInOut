@@ -87,6 +87,7 @@ from freqinout.core.varac_bbs_vault import (
     DEFAULT_COOLDOWN_SECONDS,
     DEFAULT_FAILED_ATTEMPT_LIMIT,
     DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS,
+    DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS,
     DEFAULT_GLOBAL_CODE_POLICY,
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_LOCATION_ID,
@@ -708,6 +709,7 @@ class SettingsTab(QWidget):
             access_code_iterations = int(row.get("access_code_iterations", DEFAULT_ACCESS_CODE_ITERATIONS) or DEFAULT_ACCESS_CODE_ITERATIONS)
         except Exception:
             access_code_iterations = DEFAULT_ACCESS_CODE_ITERATIONS
+        access_code_plaintext = str(row.get("access_code_plaintext", "") or "").strip()
         return {
             "id": str(row.get("id", "") or "").strip(),
             "name": name,
@@ -723,6 +725,7 @@ class SettingsTab(QWidget):
             "access_code_hash": access_code_hash,
             "access_code_salt": access_code_salt,
             "access_code_iterations": access_code_iterations,
+            "access_code_plaintext": access_code_plaintext,
         }
 
     def _selected_varac_bbs_vault_location(self) -> Optional[Dict[str, object]]:
@@ -751,7 +754,11 @@ class SettingsTab(QWidget):
         if not hasattr(self, "varac_bbs_vault_locations_list"):
             return
         self.varac_bbs_vault_locations_list.blockSignals(True)
-        self.varac_bbs_vault_locations_list.clear()
+        is_table = isinstance(self.varac_bbs_vault_locations_list, QTableWidget)
+        if is_table:
+            self.varac_bbs_vault_locations_list.setRowCount(0)
+        else:
+            self.varac_bbs_vault_locations_list.clear()
         default_location_id = str(
             self.varac_bbs_vault_default_location_combo.currentData()
             if hasattr(self, "varac_bbs_vault_default_location_combo")
@@ -784,12 +791,45 @@ class SettingsTab(QWidget):
                 badges.append("Code")
             if badges:
                 label = f"{label} ({', '.join(badges)})"
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, location_id)
-            item.setToolTip(str(normalized.get("source_dir", "") or "").strip())
-            self.varac_bbs_vault_locations_list.addItem(item)
-            if location_id == self._varac_bbs_vault_selected_location_id:
-                item.setSelected(True)
+            if is_table:
+                row_idx = self.varac_bbs_vault_locations_list.rowCount()
+                self.varac_bbs_vault_locations_list.insertRow(row_idx)
+                folder = str(normalized.get("source_dir", "") or "").strip()
+                folder_display = self._display_varac_bbs_vault_location_path(folder)
+                visible = str(normalized.get("visibility_rule", "Public") or "Public").strip() != "Hidden"
+                code_active = str(normalized.get("open_rule", "Public") or "Public").strip() in {
+                    "Access code required",
+                    "Allowed callsigns + access code",
+                }
+                values = [
+                    name or location_id or "Location",
+                    alias,
+                    folder_display,
+                    "Yes" if enabled else "No",
+                    "Yes" if visible else "No",
+                    "Yes" if code_active else "No",
+                ]
+                for col, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setData(Qt.UserRole, location_id)
+                    item.setToolTip(folder)
+                    if col in {3, 4, 5} and location_id != DEFAULT_LOCATION_ID:
+                        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                        item.setCheckState(Qt.Checked if value == "Yes" else Qt.Unchecked)
+                    else:
+                        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    if location_id == DEFAULT_LOCATION_ID:
+                        item.setToolTip("Default is the system-owned root menu.")
+                    self.varac_bbs_vault_locations_list.setItem(row_idx, col, item)
+                if location_id == self._varac_bbs_vault_selected_location_id:
+                    self.varac_bbs_vault_locations_list.selectRow(row_idx)
+            else:
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, location_id)
+                item.setToolTip(str(normalized.get("source_dir", "") or "").strip())
+                self.varac_bbs_vault_locations_list.addItem(item)
+                if location_id == self._varac_bbs_vault_selected_location_id:
+                    item.setSelected(True)
         self.varac_bbs_vault_locations_list.blockSignals(False)
         self._refresh_varac_bbs_vault_default_location_combo()
         self._load_varac_bbs_vault_editor_from_selection()
@@ -817,7 +857,47 @@ class SettingsTab(QWidget):
             idx = 0
         if idx >= 0:
             self.varac_bbs_vault_default_location_combo.setCurrentIndex(idx)
+        if hasattr(self, "varac_bbs_vault_default_display_edit"):
+            self.varac_bbs_vault_default_display_edit.setText(DEFAULT_LOCATION_NAME)
         self.varac_bbs_vault_default_location_combo.blockSignals(False)
+
+    def _display_varac_bbs_vault_location_path(self, value: object) -> str:
+        txt = str(value or "").strip()
+        if not txt:
+            return ""
+        try:
+            path = Path(txt).expanduser()
+            root_txt = self.varac_bbs_vault_root_edit.text().strip() if hasattr(self, "varac_bbs_vault_root_edit") else ""
+            if root_txt:
+                root = Path(root_txt).expanduser()
+                try:
+                    rel = path.relative_to(root)
+                    return str(Path("FIO_BBS_Vault") / rel)
+                except ValueError:
+                    pass
+            parts = path.parts
+            if "FIO_BBS_Vault" in parts:
+                idx = parts.index("FIO_BBS_Vault")
+                return str(Path(*parts[idx:]))
+        except Exception:
+            pass
+        return txt
+
+    def _varac_bbs_vault_source_path_text(self) -> str:
+        if not hasattr(self, "varac_bbs_vault_source_dir_edit"):
+            return ""
+        full = self.varac_bbs_vault_source_dir_edit.property("full_path")
+        if full:
+            return str(full).strip()
+        return self.varac_bbs_vault_source_dir_edit.text().strip()
+
+    def _set_varac_bbs_vault_source_path(self, value: object) -> None:
+        if not hasattr(self, "varac_bbs_vault_source_dir_edit"):
+            return
+        full = str(value or "").strip()
+        self.varac_bbs_vault_source_dir_edit.setProperty("full_path", full)
+        self.varac_bbs_vault_source_dir_edit.setText(self._display_varac_bbs_vault_location_path(full))
+        self.varac_bbs_vault_source_dir_edit.setToolTip(full)
 
     def _load_varac_bbs_vault_editor_from_selection(self) -> None:
         selected = self._selected_varac_bbs_vault_location()
@@ -831,9 +911,16 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_alias_edit"):
                 self.varac_bbs_vault_alias_edit.setText(str(selected.get("alias", "") or "").strip())
             if hasattr(self, "varac_bbs_vault_description_edit"):
-                self.varac_bbs_vault_description_edit.setText(str(selected.get("description", "") or "").strip())
+                selected_name = str(selected.get("name", "") or "").strip()
+                selected_description = str(selected.get("description", "") or "").strip()
+                if selected_description.lower() in {
+                    f"open {selected_name}".lower(),
+                    f"to open {selected_name}".lower(),
+                }:
+                    selected_description = ""
+                self.varac_bbs_vault_description_edit.setText(selected_description)
             if hasattr(self, "varac_bbs_vault_source_dir_edit"):
-                self.varac_bbs_vault_source_dir_edit.setText(str(selected.get("source_dir", "") or "").strip())
+                self._set_varac_bbs_vault_source_path(str(selected.get("source_dir", "") or "").strip())
             if hasattr(self, "varac_bbs_vault_enabled_chk"):
                 self.varac_bbs_vault_enabled_chk.setChecked(bool(selected.get("enabled", True)))
             if hasattr(self, "varac_bbs_vault_list_in_root_chk"):
@@ -849,7 +936,7 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_allowed_callsigns_edit"):
                 self.varac_bbs_vault_allowed_callsigns_edit.setText(str(selected.get("allowed_callsigns", "") or "").strip())
             if hasattr(self, "varac_bbs_vault_access_code_edit"):
-                self.varac_bbs_vault_access_code_edit.clear()
+                self.varac_bbs_vault_access_code_edit.setText(str(selected.get("access_code_plaintext", "") or "").strip())
             if hasattr(self, "varac_bbs_vault_access_code_confirm_edit"):
                 self.varac_bbs_vault_access_code_confirm_edit.clear()
             self._reset_varac_bbs_vault_code_visibility()
@@ -858,7 +945,9 @@ class SettingsTab(QWidget):
         self._varac_bbs_vault_auto_description = str(selected.get("description", "") or "").strip()
         self._varac_bbs_vault_auto_source_dir = str(selected.get("source_dir", "") or "").strip()
         self._refresh_varac_bbs_vault_code_ui(selected)
+        self._refresh_varac_bbs_vault_helper_preview()
         self._refresh_varac_bbs_vault_source_hint()
+        self._refresh_varac_bbs_vault_default_editor_state()
         self._refresh_varac_bbs_vault_actions()
 
     def _clear_varac_bbs_vault_editor(self) -> None:
@@ -871,7 +960,7 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_description_edit"):
                 self.varac_bbs_vault_description_edit.clear()
             if hasattr(self, "varac_bbs_vault_source_dir_edit"):
-                self.varac_bbs_vault_source_dir_edit.clear()
+                self._set_varac_bbs_vault_source_path("")
             if hasattr(self, "varac_bbs_vault_enabled_chk"):
                 self.varac_bbs_vault_enabled_chk.setChecked(True)
             if hasattr(self, "varac_bbs_vault_list_in_root_chk"):
@@ -894,36 +983,105 @@ class SettingsTab(QWidget):
         self._varac_bbs_vault_auto_description = ""
         self._varac_bbs_vault_auto_source_dir = ""
         self._refresh_varac_bbs_vault_code_ui(None)
+        self._refresh_varac_bbs_vault_helper_preview()
         self._refresh_varac_bbs_vault_source_hint()
+        self._refresh_varac_bbs_vault_default_editor_state()
+
+    def _refresh_varac_bbs_vault_default_editor_state(self) -> None:
+        selected = self._selected_varac_bbs_vault_location()
+        is_default = bool(selected and str(selected.get("id", "") or "").strip() == DEFAULT_LOCATION_ID)
+        editable_widgets = [
+            "varac_bbs_vault_location_name_edit",
+            "varac_bbs_vault_alias_edit",
+            "varac_bbs_vault_description_edit",
+            "varac_bbs_vault_visibility_combo",
+            "varac_bbs_vault_open_rule_combo",
+            "varac_bbs_vault_inherit_callsigns_chk",
+            "varac_bbs_vault_allowed_callsigns_edit",
+            "varac_bbs_vault_access_code_edit",
+            "varac_bbs_vault_access_code_confirm_edit",
+        ]
+        for name in editable_widgets:
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setEnabled(not is_default)
+        if hasattr(self, "varac_bbs_vault_default_info_label"):
+            self.varac_bbs_vault_default_info_label.setVisible(is_default)
 
     def _refresh_varac_bbs_vault_code_ui(self, selected: Optional[Dict[str, object]]) -> None:
         has_code = bool(str((selected or {}).get("access_code_hash", "") or "").strip())
+        has_plaintext = bool(str((selected or {}).get("access_code_plaintext", "") or "").strip())
         if hasattr(self, "varac_bbs_vault_code_status_label"):
-            self.varac_bbs_vault_code_status_label.setText(
-                "Code configured. Stored securely and cannot be viewed; enter a new code to replace it."
-                if has_code
-                else "No code configured. Enter a code twice to set one for this location."
-            )
+            if has_plaintext:
+                text = "Code configured. The local operator can view it here and replace it if needed."
+            elif has_code:
+                text = "Code configured from an older save. It cannot be shown until it is replaced."
+            else:
+                text = "No code configured. Enter a code twice to set one for this location."
+            self.varac_bbs_vault_code_status_label.setText(text)
         if hasattr(self, "varac_bbs_vault_access_code_edit"):
             self.varac_bbs_vault_access_code_edit.setPlaceholderText(
-                "Enter a new access code to replace the saved code" if has_code else "Enter a new access code"
+                "Saved code is shown here when available" if has_plaintext else (
+                    "Enter a new access code to replace the saved code" if has_code else "Enter a new access code"
+                )
             )
             self.varac_bbs_vault_access_code_edit.setToolTip(
-                "Access codes are stored as secure hashes and cannot be shown again after save."
+                "Stored locally for the operator and hashed for caller verification."
             )
         if hasattr(self, "varac_bbs_vault_access_code_confirm_edit"):
             self.varac_bbs_vault_access_code_confirm_edit.setPlaceholderText(
-                "Confirm the new access code to replace the saved code"
-                if has_code
-                else "Confirm the new access code"
+                "Confirm only when changing the code"
             )
             self.varac_bbs_vault_access_code_confirm_edit.setToolTip(
-                "Access codes are stored as secure hashes and cannot be shown again after save."
+                "Required when setting or changing the code."
             )
 
+    def _refresh_varac_bbs_vault_helper_preview(self) -> None:
+        if not hasattr(self, "varac_bbs_vault_helper_preview_label"):
+            return
+        selected = self._selected_varac_bbs_vault_location()
+        if not selected:
+            text = "Select a location to preview the generated helper."
+            self.varac_bbs_vault_helper_preview_label.setText(text)
+            self.varac_bbs_vault_helper_preview_label.setToolTip(text)
+            return
+        location_id = str(selected.get("id", "") or "").strip()
+        name = (
+            self.varac_bbs_vault_location_name_edit.text().strip()
+            if hasattr(self, "varac_bbs_vault_location_name_edit")
+            else str(selected.get("name", "") or "").strip()
+        )
+        alias = normalize_location_alias(
+            self.varac_bbs_vault_alias_edit.text().strip() if hasattr(self, "varac_bbs_vault_alias_edit") else selected.get("alias", ""),
+            name,
+        )
+        description = (
+            self.varac_bbs_vault_description_edit.text().strip()
+            if hasattr(self, "varac_bbs_vault_description_edit")
+            else str(selected.get("description", "") or "").strip()
+        )
+        if description.lower() in {f"open {name}".lower(), f"to open {name}".lower()}:
+            description = ""
+        open_rule = (
+            self.varac_bbs_vault_open_rule_combo.currentText().strip()
+            if hasattr(self, "varac_bbs_vault_open_rule_combo")
+            else str(selected.get("open_rule", "Public") or "Public").strip()
+        )
+        if location_id == DEFAULT_LOCATION_ID:
+            text = (
+                "Default is the main/root BBS menu. It publishes helper files for visible locations "
+                "and any files placed in the Default folder."
+            )
+        else:
+            suffix = " _code_" if open_rule in {"Access code required", "Allowed callsigns + access code"} else ""
+            desc = f" - {description}" if description else ""
+            open_name = name or alias or "location"
+            text = f"BBS MSG - Type {alias}{suffix} to open {open_name} then refresh BBS{desc}.txt"
+        self.varac_bbs_vault_helper_preview_label.setText(text)
+        self.varac_bbs_vault_helper_preview_label.setToolTip(text)
+
     def _default_varac_bbs_vault_location_description(self, name: object) -> str:
-        clean_name = " ".join(str(name or "").strip().split())
-        return f"to open {clean_name}" if clean_name else "to open this location"
+        return ""
 
     def _suggest_varac_bbs_vault_location_source_dir(self, name: object = "") -> str:
         clean_name = " ".join(str(name or "").strip().split())
@@ -969,16 +1127,16 @@ class SettingsTab(QWidget):
         suggested = self._suggest_varac_bbs_vault_location_source_dir(current_name)
         live_match = self._find_varac_bbs_live_match(current_name)
         current_source = (
-            self.varac_bbs_vault_source_dir_edit.text().strip()
+            self._varac_bbs_vault_source_path_text()
             if hasattr(self, "varac_bbs_vault_source_dir_edit")
             else ""
         )
         parts: List[str] = []
         if suggested:
             parts.append(
-                f"Suggested BBS-area source folder: {suggested}"
+                f"Location folder: {suggested}"
                 if current_source
-                else f"Suggested BBS-area source folder: {suggested} (will be created on save if needed)."
+                else f"Location folder: {suggested} (will be created on save if needed)."
             )
         else:
             parts.append(
@@ -989,6 +1147,20 @@ class SettingsTab(QWidget):
         hint = " ".join(parts)
         self.varac_bbs_vault_source_hint_label.setText(hint)
         self.varac_bbs_vault_source_hint_label.setToolTip(hint)
+
+    def _default_varac_guard_quarantine_dir_text(self) -> str:
+        managed_root = ""
+        if hasattr(self, "varac_bbs_vault_root_edit"):
+            managed_root = self.varac_bbs_vault_root_edit.text().strip()
+        if not managed_root and hasattr(self, "varac_bbs_dir_edit"):
+            managed_root = compute_default_managed_root(self.varac_bbs_dir_edit.text().strip())
+        if managed_root:
+            return str(Path(managed_root).expanduser() / "quarantine")
+        if hasattr(self, "msg_paths_edits") and self.msg_paths_edits.get("varac"):
+            incoming = self.msg_paths_edits["varac"].text().strip()
+            if incoming:
+                return str(Path(incoming).expanduser().parent / "FIO_BBS_Vault" / "quarantine")
+        return ""
 
     def _autofill_varac_bbs_vault_location_defaults(self, *, force: bool = False) -> None:
         if self._varac_bbs_vault_editor_loading:
@@ -1001,19 +1173,14 @@ class SettingsTab(QWidget):
         if not current_name:
             self._refresh_varac_bbs_vault_source_hint()
             return
-        default_description = self._default_varac_bbs_vault_location_description(current_name)
-        if hasattr(self, "varac_bbs_vault_description_edit"):
-            current_description = self.varac_bbs_vault_description_edit.text().strip()
-            if force or not current_description or current_description == self._varac_bbs_vault_auto_description:
-                if current_description != default_description:
-                    self.varac_bbs_vault_description_edit.setText(default_description)
-                self._varac_bbs_vault_auto_description = default_description
+        if hasattr(self, "varac_bbs_vault_description_edit") and force:
+            self._varac_bbs_vault_auto_description = self.varac_bbs_vault_description_edit.text().strip()
         suggested_source = self._suggest_varac_bbs_vault_location_source_dir(current_name)
         if suggested_source and hasattr(self, "varac_bbs_vault_source_dir_edit"):
             current_source = self.varac_bbs_vault_source_dir_edit.text().strip()
             if force or not current_source or current_source == self._varac_bbs_vault_auto_source_dir:
                 if current_source != suggested_source:
-                    self.varac_bbs_vault_source_dir_edit.setText(suggested_source)
+                    self._set_varac_bbs_vault_source_path(suggested_source)
                 self._varac_bbs_vault_auto_source_dir = suggested_source
         self._refresh_varac_bbs_vault_source_hint()
 
@@ -1191,14 +1358,62 @@ class SettingsTab(QWidget):
         self._autofill_varac_bbs_vault_location_defaults(force=True)
         self._refresh_varac_bbs_vault_actions()
 
+    def _persist_varac_bbs_vault_locations_cache(self) -> None:
+        if hasattr(self.settings, "set"):
+            self.settings.set("varac_bbs_vault_locations_v1", list(self._varac_bbs_vault_locations_cache))
+
     def _on_varac_bbs_vault_location_selected(self) -> None:
         if not hasattr(self, "varac_bbs_vault_locations_list"):
             return
-        selected = self.varac_bbs_vault_locations_list.selectedItems()
-        self._varac_bbs_vault_selected_location_id = (
-            str(selected[0].data(Qt.UserRole) or "").strip() if selected else ""
-        )
+        if isinstance(self.varac_bbs_vault_locations_list, QTableWidget):
+            selected_rows = self.varac_bbs_vault_locations_list.selectionModel().selectedRows()
+            if selected_rows:
+                item = self.varac_bbs_vault_locations_list.item(selected_rows[0].row(), 0)
+                self._varac_bbs_vault_selected_location_id = str(item.data(Qt.UserRole) or "").strip() if item else ""
+            else:
+                self._varac_bbs_vault_selected_location_id = ""
+        else:
+            selected = self.varac_bbs_vault_locations_list.selectedItems()
+            self._varac_bbs_vault_selected_location_id = (
+                str(selected[0].data(Qt.UserRole) or "").strip() if selected else ""
+            )
         self._load_varac_bbs_vault_editor_from_selection()
+
+    def _on_varac_bbs_vault_location_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._varac_bbs_vault_editor_loading:
+            return
+        if not isinstance(item, QTableWidgetItem):
+            return
+        col = item.column()
+        if col not in {3, 4, 5}:
+            return
+        location_id = str(item.data(Qt.UserRole) or "").strip()
+        if not location_id or location_id == DEFAULT_LOCATION_ID:
+            return
+        checked = item.checkState() == Qt.Checked
+        for idx, row in enumerate(self._varac_bbs_vault_locations_cache):
+            normalized = self._normalize_varac_bbs_vault_location(row)
+            if str(normalized.get("id", "") or "").strip() != location_id:
+                continue
+            if col == 3:
+                normalized["enabled"] = checked
+            elif col == 4:
+                normalized["visibility_rule"] = "Public" if checked else "Hidden"
+            elif col == 5:
+                current_rule = str(normalized.get("open_rule", "Public") or "Public").strip()
+                if checked and current_rule == "Public":
+                    normalized["open_rule"] = "Access code required"
+                elif checked and current_rule == "Allowed callsigns only":
+                    normalized["open_rule"] = "Allowed callsigns + access code"
+                elif not checked and current_rule == "Access code required":
+                    normalized["open_rule"] = "Public"
+                elif not checked and current_rule == "Allowed callsigns + access code":
+                    normalized["open_rule"] = "Allowed callsigns only"
+            self._varac_bbs_vault_locations_cache[idx] = normalized
+            break
+        self._persist_varac_bbs_vault_locations_cache()
+        self._mark_settings_dirty()
+        self._refresh_varac_bbs_vault_location_list()
 
     def _choose_varac_bbs_vault_root(self) -> None:
         root_txt = self._computed_varac_bbs_vault_default_root()
@@ -1208,20 +1423,25 @@ class SettingsTab(QWidget):
         QMessageBox.information(
             self,
             "Managed BBS Vault",
-            "Managed Root is automatic in this release.\n\n"
-            "FreqInOut always creates the vault in the VarAC BBS area, next to the live BBS directory.",
+            "FIO creates this folder automatically next to the live VarAC BBS folder.\n\n"
+            "Use the location table below to manage BBS locations.",
+        )
+
+    def _show_varac_bbs_vault_default_info(self) -> None:
+        QMessageBox.information(
+            self,
+            "Default BBS Menu",
+            "Default is the FIO Managed Root BBS menu.\n\n"
+            "It is not the live VarAC BBS folder. Callers see helper files here first. "
+            "After they type a location alias, FIO publishes that location into the live VarAC BBS folder.",
         )
 
     def _choose_varac_bbs_vault_location_source(self) -> None:
-        start = (
-            self.varac_bbs_vault_source_dir_edit.text().strip()
-            if hasattr(self, "varac_bbs_vault_source_dir_edit")
-            else ""
-        )
+        start = self._varac_bbs_vault_source_path_text()
         fn = QFileDialog.getExistingDirectory(self, "Select location source folder", start)
         if not fn:
             return
-        self.varac_bbs_vault_source_dir_edit.setText(fn)
+        self._set_varac_bbs_vault_source_path(fn)
         self._varac_bbs_vault_auto_source_dir = fn
         self._mark_settings_dirty()
         self._refresh_varac_bbs_vault_source_hint()
@@ -1263,7 +1483,7 @@ class SettingsTab(QWidget):
                 else ""
             ),
             "source_dir": (
-                self.varac_bbs_vault_source_dir_edit.text().strip()
+                self._varac_bbs_vault_source_path_text()
                 if hasattr(self, "varac_bbs_vault_source_dir_edit")
                 else ""
             ),
@@ -1320,6 +1540,9 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_access_code_confirm_edit")
             else ""
         )
+        saved_plaintext = str(selected.get("access_code_plaintext", "") or "").strip()
+        if access_code == saved_plaintext and not confirm_code:
+            return False
         return bool(access_code or confirm_code)
 
     def _sanitize_varac_bbs_vault_alias_text(self, text: str) -> None:
@@ -1354,7 +1577,7 @@ class SettingsTab(QWidget):
             else ""
         )
         source_dir = (
-            self.varac_bbs_vault_source_dir_edit.text().strip()
+            self._varac_bbs_vault_source_path_text()
             if hasattr(self, "varac_bbs_vault_source_dir_edit")
             else ""
         )
@@ -1362,23 +1585,50 @@ class SettingsTab(QWidget):
             QMessageBox.warning(self, "Managed BBS Vault", "Set a location name before saving.")
             return False
         if not source_dir:
-            QMessageBox.warning(self, "Managed BBS Vault", "Set a source folder before saving.")
-            return False
+            source_dir = self._suggest_varac_bbs_vault_location_source_dir(name)
+            self._set_varac_bbs_vault_source_path(source_dir)
         if not alias:
             QMessageBox.warning(self, "Managed BBS Vault", "Set a valid alias before saving.")
             return False
         source_path = Path(source_dir).expanduser()
+        selected = self._selected_varac_bbs_vault_location() or {}
+        old_source_txt = str(selected.get("source_dir", "") or "").strip()
+        old_source_path = Path(old_source_txt).expanduser() if old_source_txt else None
         if not source_path.exists():
+            if old_source_path and old_source_path.exists() and old_source_path.is_dir() and old_source_path != source_path:
+                response = QMessageBox.question(
+                    self,
+                    "Rename Location Folder",
+                    "Rename the location folder to match the new location name?\n\n"
+                    f"From:\n{old_source_path}\n\nTo:\n{source_path}",
+                    QMessageBox.Yes | QMessageBox.Cancel,
+                    QMessageBox.Yes,
+                )
+                if response != QMessageBox.Yes:
+                    return False
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                old_source_path.rename(source_path)
+            else:
+                response = QMessageBox.question(
+                    self,
+                    "Managed BBS Vault",
+                    f"Create this location folder?\n\n{source_path}",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if response != QMessageBox.Yes:
+                    return False
+                source_path.mkdir(parents=True, exist_ok=True)
+        elif old_source_path and old_source_path.exists() and old_source_path.is_dir() and old_source_path != source_path:
             response = QMessageBox.question(
                 self,
-                "Managed BBS Vault",
-                f"Create this source folder?\n\n{source_path}",
-                QMessageBox.Yes | QMessageBox.No,
+                "Location Folder Exists",
+                "A folder already exists for the new location name. Use that folder for this location?",
+                QMessageBox.Yes | QMessageBox.Cancel,
                 QMessageBox.Yes,
             )
             if response != QMessageBox.Yes:
                 return False
-            source_path.mkdir(parents=True, exist_ok=True)
         if not source_path.is_dir():
             QMessageBox.warning(self, "Managed BBS Vault", "Location source must be a directory.")
             return False
@@ -1392,7 +1642,6 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_access_code_confirm_edit")
             else ""
         )
-        selected = self._selected_varac_bbs_vault_location() or {}
         location_id = str(selected.get("id", "") or "").strip()
         for existing in self._varac_bbs_vault_locations_cache:
             existing_id = str(existing.get("id", "") or "").strip()
@@ -1418,6 +1667,23 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_open_rule_combo")
             else "Public"
         )
+        inherit_callsigns = bool(
+            self.varac_bbs_vault_inherit_callsigns_chk.isChecked()
+            if hasattr(self, "varac_bbs_vault_inherit_callsigns_chk")
+            else True
+        )
+        location_callsigns = format_callsign_list(
+            self.varac_bbs_vault_allowed_callsigns_edit.text().strip()
+            if hasattr(self, "varac_bbs_vault_allowed_callsigns_edit")
+            else ""
+        )
+        if open_rule in {"Allowed callsigns only", "Allowed callsigns + access code"} and not inherit_callsigns and not location_callsigns:
+            QMessageBox.warning(
+                self,
+                "Managed BBS Vault",
+                "Enter Location Allowed Callsigns or turn on Inherit Global Allowed Callsigns.",
+            )
+            return False
         requires_code = (
             location_id != DEFAULT_LOCATION_ID
             and (
@@ -1433,17 +1699,21 @@ class SettingsTab(QWidget):
                 "This location needs an access code under the current policy before it can be saved.",
             )
             return False
-        if access_code or confirm_code:
+        saved_plaintext = str(selected.get("access_code_plaintext", "") or "").strip()
+        code_changed = bool(access_code or confirm_code) and access_code != saved_plaintext
+        if code_changed:
             if access_code != confirm_code:
                 QMessageBox.warning(self, "Managed BBS Vault", "Access code confirmation does not match.")
                 return False
             code_payload = hash_access_code(access_code)
+            code_plaintext = access_code
         else:
             code_payload = {
                 "access_code_hash": str(selected.get("access_code_hash", "") or "").strip(),
                 "access_code_salt": str(selected.get("access_code_salt", "") or "").strip(),
                 "access_code_iterations": int(selected.get("access_code_iterations", DEFAULT_ACCESS_CODE_ITERATIONS) or DEFAULT_ACCESS_CODE_ITERATIONS),
             }
+            code_plaintext = saved_plaintext
         row = {
             "id": location_id,
             "name": " ".join(name.split()),
@@ -1451,11 +1721,7 @@ class SettingsTab(QWidget):
             "description": description,
             "source_dir": str(source_path),
             "enabled": bool(self.varac_bbs_vault_enabled_chk.isChecked() if hasattr(self, "varac_bbs_vault_enabled_chk") else True),
-            "list_in_root_menu": bool(
-                self.varac_bbs_vault_list_in_root_chk.isChecked()
-                if hasattr(self, "varac_bbs_vault_list_in_root_chk")
-                else True
-            ),
+            "list_in_root_menu": location_id != DEFAULT_LOCATION_ID,
             "visibility_rule": (
                 self.varac_bbs_vault_visibility_combo.currentText().strip()
                 if hasattr(self, "varac_bbs_vault_visibility_combo")
@@ -1466,19 +1732,12 @@ class SettingsTab(QWidget):
                 if hasattr(self, "varac_bbs_vault_open_rule_combo")
                 else "Public"
             ),
-            "inherit_global_allowed_callsigns": bool(
-                self.varac_bbs_vault_inherit_callsigns_chk.isChecked()
-                if hasattr(self, "varac_bbs_vault_inherit_callsigns_chk")
-                else True
-            ),
-            "allowed_callsigns": format_callsign_list(
-                self.varac_bbs_vault_allowed_callsigns_edit.text().strip()
-                if hasattr(self, "varac_bbs_vault_allowed_callsigns_edit")
-                else ""
-            ),
+            "inherit_global_allowed_callsigns": inherit_callsigns,
+            "allowed_callsigns": location_callsigns,
             "access_code_hash": str(code_payload.get("access_code_hash", "") or "").strip(),
             "access_code_salt": str(code_payload.get("access_code_salt", "") or "").strip(),
             "access_code_iterations": int(code_payload.get("access_code_iterations", DEFAULT_ACCESS_CODE_ITERATIONS) or DEFAULT_ACCESS_CODE_ITERATIONS),
+            "access_code_plaintext": code_plaintext,
         }
         updated = False
         for idx, existing in enumerate(self._varac_bbs_vault_locations_cache):
@@ -1493,6 +1752,7 @@ class SettingsTab(QWidget):
             self.varac_bbs_vault_default_location_combo.addItem(row["name"], location_id)
             self.varac_bbs_vault_default_location_combo.setCurrentIndex(0)
         self._refresh_varac_bbs_vault_location_list()
+        self._persist_varac_bbs_vault_locations_cache()
         self._mark_settings_dirty()
         self._refresh_section_titles()
         self._varac_bbs_vault_auto_description = description
@@ -1508,6 +1768,16 @@ class SettingsTab(QWidget):
         if location_id == DEFAULT_LOCATION_ID:
             QMessageBox.warning(self, "Managed BBS Vault", "The Default location cannot be removed.")
             return
+        response = QMessageBox.question(
+            self,
+            "Delete BBS Location",
+            "Delete this BBS location from FIO?\n\n"
+            "The location folder and files will be left on disk.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if response != QMessageBox.Yes:
+            return
         self._varac_bbs_vault_locations_cache = [
             row for row in self._varac_bbs_vault_locations_cache if str(row.get("id", "") or "").strip() != location_id
         ]
@@ -1519,6 +1789,7 @@ class SettingsTab(QWidget):
                 self.varac_bbs_vault_default_location_combo.setCurrentIndex(idx)
         self._varac_bbs_vault_selected_location_id = ""
         self._refresh_varac_bbs_vault_location_list()
+        self._persist_varac_bbs_vault_locations_cache()
         self._mark_settings_dirty()
         self._refresh_section_titles()
 
@@ -1623,6 +1894,7 @@ class SettingsTab(QWidget):
                 "access_code_hash": "",
                 "access_code_salt": "",
                 "access_code_iterations": DEFAULT_ACCESS_CODE_ITERATIONS,
+                "access_code_plaintext": "",
             }
             locations.insert(0, default_row)
         else:
@@ -1670,12 +1942,14 @@ class SettingsTab(QWidget):
         if hasattr(self.settings, "set_many"):
             self.settings.set_many(
                 {
+                    "varac_bbs_vault_locations_v1": list(self._varac_bbs_vault_locations_cache),
                     "varac_bbs_vault_runtime_state_v1": vault_runtime_state_to_data(runtime_state),
                     "varac_bbs_vault_last_summary": runtime_state.last_action,
                 },
                 save=True,
             )
         else:
+            self.settings.set("varac_bbs_vault_locations_v1", list(self._varac_bbs_vault_locations_cache))
             self.settings.set("varac_bbs_vault_runtime_state_v1", vault_runtime_state_to_data(runtime_state))
             self.settings.set("varac_bbs_vault_last_summary", runtime_state.last_action)
         self._refresh_varac_bbs_vault_location_list()
@@ -1684,6 +1958,8 @@ class SettingsTab(QWidget):
         self._refresh_section_titles()
 
     def _reset_varac_bbs_vault_to_default(self) -> None:
+        if self._varac_bbs_vault_editor_has_pending_changes() and not self._save_varac_bbs_vault_location():
+            return
         root_txt = self.varac_bbs_vault_root_edit.text().strip() if hasattr(self, "varac_bbs_vault_root_edit") else ""
         live_bbs_dir = self.varac_bbs_dir_edit.text().strip() if hasattr(self, "varac_bbs_dir_edit") else ""
         default_id = (
@@ -1888,6 +2164,12 @@ class SettingsTab(QWidget):
                 self.varac_bbs_vault_flamp_relay_dir_edit.text().strip()
                 if hasattr(self, "varac_bbs_vault_flamp_relay_dir_edit")
                 else ""
+            ),
+            "varac_bbs_vault_flamp_listing_max_age_days": int(
+                self.varac_bbs_vault_flamp_listing_age_combo.currentData()
+                if hasattr(self, "varac_bbs_vault_flamp_listing_age_combo")
+                and self.varac_bbs_vault_flamp_listing_age_combo.currentData() is not None
+                else DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS
             ),
             "varac_bbs_vault_locations_v1": list(self._varac_bbs_vault_locations_cache),
             "varac_bbs_vault_last_summary": str(self.settings.get("varac_bbs_vault_last_summary", "") or "").strip(),
@@ -2870,22 +3152,6 @@ class SettingsTab(QWidget):
         fast_light_autofill_status_row.addWidget(self.fast_light_autofill_status_label, 1)
         fast_light_v.addLayout(fast_light_autofill_status_row)
 
-        # Check-in log file copy helpers
-        launch_row = QHBoxLayout()
-        launch_row.setContentsMargins(0, 0, 0, 0)
-        launch_row.setSpacing(8)
-        launch_label = QLabel("Check-in Log Paths")
-        launch_label.setFixedWidth(msg_label_width)
-        launch_row.addWidget(launch_label)
-        self.copy_main_btn = QPushButton("Copy Main")
-        self.copy_main_btn.clicked.connect(lambda: self._copy_text(self.fldigi_main_file_edit))
-        self.copy_late_btn = QPushButton("Copy New/Late")
-        self.copy_late_btn.clicked.connect(lambda: self._copy_text(self.fldigi_late_file_edit))
-        launch_row.addWidget(self.copy_main_btn)
-        launch_row.addWidget(self.copy_late_btn)
-        launch_row.addStretch()
-        fast_light_v.addLayout(launch_row)
-
         fast_light_container = QWidget()
         fast_light_container.setLayout(fast_light_v)
         fast_light_group = self._make_collapsible_group(
@@ -3081,6 +3347,7 @@ class SettingsTab(QWidget):
 
         def _make_varac_subgroup(title: str, description: str = "") -> QVBoxLayout:
             group = QGroupBox(title)
+            group.setStyleSheet("QGroupBox::title { font-weight: 700; }")
             layout = QVBoxLayout()
             layout.setContentsMargins(8, 10, 8, 10)
             layout.setSpacing(6)
@@ -3102,7 +3369,11 @@ class SettingsTab(QWidget):
         )
         vault_guard_v = _make_varac_subgroup(
             "BBS Vault Settings",
-            "Managed BBS Vault publishes one controlled view into the live VarAC BBS while keeping source folders in a managed root.",
+            "FIO can publish a simple menu of BBS locations into the live VarAC BBS folder.",
+        )
+        vguard_v = _make_varac_subgroup(
+            "BBS VGuard Settings",
+            "VGuard checks received VarAC files against your allowed BBS callers. It is separate from the BBS vault.",
         )
 
         varac_row = QHBoxLayout()
@@ -3258,10 +3529,10 @@ class SettingsTab(QWidget):
         bbs_access_actions_row = QHBoxLayout()
         bbs_access_actions_row.setContentsMargins(0, 0, 0, 0)
         bbs_access_actions_row.setSpacing(8)
-        self.varac_bbs_sync_btn = QPushButton("Sync VarAC BBS Settings")
+        self.varac_bbs_sync_btn = QPushButton("Import VarAC BBS Settings")
         self.varac_bbs_sync_btn.clicked.connect(self._sync_varac_bbs_from_ini)
         bbs_access_actions_row.addWidget(self.varac_bbs_sync_btn)
-        self.varac_bbs_write_btn = QPushButton("Write to VarAC.ini")
+        self.varac_bbs_write_btn = QPushButton("Apply VarAC BBS Settings")
         self.varac_bbs_write_btn.clicked.connect(self._sync_varac_bbs_to_ini)
         bbs_access_actions_row.addWidget(self.varac_bbs_write_btn)
         bbs_access_actions_row.addStretch()
@@ -3291,13 +3562,16 @@ class SettingsTab(QWidget):
         bbs_callsigns_layout.addLayout(bbs_callsigns_lookup_row)
         self.varac_bbs_callsigns_list = QListWidget()
         self.varac_bbs_callsigns_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.varac_bbs_callsigns_list.setMaximumHeight(108)
+        self.varac_bbs_callsigns_list.setMinimumHeight(74)
+        self.varac_bbs_callsigns_list.setMaximumHeight(86)
+        self.varac_bbs_callsigns_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         bbs_callsigns_layout.addWidget(self.varac_bbs_callsigns_list)
         bbs_callsigns_hint = QLabel(
             "Lookup uses known operators when available. Manual callsign entry is still allowed."
         )
         bbs_callsigns_hint.setWordWrap(True)
         bbs_callsigns_layout.addWidget(bbs_callsigns_hint)
+        bbs_callsigns_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.varac_bbs_callsign_lookup_edit.textChanged.connect(lambda _text: self._refresh_varac_bbs_callsign_actions())
         self.varac_bbs_callsign_lookup_edit.returnPressed.connect(self._add_varac_bbs_allowed_callsign)
         self.varac_bbs_add_callsign_btn.clicked.connect(self._add_varac_bbs_allowed_callsign)
@@ -3309,7 +3583,7 @@ class SettingsTab(QWidget):
 
         bbs_sync_status_row = QHBoxLayout()
         bbs_sync_status_row.setContentsMargins(0, 0, 0, 0)
-        self.varac_bbs_sync_status_label = QLabel("No VarAC.ini BBS sync yet.")
+        self.varac_bbs_sync_status_label = QLabel("No VarAC BBS settings sync yet.")
         self.varac_bbs_sync_status_label.setWordWrap(True)
         bbs_sync_status_row.addWidget(self.varac_bbs_sync_status_label, 1)
         bbs_settings_v.addLayout(bbs_sync_status_row)
@@ -3360,18 +3634,29 @@ class SettingsTab(QWidget):
         vault_enabled_top.setSpacing(10)
         self.varac_bbs_vault_enabled_chk_main = QCheckBox("Enable Managed BBS Vault")
         vault_enabled_top.addWidget(self.varac_bbs_vault_enabled_chk_main)
-        self.varac_bbs_vault_initialize_btn = QPushButton("Initialize Managed Vault")
-        self.varac_bbs_vault_initialize_btn.clicked.connect(self._initialize_varac_bbs_vault)
-        vault_enabled_top.addWidget(self.varac_bbs_vault_initialize_btn)
-        self.varac_bbs_vault_reset_btn = QPushButton("Reset To Default")
-        self.varac_bbs_vault_reset_btn.clicked.connect(self._reset_varac_bbs_vault_to_default)
-        vault_enabled_top.addWidget(self.varac_bbs_vault_reset_btn)
+        vault_enabled_top.addWidget(QLabel("Turn on FIO-managed BBS menus."))
         vault_enabled_top.addStretch()
         vault_enabled_inner.addLayout(vault_enabled_top)
+        vault_init_row = QHBoxLayout()
+        vault_init_row.setContentsMargins(0, 0, 0, 0)
+        vault_init_row.setSpacing(10)
+        self.varac_bbs_vault_initialize_btn = QPushButton("Initialize Managed Vault")
+        self.varac_bbs_vault_initialize_btn.clicked.connect(self._initialize_varac_bbs_vault)
+        vault_init_row.addWidget(self.varac_bbs_vault_initialize_btn)
+        vault_init_row.addWidget(QLabel("Create the FIO_BBS_Vault folders next to the live VarAC BBS folder."))
+        vault_init_row.addStretch()
+        vault_enabled_inner.addLayout(vault_init_row)
+        vault_reset_row = QHBoxLayout()
+        vault_reset_row.setContentsMargins(0, 0, 0, 0)
+        vault_reset_row.setSpacing(10)
+        self.varac_bbs_vault_reset_btn = QPushButton("Reset To Default")
+        self.varac_bbs_vault_reset_btn.clicked.connect(self._reset_varac_bbs_vault_to_default)
+        vault_reset_row.addWidget(self.varac_bbs_vault_reset_btn)
+        vault_reset_row.addWidget(QLabel("Return callers to the root BBS menu and publish the helper files."))
+        vault_reset_row.addStretch()
+        vault_enabled_inner.addLayout(vault_reset_row)
         vault_enabled_note = QLabel(
-            "Managed BBS Services keeps the live VarAC BBS folder stable while FreqInOut publishes "
-            "a root menu, virtual folders, and optional FLAMP relay responses for the active requester. "
-            "Access codes are operational controls, not strong secrets."
+            "The live VarAC BBS folder stays simple. FIO swaps in the menu or selected location when callers use aliases."
         )
         vault_enabled_note.setWordWrap(True)
         vault_enabled_inner.addWidget(vault_enabled_note)
@@ -3399,6 +3684,13 @@ class SettingsTab(QWidget):
         )
         self.varac_bbs_vault_root_hint_label.setWordWrap(True)
         vault_guard_v.addWidget(self.varac_bbs_vault_root_hint_label)
+        self.varac_bbs_vault_default_info_label = QLabel(
+            "Default is the FIO Managed Root BBS menu. It is separate from the live VarAC BBS folder. "
+            "Callers see helper files here before they choose a location."
+        )
+        self.varac_bbs_vault_default_info_label.setWordWrap(True)
+        self.varac_bbs_vault_default_info_label.hide()
+        vault_guard_v.addWidget(self.varac_bbs_vault_default_info_label)
 
         vault_guard_v.addWidget(QLabel("Vault Session"))
         vault_policy_row = QHBoxLayout()
@@ -3415,7 +3707,16 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_default_location_combo.setToolTip(
             "Default is the system-owned root menu and is not edited as a normal location."
         )
+        self.varac_bbs_vault_default_location_combo.hide()
         vault_policy_inner.addWidget(self.varac_bbs_vault_default_location_combo, 0, 1)
+        self.varac_bbs_vault_default_display_edit = QLineEdit(DEFAULT_LOCATION_NAME)
+        self.varac_bbs_vault_default_display_edit.setReadOnly(True)
+        self.varac_bbs_vault_default_display_edit.setToolTip("Default is the FIO Managed Root BBS menu, not the live VarAC BBS folder.")
+        vault_policy_inner.addWidget(self.varac_bbs_vault_default_display_edit, 0, 1)
+        self.varac_bbs_vault_default_info_btn = QPushButton("Info")
+        self.varac_bbs_vault_default_info_btn.setFixedWidth(70)
+        self.varac_bbs_vault_default_info_btn.clicked.connect(self._show_varac_bbs_vault_default_info)
+        vault_policy_inner.addWidget(self.varac_bbs_vault_default_info_btn, 0, 2)
         global_code_policy_label = QLabel("Global Code Policy")
         vault_policy_inner.addWidget(global_code_policy_label, 0, 2)
         self.varac_bbs_vault_global_code_policy_combo = QComboBox()
@@ -3440,11 +3741,9 @@ class SettingsTab(QWidget):
         vault_policy_inner.addWidget(self.varac_bbs_vault_return_mode_combo, 1, 1)
         return_mode_label.hide()
         self.varac_bbs_vault_return_mode_combo.hide()
-        vault_policy_inner.addWidget(QLabel("Idle Timeout"), 1, 2)
         self.varac_bbs_vault_idle_timeout_combo = QComboBox()
         for seconds, label in ((60, "1 min"), (180, "3 min"), (300, "5 min")):
             self.varac_bbs_vault_idle_timeout_combo.addItem(label, seconds)
-        vault_policy_inner.addWidget(self.varac_bbs_vault_idle_timeout_combo, 1, 3)
         request_parsing_label = QLabel("Request Parsing")
         vault_policy_inner.addWidget(request_parsing_label, 2, 0)
         self.varac_bbs_vault_trigger_mode_combo = QComboBox()
@@ -3453,17 +3752,29 @@ class SettingsTab(QWidget):
         vault_policy_inner.addWidget(self.varac_bbs_vault_trigger_mode_combo, 2, 1)
         request_parsing_label.hide()
         self.varac_bbs_vault_trigger_mode_combo.hide()
-        vault_policy_inner.addWidget(QLabel("Failed Attempts"), 2, 2)
         self.varac_bbs_vault_failed_attempt_limit_combo = QComboBox()
         for count in (2, 3, 4, 5):
             self.varac_bbs_vault_failed_attempt_limit_combo.addItem(str(count), count)
-        vault_policy_inner.addWidget(self.varac_bbs_vault_failed_attempt_limit_combo, 2, 3)
-        vault_policy_inner.addWidget(QLabel("Cooldown"), 3, 0)
         self.varac_bbs_vault_cooldown_combo = QComboBox()
         for seconds, label in ((900, "15 min"), (1800, "30 min"), (3600, "60 min")):
             self.varac_bbs_vault_cooldown_combo.addItem(label, seconds)
-        vault_policy_inner.addWidget(self.varac_bbs_vault_cooldown_combo, 3, 1)
-        vault_policy_inner.addWidget(QLabel("FLAMP Relay"), 3, 2)
+        vault_timer_row = QHBoxLayout()
+        vault_timer_row.setContentsMargins(0, 0, 0, 0)
+        vault_timer_row.setSpacing(8)
+        vault_timer_row.addWidget(QLabel("Return Timer"))
+        self.varac_bbs_vault_idle_timeout_combo.setMinimumWidth(110)
+        vault_timer_row.addWidget(self.varac_bbs_vault_idle_timeout_combo)
+        vault_timer_row.addSpacing(14)
+        vault_timer_row.addWidget(QLabel("Bad Code Limit"))
+        self.varac_bbs_vault_failed_attempt_limit_combo.setMinimumWidth(84)
+        vault_timer_row.addWidget(self.varac_bbs_vault_failed_attempt_limit_combo)
+        vault_timer_row.addSpacing(14)
+        vault_timer_row.addWidget(QLabel("Cooldown"))
+        self.varac_bbs_vault_cooldown_combo.setMinimumWidth(120)
+        vault_timer_row.addWidget(self.varac_bbs_vault_cooldown_combo)
+        vault_timer_row.addStretch()
+        vault_policy_inner.addLayout(vault_timer_row, 1, 0, 1, 4)
+        vault_policy_inner.addWidget(QLabel("FLAMP Relay"), 4, 0)
         flamp_policy_row = QHBoxLayout()
         flamp_policy_row.setContentsMargins(0, 0, 0, 0)
         flamp_policy_row.setSpacing(8)
@@ -3475,16 +3786,21 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_flamp_relay_browse_btn = QPushButton("Browse")
         self.varac_bbs_vault_flamp_relay_browse_btn.clicked.connect(self._choose_varac_bbs_vault_flamp_relay_dir)
         flamp_policy_row.addWidget(self.varac_bbs_vault_flamp_relay_browse_btn)
-        vault_policy_inner.addLayout(flamp_policy_row, 3, 3)
+        vault_policy_inner.addLayout(flamp_policy_row, 4, 1, 1, 3)
+        vault_policy_inner.addWidget(QLabel("Limit FLAMP listing to files newer than"), 5, 0)
+        self.varac_bbs_vault_flamp_listing_age_combo = QComboBox()
+        for days in (3, 5, 7, 10, 14, 30):
+            self.varac_bbs_vault_flamp_listing_age_combo.addItem(f"{days} days", days)
+        vault_policy_inner.addWidget(self.varac_bbs_vault_flamp_listing_age_combo, 5, 1)
         self.varac_bbs_vault_flamp_relay_hint_label = QLabel(
             "Set FLAMP/rx first and FreqInOut will suggest a sibling relay folder automatically."
         )
         self.varac_bbs_vault_flamp_relay_hint_label.setWordWrap(True)
-        vault_policy_inner.addWidget(self.varac_bbs_vault_flamp_relay_hint_label, 4, 0, 1, 4)
+        vault_policy_inner.addWidget(self.varac_bbs_vault_flamp_relay_hint_label, 6, 0, 1, 4)
         vault_policy_row.addLayout(vault_policy_inner, 1)
         vault_guard_v.addLayout(vault_policy_row)
 
-        vault_guard_v.addWidget(QLabel("Locations"))
+        vault_guard_v.addWidget(QLabel("FIO Managed Locations"))
         vault_locations_row = QHBoxLayout()
         vault_locations_row.setContentsMargins(0, 0, 0, 0)
         vault_locations_row.setSpacing(8)
@@ -3501,14 +3817,34 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_save_location_btn = QPushButton("Save Location")
         self.varac_bbs_vault_save_location_btn.clicked.connect(self._save_varac_bbs_vault_location)
         vault_locations_actions.addWidget(self.varac_bbs_vault_save_location_btn)
-        self.varac_bbs_vault_remove_btn = QPushButton("Remove")
+        self.varac_bbs_vault_remove_btn = QPushButton("Delete Location")
         self.varac_bbs_vault_remove_btn.clicked.connect(self._remove_varac_bbs_vault_location)
         vault_locations_actions.addWidget(self.varac_bbs_vault_remove_btn)
         vault_locations_actions.addStretch()
         vault_locations_layout.addLayout(vault_locations_actions)
-        self.varac_bbs_vault_locations_list = QListWidget()
-        self.varac_bbs_vault_locations_list.setMaximumHeight(132)
+        self.varac_bbs_vault_locations_list = QTableWidget(0, 6)
+        self.varac_bbs_vault_locations_list.setHorizontalHeaderLabels(
+            ["Name", "Alias", "Filesystem Location", "Enabled", "Visible", "Code Active"]
+        )
+        self.varac_bbs_vault_locations_list.verticalHeader().setVisible(False)
+        self.varac_bbs_vault_locations_list.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.varac_bbs_vault_locations_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.varac_bbs_vault_locations_list.setAlternatingRowColors(False)
+        self.varac_bbs_vault_locations_list.setStyleSheet(
+            "QTableWidget::item:selected { background: #2a6fd3; color: white; }"
+        )
+        self.varac_bbs_vault_locations_list.setMinimumHeight(118)
+        self.varac_bbs_vault_locations_list.setMaximumHeight(190)
+        self.varac_bbs_vault_locations_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        vault_table_header = self.varac_bbs_vault_locations_list.horizontalHeader()
+        vault_table_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        vault_table_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        vault_table_header.setSectionResizeMode(2, QHeaderView.Stretch)
+        vault_table_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        vault_table_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        vault_table_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.varac_bbs_vault_locations_list.itemSelectionChanged.connect(self._on_varac_bbs_vault_location_selected)
+        self.varac_bbs_vault_locations_list.itemChanged.connect(self._on_varac_bbs_vault_location_table_item_changed)
         vault_locations_layout.addWidget(self.varac_bbs_vault_locations_list)
         vault_editor_grid = QGridLayout()
         vault_editor_grid.setContentsMargins(0, 0, 0, 0)
@@ -3522,62 +3858,74 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_alias_edit = QLineEdit()
         self.varac_bbs_vault_alias_edit.setPlaceholderText("Example: INTEL")
         self.varac_bbs_vault_alias_edit.setMaxLength(32)
-        self.varac_bbs_vault_alias_edit.setToolTip("Alias is the VarAC command callers type. Spaces are removed.")
+        self.varac_bbs_vault_alias_edit.setToolTip("Alias is the VarAC command callers type. Only letters and numbers are used.")
         vault_editor_grid.addWidget(self.varac_bbs_vault_alias_edit, 0, 3)
-        vault_editor_grid.addWidget(QLabel("Description"), 1, 0)
+        vault_editor_grid.addWidget(QLabel("Custom Helper Text"), 1, 0)
         self.varac_bbs_vault_description_edit = QLineEdit()
-        self.varac_bbs_vault_description_edit.setPlaceholderText("Example: to open Logistics")
+        self.varac_bbs_vault_description_edit.setMaxLength(80)
+        self.varac_bbs_vault_description_edit.setPlaceholderText("Optional text appended to the helper filename")
+        self.varac_bbs_vault_description_edit.setToolTip(
+            "FIO generates the command text. This optional text is appended to the helper filename."
+        )
         vault_editor_grid.addWidget(self.varac_bbs_vault_description_edit, 1, 1, 1, 3)
-        vault_editor_grid.addWidget(QLabel("Source Folder"), 2, 0)
+        vault_editor_grid.addWidget(QLabel("Helper Filename"), 2, 0)
+        self.varac_bbs_vault_helper_preview_label = QLabel("Select a location to preview the generated helper.")
+        self.varac_bbs_vault_helper_preview_label.setWordWrap(True)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_helper_preview_label, 2, 1, 1, 3)
+        vault_editor_grid.addWidget(QLabel("Location Folder"), 3, 0)
         self.varac_bbs_vault_source_dir_edit = QLineEdit()
+        self.varac_bbs_vault_source_dir_edit.setReadOnly(True)
         self.varac_bbs_vault_source_dir_edit.setPlaceholderText("Managed Root/locations/<Location Name> is the usual pattern")
-        vault_editor_grid.addWidget(self.varac_bbs_vault_source_dir_edit, 2, 1, 1, 2)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_source_dir_edit, 3, 1, 1, 2)
         self.varac_bbs_vault_source_dir_browse_btn = QPushButton("Browse")
         self.varac_bbs_vault_source_dir_browse_btn.clicked.connect(self._choose_varac_bbs_vault_location_source)
-        vault_editor_grid.addWidget(self.varac_bbs_vault_source_dir_browse_btn, 2, 3)
+        self.varac_bbs_vault_source_dir_browse_btn.hide()
+        vault_editor_grid.addWidget(self.varac_bbs_vault_source_dir_browse_btn, 3, 3)
         self.varac_bbs_vault_source_hint_label = QLabel(
             "Typical pattern in the VarAC BBS area: Managed Root / locations / <Location Name>. Save Location can create that folder."
         )
         self.varac_bbs_vault_source_hint_label.setWordWrap(True)
-        vault_editor_grid.addWidget(self.varac_bbs_vault_source_hint_label, 3, 0, 1, 4)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_source_hint_label, 4, 0, 1, 4)
         self.varac_bbs_vault_enabled_chk = QCheckBox("Enabled")
-        vault_editor_grid.addWidget(self.varac_bbs_vault_enabled_chk, 4, 0)
+        self.varac_bbs_vault_enabled_chk.hide()
+        vault_editor_grid.addWidget(self.varac_bbs_vault_enabled_chk, 5, 0)
         self.varac_bbs_vault_list_in_root_chk = QCheckBox("List In Root Menu")
-        vault_editor_grid.addWidget(self.varac_bbs_vault_list_in_root_chk, 4, 1)
-        vault_editor_grid.addWidget(QLabel("Visibility"), 4, 2)
+        self.varac_bbs_vault_list_in_root_chk.hide()
+        vault_editor_grid.addWidget(self.varac_bbs_vault_list_in_root_chk, 5, 1)
+        vault_editor_grid.addWidget(QLabel("Visible in Root Menu"), 5, 0)
         self.varac_bbs_vault_visibility_combo = QComboBox()
         self.varac_bbs_vault_visibility_combo.addItems(["Public", "Allowed callsigns only", "Hidden"])
-        vault_editor_grid.addWidget(self.varac_bbs_vault_visibility_combo, 4, 3)
-        vault_editor_grid.addWidget(QLabel("Access"), 5, 0)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_visibility_combo, 5, 1, 1, 3)
+        vault_editor_grid.addWidget(QLabel("Access Policy"), 6, 0)
         self.varac_bbs_vault_open_rule_combo = QComboBox()
         self.varac_bbs_vault_open_rule_combo.addItems(
             ["Public", "Allowed callsigns only", "Access code required", "Allowed callsigns + access code"]
         )
-        vault_editor_grid.addWidget(self.varac_bbs_vault_open_rule_combo, 5, 1, 1, 3)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_open_rule_combo, 6, 1, 1, 3)
         self.varac_bbs_vault_inherit_callsigns_chk = QCheckBox("Inherit Global Allowed Callsigns")
-        vault_editor_grid.addWidget(self.varac_bbs_vault_inherit_callsigns_chk, 6, 0, 1, 4)
-        vault_editor_grid.addWidget(QLabel("Location Allowed Callsigns"), 7, 0)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_inherit_callsigns_chk, 7, 0, 1, 4)
+        vault_editor_grid.addWidget(QLabel("Location Allowed Callsigns"), 8, 0)
         self.varac_bbs_vault_allowed_callsigns_edit = QLineEdit()
         self.varac_bbs_vault_allowed_callsigns_edit.setPlaceholderText("Optional stricter subset, comma-separated")
-        vault_editor_grid.addWidget(self.varac_bbs_vault_allowed_callsigns_edit, 7, 1, 1, 3)
-        vault_editor_grid.addWidget(QLabel("Access Code"), 8, 0)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_allowed_callsigns_edit, 8, 1, 1, 3)
+        vault_editor_grid.addWidget(QLabel("Access Code"), 9, 0)
         self.varac_bbs_vault_access_code_edit = QLineEdit()
         self.varac_bbs_vault_access_code_edit.setEchoMode(QLineEdit.Password)
         self.varac_bbs_vault_access_code_edit.setPlaceholderText("Enter a new access code")
         self.varac_bbs_vault_access_code_edit.setToolTip(
-            "Access codes are stored as secure hashes and cannot be shown again after save."
+            "Stored locally for the operator and hashed for caller verification."
         )
         self._attach_password_toggle_action(self.varac_bbs_vault_access_code_edit)
-        vault_editor_grid.addWidget(self.varac_bbs_vault_access_code_edit, 8, 1)
-        vault_editor_grid.addWidget(QLabel("Confirm Code"), 8, 2)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_access_code_edit, 9, 1)
+        vault_editor_grid.addWidget(QLabel("Confirm Code"), 9, 2)
         self.varac_bbs_vault_access_code_confirm_edit = QLineEdit()
         self.varac_bbs_vault_access_code_confirm_edit.setEchoMode(QLineEdit.Password)
         self.varac_bbs_vault_access_code_confirm_edit.setPlaceholderText("Confirm the new access code")
         self.varac_bbs_vault_access_code_confirm_edit.setToolTip(
-            "Access codes are stored as secure hashes and cannot be shown again after save."
+            "Required when setting or changing the code."
         )
         self._attach_password_toggle_action(self.varac_bbs_vault_access_code_confirm_edit)
-        vault_editor_grid.addWidget(self.varac_bbs_vault_access_code_confirm_edit, 8, 3)
+        vault_editor_grid.addWidget(self.varac_bbs_vault_access_code_confirm_edit, 9, 3)
         vault_locations_layout.addLayout(vault_editor_grid)
         self.varac_bbs_vault_code_status_label = QLabel(
             "No code configured. Enter a code twice to set one for this location."
@@ -3585,7 +3933,7 @@ class SettingsTab(QWidget):
         vault_locations_layout.addWidget(self.varac_bbs_vault_code_status_label)
         vault_locations_hint = QLabel(
             "Vault projects one location into the live BBS at a time. By default, source folders live in the VarAC BBS area "
-            "under Managed Root / locations, not under the FreqInOut app folder. Saved access codes are hashed, and nested "
+            "under Managed Root / locations, not under the FreqInOut app folder. Access codes are stored locally for the operator and hashed, and nested "
             "source subfolders are still ignored in this release."
         )
         vault_locations_hint.setWordWrap(True)
@@ -3622,6 +3970,7 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_cooldown_combo.currentIndexChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_flamp_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_flamp_relay_dir_edit.textChanged.connect(self._mark_settings_dirty)
+        self.varac_bbs_vault_flamp_listing_age_combo.currentIndexChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_location_name_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_location_name_edit.textChanged.connect(
             lambda _text: self._autofill_varac_bbs_vault_location_defaults()
@@ -3629,9 +3978,18 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_location_name_edit.textChanged.connect(
             lambda _text: self._refresh_varac_bbs_vault_source_hint()
         )
+        self.varac_bbs_vault_location_name_edit.textChanged.connect(
+            lambda _text: self._refresh_varac_bbs_vault_helper_preview()
+        )
         self.varac_bbs_vault_alias_edit.textChanged.connect(self._sanitize_varac_bbs_vault_alias_text)
         self.varac_bbs_vault_alias_edit.textChanged.connect(self._mark_settings_dirty)
+        self.varac_bbs_vault_alias_edit.textChanged.connect(
+            lambda _text: self._refresh_varac_bbs_vault_helper_preview()
+        )
         self.varac_bbs_vault_description_edit.textChanged.connect(self._mark_settings_dirty)
+        self.varac_bbs_vault_description_edit.textChanged.connect(
+            lambda _text: self._refresh_varac_bbs_vault_helper_preview()
+        )
         self.varac_bbs_vault_source_dir_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_source_dir_edit.textChanged.connect(
             lambda _text: self._refresh_varac_bbs_vault_source_hint()
@@ -3639,14 +3997,19 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_list_in_root_chk.stateChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_visibility_combo.currentIndexChanged.connect(self._mark_settings_dirty)
+        self.varac_bbs_vault_visibility_combo.currentIndexChanged.connect(
+            lambda _idx: self._refresh_varac_bbs_vault_helper_preview()
+        )
         self.varac_bbs_vault_open_rule_combo.currentIndexChanged.connect(self._mark_settings_dirty)
+        self.varac_bbs_vault_open_rule_combo.currentIndexChanged.connect(
+            lambda _idx: self._refresh_varac_bbs_vault_helper_preview()
+        )
         self.varac_bbs_vault_inherit_callsigns_chk.stateChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_allowed_callsigns_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_access_code_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_bbs_vault_access_code_confirm_edit.textChanged.connect(self._mark_settings_dirty)
         flamp_edit.textChanged.connect(lambda _text: self._maybe_autofill_varac_bbs_vault_flamp_relay_dir())
 
-        vault_guard_v.addWidget(QLabel("BBS VGuard Settings"))
         guard_row = QHBoxLayout()
         guard_row.setContentsMargins(0, 0, 0, 0)
         guard_row.setSpacing(8)
@@ -3659,7 +4022,7 @@ class SettingsTab(QWidget):
         self.varac_guard_mode_combo.setMinimumWidth(230)
         guard_row.addWidget(self.varac_guard_mode_combo)
         guard_row.addStretch()
-        vault_guard_v.addLayout(guard_row)
+        vguard_v.addLayout(guard_row)
 
         guard_dir_row = QHBoxLayout()
         guard_dir_row.setContentsMargins(0, 0, 0, 0)
@@ -3668,7 +4031,7 @@ class SettingsTab(QWidget):
         guard_dir_label.setFixedWidth(msg_label_width)
         guard_dir_row.addWidget(guard_dir_label)
         self.varac_guard_quarantine_dir_edit = QLineEdit()
-        self.varac_guard_quarantine_dir_edit.setPlaceholderText("Optional quarantine folder for unauthorized files")
+        self.varac_guard_quarantine_dir_edit.setPlaceholderText("Defaults to Managed Root/quarantine")
         guard_dir_row.addWidget(self.varac_guard_quarantine_dir_edit, 1)
         guard_dir_browse = QPushButton("Browse")
         guard_dir_browse.setFixedWidth(70)
@@ -3681,23 +4044,23 @@ class SettingsTab(QWidget):
         guard_dir_row.addWidget(self.varac_guard_retry_combo)
         guard_dir_row.addWidget(QLabel("sec"))
         guard_dir_row.addStretch()
-        vault_guard_v.addLayout(guard_dir_row)
+        vguard_v.addLayout(guard_dir_row)
 
         guard_note_row = QHBoxLayout()
         guard_note_row.setContentsMargins(0, 0, 0, 0)
         self.varac_guard_note_label = QLabel(
-            "VGuard watches VarAC incoming files and uses the allowed BBS callsigns list. It is separate from BBS access control."
+            "VGuard checks received files after VarAC logs a receive event. FIO helper files are ignored."
         )
         self.varac_guard_note_label.setWordWrap(True)
         guard_note_row.addWidget(self.varac_guard_note_label, 1)
-        vault_guard_v.addLayout(guard_note_row)
+        vguard_v.addLayout(guard_note_row)
 
         guard_status_row = QHBoxLayout()
         guard_status_row.setContentsMargins(0, 0, 0, 0)
         self.varac_guard_status_label = QLabel("No VGuard scan yet.")
         self.varac_guard_status_label.setWordWrap(True)
         guard_status_row.addWidget(self.varac_guard_status_label, 1)
-        vault_guard_v.addLayout(guard_status_row)
+        vguard_v.addLayout(guard_status_row)
 
         varac_container = QWidget()
         varac_container.setLayout(varac_v)
@@ -4959,7 +5322,10 @@ class SettingsTab(QWidget):
                 guard_mode = "Log only"
             self.varac_guard_mode_combo.setCurrentText(guard_mode)
         if hasattr(self, "varac_guard_quarantine_dir_edit"):
-            self.varac_guard_quarantine_dir_edit.setText(str(data.get("varac_guard_quarantine_dir", "") or "").strip())
+            quarantine_txt = str(data.get("varac_guard_quarantine_dir", "") or "").strip()
+            if not quarantine_txt:
+                quarantine_txt = self._default_varac_guard_quarantine_dir_text()
+            self.varac_guard_quarantine_dir_edit.setText(quarantine_txt)
         if hasattr(self, "varac_guard_retry_combo"):
             retry_txt = str(data.get("varac_guard_retry_seconds", 120) or 120).strip()
             if retry_txt not in {"30", "60", "120", "300", "600"}:
@@ -5014,6 +5380,13 @@ class SettingsTab(QWidget):
             self.varac_bbs_vault_flamp_enabled_chk.setChecked(bool(data.get("varac_bbs_vault_flamp_enabled", False)))
         if hasattr(self, "varac_bbs_vault_flamp_relay_dir_edit"):
             self.varac_bbs_vault_flamp_relay_dir_edit.setText(str(data.get("varac_bbs_vault_flamp_relay_dir", "") or "").strip())
+        if hasattr(self, "varac_bbs_vault_flamp_listing_age_combo"):
+            age_days = int(data.get("varac_bbs_vault_flamp_listing_max_age_days", DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS) or DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS)
+            idx = self.varac_bbs_vault_flamp_listing_age_combo.findData(age_days)
+            if idx < 0:
+                idx = self.varac_bbs_vault_flamp_listing_age_combo.findData(DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS)
+            if idx >= 0:
+                self.varac_bbs_vault_flamp_listing_age_combo.setCurrentIndex(idx)
         self._maybe_autofill_varac_bbs_vault_flamp_relay_dir()
         self._set_varac_bbs_vault_locations(data.get("varac_bbs_vault_locations_v1", []))
         if hasattr(self, "varac_bbs_vault_default_location_combo"):
@@ -5411,6 +5784,12 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_flamp_relay_dir_edit")
             else ""
         )
+        data["varac_bbs_vault_flamp_listing_max_age_days"] = int(
+            self.varac_bbs_vault_flamp_listing_age_combo.currentData()
+            if hasattr(self, "varac_bbs_vault_flamp_listing_age_combo")
+            and self.varac_bbs_vault_flamp_listing_age_combo.currentData() is not None
+            else DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS
+        )
         data["varac_bbs_vault_locations_v1"] = list(self._varac_bbs_vault_locations_cache)
         data["varac_bbs_vault_runtime_state_v1"] = self.settings.get("varac_bbs_vault_runtime_state_v1", {})
         data["varac_bbs_vault_last_summary"] = str(self.settings.get("varac_bbs_vault_last_summary", "") or "").strip()
@@ -5697,6 +6076,7 @@ class SettingsTab(QWidget):
                 "varac_bbs_vault_idle_timeout_seconds": data.get("varac_bbs_vault_idle_timeout_seconds", DEFAULT_IDLE_TIMEOUT_SECONDS),
                 "varac_bbs_vault_flamp_enabled": data.get("varac_bbs_vault_flamp_enabled", False),
                 "varac_bbs_vault_flamp_relay_dir": data.get("varac_bbs_vault_flamp_relay_dir", ""),
+                "varac_bbs_vault_flamp_listing_max_age_days": data.get("varac_bbs_vault_flamp_listing_max_age_days", DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS),
                 "varac_bbs_vault_locations_v1": data.get("varac_bbs_vault_locations_v1", []),
                 "varac_bbs_vault_runtime_state_v1": data.get("varac_bbs_vault_runtime_state_v1", {}),
                 "varac_bbs_vault_last_summary": data.get("varac_bbs_vault_last_summary", ""),
@@ -5798,6 +6178,7 @@ class SettingsTab(QWidget):
             self.settings.set("varac_bbs_vault_idle_timeout_seconds", data.get("varac_bbs_vault_idle_timeout_seconds", DEFAULT_IDLE_TIMEOUT_SECONDS))
             self.settings.set("varac_bbs_vault_flamp_enabled", data.get("varac_bbs_vault_flamp_enabled", False))
             self.settings.set("varac_bbs_vault_flamp_relay_dir", data.get("varac_bbs_vault_flamp_relay_dir", ""))
+            self.settings.set("varac_bbs_vault_flamp_listing_max_age_days", data.get("varac_bbs_vault_flamp_listing_max_age_days", DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS))
             self.settings.set("varac_bbs_vault_locations_v1", data.get("varac_bbs_vault_locations_v1", []))
             self.settings.set("varac_bbs_vault_runtime_state_v1", data.get("varac_bbs_vault_runtime_state_v1", {}))
             self.settings.set("varac_bbs_vault_last_summary", data.get("varac_bbs_vault_last_summary", ""))
@@ -8748,6 +9129,8 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_guard_quarantine_dir_edit")
             else ""
         )
+        if not start:
+            start = self._default_varac_guard_quarantine_dir_text()
         fn = QFileDialog.getExistingDirectory(self, "Select VGuard quarantine directory", start)
         if not fn:
             return

@@ -324,7 +324,7 @@
       <tr><td>Session bar</td><td><code>Role</code> (NCS/ANCS/Joiner), Net Name selector, next scheduled net indicator, QSY dropdown, <code>Hold</code>, <code>QSY + Hold</code>, <code>Ad Hoc Net</code>.</td></tr>
       <tr><td>Macro workspace</td><td><code>Macro Set</code>, <code>Refresh</code>, <code>Mappings...</code>, <code>Details</code>, macro-status chips, macro-file picker, and log-assisted intake controls.</td></tr>
       <tr><td>Operator lookup</td><td>Lookup field plus <code>Add to TFC</code>, <code>Add to QRU</code>, <code>Add to LATE</code>, and <code>Add to Seen Locally</code>.</td></tr>
-      <tr><td>Local roster</td><td>Roster table with category/source tracking and copy actions such as <code>Copy TFC</code>, <code>Copy QRU</code>, <code>Copy LATE</code>, <code>Copy Seen Locally</code>, and <code>Copy Summary</code>.</td></tr>
+      <tr><td>Local roster</td><td>Roster table with category/source tracking and copy actions such as <code>Copy TFC</code>, <code>Copy QRU</code>, <code>Copy LATE</code>, <code>Copy Seen Locally</code>, and <code>Copy All Check-ins</code>.</td></tr>
       <tr><td>Compare / Reference workspace</td><td>Expandable tabbed workspace with <code>Reference</code>, <code>Compare Results</code>, and <code>Review</code>.</td></tr>
       <tr><td>Net lifecycle</td><td><code>Start Net</code>, <code>Save Check-ins</code>, and <code>End Net</code>.</td></tr>
     </tbody>
@@ -338,7 +338,8 @@
     <li><strong>QSY tools</strong>: the shared QSY/hold controls let you move the station and temporarily suspend scheduler control in the same way other operating tabs do.</li>
     <li><strong>Macro Set</strong>: choose the FLDigi macro profile you want this session to follow. This matters because the macro map helps FIO understand which files and labels belong to which operational function.</li>
     <li><strong>Mappings...</strong>: opens the macro discovery and mapping dialog, which is where you review detected macros, enable or disable rows, and give operational meaning to each mapped item.</li>
-    <li><strong>Details</strong>: expands the setup panel so you can inspect the macro file path, browse for another profile, clear a legacy path, and manage log-assisted intake settings.</li>
+    <li><strong>Details</strong>: expands the setup panel so you can inspect the macro file path, browse for another profile, clear a legacy path, see the generated macro check-in file locations, see active mapped macro source files, and manage log-assisted intake settings. When expanded, the button is highlighted and the tab can scroll so the details remain readable instead of being squeezed into a small area.</li>
+    <li><strong>Macro check-in file locations</strong>: the Details panel shows the live files FIO writes for FLDigi macros: <code>main_checkins.txt</code> for <code>TFC</code>, <code>qru_checkins.txt</code> for <code>QRU</code>, <code>new-late_checkins.txt</code> for <code>LATE</code>, and <code>all_checkins.txt</code> for the consolidated roster. It also shows the archive directory under the configured check-in path.</li>
     <li><strong>Status chips</strong>: the chips summarize the current macro-mode state, whether log intake is active, whether uncertain decodes are being held for review, and whether transmitted text is being used as decode context only.</li>
     <li><strong>Log-assisted intake</strong>: <code>Auto-add from FLDigi log</code> lets FIO watch likely check-ins from the FLDigi log; <code>Hold uncertain decodes for review</code> keeps questionable candidates out of the roster until checked; <code>Use sent TX as context</code> allows sent text to improve interpretation without turning TX lines into check-ins themselves.</li>
   </ul>
@@ -347,7 +348,8 @@
   <ul class="section-list">
     <li><strong>Category model</strong>: <code>TFC</code>, <code>QRU</code>, <code>LATE</code>, and <code>Seen Locally</code> are operational buckets that help you track who has traffic, who has none, who arrived late, and who has been observed locally but not necessarily merged into the main roster picture.</li>
     <li><strong>Roster table columns</strong>: <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Traffic</code>, <code>Category</code>, and <code>Source</code>. This is the primary operator-facing working surface for the current net.</li>
-    <li><strong>Copy actions</strong>: the copy buttons produce roster slices or a summary you can paste elsewhere without manually rebuilding the list.</li>
+    <li><strong>Copy actions</strong>: the copy buttons produce roster slices or a full consolidated list you can paste into FLDigi, a message, a document, or another operator workflow without manually rebuilding the list. <code>Copy All Check-ins</code> uses the same consolidated roster format as the generated all-check-ins macro file.</li>
+    <li><strong>Category changes</strong>: the roster is the source of truth. If an entry starts as <code>TFC</code> and you later change it to <code>QRU</code>, FIO rewrites the generated check-in files so the entry moves into the QRU file and is removed from the TFC file. This avoids stale copies from earlier classifications.</li>
     <li><strong>Source awareness</strong>: the roster keeps track of where an entry came from so you can distinguish direct operator lookup insertion, reference imports, review merges, or other local workflow paths.</li>
   </ul>
 
@@ -374,9 +376,10 @@
 
   <h3 id="ncs-fldigi-lifecycle">Net Lifecycle</h3>
   <ul class="section-list">
-    <li><strong>Start Net</strong>: begins the live session state for this tab and activates the intended workflow.</li>
-    <li><strong>Save Check-ins</strong>: persists the current local roster/check-in state so the session can be reviewed or continued with confidence.</li>
-    <li><strong>End Net</strong>: closes the working session and performs the end-of-net save/log behavior. Use this when the roster is final enough to close out the event.</li>
+    <li><strong>Start Net</strong>: begins the live session state for this tab, clears the generated macro check-in files, clears the working roster/review surfaces, and then starts writing the current roster into the live macro files as the net develops.</li>
+    <li><strong>Save Check-ins</strong>: reconciles the current roster into the generated check-in files. This is a full rewrite from the current roster state, not an append-only log, so removed entries and changed categories do not linger in the wrong file.</li>
+    <li><strong>End Net</strong>: saves the final roster, imports valid check-ins into the operator database, and archives the generated check-in files under <code>&lt;fldigi_checkin_dir&gt;/archive</code>. Archive filenames include a UTC timestamp, the net name, and the original file name; for example <code>20260508_231455Z_Weekly_Net_main_checkins.txt</code>.</li>
+    <li><strong>Why archives matter</strong>: the live macro files are working files that are cleared at the next <code>Start Net</code>. The archive directory is the historical record of what the generated files looked like at end-of-net.</li>
   </ul>
 
   <h2 id="ncs-js8call">NCS: JS8Call</h2>
@@ -818,7 +821,7 @@
       </tr>
       <tr>
         <td>Fast Light Settings</td>
-        <td>FLRig/FLDigi/FLMsg/FLAmp paths, FLRig XMLRPC port, check-in/log paths, copy path helpers</td>
+        <td>FLRig/FLDigi/FLMsg/FLAmp paths, FLRig/FLDigi XMLRPC settings, FLDigi check-in/log paths, and Fast Light auto-fill helpers</td>
       </tr>
       <tr>
         <td>Message Auth (Key/Hash)</td>
@@ -879,8 +882,11 @@
   <h3 id="settings-fast-light-details">Fast Light Settings Details</h3>
   <ul class="section-list">
     <li><strong>Software paths</strong>: configure FLRig, FLDigi, FLMsg, and FLAmp launch paths or executables.</li>
-    <li><strong>Endpoint pairing</strong>: when FLRig or FLDigi paths are configured, confirm their companion host or port fields so the section does not stay warning-highlighted.</li>
+    <li><strong>Endpoint pairing</strong>: when FLRig or FLDigi paths are configured, confirm their companion fields: <code>FLRig XMLRPC Port</code>, <code>FLDigi XMLRPC Host</code>, and <code>FLDigi XMLRPC Port</code>. These are the names shown in the UI.</li>
+    <li><strong>Check-in File Path</strong>: folder where the FLDigi NCS tab writes its generated macro check-in files and end-net archive folder.</li>
+    <li><strong>FLDigi Log Path</strong>: folder or log location used by log-assisted intake.</li>
     <li><strong>Message folders</strong>: FLMsg and FLAmp workflows rely on their companion message-path settings for imports, exports, and compose staging.</li>
+    <li><strong>Auto-Fill / Attempt Auto-Fill</strong>: asks FreqInOut to inspect likely local software folders and populate the Fast Light paths it can identify.</li>
   </ul>
 
   <h3 id="settings-hf-groups-details">HF Operating Groups Details</h3>
@@ -904,65 +910,85 @@
   <h3 id="settings-varac-details">VarAC Settings Details</h3>
   <p><strong>Concept of use</strong>: treat the VarAC paths as three different jobs. <code>Incoming Files</code> is where files addressed to you arrive. <code>VarAC Outbox Directory</code> is where FreqInOut stages files that VarAC should transmit directly. <code>BBS Directory</code> is the live published file shelf remote stations can browse and pull from.</p>
   <ul class="section-list">
+    <li><strong>VarAC Paths and Launch</strong>: section for the VarAC application path, launch command, INI path, incoming-file folder, and outbox folder.</li>
+    <li><strong>BBS Management</strong>: section for the live BBS folder, BBS archive folder, BBS access settings, and allowed callsigns.</li>
+    <li><strong>BBS Vault Settings</strong>: section for Managed BBS Services, vault session settings, FLAMP relay, and FIO managed locations.</li>
+    <li><strong>BBS VGuard Settings</strong>: separate section for inbound file protection. VGuard is not the same service as the vault.</li>
     <li><strong>VarAC Install Folder</strong>: the VarAC program location. FreqInOut uses this for launch/orchestration and to help infer other VarAC resources.</li>
-    <li><strong>VarAC Launch Command</strong>: advanced override. Leave this blank unless you need a special launch method, most often on Linux/Wine.</li>
-    <li><strong>Incoming Files</strong>: VarAC's receive folder for files delivered to you. This is not your BBS folder.</li>
+    <li><strong>VarAC Launch Command (Advanced):</strong> advanced override. Leave this blank unless you need a special launch method, most often on Linux/Wine.</li>
+    <li><strong>VarAC Incoming Files</strong>: VarAC's receive folder for files delivered to you. This is not your BBS folder.</li>
     <li><strong>VarAC Outbox Directory</strong>: where FreqInOut stages files that VarAC should send directly. Use this for operator-to-operator delivery, not public BBS publication.</li>
     <li><strong>VarAC INI File</strong>: optional direct path to <code>VarAC.ini</code>. Use this when auto-detection is not enough or when you want to sync BBS policy from the authoritative INI.</li>
     <li><strong>BBS Directory</strong>: the live published VarAC BBS folder. Remote stations see the files in this directory when they browse your BBS.</li>
     <li><strong>BBS Archive</strong>: where archived BBS files are moved. This keeps the live BBS tidy without deleting older files.</li>
+    <li><strong>Auto-Archive Policy</strong>: group containing <code>Enable Auto-Archive</code>, <code>After</code>, and <code>days</code>. It moves files older than the selected age from <code>BBS Directory</code> to <code>BBS Archive</code>.</li>
     <li><strong>Enable BBS</strong>: turns VarAC BBS service on or off in FreqInOut's BBS policy view.</li>
     <li><strong>Limit Access To Callsigns</strong>: restricts BBS access to a defined allow-list. This is strongly recommended if you want a controlled BBS.</li>
     <li><strong>Allowed Callsigns</strong>: the allow-list used when access limiting is enabled. FreqInOut supports lookup-assisted management to reduce typos. In single-rig, this list applies to the station's VarAC BBS policy.</li>
     <li><strong>Announce</strong>: mirrors VarAC's BBS announcement behavior so users can choose whether the BBS is advertised.</li>
-    <li><strong>Sync From VarAC.ini</strong>: reads the <code>[BBS]</code> section and applies BBS enablement, directory, access rules, and announcement behavior to the current FreqInOut settings view.</li>
-    <li><strong>Write to VarAC.ini</strong>: pushes the current BBS policy values back into <code>VarAC.ini</code> when you want FreqInOut's view to become the authoritative one.</li>
-    <li><strong>Enable Auto-Archive</strong>: turns on background checks (first Messages open after startup, then about daily).</li>
-    <li><strong>After &lt;days&gt; days</strong>: older files are moved from <code>BBS Directory</code> to <code>BBS Archive</code>.</li>
+    <li><strong>Import VarAC BBS Settings</strong>: reads the <code>[BBS]</code> section from the configured <code>VarAC INI File</code> and applies BBS enablement, directory, access rules, and announcement behavior to the current FreqInOut settings view.</li>
+    <li><strong>Apply VarAC BBS Settings</strong>: writes the current BBS policy values back into the configured <code>VarAC INI File</code> when you want FreqInOut's view to become the authoritative one for the VarAC <code>[BBS]</code> section.</li>
     <li><strong>Managed BBS Services</strong>: the combined virtual-folder vault and FLAMP relay workflow. It publishes one selected view into the live VarAC BBS directory at a time while keeping the live folder stable for VarAC.</li>
-    <li><strong>Vault vs live BBS</strong>: think of the live <code>BBS Directory</code> as the on-air shelf and the Managed Vault as the backstage storage plus control logic. Operators edit source folders in the vault; FreqInOut projects only the active view into the live BBS.</li>
-    <li><strong>Enable Managed BBS Vault</strong>: turns on the virtual-folder and relay service processing. Only enable it after you have a valid live <code>BBS Directory</code> and at least one location.</li>
-    <li><strong>Initialize Managed Vault</strong>: creates the managed vault folder structure in the VarAC BBS area and imports the current live BBS contents into the default location so you can start from your existing BBS instead of rebuilding it by hand.</li>
-    <li><strong>Reset To Default</strong>: republishes the default location into the live BBS folder. Use this if you want to end a special-access session immediately.</li>
+    <li><strong>Vault vs live BBS</strong>: think of the live <code>BBS Directory</code> as the on-air shelf and the Managed Vault as the storage room plus menu system behind it. VarAC only needs to know about the live shelf. FreqInOut decides which vault location is placed on that shelf right now.</li>
+    <li><strong>Managed BBS Services</strong>: label above the main vault controls. This is where <code>Enable Managed BBS Vault</code>, <code>Initialize Managed Vault</code>, and <code>Reset To Default</code> live.</li>
+    <li><strong>Enable Managed BBS Vault</strong>: turns on the service that watches VarAC session traffic and publishes managed views into the live BBS folder. This is the operational on/off switch for the vault workflow; it does not erase your vault folders.</li>
+    <li><strong>Turn on FIO-managed BBS menus.</strong>: the short UI explanation shown beside <code>Enable Managed BBS Vault</code>.</li>
+    <li><strong>Initialize Managed Vault</strong>: creates the managed vault folder structure in the VarAC BBS area and imports the current live BBS contents into the default location so you can start from your existing BBS instead of rebuilding it by hand. After you confirm the import, the live BBS folder should be treated as FreqInOut's published output, not the long-term storage place for managed files.</li>
+    <li><strong>Create the FIO_BBS_Vault folders next to the live VarAC BBS folder.</strong>: the short UI explanation shown beside <code>Initialize Managed Vault</code>.</li>
+    <li><strong>Reset To Default</strong>: republishes the default location into the live BBS folder. Use this when you want the BBS to go back to the main menu immediately, for example after a caller opened a controlled location or after testing a special view.</li>
+    <li><strong>Return callers to the root BBS menu and publish the helper files.</strong>: the short UI explanation shown beside <code>Reset To Default</code>.</li>
     <li><strong>Managed Root</strong>: automatic FreqInOut-managed storage for named locations, audit state, and publish manifests. In the current release it is always created next to the live <code>BBS Directory</code> as <code>FIO_BBS_Vault</code>; it is not a free-form operator override.</li>
     <li><strong>Managed Root structure</strong>: the normal layout is <code>Managed Root/locations/&lt;Location Name&gt;</code> for operator-maintained source folders, plus <code>Managed Root/runtime/manifests</code>, <code>runtime/logs</code>, and <code>runtime/tmp</code> for FreqInOut bookkeeping.</li>
     <li><strong>Managed Root example</strong>: if your live BBS is <code>/Users/you/Radio/VarAC_files/BBS</code>, the vault root will be <code>/Users/you/Radio/VarAC_files/FIO_BBS_Vault</code>, and a location named <code>TEST_A</code> will normally use <code>FIO_BBS_Vault/locations/TEST_A</code>.</li>
     <li><strong>Manifest concept</strong>: each publish operation records what FreqInOut projected into the live BBS. That manifest lets FreqInOut reset safely, avoid clobbering unrelated live files, and explain what the last vault action actually published.</li>
-    <li><strong>Default Location</strong>: the normal published BBS set. FreqInOut returns to this location on the selected return rule, or when you click <code>Reset To Default</code>.</li>
-    <li><strong>Global Code Policy</strong>: decides whether alternate locations may stay public, whether non-default locations should normally require codes, or whether all restricted locations must require codes.</li>
-    <li><strong>Request Parsing</strong>: Vault watches VarAC session traffic and reacts to root requests, alias opens, root returns, and FLAMP commands. The normal human workflow is still command-prefix style: refresh the root view, type the location alias, and refresh again. Compatibility parsing still accepts forms such as <code>BBS OPEN TEST_A</code> and exact-code-only workflows where configured.</li>
-    <li><strong>Return Mode</strong>: decides when the BBS should go back to the default location. <code>On disconnect</code> is the most direct. <code>After inactivity timeout</code> is useful when disconnect lines are unreliable. <code>Manual operator reset only</code> keeps the special location active until you explicitly reset it.</li>
-    <li><strong>Idle Timeout</strong>: used with inactivity-based return mode. Choose a value long enough to avoid interrupting a legitimate session.</li>
-    <li><strong>Failed Attempts</strong>: how many bad codes are tolerated before cooldown is applied.</li>
-    <li><strong>Cooldown</strong>: how long FreqInOut will ignore more bad-code attempts from that sender after the failure threshold is reached.</li>
+    <li><strong>Vault Session</strong>: section for default-menu identity, timers, bad-code behavior, request parsing, and FLAMP relay options.</li>
+    <li><strong>Default Location</strong>: read-only display for the FIO-managed root BBS menu. This is not the same thing as the VarAC <code>BBS Directory</code>. The VarAC folder is the live shelf callers browse; <code>Default</code> is the managed source view that FIO publishes there when the BBS is at the main menu. The adjacent <code>Info</code> button explains this distinction in the UI.</li>
+    <li><strong>Why Default exists</strong>: it gives the caller a predictable starting point. The default view normally contains helper files such as <code>BBS MSG - Type INTEL to open Intel then refresh BBS.txt</code>, not every file from every location. That keeps the first BBS listing readable and lets callers choose the location they need.</li>
+    <li><strong>Global Code Policy</strong>: the station-wide default for how cautious alternate locations should be. The normal friendly default is to allow public locations, then set access rules per location. Use stricter global policy only when your operating plan says non-default locations should normally require codes.</li>
+    <li><strong>Request Parsing</strong>: controls how FIO recognizes caller commands in VarAC traffic. The normal mode is command-prefix style: a caller refreshes the BBS, types an alias such as <code>INTEL</code>, then refreshes again. Compatibility parsing also accepts more explicit forms such as <code>BBS OPEN INTEL</code>. Exact-code-oriented workflows are available for stations that want the code itself to be the access command, but alias-plus-code is usually easier to explain on-air.</li>
+    <li><strong>Return Mode</strong>: decides when the BBS goes back to the Default menu. <code>On disconnect</code> is the cleanest normal choice because each caller gets a fresh menu. <code>After inactivity timeout</code> is useful when disconnect lines are unreliable. <code>Manual operator reset only</code> is for deliberate operator-controlled sessions where a special location should remain published until you reset it.</li>
+    <li><strong>Return Timer</strong>: used with inactivity-based return behavior. Choose a value long enough that a slow operator has time to read, request, and refresh without being pushed back to the main menu mid-session.</li>
+    <li><strong>Bad Code Limit</strong>: how many bad codes are tolerated before cooldown is applied. This is a guardrail against repeated mistakes or guessing, not a cryptographic security system.</li>
+    <li><strong>Cooldown</strong>: how long FIO waits before accepting another bad-code attempt from that sender after the failure threshold is reached. It keeps a caller from hammering the same protected location while still allowing them to try again later.</li>
+    <li><strong>FLAMP Relay</strong>: row that contains <code>Enable FLAMP relay service</code>, the relay folder field, and a <code>Browse</code> button.</li>
     <li><strong>Enable FLAMP relay service</strong>: allows remote queue browsing and block requests using commands such as <code>LIST Q</code>, <code>LIST BLKS F277</code>, and <code>BLK 0,1 F277</code>.</li>
     <li><strong>FLAMP relay concept</strong>: this is not ordinary file browsing. It is a command-driven assist for block-based FLAMP transfer workflows. FreqInOut temporarily publishes helper files that let a remote operator discover queues, inspect available blocks, and request only the blocks they need.</li>
-    <li><strong>FLAMP relay folder</strong>: the source folder where FreqInOut looks for relay queue files to advertise and serve as temporary synthetic BBS responses.</li>
+    <li><strong>FLAMP relay folder</strong>: placeholder text in the relay folder field. This is the source folder where FreqInOut looks for relay queue files to advertise and serve as temporary synthetic BBS responses.</li>
+    <li><strong>Limit FLAMP listing to files newer than</strong>: limits queue listings to recent relay files, with choices such as <code>3 days</code>, <code>5 days</code>, <code>7 days</code>, <code>10 days</code>, <code>14 days</code>, and <code>30 days</code>.</li>
     <li><strong>FLAMP relay auto-fill</strong>: if your <code>FLAMP/rx</code> path is set, FreqInOut will usually suggest a sibling <code>relay</code> folder automatically. This is a convenience default; you can override it whenever your station uses a different relay path.</li>
-    <li><strong>Locations</strong>: named virtual folders that can be published into the live BBS. The <code>Default</code> location is your normal BBS. Other locations are optional controlled alternatives.</li>
+    <li><strong>FIO Managed Locations</strong>: section for named virtual folders that can be published into the live BBS. The table columns are <code>Name</code>, <code>Alias</code>, <code>Filesystem Location</code>, <code>Enabled</code>, <code>Visible</code>, and <code>Code Active</code>.</li>
+    <li><strong>New Location</strong>: starts a new managed location definition.</li>
+    <li><strong>Save Location</strong>: stores the current location definition in FreqInOut so it can be published later.</li>
+    <li><strong>Delete Location</strong>: deletes the selected non-default location definition from FreqInOut. The <code>Default</code> location cannot be deleted.</li>
+    <li><strong>Locations</strong>: named virtual folders that can be published into the live BBS. The <code>Default</code> location is your root BBS menu. Other locations are optional controlled alternatives.</li>
     <li><strong>Location Name</strong>: operator-friendly label for the file set, such as <code>Default</code>, <code>Logistics</code>, or <code>Exercises</code>.</li>
     <li><strong>Alias</strong>: the short command a remote station types, such as <code>INTEL</code> or <code>DOCDROP</code>.</li>
-    <li><strong>Description</strong>: the helper text shown in the root menu entry so the remote operator knows what the alias is for. The most readable pattern is a short phrase that finishes the generated instruction, such as <code>to open Logistics</code>.</li>
-    <li><strong>Source Folder</strong>: the real folder whose files will be published when that location is active. The safest normal pattern is a dedicated folder under <code>Managed Root/locations</code> in the VarAC BBS area. This is where you place files from your computer when you want that location to publish them. In the current release, nested subfolders are ignored.</li>
-    <li><strong>Source Folder defaults</strong>: when you create a new location, FreqInOut suggests <code>Managed Root/locations/&lt;Location Name&gt;</code>, shows likely live-BBS name matches, and can create the missing folder on save so you do not have to hand-build the layout first.</li>
-    <li><strong>Enabled</strong>: whether that location can be published.</li>
-    <li><strong>List In Root Menu</strong>: controls whether the alias is advertised in the root menu. Hidden locations can still exist for controlled direct access workflows.</li>
-    <li><strong>Visibility</strong>: controls whether everyone sees the alias, only allowed callsigns see it, or it stays hidden from the generated root menu.</li>
-    <li><strong>Open Rule</strong>: controls whether the location is public, callsign-limited, or requires both an allowed callsign and a code.</li>
+    <li><strong>Custom Helper Text</strong>: optional operator-written text appended to the generated helper filename. FIO writes the command instruction automatically; your custom text should tell the caller what the location holds. For example, the generated portion might say <code>Type AIB to open AIB then refresh BBS</code>, and your custom text might add <code>weekly AIB reports</code>.</li>
+    <li><strong>Helper Filename</strong>: live preview of the helper file name FIO will publish for this location in the root BBS menu.</li>
+    <li><strong>Location Folder</strong>: the managed folder whose files will be published when that location is active. The safest normal pattern is a dedicated folder under <code>Managed Root/locations</code> in the VarAC BBS area. This is where you place files from your computer when you want that location to publish them. In the current release, nested subfolders are ignored.</li>
+    <li><strong>Location Folder defaults</strong>: when you create a new location, FreqInOut suggests <code>Managed Root/locations/&lt;Location Name&gt;</code>, shows likely live-BBS name matches, and can create the missing folder on save so you do not have to hand-build the layout first.</li>
+    <li><strong>Enabled</strong>: table checkbox/column for whether that location can be published.</li>
+    <li><strong>Visible in Root Menu</strong>: controls whether the alias is advertised in the root menu. Hidden locations can still exist for controlled direct-access workflows.</li>
+    <li><strong>Visible</strong>: table column that mirrors whether the location is visible in the root menu.</li>
+    <li><strong>Access Policy</strong>: controls whether the location is public, callsign-limited, requires an access code, or requires both an allowed callsign and a code.</li>
     <li><strong>Inherit Global Allowed Callsigns</strong>: applies the normal BBS allow-list to that location. This is the safest default.</li>
     <li><strong>Location Allowed Callsigns</strong>: optional stricter subset for that location. Use this when a special location should be opened only by certain stations even if the main BBS allow-list is broader.</li>
-    <li><strong>Access Code / Confirm Code</strong>: write-only operational code used to open a non-default location. FreqInOut stores only a salted hash and shows only <code>Code configured</code> in the UI. This is workflow control, not strong secrecy.</li>
+    <li><strong>Access Code / Confirm Code</strong>: operational code used to open a non-default location. FIO stores the code locally for the station operator to view later and also keeps a hash for caller verification. This is workflow control for off-grid operations, not strong secrecy; if a code changes, you still need an operational way to share the new code with the right stations.</li>
     <li><strong>Root menu helper files</strong>: when the vault is at the default location, FreqInOut injects synthetic BBS helper entries into the live BBS such as <code>BBS MSG - Type TEST_A ... then refresh BBS</code>. These are instructions for the remote station, not operator source files.</li>
-    <li><strong>Remote workflow</strong>: a caller usually sends <code>&lt;BLR&gt;</code> to refresh the root view, reads the helper entry for the location, types the alias such as <code>TEST_A</code> or <code>TEST_A BLUEBELL</code> depending on the location policy, and then refreshes again. After that refresh, the live BBS view contains the actual files from that location. <code>ROOT</code>, <code>BACK</code>, <code>EXIT</code>, or <code>LOCK</code> returns them to the main menu.</li>
-    <li><strong>Location view behavior</strong>: only one vault view is published into the live BBS at a time. When a location is open, the remote station sees that location's files plus a helper entry telling them to type <code>ROOT</code> to return.</li>
-    <li><strong>Callsign-aware menus</strong>: root menu entries can be filtered by the requestor's callsign, so a station may only see the aliases it is allowed to use.</li>
-    <li><strong>FLAMP relay workflow</strong>: remote stations can ask for queue listings, available blocks, and individual block payloads without you manually swapping files in and out of the live BBS folder.</li>
-    <li><strong>Save Location</strong>: stores the location definition in FreqInOut so it can be published later.</li>
-    <li><strong>Remove</strong>: deletes the selected non-default location definition from FreqInOut. The <code>Default</code> location cannot be removed.</li>
+    <li><strong>Remote workflow</strong>: a caller usually sends <code>&lt;BLR&gt;</code> to refresh the root view, reads the helper entry for the location, types the alias such as <code>INTEL</code> or <code>HUBS BLUEBELL</code> depending on the location policy, and then refreshes again. After that refresh, the live BBS view contains the actual files from that location. <code>ROOT</code>, <code>BACK</code>, <code>EXIT</code>, or <code>LOCK</code> returns them to the main menu.</li>
+    <li><strong>Protected-location helper</strong>: if a caller types an alias that requires a code but does not include the code, FIO can publish a helper message for that alias instead of leaving the caller stuck in the current view. The intent is friendly: tell them what went wrong and how to try again, for example <code>Incorrect Code provided for HUBS - try again or return to ROOT</code>.</li>
+    <li><strong>Location view behavior</strong>: only one vault view is published into the live BBS at a time. When a location is open, the remote station sees that location's files plus a helper entry telling them to type <code>ROOT</code> to return. The files are copied into the live BBS for pull; the source location remains in the managed vault.</li>
+    <li><strong>Callsign-aware menus</strong>: root menu helper files should only be shown for aliases the caller is allowed to see. If a location is callsign-limited, stations outside that policy should not get a menu entry that invites them into a location they cannot use.</li>
+    <li><strong>List in root menu</strong>: the clearest normal administration model is to list locations in the root menu and let access policy decide who sees them. Hide a location only when you deliberately want direct-access behavior with no menu advertisement.</li>
+    <li><strong>FLAMP relay workflow</strong>: remote stations can ask for queue listings, available blocks, and individual block payloads without you manually swapping files in and out of the live BBS folder. The root menu can show <code>BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - then refresh BBS.txt</code>. After the caller types <code>FLAMP</code>, FIO publishes separate helper files such as <code>LIST Q</code>, <code>LIST BLKS F277</code>, <code>BLK 0,8,9 F277</code>, and <code>ROOT</code>.</li>
     <li><strong>Vault runtime status</strong>: <code>Settings</code>, <code>ControlFreq</code>, and the <code>Messages</code> BBS summary surface the last vault action so operators can tell whether the vault is enabled, active, reset, or degraded without opening logs.</li>
     <li><strong>Recommended first setup</strong>: start with normal BBS folders and verify BBS copy/archive behavior first. Then initialize the Managed Vault, confirm the imported default location looks right, and only after that add protected alternate locations.</li>
     <li><strong>Credit</strong>: advanced VarAC BBS management in FreqInOut is being shaped with explicit credit to KG5RKW for the operational ideas behind Vault and VGuard.</li>
     <li><strong>VGuard concept</strong>: VGuard is not the same feature as Managed Vault. Vault decides what you publish into the live BBS. VGuard watches inbound VarAC file transfers and can log, delete, or quarantine files from unauthorized senders before they quietly blend into operator workflows.</li>
+    <li><strong>Enable VGuard File Protection</strong>: turns on inbound file protection for received VarAC files.</li>
+    <li><strong>VGuard mode</strong>: choose <code>Log only</code>, <code>Delete unauthorized files</code>, or <code>Quarantine unauthorized files</code>.</li>
+    <li><strong>Quarantine Dir</strong>: destination used when quarantine mode is selected. The field defaults toward <code>Managed Root/quarantine</code>.</li>
+    <li><strong>Retry</strong>: how long VGuard waits between checks when VarAC has logged a receive event but the file is not fully visible yet.</li>
   </ul>
 
   <h3 id="settings-message-auth">Message Auth (Key/Hash) Details</h3>

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import time
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,16 +18,20 @@ from freqinout.core.varac_bbs_vault import (
     hash_access_code,
     import_live_bbs_to_default_location,
     initialize_managed_root,
+    load_vault_locations,
     load_vault_runtime_state,
+    normalize_location_alias,
     parse_vault_log_events,
     publish_flamp_block_overlay_view,
+    publish_flamp_queue_list_view,
     publish_root_view,
     reset_to_default_location,
     run_varac_bbs_vault,
     verify_access_code,
+    vault_locations_to_data,
     vault_runtime_state_to_data,
 )
-from freqinout.core.varac_guard import parse_varac_transfer_events
+from freqinout.core.varac_guard import parse_varac_transfer_events, run_varac_guard
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp
 
 
@@ -107,6 +113,64 @@ def test_hash_and_verify_access_code_round_trip() -> None:
         access_code_salt=str(payload["access_code_salt"]),
         access_code_iterations=int(payload["access_code_iterations"]),
     )
+
+
+def test_vault_locations_preserve_local_operator_access_code_text() -> None:
+    payload = hash_access_code("HUBS-17")
+    locations = load_vault_locations(
+        [
+            {
+                "id": "hubs",
+                "name": "HUBS",
+                "source_dir": "/tmp/hubs",
+                "alias": "HUBS",
+                "open_rule": "Access code required",
+                "access_code_hash": payload["access_code_hash"],
+                "access_code_salt": payload["access_code_salt"],
+                "access_code_iterations": payload["access_code_iterations"],
+                "access_code_plaintext": "HUBS-17",
+            }
+        ]
+    )
+
+    assert locations[0].access_code_plaintext == "HUBS-17"
+    data = vault_locations_to_data(locations)
+    assert data[0]["access_code_plaintext"] == "HUBS-17"
+    assert verify_access_code(
+        "HUBS-17",
+        access_code_hash=str(data[0]["access_code_hash"]),
+        access_code_salt=str(data[0]["access_code_salt"]),
+        access_code_iterations=int(data[0]["access_code_iterations"]),
+    )
+
+
+def test_varac_guard_ignores_fio_generated_helper_files(tmp_path: Path) -> None:
+    varac_base = tmp_path / "VarAC"
+    incoming = tmp_path / "VaraFiles" / "Incoming"
+    varac_base.mkdir(parents=True)
+    incoming.mkdir(parents=True)
+    helper = incoming / "BBS MSG - Type INTEL to open Intel then refresh BBS.txt"
+    helper.write_text("Type INTEL to open Intel then refresh BBS.\n", encoding="utf-8")
+    (varac_base / "VarAC_traffic.log").write_text(
+        "06/05/2026 19:02:07 - FILE SUCCESSFULLY RECEIVED FROM W8UFO "
+        "NAME: BBS MSG - Type INTEL to open Intel then refresh BBS.txt\n",
+        encoding="utf-8",
+    )
+    settings = _Settings(
+        varac_guard_enabled=True,
+        varac_guard_mode="Quarantine unauthorized files",
+        varac_path=str(varac_base),
+        message_paths={"varac": str(incoming)},
+        varac_bbs_allowed_callsigns="",
+        varac_bbs_dir=str(tmp_path / "VaraFiles" / "BBS"),
+    )
+
+    result = run_varac_guard(settings, retry_seconds=1)
+
+    assert helper.exists()
+    assert result.quarantined_files == 0
+    assert result.skipped_events == 1
+    assert not (tmp_path / "VaraFiles" / "FIO_BBS_Vault" / "quarantine" / helper.name).exists()
 
 
 def test_varac_log_parser_honors_day_first_and_month_first_inputs() -> None:
@@ -236,6 +300,84 @@ def test_publish_root_view_respects_callsign_visibility(tmp_path: Path) -> None:
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert any("DOCDROP" in name for name in names)
     assert not any("INTEL" in name for name in names)
+
+
+def test_publish_root_view_appends_custom_helper_text_to_filename(tmp_path: Path) -> None:
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    intel_dir = Path(created["locations"]) / "Intel"
+    intel_dir.mkdir(parents=True)
+    locations = [
+        VaultLocation(id=DEFAULT_LOCATION_ID, name=DEFAULT_LOCATION_NAME, source_dir=str(default_dir), alias="ROOT"),
+        VaultLocation(
+            id="intel",
+            name="Intel",
+            source_dir=str(intel_dir),
+            alias="INTEL",
+            description="Latest reports",
+            open_rule="Public",
+            visibility_rule="Public",
+        ),
+    ]
+
+    publish_root_view(
+        sender="",
+        locations=locations,
+        default_location_id=DEFAULT_LOCATION_ID,
+        global_allowed_callsigns=(),
+        limit_access_enabled=False,
+        global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
+        live_bbs_dir=live_bbs,
+        managed_root=managed_root,
+        flamp_enabled=False,
+    )
+
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert "BBS MSG - Type INTEL to open Intel then refresh BBS - Latest reports.txt" in names
+
+
+def test_publish_root_view_uses_normalized_alias_and_removes_old_helper(tmp_path: Path) -> None:
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    test_dir = Path(created["locations"]) / "TEST_A"
+    test_dir.mkdir(parents=True)
+    stale = live_bbs / "BBS MSG - Type TESTA to open TEST_A then refresh BBS.txt"
+    stale.write_text("old helper\n", encoding="utf-8")
+    locations = [
+        VaultLocation(id=DEFAULT_LOCATION_ID, name=DEFAULT_LOCATION_NAME, source_dir=str(default_dir), alias="ROOT"),
+        VaultLocation(
+            id="test-a",
+            name="TEST_A",
+            source_dir=str(test_dir),
+            alias="TEST_A",
+            description="custom text add-on",
+            open_rule="Public",
+            visibility_rule="Public",
+        ),
+    ]
+
+    publish_root_view(
+        sender="",
+        locations=locations,
+        default_location_id=DEFAULT_LOCATION_ID,
+        global_allowed_callsigns=(),
+        limit_access_enabled=False,
+        global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
+        live_bbs_dir=live_bbs,
+        managed_root=managed_root,
+        flamp_enabled=False,
+    )
+
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert normalize_location_alias("TEST_A") == "TESTA"
+    assert "BBS MSG - Type TESTA to open TEST_A then refresh BBS - custom text add-on.txt" in names
+    assert stale.name not in names
 
 
 def test_publish_root_view_only_lists_helpers_available_to_caller(tmp_path: Path) -> None:
@@ -1289,6 +1431,131 @@ def test_run_varac_bbs_vault_processes_flamp_commands(tmp_path: Path) -> None:
     assert state.current_view_mode in {"root", "location"}
 
 
+def test_publish_root_view_lists_flamp_menu_helper(tmp_path: Path) -> None:
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    locations = [
+        VaultLocation(id=DEFAULT_LOCATION_ID, name=DEFAULT_LOCATION_NAME, source_dir=str(default_dir), alias="ROOT"),
+    ]
+
+    publish_root_view(
+        sender="",
+        locations=locations,
+        default_location_id=DEFAULT_LOCATION_ID,
+        global_allowed_callsigns=(),
+        limit_access_enabled=False,
+        global_code_policy=DEFAULT_GLOBAL_CODE_POLICY,
+        live_bbs_dir=live_bbs,
+        managed_root=managed_root,
+        flamp_enabled=True,
+    )
+
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert "BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - then refresh BBS.txt" in names
+    assert not any("FLAMP CMDS LIST Q" in name for name in names)
+
+
+def test_run_varac_bbs_vault_flamp_command_publishes_separate_helpers(tmp_path: Path) -> None:
+    varac_root = tmp_path / "varac"
+    varac_root.mkdir()
+    varac_db = varac_root / "VarAC.db"
+    _create_varac_db(varac_db)
+    qso_guid = "qso-flamp-help"
+    _insert_qso(varac_db, guid=qso_guid, remote="W5TTA")
+    _insert_datastream(
+        varac_db,
+        [
+            (1, "a", 1, qso_guid, "W5TTA", "<BLR>", "2026-05-02 14:10:18.7762304Z"),
+            (2, "b", 1, qso_guid, "W5TTA", "FLAMP", "2026-05-02 14:10:21.0000000Z"),
+        ],
+    )
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir()
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_db_path=str(varac_db),
+        varac_path=str(varac_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_flamp_enabled=True,
+        varac_bbs_vault_flamp_relay_dir=str(relay_dir),
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            }
+        ],
+        varac_bbs_vault_runtime_state_v1={},
+    )
+
+    result = run_varac_bbs_vault(settings)
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert result.enabled
+    assert state.current_view_mode == "flamp-help"
+    assert "BBS MSG - LIST Q to list available FLAMP files - then refresh BBS.txt" in names
+    assert "BBS MSG - LIST BLKS F277 shows available blocks for F277 - then refresh BBS.txt" in names
+    assert "BBS MSG - BLK 0,8,9 F277 pulls blocks 0,8,9 for queueID F277 - then refresh BBS.txt" in names
+    assert "BBS MSG - ROOT to return to normal BBS menu - then refresh BBS.txt" in names
+
+
+def test_flamp_queue_listing_filters_age_and_unassigned_files(tmp_path: Path) -> None:
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir()
+    fresh = relay_dir / "2A0C_NATL-RR-260504-1430Z-AIB-sig.k2s"
+    old = relay_dir / "837C_NATL-RR-260427-1500Z-AIB-sig.k2s"
+    unassigned = relay_dir / "1A72_Unassigned"
+    for path in (fresh, old, unassigned):
+        path.write_text("<PROG 1.0>{ABCD}\n{ABCD:1}BLOCK\n", encoding="utf-8")
+    now = time.time()
+    old_ts = now - 8 * 86400
+    os.utime(old, (old_ts, old_ts))
+    os.utime(unassigned, (now, now))
+    os.utime(fresh, (now, now))
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    initialize_managed_root(managed_root)
+    store = FlampRelayStore(relay_dir)
+
+    publish_flamp_queue_list_view(
+        store,
+        base_source_dir="",
+        live_bbs_dir=live_bbs,
+        managed_root=managed_root,
+        max_age_days=7,
+    )
+
+    queue_text = (live_bbs / "BBS_QUEUE_LIST.txt").read_text(encoding="utf-8")
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert "2A0C_NATL-RR-260504-1430Z-AIB-sig.k2s" in queue_text
+    assert "837C_NATL-RR-260427-1500Z-AIB-sig.k2s" not in queue_text
+    assert "Unassigned" not in queue_text
+    assert any("LIST BLKS 2A0C" in name for name in names)
+    assert not any("LIST BLKS 837C" in name for name in names)
+    assert not any("1A72" in name for name in names)
+
+
 def test_settings_tab_persists_managed_vault_configuration(monkeypatch, tmp_path: Path) -> None:
     if sys.platform == "darwin":
         import pytest
@@ -1363,8 +1630,9 @@ def test_settings_tab_autofills_vault_location_defaults(tmp_path: Path) -> None:
     tab._new_varac_bbs_vault_location()
     tab.varac_bbs_vault_location_name_edit.setText("Logistics")
 
-    assert tab.varac_bbs_vault_description_edit.text() == "to open Logistics"
-    assert tab.varac_bbs_vault_source_dir_edit.text() == str(managed_root / "locations" / "Logistics")
+    assert tab.varac_bbs_vault_description_edit.text() == ""
+    assert tab.varac_bbs_vault_source_dir_edit.text() == "FIO_BBS_Vault/locations/Logistics"
+    assert tab.varac_bbs_vault_source_dir_edit.property("full_path") == str(managed_root / "locations" / "Logistics")
     assert "Live BBS likely match: Logistics.txt" in tab.varac_bbs_vault_source_hint_label.text()
 
 

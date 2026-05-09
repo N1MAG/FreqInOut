@@ -177,6 +177,16 @@ PENDING_POLL_SECONDS = 30
 JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
 BBS_AUTO_ARCHIVE_INTERVAL_SECONDS = 24 * 60 * 60  # once daily max
 BBS_AUTO_ARCHIVE_LAST_CHECK_KEY = "varac_bbs_auto_archive_last_check_ts"
+BBS_HELPER_FILE_PREFIXES = (
+    "BBS MSG - ",
+    "BBS_QUEUE_LIST",
+    "BBS_BLOCK_LIST",
+)
+
+
+def _is_fio_bbs_helper_file_name(name: object) -> bool:
+    clean = Path(str(name or "").strip()).name.upper()
+    return any(clean.startswith(prefix.upper()) for prefix in BBS_HELPER_FILE_PREFIXES)
 
 
 @dataclass
@@ -300,6 +310,8 @@ class _FileScanWorker(QObject):
                             continue
                         if not dent.is_file(follow_symlinks=False):
                             continue
+                        if _is_fio_bbs_helper_file_name(dent.name):
+                            continue
                         suffix = Path(dent.name).suffix.lower()
                         if suffix not in SUPPORTED_EXT:
                             continue
@@ -329,6 +341,8 @@ class _FileScanWorker(QObject):
                 for dent in it:
                     try:
                         if not dent.is_file(follow_symlinks=False):
+                            continue
+                        if _is_fio_bbs_helper_file_name(dent.name):
                             continue
                         suffix = Path(dent.name).suffix.lower()
                         if suffix not in SUPPORTED_EXT:

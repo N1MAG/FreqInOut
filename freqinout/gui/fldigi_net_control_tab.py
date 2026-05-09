@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QTabWidget,
     QToolButton,
+    QScrollArea,
 )
 from PySide6.QtGui import QFontMetrics, QColor
 
@@ -259,6 +260,7 @@ class FldigiNetControlTab(QWidget):
         setup_layout.addLayout(chip_row)
 
         self.setup_details_frame = QFrame()
+        self.setup_details_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         details_layout = QVBoxLayout(self.setup_details_frame)
         details_layout.setContentsMargins(0, 4, 0, 0)
         details_layout.setSpacing(4)
@@ -278,6 +280,11 @@ class FldigiNetControlTab(QWidget):
         self.macro_profile_status = QLabel("Legacy mode: no macro profile selected.")
         self.macro_profile_status.setWordWrap(True)
         details_layout.addWidget(self.macro_profile_status)
+
+        self.macro_mapping_locations_label = QLabel()
+        self.macro_mapping_locations_label.setWordWrap(True)
+        self.macro_mapping_locations_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        details_layout.addWidget(self.macro_mapping_locations_label)
 
         log_controls_layout = QVBoxLayout()
         log_controls_layout.setSpacing(2)
@@ -368,6 +375,9 @@ class FldigiNetControlTab(QWidget):
         self.setup_details_frame.setVisible(self._setup_details_expanded)
         self.macro_profile_details_btn.setChecked(self._setup_details_expanded)
         self.macro_profile_details_btn.setArrowType(Qt.DownArrow if self._setup_details_expanded else Qt.RightArrow)
+        self.macro_profile_details_btn.setStyleSheet(
+            button_style("info", resolve_theme(self.settings)) if self._setup_details_expanded else ""
+        )
 
     def _build_operator_action_band(self, layout: QVBoxLayout) -> None:
         known_row = QHBoxLayout()
@@ -403,8 +413,17 @@ class FldigiNetControlTab(QWidget):
         layout.addLayout(known_btn_row)
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
+        self._ncs_scroll_area = QScrollArea()
+        self._ncs_scroll_area.setWidgetResizable(True)
+        self._ncs_scroll_area.setFrameShape(QFrame.NoFrame)
+        outer_layout.addWidget(self._ncs_scroll_area)
+
+        self._ncs_scroll_content = QWidget()
+        layout = QVBoxLayout(self._ncs_scroll_content)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(10)
 
@@ -447,7 +466,7 @@ class FldigiNetControlTab(QWidget):
         self.copy_qru_btn = QPushButton("Copy QRU")
         self.copy_late_btn = QPushButton("Copy LATE")
         self.copy_seen_locally_btn = QPushButton("Copy Seen Locally")
-        self.copy_roster_summary_btn = QPushButton("Copy Check-ins")
+        self.copy_roster_summary_btn = QPushButton("Copy All Check-ins")
         for btn in (
             self.copy_tfc_btn,
             self.copy_qru_btn,
@@ -641,6 +660,7 @@ class FldigiNetControlTab(QWidget):
         self.review_card.text_edit.textChanged.connect(self._on_workspace_text_changed)
 
         self._apply_role_workspace(self.role_combo.currentText())
+        self._ncs_scroll_area.setWidget(self._ncs_scroll_content)
 
     def _toggle_setup_details(self, *_args) -> None:
         self._set_setup_details_expanded(not self._setup_details_expanded)
@@ -2120,6 +2140,7 @@ class FldigiNetControlTab(QWidget):
         self._update_copy_buttons_state()
         self._apply_known_op_styles(theme)
         self._update_add_buttons_state()
+        self._set_setup_details_expanded(self._setup_details_expanded)
 
     def apply_theme(self) -> None:
         self._apply_theme()
@@ -2557,6 +2578,44 @@ class FldigiNetControlTab(QWidget):
             "TX Context: On" if self._log_assisted_include_tx() else "TX Context: Off",
             "active" if self._log_assisted_include_tx() else "neutral",
         )
+        self._refresh_macro_mapping_locations()
+
+    def _macro_mapping_locations_text(self) -> str:
+        checkin_dir = self._resolve_checkin_dir()
+        default_paths = [
+            ("TFC", checkin_dir / "main_checkins.txt"),
+            ("QRU", checkin_dir / "qru_checkins.txt"),
+            ("LATE", checkin_dir / "new-late_checkins.txt"),
+            ("ALL", checkin_dir / "all_checkins.txt"),
+        ]
+        lines = ["Macro check-in files:"]
+        lines.extend(f"{label}: {path}" for label, path in default_paths)
+        lines.append(f"Archive: {checkin_dir / 'archive'}")
+
+        selected = self._normalize_macro_profile_path(self._selected_macro_profile_path())
+        record = self._macro_profile_record(selected)
+        mappings = record.get("mappings")
+        active_mappings = [
+            mapping for mapping in mappings if self._macro_profile_mapping_is_complete(mapping)
+        ] if isinstance(mappings, list) else []
+        if not active_mappings:
+            lines.append("Mapped macro files: none active.")
+            return "\n".join(lines)
+
+        lines.append("Mapped macro files:")
+        for mapping in active_mappings:
+            function = str(mapping.get("function") or "").strip().upper() or "CUSTOM"
+            if function == "CUSTOM":
+                function = str(mapping.get("custom_name") or "").strip() or "CUSTOM"
+            scope = str(mapping.get("scope") or "").strip().upper()
+            source_file = str(mapping.get("source_file") or "").strip()
+            label = f"{scope} {function}".strip()
+            lines.append(f"{label}: {source_file or '(macro-only mapping)'}")
+        return "\n".join(lines)
+
+    def _refresh_macro_mapping_locations(self) -> None:
+        if hasattr(self, "macro_mapping_locations_label"):
+            self.macro_mapping_locations_label.setText(self._macro_mapping_locations_text())
 
     # ---------------- SETTINGS LOAD ---------------- #
 
@@ -3172,6 +3231,9 @@ class FldigiNetControlTab(QWidget):
     def _all_checkins_file_path(self) -> str:
         return str(self._resolve_checkin_dir() / "all_checkins.txt")
 
+    def _checkin_archive_dir(self) -> Path:
+        return self._resolve_checkin_dir() / "archive"
+
     def _ensure_checkin_files(self) -> tuple[str, str, str]:
         base = self._resolve_checkin_dir()
         main_path = base / "main_checkins.txt"
@@ -3188,6 +3250,30 @@ class FldigiNetControlTab(QWidget):
         if not all_path.exists():
             all_path.touch()
         return str(main_path), str(qru_path), str(late_path)
+
+    def _archive_checkin_files(self) -> List[Path]:
+        archive_dir = self._checkin_archive_dir()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+        net_name = self.net_name_combo.currentText().strip() if hasattr(self, "net_name_combo") else ""
+        net_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", net_name).strip("._-")
+        prefix = f"{stamp}_{net_slug}" if net_slug else stamp
+        archived: List[Path] = []
+        paths = [Path(path) for path in self._checkin_file_paths()]
+        paths.append(Path(self._all_checkins_file_path()))
+        for source in paths:
+            if not source.exists() or not source.is_file():
+                continue
+            target = archive_dir / f"{prefix}_{source.name}"
+            counter = 2
+            while target.exists():
+                target = archive_dir / f"{prefix}_{source.stem}-{counter}{source.suffix}"
+                counter += 1
+            target.write_text(source.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+            archived.append(target)
+        if archived:
+            log.info("Archived %d FLDigi check-in files to %s", len(archived), archive_dir)
+        return archived
 
     # ---------------- BUTTON LOGIC ---------------- #
 
@@ -3422,6 +3508,7 @@ class FldigiNetControlTab(QWidget):
             )
             if resp != QMessageBox.Yes:
                 return
+            self._archive_checkin_files()
             # End net even though no check-ins exist
             self._net_in_progress = False
             self._reset_log_assisted_session()
@@ -3501,6 +3588,7 @@ class FldigiNetControlTab(QWidget):
                 "Net ended. No valid check-ins found to import.",
             )
 
+        self._archive_checkin_files()
         self._net_in_progress = False
         self._reset_log_assisted_session()
         self.net_status_changed.emit("FLDIGI", False)

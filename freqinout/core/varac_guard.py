@@ -19,6 +19,11 @@ CALLSIGN_RE = re.compile(r"\b([A-Z0-9/]{3,15})\b")
 FILENAME_RE = re.compile(r"(?:FILE|FILENAME|NAME|AS)\s*[:=]\s*([^\r\n]+)", re.IGNORECASE)
 QUOTED_FILE_RE = re.compile(r'"([^"]+\.(?:b2s|k2s|txt|rtf|html?|sig|asc|gpg)(?:\.[A-Za-z0-9]+)?)"', re.IGNORECASE)
 TRAILING_FILE_RE = re.compile(r"([A-Za-z0-9_.\- ]+\.(?:b2s|k2s|txt|rtf|html?|sig|asc|gpg))(?:\s|$)", re.IGNORECASE)
+FIO_HELPER_FILE_PREFIXES = (
+    "BBS MSG - ",
+    "BBS_QUEUE_LIST",
+    "BBS_BLOCK_LIST",
+)
 
 
 @dataclass(frozen=True)
@@ -288,7 +293,20 @@ def _resolve_quarantine_dir(settings, incoming_dir: Path) -> Path:
             return path
         except Exception:
             pass
-    return incoming_dir / "VGuard_Quarantine"
+    managed_root = str(settings.get("varac_bbs_vault_managed_root", "") or "").strip() if settings is not None else ""
+    if managed_root:
+        return Path(managed_root).expanduser() / "quarantine"
+    bbs_dir = str(settings.get("varac_bbs_dir", "") or "").strip() if settings is not None else ""
+    if bbs_dir:
+        bbs_path = Path(bbs_dir).expanduser()
+        return bbs_path.parent / "FIO_BBS_Vault" / "quarantine"
+    return incoming_dir.parent / "FIO_BBS_Vault" / "quarantine"
+
+
+def _is_fio_generated_helper_file(filename: object) -> bool:
+    clean = Path(str(filename or "").strip()).name
+    upper = clean.upper()
+    return any(upper.startswith(prefix.upper()) for prefix in FIO_HELPER_FILE_PREFIXES)
 
 
 def evaluate_varac_guard_event(
@@ -319,6 +337,12 @@ def evaluate_varac_guard_event(
     mode = str(settings.get("varac_guard_mode", "Log only") or "Log only").strip().lower() if settings is not None else "log only"
     state = state or {}
     filename = str(event.filename or "").strip()
+    if _is_fio_generated_helper_file(filename):
+        return (
+            VaracGuardDecision(action="skip", reason="fio_helper_file", sender=sender, filename=filename, log_path=event.log_path),
+            None,
+            True,
+        )
 
     candidates = _candidate_files(incoming_dir, filename)
     if not candidates and event.timestamp_utc > 0:
@@ -343,6 +367,12 @@ def evaluate_varac_guard_event(
         )
 
     src = candidates[0]
+    if _is_fio_generated_helper_file(src.name):
+        return (
+            VaracGuardDecision(action="skip", reason="fio_helper_file", sender=sender, filename=src.name, source_path=str(src), log_path=event.log_path),
+            None,
+            True,
+        )
     try:
         st = src.stat()
     except Exception:

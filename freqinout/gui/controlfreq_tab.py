@@ -67,6 +67,13 @@ from freqinout.gui.qsy_helper import (
     active_hold_button_text,
     active_hold_status_text,
 )
+
+BBS_HELPER_FILE_PREFIXES = ("BBS MSG - ", "BBS_QUEUE_LIST", "BBS_BLOCK_LIST")
+
+
+def _is_fio_bbs_helper_file_name(name: object) -> bool:
+    clean = Path(str(name or "").strip()).name.upper()
+    return any(clean.startswith(prefix.upper()) for prefix in BBS_HELPER_FILE_PREFIXES)
 from freqinout.gui.stations_map_tab import (
     FEMA_REGIONS,
     LOWER48_STATES,
@@ -4251,6 +4258,8 @@ class ControlFreqTab(QWidget):
             try:
                 for child in bbs_dir.iterdir():
                     if not child.is_file():
+                        continue
+                    if _is_fio_bbs_helper_file_name(child.name):
                         continue
                     all_names.append(child.name)
                     try:
