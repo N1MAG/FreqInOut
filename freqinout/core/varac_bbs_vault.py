@@ -1576,18 +1576,49 @@ def publish_flamp_block_list_view(
     relay_info = store.parse_queue(queue_id)
     if not relay_info:
         raise ValueError(f"FLAMP queue {queue_id} not found")
+    requested_queue_id = str(queue_id or relay_info["file_id"]).strip().upper()
     blocks, missing = store.available_blocks_text(relay_info)
     lines = [
-        f"QUEUE {relay_info['file_id']}",
+        f"QUEUE {requested_queue_id}",
         f"FILE {relay_info['name']}",
         "AVAILABLE " + (",".join(map(str, blocks)) if blocks else "NONE"),
         "MISSING " + (",".join(map(str, missing)) if missing else "NONE"),
     ]
     virtual_files = [
         _VirtualFile(
-            name=f"{DEFAULT_FLAMP_BLOCK_PREFIX}_{relay_info['file_id']}.txt",
+            name=f"{DEFAULT_FLAMP_BLOCK_PREFIX}_{requested_queue_id}.txt",
             content="\n".join(lines) + "\n",
         ),
+        _menu_instruction_entry("BBS MSG - Type ROOT to return to main menu then refresh BBS"),
+    ]
+    manifest, ignored_dirs = build_publish_manifest(base_source_dir, virtual_files=virtual_files)
+    result = _publish_manifest_entries(
+        manifest,
+        source_dir=base_source_dir,
+        live_bbs_dir=live_bbs_dir,
+        managed_root=managed_root,
+        virtual_files=virtual_files,
+    )
+    return VaultPublishResult(
+        changed=result.changed,
+        published_count=result.published_count,
+        removed_count=result.removed_count,
+        unmanaged_live_files=result.unmanaged_live_files,
+        manifest_path=result.manifest_path,
+        ignored_directories=ignored_dirs,
+    )
+
+
+def publish_flamp_notice_view(
+    *,
+    message: str,
+    base_source_dir: object,
+    live_bbs_dir: object,
+    managed_root: object,
+) -> VaultPublishResult:
+    virtual_files = [
+        _menu_instruction_entry(f"BBS MSG - {message} - then refresh BBS"),
+        _menu_instruction_entry("BBS MSG - LIST Q to list available FLAMP files - then refresh BBS"),
         _menu_instruction_entry("BBS MSG - Type ROOT to return to main menu then refresh BBS"),
     ]
     manifest, ignored_dirs = build_publish_manifest(base_source_dir, virtual_files=virtual_files)
@@ -2850,7 +2881,27 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     published = published or bool(publish_result.changed)
                     processed += 1
                 except Exception as exc:
-                    runtime_state = _update_state(runtime_state, last_action=f"FLAMP block list failed: {exc}", last_error=str(exc))
+                    notice_result = publish_flamp_notice_view(
+                        message=f"FLAMP queue {event.queue_id} not available; type LIST Q for current queues",
+                        base_source_dir=base_location.source_dir,
+                        live_bbs_dir=live_bbs_dir,
+                        managed_root=managed_root,
+                    )
+                    runtime_state = _update_state(
+                        runtime_state,
+                        current_session_callsign=event.remote_callsign,
+                        current_session_qso_guid=event.qso_guid,
+                        current_view_mode="flamp-notice",
+                        current_view_label=f"FLAMP {event.queue_id}",
+                        last_publish_manifest_path=notice_result.manifest_path,
+                        last_publish_ts=event.timestamp_utc or now_ts,
+                        last_action=f"FLAMP queue {event.queue_id} not available for {event.remote_callsign}: {exc}",
+                        last_request_ts=event.timestamp_utc or now_ts,
+                        last_error=str(exc),
+                        unmanaged_live_files=list(notice_result.unmanaged_live_files),
+                    )
+                    published = published or bool(notice_result.changed)
+                    processed += 1
             continue
         if event.kind == "flamp_block_request" and flamp_enabled and flamp_relay_dir:
             store = FlampRelayStore(flamp_relay_dir)
@@ -3050,7 +3101,27 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     published = published or bool(publish_result.changed)
                     processed += 1
                 except Exception as exc:
-                    runtime_state = _update_state(runtime_state, last_action=f"FLAMP block list failed: {exc}", last_error=str(exc))
+                    notice_result = publish_flamp_notice_view(
+                        message=f"FLAMP queue {event.queue_id} not available; type LIST Q for current queues",
+                        base_source_dir=base_location.source_dir if base_location is not None else "",
+                        live_bbs_dir=live_bbs_dir,
+                        managed_root=managed_root,
+                    )
+                    runtime_state = _update_state(
+                        runtime_state,
+                        current_session_callsign=event.sender,
+                        current_session_qso_guid=runtime_state.current_session_qso_guid,
+                        current_view_mode="flamp-notice",
+                        current_view_label=f"FLAMP {event.queue_id}",
+                        last_publish_manifest_path=notice_result.manifest_path,
+                        last_publish_ts=event.timestamp_utc or now_ts,
+                        last_action=f"FLAMP queue {event.queue_id} not available for {event.sender}: {exc}",
+                        last_request_ts=event.timestamp_utc or now_ts,
+                        last_error=str(exc),
+                        unmanaged_live_files=list(notice_result.unmanaged_live_files),
+                    )
+                    published = published or bool(notice_result.changed)
+                    processed += 1
             elif event.kind == "flamp_block_request" and flamp_enabled and flamp_relay_dir:
                 store = FlampRelayStore(flamp_relay_dir)
                 try:
