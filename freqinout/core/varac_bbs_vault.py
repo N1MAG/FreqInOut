@@ -3023,10 +3023,14 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     processed += 1
             elif event.kind == "flamp_list_blocks" and flamp_enabled and flamp_relay_dir:
                 store = FlampRelayStore(flamp_relay_dir)
+                base_location = _location_by_id(locations, runtime_state.current_location_id) or _location_by_id(
+                    locations, default_location_id
+                )
                 try:
                     publish_result = publish_flamp_block_list_view(
                         store,
                         event.queue_id,
+                        base_source_dir=base_location.source_dir if base_location is not None else "",
                         live_bbs_dir=live_bbs_dir,
                         managed_root=managed_root,
                     )
