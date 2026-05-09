@@ -280,7 +280,7 @@ def _read_tail(path: Path, max_bytes: int = 65536) -> str:
 
 
 def _parse_timestamp(stamp: str) -> float:
-    return parse_varac_event_timestamp_to_epoch(stamp)
+    return parse_varac_event_timestamp_to_epoch(stamp, prefer_day_first=True)
 
 
 def _parse_db_timestamp(value: object) -> float:
@@ -2731,6 +2731,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
     locations = _with_filesystem_location_fallbacks(locations, managed_root, default_location_id=default_location_id)
     runtime_state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    initial_last_request_ts = float(runtime_state.last_request_ts or 0.0)
     global_allowed = parse_callsign_list(settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else "")
     limit_access_enabled = bool(settings.get("varac_bbs_limit_access_enabled", False) if settings is not None else False)
 
@@ -3068,6 +3069,8 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         )
         for event in log_events:
             scanned += 1
+            if initial_last_request_ts and event.timestamp_utc and event.timestamp_utc <= initial_last_request_ts:
+                continue
             key = _state_key(event)
             if key in seen_keys:
                 continue
