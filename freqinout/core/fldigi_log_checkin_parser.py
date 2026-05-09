@@ -68,7 +68,6 @@ def _normalize_text(value: str) -> str:
     return text
 
 
-
 def _normalize_tx_context(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 

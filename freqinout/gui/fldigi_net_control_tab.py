@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QTabWidget,
     QToolButton,
+    QScrollArea,
 )
 from PySide6.QtGui import QFontMetrics, QColor
 
@@ -140,6 +141,8 @@ class FldigiNetControlTab(QWidget):
         self._log_assisted_session_tx_context: str = ""
         self._log_assisted_seen_normalized: set[str] = set()
         self._log_assisted_candidates_by_callsign: Dict[str, Dict[str, object]] = {}
+        self._activation_secondary_refresh_pending: bool = False
+        self._activation_secondary_refresh_inflight: bool = False
 
         self._build_ui()
         self._apply_theme()
@@ -257,6 +260,7 @@ class FldigiNetControlTab(QWidget):
         setup_layout.addLayout(chip_row)
 
         self.setup_details_frame = QFrame()
+        self.setup_details_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         details_layout = QVBoxLayout(self.setup_details_frame)
         details_layout.setContentsMargins(0, 4, 0, 0)
         details_layout.setSpacing(4)
@@ -276,6 +280,11 @@ class FldigiNetControlTab(QWidget):
         self.macro_profile_status = QLabel("Legacy mode: no macro profile selected.")
         self.macro_profile_status.setWordWrap(True)
         details_layout.addWidget(self.macro_profile_status)
+
+        self.macro_mapping_locations_label = QLabel()
+        self.macro_mapping_locations_label.setWordWrap(True)
+        self.macro_mapping_locations_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        details_layout.addWidget(self.macro_mapping_locations_label)
 
         log_controls_layout = QVBoxLayout()
         log_controls_layout.setSpacing(2)
@@ -366,6 +375,9 @@ class FldigiNetControlTab(QWidget):
         self.setup_details_frame.setVisible(self._setup_details_expanded)
         self.macro_profile_details_btn.setChecked(self._setup_details_expanded)
         self.macro_profile_details_btn.setArrowType(Qt.DownArrow if self._setup_details_expanded else Qt.RightArrow)
+        self.macro_profile_details_btn.setStyleSheet(
+            button_style("info", resolve_theme(self.settings)) if self._setup_details_expanded else ""
+        )
 
     def _build_operator_action_band(self, layout: QVBoxLayout) -> None:
         known_row = QHBoxLayout()
@@ -397,13 +409,21 @@ class FldigiNetControlTab(QWidget):
             "seen_locally": self.add_known_seen_locally_btn,
         }
         self._known_add_button_targets = {button: target for target, button in self._known_add_buttons.items()}
-        known_btn_row.addWidget(self.add_known_late_btn)
         known_btn_row.addStretch()
         layout.addLayout(known_btn_row)
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
+        self._ncs_scroll_area = QScrollArea()
+        self._ncs_scroll_area.setWidgetResizable(True)
+        self._ncs_scroll_area.setFrameShape(QFrame.NoFrame)
+        outer_layout.addWidget(self._ncs_scroll_area)
+
+        self._ncs_scroll_content = QWidget()
+        layout = QVBoxLayout(self._ncs_scroll_content)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(10)
 
@@ -446,7 +466,7 @@ class FldigiNetControlTab(QWidget):
         self.copy_qru_btn = QPushButton("Copy QRU")
         self.copy_late_btn = QPushButton("Copy LATE")
         self.copy_seen_locally_btn = QPushButton("Copy Seen Locally")
-        self.copy_roster_summary_btn = QPushButton("Copy Check-ins")
+        self.copy_roster_summary_btn = QPushButton("Copy All Check-ins")
         for btn in (
             self.copy_tfc_btn,
             self.copy_qru_btn,
@@ -640,6 +660,7 @@ class FldigiNetControlTab(QWidget):
         self.review_card.text_edit.textChanged.connect(self._on_workspace_text_changed)
 
         self._apply_role_workspace(self.role_combo.currentText())
+        self._ncs_scroll_area.setWidget(self._ncs_scroll_content)
 
     def _toggle_setup_details(self, *_args) -> None:
         self._set_setup_details_expanded(not self._setup_details_expanded)
@@ -1002,7 +1023,8 @@ class FldigiNetControlTab(QWidget):
                 item = self.roster_table.item(row, col)
                 if item is None:
                     item = QTableWidgetItem("")
-                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    if col != 4:
+                        item.setFlags(item.flags() | Qt.ItemIsEditable)
                     self.roster_table.setItem(row, col, item)
                 item.setText(values[col])
             self._roster_set_category(row, values[4])
@@ -1048,20 +1070,55 @@ class FldigiNetControlTab(QWidget):
         self._roster_sync_legacy_buffers()
         return row
 
+    def _roster_row_widget(self, row: int) -> Optional[QComboBox]:
+        widget = self.roster_table.cellWidget(row, 4)
+        return widget if isinstance(widget, QComboBox) else None
+
     def _roster_configure_category_editor(self, row: int) -> None:
         combo = QComboBox(self.roster_table)
-        combo.addItems(["TFC", "QRU", "LATE"])
+        categories = ["TFC", "QRU", "LATE"]
+        combo.addItems(categories)
         combo.setCurrentText("TFC")
         combo.setMinimumContentsLength(5)
         combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
 
-        def _on_category_changed(_value: str, row_index: int = row) -> None:
+        def _on_category_changed(value: str, row_index: int = row) -> None:
             if self._roster_syncing:
                 return
             self._roster_sync_legacy_buffers()
 
         combo.currentTextChanged.connect(_on_category_changed)
         self.roster_table.setCellWidget(row, 4, combo)
+
+    def _roster_rebuild_category_editors(self) -> None:
+        for row in range(self.roster_table.rowCount()):
+            if self.roster_table.cellWidget(row, 4) is None:
+                self._roster_configure_category_editor(row)
+            category = self.roster_table.item(row, 4).text().strip().upper() if self.roster_table.item(row, 4) else "TFC"
+            self._roster_set_category(row, category or "TFC")
+
+    def _roster_reset_from_text(self, text: str, category: str = "TFC") -> None:
+        self._roster_syncing = True
+        try:
+            self.roster_table.setRowCount(0)
+            for line in (text or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                cs, name, state, extra = self._split_checkin_with_extra(line)
+                if not cs and not name and not state:
+                    continue
+                self.roster_table.insertRow(self.roster_table.rowCount())
+                row = self.roster_table.rowCount() - 1
+                for col in (0, 1, 2, 3, 5):
+                    item = QTableWidgetItem("")
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    self.roster_table.setItem(row, col, item)
+                self._roster_configure_category_editor(row)
+                self._roster_set_row(row, cs, name, state, extra, category, "Local")
+        finally:
+            self._roster_syncing = False
+        self._roster_sync_legacy_buffers(write_files=False)
 
     def _copy_roster_category(self, category: str) -> None:
         text = self._roster_table_text(category)
@@ -1246,6 +1303,9 @@ class FldigiNetControlTab(QWidget):
         if not replaced:
             lines.append(line)
         card.set_text("\n".join([ln for ln in lines if ln]).strip())
+
+    def _log_assisted_bucket_text(self, bucket_id: str) -> str:
+        return self._workspace_bucket_text(bucket_id)
 
     def _render_log_assisted_candidate(self, candidate) -> str:
         return self._log_assisted_candidate_line(candidate)
@@ -1796,9 +1856,27 @@ class FldigiNetControlTab(QWidget):
             self._update_clock_labels()
             self._update_suspend_state()
             self._update_next_change_display()
+            self._schedule_activation_secondary_refresh()
+
+    def _schedule_activation_secondary_refresh(self) -> None:
+        if self._activation_secondary_refresh_pending:
+            return
+        self._activation_secondary_refresh_pending = True
+        QTimer.singleShot(120, self._run_activation_secondary_refresh)
+
+    def _run_activation_secondary_refresh(self) -> None:
+        if self._activation_secondary_refresh_inflight:
+            self._activation_secondary_refresh_pending = False
+            self._schedule_activation_secondary_refresh()
+            return
+        self._activation_secondary_refresh_pending = False
+        self._activation_secondary_refresh_inflight = True
+        try:
             self._maybe_reload_operating_groups()
             self._refresh_macro_profile_choices()
             self._poll_log_assisted_intake()
+        finally:
+            self._activation_secondary_refresh_inflight = False
 
     def set_tab_active(self, active: bool) -> None:
         self._active = bool(active)
@@ -2062,6 +2140,7 @@ class FldigiNetControlTab(QWidget):
         self._update_copy_buttons_state()
         self._apply_known_op_styles(theme)
         self._update_add_buttons_state()
+        self._set_setup_details_expanded(self._setup_details_expanded)
 
     def apply_theme(self) -> None:
         self._apply_theme()
@@ -2499,6 +2578,44 @@ class FldigiNetControlTab(QWidget):
             "TX Context: On" if self._log_assisted_include_tx() else "TX Context: Off",
             "active" if self._log_assisted_include_tx() else "neutral",
         )
+        self._refresh_macro_mapping_locations()
+
+    def _macro_mapping_locations_text(self) -> str:
+        checkin_dir = self._resolve_checkin_dir()
+        default_paths = [
+            ("TFC", checkin_dir / "main_checkins.txt"),
+            ("QRU", checkin_dir / "qru_checkins.txt"),
+            ("LATE", checkin_dir / "new-late_checkins.txt"),
+            ("ALL", checkin_dir / "all_checkins.txt"),
+        ]
+        lines = ["Macro check-in files:"]
+        lines.extend(f"{label}: {path}" for label, path in default_paths)
+        lines.append(f"Archive: {checkin_dir / 'archive'}")
+
+        selected = self._normalize_macro_profile_path(self._selected_macro_profile_path())
+        record = self._macro_profile_record(selected)
+        mappings = record.get("mappings")
+        active_mappings = [
+            mapping for mapping in mappings if self._macro_profile_mapping_is_complete(mapping)
+        ] if isinstance(mappings, list) else []
+        if not active_mappings:
+            lines.append("Mapped macro files: none active.")
+            return "\n".join(lines)
+
+        lines.append("Mapped macro files:")
+        for mapping in active_mappings:
+            function = str(mapping.get("function") or "").strip().upper() or "CUSTOM"
+            if function == "CUSTOM":
+                function = str(mapping.get("custom_name") or "").strip() or "CUSTOM"
+            scope = str(mapping.get("scope") or "").strip().upper()
+            source_file = str(mapping.get("source_file") or "").strip()
+            label = f"{scope} {function}".strip()
+            lines.append(f"{label}: {source_file or '(macro-only mapping)'}")
+        return "\n".join(lines)
+
+    def _refresh_macro_mapping_locations(self) -> None:
+        if hasattr(self, "macro_mapping_locations_label"):
+            self.macro_mapping_locations_label.setText(self._macro_mapping_locations_text())
 
     # ---------------- SETTINGS LOAD ---------------- #
 
@@ -2908,6 +3025,11 @@ class FldigiNetControlTab(QWidget):
                     QTimer.singleShot(0, self.known_op_edit.setFocus)
                     event.accept()
                     return True
+        if obj in self._known_add_button_targets and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                self._insert_known_into_bucket(self._known_add_button_targets[obj])
+                event.accept()
+                return True
         return super().eventFilter(obj, event)
 
     def _on_known_op_return(self) -> None:
@@ -3109,6 +3231,9 @@ class FldigiNetControlTab(QWidget):
     def _all_checkins_file_path(self) -> str:
         return str(self._resolve_checkin_dir() / "all_checkins.txt")
 
+    def _checkin_archive_dir(self) -> Path:
+        return self._resolve_checkin_dir() / "archive"
+
     def _ensure_checkin_files(self) -> tuple[str, str, str]:
         base = self._resolve_checkin_dir()
         main_path = base / "main_checkins.txt"
@@ -3125,6 +3250,30 @@ class FldigiNetControlTab(QWidget):
         if not all_path.exists():
             all_path.touch()
         return str(main_path), str(qru_path), str(late_path)
+
+    def _archive_checkin_files(self) -> List[Path]:
+        archive_dir = self._checkin_archive_dir()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+        net_name = self.net_name_combo.currentText().strip() if hasattr(self, "net_name_combo") else ""
+        net_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", net_name).strip("._-")
+        prefix = f"{stamp}_{net_slug}" if net_slug else stamp
+        archived: List[Path] = []
+        paths = [Path(path) for path in self._checkin_file_paths()]
+        paths.append(Path(self._all_checkins_file_path()))
+        for source in paths:
+            if not source.exists() or not source.is_file():
+                continue
+            target = archive_dir / f"{prefix}_{source.name}"
+            counter = 2
+            while target.exists():
+                target = archive_dir / f"{prefix}_{source.stem}-{counter}{source.suffix}"
+                counter += 1
+            target.write_text(source.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+            archived.append(target)
+        if archived:
+            log.info("Archived %d FLDigi check-in files to %s", len(archived), archive_dir)
+        return archived
 
     # ---------------- BUTTON LOGIC ---------------- #
 
@@ -3242,8 +3391,8 @@ class FldigiNetControlTab(QWidget):
                 continue
             self._roster_append_row(cs, name, state, extra, "TFC")
         for row in range(self.roster_table.rowCount()):
-            widget = self.roster_table.cellWidget(row, 4)
             item = self.roster_table.item(row, 4)
+            widget = self.roster_table.cellWidget(row, 4)
             current = ""
             if widget is not None and hasattr(widget, "currentText"):
                 current = str(widget.currentText() or "").strip().upper()
@@ -3359,6 +3508,7 @@ class FldigiNetControlTab(QWidget):
             )
             if resp != QMessageBox.Yes:
                 return
+            self._archive_checkin_files()
             # End net even though no check-ins exist
             self._net_in_progress = False
             self._reset_log_assisted_session()
@@ -3438,6 +3588,7 @@ class FldigiNetControlTab(QWidget):
                 "Net ended. No valid check-ins found to import.",
             )
 
+        self._archive_checkin_files()
         self._net_in_progress = False
         self._reset_log_assisted_session()
         self.net_status_changed.emit("FLDIGI", False)

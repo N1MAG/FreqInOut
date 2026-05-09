@@ -392,7 +392,7 @@
       <tr><td>Session bar</td><td><code>Role</code> (NCS/ANCS/Joiner), Net Name selector, next scheduled net indicator, QSY dropdown, <code>Hold</code>, <code>QSY + Hold</code>, <code>Ad Hoc Net</code>.</td></tr>
       <tr><td>Macro workspace</td><td><code>Macro Set</code>, <code>Refresh</code>, <code>Mappings...</code>, <code>Details</code>, macro-status chips, macro-file picker, and log-assisted intake controls.</td></tr>
       <tr><td>Operator lookup</td><td>Lookup field plus <code>Add to TFC</code>, <code>Add to QRU</code>, <code>Add to LATE</code>, and <code>Add to Seen Locally</code>.</td></tr>
-      <tr><td>Local roster</td><td>Roster table with category/source tracking and copy actions such as <code>Copy TFC</code>, <code>Copy QRU</code>, <code>Copy LATE</code>, <code>Copy Seen Locally</code>, and <code>Copy Summary</code>.</td></tr>
+      <tr><td>Local roster</td><td>Roster table with category/source tracking and copy actions such as <code>Copy TFC</code>, <code>Copy QRU</code>, <code>Copy LATE</code>, <code>Copy Seen Locally</code>, and <code>Copy All Check-ins</code>.</td></tr>
       <tr><td>Compare / Reference workspace</td><td>Expandable tabbed workspace with <code>Reference</code>, <code>Compare Results</code>, and <code>Review</code>.</td></tr>
       <tr><td>Net lifecycle</td><td><code>Start Net</code>, <code>Save Check-ins</code>, and <code>End Net</code>.</td></tr>
     </tbody>
@@ -406,7 +406,8 @@
     <li><strong>QSY tools</strong>: the shared QSY/hold controls let you move the station and temporarily suspend scheduler control in the same way other operating tabs do.</li>
     <li><strong>Macro Set</strong>: choose the FLDigi macro profile you want this session to follow. This matters because the macro map helps FIO understand which files and labels belong to which operational function.</li>
     <li><strong>Mappings...</strong>: opens the macro discovery and mapping dialog, which is where you review detected macros, enable or disable rows, and give operational meaning to each mapped item.</li>
-    <li><strong>Details</strong>: expands the setup panel so you can inspect the macro file path, browse for another profile, clear a legacy path, and manage log-assisted intake settings.</li>
+    <li><strong>Details</strong>: expands the setup panel so you can inspect the macro file path, browse for another profile, clear a legacy path, see the generated macro check-in file locations, see active mapped macro source files, and manage log-assisted intake settings. When expanded, the button is highlighted and the tab can scroll so the details remain readable instead of being squeezed into a small area.</li>
+    <li><strong>Macro check-in file locations</strong>: the Details panel shows the live files FIO writes for FLDigi macros: <code>main_checkins.txt</code> for <code>TFC</code>, <code>qru_checkins.txt</code> for <code>QRU</code>, <code>new-late_checkins.txt</code> for <code>LATE</code>, and <code>all_checkins.txt</code> for the consolidated roster. It also shows the archive directory under the configured check-in path.</li>
     <li><strong>Status chips</strong>: the chips summarize the current macro-mode state, whether log intake is active, whether uncertain decodes are being held for review, and whether transmitted text is being used as decode context only.</li>
     <li><strong>Log-assisted intake</strong>: <code>Auto-add from FLDigi log</code> lets FIO watch likely check-ins from the FLDigi log; <code>Hold uncertain decodes for review</code> keeps questionable candidates out of the roster until checked; <code>Use sent TX as context</code> allows sent text to improve interpretation without turning TX lines into check-ins themselves.</li>
     <li><strong>Multi-rig note</strong>: in multi-rig, this NCS workflow follows the current <code>Station Default</code> device shell, so verify that shell in <a href="#station-overview">Station Overview</a> if the tab seems to be looking at the wrong radio context.</li>
@@ -416,7 +417,8 @@
   <ul class="section-list">
     <li><strong>Category model</strong>: <code>TFC</code>, <code>QRU</code>, <code>LATE</code>, and <code>Seen Locally</code> are operational buckets that help you track who has traffic, who has none, who arrived late, and who has been observed locally but not necessarily merged into the main roster picture.</li>
     <li><strong>Roster table columns</strong>: <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Traffic</code>, <code>Category</code>, and <code>Source</code>. This is the primary operator-facing working surface for the current net.</li>
-    <li><strong>Copy actions</strong>: the copy buttons produce roster slices or a summary you can paste elsewhere without manually rebuilding the list.</li>
+    <li><strong>Copy actions</strong>: the copy buttons produce roster slices or a full consolidated list you can paste into FLDigi, a message, a document, or another operator workflow without manually rebuilding the list. <code>Copy All Check-ins</code> uses the same consolidated roster format as the generated all-check-ins macro file.</li>
+    <li><strong>Category changes</strong>: the roster is the source of truth. If an entry starts as <code>TFC</code> and you later change it to <code>QRU</code>, FIO rewrites the generated check-in files so the entry moves into the QRU file and is removed from the TFC file. This avoids stale copies from earlier classifications.</li>
     <li><strong>Source awareness</strong>: the roster keeps track of where an entry came from so you can distinguish direct operator lookup insertion, reference imports, review merges, or other local workflow paths.</li>
   </ul>
 
@@ -443,9 +445,10 @@
 
   <h3 id="ncs-fldigi-lifecycle">Net Lifecycle</h3>
   <ul class="section-list">
-    <li><strong>Start Net</strong>: begins the live session state for this tab and activates the intended workflow.</li>
-    <li><strong>Save Check-ins</strong>: persists the current local roster/check-in state so the session can be reviewed or continued with confidence.</li>
-    <li><strong>End Net</strong>: closes the working session and performs the end-of-net save/log behavior. Use this when the roster is final enough to close out the event.</li>
+    <li><strong>Start Net</strong>: begins the live session state for this tab, clears the generated macro check-in files, clears the working roster/review surfaces, and then starts writing the current roster into the live macro files as the net develops.</li>
+    <li><strong>Save Check-ins</strong>: reconciles the current roster into the generated check-in files. This is a full rewrite from the current roster state, not an append-only log, so removed entries and changed categories do not linger in the wrong file.</li>
+    <li><strong>End Net</strong>: saves the final roster, imports valid check-ins into the operator database, and archives the generated check-in files under <code>&lt;fldigi_checkin_dir&gt;/archive</code>. Archive filenames include a UTC timestamp, the net name, and the original file name; for example <code>20260508_231455Z_Weekly_Net_main_checkins.txt</code>.</li>
+    <li><strong>Why archives matter</strong>: the live macro files are working files that are cleared at the next <code>Start Net</code>. The archive directory is the historical record of what the generated files looked like at end-of-net.</li>
   </ul>
 
   <h2 id="ncs-js8call">NCS: JS8Call</h2>

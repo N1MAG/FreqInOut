@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
+import re
 
 from freqinout.core.fldigi_macro_parser import count_detected_file_references, scan_macro_profile
 
