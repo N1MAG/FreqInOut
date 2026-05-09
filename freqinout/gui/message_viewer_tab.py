@@ -396,6 +396,8 @@ class _FileScanWorker(QObject):
                             continue
                         if not dent.is_file(follow_symlinks=False):
                             continue
+                        if _is_fio_bbs_helper_file_name(dent.name):
+                            continue
                         suffix = Path(dent.name).suffix.lower()
                         if suffix not in SUPPORTED_EXT:
                             continue
@@ -437,6 +439,8 @@ class _FileScanWorker(QObject):
                 for dent in it:
                     try:
                         if not dent.is_file(follow_symlinks=False):
+                            continue
+                        if _is_fio_bbs_helper_file_name(dent.name):
                             continue
                         suffix = Path(dent.name).suffix.lower()
                         if suffix not in SUPPORTED_EXT:
