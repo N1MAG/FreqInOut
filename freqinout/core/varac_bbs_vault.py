@@ -880,6 +880,13 @@ def _entry_map(entries: Sequence[VaultPublishManifestEntry]) -> Dict[str, VaultP
     return {entry.live_name: entry for entry in entries}
 
 
+def _is_fio_bbs_generated_listing(name: object) -> bool:
+    clean = Path(str(name or "").strip()).name.upper()
+    if clean.startswith("BBS MSG - ") and clean.endswith(".TXT"):
+        return True
+    return clean.startswith((DEFAULT_FLAMP_QUEUE_HELPER_NAME.upper(), f"{DEFAULT_FLAMP_BLOCK_PREFIX}_"))
+
+
 def _entries_equal(a: VaultPublishManifestEntry, b: VaultPublishManifestEntry, *, src_root: Optional[Path] = None, dst_root: Optional[Path] = None) -> bool:
     if a.size != b.size or a.mtime_ns != b.mtime_ns or a.source_name != b.source_name:
         return False
@@ -952,7 +959,7 @@ def _publish_manifest_entries(
             continue
         if child.name in next_map:
             continue
-        if child.name.startswith("BBS MSG - ") and child.name.endswith(".txt"):
+        if _is_fio_bbs_generated_listing(child.name):
             try:
                 child.unlink()
                 removed += 1
@@ -971,7 +978,7 @@ def _publish_manifest_entries(
         if child.name not in tracked:
             unmanaged.append(child.name)
 
-    changed = bool(published or removed or len(entries) != len(previous_manifest))
+    changed = bool(published or removed or list(entries) != list(previous_manifest))
     return VaultPublishResult(
         changed=changed,
         published_count=published,
@@ -1952,6 +1959,104 @@ def _publish_root_action(
     return VaultActionResult(reason, True, summary, next_state, publish_result=publish_result)
 
 
+def _flamp_queue_from_view_label(label: object) -> str:
+    match = re.search(r"\bFLAMP\s+([A-Z0-9]{3,12})\b", str(label or "").upper())
+    return str(match.group(1) or "").strip().upper() if match else ""
+
+
+def _publish_flamp_refresh_action(
+    *,
+    sender: str,
+    qso_guid: str,
+    locations: Sequence[VaultLocation],
+    live_bbs_dir: object,
+    managed_root: object,
+    default_location_id: str,
+    runtime_state: VaultRuntimeState,
+    now_ts: float,
+    flamp_relay_dir: str,
+    flamp_listing_max_age_days: int,
+    reason: str,
+) -> Optional[VaultActionResult]:
+    state = load_vault_runtime_state(vault_runtime_state_to_data(runtime_state))
+    mode = str(state.current_view_mode or "").strip()
+    if not mode.startswith("flamp") or not flamp_relay_dir:
+        return None
+    base_location = _location_by_id(locations, state.current_location_id) or _location_by_id(locations, default_location_id)
+    base_source_dir = base_location.source_dir if base_location is not None else ""
+    store = FlampRelayStore(flamp_relay_dir)
+    try:
+        if mode in {"flamp-help"}:
+            publish_result = publish_flamp_command_help_view(
+                base_source_dir=base_source_dir,
+                live_bbs_dir=live_bbs_dir,
+                managed_root=managed_root,
+            )
+            label = "FLAMP commands"
+            action_text = f"Managed Vault refreshed FLAMP command help for {sender or 'public'}."
+        elif mode in {"flamp-list", "flamp-queue"}:
+            publish_result = publish_flamp_queue_list_view(
+                store,
+                base_source_dir=base_source_dir,
+                live_bbs_dir=live_bbs_dir,
+                managed_root=managed_root,
+                max_age_days=flamp_listing_max_age_days,
+            )
+            label = "FLAMP queue"
+            action_text = f"Managed Vault refreshed FLAMP queue list for {sender or 'public'}."
+        elif mode in {"flamp-block-list", "flamp-blocks"}:
+            queue_id = _flamp_queue_from_view_label(state.current_view_label)
+            if not queue_id:
+                return None
+            publish_result = publish_flamp_block_list_view(
+                store,
+                queue_id,
+                base_source_dir=base_source_dir,
+                live_bbs_dir=live_bbs_dir,
+                managed_root=managed_root,
+            )
+            label = f"FLAMP {queue_id} blocks"
+            action_text = f"Managed Vault refreshed FLAMP block list {queue_id} for {sender or 'public'}."
+        else:
+            return None
+    except Exception as exc:
+        notice_result = publish_flamp_notice_view(
+            message=f"FLAMP view no longer available; type LIST Q for current queues",
+            base_source_dir=base_source_dir,
+            live_bbs_dir=live_bbs_dir,
+            managed_root=managed_root,
+        )
+        next_state = _update_state(
+            state,
+            current_session_callsign=_normalize_callsign(sender),
+            current_session_qso_guid=str(qso_guid or "").strip(),
+            current_view_mode="flamp-notice",
+            current_view_label="FLAMP notice",
+            last_publish_manifest_path=notice_result.manifest_path,
+            last_publish_ts=now_ts,
+            last_action=f"Managed Vault refreshed FLAMP notice for {sender or 'public'}: {exc}",
+            last_request_ts=now_ts,
+            last_error=str(exc),
+            unmanaged_live_files=list(notice_result.unmanaged_live_files),
+        )
+        return VaultActionResult(reason, True, next_state.last_action, next_state, publish_result=notice_result)
+
+    next_state = _update_state(
+        state,
+        current_session_callsign=_normalize_callsign(sender),
+        current_session_qso_guid=str(qso_guid or "").strip(),
+        current_view_mode=mode,
+        current_view_label=label,
+        last_publish_manifest_path=publish_result.manifest_path,
+        last_publish_ts=now_ts,
+        last_action=action_text,
+        last_request_ts=now_ts,
+        last_error="",
+        unmanaged_live_files=list(publish_result.unmanaged_live_files),
+    )
+    return VaultActionResult(reason, True, action_text, next_state, publish_result=publish_result)
+
+
 def _publish_refresh_action(
     *,
     sender: str,
@@ -2712,21 +2817,37 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         if runtime_state.current_session_qso_guid and runtime_state.current_session_qso_guid != event.qso_guid:
             continue
         if event.kind == "root_request":
-            result = _publish_refresh_action(
-                sender=event.remote_callsign,
-                qso_guid=event.qso_guid,
-                locations=locations,
-                live_bbs_dir=live_bbs_dir,
-                managed_root=managed_root,
-                default_location_id=default_location_id,
-                global_allowed_callsigns=global_allowed,
-                limit_access_enabled=limit_access_enabled,
-                global_code_policy=global_code_policy,
-                runtime_state=runtime_state,
-                now_ts=event.timestamp_utc or now_ts,
-                flamp_enabled=flamp_enabled,
-                reason="root_request",
-            )
+            result = None
+            if flamp_enabled and flamp_relay_dir:
+                result = _publish_flamp_refresh_action(
+                    sender=event.remote_callsign,
+                    qso_guid=event.qso_guid,
+                    locations=locations,
+                    live_bbs_dir=live_bbs_dir,
+                    managed_root=managed_root,
+                    default_location_id=default_location_id,
+                    runtime_state=runtime_state,
+                    now_ts=event.timestamp_utc or now_ts,
+                    flamp_relay_dir=flamp_relay_dir,
+                    flamp_listing_max_age_days=flamp_listing_max_age_days,
+                    reason="root_request",
+                )
+            if result is None:
+                result = _publish_refresh_action(
+                    sender=event.remote_callsign,
+                    qso_guid=event.qso_guid,
+                    locations=locations,
+                    live_bbs_dir=live_bbs_dir,
+                    managed_root=managed_root,
+                    default_location_id=default_location_id,
+                    global_allowed_callsigns=global_allowed,
+                    limit_access_enabled=limit_access_enabled,
+                    global_code_policy=global_code_policy,
+                    runtime_state=runtime_state,
+                    now_ts=event.timestamp_utc or now_ts,
+                    flamp_enabled=flamp_enabled,
+                    reason="root_request",
+                )
             runtime_state = result.runtime_state
             published = published or bool(result.publish_result and result.publish_result.changed)
             processed += 1
