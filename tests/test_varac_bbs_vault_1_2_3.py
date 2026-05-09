@@ -33,7 +33,7 @@ from freqinout.core.varac_bbs_vault import (
     vault_runtime_state_to_data,
 )
 from freqinout.core.varac_guard import parse_varac_transfer_events, run_varac_guard
-from freqinout.core.varac_log_parser import parse_varac_event_timestamp
+from freqinout.core.varac_log_parser import parse_varac_event_timestamp, parse_varac_event_timestamp_to_epoch
 
 
 class _Settings:
@@ -1912,6 +1912,99 @@ def test_run_varac_bbs_vault_db_blr_refreshes_current_flamp_block_list(tmp_path:
     assert "BBS_BLOCK_LIST_41D6.txt" in live_names
     assert "BBS_BLOCK_LIST_1AD1.txt" not in live_names
     assert not any(name.startswith("BBS MSG - type FLAMP") for name in live_names)
+
+
+def test_run_varac_bbs_vault_db_command_is_not_overwritten_by_stale_log_tail(tmp_path: Path) -> None:
+    varac_root = tmp_path / "varac"
+    varac_root.mkdir()
+    varac_db = varac_root / "VarAC.db"
+    _create_varac_db(varac_db)
+    qso_guid = "qso-flamp-stale-log"
+    _insert_qso(varac_db, guid=qso_guid, remote="N5TNT")
+    _insert_datastream(
+        varac_db,
+        [
+            (3, "c", 1, qso_guid, "N5TNT", "LIST BLKS 1AD1", "2026-05-09 21:53:34.0000000Z"),
+            (4, "d", 1, qso_guid, "N5TNT", "<BLR>", "2026-05-09 21:53:42.0000000Z"),
+        ],
+    )
+    (varac_root / "VarAC_traffic.log").write_text(
+        "\n".join(
+            [
+                "09/05/2026 21:52:22 - N5TNT> LIST BLKS 2A0C",
+                "09/05/2026 21:52:30 - N5TNT> <BLR>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir()
+    (relay_dir / "1AD1_NATL-RR-260504-1430Z-AIB-sig.k2s").write_text(
+        "<PROG 1.0>{1AD1}\n<SIZE xx>{1AD1}2119 3 1024\n{1AD1:1}A\n{1AD1:3}C\n",
+        encoding="utf-8",
+    )
+    (relay_dir / "2A0C_NATL-RR-260504-1430Z-AIB-sig.k2s").write_text(
+        "<PROG 1.0>{2A0C}\n<SIZE xx>{2A0C}2119 2 1024\n{2A0C:1}A\n{2A0C:2}B\n",
+        encoding="utf-8",
+    )
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    (live_bbs / "BBS_BLOCK_LIST_2A0C.txt").write_text("stale", encoding="utf-8")
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_db_path=str(varac_db),
+        varac_path=str(varac_root),
+        varac_bbs_vault_managed_root=str(managed_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_global_code_policy="Allow public locations",
+        varac_bbs_vault_trigger_mode="VarAC session commands",
+        varac_bbs_vault_return_mode="On disconnect",
+        varac_bbs_vault_failed_attempt_limit=3,
+        varac_bbs_vault_failed_attempt_window_seconds=900,
+        varac_bbs_vault_cooldown_seconds=1800,
+        varac_bbs_vault_idle_timeout_seconds=600,
+        varac_bbs_vault_flamp_enabled=True,
+        varac_bbs_vault_flamp_relay_dir=str(relay_dir),
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            }
+        ],
+        varac_bbs_vault_runtime_state_v1={
+            "current_location_id": DEFAULT_LOCATION_ID,
+            "current_session_callsign": "N5TNT",
+            "current_session_qso_guid": qso_guid,
+            "current_view_mode": "flamp-blocks",
+            "current_view_label": "FLAMP 2A0C blocks",
+            "last_request_ts": parse_varac_event_timestamp_to_epoch("09/05/2026 21:52:38", prefer_day_first=True),
+            "last_datastream_id": 2,
+        },
+    )
+
+    run_varac_bbs_vault(settings)
+
+    assert not (live_bbs / "BBS_BLOCK_LIST_2A0C.txt").exists()
+    assert (live_bbs / "BBS_BLOCK_LIST_1AD1.txt").exists()
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    assert state.current_view_label == "FLAMP 1AD1 blocks"
 
 
 def test_flamp_queue_listing_filters_age_and_unassigned_files(tmp_path: Path) -> None:
