@@ -25,6 +25,7 @@ from freqinout.core.varac_bbs_vault import (
     publish_flamp_block_overlay_view,
     publish_flamp_queue_list_view,
     publish_root_view,
+    read_publish_manifest,
     reset_to_default_location,
     run_varac_bbs_vault,
     verify_access_code,
@@ -1825,6 +1826,92 @@ def test_run_varac_bbs_vault_log_list_blocks_switches_queue_views(tmp_path: Path
     assert "QUEUE 1AD1" in body
     assert "AVAILABLE 1,3" in body
     assert "MISSING 2" in body
+
+
+def test_run_varac_bbs_vault_db_blr_refreshes_current_flamp_block_list(tmp_path: Path) -> None:
+    varac_root = tmp_path / "varac"
+    varac_root.mkdir()
+    varac_db = varac_root / "VarAC.db"
+    _create_varac_db(varac_db)
+    qso_guid = "qso-flamp-refresh"
+    _insert_qso(varac_db, guid=qso_guid, remote="N5TNT")
+    _insert_datastream(
+        varac_db,
+        [
+            (1, "a", 1, qso_guid, "N5TNT", "LIST BLKS 1AD1", "2026-05-09 20:17:35.0000000Z"),
+            (2, "b", 1, qso_guid, "N5TNT", "<BLR>", "2026-05-09 20:17:47.0000000Z"),
+            (3, "c", 1, qso_guid, "N5TNT", "LIST BLKS 41D6", "2026-05-09 20:20:00.0000000Z"),
+            (4, "d", 1, qso_guid, "N5TNT", "<BLR>", "2026-05-09 20:20:09.0000000Z"),
+        ],
+    )
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir()
+    (relay_dir / "1AD1_NATL-RR-260504-1430Z-AIB-sig.k2s").write_text(
+        "<PROG 1.0>{1AD1}\n<SIZE xx>{1AD1}2119 3 1024\n{1AD1:1}A\n{1AD1:3}C\n",
+        encoding="utf-8",
+    )
+    (relay_dir / "41D6_NATL-RR-260413-1530Z-AIB-sig.k2s").write_text(
+        "<PROG 1.0>{41D6}\n<SIZE xx>{41D6}2119 2 1024\n{41D6:1}A\n{41D6:2}B\n",
+        encoding="utf-8",
+    )
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    stale_unmanaged = live_bbs / "BBS_BLOCK_LIST_1AD1.txt"
+    stale_unmanaged.write_text("stale", encoding="utf-8")
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_db_path=str(varac_db),
+        varac_path=str(varac_root),
+        varac_bbs_vault_managed_root=str(managed_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_global_code_policy="Allow public locations",
+        varac_bbs_vault_trigger_mode="VarAC session commands",
+        varac_bbs_vault_return_mode="On disconnect",
+        varac_bbs_vault_failed_attempt_limit=3,
+        varac_bbs_vault_failed_attempt_window_seconds=900,
+        varac_bbs_vault_cooldown_seconds=1800,
+        varac_bbs_vault_idle_timeout_seconds=600,
+        varac_bbs_vault_flamp_enabled=True,
+        varac_bbs_vault_flamp_relay_dir=str(relay_dir),
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            }
+        ],
+        varac_bbs_vault_runtime_state_v1={},
+    )
+
+    result = run_varac_bbs_vault(settings)
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    manifest_entries = read_publish_manifest(managed_root / "runtime" / "manifests" / "current_publish_manifest.json")
+    live_names = {entry.live_name for entry in manifest_entries}
+
+    assert result.enabled
+    assert state.current_view_mode in {"flamp-block-list", "flamp-blocks"}
+    assert state.current_view_label == "FLAMP 41D6 blocks"
+    assert not stale_unmanaged.exists()
+    assert not (live_bbs / "BBS_BLOCK_LIST_1AD1.txt").exists()
+    assert (live_bbs / "BBS_BLOCK_LIST_41D6.txt").exists()
+    assert "BBS_BLOCK_LIST_41D6.txt" in live_names
+    assert "BBS_BLOCK_LIST_1AD1.txt" not in live_names
+    assert not any(name.startswith("BBS MSG - type FLAMP") for name in live_names)
 
 
 def test_flamp_queue_listing_filters_age_and_unassigned_files(tmp_path: Path) -> None:
