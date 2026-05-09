@@ -140,6 +140,8 @@ class VaultLogEvent:
     body: str
     code_text: str = ""
     alias: str = ""
+    queue_id: str = ""
+    block_numbers: Tuple[int, ...] = ()
     raw_line: str = ""
     log_path: str = ""
 
@@ -258,6 +260,8 @@ def _state_key(event: VaultLogEvent) -> str:
             event.sender,
             event.alias.upper(),
             event.code_text.upper(),
+            event.queue_id.upper(),
+            ",".join(str(num) for num in event.block_numbers),
         ]
     )
 
@@ -332,9 +336,22 @@ def _extract_log_message_text(body: str) -> str:
         line = line.strip()
         if not line:
             continue
-        match = re.search(r"\b[A-Z0-9/]{3,15}>\s*(.*)$", line, re.IGNORECASE)
+        match = re.search(r"(?<!<)\b[A-Z0-9/]{3,15}>\s*(.*)$", line, re.IGNORECASE)
         payloads.append(str(match.group(1) if match else line).strip())
     return " ".join(payloads).strip()
+
+
+def _normalize_bbs_command_text(value: object) -> str:
+    text = _extract_log_message_text(str(value or ""))
+    upper = " ".join(text.split()).upper()
+    upper = re.sub(r"^DE\s+[A-Z0-9/+\-]{3,15}\s*", "", upper).strip()
+    while True:
+        cleaned = re.sub(r"^<R[+\-]?\d+>\s*", "", upper).strip()
+        cleaned = re.sub(r"^<S:[A-Z]>\s*", "", cleaned).strip()
+        if cleaned == upper:
+            break
+        upper = cleaned
+    return upper
 
 
 def parse_vault_log_events(
@@ -357,9 +374,12 @@ def parse_vault_log_events(
         body = "\n".join([match.group("body")] + lines[1:]).strip()
         sender = _extract_sender(body)
         message_text = _extract_log_message_text(body)
+        command_text = _normalize_bbs_command_text(message_text)
         code_text = ""
         alias = ""
         kind = ""
+        queue_id = ""
+        block_numbers: Tuple[int, ...] = ()
         alias, code_text = _extract_alias_request(message_text, aliases)
         if alias:
             kind = "open_alias"
@@ -368,8 +388,28 @@ def parse_vault_log_events(
             if command_match:
                 code_text = str(command_match.group(1) or "").strip()
                 kind = "unlock"
-        if not kind and ROOT_CMD_RE.match(message_text):
+        if not kind and ROOT_CMD_RE.match(command_text):
             kind = "root_return"
+        if not kind and FLAMP_CMD_RE.match(command_text):
+            kind = "flamp_help"
+            code_text = command_text
+        if not kind and LIST_Q_RE.match(command_text):
+            kind = "flamp_list_q"
+            code_text = command_text
+        if not kind:
+            list_blocks_match = LIST_BLOCKS_RE.match(command_text)
+            if list_blocks_match:
+                kind = "flamp_list_blocks"
+                queue_id = str(list_blocks_match.group(1) or "").upper()
+                code_text = command_text
+        if not kind:
+            block_match = BLOCK_REQUEST_RE.match(command_text)
+            if block_match:
+                nums = [int(part.strip()) for part in str(block_match.group(1) or "").split(",") if part.strip().isdigit()]
+                kind = "flamp_block_request"
+                queue_id = str(block_match.group(2) or "").upper()
+                block_numbers = tuple(nums)
+                code_text = command_text
         if not kind and exact_mode:
             stripped = " ".join(message_text.split())
             alias, code_text = _extract_alias_request(stripped, aliases)
@@ -392,6 +432,8 @@ def parse_vault_log_events(
                 body=body,
                 code_text=code_text,
                 alias=alias,
+                queue_id=queue_id,
+                block_numbers=block_numbers,
                 raw_line=block,
                 log_path=log_path,
             )
@@ -1685,7 +1727,7 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
         if not qso_guid or not entry_text:
             continue
         timestamp_utc = _parse_db_timestamp(row["creation_time"])
-        upper = " ".join(entry_text.split()).upper()
+        upper = _normalize_bbs_command_text(entry_text)
 
         if DISCONNECT_RE.search(upper):
             events.append(
@@ -1702,7 +1744,9 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
             )
             continue
 
-        if not remote_callsign or entry_callsign != remote_callsign:
+        if not remote_callsign:
+            continue
+        if entry_callsign and entry_callsign != remote_callsign:
             continue
 
         if upper == "<BLR>":
@@ -2924,6 +2968,116 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 runtime_state = result.runtime_state
                 published = published or bool(result.publish_result and result.publish_result.changed)
                 processed += 1
+            elif event.kind == "flamp_help" and flamp_enabled and flamp_relay_dir:
+                base_location = _location_by_id(locations, runtime_state.current_location_id) or _location_by_id(
+                    locations, default_location_id
+                )
+                if base_location is not None:
+                    publish_result = publish_flamp_command_help_view(
+                        base_source_dir=base_location.source_dir,
+                        live_bbs_dir=live_bbs_dir,
+                        managed_root=managed_root,
+                    )
+                    runtime_state = _update_state(
+                        runtime_state,
+                        current_session_callsign=event.sender,
+                        current_session_qso_guid=runtime_state.current_session_qso_guid,
+                        current_view_mode="flamp-help",
+                        current_view_label="FLAMP commands",
+                        last_publish_manifest_path=publish_result.manifest_path,
+                        last_publish_ts=event.timestamp_utc or now_ts,
+                        last_action=f"Managed Vault published FLAMP command help for {event.sender}.",
+                        last_request_ts=event.timestamp_utc or now_ts,
+                        last_error="",
+                        unmanaged_live_files=list(publish_result.unmanaged_live_files),
+                    )
+                    published = published or bool(publish_result.changed)
+                    processed += 1
+            elif event.kind == "flamp_list_q" and flamp_enabled and flamp_relay_dir:
+                store = FlampRelayStore(flamp_relay_dir)
+                base_location = _location_by_id(locations, runtime_state.current_location_id) or _location_by_id(
+                    locations, default_location_id
+                )
+                if base_location is not None:
+                    publish_result = publish_flamp_queue_list_view(
+                        store,
+                        base_source_dir=base_location.source_dir,
+                        live_bbs_dir=live_bbs_dir,
+                        managed_root=managed_root,
+                        max_age_days=flamp_listing_max_age_days,
+                    )
+                    runtime_state = _update_state(
+                        runtime_state,
+                        current_session_callsign=event.sender,
+                        current_session_qso_guid=runtime_state.current_session_qso_guid,
+                        current_view_mode="flamp-queue",
+                        current_view_label="FLAMP queue",
+                        last_publish_manifest_path=publish_result.manifest_path,
+                        last_publish_ts=event.timestamp_utc or now_ts,
+                        last_action=f"Managed Vault published FLAMP queue list for {event.sender}.",
+                        last_request_ts=event.timestamp_utc or now_ts,
+                        last_error="",
+                        unmanaged_live_files=list(publish_result.unmanaged_live_files),
+                    )
+                    published = published or bool(publish_result.changed)
+                    processed += 1
+            elif event.kind == "flamp_list_blocks" and flamp_enabled and flamp_relay_dir:
+                store = FlampRelayStore(flamp_relay_dir)
+                try:
+                    publish_result = publish_flamp_block_list_view(
+                        store,
+                        event.queue_id,
+                        live_bbs_dir=live_bbs_dir,
+                        managed_root=managed_root,
+                    )
+                    runtime_state = _update_state(
+                        runtime_state,
+                        current_session_callsign=event.sender,
+                        current_session_qso_guid=runtime_state.current_session_qso_guid,
+                        current_view_mode="flamp-blocks",
+                        current_view_label=f"FLAMP {event.queue_id} blocks",
+                        last_publish_manifest_path=publish_result.manifest_path,
+                        last_publish_ts=event.timestamp_utc or now_ts,
+                        last_action=f"Managed Vault published FLAMP block list {event.queue_id} for {event.sender}.",
+                        last_request_ts=event.timestamp_utc or now_ts,
+                        last_error="",
+                        unmanaged_live_files=list(publish_result.unmanaged_live_files),
+                    )
+                    published = published or bool(publish_result.changed)
+                    processed += 1
+                except Exception as exc:
+                    runtime_state = _update_state(runtime_state, last_action=f"FLAMP block list failed: {exc}", last_error=str(exc))
+            elif event.kind == "flamp_block_request" and flamp_enabled and flamp_relay_dir:
+                store = FlampRelayStore(flamp_relay_dir)
+                try:
+                    publish_result, overlay_name = publish_flamp_block_overlay_view(
+                        store,
+                        event.queue_id,
+                        event.block_numbers,
+                        live_bbs_dir=live_bbs_dir,
+                        managed_root=managed_root,
+                    )
+                    runtime_state = _update_state(
+                        runtime_state,
+                        previous_location_id=runtime_state.current_location_id,
+                        previous_view_mode=runtime_state.current_view_mode or DEFAULT_VIEW_MODE,
+                        previous_view_label=runtime_state.current_view_label or DEFAULT_LOCATION_NAME,
+                        current_session_callsign=event.sender,
+                        current_session_qso_guid=runtime_state.current_session_qso_guid,
+                        current_view_mode="flamp-block-overlay",
+                        current_view_label=f"FLAMP {event.queue_id}",
+                        current_overlay_file=overlay_name,
+                        last_publish_manifest_path=publish_result.manifest_path,
+                        last_publish_ts=event.timestamp_utc or now_ts,
+                        last_action=f"Managed Vault published FLAMP overlay {overlay_name} for {event.sender}.",
+                        last_request_ts=event.timestamp_utc or now_ts,
+                        last_error="",
+                        unmanaged_live_files=list(publish_result.unmanaged_live_files),
+                    )
+                    published = published or bool(publish_result.changed)
+                    processed += 1
+                except Exception as exc:
+                    runtime_state = _update_state(runtime_state, last_action=f"FLAMP block request failed: {exc}", last_error=str(exc))
             elif event.kind == "disconnect" and runtime_state.current_session_callsign:
                 if return_mode != "Manual operator reset only":
                     result = reset_to_default_location(

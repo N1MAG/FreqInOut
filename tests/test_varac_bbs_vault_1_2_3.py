@@ -219,6 +219,39 @@ def test_varac_guard_and_vault_timestamp_parsers_accept_day_first_logs() -> None
     assert root_events[0].kind == "root_return"
     assert root_events[0].sender == "W8UFO"
 
+    flamp_events = parse_vault_log_events(
+        "06/05/2026 19:51:12 - W8UFO> de W8UFO <R-13> FLAMP\n",
+        log_path="VarAC_traffic.log",
+        alias_map={"INTEL": "intel"},
+    )
+    assert flamp_events
+    assert flamp_events[0].kind == "flamp_help"
+    assert flamp_events[0].sender == "W8UFO"
+
+    list_q_events = parse_vault_log_events(
+        "06/05/2026 19:52:12 - W8UFO> LIST Q\n",
+        log_path="VarAC_traffic.log",
+    )
+    assert list_q_events
+    assert list_q_events[0].kind == "flamp_list_q"
+
+    list_blocks_events = parse_vault_log_events(
+        "06/05/2026 19:53:12 - W8UFO> LIST BLKS F277\n",
+        log_path="VarAC_traffic.log",
+    )
+    assert list_blocks_events
+    assert list_blocks_events[0].kind == "flamp_list_blocks"
+    assert list_blocks_events[0].queue_id == "F277"
+
+    block_events = parse_vault_log_events(
+        "06/05/2026 19:54:12 - W8UFO> BLK 0,8,9 F277\n",
+        log_path="VarAC_traffic.log",
+    )
+    assert block_events
+    assert block_events[0].kind == "flamp_block_request"
+    assert block_events[0].queue_id == "F277"
+    assert block_events[0].block_numbers == (0, 8, 9)
+
 
 def test_initialize_and_import_live_bbs(tmp_path: Path) -> None:
     live_bbs = tmp_path / "BBS"
@@ -1517,6 +1550,137 @@ def test_run_varac_bbs_vault_flamp_command_publishes_separate_helpers(tmp_path: 
     assert "BBS MSG - LIST BLKS F277 shows available blocks for F277 - then refresh BBS.txt" in names
     assert "BBS MSG - BLK 0,8,9 F277 pulls blocks 0,8,9 for queueID F277 - then refresh BBS.txt" in names
     assert "BBS MSG - ROOT to return to normal BBS menu - then refresh BBS.txt" in names
+
+
+def test_run_varac_bbs_vault_flamp_command_accepts_varac_prefixed_db_entry(tmp_path: Path) -> None:
+    varac_root = tmp_path / "varac"
+    varac_root.mkdir()
+    varac_db = varac_root / "VarAC.db"
+    _create_varac_db(varac_db)
+    qso_guid = "qso-flamp-prefixed"
+    _insert_qso(varac_db, guid=qso_guid, remote="W5TTA")
+    _insert_datastream(
+        varac_db,
+        [
+            (1, "a", 1, qso_guid, "W5TTA", "<BLR>", "2026-05-02 14:10:18.7762304Z"),
+            (2, "b", 1, qso_guid, "", "W5TTA> de W5TTA <R-13> FLAMP", "2026-05-02 14:10:21.0000000Z"),
+        ],
+    )
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir()
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_db_path=str(varac_db),
+        varac_path=str(varac_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_flamp_enabled=True,
+        varac_bbs_vault_flamp_relay_dir=str(relay_dir),
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            }
+        ],
+        varac_bbs_vault_runtime_state_v1={},
+    )
+
+    result = run_varac_bbs_vault(settings)
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    names = {p.name for p in live_bbs.iterdir() if p.is_file()}
+    assert result.enabled
+    assert state.current_view_mode == "flamp-help"
+    assert "BBS MSG - LIST Q to list available FLAMP files - then refresh BBS.txt" in names
+
+
+def test_run_varac_bbs_vault_flamp_queue_and_block_commands_accept_prefixed_db_entries(tmp_path: Path) -> None:
+    varac_root = tmp_path / "varac"
+    varac_root.mkdir()
+    varac_db = varac_root / "VarAC.db"
+    _create_varac_db(varac_db)
+    qso_guid = "qso-flamp-prefixed-flow"
+    _insert_qso(varac_db, guid=qso_guid, remote="W5TTA")
+    _insert_datastream(
+        varac_db,
+        [
+            (1, "a", 1, qso_guid, "W5TTA", "<BLR>", "2026-05-02 14:10:18.7762304Z"),
+            (2, "b", 1, qso_guid, "", "W5TTA> LIST Q", "2026-05-02 14:10:21.0000000Z"),
+            (3, "c", 1, qso_guid, "", "W5TTA> LIST BLKS F277", "2026-05-02 14:10:24.0000000Z"),
+            (4, "d", 1, qso_guid, "", "W5TTA> BLK 0,1 F277", "2026-05-02 14:10:27.0000000Z"),
+        ],
+    )
+
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir()
+    (relay_dir / "F277_MAGNET-S2-RR-260502.sig.b2s").write_text(
+        "<PROG 1.0>{F277}\n<SIZE xx>{F277}2119 2 1024\n{F277:1}BLOCK1\n{F277:2}BLOCK2\n",
+        encoding="utf-8",
+    )
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_db_path=str(varac_db),
+        varac_path=str(varac_root),
+        varac_bbs_vault_managed_root=str(managed_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_global_code_policy="Allow public locations",
+        varac_bbs_vault_trigger_mode="VarAC session commands",
+        varac_bbs_vault_return_mode="On disconnect",
+        varac_bbs_vault_failed_attempt_limit=3,
+        varac_bbs_vault_failed_attempt_window_seconds=900,
+        varac_bbs_vault_cooldown_seconds=1800,
+        varac_bbs_vault_idle_timeout_seconds=600,
+        varac_bbs_vault_flamp_enabled=True,
+        varac_bbs_vault_flamp_relay_dir=str(relay_dir),
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            }
+        ],
+        varac_bbs_vault_runtime_state_v1={},
+    )
+
+    result = run_varac_bbs_vault(settings)
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    assert result.enabled
+    assert state.current_view_mode == "flamp-block-overlay"
+    assert state.current_overlay_file.startswith("BBS_F277_BLK_0_1")
+    assert (live_bbs / state.current_overlay_file).exists()
 
 
 def test_flamp_queue_listing_filters_age_and_unassigned_files(tmp_path: Path) -> None:
