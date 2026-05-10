@@ -345,6 +345,8 @@ def _normalize_bbs_command_text(value: object) -> str:
     text = _extract_log_message_text(str(value or ""))
     upper = " ".join(text.split()).upper()
     upper = re.sub(r"^DE\s+[A-Z0-9/+\-]{3,15}\s*", "", upper).strip()
+    if upper != "<BLR>":
+        upper = re.sub(r"\s+<BLR>\s*$", "", upper).strip()
     while True:
         cleaned = re.sub(r"^<R[+\-]?\d+>\s*", "", upper).strip()
         cleaned = re.sub(r"^<S:[A-Z]>\s*", "", cleaned).strip()
