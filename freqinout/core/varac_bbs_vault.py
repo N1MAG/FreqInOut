@@ -382,7 +382,7 @@ def parse_vault_log_events(
         kind = ""
         queue_id = ""
         block_numbers: Tuple[int, ...] = ()
-        alias, code_text = _extract_alias_request(message_text, aliases)
+        alias, code_text = _extract_alias_request(command_text, aliases)
         if alias:
             kind = "open_alias"
         else:
@@ -413,7 +413,7 @@ def parse_vault_log_events(
                 block_numbers = tuple(nums)
                 code_text = command_text
         if not kind and exact_mode:
-            stripped = " ".join(message_text.split())
+            stripped = command_text
             alias, code_text = _extract_alias_request(stripped, aliases)
             if alias:
                 kind = "open_alias"

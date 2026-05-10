@@ -211,6 +211,17 @@ def test_varac_guard_and_vault_timestamp_parsers_accept_day_first_logs() -> None
     assert alias_events[0].sender == "W8UFO"
     assert alias_events[0].alias == "INTEL"
 
+    alias_refresh_events = parse_vault_log_events(
+        "06/05/2026 19:08:32 - W8UFO> INTEL\n<BLR>\n",
+        log_path="VarAC_traffic.log",
+        alias_map={"INTEL": "intel"},
+    )
+    assert alias_refresh_events
+    assert alias_refresh_events[0].kind == "open_alias"
+    assert alias_refresh_events[0].sender == "W8UFO"
+    assert alias_refresh_events[0].alias == "INTEL"
+    assert alias_refresh_events[0].code_text == ""
+
     root_events = parse_vault_log_events(
         "06/05/2026 19:51:12 - W8UFO> ROOT\n",
         log_path="VarAC_traffic.log",
@@ -260,6 +271,15 @@ def test_varac_guard_and_vault_timestamp_parsers_accept_day_first_logs() -> None
     assert block_events[0].kind == "flamp_block_request"
     assert block_events[0].queue_id == "F277"
     assert block_events[0].block_numbers == (0, 8, 9)
+
+    exact_code_refresh_events = parse_vault_log_events(
+        "06/05/2026 19:55:12 - W8UFO> HUBCODE\n<BLR>\n",
+        trigger_mode="exact code only",
+        log_path="VarAC_traffic.log",
+    )
+    assert exact_code_refresh_events
+    assert exact_code_refresh_events[0].kind == "unlock"
+    assert exact_code_refresh_events[0].code_text == "HUBCODE"
 
 
 def test_initialize_and_import_live_bbs(tmp_path: Path) -> None:
