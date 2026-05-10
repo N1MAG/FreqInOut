@@ -1,6 +1,7 @@
 # Changelog
 
 ## [1.2.3]
+- Changed: Message Auth signature/hash verification now applies to VarAC and VarAC BBS `.k2s/.b2s` files and signature sidecars using the same trusted-key/hash workflow already used for signed FLAmp files.
 - Changed: `FLDigi Net Control` now offers `Copy Check-ins` instead of the callsign-only summary button, copying the full consolidated TFC/QRU/LATE check-in log and maintaining an `all_checkins.txt` macro feed beside the existing per-category check-in files.
 - Changed: the in-app Help guide now teaches the major FreqInOut tabs more explicitly, expanding the purpose, workflow, and cross-tab interaction notes for ControlFreq, Messages, Map, schedules, operators, SOP Builder, and Settings so operators can learn not only how controls work, but why those screens matter and how related settings influence them.
 - Fixed: VarAC schedule protection now also watches recent `VarAC.db` transfer lifecycle events, so scheduler-driven frequency changes are more reliably deferred during inbound or outbound file transfers even when log-tail visibility is incomplete.

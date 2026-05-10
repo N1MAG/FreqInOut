@@ -90,6 +90,7 @@ tests/*
 !tests/test_nbems_compose_stage_1_2_3.py
 !tests/test_commstat_artifacts_1_2_3.py
 !tests/test_varac_bbs_filename_normalization_1_2_3.py
+!tests/test_varac_bbs_inventory_1_2_3.py
 !tests/test_release_1_2_2_followup.py
 !tests/test_station_readiness_multirig_phase1.py
 !tests/test_radio_catalog_multirig_slice2.py

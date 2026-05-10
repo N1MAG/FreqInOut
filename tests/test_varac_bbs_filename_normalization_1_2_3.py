@@ -12,7 +12,7 @@ from freqinout.gui.message_viewer_tab import FileRecord, MessageViewerTab
 
 class _MemorySettings:
     def __init__(self, bbs_dir: Path) -> None:
-        self._data = {"varac_bbs_dir": str(bbs_dir)}
+        self._data = {"varac_bbs_enabled": True, "varac_bbs_dir": str(bbs_dir)}
 
     def get(self, key: str, default=None):
         return self._data.get(key, default)
@@ -30,6 +30,7 @@ def _tab(bbs_dir: Path) -> SimpleNamespace:
     tab = SimpleNamespace(
         settings=_MemorySettings(bbs_dir),
         _bbs_copied_session_keys=set(),
+        _bbs_copy_target_session_id="",
         _unfreeze_table=lambda: None,
         _populate_messages_table=lambda force=False: None,
     )
@@ -37,6 +38,9 @@ def _tab(bbs_dir: Path) -> SimpleNamespace:
         "_can_copy_row_to_varac_bbs",
         "_bbs_copy_session_key_for_record",
         "_bbs_copy_session_key_for_row",
+        "_bbs_copy_session_marker",
+        "_varac_bbs_copy_targets",
+        "_select_varac_bbs_copy_target",
         "_varac_bbs_destination_for_row",
         "_is_row_already_in_varac_bbs",
         "_is_row_bbs_copy_action_enabled",

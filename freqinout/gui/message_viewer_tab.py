@@ -51,6 +51,10 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QScrollArea,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QListWidget,
+    QListWidgetItem,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -73,6 +77,8 @@ from freqinout.core.sitrep_metadata import (
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.varac_bbs_config import bbs_summary_text
+from freqinout.core.varac_bbs_inventory import build_bbs_inventory
+from freqinout.core.varac_bbs_vault import DEFAULT_LOCATION_ID, load_vault_locations
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
     clearsign_file,
@@ -120,6 +126,8 @@ from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".raw"}
 IMAGE_PREVIEW_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
+AUTH_FILE_EXTS = {".b2s", ".k2s", ".sig", ".asc", ".gpg"}
+AUTH_VERIFIABLE_ORIGINS = {"flamp", "varac", "bbs"}
 VARAC_BBS_SAFE_SUFFIXES = (
     ".k2s.sig",
     ".b2s.sig",
@@ -140,6 +148,9 @@ VARAC_BBS_SAFE_SUFFIXES = (
 SUPPORTED_EXT = {
     ".b2s",
     ".k2s",
+    ".sig",
+    ".asc",
+    ".gpg",
     ".txt",
     ".rtf",
     ".ff",
@@ -151,11 +162,11 @@ SUPPORTED_EXT = {
 }
 ORIGIN_EXTS = {
     "flmsg": {".b2s", ".k2s", ".txt", ".rtf", *IMAGE_EXTS},
-    "flamp": {".b2s", ".k2s", ".txt", ".rtf", ".sig", ".asc", ".gpg"},
-    "varac": {".txt", ".html", ".htm", ".b2s", ".k2s", *IMAGE_EXTS},
+    "flamp": {".txt", ".rtf", *AUTH_FILE_EXTS},
+    "varac": {".txt", ".html", ".htm", *AUTH_FILE_EXTS, *IMAGE_EXTS},
     "bbs": set(SUPPORTED_EXT),
 }
-FLAMP_AUTH_EXTS = {".b2s", ".k2s", ".sig", ".asc", ".gpg"}
+FLAMP_AUTH_EXTS = set(AUTH_FILE_EXTS)
 
 DEFAULT_WATCH_DIRS = [
     {"path": r"C:\VarAC", "origin": "varac"},
@@ -569,6 +580,7 @@ class _BbsAutoArchiveWorker(QObject):
         days: int,
         allowed_exts: List[str],
         reason: str,
+        archive_context: str = "live",
     ):
         super().__init__()
         self._bbs_dir = Path(str(bbs_dir or ""))
@@ -583,16 +595,22 @@ class _BbsAutoArchiveWorker(QObject):
             if str(ext or "").strip()
         }
         self._reason = str(reason or "").strip() or "timer"
+        self._archive_context = str(archive_context or "live").strip() or "live"
 
     def _archive_destination(self, src: Path) -> Path:
-        dst = self._archive_dir / src.name
+        try:
+            rel = src.relative_to(self._bbs_dir)
+        except Exception:
+            rel = Path(src.name)
+        dst = self._archive_dir / self._archive_context / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
         if not dst.exists():
             return dst
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-        dst = self._archive_dir / f"{src.stem}_{stamp}{src.suffix}"
+        dst = dst.parent / f"{src.stem}_{stamp}{src.suffix}"
         attempt = 2
         while dst.exists():
-            dst = self._archive_dir / f"{src.stem}_{stamp}_{attempt}{src.suffix}"
+            dst = dst.parent / f"{src.stem}_{stamp}_{attempt}{src.suffix}"
             attempt += 1
         return dst
 
@@ -607,28 +625,26 @@ class _BbsAutoArchiveWorker(QObject):
         errors: List[str] = []
         cutoff_ts = started_ts - (float(self._days) * 86400.0)
         try:
-            with os.scandir(self._bbs_dir) as it:
-                for dent in it:
-                    try:
-                        if not dent.is_file(follow_symlinks=False):
-                            continue
-                        scanned_count += 1
-                        suffix = Path(dent.name).suffix.lower()
-                        if self._allowed_exts and suffix not in self._allowed_exts:
-                            continue
-                        st = dent.stat()
-                        if float(st.st_mtime) > cutoff_ts:
-                            continue
-                        src = Path(dent.path)
-                        dst = self._archive_destination(src)
-                        eligible_count += 1
-                        shutil.move(str(src), str(dst))
-                        moved_count += 1
-                        moved_items.append((str(src), str(dst)))
-                    except Exception as e:
-                        error_count += 1
-                        errors.append(str(e))
+            for src in sorted(self._bbs_dir.rglob("*"), key=lambda item: str(item).lower()):
+                try:
+                    if not src.is_file():
                         continue
+                    scanned_count += 1
+                    suffix = src.suffix.lower()
+                    if self._allowed_exts and suffix not in self._allowed_exts:
+                        continue
+                    st = src.stat()
+                    if float(st.st_mtime) > cutoff_ts:
+                        continue
+                    dst = self._archive_destination(src)
+                    eligible_count += 1
+                    shutil.move(str(src), str(dst))
+                    moved_count += 1
+                    moved_items.append((str(src), str(dst)))
+                except Exception as e:
+                    error_count += 1
+                    errors.append(str(e))
+                    continue
         except Exception as e:
             completed_ts = time.time()
             self.finished.emit(
@@ -664,6 +680,7 @@ class _BbsAutoArchiveWorker(QObject):
                 "error_count": error_count,
                 "moved_items": moved_items,
                 "errors": errors,
+                "fatal_error": "",
             }
         )
 
@@ -1039,14 +1056,18 @@ class _RowsBuildWorker(QObject):
         return (str(rec.origin or "").strip().lower(), str(rec.path), float(rec.mtime or 0.0), int(rec.size or 0))
 
     @staticmethod
-    def _is_flamp_auth_file(rec: FileRecord) -> bool:
+    def _is_auth_verifiable_file(rec: FileRecord) -> bool:
         return (
-            str(rec.origin or "").strip().lower() == "flamp"
+            str(rec.origin or "").strip().lower() in AUTH_VERIFIABLE_ORIGINS
             and str(rec.path.suffix or "").strip().lower() in FLAMP_AUTH_EXTS
         )
 
+    @staticmethod
+    def _is_flamp_auth_file(rec: FileRecord) -> bool:
+        return _RowsBuildWorker._is_auth_verifiable_file(rec)
+
     def _signature_row_state(self, rec: FileRecord) -> tuple[str, str, bool]:
-        if not self._is_flamp_auth_file(rec):
+        if not self._is_auth_verifiable_file(rec):
             return "", "", False
         key = self._signature_key(rec)
         state = self._signature_state_map.get(key, {}) if isinstance(self._signature_state_map, dict) else {}
@@ -2284,7 +2305,8 @@ class MessageViewerTab(QWidget):
         self._signature_verify_pending: bool = False
         self._signature_verify_pending_records: List[FileRecord] = []
         self._signature_verify_deferred_until_active: bool = False
-        self._bbs_copied_session_keys: set[tuple[str, float, int]] = set()
+        self._bbs_copied_session_keys: set[tuple[str, float, int, str]] = set()
+        self._bbs_copy_target_session_id: str = ""
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -3091,11 +3113,15 @@ class MessageViewerTab(QWidget):
         )
 
     @staticmethod
-    def _is_flamp_auth_file(rec: FileRecord) -> bool:
+    def _is_auth_verifiable_file(rec: FileRecord) -> bool:
         return (
-            str(rec.origin or "").strip().lower() == "flamp"
+            str(rec.origin or "").strip().lower() in AUTH_VERIFIABLE_ORIGINS
             and str(rec.path.suffix or "").strip().lower() in FLAMP_AUTH_EXTS
         )
+
+    @staticmethod
+    def _is_flamp_auth_file(rec: FileRecord) -> bool:
+        return MessageViewerTab._is_auth_verifiable_file(rec)
 
     def _is_signature_verification_enabled(self) -> bool:
         return bool(self.settings.get("gpg_verify_flamp_k2s_enabled", False))
@@ -3240,20 +3266,21 @@ class MessageViewerTab(QWidget):
         hash_set_sig = self._trusted_hash_set_signature()
         inline_sig_name_suffixes = self._inline_signature_name_suffixes()
         out: List[FileRecord] = []
-        for rec in self.files.get("flamp", []):
-            if not self._is_flamp_auth_file(rec):
-                continue
-            if is_detached_signature_file(rec.path) and not self._is_signature_verification_enabled():
-                continue
-            key = self._signature_cache_key(rec)
-            state = self._signature_state_map.get(key)
-            if (
-                force
-                or state is None
-                or not self._signature_cache_fresh(rec, state, inline_sig_name_suffixes)
-                or not self._hash_cache_fresh(rec, state, hash_set_sig)
-            ):
-                out.append(rec)
+        for origin in ("flamp", "varac", "bbs"):
+            for rec in self.files.get(origin, []):
+                if not self._is_auth_verifiable_file(rec):
+                    continue
+                if is_detached_signature_file(rec.path) and not self._is_signature_verification_enabled():
+                    continue
+                key = self._signature_cache_key(rec)
+                state = self._signature_state_map.get(key)
+                if (
+                    force
+                    or state is None
+                    or not self._signature_cache_fresh(rec, state, inline_sig_name_suffixes)
+                    or not self._hash_cache_fresh(rec, state, hash_set_sig)
+                ):
+                    out.append(rec)
         return out
 
     def _start_signature_verification(self, *, force: bool = False) -> None:
@@ -3385,7 +3412,7 @@ class MessageViewerTab(QWidget):
             return
         for row in self._message_rows:
             payload = getattr(row, "payload", None)
-            if not isinstance(payload, FileRecord) or not self._is_flamp_auth_file(payload):
+            if not isinstance(payload, FileRecord) or not self._is_auth_verifiable_file(payload):
                 continue
             key = self._signature_cache_key(payload)
             state = updates.get(key)
@@ -3403,7 +3430,7 @@ class MessageViewerTab(QWidget):
         changed_indices: List[int] = []
         for idx, row in enumerate(rows):
             payload = getattr(row, "payload", None)
-            if not isinstance(payload, FileRecord) or not self._is_flamp_auth_file(payload):
+            if not isinstance(payload, FileRecord) or not self._is_auth_verifiable_file(payload):
                 continue
             key = self._signature_cache_key(payload)
             state = updates.get(key)
@@ -3490,7 +3517,7 @@ class MessageViewerTab(QWidget):
         return detail
 
     def _signature_detail_for_record(self, rec: Optional[FileRecord]) -> str:
-        if rec is None or not self._is_flamp_auth_file(rec):
+        if rec is None or not self._is_auth_verifiable_file(rec):
             return ""
         state = self._signature_state_for_record(rec)
         detail = self._format_signature_detail(state)
@@ -3505,7 +3532,7 @@ class MessageViewerTab(QWidget):
 
     def _refresh_current_record_signature_info(self) -> None:
         rec = self.current_record
-        if rec is None or not self._is_flamp_auth_file(rec):
+        if rec is None or not self._is_auth_verifiable_file(rec):
             return
         info_txt = self.info_label.text() if hasattr(self, "info_label") else ""
         if not info_txt:
@@ -4490,22 +4517,30 @@ class MessageViewerTab(QWidget):
             self.settings.reload()
         except Exception:
             pass
+        inventory = build_bbs_inventory(self.settings, allowed_exts=ORIGIN_EXTS.get("bbs", set(SUPPORTED_EXT)))
         summary = bbs_summary_text(
             {
-                "enable_bbs": bool(self.settings.get("varac_bbs_enabled", False)),
+                "enable_bbs": inventory.bbs_enabled,
                 "limit_access": bool(self.settings.get("varac_bbs_limit_access_enabled", False)),
                 "announce": bool(self.settings.get("varac_bbs_announce_enabled", False)),
                 "allowed_callsigns": str(self.settings.get("varac_bbs_allowed_callsigns", "") or ""),
             }
         )
-        bbs_dir = str(self.settings.get("varac_bbs_dir", "") or "").strip()
-        suffix = f" Directory: {bbs_dir}" if bbs_dir else " Directory not configured."
-        text = f"VarAC BBS (runtime-projected default context): {summary}.{suffix}"
-        vault_enabled = bool(self.settings.get("varac_bbs_vault_enabled", False))
-        vault_summary = str(self.settings.get("varac_bbs_vault_last_summary", "") or "").strip()
-        if vault_enabled:
-            compact = vault_summary or "Managed Vault enabled"
-            text = f"{text} Managed Vault: {compact}."
+        if inventory.live_dir:
+            suffix = f" Directory: {inventory.live_dir}"
+            if not inventory.live_exists:
+                suffix += " (missing)"
+            else:
+                suffix += f" ({inventory.live_file_count} live files)"
+        else:
+            suffix = " Directory not configured."
+        vault_suffix = ""
+        if inventory.vault_enabled:
+            vault_suffix = (
+                f" Managed locations: {inventory.enabled_location_count} enabled / "
+                f"{inventory.total_location_count} total, {inventory.managed_file_count} files."
+            )
+        text = f"VarAC BBS (runtime-projected default context): {summary}.{suffix}{vault_suffix}"
         self.messages_bbs_status_label.setText(text)
         self.messages_bbs_status_label.setToolTip(text)
 
@@ -5033,6 +5068,9 @@ class MessageViewerTab(QWidget):
     # ---------- BBS Auto-Archive ----------
 
     def _bbs_auto_archive_settings_snapshot(self) -> Optional[Dict[str, object]]:
+        if not MessageViewerTab._is_truthy(self.settings.get("varac_bbs_enabled", False), False):
+            log.debug("MessageViewer: BBS auto-archive skipped (BBS disabled)")
+            return None
         if not self._is_truthy(self.settings.get("varac_bbs_auto_archive_enabled", False), False):
             return None
         bbs_dir_txt = str(self.settings.get("varac_bbs_dir", "") or "").strip()
@@ -5125,6 +5163,7 @@ class MessageViewerTab(QWidget):
             days=int(snapshot.get("days", 14) or 14),
             allowed_exts=[str(v) for v in (snapshot.get("allowed_exts", []) or [])],
             reason=str(reason or "timer"),
+            archive_context="live",
         )
         self._bbs_auto_archive_worker.moveToThread(self._bbs_auto_archive_thread)
         self._bbs_auto_archive_thread.started.connect(self._bbs_auto_archive_worker.run)
@@ -6603,10 +6642,11 @@ class MessageViewerTab(QWidget):
         signature_map: Dict[tuple, Dict[str, object]] = {}
         if self._is_any_auth_verification_enabled():
             current_sig_keys: set[tuple] = set()
-            for rec in self.files.get("flamp", []):
-                if not self._is_flamp_auth_file(rec):
-                    continue
-                current_sig_keys.add(self._signature_cache_key(rec))
+            for origin in ("flamp", "varac", "bbs"):
+                for rec in self.files.get(origin, []):
+                    if not self._is_auth_verifiable_file(rec):
+                        continue
+                    current_sig_keys.add(self._signature_cache_key(rec))
             for key in current_sig_keys:
                 state = self._signature_state_map.get(key)
                 if not isinstance(key, tuple) or len(key) != 4:
@@ -8046,7 +8086,7 @@ class MessageViewerTab(QWidget):
                 auth_state = ""
                 auth_detail = ""
                 auth_trusted = False
-                if self._is_flamp_auth_file(rec):
+                if self._is_auth_verifiable_file(rec):
                     sig_state = self._signature_state_for_record(rec)
                     auth_state, auth_detail, auth_trusted = self._derive_auth_ui(sig_state)
                 rows.append(
@@ -8656,21 +8696,23 @@ class MessageViewerTab(QWidget):
                 "Configured BBS Archive is not a valid directory.",
             )
             return
+        archive_target_dir = archive_dir / "live"
         details = (
             f"Archive this BBS file?\n\n"
             f"{rec.path}\n"
-            f"Destination: {archive_dir}"
+            f"Destination: {archive_target_dir}"
         )
         resp = QMessageBox.question(self, "Archive BBS File", details, QMessageBox.Yes | QMessageBox.No)
         if resp != QMessageBox.Yes:
             return
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-        dst = archive_dir / rec.path.name
+        archive_target_dir.mkdir(parents=True, exist_ok=True)
+        dst = archive_target_dir / rec.path.name
         if dst.exists():
-            dst = archive_dir / f"{rec.path.stem}_{stamp}{rec.path.suffix}"
+            dst = archive_target_dir / f"{rec.path.stem}_{stamp}{rec.path.suffix}"
             attempt = 2
             while dst.exists():
-                dst = archive_dir / f"{rec.path.stem}_{stamp}_{attempt}{rec.path.suffix}"
+                dst = archive_target_dir / f"{rec.path.stem}_{stamp}_{attempt}{rec.path.suffix}"
                 attempt += 1
         try:
             shutil.move(str(rec.path), str(dst))
@@ -8714,6 +8756,8 @@ class MessageViewerTab(QWidget):
     def _can_copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> bool:
         if row is None:
             return False
+        if not MessageViewerTab._is_truthy(self.settings.get("varac_bbs_enabled", False), False):
+            return False
         bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
         if not bbs_dir_txt:
             return False
@@ -8746,6 +8790,12 @@ class MessageViewerTab(QWidget):
         payload = getattr(row, "payload", None) if row is not None else None
         return MessageViewerTab._bbs_copy_session_key_for_record(payload if isinstance(payload, FileRecord) else None)
 
+    def _bbs_copy_session_marker(self, row: UnifiedMessage | None, target_id: str) -> tuple[str, float, int, str] | None:
+        key = self._bbs_copy_session_key_for_row(row)
+        if key is None:
+            return None
+        return (*key, str(target_id or "live"))
+
     @staticmethod
     def _split_varac_bbs_safe_suffix(name: str) -> tuple[str, str]:
         return split_varac_bbs_safe_suffix(name)
@@ -8774,31 +8824,156 @@ class MessageViewerTab(QWidget):
         except Exception:
             return False
 
-    def _varac_bbs_destination_for_row(self, row: UnifiedMessage | None, *, unique: bool = False) -> Path | None:
+    def _bbs_location_inventory_by_id(self) -> Dict[str, object]:
+        inventory = build_bbs_inventory(self.settings, allowed_exts=ORIGIN_EXTS.get("bbs", set(SUPPORTED_EXT)))
+        return {loc.id: loc for loc in inventory.locations}
+
+    def _varac_bbs_copy_targets(self) -> List[Dict[str, object]]:
+        if not MessageViewerTab._is_truthy(self.settings.get("varac_bbs_enabled", False), False):
+            return []
+        targets: List[Dict[str, object]] = []
+        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
+        if bbs_dir_txt:
+            bbs_dir = Path(bbs_dir_txt)
+            targets.append(
+                {
+                    "id": "live",
+                    "kind": "live",
+                    "label": "Published BBS",
+                    "detail": "Live VarAC BBS folder",
+                    "path": bbs_dir,
+                    "valid": bbs_dir.exists() and bbs_dir.is_dir(),
+                    "file_count": 0,
+                    "due_now": 0,
+                    "is_default": False,
+                }
+            )
+        if MessageViewerTab._is_truthy(self.settings.get("varac_bbs_vault_enabled", False), False):
+            inventory_by_id = self._bbs_location_inventory_by_id()
+            default_id = str(self.settings.get("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID) or DEFAULT_LOCATION_ID).strip() or DEFAULT_LOCATION_ID
+            for loc in load_vault_locations(self.settings.get("varac_bbs_vault_locations_v1", [])):
+                if not loc.enabled:
+                    continue
+                path = Path(str(loc.source_dir or "").strip()) if str(loc.source_dir or "").strip() else None
+                inv = inventory_by_id.get(loc.id)
+                count = int(getattr(inv, "file_count", 0) or 0)
+                due_now = int(getattr(inv, "due_now_count", 0) or 0)
+                detail_bits = []
+                alias = str(loc.alias or "").strip()
+                if alias:
+                    detail_bits.append(f"alias {alias}")
+                detail_bits.append(f"{count} files")
+                if due_now:
+                    detail_bits.append(f"{due_now} due now")
+                targets.append(
+                    {
+                        "id": f"location:{loc.id}",
+                        "location_id": loc.id,
+                        "kind": "location",
+                        "label": loc.name,
+                        "detail": ", ".join(detail_bits),
+                        "path": path,
+                        "valid": path is not None and path.exists() and path.is_dir(),
+                        "file_count": count,
+                        "due_now": due_now,
+                        "is_default": loc.id == default_id,
+                    }
+                )
+        return targets
+
+    def _select_varac_bbs_copy_target(self) -> Optional[Dict[str, object]]:
+        targets = [target for target in self._varac_bbs_copy_targets() if bool(target.get("valid", False))]
+        if not targets:
+            return None
+        if len(targets) == 1:
+            return targets[0]
+        preferred_id = self._bbs_copy_target_session_id
+        if not preferred_id:
+            preferred = next((target for target in targets if bool(target.get("is_default", False))), None)
+            if preferred is not None:
+                preferred_id = str(preferred.get("id", "") or "")
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Copy to BBS Location")
+        layout = QVBoxLayout(dialog)
+        intro = QLabel("Choose where this file should be copied.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        list_widget = QListWidget(dialog)
+        for target in targets:
+            label = str(target.get("label", "") or "BBS")
+            kind = str(target.get("kind", "") or "")
+            prefix = "Published BBS" if kind == "live" else "Managed Location"
+            detail = str(target.get("detail", "") or "")
+            path = Path(target.get("path")) if target.get("path") else None
+            text = f"{prefix}: {label}"
+            if detail:
+                text += f"\n{detail}"
+            if path is not None:
+                text += f"\n{path}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, target)
+            list_widget.addItem(item)
+            if str(target.get("id", "") or "") == preferred_id:
+                list_widget.setCurrentItem(item)
+        if list_widget.currentRow() < 0:
+            list_widget.setCurrentRow(0)
+        layout.addWidget(list_widget)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        current = list_widget.currentItem()
+        if current is None:
+            return None
+        target = current.data(Qt.UserRole)
+        if not isinstance(target, dict):
+            return None
+        self._bbs_copy_target_session_id = str(target.get("id", "") or "")
+        return target
+
+    def _varac_bbs_destination_for_row(
+        self,
+        row: UnifiedMessage | None,
+        *,
+        unique: bool = False,
+        target: Optional[Dict[str, object]] = None,
+    ) -> Path | None:
         if not self._can_copy_row_to_varac_bbs(row):
             return None
         payload = getattr(row, "payload", None)
         if not isinstance(payload, FileRecord):
             return None
-        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
-        if not bbs_dir_txt:
+        if target is None:
+            bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
+            target_dir = Path(bbs_dir_txt) if bbs_dir_txt else None
+        else:
+            target_dir_obj = target.get("path")
+            target_dir = Path(target_dir_obj) if target_dir_obj else None
+        if target_dir is None:
             return None
-        bbs_dir = Path(bbs_dir_txt)
-        if not bbs_dir.exists() or not bbs_dir.is_dir():
+        if not target_dir.exists() or not target_dir.is_dir():
             return None
         safe_name = MessageViewerTab._safe_varac_bbs_filename(payload.path.name)
-        dst = bbs_dir / safe_name
+        dst = target_dir / safe_name
         if not unique:
             return dst
         return MessageViewerTab._unique_varac_bbs_destination(dst)
 
-    def _is_row_already_in_varac_bbs(self, row: UnifiedMessage | None) -> bool:
-        dst = self._varac_bbs_destination_for_row(row)
+    def _is_row_already_in_varac_bbs(
+        self,
+        row: UnifiedMessage | None,
+        *,
+        target: Optional[Dict[str, object]] = None,
+    ) -> bool:
+        dst = self._varac_bbs_destination_for_row(row, target=target)
         payload = getattr(row, "payload", None) if row is not None else None
         if dst is None or not isinstance(payload, FileRecord):
             return False
-        key = self._bbs_copy_session_key_for_row(row)
-        if key is not None and key in self._bbs_copied_session_keys:
+        target_id = str((target or {}).get("id", "") or "live")
+        marker = self._bbs_copy_session_marker(row, target_id)
+        if marker is not None and marker in self._bbs_copied_session_keys:
             return True
         try:
             if payload.path.resolve() == dst.resolve():
@@ -8814,18 +8989,18 @@ class MessageViewerTab(QWidget):
     def _is_row_bbs_copy_action_enabled(self, row: UnifiedMessage | None) -> bool:
         if not self._can_copy_row_to_varac_bbs(row):
             return False
-        if self._is_row_already_in_varac_bbs(row):
+        targets = [target for target in self._varac_bbs_copy_targets() if bool(target.get("valid", False))]
+        if not targets:
             return False
-        key = self._bbs_copy_session_key_for_row(row)
-        if key is None:
+        if len(targets) > 1:
             return True
-        return key not in self._bbs_copied_session_keys
+        return not self._is_row_already_in_varac_bbs(row, target=targets[0])
 
-    def _mark_row_copied_to_varac_bbs_session(self, row: UnifiedMessage | None) -> None:
-        key = self._bbs_copy_session_key_for_row(row)
-        if key is None:
+    def _mark_row_copied_to_varac_bbs_session(self, row: UnifiedMessage | None, target_id: str) -> None:
+        marker = self._bbs_copy_session_marker(row, target_id)
+        if marker is None:
             return
-        self._bbs_copied_session_keys.add(key)
+        self._bbs_copied_session_keys.add(marker)
 
     def _copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> None:
         if row is None or not self._can_copy_row_to_varac_bbs(row):
@@ -8839,15 +9014,18 @@ class MessageViewerTab(QWidget):
         if not src.exists() or not src.is_file():
             QMessageBox.warning(self, "Copy to VarAC BBS", "The selected source file no longer exists.")
             return
-        base_dst = self._varac_bbs_destination_for_row(row)
-        dst = self._varac_bbs_destination_for_row(row, unique=True)
+        target = self._select_varac_bbs_copy_target()
+        if target is None:
+            return
+        if self._is_row_already_in_varac_bbs(row, target=target):
+            return
+        base_dst = self._varac_bbs_destination_for_row(row, target=target)
+        dst = self._varac_bbs_destination_for_row(row, unique=True, target=target)
         if dst is None:
             if base_dst is None:
-                QMessageBox.warning(self, "Copy to VarAC BBS", "Configured VarAC BBS directory is not valid.")
+                QMessageBox.warning(self, "Copy to VarAC BBS", "Configured VarAC BBS target is not valid.")
             else:
                 QMessageBox.warning(self, "Copy to VarAC BBS", "Could not create a unique VarAC BBS filename.")
-            return
-        if self._is_row_already_in_varac_bbs(row):
             return
         try:
             if src.resolve() == dst.resolve():
@@ -8861,16 +9039,26 @@ class MessageViewerTab(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Copy to VarAC BBS", f"Copy failed:\n{e}")
             return
-        self._mark_row_copied_to_varac_bbs_session(row)
+        target_id = str(target.get("id", "") or "live")
+        self._mark_row_copied_to_varac_bbs_session(row, target_id)
         extra = ""
         if dst.name != payload.path.name:
             extra = f"\n\nFilename cleaned from:\n{payload.path.name}"
             if base_dst is not None and dst != base_dst:
                 extra += f"\n\nExisting BBS filename avoided; copied as:\n{dst.name}"
+        kind = str(target.get("kind", "") or "")
+        target_label = str(target.get("label", "") or "VarAC BBS")
+        if kind == "location":
+            message = (
+                f"Copied file to managed BBS location '{target_label}':\n{dst}\n\n"
+                "Publish or refresh that location to make it live in VarAC BBS."
+            )
+        else:
+            message = f"Copied file to published VarAC BBS folder:\n{dst}"
         QMessageBox.information(
             self,
             "Copy to VarAC BBS",
-            f"Copied file to VarAC BBS folder:\n{dst}{extra}",
+            f"{message}{extra}",
         )
         self._unfreeze_table()
         self._populate_messages_table(force=True)

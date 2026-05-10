@@ -80,12 +80,16 @@ MIRRORED_LEGACY_KEYS = frozenset(
         "varac_bbs_vault_enabled",
         "varac_bbs_vault_managed_root",
         "varac_bbs_vault_default_location_id",
+        "varac_bbs_vault_global_code_policy",
         "varac_bbs_vault_trigger_mode",
         "varac_bbs_vault_return_mode",
         "varac_bbs_vault_failed_attempt_limit",
         "varac_bbs_vault_failed_attempt_window_seconds",
         "varac_bbs_vault_cooldown_seconds",
         "varac_bbs_vault_idle_timeout_seconds",
+        "varac_bbs_vault_flamp_enabled",
+        "varac_bbs_vault_flamp_relay_dir",
+        "varac_bbs_vault_flamp_listing_max_age_days",
         "varac_bbs_vault_locations_v1",
         "varac_bbs_vault_runtime_state_v1",
         "varac_bbs_vault_last_summary",
@@ -155,12 +159,16 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             varac_bbs_vault_enabled INTEGER NOT NULL DEFAULT 0,
             varac_bbs_vault_managed_root TEXT,
             varac_bbs_vault_default_location_id TEXT,
+            varac_bbs_vault_global_code_policy TEXT,
             varac_bbs_vault_trigger_mode TEXT,
             varac_bbs_vault_return_mode TEXT,
             varac_bbs_vault_failed_attempt_limit INTEGER NOT NULL DEFAULT 3,
             varac_bbs_vault_failed_attempt_window_seconds INTEGER NOT NULL DEFAULT 900,
             varac_bbs_vault_cooldown_seconds INTEGER NOT NULL DEFAULT 1800,
             varac_bbs_vault_idle_timeout_seconds INTEGER NOT NULL DEFAULT 600,
+            varac_bbs_vault_flamp_enabled INTEGER NOT NULL DEFAULT 0,
+            varac_bbs_vault_flamp_relay_dir TEXT,
+            varac_bbs_vault_flamp_listing_max_age_days INTEGER NOT NULL DEFAULT 14,
             varac_bbs_vault_locations_v1 TEXT,
             varac_bbs_vault_runtime_state_v1 TEXT,
             varac_bbs_vault_last_summary TEXT,
@@ -235,12 +243,16 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "varac_bbs_vault_enabled": "INTEGER NOT NULL DEFAULT 0",
             "varac_bbs_vault_managed_root": "TEXT",
             "varac_bbs_vault_default_location_id": "TEXT",
+            "varac_bbs_vault_global_code_policy": "TEXT",
             "varac_bbs_vault_trigger_mode": "TEXT",
             "varac_bbs_vault_return_mode": "TEXT",
             "varac_bbs_vault_failed_attempt_limit": "INTEGER NOT NULL DEFAULT 3",
             "varac_bbs_vault_failed_attempt_window_seconds": "INTEGER NOT NULL DEFAULT 900",
             "varac_bbs_vault_cooldown_seconds": "INTEGER NOT NULL DEFAULT 1800",
             "varac_bbs_vault_idle_timeout_seconds": "INTEGER NOT NULL DEFAULT 600",
+            "varac_bbs_vault_flamp_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "varac_bbs_vault_flamp_relay_dir": "TEXT",
+            "varac_bbs_vault_flamp_listing_max_age_days": "INTEGER NOT NULL DEFAULT 14",
             "varac_bbs_vault_locations_v1": "TEXT",
             "varac_bbs_vault_runtime_state_v1": "TEXT",
             "varac_bbs_vault_last_summary": "TEXT",
@@ -2030,6 +2042,12 @@ def _legacy_settings_projection_from_device(
         )
         if use_varac
         else "",
+        "varac_bbs_vault_global_code_policy": _coerce_text(
+            device_profile.get("varac_bbs_vault_global_code_policy", ""),
+            "",
+        )
+        if use_varac
+        else "",
         "varac_bbs_vault_trigger_mode": _coerce_text(device_profile.get("varac_bbs_vault_trigger_mode", ""), "")
         if use_varac
         else "",
@@ -2060,6 +2078,23 @@ def _legacy_settings_projection_from_device(
         )
         if use_varac
         else 600,
+        "varac_bbs_vault_flamp_enabled": bool(
+            _coerce_bool_int(device_profile.get("varac_bbs_vault_flamp_enabled", 0), False)
+        )
+        if use_varac
+        else False,
+        "varac_bbs_vault_flamp_relay_dir": _coerce_text(
+            device_profile.get("varac_bbs_vault_flamp_relay_dir", ""),
+            "",
+        )
+        if use_varac
+        else "",
+        "varac_bbs_vault_flamp_listing_max_age_days": _coerce_optional_int(
+            device_profile.get("varac_bbs_vault_flamp_listing_max_age_days"),
+            14,
+        )
+        if use_varac
+        else 14,
         "varac_bbs_vault_locations_v1": _parse_json_list(device_profile.get("varac_bbs_vault_locations_v1", "[]"))
         if use_varac
         else [],
@@ -2319,6 +2354,11 @@ def _seed_device_defaults(
             "varac_bbs_vault_default_location_id",
             "",
         ),
+        "varac_bbs_vault_global_code_policy": _settings_text(
+            settings_values,
+            "varac_bbs_vault_global_code_policy",
+            "",
+        ),
         "varac_bbs_vault_trigger_mode": _settings_text(settings_values, "varac_bbs_vault_trigger_mode", ""),
         "varac_bbs_vault_return_mode": _settings_text(settings_values, "varac_bbs_vault_return_mode", ""),
         "varac_bbs_vault_failed_attempt_limit": _settings_int(
@@ -2340,6 +2380,20 @@ def _seed_device_defaults(
             settings_values,
             "varac_bbs_vault_idle_timeout_seconds",
             600,
+        ),
+        "varac_bbs_vault_flamp_enabled": _coerce_bool_int(
+            settings_values.get("varac_bbs_vault_flamp_enabled"),
+            False,
+        ),
+        "varac_bbs_vault_flamp_relay_dir": _settings_text(
+            settings_values,
+            "varac_bbs_vault_flamp_relay_dir",
+            "",
+        ),
+        "varac_bbs_vault_flamp_listing_max_age_days": _settings_int(
+            settings_values,
+            "varac_bbs_vault_flamp_listing_max_age_days",
+            14,
         ),
         "varac_bbs_vault_locations_v1": _coerce_json_list_text(
             settings_values.get("varac_bbs_vault_locations_v1", [])
@@ -2486,6 +2540,61 @@ def mirror_legacy_settings_into_runtime_active_device(
             False,
         ),
         "varac_bbs_auto_archive_days": _settings_int(settings_values, "varac_bbs_auto_archive_days", 14),
+        "varac_bbs_vault_enabled": _coerce_bool_int(settings_values.get("varac_bbs_vault_enabled"), False),
+        "varac_bbs_vault_managed_root": _settings_text(settings_values, "varac_bbs_vault_managed_root", ""),
+        "varac_bbs_vault_default_location_id": _settings_text(
+            settings_values,
+            "varac_bbs_vault_default_location_id",
+            "",
+        ),
+        "varac_bbs_vault_global_code_policy": _settings_text(
+            settings_values,
+            "varac_bbs_vault_global_code_policy",
+            "",
+        ),
+        "varac_bbs_vault_trigger_mode": _settings_text(settings_values, "varac_bbs_vault_trigger_mode", ""),
+        "varac_bbs_vault_return_mode": _settings_text(settings_values, "varac_bbs_vault_return_mode", ""),
+        "varac_bbs_vault_failed_attempt_limit": _settings_int(
+            settings_values,
+            "varac_bbs_vault_failed_attempt_limit",
+            3,
+        ),
+        "varac_bbs_vault_failed_attempt_window_seconds": _settings_int(
+            settings_values,
+            "varac_bbs_vault_failed_attempt_window_seconds",
+            900,
+        ),
+        "varac_bbs_vault_cooldown_seconds": _settings_int(
+            settings_values,
+            "varac_bbs_vault_cooldown_seconds",
+            1800,
+        ),
+        "varac_bbs_vault_idle_timeout_seconds": _settings_int(
+            settings_values,
+            "varac_bbs_vault_idle_timeout_seconds",
+            600,
+        ),
+        "varac_bbs_vault_flamp_enabled": _coerce_bool_int(
+            settings_values.get("varac_bbs_vault_flamp_enabled"),
+            False,
+        ),
+        "varac_bbs_vault_flamp_relay_dir": _settings_text(
+            settings_values,
+            "varac_bbs_vault_flamp_relay_dir",
+            "",
+        ),
+        "varac_bbs_vault_flamp_listing_max_age_days": _settings_int(
+            settings_values,
+            "varac_bbs_vault_flamp_listing_max_age_days",
+            14,
+        ),
+        "varac_bbs_vault_locations_v1": _coerce_json_list_text(
+            settings_values.get("varac_bbs_vault_locations_v1", [])
+        ),
+        "varac_bbs_vault_runtime_state_v1": _coerce_json_object_text(
+            settings_values.get("varac_bbs_vault_runtime_state_v1", {})
+        ),
+        "varac_bbs_vault_last_summary": _settings_text(settings_values, "varac_bbs_vault_last_summary", ""),
         "launch_enabled": _coerce_bool_int(settings_values.get("launch_control_enabled"), True),
         "launch_path": launch_path,
         "launch_cmd": _settings_text(settings_values, "varac_launch_cmd", ""),
@@ -2635,6 +2744,52 @@ class MultiRadioStore:
         flrig_host = _coerce_text(payload.get("flrig_host", (existing or {}).get("flrig_host", "127.0.0.1")), "127.0.0.1") or "127.0.0.1"
         fldigi_host = _coerce_text(payload.get("fldigi_host", (existing or {}).get("fldigi_host", "")), "") or flrig_host or "127.0.0.1"
         js8_host = _coerce_text(payload.get("js8_host", (existing or {}).get("js8_host", "127.0.0.1")), "127.0.0.1") or "127.0.0.1"
+        default_use_flrig = (existing or {}).get("use_flrig")
+        if default_use_flrig is None:
+            default_use_flrig = control_backend == "flrig"
+        default_use_fldigi = (existing or {}).get("use_fldigi")
+        if default_use_fldigi is None:
+            default_use_fldigi = fast_light_config_id is not None or any(
+                payload.get(key)
+                for key in (
+                    "fldigi_path",
+                    "fldigi_host",
+                    "fldigi_port",
+                    "fldigi_log_path",
+                    "fldigi_checkin_dir",
+                )
+            )
+        default_use_flmsg = (existing or {}).get("use_flmsg")
+        if default_use_flmsg is None:
+            default_use_flmsg = bool(payload.get("flmsg_path") or payload.get("flmsg_message_path"))
+        default_use_flamp = (existing or {}).get("use_flamp")
+        if default_use_flamp is None:
+            default_use_flamp = bool(payload.get("flamp_path") or payload.get("flamp_message_path"))
+        default_use_js8call = (existing or {}).get("use_js8call")
+        if default_use_js8call is None:
+            default_use_js8call = (
+                control_backend == "js8call"
+                or js8_instance_id is not None
+                or any(
+                    payload.get(key)
+                    for key in (
+                        "js8_host",
+                        "js8_port",
+                        "js8_profile_path",
+                        "js8_directed_path",
+                        "js8_forms_path",
+                    )
+                )
+            )
+        default_use_js8spotter = (existing or {}).get("use_js8spotter")
+        if default_use_js8spotter is None:
+            default_use_js8spotter = js8_instance_id is not None or bool(payload.get("spotter_launch_path"))
+        default_use_commstat = (existing or {}).get("use_commstat")
+        if default_use_commstat is None:
+            default_use_commstat = js8_instance_id is not None or bool(payload.get("commstat_launch_path"))
+        default_use_varac = (existing or {}).get("use_varac")
+        if default_use_varac is None:
+            default_use_varac = varac_node_id is not None
         record = {
             "system_key": system_key,
             "name": _coerce_text(payload.get("name", (existing or {}).get("name", "Device Profile")), "Device Profile") or "Device Profile",
@@ -2651,14 +2806,14 @@ class MultiRadioStore:
             "device_class": device_class,
             "deployment_mode": deployment_mode,
             "control_backend": control_backend,
-            "use_flrig": _coerce_bool_int(payload.get("use_flrig", (existing or {}).get("use_flrig", 0)), control_backend == "flrig"),
-            "use_fldigi": _coerce_bool_int(payload.get("use_fldigi", (existing or {}).get("use_fldigi", 0)), False),
-            "use_flmsg": _coerce_bool_int(payload.get("use_flmsg", (existing or {}).get("use_flmsg", 0)), False),
-            "use_flamp": _coerce_bool_int(payload.get("use_flamp", (existing or {}).get("use_flamp", 0)), False),
-            "use_js8call": _coerce_bool_int(payload.get("use_js8call", (existing or {}).get("use_js8call", 0)), control_backend == "js8call"),
-            "use_js8spotter": _coerce_bool_int(payload.get("use_js8spotter", (existing or {}).get("use_js8spotter", 0)), False),
-            "use_commstat": _coerce_bool_int(payload.get("use_commstat", (existing or {}).get("use_commstat", 0)), False),
-            "use_varac": _coerce_bool_int(payload.get("use_varac", (existing or {}).get("use_varac", 0)), False),
+            "use_flrig": _coerce_bool_int(payload.get("use_flrig", default_use_flrig), control_backend == "flrig"),
+            "use_fldigi": _coerce_bool_int(payload.get("use_fldigi", default_use_fldigi), False),
+            "use_flmsg": _coerce_bool_int(payload.get("use_flmsg", default_use_flmsg), False),
+            "use_flamp": _coerce_bool_int(payload.get("use_flamp", default_use_flamp), False),
+            "use_js8call": _coerce_bool_int(payload.get("use_js8call", default_use_js8call), control_backend == "js8call"),
+            "use_js8spotter": _coerce_bool_int(payload.get("use_js8spotter", default_use_js8spotter), False),
+            "use_commstat": _coerce_bool_int(payload.get("use_commstat", default_use_commstat), False),
+            "use_varac": _coerce_bool_int(payload.get("use_varac", default_use_varac), False),
             "rig_host": _coerce_text(payload.get("rig_host", (existing or {}).get("rig_host", "")), ""),
             "rig_port": _coerce_optional_int(payload.get("rig_port", (existing or {}).get("rig_port"))),
             "flrig_host": flrig_host,
@@ -2751,6 +2906,13 @@ class MultiRadioStore:
                 ),
                 "",
             ),
+            "varac_bbs_vault_global_code_policy": _coerce_text(
+                payload.get(
+                    "varac_bbs_vault_global_code_policy",
+                    (existing or {}).get("varac_bbs_vault_global_code_policy", ""),
+                ),
+                "",
+            ),
             "varac_bbs_vault_trigger_mode": _coerce_text(
                 payload.get("varac_bbs_vault_trigger_mode", (existing or {}).get("varac_bbs_vault_trigger_mode", "")),
                 "",
@@ -2786,6 +2948,27 @@ class MultiRadioStore:
                     (existing or {}).get("varac_bbs_vault_idle_timeout_seconds", 600),
                 ),
                 600,
+            ),
+            "varac_bbs_vault_flamp_enabled": _coerce_bool_int(
+                payload.get(
+                    "varac_bbs_vault_flamp_enabled",
+                    (existing or {}).get("varac_bbs_vault_flamp_enabled", 0),
+                ),
+                False,
+            ),
+            "varac_bbs_vault_flamp_relay_dir": _coerce_text(
+                payload.get(
+                    "varac_bbs_vault_flamp_relay_dir",
+                    (existing or {}).get("varac_bbs_vault_flamp_relay_dir", ""),
+                ),
+                "",
+            ),
+            "varac_bbs_vault_flamp_listing_max_age_days": _coerce_optional_int(
+                payload.get(
+                    "varac_bbs_vault_flamp_listing_max_age_days",
+                    (existing or {}).get("varac_bbs_vault_flamp_listing_max_age_days", 14),
+                ),
+                14,
             ),
             "varac_bbs_vault_locations_v1": _coerce_json_list_text(
                 payload.get(

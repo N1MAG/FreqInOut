@@ -262,6 +262,7 @@ def test_varac_guard_and_vault_timestamp_parsers_accept_day_first_logs() -> None
     assert list_blocks_refresh_events
     assert list_blocks_refresh_events[0].kind == "flamp_list_blocks"
     assert list_blocks_refresh_events[0].queue_id == "1AD1"
+    assert list_blocks_refresh_events[0].refresh_requested is True
 
     block_events = parse_vault_log_events(
         "06/05/2026 19:54:12 - W8UFO> BLK 0,8,9 F277\n",
@@ -398,7 +399,7 @@ def test_publish_root_view_appends_custom_helper_text_to_filename(tmp_path: Path
     )
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "BBS MSG - Type INTEL to open Intel then refresh BBS - Latest reports.txt" in names
+    assert "BBS MSG - Type INTEL to open Intel, wait 10 sec, then refresh BBS - Latest reports.txt" in names
 
 
 def test_publish_root_view_uses_normalized_alias_and_removes_old_helper(tmp_path: Path) -> None:
@@ -438,7 +439,7 @@ def test_publish_root_view_uses_normalized_alias_and_removes_old_helper(tmp_path
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert normalize_location_alias("TEST_A") == "TESTA"
-    assert "BBS MSG - Type TESTA to open TEST_A then refresh BBS - custom text add-on.txt" in names
+    assert "BBS MSG - Type TESTA to open TEST_A, wait 10 sec, then refresh BBS - custom text add-on.txt" in names
     assert stale.name not in names
 
 
@@ -1516,7 +1517,7 @@ def test_publish_root_view_lists_flamp_menu_helper(tmp_path: Path) -> None:
     )
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - then refresh BBS.txt" in names
+    assert "BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - wait 10 sec, then refresh BBS.txt" in names
     assert not any("FLAMP CMDS LIST Q" in name for name in names)
 
 
@@ -1575,10 +1576,10 @@ def test_run_varac_bbs_vault_flamp_command_publishes_separate_helpers(tmp_path: 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert result.enabled
     assert state.current_view_mode == "flamp-help"
-    assert "BBS MSG - LIST Q to list available FLAMP files - then refresh BBS.txt" in names
-    assert "BBS MSG - LIST BLKS F277 shows available blocks for F277 - then refresh BBS.txt" in names
-    assert "BBS MSG - BLK 0,8,9 F277 pulls blocks 0,8,9 for queueID F277 - then refresh BBS.txt" in names
-    assert "BBS MSG - ROOT to return to normal BBS menu - then refresh BBS.txt" in names
+    assert "BBS MSG - LIST Q to list available FLAMP files - wait 10 sec, then refresh BBS.txt" in names
+    assert "BBS MSG - LIST BLKS F277 shows available blocks for F277 - wait 10 sec, then refresh BBS.txt" in names
+    assert "BBS MSG - BLK 0,8,9 F277 pulls blocks 0,8,9 for queueID F277 - wait 10 sec, then refresh BBS.txt" in names
+    assert "BBS MSG - ROOT to return to normal BBS menu - wait 10 sec, then refresh BBS.txt" in names
 
 
 def test_run_varac_bbs_vault_flamp_command_accepts_varac_prefixed_db_entry(tmp_path: Path) -> None:
@@ -1636,7 +1637,7 @@ def test_run_varac_bbs_vault_flamp_command_accepts_varac_prefixed_db_entry(tmp_p
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert result.enabled
     assert state.current_view_mode == "flamp-help"
-    assert "BBS MSG - LIST Q to list available FLAMP files - then refresh BBS.txt" in names
+    assert "BBS MSG - LIST Q to list available FLAMP files - wait 10 sec, then refresh BBS.txt" in names
 
 
 def test_run_varac_bbs_vault_flamp_queue_and_block_commands_accept_prefixed_db_entries(tmp_path: Path) -> None:
@@ -2099,6 +2100,7 @@ def test_run_varac_bbs_vault_db_first_scan_starts_from_recent_tail(tmp_path: Pat
     assert state.current_view_label == "FLAMP 41D6"
     assert not (live_bbs / "BBS_BLOCK_LIST_1AD1.txt").exists()
     assert (live_bbs / "BBS_BLOCK_LIST_41D6.txt").exists()
+    assert (live_bbs / "BBS MSG - LIST BLKS 41D6 received - wait 10 sec, then refresh BBS again.txt").exists()
 
 
 def test_run_varac_bbs_vault_db_handles_missing_qso_and_slashed_zero_queue(tmp_path: Path) -> None:
@@ -2453,12 +2455,16 @@ def test_settings_tab_persists_managed_vault_configuration(monkeypatch, tmp_path
     tab.varac_bbs_vault_global_code_policy_combo.setCurrentText("Require for non-default locations")
     tab.varac_bbs_vault_flamp_enabled_chk.setChecked(True)
     tab.varac_bbs_vault_flamp_relay_dir_edit.setText(str(tmp_path / "relay"))
+    tab.varac_bbs_vault_flamp_listing_age_combo.setCurrentIndex(
+        tab.varac_bbs_vault_flamp_listing_age_combo.findData(7)
+    )
 
     snap = tab._settings_snapshot_for_readiness()
     assert snap["varac_bbs_vault_enabled"] is True
     assert snap["varac_bbs_vault_global_code_policy"] == "Require for non-default locations"
     assert snap["varac_bbs_vault_flamp_enabled"] is True
     assert snap["varac_bbs_vault_flamp_relay_dir"] == str(tmp_path / "relay")
+    assert snap["varac_bbs_vault_flamp_listing_max_age_days"] == 7
 
 
 def test_settings_tab_autofills_vault_location_defaults(tmp_path: Path) -> None:
@@ -2479,7 +2485,7 @@ def test_settings_tab_autofills_vault_location_defaults(tmp_path: Path) -> None:
     tab._new_varac_bbs_vault_location()
     tab.varac_bbs_vault_location_name_edit.setText("Logistics")
 
-    assert tab.varac_bbs_vault_description_edit.text() in {"", "to open Logistics"}
+    assert tab.varac_bbs_vault_description_edit.text() == ""
     assert tab.varac_bbs_vault_source_dir_edit.text() in {
         "FIO_BBS_Vault/locations/Logistics",
         str(managed_root / "locations" / "Logistics"),
@@ -2487,6 +2493,103 @@ def test_settings_tab_autofills_vault_location_defaults(tmp_path: Path) -> None:
     full_path = tab.varac_bbs_vault_source_dir_edit.property("full_path")
     assert full_path in {None, str(managed_root / "locations" / "Logistics")}
     assert "Live BBS likely match: Logistics.txt" in tab.varac_bbs_vault_source_hint_label.text()
+
+
+def test_settings_tab_helper_preview_matches_pause_helper_text(tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    managed_root = tmp_path / "managed"
+    location_dir = managed_root / "locations" / "Intel"
+    location_dir.mkdir(parents=True)
+
+    tab = SettingsTab()
+    tab.varac_bbs_vault_root_edit.setText(str(managed_root))
+    tab._set_varac_bbs_vault_locations(
+        [
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(managed_root / "locations" / DEFAULT_LOCATION_NAME),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+            {
+                "id": "intel",
+                "name": "Intel",
+                "alias": "INTEL",
+                "description": "Latest reports",
+                "source_dir": str(location_dir),
+                "enabled": True,
+                "list_in_root_menu": True,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            },
+        ]
+    )
+    tab.varac_bbs_vault_locations_list.setCurrentRow(1)
+    tab._refresh_varac_bbs_vault_helper_preview()
+
+    assert (
+        tab.varac_bbs_vault_helper_preview_label.text()
+        == "BBS MSG - Type INTEL to open Intel, wait 10 sec, then refresh BBS - Latest reports.txt"
+    )
+
+
+def test_multi_radio_store_preserves_per_varac_bbs_ui_fields(tmp_path: Path) -> None:
+    from freqinout.core.multi_radio_store import MultiRadioStore
+
+    store = MultiRadioStore(tmp_path / "freqinout.db")
+    saved = store.save_device_profile(
+        {
+            "system_key": "varac-a",
+            "name": "VarAC A",
+            "control_backend": "manual",
+            "use_varac": True,
+            "varac_bbs_vault_global_code_policy": "Allow public locations",
+            "varac_bbs_vault_flamp_enabled": True,
+            "varac_bbs_vault_flamp_relay_dir": str(tmp_path / "flamp" / "relay"),
+            "varac_bbs_vault_flamp_listing_max_age_days": 7,
+            "varac_bbs_vault_locations_v1": [
+                {
+                    "id": "intel",
+                    "name": "Intel",
+                    "alias": "INTEL",
+                    "description": "Latest reports",
+                    "source_dir": str(tmp_path / "Intel"),
+                    "enabled": True,
+                    "list_in_root_menu": True,
+                    "visibility_rule": "Public",
+                    "open_rule": "Public",
+                }
+            ],
+        }
+    )
+
+    loaded = store.get_device_profile(int(saved["id"]))
+    assert loaded is not None
+    assert loaded["varac_bbs_vault_global_code_policy"] == "Allow public locations"
+    assert loaded["varac_bbs_vault_flamp_enabled"] == 1
+    assert loaded["varac_bbs_vault_flamp_relay_dir"] == str(tmp_path / "flamp" / "relay")
+    assert loaded["varac_bbs_vault_flamp_listing_max_age_days"] == 7
+    assert load_vault_locations(loaded["varac_bbs_vault_locations_v1"])[0].alias == "INTEL"
 
 
 def test_settings_tab_autofills_flamp_relay_dir_but_allows_override(tmp_path: Path) -> None:

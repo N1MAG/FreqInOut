@@ -55,6 +55,7 @@ from freqinout.core.station_readiness import (
 )
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sop_manager import SOPManager
+from freqinout.core.varac_bbs_inventory import build_bbs_inventory, format_bbs_inventory_detail
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.qsy_helper import (
     load_operating_groups,
@@ -4315,61 +4316,15 @@ class ControlFreqTab(QWidget):
         return rows_out or [["No matches", "0", "-"]]
 
     def _collect_bbs_rows(self, search: str) -> List[List[str]]:
-        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
-        bbs_dir = Path(bbs_dir_txt) if bbs_dir_txt else None
-        vault_enabled = bool(self.settings.get("varac_bbs_vault_enabled", False))
-        vault_summary = str(self.settings.get("varac_bbs_vault_last_summary", "") or "").strip()
-        vault_note = ""
-        if vault_enabled:
-            compact = vault_summary or "Managed Vault enabled"
-            vault_note = f"Vault: {compact}"
-        auto_days_raw = self.settings.get("varac_bbs_auto_archive_days", 14)
-        try:
-            auto_days = max(1, int(auto_days_raw or 14))
-        except Exception:
-            auto_days = 14
-        now_ts = time.time()
-        aging_lower_days = max(0.0, float(auto_days - 1))
-        aging_out: List[tuple[float, str]] = []
-        all_names: List[str] = []
-        if bbs_dir and bbs_dir.exists() and bbs_dir.is_dir():
-            try:
-                for child in bbs_dir.iterdir():
-                    if not child.is_file():
-                        continue
-                    all_names.append(child.name)
-                    try:
-                        st = child.stat()
-                    except OSError:
-                        continue
-                    age_days = max(0.0, (now_ts - float(st.st_mtime)) / 86400.0)
-                    if aging_lower_days <= age_days < float(auto_days):
-                        aging_out.append((float(st.st_mtime), child.name))
-            except OSError:
-                pass
-            aging_out.sort(key=lambda item: item[0])
-            aging_names = [name for _mtime, name in aging_out]
-            if len(aging_names) > 6:
-                aging_txt = ", ".join(aging_names[:6]) + f" +{len(aging_names) - 6} more"
-            else:
-                aging_txt = ", ".join(aging_names)
-            if vault_note:
-                aging_txt = f"{aging_txt} | {vault_note}" if aging_txt else vault_note
-            row = ["VarAC BBS", str(len(all_names)), aging_txt or "-"]
-            search_hits = search and (
-                search in row[0].upper()
-                or any(search in name.upper() for name in aging_names)
-                or any(search in name.upper() for name in all_names)
-                or search in vault_note.upper()
-            )
-            if not search or search_hits:
-                return [row]
-            return [["No matches", "0", "-"]]
-        note = "Not configured" if not bbs_dir_txt else "Missing directory"
-        if vault_note:
-            note = f"{note} | {vault_note}"
-        row = ["VarAC BBS", "0", note]
-        if not search or search in row[0].upper() or search in note.upper():
+        inventory = build_bbs_inventory(self.settings)
+        detail = format_bbs_inventory_detail(inventory)
+        count = str(inventory.live_file_count if inventory.bbs_enabled and inventory.live_exists else 0)
+        row = ["VarAC BBS", count, detail or "-"]
+        haystack_parts = [row[0], row[1], row[2], inventory.live_dir]
+        haystack_parts.extend(loc.name for loc in inventory.locations)
+        haystack_parts.extend(loc.alias for loc in inventory.locations)
+        haystack_parts.extend(loc.source_dir for loc in inventory.locations)
+        if not search or any(search in str(part or "").upper() for part in haystack_parts):
             return [row]
         return [["No matches", "0", "-"]]
 
