@@ -163,6 +163,12 @@ class VaultDbEvent:
 
 
 @dataclass(frozen=True)
+class VaultDbScanResult:
+    events: Tuple[VaultDbEvent, ...]
+    max_scanned_row_id: int = 0
+
+
+@dataclass(frozen=True)
 class VaultActionResult:
     action: str
     success: bool
@@ -1719,15 +1725,20 @@ def _resolve_varac_db_path(settings) -> Optional[Path]:
     return None
 
 
-def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: Mapping[str, str]) -> List[VaultDbEvent]:
+def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: Mapping[str, str]) -> VaultDbScanResult:
     events: List[VaultDbEvent] = []
+    max_scanned_row_id = int(last_datastream_id or 0)
     try:
         conn = sqlite3.connect(str(varac_db_path), timeout=1.5)
         conn.row_factory = sqlite3.Row
     except Exception as exc:
         log.debug("varac_bbs_vault: could not open VarAC.db %s: %s", varac_db_path, exc)
-        return events
+        return VaultDbScanResult(tuple(events), max_scanned_row_id)
     try:
+        start_after_id = int(last_datastream_id or 0)
+        if start_after_id <= 0:
+            max_row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM datastream").fetchone()[0]
+            start_after_id = max(0, int(max_row or 0) - int(MAX_DB_ROWS_PER_SCAN))
         rows = conn.execute(
             """
             SELECT
@@ -1745,12 +1756,12 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
             ORDER BY ds.id ASC
             LIMIT ?
             """,
-            (int(last_datastream_id or 0), int(MAX_DB_ROWS_PER_SCAN)),
+            (start_after_id, int(MAX_DB_ROWS_PER_SCAN)),
         ).fetchall()
     except Exception as exc:
         log.debug("varac_bbs_vault: could not query VarAC.db datastream: %s", exc)
         conn.close()
-        return events
+        return VaultDbScanResult(tuple(events), max_scanned_row_id)
     finally:
         try:
             conn.close()
@@ -1759,6 +1770,7 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
 
     for row in rows:
         row_id = int(row["id"] or 0)
+        max_scanned_row_id = max(max_scanned_row_id, row_id)
         qso_guid = str(row["qso_guid"] or "").strip()
         remote_callsign = _normalize_callsign(row["remote_callsign"])
         my_callsign = _normalize_callsign(row["my_callsign"])
@@ -1877,7 +1889,7 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
                     code_text=str(match.group(1) or "").strip(),
                 )
             )
-    return events
+    return VaultDbScanResult(tuple(events), max_scanned_row_id)
 
 
 def _summary_location_name(locations: Sequence[VaultLocation], location_id: str) -> str:
@@ -2783,9 +2795,12 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
             runtime_state = restored.runtime_state
             published = published or bool(restored.publish_result and restored.publish_result.changed)
 
-    events: List[VaultDbEvent] = []
+    events: Tuple[VaultDbEvent, ...] = ()
+    max_scanned_datastream_id = int(runtime_state.last_datastream_id or 0)
     if varac_db_path is not None:
-        events = _load_db_events(varac_db_path, last_datastream_id=runtime_state.last_datastream_id, alias_map=alias_map)
+        db_scan = _load_db_events(varac_db_path, last_datastream_id=runtime_state.last_datastream_id, alias_map=alias_map)
+        events = db_scan.events
+        max_scanned_datastream_id = max(max_scanned_datastream_id, int(db_scan.max_scanned_row_id or 0))
 
     for event in events:
         scanned += 1
@@ -3059,6 +3074,9 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
             except Exception as exc:
                 runtime_state = _update_state(runtime_state, last_action=f"FLAMP block request failed: {exc}", last_error=str(exc))
             continue
+
+    if max_scanned_datastream_id > int(runtime_state.last_datastream_id or 0):
+        runtime_state = _update_state(runtime_state, last_datastream_id=max_scanned_datastream_id)
 
     log_paths = resolve_varac_traffic_log_paths(settings)
     seen_keys = set(runtime_state.processed_event_keys)
