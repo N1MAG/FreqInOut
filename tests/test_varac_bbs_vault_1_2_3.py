@@ -2101,6 +2101,93 @@ def test_run_varac_bbs_vault_db_first_scan_starts_from_recent_tail(tmp_path: Pat
     assert (live_bbs / "BBS_BLOCK_LIST_41D6.txt").exists()
 
 
+def test_run_varac_bbs_vault_db_handles_missing_qso_and_slashed_zero_queue(tmp_path: Path) -> None:
+    varac_root = tmp_path / "varac"
+    varac_root.mkdir()
+    varac_db = varac_root / "VarAC.db"
+    _create_varac_db(varac_db)
+    qso_guid = "qso-missing-join"
+    _insert_datastream(
+        varac_db,
+        [
+            (674, "cmd1", 1, qso_guid, "N5TNT", "LIST BLKS 1AD1", "2026-05-10 03:40:04.0000000Z"),
+            (675, "blr1", 1, qso_guid, "N5TNT", "<BLR>", "2026-05-10 03:40:39.0000000Z"),
+            (676, "out1", 2, qso_guid, "W5TTA/P", "<BL:BBS_BLOCK_LIST_1AD1.txt|2026-05-09|144\n>", "2026-05-10 03:40:47.0000000Z"),
+            (677, "cmd2", 1, qso_guid, "N5TNT", "LIST BLKS 41D6\n<BLR>", "2026-05-10 03:41:15.0000000Z"),
+            (678, "out2", 2, qso_guid, "W5TTA/P", "<BL:BBS_BLOCK_LIST_41D6.txt|2026-05-09|149\n>", "2026-05-10 03:41:22.0000000Z"),
+            (679, "cmd3", 1, qso_guid, "N5TNT", "LIST BLKS 2AØC", "2026-05-10 03:41:50.0000000Z"),
+            (680, "blr3", 1, qso_guid, "N5TNT", "<BLR>", "2026-05-10 03:41:58.0000000Z"),
+        ],
+    )
+    relay_dir = tmp_path / "relay"
+    relay_dir.mkdir()
+    (relay_dir / "1AD1_NATL-RR-260504-1430Z-AIB-sig.k2s").write_text(
+        "<PROG 1.0>{1AD1}\n<SIZE xx>{1AD1}2119 3 1024\n{1AD1:1}A\n{1AD1:3}C\n",
+        encoding="utf-8",
+    )
+    (relay_dir / "41D6_NATL-RR-260413-1530Z-AIB-sig.k2s").write_text(
+        "<PROG 1.0>{41D6}\n<SIZE xx>{41D6}2119 2 1024\n{41D6:1}A\n{41D6:2}B\n",
+        encoding="utf-8",
+    )
+    (relay_dir / "2A0C_NATL-RR-260504-1430Z-AIB-sig.k2s").write_text(
+        "<PROG 1.0>{2A0C}\n<SIZE xx>{2A0C}2119 4 1024\n{2A0C:1}A\n{2A0C:4}D\n",
+        encoding="utf-8",
+    )
+    live_bbs = tmp_path / "BBS"
+    live_bbs.mkdir()
+    managed_root = tmp_path / "FIO_BBS_Vault"
+    created = initialize_managed_root(managed_root)
+    default_dir = Path(created["default"])
+    settings = _Settings(
+        varac_bbs_vault_enabled=True,
+        varac_bbs_dir=str(live_bbs),
+        varac_db_path=str(varac_db),
+        varac_path=str(varac_root),
+        varac_bbs_vault_managed_root=str(managed_root),
+        varac_bbs_vault_default_location_id=DEFAULT_LOCATION_ID,
+        varac_bbs_vault_global_code_policy="Allow public locations",
+        varac_bbs_vault_trigger_mode="VarAC session commands",
+        varac_bbs_vault_return_mode="On disconnect",
+        varac_bbs_vault_failed_attempt_limit=3,
+        varac_bbs_vault_failed_attempt_window_seconds=900,
+        varac_bbs_vault_cooldown_seconds=1800,
+        varac_bbs_vault_idle_timeout_seconds=600,
+        varac_bbs_vault_flamp_enabled=True,
+        varac_bbs_vault_flamp_relay_dir=str(relay_dir),
+        varac_bbs_vault_locations_v1=[
+            {
+                "id": DEFAULT_LOCATION_ID,
+                "name": DEFAULT_LOCATION_NAME,
+                "alias": "ROOT",
+                "description": "Main menu",
+                "source_dir": str(default_dir),
+                "enabled": True,
+                "list_in_root_menu": False,
+                "visibility_rule": "Public",
+                "open_rule": "Public",
+                "inherit_global_allowed_callsigns": True,
+                "allowed_callsigns": [],
+                "access_code_hash": "",
+                "access_code_salt": "",
+                "access_code_iterations": 310000,
+            }
+        ],
+        varac_bbs_vault_runtime_state_v1={"last_datastream_id": 673},
+    )
+
+    result = run_varac_bbs_vault(settings)
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+
+    assert result.enabled
+    assert result.processed_events >= 3
+    assert state.current_session_callsign == "N5TNT"
+    assert state.current_view_label in {"FLAMP 2A0C", "FLAMP 2A0C blocks"}
+    assert state.last_datastream_id == 680
+    assert not (live_bbs / "BBS_BLOCK_LIST_1AD1.txt").exists()
+    assert not (live_bbs / "BBS_BLOCK_LIST_41D6.txt").exists()
+    assert (live_bbs / "BBS_BLOCK_LIST_2A0C.txt").exists()
+
+
 def test_run_varac_bbs_vault_db_command_is_not_overwritten_by_stale_log_tail(tmp_path: Path) -> None:
     varac_root = tmp_path / "varac"
     varac_root.mkdir()

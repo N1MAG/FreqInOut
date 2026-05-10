@@ -349,6 +349,7 @@ def _extract_log_message_text(body: str) -> str:
 
 def _normalize_bbs_command_text(value: object) -> str:
     text = _extract_log_message_text(str(value or ""))
+    text = text.replace("Ø", "0").replace("ø", "0")
     upper = " ".join(text.split()).upper()
     upper = re.sub(r"^DE\s+[A-Z0-9/+\-]{3,15}\s*", "", upper).strip()
     if upper != "<BLR>":
@@ -1776,10 +1777,14 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
         my_callsign = _normalize_callsign(row["my_callsign"])
         entry_callsign = _normalize_callsign(row["entry_callsign"])
         entry_text = str(row["entry_text"] or "").strip()
+        entry_type_id = int(row["entry_type_id"] or 0)
         if not qso_guid or not entry_text:
             continue
         timestamp_utc = _parse_db_timestamp(row["creation_time"])
         upper = _normalize_bbs_command_text(entry_text)
+
+        if not remote_callsign and entry_type_id == 1 and entry_callsign:
+            remote_callsign = entry_callsign
 
         if DISCONNECT_RE.search(upper):
             events.append(
