@@ -2838,7 +2838,15 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 processed += 1
             continue
         if runtime_state.current_session_qso_guid and runtime_state.current_session_qso_guid != event.qso_guid:
-            continue
+            runtime_state = _update_state(
+                runtime_state,
+                current_location_id=default_location_id,
+                current_session_callsign="",
+                current_session_qso_guid="",
+                current_view_mode=DEFAULT_VIEW_MODE,
+                current_view_label=_summary_location_name(locations, default_location_id),
+                current_overlay_file="",
+            )
         if event.kind == "root_request":
             result = None
             if flamp_enabled and flamp_relay_dir:
