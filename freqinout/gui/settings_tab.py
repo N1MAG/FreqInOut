@@ -87,6 +87,7 @@ from freqinout.core.varac_bbs_vault import (
     DEFAULT_COOLDOWN_SECONDS,
     DEFAULT_FAILED_ATTEMPT_LIMIT,
     DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS,
+    DEFAULT_BBS_REFRESH_PAUSE_SECONDS,
     DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS,
     DEFAULT_GLOBAL_CODE_POLICY,
     DEFAULT_IDLE_TIMEOUT_SECONDS,
@@ -1076,7 +1077,10 @@ class SettingsTab(QWidget):
             suffix = " _code_" if open_rule in {"Access code required", "Allowed callsigns + access code"} else ""
             desc = f" - {description}" if description else ""
             open_name = name or alias or "location"
-            text = f"BBS MSG - Type {alias}{suffix} to open {open_name} then refresh BBS{desc}.txt"
+            text = (
+                f"BBS MSG - Type {alias}{suffix} to open {open_name}, "
+                f"wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, then refresh BBS{desc}.txt"
+            )
         self.varac_bbs_vault_helper_preview_label.setText(text)
         self.varac_bbs_vault_helper_preview_label.setToolTip(text)
 

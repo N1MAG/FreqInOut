@@ -40,6 +40,7 @@ DEFAULT_FLAMP_QUEUE_HELPER_NAME = "BBS_QUEUE_LIST.txt"
 DEFAULT_FLAMP_BLOCK_PREFIX = "BBS_BLOCK_LIST"
 DEFAULT_FLAMP_FILE_PREFIX = "BBS"
 DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS = 14
+DEFAULT_BBS_REFRESH_PAUSE_SECONDS = 10
 
 EVENT_TS_RE = re.compile(r"^(?P<stamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\s+-\s+(?P<body>.*)$")
 COMMAND_RE = re.compile(r"\bBBS\s+OPEN\s+([A-Z0-9][A-Z0-9_.:/+\-]{0,63})\b", re.IGNORECASE)
@@ -144,6 +145,7 @@ class VaultLogEvent:
     block_numbers: Tuple[int, ...] = ()
     raw_line: str = ""
     log_path: str = ""
+    refresh_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -160,6 +162,7 @@ class VaultDbEvent:
     code_text: str = ""
     queue_id: str = ""
     block_numbers: Tuple[int, ...] = ()
+    refresh_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -347,6 +350,10 @@ def _extract_log_message_text(body: str) -> str:
     return " ".join(payloads).strip()
 
 
+def _entry_includes_bbs_refresh(value: object) -> bool:
+    return bool(re.search(r"(?i)(?:^|\s)<BLR>(?:\s|$)", str(value or "")))
+
+
 def _normalize_bbs_command_text(value: object) -> str:
     text = _extract_log_message_text(str(value or ""))
     text = text.replace("Ø", "0").replace("ø", "0")
@@ -384,6 +391,7 @@ def parse_vault_log_events(
         sender = _extract_sender(body)
         message_text = _extract_log_message_text(body)
         command_text = _normalize_bbs_command_text(message_text)
+        refresh_requested = _entry_includes_bbs_refresh(body)
         code_text = ""
         alias = ""
         kind = ""
@@ -445,6 +453,7 @@ def parse_vault_log_events(
                 block_numbers=block_numbers,
                 raw_line=block,
                 log_path=log_path,
+                refresh_requested=refresh_requested,
             )
         )
     return events
@@ -1166,6 +1175,18 @@ def _menu_instruction_entry(text: str) -> _VirtualFile:
     return _VirtualFile(name=f"{text}.txt", content=text + "\n")
 
 
+def _refresh_action_phrase(*, again: bool = False) -> str:
+    suffix = " again" if again else ""
+    return f"wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, then refresh BBS{suffix}"
+
+
+def _quick_refresh_notice_entry(command_text: object) -> _VirtualFile:
+    command = str(command_text or "").strip().upper()
+    if not command:
+        command = "Command"
+    return _menu_instruction_entry(f"BBS MSG - {command} received - {_refresh_action_phrase(again=True)}")
+
+
 def _root_location_helper_text(location: VaultLocation, *, default_location_id: str, global_code_policy: str) -> str:
     alias = normalize_location_alias(location.alias, location.name)
     name = str(location.name or alias or "location").strip()
@@ -1178,7 +1199,7 @@ def _root_location_helper_text(location: VaultLocation, *, default_location_id: 
     if custom.lower() in {f"open {name}".lower(), f"to open {name}".lower()}:
         custom = ""
     custom_suffix = f" - {custom}" if custom else ""
-    return f"BBS MSG - Type {alias}{code_hint} to open {name} then refresh BBS{custom_suffix}"
+    return f"BBS MSG - Type {alias}{code_hint} to open {name}, {_refresh_action_phrase()}{custom_suffix}"
 
 
 def _root_virtual_files(
@@ -1230,7 +1251,7 @@ def _root_virtual_files(
     if flamp_enabled:
         entries.append(
             _menu_instruction_entry(
-                "BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - then refresh BBS"
+                f"BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - {_refresh_action_phrase()}"
             )
         )
     return entries
@@ -1254,14 +1275,14 @@ def _filesystem_location_virtual_files(managed_root: object) -> List[_VirtualFil
         if not alias or alias in seen_aliases:
             continue
         seen_aliases.add(alias)
-        entries.append(_menu_instruction_entry(f"BBS MSG - Type {alias} to open {child.name} then refresh BBS"))
+        entries.append(_menu_instruction_entry(f"BBS MSG - Type {alias} to open {child.name}, {_refresh_action_phrase()}"))
     return entries
 
 
 def _location_virtual_files(*, include_root: bool = True) -> List[_VirtualFile]:
     entries: List[_VirtualFile] = []
     if include_root:
-        entries.append(_menu_instruction_entry("BBS MSG - Type ROOT to return to main menu then refresh BBS"))
+        entries.append(_menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"))
     return entries
 
 
@@ -1270,24 +1291,24 @@ def _location_access_prompt_virtual_files(location: VaultLocation, *, reason: st
     if reason == "incorrect_code":
         lines = [
             f"BBS MSG - Incorrect code provided for {alias} - try again or return to ROOT",
-            f"BBS MSG - Type {alias} _code_ then refresh BBS",
-            "BBS MSG - Type ROOT to return to main menu then refresh BBS",
+            f"BBS MSG - Type {alias} _code_, {_refresh_action_phrase()}",
+            f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}",
         ]
     elif reason == "callsign_restricted":
         lines = [
             f"BBS MSG - {location.name} is restricted to allowed callsigns",
-            "BBS MSG - Type ROOT to return to main menu then refresh BBS",
+            f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}",
         ]
     elif reason == "cooldown":
         lines = [
             f"BBS MSG - {location.name} access is temporarily locked after failed attempts",
-            "BBS MSG - Type ROOT to return to main menu then refresh BBS",
+            f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}",
         ]
     else:
         lines = [
             f"BBS MSG - {location.name} requires an access code",
-            f"BBS MSG - Type {alias} _code_ then refresh BBS",
-            "BBS MSG - Type ROOT to return to main menu then refresh BBS",
+            f"BBS MSG - Type {alias} _code_, {_refresh_action_phrase()}",
+            f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}",
         ]
     return [_menu_instruction_entry(line) for line in lines]
 
@@ -1503,20 +1524,23 @@ def _flamp_queue_files(store: FlampRelayStore) -> List[_VirtualFile]:
     for queue_id, path in sorted(store.queue_index().items()):
         entries.append(
             _menu_instruction_entry(
-                f"BBS MSG - LIST BLKS {queue_id} to show blocks for {path.name} - then refresh BBS"
+                f"BBS MSG - LIST BLKS {queue_id} to show blocks for {path.name} - {_refresh_action_phrase()}"
             )
         )
-    entries.append(_menu_instruction_entry("BBS MSG - Type ROOT to return to main menu then refresh BBS"))
+    entries.append(_menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"))
     return entries
 
 
-def _flamp_command_help_files() -> List[_VirtualFile]:
-    return [
-        _menu_instruction_entry("BBS MSG - LIST Q to list available FLAMP files - then refresh BBS"),
-        _menu_instruction_entry("BBS MSG - LIST BLKS F277 shows available blocks for F277 - then refresh BBS"),
-        _menu_instruction_entry("BBS MSG - BLK 0,8,9 F277 pulls blocks 0,8,9 for queueID F277 - then refresh BBS"),
-        _menu_instruction_entry("BBS MSG - ROOT to return to normal BBS menu - then refresh BBS"),
+def _flamp_command_help_files(*, refresh_retry_command: object = "") -> List[_VirtualFile]:
+    entries = [
+        _menu_instruction_entry(f"BBS MSG - LIST Q to list available FLAMP files - {_refresh_action_phrase()}"),
+        _menu_instruction_entry(f"BBS MSG - LIST BLKS F277 shows available blocks for F277 - {_refresh_action_phrase()}"),
+        _menu_instruction_entry(f"BBS MSG - BLK 0,8,9 F277 pulls blocks 0,8,9 for queueID F277 - {_refresh_action_phrase()}"),
+        _menu_instruction_entry(f"BBS MSG - ROOT to return to normal BBS menu - {_refresh_action_phrase()}"),
     ]
+    if refresh_retry_command:
+        entries.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
+    return entries
 
 
 def publish_flamp_command_help_view(
@@ -1524,8 +1548,9 @@ def publish_flamp_command_help_view(
     base_source_dir: object,
     live_bbs_dir: object,
     managed_root: object,
+    refresh_retry_command: object = "",
 ) -> VaultPublishResult:
-    virtual_files = _flamp_command_help_files()
+    virtual_files = _flamp_command_help_files(refresh_retry_command=refresh_retry_command)
     manifest, ignored_dirs = build_publish_manifest(base_source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
@@ -1551,18 +1576,21 @@ def publish_flamp_queue_list_view(
     live_bbs_dir: object,
     managed_root: object,
     max_age_days: Optional[int] = None,
+    refresh_retry_command: object = "",
 ) -> VaultPublishResult:
     queues = store.queue_index(max_age_days=max_age_days)
     body_lines = [f"{queue_id} {path.name}" for queue_id, path in sorted(queues.items())]
     queue_helpers = [
-        _menu_instruction_entry(f"BBS MSG - LIST BLKS {queue_id} to show blocks for {path.name} - then refresh BBS")
+        _menu_instruction_entry(f"BBS MSG - LIST BLKS {queue_id} to show blocks for {path.name} - {_refresh_action_phrase()}")
         for queue_id, path in sorted(queues.items())
     ]
-    queue_helpers.append(_menu_instruction_entry("BBS MSG - Type ROOT to return to main menu then refresh BBS"))
+    queue_helpers.append(_menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"))
     virtual_files = [
         _VirtualFile(name=DEFAULT_FLAMP_QUEUE_HELPER_NAME, content="\n".join(body_lines) + ("\n" if body_lines else "")),
         *queue_helpers,
     ]
+    if refresh_retry_command:
+        virtual_files.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
     manifest, ignored_dirs = build_publish_manifest(base_source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
@@ -1588,6 +1616,7 @@ def publish_flamp_block_list_view(
     base_source_dir: object,
     live_bbs_dir: object,
     managed_root: object,
+    refresh_retry_command: object = "",
 ) -> VaultPublishResult:
     relay_info = store.parse_queue(queue_id)
     if not relay_info:
@@ -1605,8 +1634,10 @@ def publish_flamp_block_list_view(
             name=f"{DEFAULT_FLAMP_BLOCK_PREFIX}_{requested_queue_id}.txt",
             content="\n".join(lines) + "\n",
         ),
-        _menu_instruction_entry("BBS MSG - Type ROOT to return to main menu then refresh BBS"),
+        _menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"),
     ]
+    if refresh_retry_command:
+        virtual_files.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
     manifest, ignored_dirs = build_publish_manifest(base_source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
@@ -1631,12 +1662,15 @@ def publish_flamp_notice_view(
     base_source_dir: object,
     live_bbs_dir: object,
     managed_root: object,
+    refresh_retry_command: object = "",
 ) -> VaultPublishResult:
     virtual_files = [
-        _menu_instruction_entry(f"BBS MSG - {message} - then refresh BBS"),
-        _menu_instruction_entry("BBS MSG - LIST Q to list available FLAMP files - then refresh BBS"),
-        _menu_instruction_entry("BBS MSG - Type ROOT to return to main menu then refresh BBS"),
+        _menu_instruction_entry(f"BBS MSG - {message} - {_refresh_action_phrase()}"),
+        _menu_instruction_entry(f"BBS MSG - LIST Q to list available FLAMP files - {_refresh_action_phrase()}"),
+        _menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"),
     ]
+    if refresh_retry_command:
+        virtual_files.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
     manifest, ignored_dirs = build_publish_manifest(base_source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
@@ -1662,6 +1696,7 @@ def publish_flamp_block_overlay_view(
     *,
     live_bbs_dir: object,
     managed_root: object,
+    refresh_retry_command: object = "",
 ) -> Tuple[VaultPublishResult, str]:
     relay_info = store.parse_queue(queue_id)
     if not relay_info:
@@ -1689,8 +1724,10 @@ def publish_flamp_block_overlay_view(
     overlay_name = f"{DEFAULT_FLAMP_FILE_PREFIX}_{relay_info['file_id']}_BLK_{'_'.join(delivered)}.txt"
     virtual_files = [
         _VirtualFile(name=overlay_name, content="\n".join(combined_blocks) + "\n"),
-        _menu_instruction_entry("BBS MSG - Type ROOT to return to main menu then refresh BBS"),
+        _menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"),
     ]
+    if refresh_retry_command:
+        virtual_files.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
     manifest, _ = build_publish_manifest("", virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
@@ -1782,6 +1819,7 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
             continue
         timestamp_utc = _parse_db_timestamp(row["creation_time"])
         upper = _normalize_bbs_command_text(entry_text)
+        refresh_requested = _entry_includes_bbs_refresh(entry_text)
 
         if not remote_callsign and entry_type_id == 1 and entry_callsign:
             remote_callsign = entry_callsign
@@ -1797,6 +1835,7 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
                     entry_callsign=entry_callsign,
                     entry_text=entry_text,
                     kind="disconnect",
+                    refresh_requested=refresh_requested,
                 )
             )
             continue
@@ -1808,23 +1847,63 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
 
         if upper == "<BLR>":
             events.append(
-                VaultDbEvent(row_id, timestamp_utc, qso_guid, remote_callsign, my_callsign, entry_callsign, entry_text, "root_request")
+                VaultDbEvent(
+                    row_id,
+                    timestamp_utc,
+                    qso_guid,
+                    remote_callsign,
+                    my_callsign,
+                    entry_callsign,
+                    entry_text,
+                    "root_request",
+                    refresh_requested=refresh_requested,
+                )
             )
             continue
         if ROOT_CMD_RE.match(upper):
             events.append(
-                VaultDbEvent(row_id, timestamp_utc, qso_guid, remote_callsign, my_callsign, entry_callsign, entry_text, "root_return")
+                VaultDbEvent(
+                    row_id,
+                    timestamp_utc,
+                    qso_guid,
+                    remote_callsign,
+                    my_callsign,
+                    entry_callsign,
+                    entry_text,
+                    "root_return",
+                    refresh_requested=refresh_requested,
+                )
             )
             continue
         if FLAMP_CMD_RE.match(upper):
             events.append(
-                VaultDbEvent(row_id, timestamp_utc, qso_guid, remote_callsign, my_callsign, entry_callsign, entry_text, "flamp_help")
+                VaultDbEvent(
+                    row_id,
+                    timestamp_utc,
+                    qso_guid,
+                    remote_callsign,
+                    my_callsign,
+                    entry_callsign,
+                    entry_text,
+                    "flamp_help",
+                    refresh_requested=refresh_requested,
+                )
             )
             continue
         match = LIST_Q_RE.match(upper)
         if match:
             events.append(
-                VaultDbEvent(row_id, timestamp_utc, qso_guid, remote_callsign, my_callsign, entry_callsign, entry_text, "flamp_list_q")
+                VaultDbEvent(
+                    row_id,
+                    timestamp_utc,
+                    qso_guid,
+                    remote_callsign,
+                    my_callsign,
+                    entry_callsign,
+                    entry_text,
+                    "flamp_list_q",
+                    refresh_requested=refresh_requested,
+                )
             )
             continue
         match = LIST_BLOCKS_RE.match(upper)
@@ -1840,6 +1919,7 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
                     entry_text,
                     "flamp_list_blocks",
                     queue_id=str(match.group(1) or "").upper(),
+                    refresh_requested=refresh_requested,
                 )
             )
             continue
@@ -1858,6 +1938,7 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
                     "flamp_block_request",
                     queue_id=str(match.group(2) or "").upper(),
                     block_numbers=tuple(nums),
+                    refresh_requested=refresh_requested,
                 )
             )
             continue
@@ -1875,6 +1956,7 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
                     "open_alias",
                     alias=alias,
                     code_text=code_text,
+                    refresh_requested=refresh_requested,
                 )
             )
             continue
@@ -1892,6 +1974,7 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
                     entry_text,
                     "legacy_code_open",
                     code_text=str(match.group(1) or "").strip(),
+                    refresh_requested=refresh_requested,
                 )
             )
     return VaultDbScanResult(tuple(events), max_scanned_row_id)
@@ -1900,6 +1983,32 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
 def _summary_location_name(locations: Sequence[VaultLocation], location_id: str) -> str:
     location = _location_by_id(locations, location_id)
     return location.name if location is not None else location_id or DEFAULT_LOCATION_NAME
+
+
+def _refresh_retry_command_for_event(event: object) -> str:
+    if not bool(getattr(event, "refresh_requested", False)):
+        return ""
+    kind = str(getattr(event, "kind", "") or "").strip()
+    queue_id = str(getattr(event, "queue_id", "") or "").strip().upper()
+    if kind == "flamp_help":
+        return "FLAMP"
+    if kind == "flamp_list_q":
+        return "LIST Q"
+    if kind == "flamp_list_blocks" and queue_id:
+        return f"LIST BLKS {queue_id}"
+    if kind == "flamp_block_request" and queue_id:
+        blocks = ",".join(str(num) for num in getattr(event, "block_numbers", ()) or ())
+        return f"BLK {blocks} {queue_id}".strip()
+    if kind == "root_return":
+        return "ROOT"
+    if kind == "open_alias":
+        alias = str(getattr(event, "alias", "") or "").strip().upper()
+        code_text = str(getattr(event, "code_text", "") or "").strip()
+        return f"{alias} {code_text}".strip()
+    code_text = str(getattr(event, "code_text", "") or "").strip()
+    if code_text:
+        return code_text
+    return _normalize_bbs_command_text(str(getattr(event, "entry_text", "") or getattr(event, "body", "") or ""))
 
 
 def _persist_runtime_state(settings, state: VaultRuntimeState, summary: str) -> None:
@@ -2961,6 +3070,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     base_source_dir=base_location.source_dir,
                     live_bbs_dir=live_bbs_dir,
                     managed_root=managed_root,
+                    refresh_retry_command=_refresh_retry_command_for_event(event),
                 )
                 runtime_state = _update_state(
                     runtime_state,
@@ -2988,6 +3098,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     live_bbs_dir=live_bbs_dir,
                     managed_root=managed_root,
                     max_age_days=flamp_listing_max_age_days,
+                    refresh_retry_command=_refresh_retry_command_for_event(event),
                 )
                 runtime_state = _update_state(
                     runtime_state,
@@ -3016,6 +3127,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         base_source_dir=base_location.source_dir,
                         live_bbs_dir=live_bbs_dir,
                         managed_root=managed_root,
+                        refresh_retry_command=_refresh_retry_command_for_event(event),
                     )
                     runtime_state = _update_state(
                         runtime_state,
@@ -3038,6 +3150,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         base_source_dir=base_location.source_dir,
                         live_bbs_dir=live_bbs_dir,
                         managed_root=managed_root,
+                        refresh_retry_command=_refresh_retry_command_for_event(event),
                     )
                     runtime_state = _update_state(
                         runtime_state,
@@ -3064,6 +3177,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     event.block_numbers,
                     live_bbs_dir=live_bbs_dir,
                     managed_root=managed_root,
+                    refresh_retry_command=_refresh_retry_command_for_event(event),
                 )
                 runtime_state = _update_state(
                     runtime_state,
@@ -3185,6 +3299,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         base_source_dir=base_location.source_dir,
                         live_bbs_dir=live_bbs_dir,
                         managed_root=managed_root,
+                        refresh_retry_command=_refresh_retry_command_for_event(event),
                     )
                     runtime_state = _update_state(
                         runtime_state,
@@ -3213,6 +3328,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         live_bbs_dir=live_bbs_dir,
                         managed_root=managed_root,
                         max_age_days=flamp_listing_max_age_days,
+                        refresh_retry_command=_refresh_retry_command_for_event(event),
                     )
                     runtime_state = _update_state(
                         runtime_state,
@@ -3241,6 +3357,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         base_source_dir=base_location.source_dir if base_location is not None else "",
                         live_bbs_dir=live_bbs_dir,
                         managed_root=managed_root,
+                        refresh_retry_command=_refresh_retry_command_for_event(event),
                     )
                     runtime_state = _update_state(
                         runtime_state,
@@ -3263,6 +3380,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         base_source_dir=base_location.source_dir if base_location is not None else "",
                         live_bbs_dir=live_bbs_dir,
                         managed_root=managed_root,
+                        refresh_retry_command=_refresh_retry_command_for_event(event),
                     )
                     runtime_state = _update_state(
                         runtime_state,
@@ -3288,6 +3406,7 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                         event.block_numbers,
                         live_bbs_dir=live_bbs_dir,
                         managed_root=managed_root,
+                        refresh_retry_command=_refresh_retry_command_for_event(event),
                     )
                     runtime_state = _update_state(
                         runtime_state,
