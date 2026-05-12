@@ -448,6 +448,10 @@ def build_signed_filename(name: str) -> str:
     return f"{stem}-sig{suffix}"
 
 
+def _flmsg_field_length(value: str) -> int:
+    return len(str(value or "").encode("utf-8"))
+
+
 def serialize_custom_form_message(
     template_name: str,
     field_pairs: Sequence[Tuple[str, str]],
@@ -462,19 +466,22 @@ def serialize_custom_form_message(
     callsign_txt = str(callsign or "").strip().upper() or "UNKNOWN"
     hdr_fm = f"{callsign_txt} {created_stamp}"
     hdr_ed = f"{callsign_txt} {edited_stamp}"
-    mg_value = f"CUSTOM_FORM,{Path(str(template_name or '')).name}"
-    lines = [
+    payload_lines = [f"CUSTOM_FORM,{Path(str(template_name or '')).name}"]
+    for key, value in field_pairs:
+        field_key = str(key or "").strip().upper()
+        if not field_key:
+            continue
+        payload_lines.append(f"{field_key},{_normalize_field_value(value)}")
+    mg_value = "\n".join(payload_lines) + "\n"
+    header_lines = [
         f"<flmsg>{flmsg_version}",
-        f":hdr_fm:{len(hdr_fm)} ",
+        f":hdr_fm:{_flmsg_field_length(hdr_fm)} ",
         hdr_fm,
-        f":hdr_ed:{len(hdr_ed)} ",
+        f":hdr_ed:{_flmsg_field_length(hdr_ed)} ",
         hdr_ed,
         "<customform>",
-        f":mg:{len(mg_value)} {mg_value}",
     ]
-    for key, value in field_pairs:
-        lines.append(f"{str(key or '').strip().upper()},{_normalize_field_value(value)}")
-    return "\n".join(lines) + "\n"
+    return "\n".join(header_lines) + "\n" + f":mg:{_flmsg_field_length(mg_value)} {mg_value}"
 
 
 def serialize_standard_blank_message(
@@ -514,12 +521,12 @@ def serialize_standard_blank_message(
     mg_value = "\n".join(body_lines).strip()
     lines = [
         f"<flmsg>{flmsg_version}",
-        f":hdr_fm:{len(hdr_fm)} ",
+        f":hdr_fm:{_flmsg_field_length(hdr_fm)} ",
         hdr_fm,
-        f":hdr_ed:{len(hdr_ed)} ",
+        f":hdr_ed:{_flmsg_field_length(hdr_ed)} ",
         hdr_ed,
         "<blankform>",
-        f":mg:{len(mg_value)} {mg_value}",
+        f":mg:{_flmsg_field_length(mg_value)} {mg_value}",
     ]
     return "\n".join(lines) + "\n"
 

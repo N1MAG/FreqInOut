@@ -9,6 +9,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from freqinout.core import gpg_tools
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
+    clearsign_file,
+    list_secret_keys,
     signature_payload_candidates,
     verify_file_with_discovery,
 )
@@ -107,6 +109,65 @@ def test_verify_file_with_discovery_reports_missing_payload_for_signature_record
     assert result.status == "unsigned"
     assert result.signature_path == str(signature)
     assert "payload not found" in result.detail.lower()
+
+
+def test_list_secret_keys_parses_primary_secret_fingerprints(monkeypatch) -> None:
+    def fake_run_gpg(gpg_path: str, args: list[str], **kwargs):
+        assert "--list-secret-keys" in args
+        return subprocess.CompletedProcess(
+            args=["gpg"],
+            returncode=0,
+            stdout=(
+                "sec:u:4096:1:ABCDEF1234567890:1760000000:::u:::scESC:::+:::23::0:\n"
+                "fpr:::::::::1234567890ABCDEF1234567890ABCDEF12345678:\n"
+                "uid:u::::1760000000::hash::N1MAG <n1mag@example.org>::::::::::0:\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(gpg_tools, "resolve_gpg_executable", lambda configured_path="": "/usr/bin/gpg")
+    monkeypatch.setattr(gpg_tools, "_run_gpg", fake_run_gpg)
+
+    keys, err = list_secret_keys()
+
+    assert err == ""
+    assert len(keys) == 1
+    assert keys[0].fingerprint == "1234567890ABCDEF1234567890ABCDEF12345678"
+    assert keys[0].user_ids == ["N1MAG <n1mag@example.org>"]
+
+
+def test_clearsign_file_passes_selected_signer(monkeypatch, tmp_path: Path) -> None:
+    src = tmp_path / "Report.k2s"
+    dst = tmp_path / "Report-sig.k2s"
+    src.write_text("payload", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run_gpg(gpg_path: str, args: list[str], **kwargs):
+        calls.append(args)
+        dst.write_text("signed", encoding="utf-8")
+        return subprocess.CompletedProcess(args=["gpg"], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(gpg_tools, "resolve_gpg_executable", lambda configured_path="": "/usr/bin/gpg")
+    monkeypatch.setattr(gpg_tools, "_run_gpg", fake_run_gpg)
+
+    ok, detail = clearsign_file(
+        src,
+        output_path=dst,
+        signer_fingerprint="1234 5678 90ab cdef 1234 5678 90ab cdef 1234 5678",
+    )
+
+    assert ok, detail
+    assert calls == [
+        [
+            "--armor",
+            "--clearsign",
+            "--output",
+            str(dst),
+            "--local-user",
+            "1234567890ABCDEF1234567890ABCDEF12345678",
+            str(src),
+        ]
+    ]
 
 
 def test_auth_candidates_are_origin_and_suffix_bounded(tmp_path: Path) -> None:

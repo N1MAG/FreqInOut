@@ -98,6 +98,43 @@ def test_standard_blank_serialization_uses_blankform_and_custom_uses_customform(
     assert "CUSTOM_FORM,magnet_general_V1.1.0.html" in custom
 
 
+def test_custom_form_serialization_counts_complete_mg_payload_and_keeps_field_order() -> None:
+    when = dt.datetime(2026, 5, 12, 19, 26, 48, tzinfo=dt.timezone.utc)
+    fields = [
+        ("L01", "260512-1925z"),
+        ("L02", "MR08"),
+        ("L03", "N1MAG"),
+        ("L06", "test"),
+        ("L07", "this is a test message"),
+        ("L04", "R"),
+        ("L05", "08"),
+        ("L08", ""),
+    ]
+
+    custom = serialize_custom_form_message(
+        "magnet_general_V1.1.0.html",
+        fields,
+        callsign="N1MAG",
+        created_utc=when,
+        flmsg_version="4.0.24.02",
+    )
+
+    expected_payload = (
+        "CUSTOM_FORM,magnet_general_V1.1.0.html\n"
+        "L01,260512-1925z\n"
+        "L02,MR08\n"
+        "L03,N1MAG\n"
+        "L06,test\n"
+        "L07,this is a test message\n"
+        "L04,R\n"
+        "L05,08\n"
+        "L08,\n"
+    )
+    assert "<flmsg>4.0.24.02" in custom
+    assert f":mg:{len(expected_payload.encode('utf-8'))} {expected_payload}" in custom
+    assert custom.index("L06,test") < custom.index("L04,R")
+
+
 def test_parse_compose_template_fields_keeps_suffix_keys_and_html_metadata() -> None:
     template = """
     <html>
@@ -210,10 +247,18 @@ def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None
     text = _read("freqinout/gui/message_viewer_tab.py")
     assert 'QPushButton("Compose")' in text
     assert 'QPushButton("Inbox")' in text
+    assert "class ComposeRadioTarget" in text
+    assert 'radio_row.addWidget(QLabel("Compose For"))' in text
+    assert 'self.compose_refresh_radios_btn.clicked.connect(self._refresh_compose_radios_clicked)' in text
+    assert 'self.settings.set("messages_compose_radio_id", int(target.radio_id))' in text
+    assert "No radio profile has FLMsg, FLAmp, or VarAC message destinations configured." in text
+    assert "def _compose_bbs_targets_for_radio(self, target: Optional[ComposeRadioTarget])" in text
+    assert 'radio_row.addWidget(QLabel("Radio"))' in text
+    assert 'location_row.addWidget(QLabel("BBS Location"))' in text
     assert 'row2.addWidget(QLabel("Report Title"))' in text
     assert 'self.compose_varac_target_combo.addItems(["None", "Outbox", "BBS", "Both"])' in text
-    assert 'varac_outbox_dir=self._compose_varac_outbox_dir()' in text
-    assert 'def _compose_varac_outbox_dir(self) -> str:' in text
+    assert 'varac_outbox_dir=self._compose_varac_outbox_dir(radio_target)' in text
+    assert 'def _compose_varac_outbox_dir(self, target: Optional[ComposeRadioTarget] = None) -> str:' in text
     assert 'self.compose_family_combo.addItem("Standard Blank Form (.b2s)"' not in text
     assert 'self.compose_form_combo.addItem("Standard Blank Form (.b2s)", {"kind": "standard"})' in text
     assert "self._configure_compose_combo_width(self.compose_priority_combo, floor=96)" in text

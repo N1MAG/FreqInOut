@@ -17,7 +17,7 @@ import xml.dom.minidom
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Sequence
+from typing import Any, Dict, List, Tuple, Optional, Sequence
 
 from PySide6.QtCore import Qt, QTimer, QAbstractTableModel, QModelIndex, QEvent, QRect, Signal, QObject, QThread
 from PySide6.QtGui import QPainter, QColor, QPalette, QFont
@@ -53,14 +53,13 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
-    QListWidget,
-    QListWidgetItem,
 )
 
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.sqlite_utils import fetch_all
@@ -83,7 +82,9 @@ from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
     clearsign_file,
     find_detached_signature,
+    gpg_key_display_label,
     is_detached_signature_file,
+    list_secret_keys,
     normalize_fingerprint,
     normalize_fingerprints,
     normalize_signature_name_suffixes,
@@ -190,6 +191,14 @@ BBS_HELPER_FILE_PREFIXES = (
 def _is_fio_bbs_helper_file_name(name: object) -> bool:
     clean = Path(str(name or "").strip()).name.upper()
     return any(clean.startswith(prefix.upper()) for prefix in BBS_HELPER_FILE_PREFIXES)
+
+
+@dataclass(frozen=True)
+class ComposeRadioTarget:
+    radio_id: int
+    label: str
+    profile: Dict[str, Any]
+    capabilities: Tuple[str, ...]
 
 
 @dataclass
@@ -2178,6 +2187,7 @@ class MessageViewerTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self._multi_radio_store = MultiRadioStore()
         default_mode = (self.settings.get("display_time_mode", "LOCAL") or "LOCAL").upper()
         self._time_mode_override: str | None = None
         self._show_local_time = default_mode != "UTC"
@@ -2238,6 +2248,12 @@ class MessageViewerTab(QWidget):
         self._compose_launch_orchestrator = LaunchOrchestrator(self.settings, self)
         self._compose_timestamp_utc: datetime.datetime = datetime.datetime.now(datetime.timezone.utc)
         self._compose_status_role: str = "info"
+        self._compose_radio_targets: List[ComposeRadioTarget] = []
+        self._compose_radio_targets_loaded: bool = False
+        self._compose_signing_keys_loaded: bool = False
+        self._compose_signing_keys_loading: bool = False
+        self._compose_signing_key_count: int = 0
+        self._compose_signing_key_error: str = ""
         self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
         self._filters_initialized = False
@@ -3885,6 +3901,16 @@ class MessageViewerTab(QWidget):
         setup_box = QGroupBox("Compose Setup")
         setup_layout = QVBoxLayout(setup_box)
 
+        radio_row = QHBoxLayout()
+        radio_row.addWidget(QLabel("Compose For"))
+        self.compose_radio_combo = QComboBox()
+        self.compose_radio_combo.currentIndexChanged.connect(self._on_compose_radio_changed)
+        radio_row.addWidget(self.compose_radio_combo, 1)
+        self.compose_refresh_radios_btn = QPushButton("Refresh Radios")
+        self.compose_refresh_radios_btn.clicked.connect(self._refresh_compose_radios_clicked)
+        radio_row.addWidget(self.compose_refresh_radios_btn)
+        setup_layout.addLayout(radio_row)
+
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Form Family"))
         self.compose_family_combo = QComboBox()
@@ -3949,6 +3975,30 @@ class MessageViewerTab(QWidget):
         row4.addWidget(self.compose_sign_flamp_chk)
         row4.addStretch()
         setup_layout.addLayout(row4)
+
+        self.compose_signing_row_widget = QWidget()
+        signing_row = QHBoxLayout(self.compose_signing_row_widget)
+        signing_row.setContentsMargins(0, 0, 0, 0)
+        signing_row.addWidget(QLabel("Signing Key"))
+        self.compose_signing_key_combo = QComboBox()
+        self.compose_signing_key_combo.addItem("Select signing key...", "")
+        self.compose_signing_key_combo.currentIndexChanged.connect(self._on_compose_signing_key_changed)
+        signing_row.addWidget(self.compose_signing_key_combo, 1)
+        self.compose_refresh_signing_keys_btn = QPushButton("Refresh Signing Keys")
+        self.compose_refresh_signing_keys_btn.clicked.connect(lambda: self._refresh_compose_signing_keys(force=True))
+        signing_row.addWidget(self.compose_refresh_signing_keys_btn)
+        self.compose_signing_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_signing_row_widget)
+
+        self.compose_bbs_location_row_widget = QWidget()
+        bbs_location_row = QHBoxLayout(self.compose_bbs_location_row_widget)
+        bbs_location_row.setContentsMargins(0, 0, 0, 0)
+        bbs_location_row.addWidget(QLabel("BBS Location"))
+        self.compose_bbs_location_combo = QComboBox()
+        self.compose_bbs_location_combo.currentIndexChanged.connect(self._on_compose_bbs_location_changed)
+        bbs_location_row.addWidget(self.compose_bbs_location_combo, 1)
+        self.compose_bbs_location_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_bbs_location_row_widget)
 
         root.addWidget(setup_box)
 
@@ -4352,16 +4402,304 @@ class MessageViewerTab(QWidget):
             return bool(str(data.get("path", "") or "").strip())
         return False
 
+    @staticmethod
+    def _compose_profile_bool(profile: Dict[str, Any], key: str) -> bool:
+        value = profile.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return int(value) != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @staticmethod
+    def _compose_profile_text(profile: Dict[str, Any], key: str) -> str:
+        return str(profile.get(key, "") or "").strip()
+
+    def _compose_profile_capabilities(self, profile: Dict[str, Any]) -> Tuple[str, ...]:
+        caps: List[str] = []
+        if (
+            self._compose_profile_bool(profile, "use_flmsg")
+            or self._compose_profile_text(profile, "flmsg_path")
+            or self._compose_profile_text(profile, "flmsg_message_path")
+        ):
+            caps.append("FLMsg")
+        if (
+            self._compose_profile_bool(profile, "use_flamp")
+            or self._compose_profile_text(profile, "flamp_path")
+            or self._compose_profile_text(profile, "flamp_message_path")
+        ):
+            caps.append("FLAmp")
+        if (
+            self._compose_profile_bool(profile, "use_varac")
+            or self._compose_profile_text(profile, "varac_install_path")
+            or self._compose_profile_text(profile, "varac_outbox_dir")
+            or self._compose_profile_text(profile, "varac_bbs_dir")
+            or self._compose_profile_bool(profile, "varac_bbs_vault_enabled")
+        ):
+            caps.append("VarAC")
+        return tuple(caps)
+
+    def _compose_radio_label(self, profile: Dict[str, Any], capabilities: Sequence[str]) -> str:
+        name = self._compose_profile_text(profile, "name") or f"Radio {profile.get('id', '')}".strip()
+        model_bits = [
+            self._compose_profile_text(profile, "radio_manufacturer"),
+            self._compose_profile_text(profile, "radio_model"),
+        ]
+        model = " ".join(bit for bit in model_bits if bit).strip()
+        device_class = self._compose_profile_text(profile, "device_class")
+        suffix: List[str] = []
+        if model:
+            suffix.append(model)
+        if device_class and device_class != "tx_rx":
+            suffix.append(device_class.replace("_", " ").title())
+        if capabilities:
+            suffix.append(", ".join(capabilities))
+        return f"{name} - {' - '.join(suffix)}" if suffix else name
+
+    def _load_compose_radio_targets(self) -> List[ComposeRadioTarget]:
+        try:
+            profiles = list(self._multi_radio_store.list_device_profiles())
+        except Exception:
+            profiles = []
+        targets: List[ComposeRadioTarget] = []
+        for profile in profiles:
+            if not self._compose_profile_bool(profile, "enabled"):
+                continue
+            try:
+                radio_id = int(profile.get("id", 0) or 0)
+            except Exception:
+                radio_id = 0
+            if radio_id <= 0:
+                continue
+            capabilities = self._compose_profile_capabilities(profile)
+            if not capabilities:
+                continue
+            targets.append(
+                ComposeRadioTarget(
+                    radio_id=radio_id,
+                    label=self._compose_radio_label(profile, capabilities),
+                    profile=dict(profile),
+                    capabilities=capabilities,
+                )
+            )
+        return targets
+
+    def _runtime_primary_radio_id(self) -> int:
+        try:
+            profile = self._multi_radio_store.get_runtime_primary_device_profile()
+        except Exception:
+            profile = None
+        if not isinstance(profile, dict):
+            return 0
+        try:
+            return int(profile.get("id", 0) or 0)
+        except Exception:
+            return 0
+
+    def _refresh_compose_radio_targets(self, *, force: bool = False) -> None:
+        if not hasattr(self, "compose_radio_combo"):
+            return
+        if self._compose_radio_targets_loaded and not force:
+            return
+        saved_id = 0
+        try:
+            saved_id = int(self.settings.get("messages_compose_radio_id", 0) or 0)
+        except Exception:
+            saved_id = 0
+        current_id = 0
+        data = self.compose_radio_combo.currentData()
+        try:
+            current_id = int(data or 0)
+        except Exception:
+            current_id = 0
+        preferred_id = current_id or saved_id or self._runtime_primary_radio_id()
+        targets = self._load_compose_radio_targets()
+        self.compose_radio_combo.blockSignals(True)
+        try:
+            self.compose_radio_combo.clear()
+            selected_index = 0
+            for target in targets:
+                self.compose_radio_combo.addItem(target.label, target.radio_id)
+                if preferred_id and target.radio_id == preferred_id:
+                    selected_index = self.compose_radio_combo.count() - 1
+            if self.compose_radio_combo.count():
+                self.compose_radio_combo.setCurrentIndex(selected_index)
+        finally:
+            self.compose_radio_combo.blockSignals(False)
+        self._compose_radio_targets = targets
+        self._compose_radio_targets_loaded = True
+        self._refresh_compose_bbs_location_targets()
+
+    def _refresh_compose_radios_clicked(self) -> None:
+        self._refresh_compose_radio_targets(force=True)
+        self._update_compose_preview()
+
+    def _selected_compose_radio_target(self) -> Optional[ComposeRadioTarget]:
+        if not self._compose_radio_targets_loaded:
+            self._refresh_compose_radio_targets()
+        if not hasattr(self, "compose_radio_combo"):
+            return None
+        try:
+            radio_id = int(self.compose_radio_combo.currentData() or 0)
+        except Exception:
+            radio_id = 0
+        for target in self._compose_radio_targets:
+            if target.radio_id == radio_id:
+                return target
+        return self._compose_radio_targets[0] if self._compose_radio_targets else None
+
+    def _on_compose_radio_changed(self) -> None:
+        target = self._selected_compose_radio_target()
+        if target is not None:
+            try:
+                self.settings.set("messages_compose_radio_id", int(target.radio_id))
+            except Exception:
+                pass
+        self._refresh_compose_bbs_location_targets()
+        self._update_compose_preview()
+
+    def _compose_radio_message_paths(self, target: Optional[ComposeRadioTarget]) -> Dict[str, str]:
+        if target is None:
+            return {}
+        profile = target.profile
+        return {
+            "flmsg": self._compose_profile_text(profile, "flmsg_message_path"),
+            "flamp": self._compose_profile_text(profile, "flamp_message_path"),
+            "varac": self._compose_profile_text(profile, "varac_incoming_path"),
+        }
+
+    def _location_dir_for_compose_radio(self, location, profile: Dict[str, Any]) -> str:
+        source_dir = str(getattr(location, "source_dir", "") or "").strip()
+        if source_dir:
+            return str(Path(source_dir).expanduser())
+        managed_root = self._compose_profile_text(profile, "varac_bbs_vault_managed_root")
+        if not managed_root:
+            return ""
+        folder_name = (
+            str(getattr(location, "name", "") or "").strip()
+            or str(getattr(location, "alias", "") or "").strip()
+            or str(getattr(location, "id", "") or "").strip()
+        )
+        if not folder_name:
+            return ""
+        return str(Path(managed_root).expanduser() / "locations" / folder_name)
+
+    def _compose_bbs_targets_for_radio(self, target: Optional[ComposeRadioTarget]) -> List[Dict[str, str]]:
+        if target is None:
+            return []
+        profile = target.profile
+        live_dir = self._compose_profile_text(profile, "varac_bbs_dir")
+        vault_enabled = self._compose_profile_bool(profile, "varac_bbs_vault_enabled")
+        out: List[Dict[str, str]] = []
+        if vault_enabled:
+            default_id = self._compose_profile_text(profile, "varac_bbs_vault_default_location_id") or DEFAULT_LOCATION_ID
+            for location in load_vault_locations(profile.get("varac_bbs_vault_locations_v1", [])):
+                if not bool(getattr(location, "enabled", True)):
+                    continue
+                directory = self._location_dir_for_compose_radio(location, profile)
+                if not directory:
+                    continue
+                try:
+                    Path(directory).mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+                alias = str(getattr(location, "alias", "") or "").strip()
+                name = str(getattr(location, "name", "") or "").strip() or alias or str(getattr(location, "id", "") or "")
+                hints: List[str] = []
+                if str(getattr(location, "id", "") or "") == default_id:
+                    hints.append("default")
+                if str(getattr(location, "open_rule", "") or "").strip().lower() == "code":
+                    hints.append("code")
+                alias_part = f" - {alias}" if alias else ""
+                hint_part = f" ({', '.join(hints)})" if hints else ""
+                out.append(
+                    {
+                        "id": f"radio:{target.radio_id}:managed:{str(getattr(location, 'id', '') or '').strip()}",
+                        "label": f"Managed BBS: {name}{alias_part}{hint_part}",
+                        "path": directory,
+                        "kind": "managed",
+                        "radio_id": str(target.radio_id),
+                    }
+                )
+            if live_dir:
+                out.append(
+                    {
+                        "id": f"radio:{target.radio_id}:live:bypass",
+                        "label": "Live BBS root (bypass managed vault)",
+                        "path": live_dir,
+                        "kind": "live",
+                        "radio_id": str(target.radio_id),
+                    }
+                )
+        elif live_dir:
+            out.append(
+                {
+                    "id": f"radio:{target.radio_id}:live",
+                    "label": "Live VarAC BBS",
+                    "path": live_dir,
+                    "kind": "live",
+                    "radio_id": str(target.radio_id),
+                }
+            )
+        return out
+
+    def _refresh_compose_bbs_location_targets(self) -> None:
+        if not hasattr(self, "compose_bbs_location_combo"):
+            return
+        target = self._selected_compose_radio_target()
+        saved = str(self.settings.get("varac_bbs_compose_location_target", "") or "").strip()
+        current = ""
+        data = self.compose_bbs_location_combo.currentData()
+        if isinstance(data, dict):
+            current = str(data.get("id", "") or "")
+        preferred = current or saved
+        targets = self._compose_bbs_targets_for_radio(target)
+        self.compose_bbs_location_combo.blockSignals(True)
+        try:
+            self.compose_bbs_location_combo.clear()
+            self.compose_bbs_location_combo.setEditable(len(targets) > 8)
+            if self.compose_bbs_location_combo.isEditable():
+                self.compose_bbs_location_combo.setInsertPolicy(QComboBox.NoInsert)
+            selected_index = 0
+            for bbs_target in targets:
+                self.compose_bbs_location_combo.addItem(bbs_target["label"], bbs_target)
+                if preferred and bbs_target.get("id") == preferred:
+                    selected_index = self.compose_bbs_location_combo.count() - 1
+            if self.compose_bbs_location_combo.count():
+                self.compose_bbs_location_combo.setCurrentIndex(selected_index)
+        finally:
+            self.compose_bbs_location_combo.blockSignals(False)
+
+    def _selected_compose_bbs_target(self) -> Optional[Dict[str, str]]:
+        if not hasattr(self, "compose_bbs_location_combo"):
+            return None
+        data = self.compose_bbs_location_combo.currentData()
+        return data if isinstance(data, dict) else None
+
+    def _on_compose_bbs_location_changed(self) -> None:
+        target = self._selected_compose_bbs_target()
+        if target:
+            try:
+                self.settings.set("varac_bbs_compose_location_target", str(target.get("id", "") or ""))
+            except Exception:
+                pass
+        self._update_compose_preview()
+
     def _compose_destination_plans(self) -> List[ComposeDestinationPlan]:
-        msg_paths = self.settings.get("message_paths", {}) or {}
+        radio_target = self._selected_compose_radio_target()
+        msg_paths = self._compose_radio_message_paths(radio_target)
+        bbs_target = self._selected_compose_bbs_target()
+        bbs_dir = str((bbs_target or {}).get("path", "") or "").strip()
         return plan_compose_destinations(
             self._compose_base_filename(),
             send_target=self.compose_send_target_combo.currentText() if hasattr(self, "compose_send_target_combo") else "FLMsg",
             varac_target=self.compose_varac_target_combo.currentText() if hasattr(self, "compose_varac_target_combo") else "None",
             flmsg_dir=str(msg_paths.get("flmsg", "") or "").strip(),
             flamp_dir=str(msg_paths.get("flamp", "") or "").strip(),
-            varac_outbox_dir=self._compose_varac_outbox_dir(),
-            varac_bbs_dir=str(self.settings.get("varac_bbs_dir", "") or "").strip(),
+            varac_outbox_dir=self._compose_varac_outbox_dir(radio_target),
+            varac_bbs_dir=bbs_dir,
             sign_flamp_copy=bool(
                 hasattr(self, "compose_sign_flamp_chk")
                 and self.compose_sign_flamp_chk.isChecked()
@@ -4369,12 +4707,14 @@ class MessageViewerTab(QWidget):
             ),
         )
 
-    def _compose_varac_outbox_dir(self) -> str:
-        configured = str(self.settings.get("varac_outbox_dir", "") or "").strip()
+    def _compose_varac_outbox_dir(self, target: Optional[ComposeRadioTarget] = None) -> str:
+        profile = target.profile if target is not None else {}
+        configured = self._compose_profile_text(profile, "varac_outbox_dir") or str(self.settings.get("varac_outbox_dir", "") or "").strip()
         if configured:
             return configured
         install_txt = str(
-            self.settings.get("varac_path", "")
+            self._compose_profile_text(profile, "varac_install_path")
+            or self.settings.get("varac_path", "")
             or self.settings.get("varac_install_path", "")
             or ""
         ).strip()
@@ -4393,7 +4733,7 @@ class MessageViewerTab(QWidget):
                     install_path / "OutgoingFiles",
                 ]
             )
-        incoming_txt = str((self.settings.get("message_paths", {}) or {}).get("varac", "") or "").strip()
+        incoming_txt = str(self._compose_radio_message_paths(target).get("varac", "") or "").strip()
         if incoming_txt:
             incoming_path = Path(incoming_txt).expanduser()
             parent = incoming_path.parent
@@ -4599,8 +4939,25 @@ class MessageViewerTab(QWidget):
         self._set_compose_status("Compose output path copied to clipboard.", role="success")
 
     def _launch_compose_app(self, app_name: str) -> None:
+        target = self._selected_compose_radio_target()
+        profile = target.profile if target is not None else {}
+        path_key = "flmsg_path" if app_name == "FLMsg" else "flamp_path" if app_name == "FLAmp" else ""
+        configured_path = self._compose_profile_text(profile, path_key) if path_key else ""
+        if configured_path:
+            try:
+                if platform.system() == "Darwin":
+                    subprocess.Popen(["open", configured_path])
+                else:
+                    subprocess.Popen([configured_path])
+                label = target.label if target is not None else "selected radio"
+                self._set_compose_status(f"Launching {app_name} for {label}...", role="info")
+                return
+            except Exception as e:
+                self._set_compose_status(f"Could not launch {app_name}: {e}", role="warning")
+                return
         if not self._compose_launch_orchestrator.is_configured(app_name):
-            self._set_compose_status(f"{app_name} is not configured in Settings.", role="warning")
+            label = target.label if target is not None else "the selected radio"
+            self._set_compose_status(f"{app_name} is not configured for {label}.", role="warning")
             return
         started = self._compose_launch_orchestrator.start_manual_sequence(
             [{"name": app_name, "enabled": True, "startup": False}]
@@ -4640,9 +4997,60 @@ class MessageViewerTab(QWidget):
             f"padding: 6px 8px; border-radius: 4px; background: {bg}; color: {color}; border: 1px solid {border};"
         )
 
+    def _refresh_compose_signing_keys(self, *, force: bool = False) -> None:
+        if not hasattr(self, "compose_signing_key_combo"):
+            return
+        if self._compose_signing_keys_loaded and not force:
+            return
+        saved = normalize_fingerprint(str(self.settings.get("gpg_compose_signing_key_fingerprint", "") or ""))
+        current = normalize_fingerprint(str(self.compose_signing_key_combo.currentData() or ""))
+        preferred = current or saved
+        self._compose_signing_keys_loading = True
+        self._compose_signing_key_error = ""
+        try:
+            self.compose_signing_key_combo.clear()
+            self.compose_signing_key_combo.addItem("Select signing key...", "")
+            keys, err = list_secret_keys(
+                configured_path=str(self.settings.get("gpg_executable_path", "") or "").strip()
+            )
+            self._compose_signing_key_error = err
+            selected_index = 0
+            count = 0
+            for key in keys:
+                fpr = normalize_fingerprint(key.fingerprint)
+                if not fpr:
+                    continue
+                count += 1
+                self.compose_signing_key_combo.addItem(gpg_key_display_label(key), fpr)
+                if preferred and fpr == preferred:
+                    selected_index = self.compose_signing_key_combo.count() - 1
+            if count == 1 and selected_index == 0:
+                selected_index = 1
+            self.compose_signing_key_combo.setCurrentIndex(selected_index)
+            self._compose_signing_key_count = count
+            self._compose_signing_keys_loaded = True
+        finally:
+            self._compose_signing_keys_loading = False
+        self._update_compose_preview()
+
+    def _selected_compose_signing_fingerprint(self) -> str:
+        if not hasattr(self, "compose_signing_key_combo"):
+            return ""
+        return normalize_fingerprint(str(self.compose_signing_key_combo.currentData() or ""))
+
+    def _on_compose_signing_key_changed(self) -> None:
+        if self._compose_signing_keys_loading:
+            return
+        try:
+            self.settings.set("gpg_compose_signing_key_fingerprint", self._selected_compose_signing_fingerprint())
+        except Exception:
+            pass
+        self._update_compose_preview()
+
     def _update_compose_preview(self) -> None:
         if not hasattr(self, "compose_summary_label"):
             return
+        self._refresh_compose_radio_targets()
         flamp_selected = (
             hasattr(self, "compose_send_target_combo")
             and self.compose_send_target_combo.currentText() in {"FLAmp", "Both"}
@@ -4650,25 +5058,49 @@ class MessageViewerTab(QWidget):
         self.compose_sign_flamp_chk.setEnabled(bool(flamp_selected))
         if not flamp_selected and self.compose_sign_flamp_chk.isChecked():
             self.compose_sign_flamp_chk.setChecked(False)
+        sign_flamp_selected = bool(
+            flamp_selected
+            and hasattr(self, "compose_sign_flamp_chk")
+            and self.compose_sign_flamp_chk.isChecked()
+            and self.compose_sign_flamp_chk.isEnabled()
+        )
+        if hasattr(self, "compose_signing_row_widget"):
+            self.compose_signing_row_widget.setVisible(sign_flamp_selected)
+        if sign_flamp_selected and not self._compose_signing_keys_loaded and not self._compose_signing_keys_loading:
+            self._refresh_compose_signing_keys()
+        bbs_selected = (
+            hasattr(self, "compose_varac_target_combo")
+            and self.compose_varac_target_combo.currentText() in {"BBS", "Both"}
+        )
+        if hasattr(self, "compose_bbs_location_row_widget"):
+            self.compose_bbs_location_row_widget.setVisible(bool(bbs_selected))
+        if bbs_selected:
+            self._refresh_compose_bbs_location_targets()
         self.compose_zulu_value.setText(self._compose_zulu_text())
         self.compose_callsign_value.setText(self._compose_operator_callsign() or "Not set")
         self.compose_state_value.setText(self._compose_operator_state() or "Not set")
         self.compose_grid_value.setText(self._compose_operator_grid() or "Not set")
         filename = self._compose_base_filename()
         report_component = sanitize_report_name(self.compose_report_title_edit.text())
+        radio_target = self._selected_compose_radio_target()
+        radio_label = radio_target.label if radio_target is not None else "No compose-capable radio"
         self.compose_summary_label.setText(
             "Stage only: FreqInOut creates files. The operator sends manually from FLMsg, FLAmp, or VarAC.\n"
+            f"Compose for: {radio_label}\n"
             f"Filename preview: {filename}\n"
             f"Report name component: {report_component}"
         )
         plans = self._compose_destination_plans()
         destination_lines: List[str] = []
-        for plan in plans:
-            if plan.ready:
-                detail = plan.note or plan.path
-                destination_lines.append(f"{plan.label}: {detail}")
-            else:
-                destination_lines.append(f"{plan.label}: {plan.note}")
+        if radio_target is None:
+            destination_lines.append("No radio profile has FLMsg, FLAmp, or VarAC message destinations configured.")
+        else:
+            for plan in plans:
+                if plan.ready:
+                    detail = plan.note or plan.path
+                    destination_lines.append(f"{plan.label}: {detail}")
+                else:
+                    destination_lines.append(f"{plan.label}: {radio_label} - {plan.note}")
         if not destination_lines:
             destination_lines.append("No stage destinations selected yet.")
         self.compose_destinations_label.setText("\n".join(destination_lines))
@@ -4682,18 +5114,36 @@ class MessageViewerTab(QWidget):
             title = self._compose_template_title or self.compose_form_combo.currentText()
         preview_html = self._render_custom_form_fields(field_values, preview_rows, title=title)
         metadata = [
+            f"<div><b>Compose For:</b> {html.escape(radio_label)}</div>",
             f"<div><b>Filename:</b> {html.escape(filename)}</div>",
             f"<div><b>Send Target:</b> {html.escape(self.compose_send_target_combo.currentText())}</div>",
             f"<div><b>VarAC Copy:</b> {html.escape(self.compose_varac_target_combo.currentText())}</div>",
         ]
+        if bbs_selected:
+            bbs_target = self._selected_compose_bbs_target()
+            metadata.append(
+                f"<div><b>BBS Location:</b> {html.escape(str((bbs_target or {}).get('label', '') or 'No valid BBS target'))}</div>"
+            )
         if self.compose_sign_flamp_chk.isEnabled() and self.compose_sign_flamp_chk.isChecked():
             metadata.append(
                 f"<div><b>Signed FLAmp Name:</b> {html.escape(build_signed_filename(filename))}</div>"
             )
+            selected_signer = self._selected_compose_signing_fingerprint()
+            if selected_signer:
+                metadata.append(
+                    f"<div><b>Signing Key:</b> {html.escape(self.compose_signing_key_combo.currentText())}</div>"
+                )
+            elif self._compose_signing_key_error:
+                metadata.append(f"<div><b>Signing Key:</b> {html.escape(self._compose_signing_key_error)}</div>")
+            elif self._compose_signing_key_count == 0:
+                metadata.append("<div><b>Signing Key:</b> No private signing keys found.</div>")
+            else:
+                metadata.append("<div><b>Signing Key:</b> Select a private signing key.</div>")
         self.compose_preview.setHtml("".join(metadata) + "<hr/>" + preview_html)
 
         ready_plans = [plan for plan in plans if plan.ready]
-        can_stage = bool(ready_plans) and self._compose_has_valid_form_selection()
+        signing_ready = (not sign_flamp_selected) or bool(self._selected_compose_signing_fingerprint())
+        can_stage = bool(ready_plans) and self._compose_has_valid_form_selection() and signing_ready and radio_target is not None
         self.compose_stage_btn.setEnabled(can_stage)
         theme = resolve_theme(self.settings)
         self.compose_stage_btn.setStyleSheet(button_style("primary" if can_stage else "muted", theme))
@@ -4705,8 +5155,15 @@ class MessageViewerTab(QWidget):
             self.compose_refresh_time_btn,
         ):
             btn.setStyleSheet(button_style("muted", theme))
-        self.compose_open_flmsg_btn.setEnabled(self._compose_launch_orchestrator.is_configured("FLMsg"))
-        self.compose_open_flamp_btn.setEnabled(self._compose_launch_orchestrator.is_configured("FLAmp"))
+        profile = radio_target.profile if radio_target is not None else {}
+        self.compose_open_flmsg_btn.setEnabled(
+            bool(self._compose_profile_text(profile, "flmsg_path"))
+            or self._compose_launch_orchestrator.is_configured("FLMsg")
+        )
+        self.compose_open_flamp_btn.setEnabled(
+            bool(self._compose_profile_text(profile, "flamp_path"))
+            or self._compose_launch_orchestrator.is_configured("FLAmp")
+        )
         has_paths = bool(self._compose_last_stage_paths or ready_plans)
         self.compose_open_folder_btn.setEnabled(has_paths)
         self.compose_copy_paths_btn.setEnabled(has_paths)
@@ -4725,8 +5182,16 @@ class MessageViewerTab(QWidget):
         outputs: List[Path] = []
         problems: List[str] = []
         gpg_path = str(self.settings.get("gpg_executable_path", "") or "").strip()
-        trusted_fingerprints = self.settings.get("gpg_trusted_fingerprints", []) or []
+        trusted_fingerprints = self.settings.get("gpg_trusted_signers", []) or []
         sign_flamp = bool(self.compose_sign_flamp_chk.isEnabled() and self.compose_sign_flamp_chk.isChecked())
+        signer_fingerprint = self._selected_compose_signing_fingerprint() if sign_flamp else ""
+        if sign_flamp and not signer_fingerprint:
+            self._set_compose_status("Select a private signing key before staging a signed FLAmp copy.", role="warning")
+            return
+        radio_target = self._selected_compose_radio_target()
+        if radio_target is None:
+            self._set_compose_status("Select a radio profile before staging compose files.", role="warning")
+            return
         unsigned_name = self._compose_base_filename()
         for plan in ready_plans:
             dst = Path(plan.path)
@@ -4735,7 +5200,12 @@ class MessageViewerTab(QWidget):
                     with tempfile.TemporaryDirectory(prefix="fio-compose-") as tmpdir:
                         temp_src = Path(tmpdir) / unsigned_name
                         temp_src.write_text(payload, encoding="utf-8")
-                        ok, detail = clearsign_file(temp_src, output_path=dst, configured_path=gpg_path)
+                        ok, detail = clearsign_file(
+                            temp_src,
+                            output_path=dst,
+                            configured_path=gpg_path,
+                            signer_fingerprint=signer_fingerprint,
+                        )
                     if ok:
                         outputs.append(dst)
                         verify_result = verify_file_with_discovery(
@@ -4761,7 +5231,7 @@ class MessageViewerTab(QWidget):
         self._compose_last_stage_paths = outputs
         lines: List[str] = []
         if outputs:
-            lines.append(f"Staged {len(outputs)} compose file(s).")
+            lines.append(f"Staged {len(outputs)} compose file(s) for {radio_target.label}.")
             for path in outputs:
                 lines.append(str(path))
         else:
@@ -8756,10 +9226,7 @@ class MessageViewerTab(QWidget):
     def _can_copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> bool:
         if row is None:
             return False
-        if not MessageViewerTab._is_truthy(self.settings.get("varac_bbs_enabled", False), False):
-            return False
-        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
-        if not bbs_dir_txt:
+        if not self._varac_bbs_copy_targets():
             return False
         msg_type = str(getattr(row, "msg_type", "") or "").strip().upper()
         if msg_type not in {"FLMSG", "FLAMP", "VARAC"}:
@@ -8829,54 +9296,31 @@ class MessageViewerTab(QWidget):
         return {loc.id: loc for loc in inventory.locations}
 
     def _varac_bbs_copy_targets(self) -> List[Dict[str, object]]:
-        if not MessageViewerTab._is_truthy(self.settings.get("varac_bbs_enabled", False), False):
-            return []
         targets: List[Dict[str, object]] = []
-        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
-        if bbs_dir_txt:
-            bbs_dir = Path(bbs_dir_txt)
-            targets.append(
-                {
-                    "id": "live",
-                    "kind": "live",
-                    "label": "Published BBS",
-                    "detail": "Live VarAC BBS folder",
-                    "path": bbs_dir,
-                    "valid": bbs_dir.exists() and bbs_dir.is_dir(),
-                    "file_count": 0,
-                    "due_now": 0,
-                    "is_default": False,
-                }
-            )
-        if MessageViewerTab._is_truthy(self.settings.get("varac_bbs_vault_enabled", False), False):
-            inventory_by_id = self._bbs_location_inventory_by_id()
-            default_id = str(self.settings.get("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID) or DEFAULT_LOCATION_ID).strip() or DEFAULT_LOCATION_ID
-            for loc in load_vault_locations(self.settings.get("varac_bbs_vault_locations_v1", [])):
-                if not loc.enabled:
-                    continue
-                path = Path(str(loc.source_dir or "").strip()) if str(loc.source_dir or "").strip() else None
-                inv = inventory_by_id.get(loc.id)
-                count = int(getattr(inv, "file_count", 0) or 0)
-                due_now = int(getattr(inv, "due_now_count", 0) or 0)
-                detail_bits = []
-                alias = str(loc.alias or "").strip()
-                if alias:
-                    detail_bits.append(f"alias {alias}")
-                detail_bits.append(f"{count} files")
-                if due_now:
-                    detail_bits.append(f"{due_now} due now")
+        for radio_target in self._load_compose_radio_targets():
+            for bbs_target in self._compose_bbs_targets_for_radio(radio_target):
+                path_txt = str(bbs_target.get("path", "") or "").strip()
+                path = Path(path_txt).expanduser() if path_txt else None
+                if path is not None and bbs_target.get("kind") == "managed":
+                    try:
+                        path.mkdir(parents=True, exist_ok=True)
+                    except Exception:
+                        pass
+                label = str(bbs_target.get("label", "") or "BBS")
                 targets.append(
                     {
-                        "id": f"location:{loc.id}",
-                        "location_id": loc.id,
-                        "kind": "location",
-                        "label": loc.name,
-                        "detail": ", ".join(detail_bits),
+                        "id": str(bbs_target.get("id", "") or ""),
+                        "kind": "location" if bbs_target.get("kind") == "managed" else "live",
+                        "label": f"{radio_target.label}: {label}",
+                        "radio_id": str(radio_target.radio_id),
+                        "radio_label": radio_target.label,
+                        "bbs_label": label,
+                        "detail": f"Radio: {radio_target.label}",
                         "path": path,
                         "valid": path is not None and path.exists() and path.is_dir(),
-                        "file_count": count,
-                        "due_now": due_now,
-                        "is_default": loc.id == default_id,
+                        "file_count": 0,
+                        "due_now": 0,
+                        "is_default": "default" in label.lower(),
                     }
                 )
         return targets
@@ -8892,42 +9336,79 @@ class MessageViewerTab(QWidget):
             preferred = next((target for target in targets if bool(target.get("is_default", False))), None)
             if preferred is not None:
                 preferred_id = str(preferred.get("id", "") or "")
+        preferred_target = next((target for target in targets if str(target.get("id", "") or "") == preferred_id), None)
+        preferred_radio_id = str((preferred_target or {}).get("radio_id", "") or "")
+        by_radio: Dict[str, List[Dict[str, object]]] = {}
+        radio_labels: Dict[str, str] = {}
+        for target in targets:
+            radio_id = str(target.get("radio_id", "") or "")
+            if not radio_id:
+                continue
+            by_radio.setdefault(radio_id, []).append(target)
+            radio_labels.setdefault(radio_id, str(target.get("radio_label", "") or "Radio"))
         dialog = QDialog(self)
         dialog.setWindowTitle("Copy to BBS Location")
         layout = QVBoxLayout(dialog)
-        intro = QLabel("Choose where this file should be copied.")
+        intro = QLabel("Choose the radio and BBS location for this file.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
-        list_widget = QListWidget(dialog)
-        for target in targets:
-            label = str(target.get("label", "") or "BBS")
-            kind = str(target.get("kind", "") or "")
-            prefix = "Published BBS" if kind == "live" else "Managed Location"
-            detail = str(target.get("detail", "") or "")
+        radio_row = QHBoxLayout()
+        radio_row.addWidget(QLabel("Radio"))
+        radio_combo = QComboBox(dialog)
+        for radio_id, label in radio_labels.items():
+            radio_combo.addItem(label, radio_id)
+            if preferred_radio_id and radio_id == preferred_radio_id:
+                radio_combo.setCurrentIndex(radio_combo.count() - 1)
+        radio_row.addWidget(radio_combo, 1)
+        layout.addLayout(radio_row)
+
+        location_row = QHBoxLayout()
+        location_row.addWidget(QLabel("BBS Location"))
+        location_combo = QComboBox(dialog)
+        location_row.addWidget(location_combo, 1)
+        layout.addLayout(location_row)
+
+        path_preview = QLabel()
+        path_preview.setWordWrap(True)
+        layout.addWidget(path_preview)
+
+        def update_path_preview() -> None:
+            target = location_combo.currentData()
+            if not isinstance(target, dict):
+                path_preview.setText("No BBS location selected.")
+                return
+            kind = "Live BBS root" if target.get("kind") == "live" else "Managed BBS location"
             path = Path(target.get("path")) if target.get("path") else None
-            text = f"{prefix}: {label}"
-            if detail:
-                text += f"\n{detail}"
-            if path is not None:
-                text += f"\n{path}"
-            item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, target)
-            list_widget.addItem(item)
-            if str(target.get("id", "") or "") == preferred_id:
-                list_widget.setCurrentItem(item)
-        if list_widget.currentRow() < 0:
-            list_widget.setCurrentRow(0)
-        layout.addWidget(list_widget)
+            path_txt = str(path) if path is not None else "No path configured"
+            path_preview.setText(f"{kind}\n{path_txt}")
+
+        def populate_locations() -> None:
+            radio_id = str(radio_combo.currentData() or "")
+            radio_targets = by_radio.get(radio_id, [])
+            selected_index = 0
+            location_combo.blockSignals(True)
+            try:
+                location_combo.clear()
+                for target in radio_targets:
+                    location_combo.addItem(str(target.get("bbs_label", "") or target.get("label", "") or "BBS"), target)
+                    if preferred_id and str(target.get("id", "") or "") == preferred_id:
+                        selected_index = location_combo.count() - 1
+                if location_combo.count():
+                    location_combo.setCurrentIndex(selected_index)
+            finally:
+                location_combo.blockSignals(False)
+            update_path_preview()
+
+        radio_combo.currentIndexChanged.connect(populate_locations)
+        location_combo.currentIndexChanged.connect(update_path_preview)
+        populate_locations()
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         if dialog.exec() != QDialog.Accepted:
             return None
-        current = list_widget.currentItem()
-        if current is None:
-            return None
-        target = current.data(Qt.UserRole)
+        target = location_combo.currentData()
         if not isinstance(target, dict):
             return None
         self._bbs_copy_target_session_id = str(target.get("id", "") or "")

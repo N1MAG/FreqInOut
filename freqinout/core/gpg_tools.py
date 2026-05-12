@@ -49,6 +49,15 @@ def normalize_fingerprints(values: Iterable[str]) -> Set[str]:
     return out
 
 
+def gpg_key_display_label(key: GPGKeyInfo) -> str:
+    fpr = normalize_fingerprint(key.fingerprint)
+    uid = next((str(u).strip() for u in key.user_ids if str(u).strip()), "")
+    short = fpr[-16:] if len(fpr) >= 16 else (fpr or str(key.key_id or "").strip())
+    if uid and short:
+        return f"{uid} - {short}"
+    return uid or short or "(unnamed key)"
+
+
 def normalize_signature_name_suffixes(values: Iterable[str]) -> List[str]:
     out: List[str] = []
     seen: Set[str] = set()
@@ -140,14 +149,20 @@ def gpg_available(configured_path: str = "", gnupg_home: str = "") -> Tuple[bool
     return True, first_line, gpg_path
 
 
-def list_public_keys(configured_path: str = "", gnupg_home: str = "") -> Tuple[List[GPGKeyInfo], str]:
+def _list_keys(
+    configured_path: str = "",
+    gnupg_home: str = "",
+    *,
+    secret: bool = False,
+) -> Tuple[List[GPGKeyInfo], str]:
     gpg_path = resolve_gpg_executable(configured_path)
     if not gpg_path:
         return [], "GPG executable not found."
+    command = "--list-secret-keys" if secret else "--list-keys"
     try:
         cp = _run_gpg(
             gpg_path,
-            ["--with-colons", "--list-keys", "--fingerprint", "--fingerprint"],
+            ["--with-colons", command, "--fingerprint", "--fingerprint"],
             gnupg_home=gnupg_home,
             timeout_sec=15.0,
         )
@@ -165,7 +180,7 @@ def list_public_keys(configured_path: str = "", gnupg_home: str = "") -> Tuple[L
         if not parts:
             continue
         rec_type = parts[0]
-        if rec_type == "pub":
+        if rec_type == ("sec" if secret else "pub"):
             if current and current.fingerprint:
                 keys.append(current)
             trust = parts[1] if len(parts) > 1 else ""
@@ -193,6 +208,14 @@ def list_public_keys(configured_path: str = "", gnupg_home: str = "") -> Tuple[L
 
     keys.sort(key=lambda k: (k.user_ids[0] if k.user_ids else "", k.fingerprint))
     return keys, ""
+
+
+def list_public_keys(configured_path: str = "", gnupg_home: str = "") -> Tuple[List[GPGKeyInfo], str]:
+    return _list_keys(configured_path=configured_path, gnupg_home=gnupg_home, secret=False)
+
+
+def list_secret_keys(configured_path: str = "", gnupg_home: str = "") -> Tuple[List[GPGKeyInfo], str]:
+    return _list_keys(configured_path=configured_path, gnupg_home=gnupg_home, secret=True)
 
 
 def import_public_key_file(file_path: str, configured_path: str = "", gnupg_home: str = "") -> Tuple[bool, str]:
@@ -271,6 +294,7 @@ def clearsign_file(
     output_path: str | Path,
     configured_path: str = "",
     gnupg_home: str = "",
+    signer_fingerprint: str = "",
 ) -> Tuple[bool, str]:
     gpg_path = resolve_gpg_executable(configured_path)
     if not gpg_path:
@@ -281,10 +305,15 @@ def clearsign_file(
         return False, "Message file not found."
     if not str(dst):
         return False, "Missing output path."
+    signer = normalize_fingerprint(signer_fingerprint)
+    args = ["--armor", "--clearsign", "--output", str(dst)]
+    if signer:
+        args.extend(["--local-user", signer])
+    args.append(str(src))
     try:
         cp = _run_gpg(
             gpg_path,
-            ["--armor", "--clearsign", "--output", str(dst), str(src)],
+            args,
             gnupg_home=gnupg_home,
             timeout_sec=45.0,
         )
