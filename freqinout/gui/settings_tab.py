@@ -135,6 +135,7 @@ from freqinout.core.varac_bbs_vault import (
     publish_location_view,
     publish_root_view,
     reset_to_default_location,
+    root_location_helper_filename_preview,
     vault_locations_to_data,
     vault_runtime_state_to_data,
 )
@@ -1047,16 +1048,33 @@ class SettingsTab(QWidget):
         )
         if location_id == DEFAULT_LOCATION_ID:
             text = (
-                "Default is the main/root BBS menu. It publishes helper files for visible locations "
+                f"All BBS views include: 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt\n"
+                "Default is the FIO Managed Root BBS menu. It publishes helper files for visible locations "
                 "and any files placed in the Default folder."
             )
         else:
-            suffix = " _code_" if open_rule in {"Access code required", "Allowed callsigns + access code"} else ""
-            desc = f" - {description}" if description else ""
-            open_name = name or alias or "location"
+            global_code_policy = (
+                self.varac_bbs_vault_global_code_policy_combo.currentText().strip()
+                if hasattr(self, "varac_bbs_vault_global_code_policy_combo")
+                else DEFAULT_GLOBAL_CODE_POLICY
+            )
+            preview_location = VaultLocation(
+                id=location_id,
+                name=name or alias or "location",
+                source_dir=str(selected.get("source_dir", "") or ""),
+                alias=alias,
+                description=description,
+                open_rule=open_rule,
+            )
+            helper_name = root_location_helper_filename_preview(
+                preview_location,
+                default_location_id=DEFAULT_LOCATION_ID,
+                global_code_policy=global_code_policy,
+                order=20,
+            )
             text = (
-                f"BBS MSG - Type {alias}{suffix} to open {open_name}, "
-                f"wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, then refresh BBS{desc}.txt"
+                f"All BBS views include: 00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS.txt\n"
+                f"{helper_name}"
             )
         self.varac_bbs_vault_helper_preview_label.setText(text)
         self.varac_bbs_vault_helper_preview_label.setToolTip(text)
