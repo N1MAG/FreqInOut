@@ -113,10 +113,12 @@ from freqinout.core.varac_bbs_vault import (
     vault_runtime_state_to_data,
 )
 from freqinout.core.gpg_tools import (
+    gpg_key_display_label,
     gpg_available,
     import_public_key_file,
     import_public_key_text,
     list_public_keys,
+    list_secret_keys,
     local_sign_key,
     normalize_fingerprint,
 )
@@ -484,6 +486,7 @@ class SettingsTab(QWidget):
         self._varac_bbs_vault_root_loading = False
         self._last_varac_bbs_dir_for_root_sync = ""
         self._gpg_keys_table_loading = False
+        self._gpg_signing_keys_loading = False
         self._gpg_keys_loaded = False
         self._gpg_keys_auto_probe_attempted = False
         self._gpg_trusted_fingerprints: set[str] = set()
@@ -3310,6 +3313,27 @@ class SettingsTab(QWidget):
         self.gpg_keys_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         gpg_v.addWidget(self.gpg_keys_table)
 
+        signing_title = QLabel("<b>Signing Identity</b>")
+        gpg_v.addWidget(signing_title)
+        signing_row = QHBoxLayout()
+        signing_row.setContentsMargins(0, 0, 0, 0)
+        signing_row.setSpacing(8)
+        signing_label = QLabel("Default FLAmp signing key")
+        signing_label.setFixedWidth(msg_label_width)
+        signing_row.addWidget(signing_label)
+        self.gpg_signing_key_combo = QComboBox()
+        self.gpg_signing_key_combo.addItem("Auto-select when only one private key is available", "")
+        signing_row.addWidget(self.gpg_signing_key_combo, 1)
+        self.gpg_refresh_signing_keys_btn = QPushButton("Refresh Signing Keys")
+        signing_row.addWidget(self.gpg_refresh_signing_keys_btn)
+        gpg_v.addLayout(signing_row)
+        self.gpg_signing_status_label = QLabel(
+            "FIO stores only the selected key fingerprint. Private keys stay in GPG."
+        )
+        self.gpg_signing_status_label.setWordWrap(True)
+        self.gpg_signing_status_label.setMaximumHeight(36)
+        gpg_v.addWidget(self.gpg_signing_status_label)
+
         self.gpg_verify_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
         self.hash_verify_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
         self.trusted_hash_edit.returnPressed.connect(self._add_trusted_hash_entry)
@@ -3327,6 +3351,8 @@ class SettingsTab(QWidget):
         self.gpg_sign_key_btn.clicked.connect(self._local_sign_selected_gpg_key)
         self.gpg_keys_table.itemChanged.connect(self._on_gpg_keys_table_item_changed)
         self.gpg_keys_table.itemSelectionChanged.connect(self._update_gpg_sign_button_state)
+        self.gpg_refresh_signing_keys_btn.clicked.connect(self._refresh_gpg_signing_keys)
+        self.gpg_signing_key_combo.currentIndexChanged.connect(self._on_gpg_signing_key_changed)
 
         gpg_container = QWidget()
         gpg_container.setLayout(gpg_v)
@@ -5274,6 +5300,23 @@ class SettingsTab(QWidget):
                 self.gpg_keys_table.setRowCount(0)
             finally:
                 self._gpg_keys_table_loading = False
+        if hasattr(self, "gpg_signing_key_combo"):
+            self._gpg_signing_keys_loading = True
+            try:
+                self.gpg_signing_key_combo.clear()
+                self.gpg_signing_key_combo.addItem("Auto-select when only one private key is available", "")
+                saved_signing_fpr = normalize_fingerprint(
+                    str(data.get("gpg_compose_signing_key_fingerprint", "") or "")
+                )
+                if saved_signing_fpr:
+                    self.gpg_signing_key_combo.addItem(f"Saved default - {saved_signing_fpr[-16:]}", saved_signing_fpr)
+                    self.gpg_signing_key_combo.setCurrentIndex(1)
+            finally:
+                self._gpg_signing_keys_loading = False
+        if hasattr(self, "gpg_signing_status_label"):
+            self.gpg_signing_status_label.setText(
+                "Signing keys not loaded. Click Refresh Signing Keys to detect private keys from GPG."
+            )
         self._set_gpg_status("GPG status: keys not loaded. Open this section or click Refresh Keys.")
         varac_path = (data.get("varac_path", "") or "").strip()
         if not varac_path:
@@ -5685,6 +5728,11 @@ class SettingsTab(QWidget):
         data["gpg_executable_path"] = self.gpg_path_edit.text().strip() if hasattr(self, "gpg_path_edit") else ""
         data["gpg_trusted_signers"] = sorted(
             [fp for fp in self._gpg_trusted_fingerprints if normalize_fingerprint(fp)]
+        )
+        data["gpg_compose_signing_key_fingerprint"] = normalize_fingerprint(
+            str(self.gpg_signing_key_combo.currentData() or "")
+            if hasattr(self, "gpg_signing_key_combo")
+            else ""
         )
         data["trusted_file_hashes"] = [
             {
@@ -8577,6 +8625,58 @@ class SettingsTab(QWidget):
             finally:
                 self._gpg_keys_table_loading = False
             self._update_gpg_sign_button_state()
+            self._refresh_gpg_signing_keys(show_dialog_on_error=False)
+
+    def _refresh_gpg_signing_keys(self, *, show_dialog_on_error: bool = True) -> None:
+        if not hasattr(self, "gpg_signing_key_combo"):
+            return
+        configured = self._current_gpg_path()
+        saved = normalize_fingerprint(str(self.settings.get("gpg_compose_signing_key_fingerprint", "") or ""))
+        current = normalize_fingerprint(str(self.gpg_signing_key_combo.currentData() or ""))
+        preferred = current or saved
+        keys, err = list_secret_keys(configured_path=configured)
+        self._gpg_signing_keys_loading = True
+        try:
+            self.gpg_signing_key_combo.clear()
+            self.gpg_signing_key_combo.addItem("Auto-select when only one private key is available", "")
+            selected_index = 0
+            for key in keys:
+                fpr = normalize_fingerprint(key.fingerprint)
+                if not fpr:
+                    continue
+                self.gpg_signing_key_combo.addItem(gpg_key_display_label(key), fpr)
+                if preferred and fpr == preferred:
+                    selected_index = self.gpg_signing_key_combo.count() - 1
+            self.gpg_signing_key_combo.setCurrentIndex(selected_index)
+        finally:
+            self._gpg_signing_keys_loading = False
+        if err:
+            text = f"Signing keys unavailable: {err}"
+            if hasattr(self, "gpg_signing_status_label"):
+                self.gpg_signing_status_label.setText(text)
+            if show_dialog_on_error:
+                QMessageBox.warning(self, "GPG Signing Keys", err)
+            return
+        count = self.gpg_signing_key_combo.count() - 1
+        if hasattr(self, "gpg_signing_status_label"):
+            if count == 0:
+                self.gpg_signing_status_label.setText(
+                    "No private signing keys found. Import or create a GPG private key to sign FLAmp files."
+                )
+            elif count == 1:
+                self.gpg_signing_status_label.setText(
+                    "One private signing key found. Compose can use it automatically when signing is enabled."
+                )
+            else:
+                self.gpg_signing_status_label.setText(
+                    "Multiple private signing keys found. Choose a default here or select one in Compose."
+                )
+
+    def _on_gpg_signing_key_changed(self) -> None:
+        if self._gpg_signing_keys_loading:
+            return
+        self._mark_settings_dirty()
+        self._refresh_section_titles()
 
     def _on_gpg_keys_table_item_changed(self, item: QTableWidgetItem) -> None:
         if self._gpg_keys_table_loading:

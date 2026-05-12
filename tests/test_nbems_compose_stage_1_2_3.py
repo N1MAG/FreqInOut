@@ -98,6 +98,43 @@ def test_standard_blank_serialization_uses_blankform_and_custom_uses_customform(
     assert "CUSTOM_FORM,magnet_general_V1.1.0.html" in custom
 
 
+def test_custom_form_serialization_counts_complete_mg_payload_and_keeps_field_order() -> None:
+    when = dt.datetime(2026, 5, 12, 19, 26, 48, tzinfo=dt.timezone.utc)
+    fields = [
+        ("L01", "260512-1925z"),
+        ("L02", "MR08"),
+        ("L03", "N1MAG"),
+        ("L06", "test"),
+        ("L07", "this is a test message"),
+        ("L04", "R"),
+        ("L05", "08"),
+        ("L08", ""),
+    ]
+
+    custom = serialize_custom_form_message(
+        "magnet_general_V1.1.0.html",
+        fields,
+        callsign="N1MAG",
+        created_utc=when,
+        flmsg_version="4.0.24.02",
+    )
+
+    expected_payload = (
+        "CUSTOM_FORM,magnet_general_V1.1.0.html\n"
+        "L01,260512-1925z\n"
+        "L02,MR08\n"
+        "L03,N1MAG\n"
+        "L06,test\n"
+        "L07,this is a test message\n"
+        "L04,R\n"
+        "L05,08\n"
+        "L08,\n"
+    )
+    assert "<flmsg>4.0.24.02" in custom
+    assert f":mg:{len(expected_payload.encode('utf-8'))} {expected_payload}" in custom
+    assert custom.index("L06,test") < custom.index("L04,R")
+
+
 def test_parse_compose_template_fields_keeps_suffix_keys_and_html_metadata() -> None:
     template = """
     <html>

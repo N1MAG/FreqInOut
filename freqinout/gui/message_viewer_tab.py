@@ -54,6 +54,8 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QScrollArea,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -76,11 +78,14 @@ from freqinout.core.sitrep_metadata import (
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.varac_bbs_config import bbs_summary_text
+from freqinout.core.varac_bbs_vault import DEFAULT_LOCATION_ID, load_vault_locations
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
     clearsign_file,
     find_detached_signature,
+    gpg_key_display_label,
     is_detached_signature_file,
+    list_secret_keys,
     normalize_fingerprint,
     normalize_fingerprints,
     normalize_signature_name_suffixes,
@@ -2229,6 +2234,10 @@ class MessageViewerTab(QWidget):
         self._compose_launch_orchestrator = LaunchOrchestrator(self.settings, self)
         self._compose_timestamp_utc: datetime.datetime = datetime.datetime.now(datetime.timezone.utc)
         self._compose_status_role: str = "info"
+        self._compose_signing_keys_loaded: bool = False
+        self._compose_signing_keys_loading: bool = False
+        self._compose_signing_key_count: int = 0
+        self._compose_signing_key_error: str = ""
         self._read_state_map: Dict[tuple, tuple[str, float, int]] = {}
         self._message_rows: List[UnifiedMessage] = []
         self._filters_initialized = False
@@ -3942,6 +3951,30 @@ class MessageViewerTab(QWidget):
         row4.addStretch()
         setup_layout.addLayout(row4)
 
+        self.compose_signing_row_widget = QWidget()
+        signing_row = QHBoxLayout(self.compose_signing_row_widget)
+        signing_row.setContentsMargins(0, 0, 0, 0)
+        signing_row.addWidget(QLabel("Signing Key"))
+        self.compose_signing_key_combo = QComboBox()
+        self.compose_signing_key_combo.addItem("Select signing key...", "")
+        self.compose_signing_key_combo.currentIndexChanged.connect(self._on_compose_signing_key_changed)
+        signing_row.addWidget(self.compose_signing_key_combo, 1)
+        self.compose_refresh_signing_keys_btn = QPushButton("Refresh Signing Keys")
+        self.compose_refresh_signing_keys_btn.clicked.connect(lambda: self._refresh_compose_signing_keys(force=True))
+        signing_row.addWidget(self.compose_refresh_signing_keys_btn)
+        self.compose_signing_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_signing_row_widget)
+
+        self.compose_bbs_location_row_widget = QWidget()
+        bbs_location_row = QHBoxLayout(self.compose_bbs_location_row_widget)
+        bbs_location_row.setContentsMargins(0, 0, 0, 0)
+        bbs_location_row.addWidget(QLabel("BBS Location"))
+        self.compose_bbs_location_combo = QComboBox()
+        self.compose_bbs_location_combo.currentIndexChanged.connect(self._on_compose_bbs_location_changed)
+        bbs_location_row.addWidget(self.compose_bbs_location_combo, 1)
+        self.compose_bbs_location_row_widget.setVisible(False)
+        setup_layout.addWidget(self.compose_bbs_location_row_widget)
+
         root.addWidget(setup_box)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -4344,8 +4377,128 @@ class MessageViewerTab(QWidget):
             return bool(str(data.get("path", "") or "").strip())
         return False
 
+    def _varac_bbs_location_dir_for_location(self, location) -> str:
+        source_dir = str(getattr(location, "source_dir", "") or "").strip()
+        if source_dir:
+            return str(Path(source_dir).expanduser())
+        managed_root = str(self.settings.get("varac_bbs_vault_managed_root", "") or "").strip()
+        if not managed_root:
+            return ""
+        folder_name = (
+            str(getattr(location, "name", "") or "").strip()
+            or str(getattr(location, "alias", "") or "").strip()
+            or str(getattr(location, "id", "") or "").strip()
+        )
+        if not folder_name:
+            return ""
+        return str(Path(managed_root).expanduser() / "locations" / folder_name)
+
+    def _varac_bbs_publish_targets(self) -> List[Dict[str, str]]:
+        targets: List[Dict[str, str]] = []
+        live_dir = str(self.settings.get("varac_bbs_dir", "") or "").strip()
+        vault_enabled = bool(self.settings.get("varac_bbs_vault_enabled", False))
+        if vault_enabled:
+            default_id = str(
+                self.settings.get("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID)
+                or DEFAULT_LOCATION_ID
+            ).strip() or DEFAULT_LOCATION_ID
+            locations = load_vault_locations(self.settings.get("varac_bbs_vault_locations_v1", []))
+            for location in locations:
+                if not bool(getattr(location, "enabled", True)):
+                    continue
+                directory = self._varac_bbs_location_dir_for_location(location)
+                if not directory:
+                    continue
+                try:
+                    Path(directory).mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+                alias = str(getattr(location, "alias", "") or "").strip()
+                name = str(getattr(location, "name", "") or "").strip() or alias or str(getattr(location, "id", "") or "")
+                hints: List[str] = []
+                if str(getattr(location, "id", "") or "") == default_id:
+                    hints.append("default")
+                if str(getattr(location, "open_rule", "") or "").strip().lower() == "code":
+                    hints.append("code")
+                if str(getattr(location, "visibility_rule", "") or "").strip().lower() != "public":
+                    hints.append("restricted")
+                alias_part = f" - {alias}" if alias else ""
+                hint_part = f" ({', '.join(hints)})" if hints else ""
+                targets.append(
+                    {
+                        "id": f"managed:{str(getattr(location, 'id', '') or '').strip()}",
+                        "label": f"Managed BBS: {name}{alias_part}{hint_part}",
+                        "path": directory,
+                        "kind": "managed",
+                    }
+                )
+            if live_dir:
+                targets.append(
+                    {
+                        "id": "live:bypass",
+                        "label": "Live BBS root (bypass managed vault)",
+                        "path": live_dir,
+                        "kind": "live",
+                    }
+                )
+        elif live_dir:
+            targets.append(
+                {
+                    "id": "live",
+                    "label": "Live VarAC BBS",
+                    "path": live_dir,
+                    "kind": "live",
+                }
+            )
+        return targets
+
+    def _refresh_compose_bbs_location_targets(self) -> None:
+        if not hasattr(self, "compose_bbs_location_combo"):
+            return
+        saved = str(self.settings.get("varac_bbs_compose_location_target", "") or "").strip()
+        current = ""
+        data = self.compose_bbs_location_combo.currentData()
+        if isinstance(data, dict):
+            current = str(data.get("id", "") or "")
+        preferred = current or saved
+        self.compose_bbs_location_combo.blockSignals(True)
+        try:
+            self.compose_bbs_location_combo.clear()
+            targets = self._varac_bbs_publish_targets()
+            self.compose_bbs_location_combo.setEditable(len(targets) > 8)
+            if self.compose_bbs_location_combo.isEditable():
+                self.compose_bbs_location_combo.setInsertPolicy(QComboBox.NoInsert)
+            selected_index = 0
+            for target in targets:
+                self.compose_bbs_location_combo.addItem(target["label"], target)
+                if preferred and target.get("id") == preferred:
+                    selected_index = self.compose_bbs_location_combo.count() - 1
+            if self.compose_bbs_location_combo.count():
+                self.compose_bbs_location_combo.setCurrentIndex(selected_index)
+        finally:
+            self.compose_bbs_location_combo.blockSignals(False)
+
+    def _selected_compose_bbs_target(self) -> Dict[str, str] | None:
+        if not hasattr(self, "compose_bbs_location_combo"):
+            return None
+        data = self.compose_bbs_location_combo.currentData()
+        return data if isinstance(data, dict) else None
+
+    def _on_compose_bbs_location_changed(self) -> None:
+        target = self._selected_compose_bbs_target()
+        if target:
+            try:
+                self.settings.set("varac_bbs_compose_location_target", str(target.get("id", "") or ""))
+            except Exception:
+                pass
+        self._update_compose_preview()
+
     def _compose_destination_plans(self) -> List[ComposeDestinationPlan]:
         msg_paths = self.settings.get("message_paths", {}) or {}
+        bbs_target = self._selected_compose_bbs_target()
+        bbs_dir = str((bbs_target or {}).get("path", "") or "").strip()
+        if not bbs_dir:
+            bbs_dir = str(self.settings.get("varac_bbs_dir", "") or "").strip()
         return plan_compose_destinations(
             self._compose_base_filename(),
             send_target=self.compose_send_target_combo.currentText() if hasattr(self, "compose_send_target_combo") else "FLMsg",
@@ -4353,7 +4506,7 @@ class MessageViewerTab(QWidget):
             flmsg_dir=str(msg_paths.get("flmsg", "") or "").strip(),
             flamp_dir=str(msg_paths.get("flamp", "") or "").strip(),
             varac_outbox_dir=self._compose_varac_outbox_dir(),
-            varac_bbs_dir=str(self.settings.get("varac_bbs_dir", "") or "").strip(),
+            varac_bbs_dir=bbs_dir,
             sign_flamp_copy=bool(
                 hasattr(self, "compose_sign_flamp_chk")
                 and self.compose_sign_flamp_chk.isChecked()
@@ -4622,6 +4775,57 @@ class MessageViewerTab(QWidget):
             f"padding: 6px 8px; border-radius: 4px; background: {bg}; color: {color}; border: 1px solid {border};"
         )
 
+    def _refresh_compose_signing_keys(self, *, force: bool = False) -> None:
+        if not hasattr(self, "compose_signing_key_combo"):
+            return
+        if self._compose_signing_keys_loaded and not force:
+            return
+        saved = normalize_fingerprint(str(self.settings.get("gpg_compose_signing_key_fingerprint", "") or ""))
+        current = normalize_fingerprint(str(self.compose_signing_key_combo.currentData() or ""))
+        preferred = current or saved
+        self._compose_signing_keys_loading = True
+        self._compose_signing_key_error = ""
+        try:
+            self.compose_signing_key_combo.clear()
+            self.compose_signing_key_combo.addItem("Select signing key...", "")
+            keys, err = list_secret_keys(
+                configured_path=str(self.settings.get("gpg_executable_path", "") or "").strip()
+            )
+            self._compose_signing_key_error = err
+            selected_index = 0
+            count = 0
+            for key in keys:
+                fpr = normalize_fingerprint(key.fingerprint)
+                if not fpr:
+                    continue
+                count += 1
+                self.compose_signing_key_combo.addItem(gpg_key_display_label(key), fpr)
+                if preferred and fpr == preferred:
+                    selected_index = self.compose_signing_key_combo.count() - 1
+            if count == 1 and selected_index == 0:
+                selected_index = 1
+            self.compose_signing_key_combo.setCurrentIndex(selected_index)
+            self._compose_signing_key_count = count
+            self._compose_signing_keys_loaded = True
+        finally:
+            self._compose_signing_keys_loading = False
+        self._update_compose_preview()
+
+    def _selected_compose_signing_fingerprint(self) -> str:
+        if not hasattr(self, "compose_signing_key_combo"):
+            return ""
+        return normalize_fingerprint(str(self.compose_signing_key_combo.currentData() or ""))
+
+    def _on_compose_signing_key_changed(self) -> None:
+        if self._compose_signing_keys_loading:
+            return
+        fpr = self._selected_compose_signing_fingerprint()
+        try:
+            self.settings.set("gpg_compose_signing_key_fingerprint", fpr)
+        except Exception:
+            pass
+        self._update_compose_preview()
+
     def _update_compose_preview(self) -> None:
         if not hasattr(self, "compose_summary_label"):
             return
@@ -4632,6 +4836,24 @@ class MessageViewerTab(QWidget):
         self.compose_sign_flamp_chk.setEnabled(bool(flamp_selected))
         if not flamp_selected and self.compose_sign_flamp_chk.isChecked():
             self.compose_sign_flamp_chk.setChecked(False)
+        sign_flamp_selected = bool(
+            flamp_selected
+            and hasattr(self, "compose_sign_flamp_chk")
+            and self.compose_sign_flamp_chk.isChecked()
+            and self.compose_sign_flamp_chk.isEnabled()
+        )
+        if hasattr(self, "compose_signing_row_widget"):
+            self.compose_signing_row_widget.setVisible(sign_flamp_selected)
+        if sign_flamp_selected and not self._compose_signing_keys_loaded and not self._compose_signing_keys_loading:
+            self._refresh_compose_signing_keys()
+        bbs_selected = (
+            hasattr(self, "compose_varac_target_combo")
+            and self.compose_varac_target_combo.currentText() in {"BBS", "Both"}
+        )
+        if hasattr(self, "compose_bbs_location_row_widget"):
+            self.compose_bbs_location_row_widget.setVisible(bool(bbs_selected))
+        if bbs_selected:
+            self._refresh_compose_bbs_location_targets()
         self.compose_zulu_value.setText(self._compose_zulu_text())
         self.compose_callsign_value.setText(self._compose_operator_callsign() or "Not set")
         self.compose_state_value.setText(self._compose_operator_state() or "Not set")
@@ -4668,14 +4890,31 @@ class MessageViewerTab(QWidget):
             f"<div><b>Send Target:</b> {html.escape(self.compose_send_target_combo.currentText())}</div>",
             f"<div><b>VarAC Copy:</b> {html.escape(self.compose_varac_target_combo.currentText())}</div>",
         ]
+        if bbs_selected:
+            bbs_target = self._selected_compose_bbs_target()
+            metadata.append(
+                f"<div><b>BBS Location:</b> {html.escape(str((bbs_target or {}).get('label', '') or 'No valid BBS target'))}</div>"
+            )
         if self.compose_sign_flamp_chk.isEnabled() and self.compose_sign_flamp_chk.isChecked():
             metadata.append(
                 f"<div><b>Signed FLAmp Name:</b> {html.escape(build_signed_filename(filename))}</div>"
             )
+            selected_signer = self._selected_compose_signing_fingerprint()
+            if selected_signer:
+                metadata.append(
+                    f"<div><b>Signing Key:</b> {html.escape(self.compose_signing_key_combo.currentText())}</div>"
+                )
+            elif self._compose_signing_key_error:
+                metadata.append(f"<div><b>Signing Key:</b> {html.escape(self._compose_signing_key_error)}</div>")
+            elif self._compose_signing_key_count == 0:
+                metadata.append("<div><b>Signing Key:</b> No private signing keys found.</div>")
+            else:
+                metadata.append("<div><b>Signing Key:</b> Select a private signing key.</div>")
         self.compose_preview.setHtml("".join(metadata) + "<hr/>" + preview_html)
 
         ready_plans = [plan for plan in plans if plan.ready]
-        can_stage = bool(ready_plans) and self._compose_has_valid_form_selection()
+        signing_ready = (not sign_flamp_selected) or bool(self._selected_compose_signing_fingerprint())
+        can_stage = bool(ready_plans) and self._compose_has_valid_form_selection() and signing_ready
         self.compose_stage_btn.setEnabled(can_stage)
         theme = resolve_theme(self.settings)
         self.compose_stage_btn.setStyleSheet(button_style("primary" if can_stage else "muted", theme))
@@ -4707,8 +4946,12 @@ class MessageViewerTab(QWidget):
         outputs: List[Path] = []
         problems: List[str] = []
         gpg_path = str(self.settings.get("gpg_executable_path", "") or "").strip()
-        trusted_fingerprints = self.settings.get("gpg_trusted_fingerprints", []) or []
+        trusted_fingerprints = self.settings.get("gpg_trusted_signers", []) or []
         sign_flamp = bool(self.compose_sign_flamp_chk.isEnabled() and self.compose_sign_flamp_chk.isChecked())
+        signer_fingerprint = self._selected_compose_signing_fingerprint() if sign_flamp else ""
+        if sign_flamp and not signer_fingerprint:
+            self._set_compose_status("Select a private signing key before staging a signed FLAmp copy.", role="warning")
+            return
         unsigned_name = self._compose_base_filename()
         for plan in ready_plans:
             dst = Path(plan.path)
@@ -4717,7 +4960,12 @@ class MessageViewerTab(QWidget):
                     with tempfile.TemporaryDirectory(prefix="fio-compose-") as tmpdir:
                         temp_src = Path(tmpdir) / unsigned_name
                         temp_src.write_text(payload, encoding="utf-8")
-                        ok, detail = clearsign_file(temp_src, output_path=dst, configured_path=gpg_path)
+                        ok, detail = clearsign_file(
+                            temp_src,
+                            output_path=dst,
+                            configured_path=gpg_path,
+                            signer_fingerprint=signer_fingerprint,
+                        )
                     if ok:
                         outputs.append(dst)
                         verify_result = verify_file_with_discovery(
@@ -8768,8 +9016,7 @@ class MessageViewerTab(QWidget):
     def _can_copy_row_to_varac_bbs(self, row: UnifiedMessage | None) -> bool:
         if row is None:
             return False
-        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
-        if not bbs_dir_txt:
+        if not self._varac_bbs_publish_targets():
             return False
         msg_type = str(getattr(row, "msg_type", "") or "").strip().upper()
         if msg_type not in {"FLMSG", "FLAMP", "VARAC"}:
@@ -8828,13 +9075,20 @@ class MessageViewerTab(QWidget):
         except Exception:
             return False
 
-    def _varac_bbs_destination_for_row(self, row: UnifiedMessage | None, *, unique: bool = False) -> Path | None:
+    def _varac_bbs_destination_for_row(
+        self,
+        row: UnifiedMessage | None,
+        *,
+        unique: bool = False,
+        target: Dict[str, str] | None = None,
+    ) -> Path | None:
         if not self._can_copy_row_to_varac_bbs(row):
             return None
         payload = getattr(row, "payload", None)
         if not isinstance(payload, FileRecord):
             return None
-        bbs_dir_txt = (self.settings.get("varac_bbs_dir", "") or "").strip()
+        selected_target = target or (self._varac_bbs_publish_targets()[0] if self._varac_bbs_publish_targets() else None)
+        bbs_dir_txt = str((selected_target or {}).get("path", "") or "").strip()
         if not bbs_dir_txt:
             return None
         bbs_dir = Path(bbs_dir_txt)
@@ -8845,6 +9099,58 @@ class MessageViewerTab(QWidget):
         if not unique:
             return dst
         return MessageViewerTab._unique_varac_bbs_destination(dst)
+
+    def _choose_varac_bbs_target_for_copy(self) -> Dict[str, str] | None:
+        targets = self._varac_bbs_publish_targets()
+        if not targets:
+            return None
+        if len(targets) == 1:
+            return targets[0]
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Add to VarAC BBS")
+        layout = QVBoxLayout(dlg)
+        info = QLabel("Choose where this file should be added.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        combo = QComboBox()
+        combo.setEditable(len(targets) > 8)
+        if combo.isEditable():
+            combo.setInsertPolicy(QComboBox.NoInsert)
+        saved = str(self.settings.get("varac_bbs_compose_location_target", "") or "").strip()
+        selected_index = 0
+        for target in targets:
+            combo.addItem(str(target.get("label", "") or "VarAC BBS"), target)
+            if saved and target.get("id") == saved:
+                selected_index = combo.count() - 1
+        combo.setCurrentIndex(selected_index)
+        layout.addWidget(combo)
+        path_label = QLabel()
+        path_label.setWordWrap(True)
+        layout.addWidget(path_label)
+
+        def _update_path_label() -> None:
+            data = combo.currentData()
+            path_label.setText(str((data or {}).get("path", "") or "") if isinstance(data, dict) else "")
+
+        combo.currentIndexChanged.connect(_update_path_label)
+        _update_path_label()
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_btn = buttons.button(QDialogButtonBox.Ok)
+        if ok_btn is not None:
+            ok_btn.setText("Copy")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        data = combo.currentData()
+        if isinstance(data, dict):
+            try:
+                self.settings.set("varac_bbs_compose_location_target", str(data.get("id", "") or ""))
+            except Exception:
+                pass
+            return data
+        return None
 
     def _is_row_already_in_varac_bbs(self, row: UnifiedMessage | None) -> bool:
         dst = self._varac_bbs_destination_for_row(row)
@@ -8893,8 +9199,11 @@ class MessageViewerTab(QWidget):
         if not src.exists() or not src.is_file():
             QMessageBox.warning(self, "Copy to VarAC BBS", "The selected source file no longer exists.")
             return
-        base_dst = self._varac_bbs_destination_for_row(row)
-        dst = self._varac_bbs_destination_for_row(row, unique=True)
+        target = self._choose_varac_bbs_target_for_copy()
+        if target is None:
+            return
+        base_dst = self._varac_bbs_destination_for_row(row, target=target)
+        dst = self._varac_bbs_destination_for_row(row, unique=True, target=target)
         if dst is None:
             if base_dst is None:
                 QMessageBox.warning(self, "Copy to VarAC BBS", "Configured VarAC BBS directory is not valid.")
