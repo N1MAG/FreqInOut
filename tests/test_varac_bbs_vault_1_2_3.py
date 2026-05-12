@@ -174,6 +174,17 @@ def test_varac_guard_ignores_fio_generated_helper_files(tmp_path: Path) -> None:
     assert not (tmp_path / "VaraFiles" / "FIO_BBS_Vault" / "quarantine" / helper.name).exists()
 
 
+def test_messages_helper_filter_hides_new_instruction_files() -> None:
+    from freqinout.gui.message_viewer_tab import _is_fio_bbs_helper_file_name
+
+    assert _is_fio_bbs_helper_file_name("00 READ FIRST - type command, wait 10 sec, refresh BBS.txt")
+    assert _is_fio_bbs_helper_file_name("00 NOTICE - LIST BLKS 1AD1 received; wait 10 sec, refresh again.txt")
+    assert _is_fio_bbs_helper_file_name("01 COMMANDS - type one command below.txt")
+    assert _is_fio_bbs_helper_file_name("21 type HUBS [CODE] - open HUBS with access code.txt")
+    assert _is_fio_bbs_helper_file_name("BBS MSG - Type INTEL to open Intel then refresh BBS.txt")
+    assert not _is_fio_bbs_helper_file_name("NATL-RR-260427-1500Z-AIB-sig.k2s")
+
+
 def test_varac_log_parser_honors_day_first_and_month_first_inputs() -> None:
     euro = parse_varac_event_timestamp("13/04/2025 04:07:31")
     assert euro is not None
@@ -399,7 +410,9 @@ def test_publish_root_view_appends_custom_helper_text_to_filename(tmp_path: Path
     )
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "BBS MSG - Type INTEL to open Intel, wait 10 sec, then refresh BBS - Latest reports.txt" in names
+    assert "00 READ FIRST - type command, wait 10 sec, refresh BBS.txt" in names
+    assert "01 COMMANDS - type one command below.txt" in names
+    assert "20 type INTEL - open Intel - Latest reports.txt" in names
 
 
 def test_publish_root_view_uses_normalized_alias_and_removes_old_helper(tmp_path: Path) -> None:
@@ -439,7 +452,7 @@ def test_publish_root_view_uses_normalized_alias_and_removes_old_helper(tmp_path
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert normalize_location_alias("TEST_A") == "TESTA"
-    assert "BBS MSG - Type TESTA to open TEST_A, wait 10 sec, then refresh BBS - custom text add-on.txt" in names
+    assert "20 type TESTA - open TEST_A - custom text add-on.txt" in names
     assert stale.name not in names
 
 
@@ -516,7 +529,7 @@ def test_publish_root_view_only_lists_helpers_available_to_caller(tmp_path: Path
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert any("PUBLIC" in name for name in names)
     assert any("RESTRICTED" in name for name in names)
-    assert any("CODE" in name for name in names)
+    assert "22 type CODE [CODE] - open CODE with access code.txt" in names
 
     publish_root_view(
         sender="KX9ZZZ",
@@ -532,7 +545,7 @@ def test_publish_root_view_only_lists_helpers_available_to_caller(tmp_path: Path
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert any("PUBLIC" in name for name in names)
     assert not any("RESTRICTED" in name for name in names)
-    assert any("CODE" in name for name in names)
+    assert "21 type CODE [CODE] - open CODE with access code.txt" in names
 
 
 def test_reset_to_default_uses_configured_root_visibility_policy(tmp_path: Path) -> None:
@@ -1187,8 +1200,8 @@ def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: 
     )
     run_varac_bbs_vault(settings)
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert any("HUBS requires an access code" in name for name in names)
-    assert any("Type HUBS _code_" in name for name in names)
+    assert "00 NOTICE - HUBS requires an access code.txt" in names
+    assert "10 type HUBS [CODE] - open with access code.txt" in names
     assert "NATL-RR-260427-1500Z-AIB-sig.k2s" not in names
     assert "N1MAG-20260429-OpNet-1.b2s" not in names
 
@@ -1212,8 +1225,8 @@ def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: 
     )
     run_varac_bbs_vault(settings)
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert any("Incorrect code provided for HUBS" in name for name in names)
-    assert any("try again or return to ROOT" in name for name in names)
+    assert "00 NOTICE - Incorrect code for HUBS.txt" in names
+    assert "10 type HUBS [CODE] - try again with access code.txt" in names
     assert "N1MAG-20260429-OpNet-1.b2s" not in names
 
     settings.set("varac_bbs_vault_runtime_state_v1", {**settings.get("varac_bbs_vault_runtime_state_v1"), "last_datastream_id": 1})
@@ -1236,8 +1249,8 @@ def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: 
     )
     run_varac_bbs_vault(settings)
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert any("Type AIB" in name for name in names)
-    assert any("Type INTEL" in name for name in names)
+    assert any("type AIB" in name for name in names)
+    assert any("type INTEL" in name for name in names)
     assert "NATL-RR-260427-1500Z-AIB-sig.k2s" not in names
 
 
@@ -1517,7 +1530,9 @@ def test_publish_root_view_lists_flamp_menu_helper(tmp_path: Path) -> None:
     )
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - wait 10 sec, then refresh BBS.txt" in names
+    assert "00 READ FIRST - type command, wait 10 sec, refresh BBS.txt" in names
+    assert "01 COMMANDS - type one command below.txt" in names
+    assert "20 type FLAMP - show Flamp block fill commands.txt" in names
     assert not any("FLAMP CMDS LIST Q" in name for name in names)
 
 
@@ -1576,10 +1591,10 @@ def test_run_varac_bbs_vault_flamp_command_publishes_separate_helpers(tmp_path: 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert result.enabled
     assert state.current_view_mode == "flamp-help"
-    assert "BBS MSG - LIST Q to list available FLAMP files - wait 10 sec, then refresh BBS.txt" in names
-    assert "BBS MSG - LIST BLKS F277 shows available blocks for F277 - wait 10 sec, then refresh BBS.txt" in names
-    assert "BBS MSG - BLK 0,8,9 F277 pulls blocks 0,8,9 for queueID F277 - wait 10 sec, then refresh BBS.txt" in names
-    assert "BBS MSG - ROOT to return to normal BBS menu - wait 10 sec, then refresh BBS.txt" in names
+    assert "10 type ROOT - return to main menu.txt" in names
+    assert "20 type LIST Q - list available Flamp files.txt" in names
+    assert "21 type LIST BLKS F277 - show blocks for queue F277.txt" in names
+    assert "22 type BLK 0,8,9 F277 - request blocks 0,8,9.txt" in names
 
 
 def test_run_varac_bbs_vault_flamp_command_accepts_varac_prefixed_db_entry(tmp_path: Path) -> None:
@@ -1637,7 +1652,7 @@ def test_run_varac_bbs_vault_flamp_command_accepts_varac_prefixed_db_entry(tmp_p
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert result.enabled
     assert state.current_view_mode == "flamp-help"
-    assert "BBS MSG - LIST Q to list available FLAMP files - wait 10 sec, then refresh BBS.txt" in names
+    assert "20 type LIST Q - list available Flamp files.txt" in names
 
 
 def test_run_varac_bbs_vault_flamp_queue_and_block_commands_accept_prefixed_db_entries(tmp_path: Path) -> None:
@@ -2019,7 +2034,7 @@ def test_run_varac_bbs_vault_db_blr_refreshes_current_flamp_block_list(tmp_path:
     assert (live_bbs / "BBS_BLOCK_LIST_41D6.txt").exists()
     assert "BBS_BLOCK_LIST_41D6.txt" in live_names
     assert "BBS_BLOCK_LIST_1AD1.txt" not in live_names
-    assert not any(name.startswith("BBS MSG - type FLAMP") for name in live_names)
+    assert not any(name == "20 type FLAMP - show Flamp block fill commands.txt" for name in live_names)
 
 
 def test_run_varac_bbs_vault_db_first_scan_starts_from_recent_tail(tmp_path: Path) -> None:
@@ -2100,7 +2115,7 @@ def test_run_varac_bbs_vault_db_first_scan_starts_from_recent_tail(tmp_path: Pat
     assert state.current_view_label == "FLAMP 41D6"
     assert not (live_bbs / "BBS_BLOCK_LIST_1AD1.txt").exists()
     assert (live_bbs / "BBS_BLOCK_LIST_41D6.txt").exists()
-    assert (live_bbs / "BBS MSG - LIST BLKS 41D6 received - wait 10 sec, then refresh BBS again.txt").exists()
+    assert (live_bbs / "00 NOTICE - LIST BLKS 41D6 received; wait 10 sec, refresh again.txt").exists()
 
 
 def test_run_varac_bbs_vault_db_handles_missing_qso_and_slashed_zero_queue(tmp_path: Path) -> None:
@@ -2541,7 +2556,8 @@ def test_settings_tab_helper_preview_matches_pause_helper_text(tmp_path: Path) -
 
     assert (
         tab.varac_bbs_vault_helper_preview_label.text()
-        == "BBS MSG - Type INTEL to open Intel, wait 10 sec, then refresh BBS - Latest reports.txt"
+        == "All BBS views include: 00 READ FIRST - type command, wait 10 sec, refresh BBS.txt\n"
+        "20 type INTEL - open Intel - Latest reports.txt"
     )
 
 

@@ -902,6 +902,10 @@ def _is_fio_bbs_generated_listing(name: object) -> bool:
     clean = Path(str(name or "").strip()).name.upper()
     if clean.startswith("BBS MSG - ") and clean.endswith(".TXT"):
         return True
+    if clean.startswith(("00 READ FIRST -", "00 NOTICE -", "01 COMMANDS -")) and clean.endswith(".TXT"):
+        return True
+    if re.match(r"^\d{2} TYPE .+\.TXT$", clean):
+        return True
     return clean.startswith((DEFAULT_FLAMP_QUEUE_HELPER_NAME.upper(), f"{DEFAULT_FLAMP_BLOCK_PREFIX}_"))
 
 
@@ -1175,31 +1179,75 @@ def _menu_instruction_entry(text: str) -> _VirtualFile:
     return _VirtualFile(name=f"{text}.txt", content=text + "\n")
 
 
-def _refresh_action_phrase(*, again: bool = False) -> str:
-    suffix = " again" if again else ""
-    return f"wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, then refresh BBS{suffix}"
+def _read_first_entry() -> _VirtualFile:
+    text = f"00 READ FIRST - type command, wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh BBS"
+    return _menu_instruction_entry(text)
+
+
+def _commands_heading_entry() -> _VirtualFile:
+    return _menu_instruction_entry("01 COMMANDS - type one command below")
+
+
+def _standard_helper_header_entries(*, include_commands: bool = True) -> List[_VirtualFile]:
+    entries = [_read_first_entry()]
+    if include_commands:
+        entries.append(_commands_heading_entry())
+    return entries
+
+
+def _command_helper_entry(order: int, command: object, description: object) -> _VirtualFile:
+    order_num = max(0, min(99, int(order)))
+    command_txt = " ".join(str(command or "").strip().upper().split())
+    description_txt = " ".join(str(description or "").strip().split())
+    if description_txt:
+        text = f"{order_num:02d} type {command_txt} - {description_txt}"
+    else:
+        text = f"{order_num:02d} type {command_txt}"
+    return _menu_instruction_entry(text)
+
+
+def _notice_entry(message: object) -> _VirtualFile:
+    message_txt = " ".join(str(message or "").strip().split()) or "Notice"
+    return _menu_instruction_entry(f"00 NOTICE - {message_txt}")
 
 
 def _quick_refresh_notice_entry(command_text: object) -> _VirtualFile:
     command = str(command_text or "").strip().upper()
     if not command:
         command = "Command"
-    return _menu_instruction_entry(f"BBS MSG - {command} received - {_refresh_action_phrase(again=True)}")
+    return _notice_entry(f"{command} received; wait {DEFAULT_BBS_REFRESH_PAUSE_SECONDS} sec, refresh again")
 
 
-def _root_location_helper_text(location: VaultLocation, *, default_location_id: str, global_code_policy: str) -> str:
+def root_location_helper_filename_preview(location: VaultLocation, *, default_location_id: str, global_code_policy: str, order: int = 20) -> str:
     alias = normalize_location_alias(location.alias, location.name)
     name = str(location.name or alias or "location").strip()
-    code_hint = " _code_" if _location_requires_code(
+    requires_code = _location_requires_code(
         location,
         default_location_id=default_location_id,
         global_code_policy=global_code_policy,
-    ) else ""
+    )
     custom = str(location.description or "").strip()
     if custom.lower() in {f"open {name}".lower(), f"to open {name}".lower()}:
         custom = ""
-    custom_suffix = f" - {custom}" if custom else ""
-    return f"BBS MSG - Type {alias}{code_hint} to open {name}, {_refresh_action_phrase()}{custom_suffix}"
+    command = f"{alias} [CODE]" if requires_code else alias
+    if requires_code:
+        description = f"open {alias} with access code"
+    else:
+        description = f"open {name}"
+    if custom:
+        description = f"{description} - {custom}"
+    return f"{max(0, min(99, int(order))):02d} type {command} - {description}.txt"
+
+
+def _root_location_helper_entry(location: VaultLocation, *, default_location_id: str, global_code_policy: str, order: int) -> _VirtualFile:
+    text = root_location_helper_filename_preview(
+        location,
+        default_location_id=default_location_id,
+        global_code_policy=global_code_policy,
+        order=order,
+    )
+    stem = text[:-4] if text.upper().endswith(".TXT") else text
+    return _menu_instruction_entry(stem)
 
 
 def _root_virtual_files(
@@ -1213,7 +1261,8 @@ def _root_virtual_files(
     flamp_enabled: bool,
     include_enabled_fallback: bool = False,
 ) -> List[_VirtualFile]:
-    entries: List[_VirtualFile] = []
+    command_entries: List[_VirtualFile] = []
+    order = 20
     for location in locations:
         if not _location_visible_in_root(
             location,
@@ -1224,37 +1273,35 @@ def _root_virtual_files(
             global_code_policy=global_code_policy,
         ):
             continue
-        entries.append(
-            _menu_instruction_entry(
-                _root_location_helper_text(
-                    location,
-                    default_location_id=default_location_id,
-                    global_code_policy=global_code_policy,
-                )
+        command_entries.append(
+            _root_location_helper_entry(
+                location,
+                default_location_id=default_location_id,
+                global_code_policy=global_code_policy,
+                order=order,
             )
         )
-    if not entries and include_enabled_fallback:
+        order += 1
+    if not command_entries and include_enabled_fallback:
         for location in locations:
             if not location.enabled or location.id == default_location_id:
                 continue
             if str(location.visibility_rule or "Public").strip() == "Hidden":
                 continue
-            entries.append(
-                _menu_instruction_entry(
-                    _root_location_helper_text(
-                        location,
-                        default_location_id=default_location_id,
-                        global_code_policy=global_code_policy,
-                    )
+            command_entries.append(
+                _root_location_helper_entry(
+                    location,
+                    default_location_id=default_location_id,
+                    global_code_policy=global_code_policy,
+                    order=order,
                 )
             )
+            order += 1
     if flamp_enabled:
-        entries.append(
-            _menu_instruction_entry(
-                f"BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - {_refresh_action_phrase()}"
-            )
-        )
-    return entries
+        command_entries.append(_command_helper_entry(order, "FLAMP", "show Flamp block fill commands"))
+    if not command_entries:
+        return []
+    return [*_standard_helper_header_entries(), *command_entries]
 
 
 def _filesystem_location_virtual_files(managed_root: object) -> List[_VirtualFile]:
@@ -1264,8 +1311,9 @@ def _filesystem_location_virtual_files(managed_root: object) -> List[_VirtualFil
         return []
     if not locations_root.exists() or not locations_root.is_dir():
         return []
-    entries: List[_VirtualFile] = []
+    command_entries: List[_VirtualFile] = []
     seen_aliases = {"ROOT"}
+    order = 20
     for child in sorted(locations_root.iterdir(), key=lambda item: item.name.lower()):
         if not child.is_dir():
             continue
@@ -1275,42 +1323,50 @@ def _filesystem_location_virtual_files(managed_root: object) -> List[_VirtualFil
         if not alias or alias in seen_aliases:
             continue
         seen_aliases.add(alias)
-        entries.append(_menu_instruction_entry(f"BBS MSG - Type {alias} to open {child.name}, {_refresh_action_phrase()}"))
-    return entries
+        command_entries.append(_command_helper_entry(order, alias, f"open {child.name}"))
+        order += 1
+    if not command_entries:
+        return []
+    return [*_standard_helper_header_entries(), *command_entries]
 
 
 def _location_virtual_files(*, include_root: bool = True) -> List[_VirtualFile]:
-    entries: List[_VirtualFile] = []
+    command_entries: List[_VirtualFile] = []
     if include_root:
-        entries.append(_menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"))
-    return entries
+        command_entries.append(_command_helper_entry(10, "ROOT", "return to main menu"))
+    if not command_entries:
+        return []
+    return [*_standard_helper_header_entries(), *command_entries]
 
 
 def _location_access_prompt_virtual_files(location: VaultLocation, *, reason: str = "code_required") -> List[_VirtualFile]:
     alias = normalize_location_alias(location.alias, location.name)
     if reason == "incorrect_code":
-        lines = [
-            f"BBS MSG - Incorrect code provided for {alias} - try again or return to ROOT",
-            f"BBS MSG - Type {alias} _code_, {_refresh_action_phrase()}",
-            f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}",
+        return [
+            _read_first_entry(),
+            _notice_entry(f"Incorrect code for {alias}"),
+            _command_helper_entry(10, f"{alias} [CODE]", "try again with access code"),
+            _command_helper_entry(11, "ROOT", "return to main menu"),
         ]
     elif reason == "callsign_restricted":
-        lines = [
-            f"BBS MSG - {location.name} is restricted to allowed callsigns",
-            f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}",
+        return [
+            _read_first_entry(),
+            _notice_entry(f"{location.name} is restricted to allowed callsigns"),
+            _command_helper_entry(10, "ROOT", "return to main menu"),
         ]
     elif reason == "cooldown":
-        lines = [
-            f"BBS MSG - {location.name} access is temporarily locked after failed attempts",
-            f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}",
+        return [
+            _read_first_entry(),
+            _notice_entry(f"{location.name} access temporarily locked after failed attempts"),
+            _command_helper_entry(10, "ROOT", "return to main menu"),
         ]
     else:
-        lines = [
-            f"BBS MSG - {location.name} requires an access code",
-            f"BBS MSG - Type {alias} _code_, {_refresh_action_phrase()}",
-            f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}",
+        return [
+            _read_first_entry(),
+            _notice_entry(f"{location.name} requires an access code"),
+            _command_helper_entry(10, f"{alias} [CODE]", "open with access code"),
+            _command_helper_entry(11, "ROOT", "return to main menu"),
         ]
-    return [_menu_instruction_entry(line) for line in lines]
 
 
 def publish_location_access_prompt_view(
@@ -1520,23 +1576,21 @@ class FlampRelayStore:
 
 
 def _flamp_queue_files(store: FlampRelayStore) -> List[_VirtualFile]:
-    entries: List[_VirtualFile] = []
+    command_entries: List[_VirtualFile] = []
+    order = 20
     for queue_id, path in sorted(store.queue_index().items()):
-        entries.append(
-            _menu_instruction_entry(
-                f"BBS MSG - LIST BLKS {queue_id} to show blocks for {path.name} - {_refresh_action_phrase()}"
-            )
-        )
-    entries.append(_menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"))
-    return entries
+        command_entries.append(_command_helper_entry(order, f"LIST BLKS {queue_id}", f"blocks for {path.name}"))
+        order += 1
+    return [*_standard_helper_header_entries(), _command_helper_entry(10, "ROOT", "return to main menu"), *command_entries]
 
 
 def _flamp_command_help_files(*, refresh_retry_command: object = "") -> List[_VirtualFile]:
     entries = [
-        _menu_instruction_entry(f"BBS MSG - LIST Q to list available FLAMP files - {_refresh_action_phrase()}"),
-        _menu_instruction_entry(f"BBS MSG - LIST BLKS F277 shows available blocks for F277 - {_refresh_action_phrase()}"),
-        _menu_instruction_entry(f"BBS MSG - BLK 0,8,9 F277 pulls blocks 0,8,9 for queueID F277 - {_refresh_action_phrase()}"),
-        _menu_instruction_entry(f"BBS MSG - ROOT to return to normal BBS menu - {_refresh_action_phrase()}"),
+        *_standard_helper_header_entries(),
+        _command_helper_entry(10, "ROOT", "return to main menu"),
+        _command_helper_entry(20, "LIST Q", "list available Flamp files"),
+        _command_helper_entry(21, "LIST BLKS F277", "show blocks for queue F277"),
+        _command_helper_entry(22, "BLK 0,8,9 F277", "request blocks 0,8,9"),
     ]
     if refresh_retry_command:
         entries.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
@@ -1580,12 +1634,14 @@ def publish_flamp_queue_list_view(
 ) -> VaultPublishResult:
     queues = store.queue_index(max_age_days=max_age_days)
     body_lines = [f"{queue_id} {path.name}" for queue_id, path in sorted(queues.items())]
-    queue_helpers = [
-        _menu_instruction_entry(f"BBS MSG - LIST BLKS {queue_id} to show blocks for {path.name} - {_refresh_action_phrase()}")
-        for queue_id, path in sorted(queues.items())
-    ]
-    queue_helpers.append(_menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"))
+    queue_helpers: List[_VirtualFile] = []
+    order = 20
+    for queue_id, path in sorted(queues.items()):
+        queue_helpers.append(_command_helper_entry(order, f"LIST BLKS {queue_id}", f"blocks for {path.name}"))
+        order += 1
     virtual_files = [
+        *_standard_helper_header_entries(),
+        _command_helper_entry(10, "ROOT", "return to main menu"),
         _VirtualFile(name=DEFAULT_FLAMP_QUEUE_HELPER_NAME, content="\n".join(body_lines) + ("\n" if body_lines else "")),
         *queue_helpers,
     ]
@@ -1630,11 +1686,13 @@ def publish_flamp_block_list_view(
         "MISSING " + (",".join(map(str, missing)) if missing else "NONE"),
     ]
     virtual_files = [
+        *_standard_helper_header_entries(),
+        _command_helper_entry(10, "ROOT", "return to main menu"),
+        _command_helper_entry(20, f"BLK 0,8,9 {requested_queue_id}", "request example blocks"),
         _VirtualFile(
             name=f"{DEFAULT_FLAMP_BLOCK_PREFIX}_{requested_queue_id}.txt",
             content="\n".join(lines) + "\n",
         ),
-        _menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"),
     ]
     if refresh_retry_command:
         virtual_files.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
@@ -1665,9 +1723,10 @@ def publish_flamp_notice_view(
     refresh_retry_command: object = "",
 ) -> VaultPublishResult:
     virtual_files = [
-        _menu_instruction_entry(f"BBS MSG - {message} - {_refresh_action_phrase()}"),
-        _menu_instruction_entry(f"BBS MSG - LIST Q to list available FLAMP files - {_refresh_action_phrase()}"),
-        _menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"),
+        _read_first_entry(),
+        _notice_entry(message),
+        _command_helper_entry(10, "ROOT", "return to main menu"),
+        _command_helper_entry(20, "LIST Q", "list available Flamp files"),
     ]
     if refresh_retry_command:
         virtual_files.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
@@ -1723,8 +1782,9 @@ def publish_flamp_block_overlay_view(
         raise ValueError(f"Requested block(s) not present for queue {queue_id}: {', '.join(missing)}")
     overlay_name = f"{DEFAULT_FLAMP_FILE_PREFIX}_{relay_info['file_id']}_BLK_{'_'.join(delivered)}.txt"
     virtual_files = [
+        *_standard_helper_header_entries(),
+        _command_helper_entry(10, "ROOT", "return to main menu"),
         _VirtualFile(name=overlay_name, content="\n".join(combined_blocks) + "\n"),
-        _menu_instruction_entry(f"BBS MSG - Type ROOT to return to main menu, {_refresh_action_phrase()}"),
     ]
     if refresh_retry_command:
         virtual_files.insert(0, _quick_refresh_notice_entry(refresh_retry_command))

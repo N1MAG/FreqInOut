@@ -184,6 +184,9 @@ BBS_AUTO_ARCHIVE_INTERVAL_SECONDS = 24 * 60 * 60  # once daily max
 BBS_AUTO_ARCHIVE_LAST_CHECK_KEY = "varac_bbs_auto_archive_last_check_ts"
 BBS_HELPER_FILE_PREFIXES = (
     "BBS MSG - ",
+    "00 READ FIRST -",
+    "00 NOTICE -",
+    "01 COMMANDS -",
     "BBS_QUEUE_LIST",
     "BBS_BLOCK_LIST",
 )
@@ -191,7 +194,9 @@ BBS_HELPER_FILE_PREFIXES = (
 
 def _is_fio_bbs_helper_file_name(name: object) -> bool:
     clean = Path(str(name or "").strip()).name.upper()
-    return any(clean.startswith(prefix.upper()) for prefix in BBS_HELPER_FILE_PREFIXES)
+    return any(clean.startswith(prefix.upper()) for prefix in BBS_HELPER_FILE_PREFIXES) or bool(
+        re.match(r"^\d{2} TYPE .+\.TXT$", clean)
+    )
 
 
 @dataclass
