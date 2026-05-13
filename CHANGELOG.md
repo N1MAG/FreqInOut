@@ -1,5 +1,8 @@
 # Changelog
 
+## [1.2.3.2]
+- Fixed: Windows packaged builds now sanitize inherited Qt/Python development environment variables before importing PySide, avoiding native startup crashes caused by stale development `QT_PLUGIN_PATH`, QML, or Python path settings on machines that were also used for FreqInOut development.
+
 ## [1.2.3.1]
 - Fixed: Windows release packaging now runs a packaged executable smoke test before publishing the installer, catching launch-time packaging failures before the `.exe` reaches GitHub releases.
 - Changed: startup failures now write `startup-error.log` beside the normal FreqInOut log directory so Windows users have a clear diagnostic file when the GUI cannot open.

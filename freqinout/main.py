@@ -68,6 +68,9 @@ def main():
         help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
+    sanitized_env = os.environ.get("FREQINOUT_SANITIZED_ENV_VARS", "").strip()
+    if sanitized_env:
+        log.warning("Sanitized inherited frozen runtime environment variables: %s", sanitized_env)
 
     if args.update:
         from freqinout.core import updater
