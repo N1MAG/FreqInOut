@@ -46,12 +46,13 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           FREQINOUT_HARD_EXIT: "0"
         run: |
-          & ".\dist\FreqInOut\FreqInOut.exe" --smoke-test
-          if ($LASTEXITCODE -ne 0) {
+          $exe = Resolve-Path ".\dist\FreqInOut\FreqInOut.exe"
+          $process = Start-Process -FilePath $exe -ArgumentList "--smoke-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
             if (Test-Path "$env:FREQINOUT_CONFIG_DIR\startup-error.log") {
               Get-Content "$env:FREQINOUT_CONFIG_DIR\startup-error.log"
             }
-            throw "Packaged FreqInOut smoke test failed with exit code $LASTEXITCODE"
+            throw "Packaged FreqInOut smoke test failed with exit code $($process.ExitCode)"
           }
 
       - name: Install Inno Setup
