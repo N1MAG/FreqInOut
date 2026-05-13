@@ -159,6 +159,8 @@ def test_clearsign_file_passes_selected_signer(monkeypatch, tmp_path: Path) -> N
     assert ok, detail
     assert calls == [
         [
+            "--pinentry-mode",
+            "error",
             "--armor",
             "--clearsign",
             "--output",
@@ -168,6 +170,25 @@ def test_clearsign_file_passes_selected_signer(monkeypatch, tmp_path: Path) -> N
             str(src),
         ]
     ]
+
+
+def test_clearsign_file_reports_timeout_without_raw_command(monkeypatch, tmp_path: Path) -> None:
+    src = tmp_path / "Report.k2s"
+    dst = tmp_path / "Report-sig.k2s"
+    src.write_text("payload", encoding="utf-8")
+
+    def fake_run_gpg(gpg_path: str, args: list[str], **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["gpg", "--clearsign", str(src)], timeout=10.0)
+
+    monkeypatch.setattr(gpg_tools, "resolve_gpg_executable", lambda configured_path="": "/usr/bin/gpg")
+    monkeypatch.setattr(gpg_tools, "_run_gpg", fake_run_gpg)
+
+    ok, detail = clearsign_file(src, output_path=dst)
+
+    assert not ok
+    assert "private key may require a passphrase" in detail
+    assert "Command" not in detail
+    assert str(src) not in detail
 
 
 def test_auth_candidates_are_origin_and_suffix_bounded(tmp_path: Path) -> None:
