@@ -19,6 +19,10 @@
     .warn { background: #fff7e6; border-left: 4px solid #e0a106; }
     table { border-collapse: collapse; width: 100%; margin: 10px 0; }
     th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
+    .learning-table th:nth-child(1), .learning-table td:nth-child(1) { width: 18%; }
+    .learning-table th:nth-child(2), .learning-table td:nth-child(2) { width: 24%; }
+    .learning-table th:nth-child(3), .learning-table td:nth-child(3) { width: 34%; }
+    .learning-table th:nth-child(4), .learning-table td:nth-child(4) { width: 24%; }
   </style>
 </head>
 <body>
@@ -32,8 +36,8 @@
   <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
   <p><strong>How to use this guide</strong>: if you are new, read the sections in operational order instead of treating this as a pure control catalog. Start with <a href="#settings">Settings</a> and <a href="#multi-rig-configuration">Multi-Rig Configuration</a>, then the schedule tabs, then the live operating tabs such as <a href="#controlfreq">ControlFreq</a>, <a href="#messages">Messages</a>, and <a href="#map">Map</a>. If you are already operating, use the guide as a workflow map: when one tab seems confusing, the answer is often explained in a related tab or settings section.</p>
   <ul class="section-list">
-    <li><strong>How</strong>: each section explains what the controls do.</li>
-    <li><strong>Why</strong>: each major tab also explains what operational problem it solves so you know when to use it.</li>
+    <li><strong>How</strong>: each section explains what the controls do and what operator decision they support.</li>
+    <li><strong>Why</strong>: each major tab, tab section, and nested workflow explains what operational problem it solves so you know when to use it.</li>
     <li><strong>Where it interacts</strong>: FreqInOut is intentionally cross-connected. In multi-rig, many surfaces also depend on which device is currently the <code>Station Default</code> shell.</li>
   </ul>
 
@@ -44,18 +48,18 @@
   <h2 id="quick-start">Quick Start</h2>
   <p><strong>Goal</strong>: build a multi-radio station in the same order the application expects to reason about it. Multi-rig becomes much easier to use when you think in layers: operator identity first, then device definitions, then operating profiles, then assignments, then schedules, then operating tabs. Quick Start is intentionally explanatory so a new user understands not only what to click, but why the sequence matters.</p>
   <ol class="section-list">
-    <li><strong>1) Begin with <a href="#settings-operator-info">Operator Information</a></strong>: callsign, name, state, and grid still matter globally in multi-rig. These values drive filenames, compose defaults, operator matching, map context, and several station-level workflows even though device control is split across profiles.</li>
-    <li><strong>2) Read <a href="#multi-rig-configuration">Multi-Rig Configuration</a> before building anything else</strong>: this section explains the most important concept in the current design, which is that one device acts as the <code>Station Default</code> compatibility shell even while other devices may be active. If you understand that idea early, the rest of Settings becomes much more intuitive.</li>
-    <li><strong>3) Build <a href="#settings-device-profiles">Device Profiles</a> first</strong>: define each radio or observer endpoint, its control method, launch behavior, shared RF/PTT groups, and device-local VarAC data. Device Profiles are the source of truth for what each radio actually is.</li>
-    <li><strong>4) Build <a href="#settings-operating-profiles">Operating Profiles</a> next</strong>: decide how each device should behave when it becomes the Station Default shell. This is where you choose whether scheduler automation, Messages, Map, Launch Control, and other major surfaces are active for that operating style.</li>
-    <li><strong>5) Apply <a href="#settings-device-assignments">Device Assignments</a> and choose the <code>Station Default</code></strong>: assignments connect devices to operating intent. The Station Default selection determines which radio the legacy/core tabs are currently projecting. This is why a user can have several active radios but still see one primary shell in ControlFreq, Messages, and most operating tabs.</li>
-    <li><strong>6) Configure projected software sections only after the Station Default is understood</strong>: review <a href="#settings-js8call-details">JS8Call Settings Details</a>, <a href="#settings-fast-light-details">Fast Light Settings Details</a>, and <a href="#settings-varac-details">VarAC Settings Details</a> as the current projection of the Station Default device. These sections are still important, but in multi-rig they are easier to understand after the device/profile/assignment model is clear.</li>
-    <li><strong>7) Add optional station-wide helpers only after the primary device model works</strong>: use <a href="#settings-custom-tools-details">Custom Tools Details</a> for scripts and helper launchers that are not radio-specific integrations, then review <a href="#settings-launch-control">Launch Control</a> if you want FIO to launch software for the current shell.</li>
-    <li><strong>8) Build your operating plan</strong>: define your shared operating logic in <a href="#settings-hf-groups">HF Operating Groups</a>, then create schedules in <a href="#hf-daily">HF Daily</a> and <a href="#hf-nets">HF Nets</a>. In multi-rig, schedules only make good sense after the Station Default and assignment logic are settled.</li>
-    <li><strong>9) Use <a href="#station-overview">Station Overview</a> as your truth-check</strong>: confirm which device is the current <code>Station Default</code>, which profiles are active, whether temporary overrides are in effect, and whether RF/PTT or VarAC cluster warnings need attention. This tab is one of the most important “why does the app look this way right now?” tools in multi-rig.</li>
-    <li><strong>10) Validate the live operating picture in <a href="#freqplanner">FreqPlanner</a> and <a href="#controlfreq">ControlFreq</a></strong>: FreqPlanner helps verify plan logic; ControlFreq shows what the current Station Default shell believes it should do now. If either looks wrong, revisit Settings and Station Overview before assuming the scheduler is incorrect.</li>
-    <li><strong>11) Move into operating tabs only after the shell is trustworthy</strong>: use <a href="#messages">Messages</a>, <a href="#map">Map</a>, and <a href="#sop-builder">SOP Builder</a> once the device and assignment model is stable. These tabs are powerful, but they are much easier to interpret when you already know which radio/profile shell they are following.</li>
-    <li><strong>12) Use the NCS tabs only for active role-based operation</strong>: <a href="#ncs-fldigi-ssb">FLDigi / SSB</a>, <a href="#ncs-js8call">JS8Call</a>, and <a href="#ncs-vhf-uhf">VHF/UHF</a> assume you already have a coherent multi-rig station definition and now need operating support for a specific net-control role.</li>
+    <li><strong>Begin with <a href="#settings-operator-info">Operator Information</a></strong>: callsign, name, state, and grid still matter globally in multi-rig. These values drive filenames, compose defaults, operator matching, map context, and several station-level workflows even though device control is split across profiles.</li>
+    <li><strong>Read <a href="#multi-rig-configuration">Multi-Rig Configuration</a> before building anything else</strong>: this section explains the most important concept in the current design, which is that one device acts as the <code>Station Default</code> compatibility shell even while other devices may be active. If you understand that idea early, the rest of Settings becomes much more intuitive.</li>
+    <li><strong>Build <a href="#settings-device-profiles">Device Profiles</a> first</strong>: define each radio or observer endpoint, its control method, launch behavior, shared RF/PTT groups, and device-local VarAC data. Device Profiles are the source of truth for what each radio actually is.</li>
+    <li><strong>Build <a href="#settings-operating-profiles">Operating Profiles</a> next</strong>: decide how each device should behave when it becomes the Station Default shell. This is where you choose whether scheduler automation, Messages, Map, Launch Control, and other major surfaces are active for that operating style.</li>
+    <li><strong>Apply <a href="#settings-device-assignments">Device Assignments</a> and choose the <code>Station Default</code></strong>: assignments connect devices to operating intent. The Station Default selection determines which radio the legacy/core tabs are currently projecting. This is why a user can have several active radios but still see one primary shell in ControlFreq, Messages, and most operating tabs.</li>
+    <li><strong>Configure projected software sections only after the Station Default is understood</strong>: review <a href="#settings-js8call-details">JS8Call Settings Details</a>, <a href="#settings-fast-light-details">Fast Light Settings Details</a>, and <a href="#settings-varac-details">VarAC Settings Details</a> as the current projection of the Station Default device. These sections are still important, but in multi-rig they are easier to understand after the device/profile/assignment model is clear.</li>
+    <li><strong>Add optional station-wide helpers only after the primary device model works</strong>: use <a href="#settings-custom-tools-details">Custom Tools Details</a> for scripts and helper launchers that are not radio-specific integrations, then review <a href="#settings-launch-control">Launch Control</a> if you want FIO to launch software for the current shell.</li>
+    <li><strong>Build your operating plan</strong>: define your shared operating logic in <a href="#settings-hf-groups">HF Operating Groups</a>, then create schedules in <a href="#hf-daily">HF Daily</a> and <a href="#hf-nets">HF Nets</a>. In multi-rig, schedules only make good sense after the Station Default and assignment logic are settled.</li>
+    <li><strong>Use <a href="#station-overview">Station Overview</a> as your truth-check</strong>: confirm which device is the current <code>Station Default</code>, which profiles are active, whether temporary overrides are in effect, and whether RF/PTT or VarAC cluster warnings need attention. This tab is one of the most important “why does the app look this way right now?” tools in multi-rig.</li>
+    <li><strong>Validate the live operating picture in <a href="#freqplanner">FreqPlanner</a> and <a href="#controlfreq">ControlFreq</a></strong>: FreqPlanner helps verify plan logic; ControlFreq shows what the current Station Default shell believes it should do now. If either looks wrong, revisit Settings and Station Overview before assuming the scheduler is incorrect.</li>
+    <li><strong>Move into operating tabs only after the shell is trustworthy</strong>: use <a href="#messages">Messages</a>, <a href="#map">Map</a>, and <a href="#sop-builder">SOP Builder</a> once the device and assignment model is stable. These tabs are powerful, but they are much easier to interpret when you already know which radio/profile shell they are following.</li>
+    <li><strong>Use the NCS tabs only for active role-based operation</strong>: <a href="#ncs-fldigi-ssb">FLDigi / SSB</a>, <a href="#ncs-js8call">JS8Call</a>, and <a href="#ncs-vhf-uhf">VHF/UHF</a> assume you already have a coherent multi-rig station definition and now need operating support for a specific net-control role.</li>
   </ol>
   <div class="callout">
     Recommended first-run mindset: in multi-rig, do not start with the schedule tabs. Start by teaching FreqInOut what radios exist, how they behave, and which one currently owns the compatibility shell. Once that foundation is correct, schedule behavior and operating tabs become much easier to trust.
@@ -68,15 +72,15 @@
 
   <h3 id="multi-rig-setup-order">Recommended Setup Order</h3>
   <ol class="section-list">
-    <li><strong>1) Build <a href="#settings-device-profiles">Device Profiles</a> first</strong>: create one row for each radio/control endpoint you want to manage. This is where you define control backend, deployment mode, backend endpoints, launch path, device-local VarAC paths, optional observer/SDR endpoint, and shared resource labels such as <code>PTT Group</code>, <code>Antenna Group</code>, <code>Front-End Group</code>, and <code>Amplifier Group</code>.</li>
-    <li><strong>2) Mark the runtime-active devices and choose one <code>Station Default</code></strong>: use <code>Activate</code> for devices that should participate in the running station, then use <code>Set Station Default</code> on the one device that should drive the current compatibility shell. Existing primary tabs continue to control that device.</li>
-    <li><strong>3) Create <a href="#settings-operating-profiles">Operating Profiles</a></strong>: define the shell policy you want a device to use when it becomes the Station Default. This is where you enable or suppress scheduler automation, Messages, Map, background ingest, Launch Control, and the net-control tabs. Preferred bands and <code>Allow profile swap coordination</code> also live here.</li>
-    <li><strong>4) Apply <a href="#settings-device-assignments">Device Assignments</a></strong>: assign the intended operating profile to each device. Use <code>Temporary Override</code> when you want a different shell policy now without rewriting the baseline assignment, and use <code>Restore Default</code> when that temporary policy is no longer needed.</li>
-    <li><strong>5) Use <code>Temporary Swap...</code> only when you need to move the Station Default runtime temporarily</strong>: the recommended mode is <code>Use target device profile</code>, which changes the Station Default device without rewriting that target device's current effective profile. <code>Carry current primary profile</code> is only available when the current primary operating profile explicitly allows it.</li>
-    <li><strong>6) Group shared transmit and RF resources before operating</strong>: matching <code>PTT Group</code> values create hard shared-PTT protection, while matching antenna/front-end/amplifier groups raise prompt-first RF conflict warnings before scheduler or QSY changes proceed.</li>
-    <li><strong>7) Configure device-local VarAC data in Device Profiles before you build clusters</strong>: per-device VarAC install path, DB path, INI path, and optional launch command stay with the device profile. Shared-cluster identity is configured later in <a href="#settings-varac-clusters">VarAC Clusters</a> and <a href="#settings-varac-memberships">VarAC Memberships</a>.</li>
-    <li><strong>8) Create VarAC clusters, then memberships, then select the gateway handler</strong>: create the cluster record first, assign enabled non-observer devices with unique instance numbers, and then return to the cluster editor to choose the gateway handler from the enabled members.</li>
-    <li><strong>9) Confirm the result in Station Overview before trusting live control</strong>: verify the Station Default badge, active device cards, shared PTT/RF warnings, observer follow guidance, VarAC cluster summaries, and any temporary-swap notices.</li>
+    <li><strong>Build <a href="#settings-device-profiles">Device Profiles</a> first</strong>: create one row for each radio/control endpoint you want to manage. This is where you define control backend, deployment mode, backend endpoints, launch path, device-local VarAC paths, optional observer/SDR endpoint, and shared resource labels such as <code>PTT Group</code>, <code>Antenna Group</code>, <code>Front-End Group</code>, and <code>Amplifier Group</code>.</li>
+    <li><strong>Mark the runtime-active devices and choose one <code>Station Default</code></strong>: use <code>Activate</code> for devices that should participate in the running station, then use <code>Set Station Default</code> on the one device that should drive the current compatibility shell. Existing primary tabs continue to control that device.</li>
+    <li><strong>Create <a href="#settings-operating-profiles">Operating Profiles</a></strong>: define the shell policy you want a device to use when it becomes the Station Default. This is where you enable or suppress scheduler automation, Messages, Map, background ingest, Launch Control, and the net-control tabs. Preferred bands and <code>Allow profile swap coordination</code> also live here.</li>
+    <li><strong>Apply <a href="#settings-device-assignments">Device Assignments</a></strong>: assign the intended operating profile to each device. Use <code>Temporary Override</code> when you want a different shell policy now without rewriting the baseline assignment, and use <code>Restore Default</code> when that temporary policy is no longer needed.</li>
+    <li><strong>Use <code>Temporary Swap...</code> only when you need to move the Station Default runtime temporarily</strong>: the recommended mode is <code>Use target device profile</code>, which changes the Station Default device without rewriting that target device's current effective profile. <code>Carry current primary profile</code> is only available when the current primary operating profile explicitly allows it.</li>
+    <li><strong>Group shared transmit and RF resources before operating</strong>: matching <code>PTT Group</code> values create hard shared-PTT protection, while matching antenna/front-end/amplifier groups raise prompt-first RF conflict warnings before scheduler or QSY changes proceed.</li>
+    <li><strong>Configure device-local VarAC data in Device Profiles before you build clusters</strong>: per-device VarAC install path, DB path, INI path, and optional launch command stay with the device profile. Shared-cluster identity is configured later in <a href="#settings-varac-clusters">VarAC Clusters</a> and <a href="#settings-varac-memberships">VarAC Memberships</a>.</li>
+    <li><strong>Create VarAC clusters, then memberships, then select the gateway handler</strong>: create the cluster record first, assign enabled non-observer devices with unique instance numbers, and then return to the cluster editor to choose the gateway handler from the enabled members.</li>
+    <li><strong>Confirm the result in Station Overview before trusting live control</strong>: verify the Station Default badge, active device cards, shared PTT/RF warnings, observer follow guidance, VarAC cluster summaries, and any temporary-swap notices.</li>
   </ol>
 
   <h3 id="multi-rig-settings-reference">Settings Configuration Reference</h3>
@@ -113,6 +117,179 @@
       <tr><td>Schedules</td><td><code>HF Daily</code>, <code>HF Nets</code>, <code>HF Peers</code></td></tr>
       <tr><td>Operators</td><td><code>HF Callsigns</code>, <code>Local Callsigns</code></td></tr>
       <tr><td>Other</td><td><code>SOP Builder</code>, <code>Settings</code>, <code>Help</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="main-menu-learning-map">Explain Each Tab</h3>
+  <p>Use this as the plain-language map before the control details. Each tab answers one operator question. The sections inside that tab break the question into smaller decisions.</p>
+  <table class="learning-table">
+    <thead>
+      <tr><th>Tab</th><th>Explain This</th><th>Sections Inside It</th><th>Why It Matters</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><a href="#controlfreq">ControlFreq</a></td>
+        <td>This is the live "what now?" screen for the current Station Default.</td>
+        <td>Actions control refresh, filters, time display, focus mode, QSY, and temporary holds. Tables explain recent activity, schedule intersections, message status, upcoming schedule rows, and propagation.</td>
+        <td>Use this as the live dashboard. It does not create the plan; it tells you what the selected station shell, saved plan, current software status, and recent evidence mean right now.</td>
+      </tr>
+      <tr>
+        <td><a href="#station-overview">Station Overview</a></td>
+        <td>This shows which radio/device profile is active and whether the multi-rig model is healthy.</td>
+        <td>The overview summarizes device profiles, station-default state, runtime readiness, and profile relationships.</td>
+        <td>Use it when something looks like it belongs to the wrong radio. In multi-rig, many screens follow the Station Default projection.</td>
+      </tr>
+      <tr>
+        <td><a href="#freqplanner">FreqPlanner</a></td>
+        <td>This is the week-at-a-glance schedule sanity check.</td>
+        <td>The display toggles help you compare Local/UTC time and Band/Frequency views without editing the schedule.</td>
+        <td>Use it after schedule or SOP edits to catch coverage gaps, crowded periods, or surprising active windows before operating.</td>
+      </tr>
+      <tr>
+        <td><a href="#messages">Messages</a></td>
+        <td>This is the traffic inbox and outbound staging area.</td>
+        <td>Header actions manage scanning and exports. Pending JS8 MSGs are retrieval tasks. The main table is the inbox. Compose and Staging creates outbound form files. BBS Archive handles VarAC published-file hygiene.</td>
+        <td>Messages is both an inbox and a source of status evidence. Rows you review here can affect Map, operator history, SitRep summaries, and BBS workflows.</td>
+      </tr>
+      <tr>
+        <td><a href="#map">Map</a></td>
+        <td>This is the visual operating picture.</td>
+        <td>Top controls filter the view. The control drawer manages layers and propagation. Paths, Paths To, Peer Sched Now, and SitRep Status explain different kinds of evidence.</td>
+        <td>Use Map for decision support, not certainty. It combines schedules, activity, operator data, and SitRep/CommStat evidence for the current shell owner.</td>
+      </tr>
+      <tr>
+        <td><a href="#ncs-fldigi-ssb">FLDigi / SSB</a></td>
+        <td>This is the live FLDigi or voice net-control desk.</td>
+        <td>Session and Macro Workspace defines the net and macro behavior. Local Roster tracks live check-ins. Compare/Reference/Review reconciles outside lists and uncertain log candidates. Macro Mapping teaches FIO what each macro means.</td>
+        <td>Use this once station setup and schedules are stable. It turns a live net into organized categories, generated macro files, and saved check-in history.</td>
+      </tr>
+      <tr>
+        <td><a href="#ncs-js8call">JS8Call</a></td>
+        <td>This is the JS8 net-control desk.</td>
+        <td>Session controls define role, group target, and expected query. Check-ins show who has participated. ACK and Query actions send group or callsign-specific responses.</td>
+        <td>Use this to decide who has checked in, who has been acknowledged, and who still needs a requested response.</td>
+      </tr>
+      <tr>
+        <td><a href="#ncs-vhf-uhf">VHF/UHF</a></td>
+        <td>This is the local net log and status board.</td>
+        <td>Session Workflow starts or joins the local net. Lookup and filters manage entries. The selected-entry editor records status and persistent notes.</td>
+        <td>Use this for local operator status that may never arrive through JS8, FLDigi, or VarAC.</td>
+      </tr>
+      <tr>
+        <td><a href="#hf-daily">HF Daily</a></td>
+        <td>This is the normal HF schedule.</td>
+        <td>Active Schedule is the live baseline. Schedule Resources is a candidate library. SOP Schedule Status shows how active SOP windows modify or conflict with the baseline.</td>
+        <td>Rows saved here drive scheduler behavior, ControlFreq, FreqPlanner, and Map schedule context.</td>
+      </tr>
+      <tr>
+        <td><a href="#hf-nets">HF Nets</a></td>
+        <td>This is the schedule for named nets.</td>
+        <td>Net Schedule stores active net rows. Net Resources stores reusable catalog rows. Manage Net/SOP Policies records priority decisions when nets overlap active SOP windows.</td>
+        <td>Use this when an event is not just baseline monitoring. Nets can carry names, early windows, FLDigi expectations, and priority decisions.</td>
+      </tr>
+      <tr>
+        <td><a href="#hf-peers">HF Peers</a></td>
+        <td>This shows other operators' planned HF availability.</td>
+        <td>Import, refresh, delete, time display, and filters help you maintain peer schedule evidence by callsign, region, group, and overlap.</td>
+        <td>Peer data supports planning and Map overlays. It is intent data, so compare it with actual traffic before making critical decisions.</td>
+      </tr>
+      <tr>
+        <td><a href="#hf-callsigns">HF Callsigns</a></td>
+        <td>This is the HF operator roster.</td>
+        <td>Search and filters find operators. Manage Operators edits roster records. Import/Export moves roster data. SitRep actions set latest operator status.</td>
+        <td>This roster gives names, state, grid, groups, trust, and history to many other tabs.</td>
+      </tr>
+      <tr>
+        <td><a href="#local-callsigns">Local Callsigns</a></td>
+        <td>This is the local operator roster.</td>
+        <td>Search/category filters find local operators. Add/Edit/Delete and Import/Export maintain the roster used by local workflows.</td>
+        <td>This data feeds Local NCS and local reporting. It is separate from HF because local nets often need different categories and notes.</td>
+      </tr>
+      <tr>
+        <td><a href="#sop-builder">SOP Builder</a></td>
+        <td>This is where alternate operating plans are built.</td>
+        <td>Top-level actions manage the SOP. Versions preserve drafts. Profile fields define identity and activation. Action rows describe what to do. Conflict prompts and export modal handle review and sharing.</td>
+        <td>SOPs are alternate operating postures, not ordinary schedule rows. Activating one can reshape HF Daily's effective schedule and require Net/SOP priority choices.</td>
+      </tr>
+      <tr>
+        <td><a href="#settings">Settings</a></td>
+        <td>This tells FIO who you are, which radios exist, and what station software they use.</td>
+        <td>Operator, FreqInOut, device profiles, operating profiles, assignments, JS8Call, Fast Light, groups, VarAC, Message Auth, Custom Tools, Launch Control, and Diagnostics sections each define one part of station behavior.</td>
+        <td>Most other tabs are downstream of Settings. In multi-rig, Settings is also where the compatibility view for the current Station Default is projected.</td>
+      </tr>
+      <tr>
+        <td><a href="#help">Help</a></td>
+        <td>This is the built-in guide.</td>
+        <td>The table of contents jumps by heading, focused help buttons open a nearby section, and PDF export gives an offline copy.</td>
+        <td>Use Help as a map of relationships. If a screen looks wrong, read the cross-tab notes to find the upstream setting, roster, schedule, or message source.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p><strong>Section language</strong>: this guide uses "section" for collapsible panels or major areas inside a tab, and "sub-tab" for nested tabbed workspaces such as Messages Compose, FLDigi Compare/Reference/Review, or dialogs with multiple option groups. Read those sections as workflow explanations first and control references second.</p>
+
+  <h3 id="main-menu-section-explainers">Explain Each Section and Sub-Tab</h3>
+  <p>These short explanations are for the moments when you can see a section name but are not yet sure why you would open it.</p>
+  <table>
+    <thead>
+      <tr><th>Section or Sub-Tab</th><th>Plain Explanation</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><a href="#multi-rig-setup-order">Multi-Rig Setup Order</a></td><td>This is the safest order for defining radios, operating profiles, assignments, and the Station Default shell.</td></tr>
+      <tr><td><a href="#multi-rig-settings-reference">Multi-Rig Settings Reference</a></td><td>This explains which Settings sections are global and which ones are projected from the selected device profile.</td></tr>
+      <tr><td><a href="#controlfreq-actions">ControlFreq Actions</a></td><td>Use these when you need to refresh the live picture, narrow it down, move frequency, or pause schedule control temporarily.</td></tr>
+      <tr><td><a href="#controlfreq-tables">ControlFreq Tables</a></td><td>These tables explain why ControlFreq thinks the current shell is on schedule, busy, changing soon, or seeing activity.</td></tr>
+      <tr><td><a href="#messages-header-actions">Messages Header Actions</a></td><td>These are inbox-wide tools: refresh, export, delete selected rows, mark traffic read, and hide noisy message types.</td></tr>
+      <tr><td><a href="#messages-pending">Pending JS8 MSGs</a></td><td>This is the to-do list for JS8 messages that have been announced but still need retrieval or acknowledgement.</td></tr>
+      <tr><td><a href="#messages-main-table">Messages Table</a></td><td>This is the main traffic list. Use the filters first, then open, flag, archive, delete, or publish the rows that matter.</td></tr>
+      <tr><td><a href="#messages-compose">Compose and Staging</a></td><td>This is where you build outbound form traffic and stage the files for FLMsg, FLAmp, VarAC Outbox, or VarAC BBS use.</td></tr>
+      <tr><td><a href="#messages-bbs-archive">BBS Archive and Auto-Archive</a></td><td>This keeps the live VarAC BBS folder useful by moving old published files aside without losing them.</td></tr>
+      <tr><td><a href="#map-top-controls">Top Map Controls</a></td><td>These quickly answer “which operators, paths, bands, regions, or recent traffic do I want to see?”</td></tr>
+      <tr><td><a href="#map-drawer">Map Control Drawer</a></td><td>This is for deeper map display choices such as layers, city density, grids, and propagation overlays.</td></tr>
+      <tr><td><a href="#map-paths">Paths, Paths To, and Peer Sched Now</a></td><td>Use these when you are thinking about reachability, relay possibilities, or who is likely scheduled now.</td></tr>
+      <tr><td><a href="#ncs-fldigi-session-workspace">FLDigi Session and Macro Workspace</a></td><td>This tells the tab what net you are running and how your FLDigi macros should support that net.</td></tr>
+      <tr><td><a href="#ncs-fldigi-roster">FLDigi Local Roster and Categories</a></td><td>This is the live check-in list, organized into practical buckets like traffic, no traffic, late, and seen locally.</td></tr>
+      <tr><td><a href="#ncs-fldigi-compare-workspace">FLDigi Compare, Reference, and Review</a></td><td>Use this to compare your roster with another list and to approve uncertain log-assisted check-ins before they become real roster entries.</td></tr>
+      <tr><td><a href="#ncs-fldigi-macro-mapping">FLDigi Macro Mapping Dialog</a></td><td>This is where you teach FIO what your FLDigi macro buttons mean so generated check-in files and labels line up with your workflow.</td></tr>
+      <tr><td><a href="#ncs-fldigi-lifecycle">FLDigi Net Lifecycle</a></td><td>Start, save, and end the net here so the working files and final archive match what actually happened.</td></tr>
+      <tr><td><a href="#ncs-js8-session-controls">JS8 Session, Group, and Expect-Query Controls</a></td><td>This sets the role, group target, refresh timing, and expected follow-up form for JS8 net work.</td></tr>
+      <tr><td><a href="#ncs-js8-checkins">JS8 Check-ins and Status Tracking</a></td><td>This shows who has appeared in the JS8 workflow and which stations still need operator attention.</td></tr>
+      <tr><td><a href="#ncs-js8-actions">JS8 ACK and Query Actions</a></td><td>Use these to acknowledge stations or ask for the expected response, either by group or by selected callsign.</td></tr>
+      <tr><td><a href="#ncs-js8-query-notes">JS8 Query Workflow Notes</a></td><td>This explains what FIO does and does not automate so you know when the operator is still in control.</td></tr>
+      <tr><td><a href="#ncs-vhf-session-workflow">Local NCS Session Workflow</a></td><td>This opens, joins, or closes the local net session so check-ins belong to the right event.</td></tr>
+      <tr><td><a href="#ncs-vhf-entry-management">Local NCS Lookup, Filters, and Entries</a></td><td>This is how you find local operators, add check-ins, narrow the table, refresh, and export the session.</td></tr>
+      <tr><td><a href="#ncs-vhf-editor">Local NCS Selected Entry Editor</a></td><td>This is where one operator's current local status and notes are edited safely during the net.</td></tr>
+      <tr><td><a href="#hf-daily-active">HF Daily Active Schedule</a></td><td>This is the schedule the station normally follows when no higher-priority SOP or net rule changes it.</td></tr>
+      <tr><td><a href="#hf-daily-resources">HF Daily Schedule Resources</a></td><td>This is the holding area for schedule rows you might add later without making them active yet.</td></tr>
+      <tr><td><a href="#hf-daily-sop-status">HF Daily SOP Schedule Status</a></td><td>This tells you whether an active HF SOP has cleanly merged with the normal HF schedule or still needs attention.</td></tr>
+      <tr><td><a href="#hf-daily-sop-workflow">HF Daily SOP Review Workflow</a></td><td>Follow this after saving or activating an HF SOP to confirm the real runtime schedule.</td></tr>
+      <tr><td><a href="#hf-nets-schedule">HF Nets Schedule</a></td><td>This is the active list of named nets the station should know about.</td></tr>
+      <tr><td><a href="#hf-nets-resources">HF Nets Resources</a></td><td>This is the catalog of reusable net rows before they are added to the active net schedule.</td></tr>
+      <tr><td><a href="#hf-nets-policy-manager">Net/SOP Policies Dialog</a></td><td>This records whether a net or an SOP wins when their time windows overlap.</td></tr>
+      <tr><td><a href="#hf-nets-sop-workflow">Net/SOP Conflict Review</a></td><td>Use this when a net and an active SOP both want control at the same time.</td></tr>
+      <tr><td><a href="#hf-callsigns-actions">HF Callsigns Actions</a></td><td>These are the roster-maintenance tools for searching, editing, importing, exporting, trusting, tagging, and setting SitRep status.</td></tr>
+      <tr><td><a href="#sop-builder-actions">SOP Builder Top-Level Actions</a></td><td>These manage the SOP as a whole: create, save, delete, version, import/export, and PDF output.</td></tr>
+      <tr><td><a href="#sop-builder-versions">SOP Versions</a></td><td>Versions are named drafts, useful when you want to keep several possible plans without making all of them active.</td></tr>
+      <tr><td><a href="#sop-builder-fields">SOP Profile Fields</a></td><td>These name the SOP, choose HF or local scope, and decide whether the saved profile should become active.</td></tr>
+      <tr><td><a href="#sop-builder-table">SOP Action Rows Table</a></td><td>Each row says what to do, when to do it, who or what it targets, and whether it conflicts with another plan.</td></tr>
+      <tr><td><a href="#sop-builder-workflow">Recommended HF SOP Workflow</a></td><td>This is the safest order for building, reviewing, saving, and validating an HF SOP.</td></tr>
+      <tr><td><a href="#sop-builder-conflicts">SOP Conflict Prompts</a></td><td>These prompts keep FIO from guessing when two plans disagree about timing or priority.</td></tr>
+      <tr><td><a href="#sop-builder-after-save">After Saving an Active HF SOP</a></td><td>This explains what to check next so the active SOP really affects the schedule the way you intended.</td></tr>
+      <tr><td><a href="#sop-builder-export-pdf">SOP Export PDF Modal</a></td><td>This controls what the printed or shared SOP includes, such as time display and roster appendices.</td></tr>
+      <tr><td><a href="#settings-sections">Settings Sections</a></td><td>This is the index of station setup areas. Start here when a feature is missing or disabled.</td></tr>
+      <tr><td><a href="#settings-operator-info">Operator Information</a></td><td>This is your station identity. It affects filenames, messages, map position, and operator matching.</td></tr>
+      <tr><td><a href="#settings-freqinout-details">FreqInOut Settings Details</a></td><td>These choices control the app's look, scheduler behavior, and how strongly FIO should correct off-schedule conditions.</td></tr>
+      <tr><td><a href="#settings-js8call-details">JS8Call Settings Details</a></td><td>These tell FIO where JS8Call is and where its traffic files live for the current Station Default projection.</td></tr>
+      <tr><td><a href="#settings-fast-light-details">Fast Light Settings Details</a></td><td>These connect FIO to FLRig, FLDigi, FLMsg, and FLAmp paths, ports, logs, and message folders for the current projection.</td></tr>
+      <tr><td><a href="#settings-device-profiles-details">Device Profiles and Station Default</a></td><td>This is where each radio/software bundle is defined and where one bundle is chosen as the active compatibility shell.</td></tr>
+      <tr><td><a href="#settings-operating-profiles-details">Operating Profiles and Assignments</a></td><td>This groups devices into operating roles so multi-rig behavior can be managed intentionally instead of as loose paths.</td></tr>
+      <tr><td><a href="#settings-varac-clusters-details">VarAC Clusters and Memberships</a></td><td>This explains how multiple VarAC-capable device profiles share cluster identity, instance numbers, and enabled membership.</td></tr>
+      <tr><td><a href="#settings-hf-groups-details">HF Operating Groups Details</a></td><td>These define the named HF groups, expected modes, bands, frequencies, offsets, and optional condition-level behavior.</td></tr>
+      <tr><td><a href="#settings-local-comms-details">Local Comms Groups Details</a></td><td>These define local communication resources that support VHF/UHF or nearby coordination work.</td></tr>
+      <tr><td><a href="#settings-varac-details">VarAC Settings Details</a></td><td>These connect FIO to VarAC files, BBS behavior, Managed BBS Services, FLAMP relay, and VGuard protection.</td></tr>
+      <tr><td><a href="#settings-message-auth">Message Auth Details</a></td><td>These settings help operators decide whether a received or staged file is trusted, signed, or hash-verified.</td></tr>
+      <tr><td><a href="#settings-custom-tools-details">Custom Tools Details</a></td><td>This is where you add station-specific helper programs that FIO can launch but does not deeply integrate with.</td></tr>
+      <tr><td><a href="#settings-launch-control">Launch Control Details</a></td><td>This controls which station tools FIO can start, in what order, and whether they start automatically.</td></tr>
+      <tr><td><a href="#settings-logging-diagnostics">Logging and Diagnostics</a></td><td>Use this when you need logs, diagnostics, or extra debug detail for troubleshooting.</td></tr>
     </tbody>
   </table>
 
@@ -607,7 +784,7 @@
   <h3 id="hf-daily-sop-workflow">Step-by-Step: HF SOP Review in HF Daily</h3>
   <ol class="section-list">
     <li><strong>1) Open HF Daily after saving or activating an HF SOP</strong>: use this tab to verify how the baseline HF plan and the active HF SOP interact.</li>
-    <li><strong>2) Read the SOP Schedule Status section first</strong>: if it shows <code>Conflict</code>, there is still a blocking HF overlap to fix. If it shows <code>Attention</code>, HF is clear but Net or SOP review is still needed.</li>
+    <li><strong>Read the SOP Schedule Status section first</strong>: if it shows <code>Conflict</code>, there is still a blocking HF overlap to fix. If it shows <code>Attention</code>, HF is clear but Net or SOP review is still needed.</li>
     <li><strong>3) Click <code>Resolve Conflicts</code> when available</strong>: the dialog summarizes only the blocking HF/SOP overlap pairs that still need action.</li>
     <li><strong>4) Use <code>Auto-Adjust HF Around SOP (Reversible)</code> when you want FreqInOut to split or trim the HF rows for you</strong>: this now saves the adjusted HF rows immediately so the status can refresh right away.</li>
     <li><strong>5) Turn on <code>Show Effective Schedule</code> to confirm the actual runtime timeline</strong>: this view is read-only and shows the exact HF/SOP sequence the scheduler will follow, including the return to the baseline HF row after an SOP window ends.</li>
@@ -810,7 +987,7 @@
     <li><strong>2) Select <code>HF SOP</code> in the SOP selector</strong>: this keeps you in the HF-only workflow. Use <code>Local Comms SOP</code> only for local profiles and reminders.</li>
     <li><strong>3) Fill in the profile header</strong>: confirm the name and decide whether you want the profile to be saved as active right away.</li>
     <li><strong>4) Add all needed action rows before opening the workbench</strong>: complete Group, Resource, Action, Band/Freq, Start, End, and any contact details. The workbench is designed to stay collapsed while you make several row edits.</li>
-    <li><strong>5) Use the in-line conflict badges while editing</strong>: <code>OK</code> means the row is currently clear, <code>Conflict</code> means the row still needs review, and <code>Local</code> identifies local-only rows that do not participate in the HF conflict flow.</li>
+    <li><strong>Use the in-line conflict badges while editing</strong>: <code>OK</code> means the row is currently clear, <code>Conflict</code> means the row still needs review, and <code>Local</code> identifies local-only rows that do not participate in the HF conflict flow.</li>
     <li><strong>6) Expand the Conflict Workbench only after the rows are mostly complete</strong>: this keeps the builder stable while you make multiple edits and reduces context switching.</li>
     <li><strong>7) For timing conflicts, use <code>Suggest</code> first</strong>: if a timing shift is possible, the suggested start will be precomputed for you. If the conflict is not time-based, the field stays neutral so it does not imply a missing required value.</li>
     <li><strong>8) Apply per-conflict priority only when needed</strong>: use the workbench buttons to choose SOP, Net, or Daily priority for the selected conflict row, or use the builder defaults when that matches your plan.</li>
