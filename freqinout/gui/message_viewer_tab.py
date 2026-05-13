@@ -56,7 +56,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
-    QInputDialog,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -100,6 +99,7 @@ from freqinout.core.hash_tools import (
     verify_file_hash_against_registry,
     verify_file_hash_with_discovery,
 )
+from freqinout.core.secret_store import load_gpg_signing_passphrase
 from freqinout.core.launch_orchestrator import LaunchOrchestrator
 from freqinout.core.nbems_compose import (
     ComposeDestinationPlan,
@@ -4824,19 +4824,6 @@ class MessageViewerTab(QWidget):
             return ""
         return normalize_fingerprint(str(self.compose_signing_key_combo.currentData() or ""))
 
-    def _prompt_compose_gpg_passphrase(self, signer_fingerprint: str) -> Optional[str]:
-        short = normalize_fingerprint(signer_fingerprint)[-16:] or "selected key"
-        text, ok = QInputDialog.getText(
-            self,
-            "GPG Signing Passphrase",
-            f"Enter the passphrase for signing key {short}.\n"
-            "FIO uses it only for this signing operation and does not save it.",
-            QLineEdit.Password,
-        )
-        if not ok:
-            return None
-        return str(text)
-
     def _on_compose_signing_key_changed(self) -> None:
         if self._compose_signing_keys_loading:
             return
@@ -5003,9 +4990,11 @@ class MessageViewerTab(QWidget):
                             signer_fingerprint=signer_fingerprint,
                         )
                         if not ok and gpg_detail_indicates_passphrase_needed(detail):
-                            passphrase = self._prompt_compose_gpg_passphrase(signer_fingerprint)
-                            if passphrase is None:
-                                detail = "GPG signing cancelled; passphrase was not entered."
+                            passphrase, secret_err = load_gpg_signing_passphrase(signer_fingerprint)
+                            if not passphrase:
+                                detail = secret_err or (
+                                    "Selected signing key requires a passphrase. Save it in Settings > Message Auth."
+                                )
                             else:
                                 try:
                                     ok, detail = clearsign_file(

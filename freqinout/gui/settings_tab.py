@@ -7,6 +7,7 @@ import sqlite3
 import os
 import sys
 import time
+import tempfile
 import zipfile
 import re
 from pathlib import Path
@@ -114,6 +115,8 @@ from freqinout.core.varac_bbs_vault import (
     vault_runtime_state_to_data,
 )
 from freqinout.core.gpg_tools import (
+    clearsign_file,
+    gpg_detail_indicates_passphrase_needed,
     gpg_key_display_label,
     gpg_available,
     import_public_key_file,
@@ -122,6 +125,12 @@ from freqinout.core.gpg_tools import (
     list_secret_keys,
     local_sign_key,
     normalize_fingerprint,
+)
+from freqinout.core.secret_store import (
+    credential_store_available,
+    delete_gpg_signing_passphrase,
+    has_gpg_signing_passphrase,
+    store_gpg_signing_passphrase,
 )
 from freqinout.core.hash_tools import (
     infer_algorithm_from_hash,
@@ -3345,8 +3354,34 @@ class SettingsTab(QWidget):
         self.gpg_refresh_signing_keys_btn = QPushButton("Refresh Signing Keys")
         signing_row.addWidget(self.gpg_refresh_signing_keys_btn)
         gpg_v.addLayout(signing_row)
+        passphrase_row = QHBoxLayout()
+        passphrase_row.setContentsMargins(0, 0, 0, 0)
+        passphrase_row.setSpacing(8)
+        passphrase_label = QLabel("Signing key passphrase")
+        passphrase_label.setFixedWidth(msg_label_width)
+        passphrase_row.addWidget(passphrase_label)
+        self.gpg_signing_passphrase_edit = QLineEdit()
+        self.gpg_signing_passphrase_edit.setEchoMode(QLineEdit.Password)
+        self.gpg_signing_passphrase_edit.setPlaceholderText("Stored in OS credential store, not FIO settings")
+        passphrase_row.addWidget(self.gpg_signing_passphrase_edit, 1)
+        self.gpg_check_save_passphrase_btn = QPushButton("Check/Save")
+        self.gpg_clear_passphrase_btn = QPushButton("Clear Saved")
+        passphrase_row.addWidget(self.gpg_check_save_passphrase_btn)
+        passphrase_row.addWidget(self.gpg_clear_passphrase_btn)
+        gpg_v.addLayout(passphrase_row)
+        passphrase_confirm_row = QHBoxLayout()
+        passphrase_confirm_row.setContentsMargins(0, 0, 0, 0)
+        passphrase_confirm_row.setSpacing(8)
+        passphrase_confirm_label = QLabel("Confirm passphrase")
+        passphrase_confirm_label.setFixedWidth(msg_label_width)
+        passphrase_confirm_row.addWidget(passphrase_confirm_label)
+        self.gpg_signing_passphrase_confirm_edit = QLineEdit()
+        self.gpg_signing_passphrase_confirm_edit.setEchoMode(QLineEdit.Password)
+        passphrase_confirm_row.addWidget(self.gpg_signing_passphrase_confirm_edit, 1)
+        passphrase_confirm_row.addStretch()
+        gpg_v.addLayout(passphrase_confirm_row)
         self.gpg_signing_status_label = QLabel(
-            "FIO stores only the selected key fingerprint. Private keys stay in GPG."
+            "FIO stores the selected key fingerprint in settings. Saved passphrases use the OS credential store."
         )
         self.gpg_signing_status_label.setWordWrap(True)
         self.gpg_signing_status_label.setMaximumHeight(36)
@@ -3371,6 +3406,8 @@ class SettingsTab(QWidget):
         self.gpg_keys_table.itemSelectionChanged.connect(self._update_gpg_sign_button_state)
         self.gpg_refresh_signing_keys_btn.clicked.connect(self._refresh_gpg_signing_keys)
         self.gpg_signing_key_combo.currentIndexChanged.connect(self._on_gpg_signing_key_changed)
+        self.gpg_check_save_passphrase_btn.clicked.connect(self._check_and_save_gpg_signing_passphrase)
+        self.gpg_clear_passphrase_btn.clicked.connect(self._clear_gpg_signing_passphrase)
 
         gpg_container = QWidget()
         gpg_container.setLayout(gpg_v)
@@ -8689,11 +8726,118 @@ class SettingsTab(QWidget):
                 self.gpg_signing_status_label.setText(
                     "Multiple private signing keys found. Choose a default here or select one in Compose."
                 )
+        self._refresh_gpg_signing_passphrase_status()
+
+    def _selected_gpg_signing_fingerprint(self) -> str:
+        if not hasattr(self, "gpg_signing_key_combo"):
+            return ""
+        fpr = normalize_fingerprint(str(self.gpg_signing_key_combo.currentData() or ""))
+        if fpr:
+            return fpr
+        if self.gpg_signing_key_combo.count() == 2:
+            return normalize_fingerprint(str(self.gpg_signing_key_combo.itemData(1) or ""))
+        return ""
+
+    def _refresh_gpg_signing_passphrase_status(self) -> None:
+        if not hasattr(self, "gpg_signing_passphrase_edit"):
+            return
+        fpr = self._selected_gpg_signing_fingerprint()
+        store_ok, store_msg = credential_store_available()
+        enabled = bool(fpr and store_ok)
+        self.gpg_signing_passphrase_edit.setEnabled(enabled)
+        self.gpg_signing_passphrase_confirm_edit.setEnabled(enabled)
+        self.gpg_check_save_passphrase_btn.setEnabled(enabled)
+        self.gpg_clear_passphrase_btn.setEnabled(bool(fpr and store_ok))
+        if not fpr:
+            return
+        if not store_ok:
+            self.gpg_signing_status_label.setText(store_msg)
+            return
+        saved, err = has_gpg_signing_passphrase(fpr)
+        if err:
+            self.gpg_signing_status_label.setText(err)
+        elif saved:
+            self.gpg_signing_status_label.setText(
+                f"Saved passphrase is available for signing key {fpr[-16:]} in the OS credential store."
+            )
+        else:
+            self.gpg_signing_status_label.setText(
+                f"No saved passphrase for signing key {fpr[-16:]}. Use Check/Save if the key requires one."
+            )
+
+    def _check_and_save_gpg_signing_passphrase(self) -> None:
+        fpr = self._selected_gpg_signing_fingerprint()
+        if not fpr:
+            QMessageBox.warning(self, "GPG Passphrase", "Select a default FLAmp signing key first.")
+            return
+        store_ok, store_msg = credential_store_available()
+        if not store_ok:
+            QMessageBox.warning(self, "GPG Passphrase", store_msg)
+            return
+        passphrase = self.gpg_signing_passphrase_edit.text() if hasattr(self, "gpg_signing_passphrase_edit") else ""
+        confirm = (
+            self.gpg_signing_passphrase_confirm_edit.text()
+            if hasattr(self, "gpg_signing_passphrase_confirm_edit")
+            else ""
+        )
+        if passphrase or confirm:
+            if passphrase != confirm:
+                self.gpg_signing_status_label.setText("Passphrase entries do not match.")
+                return
+        with tempfile.TemporaryDirectory(prefix="fio-gpg-check-") as tmpdir:
+            src = Path(tmpdir) / "fio-passphrase-check.k2s"
+            dst = Path(tmpdir) / "fio-passphrase-check-sig.k2s"
+            src.write_text("FreqInOut GPG signing passphrase check\n", encoding="utf-8")
+            ok, detail = clearsign_file(
+                src,
+                output_path=dst,
+                configured_path=self._current_gpg_path(),
+                signer_fingerprint=fpr,
+                passphrase=passphrase if passphrase else None,
+            )
+        if not ok:
+            if gpg_detail_indicates_passphrase_needed(detail) and not passphrase:
+                self.gpg_signing_status_label.setText("This signing key requires a passphrase. Enter it and click Check/Save.")
+            else:
+                self.gpg_signing_status_label.setText(f"Passphrase check failed: {detail}")
+            return
+        if passphrase:
+            saved, msg = store_gpg_signing_passphrase(fpr, passphrase)
+            self.gpg_signing_passphrase_edit.clear()
+            self.gpg_signing_passphrase_confirm_edit.clear()
+            passphrase = ""
+            confirm = ""
+            if not saved:
+                self.gpg_signing_status_label.setText(msg)
+                return
+            self.gpg_signing_status_label.setText(msg)
+        else:
+            self.gpg_signing_status_label.setText("Signing check passed. This key did not require a saved passphrase.")
+        self._refresh_gpg_signing_passphrase_status()
+
+    def _clear_gpg_signing_passphrase(self) -> None:
+        fpr = self._selected_gpg_signing_fingerprint()
+        if not fpr:
+            QMessageBox.warning(self, "GPG Passphrase", "Select a default FLAmp signing key first.")
+            return
+        ok, msg = delete_gpg_signing_passphrase(fpr)
+        if hasattr(self, "gpg_signing_passphrase_edit"):
+            self.gpg_signing_passphrase_edit.clear()
+        if hasattr(self, "gpg_signing_passphrase_confirm_edit"):
+            self.gpg_signing_passphrase_confirm_edit.clear()
+        self.gpg_signing_status_label.setText(msg)
+        if not ok:
+            QMessageBox.warning(self, "GPG Passphrase", msg)
 
     def _on_gpg_signing_key_changed(self) -> None:
         if self._gpg_signing_keys_loading:
             return
         self._mark_settings_dirty()
+        if hasattr(self, "gpg_signing_passphrase_edit"):
+            self.gpg_signing_passphrase_edit.clear()
+        if hasattr(self, "gpg_signing_passphrase_confirm_edit"):
+            self.gpg_signing_passphrase_confirm_edit.clear()
+        self._refresh_gpg_signing_passphrase_status()
         self._refresh_section_titles()
 
     def _on_gpg_keys_table_item_changed(self, item: QTableWidgetItem) -> None:
