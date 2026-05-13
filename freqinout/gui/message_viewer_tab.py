@@ -67,6 +67,7 @@ from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.sqlite_utils import fetch_all
 from freqinout.core.support_reporting import build_support_summary, bullet_lines
 from freqinout.core.commstat_artifacts import artifact_filter_label, artifact_kind_label
+from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.sitrep_metadata import (
     parse_filter_subtype_label,
     source_family_display_label,
@@ -6143,7 +6144,7 @@ class MessageViewerTab(QWidget):
                 event_ts_utc=str(r[3] or ""),
                 from_call=str(r[4] or "").strip().upper(),
                 target=str(r[5] or "").strip().upper(),
-                report_group=str(r[6] or "").strip().upper(),
+                report_group=normalize_group_name(r[6]),
                 grid=str(r[7] or "").strip().upper(),
                 state_code=str(r[8] or "").strip().upper(),
                 state_confidence=str(r[9] or "").strip().lower(),
@@ -6224,7 +6225,7 @@ class MessageViewerTab(QWidget):
                 event_ts_utc=str(r[5] or ""),
                 from_call=str(r[6] or "").strip().upper(),
                 target=str(r[7] or "").strip().upper(),
-                report_group=str(r[8] or "").strip().upper(),
+                report_group=normalize_group_name(r[8]),
                 grid=str(r[9] or "").strip().upper(),
                 state_code=str(r[10] or "").strip().upper(),
                 scope=str(r[11] or "").strip(),

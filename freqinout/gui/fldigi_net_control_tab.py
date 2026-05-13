@@ -143,6 +143,8 @@ class FldigiNetControlTab(QWidget):
         self._log_assisted_candidates_by_callsign: Dict[str, Dict[str, object]] = {}
         self._activation_secondary_refresh_pending: bool = False
         self._activation_secondary_refresh_inflight: bool = False
+        self._ncs_partner_call: str = ""
+        self._ancs_partner_call: str = ""
 
         self._build_ui()
         self._apply_theme()
@@ -198,6 +200,31 @@ class FldigiNetControlTab(QWidget):
         )
         context_row.addWidget(self.next_change_label)
         session_layout.addLayout(context_row)
+
+        partner_row = QHBoxLayout()
+        self.partner_primary_label = QLabel("ANCS Callsign:")
+        self.partner_primary_edit = QLineEdit()
+        self.partner_primary_edit.setMaximumWidth(150)
+        self.partner_primary_btn = QPushButton("Set ANCS")
+        self.joiner_ncs_label = QLabel("NCS:")
+        self.joiner_ncs_edit = QLineEdit()
+        self.joiner_ncs_edit.setMaximumWidth(130)
+        self.joiner_ancs_label = QLabel("ANCS:")
+        self.joiner_ancs_edit = QLineEdit()
+        self.joiner_ancs_edit.setMaximumWidth(130)
+        self.joiner_add_btn = QPushButton("Add to Roster")
+        self.partner_status_label = QLabel("")
+        partner_row.addWidget(self.partner_primary_label)
+        partner_row.addWidget(self.partner_primary_edit)
+        partner_row.addWidget(self.partner_primary_btn)
+        partner_row.addSpacing(10)
+        partner_row.addWidget(self.joiner_ncs_label)
+        partner_row.addWidget(self.joiner_ncs_edit)
+        partner_row.addWidget(self.joiner_ancs_label)
+        partner_row.addWidget(self.joiner_ancs_edit)
+        partner_row.addWidget(self.joiner_add_btn)
+        partner_row.addWidget(self.partner_status_label, stretch=1)
+        session_layout.addLayout(partner_row)
 
         qsy_row = QHBoxLayout()
         qsy_row.addStretch()
@@ -649,6 +676,11 @@ class FldigiNetControlTab(QWidget):
         self.macro_profile_details_btn.clicked.connect(self._toggle_setup_details)
         self.compare_workspace_toggle_btn.clicked.connect(self._toggle_compare_workspace)
         self.role_combo.currentTextChanged.connect(self._on_role_changed)
+        self.partner_primary_btn.clicked.connect(self._set_partner_from_primary_controls)
+        self.partner_primary_edit.returnPressed.connect(self._set_partner_from_primary_controls)
+        self.joiner_add_btn.clicked.connect(self._add_joiner_net_control_rows)
+        self.joiner_ncs_edit.returnPressed.connect(self._add_joiner_net_control_rows)
+        self.joiner_ancs_edit.returnPressed.connect(self._add_joiner_net_control_rows)
         self.log_assisted_enable_chk.toggled.connect(self._on_log_assisted_controls_changed)
         self.log_assisted_review_chk.toggled.connect(self._on_log_assisted_controls_changed)
         self.log_assisted_tx_chk.toggled.connect(self._on_log_assisted_controls_changed)
@@ -660,6 +692,7 @@ class FldigiNetControlTab(QWidget):
         self.review_card.text_edit.textChanged.connect(self._on_workspace_text_changed)
 
         self._apply_role_workspace(self.role_combo.currentText())
+        self._refresh_partner_controls()
         self._ncs_scroll_area.setWidget(self._ncs_scroll_content)
 
     def _toggle_setup_details(self, *_args) -> None:
@@ -900,6 +933,54 @@ class FldigiNetControlTab(QWidget):
                 lines.append(formatted)
         return "\n".join(lines)
 
+    def _roster_role_for_source(self, source: object) -> str:
+        text = str(source or "").strip().upper()
+        if text.startswith("NCS"):
+            return "NCS"
+        if text.startswith("ANCS"):
+            return "ANCS"
+        return ""
+
+    def _roster_role_rank(self, row: Dict[str, str], index: int) -> tuple[int, int]:
+        role = self._roster_role_for_source(row.get("source"))
+        if role == "NCS":
+            return (0, index)
+        if role == "ANCS":
+            return (1, index)
+        return (2, index)
+
+    def _roster_apply_pinned_order(self) -> None:
+        if self._roster_syncing or not hasattr(self, "roster_table"):
+            return
+        rows = self._roster_table_rows()
+        if len(rows) < 2:
+            return
+        ordered = [row for _rank, row in sorted(((self._roster_role_rank(row, idx), row) for idx, row in enumerate(rows)), key=lambda item: item[0])]
+        if ordered == rows:
+            return
+        self._roster_syncing = True
+        try:
+            self.roster_table.setRowCount(0)
+            for entry in ordered:
+                row = self.roster_table.rowCount()
+                self.roster_table.insertRow(row)
+                for col in (0, 1, 2, 3, 5):
+                    item = QTableWidgetItem("")
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    self.roster_table.setItem(row, col, item)
+                self._roster_configure_category_editor(row)
+                self._roster_set_row(
+                    row,
+                    entry.get("callsign", ""),
+                    entry.get("name", ""),
+                    entry.get("state", ""),
+                    entry.get("traffic", ""),
+                    entry.get("category", "TFC"),
+                    entry.get("source", ""),
+                )
+        finally:
+            self._roster_syncing = False
+
     def _roster_unique_callsigns(self) -> List[str]:
         seen = set()
         callsigns: List[str] = []
@@ -1057,6 +1138,7 @@ class FldigiNetControlTab(QWidget):
             current_source = (current_source_item.text() if current_source_item else "").strip()
             next_source = source.strip() if overwrite_source or not current_source else current_source
             self._roster_set_row(existing, cs, name, state, traffic, category, next_source)
+            self._roster_apply_pinned_order()
             self._roster_sync_legacy_buffers()
             return existing
         row = self.roster_table.rowCount()
@@ -1067,6 +1149,7 @@ class FldigiNetControlTab(QWidget):
             self.roster_table.setItem(row, col, item)
         self._roster_configure_category_editor(row)
         self._roster_set_row(row, cs, name, state, traffic, category, source)
+        self._roster_apply_pinned_order()
         self._roster_sync_legacy_buffers()
         return row
 
@@ -1085,6 +1168,7 @@ class FldigiNetControlTab(QWidget):
         def _on_category_changed(value: str, row_index: int = row) -> None:
             if self._roster_syncing:
                 return
+            self._roster_apply_pinned_order()
             self._roster_sync_legacy_buffers()
 
         combo.currentTextChanged.connect(_on_category_changed)
@@ -1118,6 +1202,7 @@ class FldigiNetControlTab(QWidget):
                 self._roster_set_row(row, cs, name, state, extra, category, "Local")
         finally:
             self._roster_syncing = False
+        self._roster_apply_pinned_order()
         self._roster_sync_legacy_buffers(write_files=False)
 
     def _copy_roster_category(self, category: str) -> None:
@@ -1454,10 +1539,94 @@ class FldigiNetControlTab(QWidget):
             if bucket_id not in self._workspace_visible_bucket_ids:
                 self._custom_bucket_cards[bucket_id].setVisible(False)
 
+    def _refresh_partner_controls(self) -> None:
+        role = normalize_role(self.role_combo.currentText())
+        joiner = role == "JOINER"
+        self.partner_primary_label.setVisible(not joiner)
+        self.partner_primary_edit.setVisible(not joiner)
+        self.partner_primary_btn.setVisible(not joiner)
+        self.joiner_ncs_label.setVisible(joiner)
+        self.joiner_ncs_edit.setVisible(joiner)
+        self.joiner_ancs_label.setVisible(joiner)
+        self.joiner_ancs_edit.setVisible(joiner)
+        self.joiner_add_btn.setVisible(joiner)
+        if role == "ANCS":
+            self.partner_primary_label.setText("NCS Callsign:")
+            self.partner_primary_btn.setText("Set NCS")
+            self.partner_primary_edit.setText(self._ncs_partner_call)
+        else:
+            self.partner_primary_label.setText("ANCS Callsign:")
+            self.partner_primary_btn.setText("Set ANCS")
+            self.partner_primary_edit.setText(self._ancs_partner_call)
+
+    def _add_net_control_roster_row(self, callsign: str, role: str, *, local: bool = False) -> int:
+        cs = (callsign or "").strip().upper()
+        role_key = normalize_role(role)
+        if not cs or role_key not in {"NCS", "ANCS"}:
+            return -1
+        name, state, _exists = self._lookup_operator_name_state(cs)
+        if local:
+            name = (self.settings.get("operator_name", "") or "").strip() or name
+            state = (self.settings.get("operator_state", "") or "").strip().upper() or state
+        source = f"{role_key} - Net Control"
+        existing = self._roster_find_row(cs)
+        category = "QRU"
+        traffic = ""
+        if existing >= 0:
+            widget = self.roster_table.cellWidget(existing, 4)
+            if widget is not None and hasattr(widget, "currentText"):
+                category = str(widget.currentText() or "").strip().upper() or "QRU"
+            item = self.roster_table.item(existing, 3)
+            traffic = (item.text() if item else "").strip()
+        return self._roster_append_row(cs, name, state, traffic, category, source, overwrite_source=True)
+
+    def _apply_local_net_control_role(self) -> None:
+        role = normalize_role(self.role_combo.currentText())
+        cs = (self.settings.get("operator_callsign", "") or "").strip().upper()
+        if cs and role in {"NCS", "ANCS"}:
+            self._add_net_control_roster_row(cs, role, local=True)
+
+    def _set_partner_from_primary_controls(self) -> None:
+        role = normalize_role(self.role_combo.currentText())
+        cs = (self.partner_primary_edit.text() or "").strip().upper()
+        if not cs:
+            self.partner_status_label.setText("No callsign entered.")
+            return
+        if role == "ANCS":
+            self._ncs_partner_call = cs
+            self._add_net_control_roster_row(cs, "NCS")
+            self._apply_local_net_control_role()
+            self.partner_status_label.setText(f"NCS {cs} added to roster.")
+        else:
+            self._ancs_partner_call = cs
+            self._apply_local_net_control_role()
+            self._add_net_control_roster_row(cs, "ANCS")
+            self.partner_status_label.setText(f"ANCS {cs} added to roster.")
+
+    def _add_joiner_net_control_rows(self) -> None:
+        ncs = (self.joiner_ncs_edit.text() or "").strip().upper()
+        ancs = (self.joiner_ancs_edit.text() or "").strip().upper()
+        added: List[str] = []
+        if ncs:
+            self._ncs_partner_call = ncs
+            self._add_net_control_roster_row(ncs, "NCS")
+            added.append(f"NCS {ncs}")
+        if ancs:
+            self._ancs_partner_call = ancs
+            self._add_net_control_roster_row(ancs, "ANCS")
+            added.append(f"ANCS {ancs}")
+        self.partner_status_label.setText(
+            f"{', '.join(added)} added to roster." if added else "No net control callsigns entered."
+        )
+
     def _on_role_changed(self, role: str) -> None:
         if self._workspace_role_loading:
             return
         self._apply_role_workspace(role)
+        self._refresh_partner_controls()
+        self._apply_local_net_control_role()
+        self._roster_apply_pinned_order()
+        self._roster_sync_legacy_buffers()
 
     def _on_workspace_text_changed(self) -> None:
         self._update_bucket_card_states()
@@ -3323,15 +3492,21 @@ class FldigiNetControlTab(QWidget):
         self.compare_workspace_tabs.setCurrentWidget(self.reference_card)
         self._update_bucket_card_states()
 
-        # Append operator line CALLSIGN / NAME / STATE [/ ROLE]
-        cs = (self.settings.get("operator_callsign", "") or "").strip().upper()
-        name = (self.settings.get("operator_name", "") or "").strip()
-        state = (self.settings.get("operator_state", "") or "").strip().upper()
-        if cs or name or state:
-            self._roster_append_row(cs, name, state, "", "TFC")
-
         self._net_in_progress = True
         self._net_start_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+        role = normalize_role(self.role_combo.currentText())
+        if role in {"NCS", "ANCS"}:
+            self._apply_local_net_control_role()
+            partner = (self.partner_primary_edit.text() or "").strip().upper()
+            if partner:
+                if role == "NCS":
+                    self._ancs_partner_call = partner
+                    self._add_net_control_roster_row(partner, "ANCS")
+                else:
+                    self._ncs_partner_call = partner
+                    self._add_net_control_roster_row(partner, "NCS")
+        else:
+            self._add_joiner_net_control_rows()
         self._roster_sync_legacy_buffers(write_files=True)
         self._capture_log_assisted_session()
         self.net_status_changed.emit("FLDIGI", True)

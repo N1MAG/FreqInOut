@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.logger import log
 from freqinout.core.operator_activity import newer_timestamp_text
 from freqinout.core.sitrep_metadata import (
@@ -700,7 +701,7 @@ def _canonicalize_row(row: Sequence) -> Optional[Dict]:
         "subtype": subtype_txt,
         "from_call": call,
         "target": _clean_target(target),
-        "report_group": _clean_target(report_group),
+        "report_group": normalize_group_name(report_group),
         "grid": _clean_grid(grid),
         "state_code": _clean_target(state_code),
         "state_confidence": str(state_confidence or "").strip().lower(),
@@ -1175,7 +1176,7 @@ def _refresh_latest_for_call(conn: sqlite3.Connection, callsign: str) -> bool:
             str(row[2] or ""),
             str(row[23] or "").strip().upper(),
             str(row[4] or "").strip().upper(),
-            str(row[5] or "").strip().upper(),
+            normalize_group_name(row[5]),
             str(row[6] or "").strip().upper(),
             str(row[7] or "").strip().upper(),
             str(row[8] or "").strip().lower(),
@@ -1282,7 +1283,7 @@ def _sync_operator_presence(conn: sqlite3.Connection) -> int:
             except Exception:
                 pass
         for group in (existing_g1, existing_g2, existing_g3, report_group):
-            txt = str(group or "").strip().upper()
+            txt = normalize_group_name(group)
             if txt and txt not in merged_groups:
                 merged_groups.append(txt)
         merged_groups = merged_groups[:3]
@@ -1354,7 +1355,7 @@ def _refresh_state_rollups(conn: sqlite3.Connection) -> int:
         if not state:
             continue
         groups = [_ALL_GROUP_KEY]
-        group_txt = str(report_group or "").strip().upper()
+        group_txt = normalize_group_name(report_group)
         if group_txt:
             groups.append(group_txt)
         status = _canonicalize_value(effective_status)

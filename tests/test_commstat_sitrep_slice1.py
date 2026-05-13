@@ -110,7 +110,7 @@ def test_parse_commstat_standard_message_extracts_state_and_brevity(tmp_path: Pa
     assert parsed["grid"] == "EM83"
     assert parsed["scope"] == "My County"
     assert parsed["status_payload"]["status"] == "321311111331"
-    assert parsed["metadata"]["report_group"] == "@MAGNET"
+    assert parsed["metadata"]["report_group"] == "MAGNET"
     assert parsed["metadata"]["transport_mode"] == "js8"
     assert parsed["metadata"]["remarks_text"] == "NTR OR 4BBGUB"
     assert parsed["metadata"]["brevity_code"] == "4BBGUB"
@@ -177,7 +177,7 @@ def test_ingest_commstat3_messages_only_populates_metadata(tmp_path: Path) -> No
         ).fetchone()
         assert row is not None
         assert row[0] == "COMMSTAT_12"
-        assert row[1] == "@MAGNET"
+        assert row[1] == "MAGNET"
         assert row[2] == "EM83"
         assert row[3] == "My County"
         assert row[4] == "internet"
@@ -252,6 +252,6 @@ def test_ingest_commstat3_statrep_populates_transport_and_geo(tmp_path: Path) ->
             FROM sitrep_source_events
             """
         ).fetchone()
-        assert row == ("@AMRRON", "internet", "MI", "explicit", "grid6")
+        assert row == ("AMRRON", "internet", "MI", "explicit", "grid6")
     finally:
         local_conn.close()

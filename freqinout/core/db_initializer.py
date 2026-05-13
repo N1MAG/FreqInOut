@@ -13,6 +13,7 @@ from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.commstat_artifacts import ensure_commstat_artifact_tables
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.operator_activity import ensure_js8_callsign_stats
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.varac_ingest import ensure_varac_local_tables
@@ -206,6 +207,49 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> Set[str]:
     cur = conn.cursor()
     cur.execute(f"PRAGMA table_info({table})")
     return {row[1] for row in cur.fetchall()}
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (table,))
+    return cur.fetchone() is not None
+
+
+def _repair_group_column(conn: sqlite3.Connection, table: str, column: str, *, preserve_all: bool = False) -> int:
+    if not _table_exists(conn, table) or column not in _table_columns(conn, table):
+        return 0
+    cur = conn.cursor()
+    cur.execute(f"SELECT rowid, {column} FROM {table}")
+    changed = 0
+    for rowid, value in cur.fetchall():
+        original = str(value or "").strip()
+        if preserve_all and original == "__ALL__":
+            continue
+        normalized = normalize_group_name(original)
+        if normalized != original:
+            cur.execute(f"UPDATE {table} SET {column}=? WHERE rowid=?", (normalized, rowid))
+            changed += 1
+    return changed
+
+
+def _repair_sitrep_commstat_groups(conn: sqlite3.Connection) -> None:
+    changed = 0
+    for table, column, preserve_all in (
+        ("sitrep_source_events", "report_group", False),
+        ("sitrep_events", "report_group", False),
+        ("sitrep_latest_by_callsign", "latest_report_group", False),
+        ("commstat_artifacts", "report_group", False),
+    ):
+        changed += _repair_group_column(conn, table, column, preserve_all=preserve_all)
+    if _table_exists(conn, "sitrep_latest_by_callsign") and _table_exists(conn, "sitrep_state_rollup"):
+        try:
+            from freqinout.core.sitrep_fusion import _refresh_state_rollups
+
+            _refresh_state_rollups(conn)
+        except Exception as e:
+            log.debug("DB init: SitRep state rollup repair refresh failed: %s", e)
+    if changed:
+        log.info("DB init: normalized %d SitRep/CommStat group value(s).", changed)
 
 
 def _ensure_prop_contact_events(conn: sqlite3.Connection) -> None:
@@ -1330,6 +1374,7 @@ def _ensure_nets_db() -> None:
         _ensure_js8_links(conn)
         ensure_varac_local_tables(conn)
         _ensure_controlfreq_support_indexes(conn)
+        _repair_sitrep_commstat_groups(conn)
 
         conn.commit()
     finally:

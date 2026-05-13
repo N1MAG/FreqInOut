@@ -122,7 +122,7 @@ def test_commstat3_plain_message_becomes_first_class_message(tmp_path: Path) -> 
         ).fetchone()
         assert row == (
             "MESSAGE",
-            "@MAGNET",
+            "MAGNET",
             "internet",
             "INFO",
             "General advisory update for station staffing and local conditions.",
@@ -254,7 +254,7 @@ def test_commstat3_statrep_and_message_copy_merge_into_one_artifact(tmp_path: Pa
         kind, from_call, group_name, source_count, refs_json, body_text = artifact_rows[0]
         assert kind == "STATREP"
         assert from_call == "KC1UTT"
-        assert group_name == "@MAGNET"
+        assert group_name == "MAGNET"
         assert source_count == 1
         assert "statrep:1" in refs_json
         assert "messages:1" in refs_json

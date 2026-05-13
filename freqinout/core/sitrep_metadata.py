@@ -28,8 +28,8 @@ _SOURCE_SHORT_LABELS = {
 }
 
 _SUBTYPE_LABELS = {
-    "COMMSTAT_12": "COMMSTAT",
-    "COMMSTAT_FWD": "COMMSTAT FWD",
+    "COMMSTAT_12": "CommStat",
+    "COMMSTAT_FWD": "CommStat",
     "SPOTTER_301": "F!301",
     "SPOTTER_304": "F!304",
     "SPOTTER_104": "F!104",
@@ -79,7 +79,7 @@ def source_family_key(source: object) -> str:
     src = str(source or "").strip().upper()
     if not src:
         return "UNKNOWN"
-    if src in {"COMMSTAT3", "COMMSTAT23", "COMMSTAT"}:
+    if src in {"COMMSTAT3", "COMMSTAT23", "COMMSTAT", "COMMSTAT_12", "COMMSTAT_FWD"}:
         return "COMMSTAT"
     if src in {"JS8SPOTTER", "SPOTTER"}:
         return "JS8SPOTTER"

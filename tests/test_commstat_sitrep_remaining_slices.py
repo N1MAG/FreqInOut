@@ -139,7 +139,7 @@ def test_fusion_merges_transport_syncs_operator_and_builds_state_rollup(tmp_path
         ).fetchone()
         assert event_row is not None
         assert event_row[0] == "js8+internet"
-        assert event_row[1] == "@MAGNET"
+        assert event_row[1] == "MAGNET"
         assert event_row[2] == "OR"
         assert "4BBGUB" in event_row[4]
 
@@ -150,7 +150,7 @@ def test_fusion_merges_transport_syncs_operator_and_builds_state_rollup(tmp_path
             WHERE callsign='N0DDK'
             """
         ).fetchone()
-        assert latest_row == ("@MAGNET", "js8+internet", "OR", json.dumps({"COMMSTAT": "red"}, separators=(",", ":"), ensure_ascii=True))
+        assert latest_row == ("MAGNET", "js8+internet", "OR", json.dumps({"COMMSTAT": "red"}, separators=(",", ":"), ensure_ascii=True))
 
         operator_row = conn.execute(
             """
@@ -163,8 +163,8 @@ def test_fusion_merges_transport_syncs_operator_and_builds_state_rollup(tmp_path
         assert operator_row[0] == 0
         assert operator_row[1] == "OR"
         assert operator_row[2] == "EM83"
-        assert operator_row[3] == "@MAGNET"
-        assert json.loads(operator_row[4]) == ["@MAGNET"]
+        assert operator_row[3] == "MAGNET"
+        assert json.loads(operator_row[4]) == ["MAGNET"]
         assert operator_row[5] == 0
 
         roll_all = conn.execute(
@@ -179,7 +179,7 @@ def test_fusion_merges_transport_syncs_operator_and_builds_state_rollup(tmp_path
             """
             SELECT callsign_count, red_count, mixed_transport_count
             FROM sitrep_state_rollup
-            WHERE report_group='@MAGNET' AND state_code='OR'
+            WHERE report_group='MAGNET' AND state_code='OR'
             """
         ).fetchone()
         assert roll_group == (1, 1, 1)
@@ -320,10 +320,10 @@ def test_message_viewer_loads_commstat_sitrep_with_family_transport_and_filter_l
 
     assert len(tab.sitrep_messages) == 1
     msg = tab.sitrep_messages[0]
-    assert msg.subtype_label == "COMMSTAT"
+    assert msg.subtype_label == "CommStat"
     assert msg.source_family_label == "CommStat"
     assert msg.transport_label == "JS8 + Internet"
-    assert msg.report_group == "@MAGNET"
+    assert msg.report_group == "MAGNET"
 
     row = UnifiedMessage(
         msg_type="SitRep",

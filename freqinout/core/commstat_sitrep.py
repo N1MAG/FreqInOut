@@ -6,6 +6,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+from freqinout.core.group_utils import normalize_group_name
+
 
 COMMSTAT_SCOPE_MAP = {
     "1": "My Location",
@@ -114,9 +116,9 @@ def transport_mode_for_source(source_value: object, raw_message: object = "") ->
 
 
 def report_group_for_target(target: object) -> str:
-    value = str(target or "").strip().upper()
+    value = str(target or "").strip()
     if value.startswith("@"):
-        return value
+        return normalize_group_name(value)
     return ""
 
 
