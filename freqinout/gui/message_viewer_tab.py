@@ -3977,6 +3977,7 @@ class MessageViewerTab(QWidget):
         self.compose_varac_target_combo.currentIndexChanged.connect(self._update_compose_preview)
         row4.addWidget(self.compose_varac_target_combo)
         self.compose_sign_flamp_chk = QCheckBox("Sign FLAmp Copy")
+        self.compose_sign_flamp_chk.setToolTip("Create a signed FLAmp copy. When FLMsg is selected, this also selects Both.")
         self.compose_sign_flamp_chk.stateChanged.connect(self._update_compose_preview)
         row4.addWidget(self.compose_sign_flamp_chk)
         row4.addStretch()
@@ -4709,7 +4710,6 @@ class MessageViewerTab(QWidget):
             sign_flamp_copy=bool(
                 hasattr(self, "compose_sign_flamp_chk")
                 and self.compose_sign_flamp_chk.isChecked()
-                and self.compose_sign_flamp_chk.isEnabled()
             ),
         )
 
@@ -4907,12 +4907,12 @@ class MessageViewerTab(QWidget):
         self._compose_timestamp_utc = datetime.datetime.now(datetime.timezone.utc)
         if hasattr(self, "compose_priority_combo"):
             self.compose_priority_combo.setCurrentText("RR")
+        if hasattr(self, "compose_sign_flamp_chk"):
+            self.compose_sign_flamp_chk.setChecked(False)
         if hasattr(self, "compose_send_target_combo"):
             self.compose_send_target_combo.setCurrentText("FLMsg")
         if hasattr(self, "compose_varac_target_combo"):
             self.compose_varac_target_combo.setCurrentText("None")
-        if hasattr(self, "compose_sign_flamp_chk"):
-            self.compose_sign_flamp_chk.setChecked(False)
         if hasattr(self, "compose_report_title_edit"):
             self.compose_report_title_edit.clear()
         self._compose_last_stage_paths = []
@@ -5053,22 +5053,37 @@ class MessageViewerTab(QWidget):
             pass
         self._update_compose_preview()
 
+    def _compose_sign_flamp_selected(self) -> bool:
+        return bool(hasattr(self, "compose_sign_flamp_chk") and self.compose_sign_flamp_chk.isChecked())
+
+    def _compose_flamp_target_selected(self) -> bool:
+        return bool(
+            hasattr(self, "compose_send_target_combo")
+            and self.compose_send_target_combo.currentText() in {"FLAmp", "Both"}
+        )
+
+    def _ensure_compose_flamp_target_for_signing(self) -> bool:
+        if self._compose_flamp_target_selected():
+            return True
+        if not self._compose_sign_flamp_selected() or not hasattr(self, "compose_send_target_combo"):
+            return False
+        previous_blocked = self.compose_send_target_combo.blockSignals(True)
+        try:
+            self.compose_send_target_combo.setCurrentText("Both")
+        finally:
+            self.compose_send_target_combo.blockSignals(previous_blocked)
+        return self._compose_flamp_target_selected()
+
     def _update_compose_preview(self) -> None:
         if not hasattr(self, "compose_summary_label"):
             return
         self._refresh_compose_radio_targets()
-        flamp_selected = (
-            hasattr(self, "compose_send_target_combo")
-            and self.compose_send_target_combo.currentText() in {"FLAmp", "Both"}
-        )
-        self.compose_sign_flamp_chk.setEnabled(bool(flamp_selected))
-        if not flamp_selected and self.compose_sign_flamp_chk.isChecked():
-            self.compose_sign_flamp_chk.setChecked(False)
+        flamp_selected = self._ensure_compose_flamp_target_for_signing()
+        if hasattr(self, "compose_sign_flamp_chk"):
+            self.compose_sign_flamp_chk.setEnabled(True)
         sign_flamp_selected = bool(
             flamp_selected
-            and hasattr(self, "compose_sign_flamp_chk")
-            and self.compose_sign_flamp_chk.isChecked()
-            and self.compose_sign_flamp_chk.isEnabled()
+            and self._compose_sign_flamp_selected()
         )
         if hasattr(self, "compose_signing_row_widget"):
             self.compose_signing_row_widget.setVisible(sign_flamp_selected)
@@ -5130,7 +5145,7 @@ class MessageViewerTab(QWidget):
             metadata.append(
                 f"<div><b>BBS Location:</b> {html.escape(str((bbs_target or {}).get('label', '') or 'No valid BBS target'))}</div>"
             )
-        if self.compose_sign_flamp_chk.isEnabled() and self.compose_sign_flamp_chk.isChecked():
+        if sign_flamp_selected:
             metadata.append(
                 f"<div><b>Signed FLAmp Name:</b> {html.escape(build_signed_filename(filename))}</div>"
             )
@@ -5189,7 +5204,7 @@ class MessageViewerTab(QWidget):
         problems: List[str] = []
         gpg_path = str(self.settings.get("gpg_executable_path", "") or "").strip()
         trusted_fingerprints = self.settings.get("gpg_trusted_signers", []) or []
-        sign_flamp = bool(self.compose_sign_flamp_chk.isEnabled() and self.compose_sign_flamp_chk.isChecked())
+        sign_flamp = self._compose_sign_flamp_selected()
         signer_fingerprint = self._selected_compose_signing_fingerprint() if sign_flamp else ""
         if sign_flamp and not signer_fingerprint:
             self._set_compose_status("Select a private signing key before staging a signed FLAmp copy.", role="warning")
