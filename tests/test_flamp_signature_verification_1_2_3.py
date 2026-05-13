@@ -10,6 +10,7 @@ from freqinout.core import gpg_tools
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
     clearsign_file,
+    gpg_detail_indicates_passphrase_needed,
     list_secret_keys,
     signature_payload_candidates,
     verify_file_with_discovery,
@@ -189,6 +190,62 @@ def test_clearsign_file_reports_timeout_without_raw_command(monkeypatch, tmp_pat
     assert "private key may require a passphrase" in detail
     assert "Command" not in detail
     assert str(src) not in detail
+
+
+def test_clearsign_file_supports_passphrase_over_stdin(monkeypatch, tmp_path: Path) -> None:
+    src = tmp_path / "Report.k2s"
+    dst = tmp_path / "Report-sig.k2s"
+    src.write_text("payload", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def fake_run_gpg(gpg_path: str, args: list[str], **kwargs):
+        seen["args"] = args
+        seen["input_text"] = kwargs.get("input_text")
+        dst.write_text("signed", encoding="utf-8")
+        return subprocess.CompletedProcess(args=["gpg"], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(gpg_tools, "resolve_gpg_executable", lambda configured_path="": "/usr/bin/gpg")
+    monkeypatch.setattr(gpg_tools, "_run_gpg", fake_run_gpg)
+
+    ok, detail = clearsign_file(src, output_path=dst, passphrase="correct horse battery staple")
+
+    assert ok, detail
+    assert seen["args"] == [
+        "--pinentry-mode",
+        "loopback",
+        "--passphrase-fd",
+        "0",
+        "--armor",
+        "--clearsign",
+        "--output",
+        str(dst),
+        str(src),
+    ]
+    assert seen["input_text"] == "correct horse battery staple\n"
+    assert "correct horse" not in " ".join(seen["args"])
+
+
+def test_clearsign_file_reports_passphrase_needed(monkeypatch, tmp_path: Path) -> None:
+    src = tmp_path / "Report.k2s"
+    dst = tmp_path / "Report-sig.k2s"
+    src.write_text("payload", encoding="utf-8")
+
+    def fake_run_gpg(gpg_path: str, args: list[str], **kwargs):
+        return subprocess.CompletedProcess(
+            args=["gpg"],
+            returncode=2,
+            stdout="",
+            stderr="gpg: signing failed: No pinentry",
+        )
+
+    monkeypatch.setattr(gpg_tools, "resolve_gpg_executable", lambda configured_path="": "/usr/bin/gpg")
+    monkeypatch.setattr(gpg_tools, "_run_gpg", fake_run_gpg)
+
+    ok, detail = clearsign_file(src, output_path=dst)
+
+    assert not ok
+    assert detail == "Clearsign requires the selected key passphrase."
+    assert gpg_detail_indicates_passphrase_needed(detail)
 
 
 def test_auth_candidates_are_origin_and_suffix_bounded(tmp_path: Path) -> None:

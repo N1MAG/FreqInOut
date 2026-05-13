@@ -35,6 +35,13 @@ DETACHED_SIGNATURE_SUFFIXES: Tuple[str, ...] = (".sig", ".asc", ".gpg")
 FLAMP_PAYLOAD_SUFFIXES: Tuple[str, ...] = (".k2s", ".b2s")
 _PGP_CLEARSIGNED_HEADER = b"-----BEGIN PGP SIGNED MESSAGE-----"
 _CLEARSIGN_TIMEOUT_SEC = 10.0
+_PASSPHRASE_NEEDED_MARKERS: Tuple[str, ...] = (
+    "passphrase",
+    "pinentry",
+    "inappropriate ioctl",
+    "no secret key",
+    "secret key not available",
+)
 
 
 def normalize_fingerprint(value: str) -> str:
@@ -48,6 +55,11 @@ def normalize_fingerprints(values: Iterable[str]) -> Set[str]:
         if norm:
             out.add(norm)
     return out
+
+
+def gpg_detail_indicates_passphrase_needed(detail: str) -> bool:
+    text = str(detail or "").strip().lower()
+    return bool(text and any(marker in text for marker in _PASSPHRASE_NEEDED_MARKERS))
 
 
 def gpg_key_display_label(key: GPGKeyInfo) -> str:
@@ -296,6 +308,7 @@ def clearsign_file(
     configured_path: str = "",
     gnupg_home: str = "",
     signer_fingerprint: str = "",
+    passphrase: Optional[str] = None,
 ) -> Tuple[bool, str]:
     gpg_path = resolve_gpg_executable(configured_path)
     if not gpg_path:
@@ -307,7 +320,13 @@ def clearsign_file(
     if not str(dst):
         return False, "Missing output path."
     signer = normalize_fingerprint(signer_fingerprint)
-    args = ["--pinentry-mode", "error", "--armor", "--clearsign", "--output", str(dst)]
+    input_text = None
+    if passphrase is None:
+        args = ["--pinentry-mode", "error"]
+    else:
+        args = ["--pinentry-mode", "loopback", "--passphrase-fd", "0"]
+        input_text = str(passphrase) + "\n"
+    args.extend(["--armor", "--clearsign", "--output", str(dst)])
     if signer:
         args.extend(["--local-user", signer])
     args.append(str(src))
@@ -316,6 +335,7 @@ def clearsign_file(
             gpg_path,
             args,
             gnupg_home=gnupg_home,
+            input_text=input_text,
             timeout_sec=_CLEARSIGN_TIMEOUT_SEC,
         )
     except subprocess.TimeoutExpired:
@@ -328,6 +348,8 @@ def clearsign_file(
         return False, f"Clearsign failed: {e}"
     if cp.returncode != 0:
         detail = (cp.stderr or cp.stdout or "").strip() or f"exit code {cp.returncode}"
+        if passphrase is None and gpg_detail_indicates_passphrase_needed(detail):
+            return False, "Clearsign requires the selected key passphrase."
         return False, f"Clearsign failed: {detail}"
     if not dst.exists():
         return False, "Clearsign did not create an output file."
