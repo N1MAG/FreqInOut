@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QInputDialog,
 )
 
 from reportlab.lib.pagesizes import letter
@@ -83,6 +84,7 @@ from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
     clearsign_file,
     find_detached_signature,
+    gpg_detail_indicates_passphrase_needed,
     gpg_key_display_label,
     is_detached_signature_file,
     list_secret_keys,
@@ -5044,6 +5046,19 @@ class MessageViewerTab(QWidget):
             return ""
         return normalize_fingerprint(str(self.compose_signing_key_combo.currentData() or ""))
 
+    def _prompt_compose_gpg_passphrase(self, signer_fingerprint: str) -> Optional[str]:
+        short = normalize_fingerprint(signer_fingerprint)[-16:] or "selected key"
+        text, ok = QInputDialog.getText(
+            self,
+            "GPG Signing Passphrase",
+            f"Enter the passphrase for signing key {short}.\n"
+            "FIO uses it only for this signing operation and does not save it.",
+            QLineEdit.Password,
+        )
+        if not ok:
+            return None
+        return str(text)
+
     def _on_compose_signing_key_changed(self) -> None:
         if self._compose_signing_keys_loading:
             return
@@ -5227,6 +5242,21 @@ class MessageViewerTab(QWidget):
                             configured_path=gpg_path,
                             signer_fingerprint=signer_fingerprint,
                         )
+                        if not ok and gpg_detail_indicates_passphrase_needed(detail):
+                            passphrase = self._prompt_compose_gpg_passphrase(signer_fingerprint)
+                            if passphrase is None:
+                                detail = "GPG signing cancelled; passphrase was not entered."
+                            else:
+                                try:
+                                    ok, detail = clearsign_file(
+                                        temp_src,
+                                        output_path=dst,
+                                        configured_path=gpg_path,
+                                        signer_fingerprint=signer_fingerprint,
+                                        passphrase=passphrase,
+                                    )
+                                finally:
+                                    passphrase = ""
                     if ok:
                         outputs.append(dst)
                         verify_result = verify_file_with_discovery(
