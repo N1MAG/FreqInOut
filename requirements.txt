@@ -8,5 +8,6 @@ pytz>=2023.3
 PyYAML>=6.0
 packaging>=23.1
 tzdata>=2024.1
+keyring>=25.0
 # js8net is vendored at third_party/js8net/js8net-main
 reportlab>=4.0
