@@ -26,6 +26,7 @@ Use this checklist before pushing a release commit, tagging, or building install
 - Linux: verify desktop launcher/icon behavior and logs.
 - Windows: run `python build_executable.py`.
 - Windows: update `installer.iss` and compile with Inno Setup.
+- Public GitHub Windows release: push a `vX.Y.Z` tag on `main`; `.github/workflows/windows-release.yml` builds the PyInstaller app folder, compiles the Inno Setup installer, and uploads `FreqInOut-Setup-X.Y.Z.exe` to the GitHub release.
 
 ## 4) Preflight
 

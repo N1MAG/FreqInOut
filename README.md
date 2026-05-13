@@ -31,12 +31,14 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 
 ## What's New in v1.2.3
 
-- FLDigi Net Control now uses a unified editable local roster table for the left-side working area, with category outputs and live check-in file sync derived from the roster rather than the legacy TFC/QRU/LATE text buckets.
-- Added FLDigi macro-profile discovery and mapping for `.mdf` files, including structured `<FILE:...>` parsing, review-only fallback separation, and safe persistence of operator-configured rows without activating mapped mode until a complete enabled mapping exists.
-- Added profile-scoped persistence with absolute-path keys, profile-local custom-name fallback, and reviewable storage for incomplete or disabled operator edits instead of silently discarding them.
-- Added FLDigi log-assisted intake TX-context support so the most recent TX prompt can annotate later RX review candidates across incremental polls without creating inbound check-ins or changing RX-only intake semantics.
-- Fixed Task 2 regression coverage so the real `.mdf` fixture, manual fallback review paths, and activation/persistence split stay covered before Task 3.
-- Fixed Task 3 workspace refinement so enabled custom mappings surface as visible workspace cards and compare options stay aligned with the current role and mapped profile.
+- Messages Compose is now a fuller outbound staging workflow: it can create standard blank or custom FLMsg files, stage to FLMsg, FLAmp, VarAC Outbox, or VarAC BBS, choose ICS/Messages subfolders up to two levels deep, and reset cleanly between new drafts.
+- FLAmp compose signing now fails closed instead of quietly staging unsigned fallback files, stages outbound FLAmp copies to the transmit-side folder, and verifies signed FLAmp output after signing.
+- GPG signing support now handles passphrase-protected keys through the operating system credential store, validates passphrase entry in Settings, and gives clearer Windows guidance when Kleopatra or another GUI key manager is selected instead of `gpg.exe`.
+- CommStat and JS8Spotter SitRep data now roll into the same ControlFreq, Messages, Operator History, and Map status model, including operator-callsign group filtering and clearer CommStat labels in map tooltips.
+- VarAC BBS support expanded with Managed BBS Vault services, alias-driven virtual folders, allowed-callsign management, VarAC.ini sync tools, VGuard-style inbound file protection, and safer BBS filename handling.
+- The in-app Help guide and README were refreshed so major tabs, setup sections, Compose, Message Auth, BBS/Vault workflows, and release/install expectations are explained in operator-friendly language.
+- Performance and stability work reduces redundant Messages, Map, Settings, SOP, and hidden-tab refresh churn while preserving active workflow updates.
+- FLDigi Net Control gained the unified editable local roster table, macro-profile discovery/mapping for `.mdf` files, and log-assisted intake refinements developed during the 1.2.3 cycle.
 
 ## Quick Start
 

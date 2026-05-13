@@ -1,0 +1,93 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-installer:
+    name: Build Windows installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Run release verification
+        shell: pwsh
+        run: |
+          python tools/release_preflight.py
+          python -m compileall freqinout
+
+      - name: Build PyInstaller app folder
+        shell: pwsh
+        run: python build_executable.py
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler not found at $iscc"
+          }
+          & $iscc installer.iss
+
+      - name: Prepare release notes
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          $lines = Get-Content CHANGELOG.md
+          $start = [Array]::IndexOf($lines, "## [$version]")
+          if ($start -lt 0) {
+            "See CHANGELOG.md for release notes." | Out-File release-notes.md -Encoding utf8
+            exit 0
+          }
+          $end = $lines.Count
+          for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^## \[') {
+              $end = $i
+              break
+            }
+          }
+          if ($end -le ($start + 1)) {
+            "See CHANGELOG.md for release notes." | Out-File release-notes.md -Encoding utf8
+          } else {
+            $lines[($start + 1)..($end - 1)] | Out-File release-notes.md -Encoding utf8
+          }
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          $asset = "FreqInOut-Setup-$version.exe"
+          Copy-Item "Output\FreqInOut-Setup.exe" $asset -Force
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $asset --clobber
+          } else {
+            gh release create $tag $asset --title "FreqInOut $tag" --notes-file release-notes.md --verify-tag
+          }

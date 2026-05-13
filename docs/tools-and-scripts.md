@@ -140,7 +140,6 @@ python tools/dedupe_operator_groups.py --apply --show
 - `tools/release_preflight.py`: verifies version/changelog/docs/license consistency before release.
 - `release_builder.py`: runs preflight and optionally `.exe` build.
 - `build_executable.py`: PyInstaller build for Windows executable from `FreqInOut.spec`.
-- `tools/publish-release.ps1`: GitHub release publish/upload helper (maintainer workflow).
 - `tools/update_changelog_from_security.py`: reads internal security incident YAML and reports status (stub behavior).
 
 Safe starter commands:

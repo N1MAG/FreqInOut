@@ -1,6 +1,12 @@
 # Changelog
 
 ## [1.2.3]
+- Changed: `Messages` now opens to Inbox from main navigation, shows Compose only after the internal Compose action is selected, starts each new compose draft from defaults, and resets the draft after successful staging while preserving durable station configuration such as selected folders and signing keys.
+- Changed: `Messages -> Compose` now uses a tighter drafting layout with a compact file/status strip, shorter compose utility buttons, shared `Save Under` / signing-key row, and operator-friendly signing-key labels with full key detail retained in tooltips.
+- Added: `Messages -> Compose` now lets operators choose the configured ICS/Messages root or existing subfolders up to two levels deep for FLMsg output, including per-radio folder memory in multi-rig builds while keeping selections constrained under the configured root.
+- Fixed: FLAmp compose staging now derives a transmit-side folder from common FLAmp `rx`/root paths, signs outbound FLAmp copies there, verifies the signed file, and fails closed instead of staging unsigned fallback files when signing fails.
+- Fixed: GPG setup now detects Kleopatra/GPA/GpgEX GUI executables before running them as command-line GPG, auto-uses a sibling `gpg.exe` when available, and reports a clear Settings warning when the selected Windows path is not a usable command-line executable.
+- Added: GPG compose signing now supports passphrase-protected keys through the OS credential store, with Settings-side passphrase confirmation and documentation that `keyring` must be installed and backed by a real OS keyring service.
 - Changed: Message Auth signature/hash verification now applies to VarAC and VarAC BBS `.k2s/.b2s` files and signature sidecars using the same trusted-key/hash workflow already used for signed FLAmp files.
 - Changed: `FLDigi Net Control` now offers `Copy Check-ins` instead of the callsign-only summary button, copying the full consolidated TFC/QRU/LATE check-in log and maintaining an `all_checkins.txt` macro feed beside the existing per-category check-in files.
 - Changed: the in-app Help guide now teaches the major FreqInOut tabs more explicitly, expanding the purpose, workflow, and cross-tab interaction notes for ControlFreq, Messages, Map, schedules, operators, SOP Builder, and Settings so operators can learn not only how controls work, but why those screens matter and how related settings influence them.
