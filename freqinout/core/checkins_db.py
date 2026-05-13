@@ -8,6 +8,7 @@ from typing import Dict, Any, List
 
 from freqinout.core.logger import log
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.operator_activity import newer_timestamp_text
 
 TRAILING_CALL_NOISE_RE = re.compile(r"[^A-Z0-9/]+$")
@@ -68,13 +69,12 @@ def _normalize_groups_list(values: List[object]) -> List[str]:
     seen = set()
     groups: List[str] = []
     for value in values:
-        group = str(value or "").strip()
+        group = normalize_group_name(value)
         if not group:
             continue
-        key = group.upper()
-        if key in seen:
+        if group in seen:
             continue
-        seen.add(key)
+        seen.add(group)
         groups.append(group)
     return groups
 
@@ -139,19 +139,33 @@ def _repair_operator_checkins_data(cur: sqlite3.Cursor) -> None:
     )
     cur.execute("SELECT callsign, group1, group2, group3, groups_json FROM operator_checkins")
     for callsign, group1, group2, group3, groups_json in cur.fetchall():
-        groups = None
+        groups: List[str] = []
         if groups_json:
             try:
                 parsed = json.loads(groups_json)
                 if isinstance(parsed, list):
-                    continue
+                    groups.extend(parsed)
             except Exception:
                 pass
-        normalized = _normalize_groups_list([group1, group2, group3])
+        groups.extend([group1, group2, group3])
+        normalized = _normalize_groups_list(groups)
         groups = json.dumps(normalized) if normalized else None
         cur.execute(
-            "UPDATE operator_checkins SET groups_json=? WHERE callsign=?",
-            (groups, callsign),
+            """
+            UPDATE operator_checkins
+               SET group1=?,
+                   group2=?,
+                   group3=?,
+                   groups_json=?
+             WHERE callsign=?
+            """,
+            (
+                normalized[0] if len(normalized) > 0 else "",
+                normalized[1] if len(normalized) > 1 else "",
+                normalized[2] if len(normalized) > 2 else "",
+                groups,
+                callsign,
+            ),
         )
 
 
@@ -293,9 +307,9 @@ def upsert_checkins(entries: List[Dict[str, Any]]):
             name = (e.get("name") or "").strip()
             state = (e.get("state") or "").upper().strip()
             grid = (e.get("grid") or "").strip().upper()
-            group1 = (e.get("group1") or "").strip()
-            group2 = (e.get("group2") or "").strip()
-            group3 = (e.get("group3") or "").strip()
+            group1 = normalize_group_name(e.get("group1"))
+            group2 = normalize_group_name(e.get("group2"))
+            group3 = normalize_group_name(e.get("group3"))
             group_role = _normalize_group_role(e.get("group_role"))
             last_seen = (e.get("last_seen_utc") or "").strip()
             first_seen = (e.get("first_seen_utc") or "").strip()
@@ -340,15 +354,23 @@ def upsert_checkins(entries: List[Dict[str, Any]]):
             first_out = first_seen or existing_first or last_seen
             last_out = newer_timestamp_text(existing_last, last_seen)
             groups_json_out = groups_json if groups_json is not None else existing_groups_json
+            if groups_json_out is not None:
+                try:
+                    parsed = json.loads(groups_json_out) if isinstance(groups_json_out, str) else groups_json_out
+                    if isinstance(parsed, list):
+                        normalized = _normalize_groups_list(parsed)
+                        groups_json_out = json.dumps(normalized) if normalized else None
+                except Exception:
+                    pass
             trusted_out = (
                 int(trusted_raw)
                 if trusted_raw is not None
                 else (int(existing_trusted) if existing_trusted is not None else 0)
             )
             grid_out = grid or existing_grid
-            g1_out = group1 or existing_g1
-            g2_out = group2 or existing_g2
-            g3_out = group3 or existing_g3
+            g1_out = group1 or normalize_group_name(existing_g1)
+            g2_out = group2 or normalize_group_name(existing_g2)
+            g3_out = group3 or normalize_group_name(existing_g3)
             role_out = group_role or existing_role
             insert_count = int(existing_count or 0) + 1
 
@@ -514,9 +536,9 @@ def upsert_operator_metadata(entries: List[Dict[str, Any]], conn: sqlite3.Connec
                 g2_out = group2
                 g3_out = group3
             else:
-                g1_out = str(existing_g1 or "").strip()
-                g2_out = str(existing_g2 or "").strip()
-                g3_out = str(existing_g3 or "").strip()
+                g1_out = normalize_group_name(existing_g1)
+                g2_out = normalize_group_name(existing_g2)
+                g3_out = normalize_group_name(existing_g3)
 
             first_seen_out = str(existing_first or "").strip() or first_seen or last_seen
             last_seen_out = newer_timestamp_text(str(existing_last or "").strip(), last_seen)

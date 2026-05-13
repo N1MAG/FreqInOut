@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.logger import log
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.perf_metrics import span as perf_span
@@ -54,6 +55,7 @@ from freqinout.core.station_readiness import (
     visible_status_programs,
 )
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.sitrep_metadata import source_family_label
 from freqinout.core.sop_manager import SOPManager
 from freqinout.core.varac_bbs_inventory import build_bbs_inventory, format_bbs_inventory_detail
 from freqinout.utils.timezones import get_timezone
@@ -2217,7 +2219,7 @@ class ControlFreqTab(QWidget):
         ops = self.settings.get("operating_groups", []) or []
         out: List[str] = []
         for row in ops:
-            grp = str(row.get("group", "") or "").strip().upper()
+            grp = normalize_group_name(row.get("group", ""))
             if grp and grp not in out:
                 out.append(grp)
         return sorted(out)
@@ -2226,7 +2228,7 @@ class ControlFreqTab(QWidget):
         ops = self.settings.get("operating_groups", []) or []
         out: Dict[str, List[float]] = {}
         for row in ops:
-            grp = str(row.get("group", "") or "").strip().upper()
+            grp = normalize_group_name(row.get("group", ""))
             if not grp:
                 continue
             try:
@@ -2240,7 +2242,7 @@ class ControlFreqTab(QWidget):
         ops = self.settings.get("operating_groups", []) or []
         out: Dict[str, Set[str]] = {}
         for row in ops:
-            grp = str(row.get("group", "") or "").strip().upper()
+            grp = normalize_group_name(row.get("group", ""))
             band = str(row.get("band", "") or "").strip().upper()
             if not grp or not band:
                 continue
@@ -2280,14 +2282,14 @@ class ControlFreqTab(QWidget):
                 continue
             groups: Set[str] = set()
             for key in ("group1", "group2", "group3"):
-                g = (r[key] or "").strip().upper()
+                g = normalize_group_name(r[key])
                 if g:
                     groups.add(g)
             try:
                 if r["groups_json"]:
                     gj = json.loads(r["groups_json"])
                     for g in gj or []:
-                        g = str(g).strip().upper()
+                        g = normalize_group_name(g)
                         if g:
                             groups.add(g)
             except Exception:
@@ -2625,7 +2627,7 @@ class ControlFreqTab(QWidget):
         if not bool(self._view_cards.get("intersections", True)):
             return
         now_ts = time.time()
-        group_filter = (self.group_combo.currentData() or "").strip().upper()
+        group_filter = normalize_group_name(self.group_combo.currentData())
         search = (self.search_edit.text() or "").strip().upper()
         cache_key = (group_filter, search)
         if (
@@ -4215,7 +4217,8 @@ class ControlFreqTab(QWidget):
         counts = {"JS8": 0, "Spotter": 0, "VarAC": 0}
         top_senders: Dict[str, Dict[str, int]] = {"JS8": {}, "Spotter": {}, "VarAC": {}}
         sitrep_counts = {"red": 0, "yellow": 0, "green": 0}
-        group_filter = (self.group_combo.currentData() or "").strip().upper()
+        group_filter = normalize_group_name(self.group_combo.currentData())
+        local_operator_call = str(self.settings.get("operator_callsign", "") or "").strip().upper()
 
         def _load_operator_groups(cur: sqlite3.Cursor) -> Dict[str, Set[str]]:
             out: Dict[str, Set[str]] = {}
@@ -4232,14 +4235,14 @@ class ControlFreqTab(QWidget):
                         continue
                     groups: Set[str] = set()
                     for g in (g1, g2, g3):
-                        gg = (g or "").strip().upper()
+                        gg = normalize_group_name(g)
                         if gg:
                             groups.add(gg)
                     try:
                         parsed = json.loads(groups_json) if groups_json else []
                         if isinstance(parsed, list):
                             for g in parsed:
-                                gg = str(g or "").strip().upper()
+                                gg = normalize_group_name(g)
                                 if gg:
                                     groups.add(gg)
                     except Exception:
@@ -4248,6 +4251,35 @@ class ControlFreqTab(QWidget):
             except Exception:
                 return {}
             return out
+
+        def _status_word(key: str) -> str:
+            return "RED" if key == "red" else ("YELLOW" if key == "yellow" else "GREEN")
+
+        def _source_terms(source_summary_json: object) -> Set[str]:
+            terms: Set[str] = set()
+            try:
+                parsed = json.loads(source_summary_json) if source_summary_json else {}
+                if isinstance(parsed, dict):
+                    for raw_source in parsed.keys():
+                        raw = str(raw_source or "").strip().upper()
+                        if raw:
+                            terms.add(raw)
+                            terms.add(source_family_label(raw).upper())
+            except Exception:
+                pass
+            return terms
+
+        def _matches_sitrep_search(
+            callsign: str,
+            status_key: str,
+            report_group: str = "",
+            source_summary_json: object = "",
+        ) -> bool:
+            if not search:
+                return True
+            terms = {"SITREP", callsign, _status_word(status_key), normalize_group_name(report_group)}
+            terms.update(_source_terms(source_summary_json))
+            return any(search in term for term in terms if term)
 
         try:
             conn = sqlite3.connect(db_path)
@@ -4280,25 +4312,59 @@ class ControlFreqTab(QWidget):
                 counts["VarAC"] += 1
                 top_senders["VarAC"][cs] = top_senders["VarAC"].get(cs, 0) + 1
             operator_groups: Dict[str, Set[str]] = {}
-            if group_filter:
+            local_operator_groups: Set[str] = set()
+            if group_filter or local_operator_call:
                 operator_groups = _load_operator_groups(cur)
+                if local_operator_call:
+                    local_operator_groups = operator_groups.get(local_operator_call, set())
+            loaded_unified_sitreps = False
             try:
-                cur.execute("SELECT from_call, status_key FROM spotter_station_status")
-                for cs, status_key in cur.fetchall():
+                cur.execute(
+                    """
+                    SELECT callsign, effective_status, latest_report_group, source_summary_json
+                    FROM sitrep_latest_by_callsign
+                    """
+                )
+                unified_rows = cur.fetchall()
+                loaded_unified_sitreps = bool(unified_rows)
+                for cs, status_key, report_group, source_summary_json in unified_rows:
                     cs_up = (cs or "").strip().upper()
                     key = (status_key or "").strip().lower()
+                    if key == "not_reported":
+                        key = "unknown"
                     if not cs_up or key not in sitrep_counts:
                         continue
+                    group = normalize_group_name(report_group)
+                    if not group or group not in local_operator_groups:
+                        continue
                     if group_filter:
-                        if group_filter not in operator_groups.get(cs_up, set()):
+                        if group != group_filter:
                             continue
-                    if search:
-                        status_word = "RED" if key == "red" else ("YELLOW" if key == "yellow" else "GREEN")
-                        if search not in cs_up and search not in "SITREP" and search not in status_word:
-                            continue
+                    if not _matches_sitrep_search(cs_up, key, group, source_summary_json):
+                        continue
                     sitrep_counts[key] += 1
             except Exception:
                 pass
+            if not loaded_unified_sitreps:
+                try:
+                    cur.execute("SELECT from_call, status_key FROM spotter_station_status")
+                    for cs, status_key in cur.fetchall():
+                        cs_up = (cs or "").strip().upper()
+                        key = (status_key or "").strip().lower()
+                        if not cs_up or key not in sitrep_counts:
+                            continue
+                        if not local_operator_groups:
+                            continue
+                        station_groups = operator_groups.get(cs_up, set())
+                        if local_operator_groups and not station_groups.intersection(local_operator_groups):
+                            continue
+                        if group_filter and group_filter not in station_groups:
+                            continue
+                        if not _matches_sitrep_search(cs_up, key):
+                            continue
+                        sitrep_counts[key] += 1
+                except Exception:
+                    pass
             conn.close()
         except Exception as e:
             log.debug("ControlFreq: inbox summary load failed: %s", e)

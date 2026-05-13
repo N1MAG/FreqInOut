@@ -60,7 +60,34 @@ def test_core_operator_checkins_schema_migrates_legacy_layout():
             """
         ).fetchone()
 
-        assert row == ("20240301", "", '["Alpha", "Bravo"]', 0, "", 7)
+        assert row == ("20240301", "", '["ALPHA", "BRAVO"]', 0, "", 7)
+    finally:
+        conn.close()
+
+
+def test_core_operator_checkins_repair_normalizes_commstat_groups():
+    conn = sqlite3.connect(":memory:")
+    try:
+        ensure_operator_checkins_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO operator_checkins
+                (callsign, name, state, group1, group2, group3, groups_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("K1ABC", "Bill", "CO", "@MAGNET", "MAGNET", "", '["@MAGNET","MAGNET","ARES"]'),
+        )
+
+        ensure_operator_checkins_schema(conn, repair_data=True)
+
+        row = conn.execute(
+            """
+            SELECT group1, group2, group3, groups_json
+            FROM operator_checkins
+            WHERE callsign='K1ABC'
+            """
+        ).fetchone()
+        assert row == ("MAGNET", "ARES", "", '["MAGNET", "ARES"]')
     finally:
         conn.close()
 
@@ -127,7 +154,7 @@ def test_db_initializer_migrates_operator_checkins_before_ui(monkeypatch, tmp_pa
             WHERE callsign='N0CALL'
             """
         ).fetchone()
-        assert row == ("20240229", '["Hub"]', 0, "NCS", 3)
+        assert row == ("20240229", '["HUB"]', 0, "NCS", 3)
     finally:
         conn.close()
 

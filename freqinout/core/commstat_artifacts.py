@@ -6,6 +6,7 @@ import sqlite3
 import time
 from typing import Dict, Iterable, List
 
+from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.sitrep_metadata import merge_transport_modes, normalize_transport_mode
 
 
@@ -295,7 +296,7 @@ def upsert_commstat_artifact(
     subtype_txt = str(subtype or "").strip().upper()
     from_txt = str(from_call or "").strip().upper()
     target_txt = str(target or "").strip().upper()
-    report_group_txt = str(report_group or "").strip().upper()
+    report_group_txt = normalize_group_name(report_group)
     grid_txt = str(grid or "").strip().upper()
     state_txt = str(state_code or "").strip().upper()
     scope_txt = _canonical_scope(scope)

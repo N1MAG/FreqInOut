@@ -28,6 +28,7 @@ from freqinout.core.commstat_artifacts import (
     upsert_commstat_artifact,
 )
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.logger import log
 
 
@@ -453,7 +454,7 @@ def _insert_source_event(
             subtype,
             _clean_call(from_call),
             (target or "").strip().upper(),
-            (report_group or "").strip().upper(),
+            normalize_group_name(report_group),
             (grid or "").strip().upper(),
             (scope or "").strip(),
             (transport_mode or "").strip().lower(),
