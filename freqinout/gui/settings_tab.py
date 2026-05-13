@@ -13516,13 +13516,23 @@ class SettingsTab(QWidget):
             return
         fpr = self._selected_gpg_signing_fingerprint()
         store_ok, store_msg = credential_store_available()
-        enabled = bool(fpr and store_ok)
+        enabled = bool(fpr)
         self.gpg_signing_passphrase_edit.setEnabled(enabled)
         self.gpg_signing_passphrase_confirm_edit.setEnabled(enabled)
         self.gpg_check_save_passphrase_btn.setEnabled(enabled)
         self.gpg_clear_passphrase_btn.setEnabled(bool(fpr and store_ok))
         if not fpr:
+            if hasattr(self, "gpg_signing_key_combo") and self.gpg_signing_key_combo.count() > 2:
+                self.gpg_signing_status_label.setText(
+                    "Choose a specific signing key before entering a passphrase. Auto-select only works when one private key is available."
+                )
+            else:
+                self.gpg_signing_status_label.setText(
+                    "Refresh Signing Keys and choose a signing key before entering a passphrase."
+                )
+            self.gpg_signing_passphrase_edit.setPlaceholderText("Select a signing key first")
             return
+        self.gpg_signing_passphrase_edit.setPlaceholderText("Stored in OS credential store, not FIO settings")
         if not store_ok:
             self.gpg_signing_status_label.setText(store_msg)
             return
