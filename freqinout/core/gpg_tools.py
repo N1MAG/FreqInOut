@@ -34,6 +34,7 @@ DEFAULT_INLINE_SIGNED_SUFFIXES: Tuple[str, ...] = ("-sig.k2s", "-sig.b2s", ".sig
 DETACHED_SIGNATURE_SUFFIXES: Tuple[str, ...] = (".sig", ".asc", ".gpg")
 FLAMP_PAYLOAD_SUFFIXES: Tuple[str, ...] = (".k2s", ".b2s")
 _PGP_CLEARSIGNED_HEADER = b"-----BEGIN PGP SIGNED MESSAGE-----"
+_CLEARSIGN_TIMEOUT_SEC = 10.0
 
 
 def normalize_fingerprint(value: str) -> str:
@@ -306,7 +307,7 @@ def clearsign_file(
     if not str(dst):
         return False, "Missing output path."
     signer = normalize_fingerprint(signer_fingerprint)
-    args = ["--armor", "--clearsign", "--output", str(dst)]
+    args = ["--pinentry-mode", "error", "--armor", "--clearsign", "--output", str(dst)]
     if signer:
         args.extend(["--local-user", signer])
     args.append(str(src))
@@ -315,7 +316,13 @@ def clearsign_file(
             gpg_path,
             args,
             gnupg_home=gnupg_home,
-            timeout_sec=45.0,
+            timeout_sec=_CLEARSIGN_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            False,
+            "Clearsign failed: GPG did not finish. The selected private key may require a passphrase prompt; "
+            "unlock it in GPG/Pinentry first or select an unprotected signing key.",
         )
     except Exception as e:
         return False, f"Clearsign failed: {e}"
