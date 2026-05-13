@@ -92,6 +92,8 @@ This installer:
 - Backs up detected user/config data before updates
 - Runs a post-install self-test and writes logs to `~/freqinout-install.log`
 
+`keyring` is included in `requirements.txt` and is installed automatically by the installer or by `pip install -r requirements.txt`. FIO uses it only for secure GPG signing passphrase storage through the OS credential store. On Linux, the desktop keyring service must also be available, such as Secret Service or KWallet.
+
 Default install path is `~/FreqInOut`.
 
 Easiest install-location override:

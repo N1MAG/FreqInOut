@@ -29,6 +29,8 @@ python -m venv venv
 pip install -r requirements.txt
 ```
 
+`requirements.txt` includes `keyring`, which FIO uses for secure GPG signing passphrase storage in the operating system credential store. On Linux, make sure a supported keyring backend is available, such as Secret Service or KWallet; FIO will not fall back to plaintext storage.
+
 If you will control JS8Call, also install:
 ```
 pip install pyjs8call
