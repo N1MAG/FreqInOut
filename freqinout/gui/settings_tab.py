@@ -8893,8 +8893,14 @@ class SettingsTab(QWidget):
         self._mark_settings_dirty()
 
     def _test_gpg_executable(self) -> None:
-        ok, msg, resolved = gpg_available(self._current_gpg_path())
+        current_path = self._current_gpg_path()
+        ok, msg, resolved = gpg_available(current_path)
         if ok:
+            if resolved and current_path and Path(current_path).name.lower() not in {"gpg", "gpg2", "gpg.exe", "gpg2.exe"}:
+                self.gpg_path_edit.setText(resolved)
+                self._gpg_keys_loaded = False
+                self._gpg_keys_auto_probe_attempted = False
+                self._mark_settings_dirty()
             detail = msg
             if resolved:
                 detail = f"{msg}\nPath: {resolved}"

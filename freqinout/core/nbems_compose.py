@@ -77,6 +77,95 @@ class ComposeDestinationPlan:
     note: str = ""
 
 
+@dataclass(frozen=True)
+class ComposeMessageFolderOption:
+    label: str
+    relative_path: str
+    path: Path
+
+
+def resolve_flamp_transmit_dir(path_text: str) -> str:
+    """Derive an outbound FLAmp staging folder from the configured FLAmp receive path."""
+    raw = str(path_text or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    name = path.name.lower()
+    if name == "rx":
+        return str(path.with_name("tx"))
+    if name == "flamp":
+        return str(path / "tx")
+    if path.parent.name.lower() == "rx":
+        return str(path.parent.with_name("tx"))
+    return str(path)
+
+
+def compose_message_relative_path(root: Path, folder: Path, *, max_depth: int = 2) -> Optional[str]:
+    root_path = Path(root).expanduser()
+    folder_path = Path(folder).expanduser()
+    try:
+        root_resolved = root_path.resolve(strict=False)
+        folder_resolved = folder_path.resolve(strict=False)
+        rel = folder_resolved.relative_to(root_resolved)
+    except Exception:
+        return None
+    if rel == Path("."):
+        return ""
+    parts = rel.parts
+    if len(parts) > int(max_depth):
+        return None
+    if any(part in {"", ".", ".."} or part.startswith(".") for part in parts):
+        return None
+    return Path(*parts).as_posix() if parts else ""
+
+
+def resolve_compose_message_folder(root: str | Path, relative_path: str, *, max_depth: int = 2) -> Optional[Path]:
+    root_path = Path(root).expanduser()
+    rel_text = str(relative_path or "").strip().replace("\\", "/")
+    if not rel_text:
+        return root_path
+    rel_path = Path(rel_text)
+    if rel_path.is_absolute():
+        return None
+    target = root_path / rel_path
+    rel = compose_message_relative_path(root_path, target, max_depth=max_depth)
+    if rel is None or rel != rel_path.as_posix():
+        return None
+    return target
+
+
+def discover_compose_message_folders(root: str | Path, *, max_depth: int = 2) -> List[ComposeMessageFolderOption]:
+    root_path = Path(root).expanduser()
+    if not root_path.exists() or not root_path.is_dir():
+        return []
+    options = [ComposeMessageFolderOption(label="Messages", relative_path="", path=root_path)]
+    found: List[Tuple[str, Path]] = []
+
+    def visit(parent: Path, depth: int) -> None:
+        if depth > int(max_depth):
+            return
+        try:
+            children = sorted(
+                [child for child in parent.iterdir() if child.is_dir() and not child.name.startswith(".")],
+                key=lambda item: item.name.casefold(),
+            )
+        except Exception:
+            return
+        for child in children:
+            if child.is_symlink():
+                continue
+            rel = compose_message_relative_path(root_path, child, max_depth=max_depth)
+            if rel is None:
+                continue
+            found.append((rel, child))
+            visit(child, depth + 1)
+
+    visit(root_path, 1)
+    for rel, path in sorted(found, key=lambda item: item[0].casefold()):
+        options.append(ComposeMessageFolderOption(label=rel, relative_path=rel, path=path))
+    return options
+
+
 def resolve_nbems_root(
     settings,
     *,
