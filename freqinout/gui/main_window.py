@@ -3753,6 +3753,8 @@ class MainWindow(QMainWindow):
                 self._active_tab_index = index
                 try:
                     widget_active = self.stack.widget(index)
+                    if label == "Messages" and hasattr(widget_active, "show_inbox_from_navigation"):
+                        widget_active.show_inbox_from_navigation()
                     if hasattr(widget_active, "set_tab_active"):
                         widget_active.set_tab_active(True)
                 except Exception:

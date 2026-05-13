@@ -32,6 +32,15 @@ class SignatureResult:
 
 DEFAULT_INLINE_SIGNED_SUFFIXES: Tuple[str, ...] = ("-sig.k2s", "-sig.b2s", ".sig.k2s", ".sig.b2s")
 DETACHED_SIGNATURE_SUFFIXES: Tuple[str, ...] = (".sig", ".asc", ".gpg")
+GPG_EXECUTABLE_NAMES = {"gpg", "gpg2", "gpg.exe", "gpg2.exe"}
+GPG_GUI_EXECUTABLE_HINTS = {
+    "kleopatra": "Kleopatra is the Gpg4win key manager, not the command-line GPG executable.",
+    "kleopatra.exe": "Kleopatra is the Gpg4win key manager, not the command-line GPG executable.",
+    "gpa": "GPA is a GPG key manager, not the command-line GPG executable.",
+    "gpa.exe": "GPA is a GPG key manager, not the command-line GPG executable.",
+    "gpgex": "GpgEX is a Windows Explorer extension, not the command-line GPG executable.",
+    "gpgex.exe": "GpgEX is a Windows Explorer extension, not the command-line GPG executable.",
+}
 FLAMP_PAYLOAD_SUFFIXES: Tuple[str, ...] = (".k2s", ".b2s")
 _PGP_CLEARSIGNED_HEADER = b"-----BEGIN PGP SIGNED MESSAGE-----"
 _CLEARSIGN_TIMEOUT_SEC = 10.0
@@ -114,10 +123,23 @@ def resolve_gpg_executable(configured_path: str = "") -> Optional[str]:
     if cand:
         p = Path(cand)
         if p.exists():
-            return str(p)
+            if p.name.lower() in GPG_EXECUTABLE_NAMES:
+                return str(p)
+            for sibling_name in ("gpg.exe", "gpg", "gpg2.exe", "gpg2"):
+                sibling = p.with_name(sibling_name)
+                if sibling.exists():
+                    return str(sibling)
+            return None
+        if Path(cand).name.lower() in GPG_GUI_EXECUTABLE_HINTS:
+            return None
+        if Path(cand).name.lower() not in GPG_EXECUTABLE_NAMES and ("/" in cand or "\\" in cand):
+            return None
         resolved = shutil.which(cand)
         if resolved:
-            return str(resolved)
+            resolved_path = Path(resolved)
+            if resolved_path.name.lower() in GPG_EXECUTABLE_NAMES:
+                return str(resolved_path)
+            return None
 
     for name in ("gpg", "gpg2"):
         resolved = shutil.which(name)
@@ -130,6 +152,7 @@ def resolve_gpg_executable(configured_path: str = "") -> Optional[str]:
             base = os.environ.get(env, "")
             if base:
                 common_dirs.append(Path(base) / "GnuPG" / "bin" / "gpg.exe")
+                common_dirs.append(Path(base) / "Gpg4win" / "bin" / "gpg.exe")
         for p in common_dirs:
             if p.exists():
                 return str(p)
@@ -137,6 +160,16 @@ def resolve_gpg_executable(configured_path: str = "") -> Optional[str]:
 
 
 def gpg_available(configured_path: str = "", gnupg_home: str = "") -> Tuple[bool, str, str]:
+    gui_hint = ""
+    configured_name = Path(str(configured_path or "").strip()).name.lower()
+    if configured_name in GPG_GUI_EXECUTABLE_HINTS:
+        hint = GPG_GUI_EXECUTABLE_HINTS[configured_name]
+        sibling = Path(str(configured_path or "")).with_name("gpg.exe") if configured_path else None
+        if sibling is not None and sibling.exists():
+            configured_path = str(sibling)
+            gui_hint = f"{hint} Using sibling command-line executable: {sibling}"
+        else:
+            return False, f"{hint} Select gpg.exe, usually in Gpg4win\\bin or GnuPG\\bin.", ""
     gpg_path = resolve_gpg_executable(configured_path)
     if not gpg_path:
         return False, "GPG executable not found.", ""
@@ -159,6 +192,8 @@ def gpg_available(configured_path: str = "", gnupg_home: str = "") -> Tuple[bool
             break
     if not first_line:
         first_line = "GPG available"
+    if gui_hint:
+        first_line = f"{first_line}\n{gui_hint}"
     return True, first_line, gpg_path
 
 

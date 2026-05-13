@@ -7,8 +7,12 @@ from freqinout.core.nbems_compose import (
     ComposeFieldOption,
     build_compose_filename,
     build_signed_filename,
+    compose_message_relative_path,
+    discover_compose_message_folders,
     parse_compose_template_fields,
     plan_compose_destinations,
+    resolve_compose_message_folder,
+    resolve_flamp_transmit_dir,
     sanitize_report_name,
     serialize_custom_form_message,
     serialize_standard_blank_message,
@@ -72,6 +76,50 @@ def test_plan_compose_destinations_adds_varac_outbox_and_bbs_targets(tmp_path: P
     assert ready["flamp"].path.endswith("-sig.k2s")
     assert ready["varac_outbox"].path.endswith(".k2s")
     assert ready["varac_bbs"].path.endswith(".k2s")
+
+
+def test_flamp_compose_uses_transmit_sibling_for_rx_path(tmp_path: Path) -> None:
+    flamp_root = tmp_path / "FLAMP"
+    rx_dir = flamp_root / "rx"
+    tx_dir = flamp_root / "tx"
+    tx_dir.mkdir(parents=True)
+    rx_dir.mkdir()
+
+    assert resolve_flamp_transmit_dir(str(rx_dir)) == str(tx_dir)
+    assert resolve_flamp_transmit_dir(str(flamp_root)) == str(tx_dir)
+
+    plans = plan_compose_destinations(
+        "W8UFO-TN-RR-20260423-1325z-ROADCLOSURE.k2s",
+        send_target="FLAmp",
+        varac_target="None",
+        flamp_dir=resolve_flamp_transmit_dir(str(rx_dir)),
+        sign_flamp_copy=True,
+    )
+
+    ready = {plan.key: plan for plan in plans if plan.ready}
+    assert ready["flamp"].directory == str(tx_dir)
+    assert ready["flamp"].path.endswith("-sig.k2s")
+
+
+def test_compose_message_folder_options_are_limited_to_two_levels(tmp_path: Path) -> None:
+    root = tmp_path / "messages"
+    (root / "mine" / "Intel" / "Deep").mkdir(parents=True)
+    (root / "Region" / "Summary").mkdir(parents=True)
+    (root / ".hidden").mkdir()
+
+    options = discover_compose_message_folders(root)
+
+    assert [option.label for option in options] == [
+        "Messages",
+        "mine",
+        "mine/Intel",
+        "Region",
+        "Region/Summary",
+    ]
+    assert resolve_compose_message_folder(root, "mine/Intel") == root / "mine" / "Intel"
+    assert resolve_compose_message_folder(root, "../outside") is None
+    assert resolve_compose_message_folder(root, "mine/Intel/Deep") is None
+    assert compose_message_relative_path(root, root / "Region" / "Summary") == "Region/Summary"
 
 
 def test_standard_blank_serialization_uses_blankform_and_custom_uses_customform() -> None:
@@ -273,3 +321,6 @@ def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None
     assert 'parse_compose_template_fields(template_text)' in text
     assert "widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)" in text
     assert "widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)" in text
+    assert "FLAmp signed file verified:" in text
+    assert "FLAmp signing failed; no unsigned FLAmp fallback was staged." in text
+    assert "FLAmp signing failed; staged unsigned file instead" not in text

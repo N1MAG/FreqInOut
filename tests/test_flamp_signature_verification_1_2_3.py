@@ -10,8 +10,10 @@ from freqinout.core import gpg_tools
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
     clearsign_file,
+    gpg_available,
     gpg_detail_indicates_passphrase_needed,
     list_secret_keys,
+    resolve_gpg_executable,
     signature_payload_candidates,
     verify_file_with_discovery,
 )
@@ -37,6 +39,39 @@ def test_default_inline_suffixes_include_canonical_and_dot_style_names() -> None
     assert "-sig.b2s" in DEFAULT_INLINE_SIGNED_SUFFIXES
     assert ".sig.k2s" in DEFAULT_INLINE_SIGNED_SUFFIXES
     assert ".sig.b2s" in DEFAULT_INLINE_SIGNED_SUFFIXES
+
+
+def test_gpg_available_resolves_kleopatra_sibling_gpg(monkeypatch, tmp_path: Path) -> None:
+    kleopatra = tmp_path / "kleopatra.exe"
+    gpg = tmp_path / "gpg.exe"
+    kleopatra.write_text("", encoding="utf-8")
+    gpg.write_text("", encoding="utf-8")
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_run_gpg(gpg_path: str, args: list[str], **kwargs):
+        calls.append((gpg_path, args))
+        return subprocess.CompletedProcess(args=["gpg"], returncode=0, stdout="gpg (GnuPG) 2.4.0\n", stderr="")
+
+    monkeypatch.setattr(gpg_tools, "_run_gpg", fake_run_gpg)
+
+    assert resolve_gpg_executable(str(kleopatra)) == str(gpg)
+    ok, msg, resolved = gpg_available(str(kleopatra))
+
+    assert ok is True
+    assert resolved == str(gpg)
+    assert "Kleopatra is the Gpg4win key manager" in msg
+    assert calls == [(str(gpg), ["--version"])]
+
+
+def test_gpg_available_rejects_kleopatra_without_sibling_gpg(tmp_path: Path) -> None:
+    kleopatra = tmp_path / "kleopatra.exe"
+    kleopatra.write_text("", encoding="utf-8")
+
+    ok, msg, resolved = gpg_available(str(kleopatra))
+
+    assert ok is False
+    assert resolved == ""
+    assert "Select gpg.exe" in msg
 
 
 def test_signature_payload_candidates_pair_k2s_and_b2s_sidecars(tmp_path: Path) -> None:

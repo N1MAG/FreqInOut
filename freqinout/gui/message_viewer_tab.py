@@ -105,8 +105,10 @@ from freqinout.core.nbems_compose import (
     ComposeFieldDefinition,
     ComposeFormFamily,
     ComposeFormTemplate,
+    compose_message_relative_path,
     build_compose_filename,
     build_signed_filename,
+    discover_compose_message_folders,
     discover_form_families,
     discover_forms_for_family,
     extract_compose_menu_item,
@@ -114,7 +116,8 @@ from freqinout.core.nbems_compose import (
     format_compose_zulu,
     parse_compose_template_fields,
     plan_compose_destinations,
-    sanitize_report_name,
+    resolve_compose_message_folder,
+    resolve_flamp_transmit_dir,
     safe_varac_bbs_filename,
     serialize_custom_form_message,
     serialize_standard_blank_message,
@@ -2240,9 +2243,7 @@ class MessageViewerTab(QWidget):
         self._form_cache: Dict[str, List[Dict]] = {}
         self._form_title_cache: Dict[str, str] = {}
         self.forms_path = (self.settings.get("js8_forms_path", "") or "").strip()
-        self._messages_mode: str = str(cfg.get("mode", "Inbox") or "Inbox").strip().title()
-        if self._messages_mode not in {"Inbox", "Compose"}:
-            self._messages_mode = "Inbox"
+        self._messages_mode: str = "Inbox"
         self._compose_templates: List[ComposeFormTemplate] = []
         self._compose_template_kind: str = "custom"
         self._compose_field_widgets: Dict[str, QWidget] = {}
@@ -3634,15 +3635,18 @@ class MessageViewerTab(QWidget):
         self.messages_copy_summary_btn.setToolTip("Copy a concise Messages support summary for the current mode.")
         self.messages_copy_summary_btn.clicked.connect(self._copy_messages_support_summary)
         self.messages_inbox_mode_btn = QPushButton("Inbox")
-        self.messages_inbox_mode_btn.clicked.connect(lambda: self._set_messages_mode("Inbox"))
+        self.messages_inbox_mode_btn.clicked.connect(lambda: self._set_messages_mode("Inbox", save=False))
         self.messages_compose_mode_btn = QPushButton("Compose")
-        self.messages_compose_mode_btn.clicked.connect(lambda: self._set_messages_mode("Compose"))
+        self.messages_compose_mode_btn.clicked.connect(lambda: self._set_messages_mode("Compose", save=False, reset_compose=True))
 
-        self.compose_refresh_forms_btn = QPushButton("Refresh Forms")
+        self.compose_refresh_forms_btn = QPushButton("Refresh")
+        self.compose_refresh_forms_btn.setToolTip("Refresh the available FLMsg compose forms.")
         self.compose_refresh_forms_btn.clicked.connect(self._refresh_compose_forms)
-        self.compose_reset_btn = QPushButton("Reset Draft")
-        self.compose_reset_btn.clicked.connect(self._reset_compose_draft)
-        self.compose_open_source_btn = QPushButton("Open Source Folder")
+        self.compose_reset_btn = QPushButton("Reset")
+        self.compose_reset_btn.setToolTip("Reset the current compose draft.")
+        self.compose_reset_btn.clicked.connect(lambda: self._reset_compose_draft())
+        self.compose_open_source_btn = QPushButton("Source")
+        self.compose_open_source_btn.setToolTip("Open the folder that contains the selected compose form.")
         self.compose_open_source_btn.clicked.connect(self._open_compose_source_folder)
 
         self.scan_combo = QComboBox()
@@ -3686,7 +3690,6 @@ class MessageViewerTab(QWidget):
 
         compose_row = QHBoxLayout()
         compose_row.setSpacing(8)
-        compose_row.addWidget(QLabel("Compose Tools:"))
         compose_row.addWidget(self.compose_refresh_forms_btn)
         compose_row.addWidget(self.compose_reset_btn)
         compose_row.addWidget(self.compose_open_source_btn)
@@ -3895,19 +3898,28 @@ class MessageViewerTab(QWidget):
     def _build_compose_page(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(6)
+        summary_row = QHBoxLayout()
+        summary_row.setContentsMargins(0, 0, 0, 0)
+        summary_row.setSpacing(8)
         self.compose_summary_label = QLabel()
-        self.compose_summary_label.setWordWrap(True)
-        root.addWidget(self.compose_summary_label)
-        compose_help_row = QHBoxLayout()
-        compose_help_row.addStretch()
+        self.compose_summary_label.setWordWrap(False)
+        self.compose_summary_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.compose_summary_label.setToolTip(
+            "FreqInOut stages compose files only. The operator sends them manually from FLMsg, FLAmp, or VarAC."
+        )
+        summary_row.addWidget(self.compose_summary_label, 1)
         self.compose_setup_help_btn = QPushButton("Compose Setup Help")
         self.compose_setup_help_btn.setToolTip("Open help for compose setup, VarAC copy targets, and FLAmp signing.")
         self.compose_setup_help_btn.clicked.connect(lambda: self._open_context_help("messages.compose-setup"))
-        compose_help_row.addWidget(self.compose_setup_help_btn)
-        root.addLayout(compose_help_row)
+        summary_row.addWidget(self.compose_setup_help_btn)
+        root.addLayout(summary_row)
 
-        setup_box = QGroupBox("Compose Setup")
+        setup_box = QGroupBox("Compose")
         setup_layout = QVBoxLayout(setup_box)
+        setup_layout.setContentsMargins(8, 8, 8, 8)
+        setup_layout.setSpacing(6)
 
         radio_row = QHBoxLayout()
         radio_row.addWidget(QLabel("Compose For"))
@@ -3985,19 +3997,33 @@ class MessageViewerTab(QWidget):
         row4.addStretch()
         setup_layout.addLayout(row4)
 
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("Save Under"))
+        self.compose_message_folder_combo = QComboBox()
+        self.compose_message_folder_combo.setToolTip("Choose the selected radio's ICS/Messages folder or a subfolder up to two levels deep.")
+        self.compose_message_folder_combo.currentIndexChanged.connect(self._on_compose_message_folder_changed)
+        folder_row.addWidget(self.compose_message_folder_combo, 1)
+        self.compose_choose_message_folder_btn = QPushButton("Choose")
+        self.compose_choose_message_folder_btn.setToolTip("Choose an existing folder under the selected radio's ICS/Messages root.")
+        self.compose_choose_message_folder_btn.clicked.connect(self._choose_compose_message_folder)
+        folder_row.addWidget(self.compose_choose_message_folder_btn)
+
         self.compose_signing_row_widget = QWidget()
         signing_row = QHBoxLayout(self.compose_signing_row_widget)
         signing_row.setContentsMargins(0, 0, 0, 0)
-        signing_row.addWidget(QLabel("Signing Key"))
+        self.compose_signing_key_label = QLabel("Signing Key")
+        signing_row.addWidget(self.compose_signing_key_label)
         self.compose_signing_key_combo = QComboBox()
         self.compose_signing_key_combo.addItem("Select signing key...", "")
         self.compose_signing_key_combo.currentIndexChanged.connect(self._on_compose_signing_key_changed)
         signing_row.addWidget(self.compose_signing_key_combo, 1)
-        self.compose_refresh_signing_keys_btn = QPushButton("Refresh Signing Keys")
+        self.compose_refresh_signing_keys_btn = QPushButton("Keys")
+        self.compose_refresh_signing_keys_btn.setToolTip("Refresh signing keys.")
         self.compose_refresh_signing_keys_btn.clicked.connect(lambda: self._refresh_compose_signing_keys(force=True))
         signing_row.addWidget(self.compose_refresh_signing_keys_btn)
         self.compose_signing_row_widget.setVisible(False)
-        setup_layout.addWidget(self.compose_signing_row_widget)
+        folder_row.addWidget(self.compose_signing_row_widget, 1)
+        setup_layout.addLayout(folder_row)
 
         self.compose_bbs_location_row_widget = QWidget()
         bbs_location_row = QHBoxLayout(self.compose_bbs_location_row_widget)
@@ -4039,6 +4065,9 @@ class MessageViewerTab(QWidget):
         output_layout.addWidget(self.compose_status_label)
         action_row = QHBoxLayout()
         self.compose_stage_btn = QPushButton("Stage Files")
+        self.compose_stage_btn.setToolTip(
+            "Create compose files for the selected destinations. FreqInOut stages only; the operator sends manually."
+        )
         self.compose_stage_btn.clicked.connect(self._stage_compose_files)
         action_row.addWidget(self.compose_stage_btn)
         self.compose_open_flmsg_btn = QPushButton("Open FLMsg")
@@ -4566,6 +4595,8 @@ class MessageViewerTab(QWidget):
                 self.settings.set("messages_compose_radio_id", int(target.radio_id))
             except Exception:
                 pass
+        self._compose_message_folder_root_cache = None
+        self._refresh_compose_message_folder_options(force=True)
         self._refresh_compose_bbs_location_targets()
         self._update_compose_preview()
 
@@ -4696,6 +4727,120 @@ class MessageViewerTab(QWidget):
                 pass
         self._update_compose_preview()
 
+    def _compose_message_root_dir(self, target: Optional[ComposeRadioTarget] = None) -> str:
+        msg_paths = self._compose_radio_message_paths(target or self._selected_compose_radio_target())
+        return str(msg_paths.get("flmsg", "") or "").strip()
+
+    def _saved_compose_message_subfolders(self) -> Dict[str, str]:
+        data = self.settings.get("messages_compose_subfolder_by_radio", {}) or {}
+        return dict(data) if isinstance(data, dict) else {}
+
+    def _saved_compose_message_subfolder(self, target: Optional[ComposeRadioTarget] = None) -> str:
+        radio = target or self._selected_compose_radio_target()
+        if radio is None:
+            return ""
+        saved = self._saved_compose_message_subfolders()
+        return str(saved.get(str(radio.radio_id), "") or "").strip().replace("\\", "/")
+
+    def _selected_compose_message_subfolder(self) -> str:
+        if not hasattr(self, "compose_message_folder_combo"):
+            return self._saved_compose_message_subfolder()
+        data = self.compose_message_folder_combo.currentData()
+        if isinstance(data, str):
+            return data.strip().replace("\\", "/")
+        return ""
+
+    def _selected_compose_message_dir(self, target: Optional[ComposeRadioTarget] = None) -> str:
+        radio = target or self._selected_compose_radio_target()
+        root = self._compose_message_root_dir(radio)
+        if not root:
+            return ""
+        selected = resolve_compose_message_folder(root, self._selected_compose_message_subfolder())
+        return str(selected or Path(root).expanduser())
+
+    def _save_compose_message_subfolder(self, subfolder: str, target: Optional[ComposeRadioTarget] = None) -> None:
+        radio = target or self._selected_compose_radio_target()
+        if radio is None:
+            return
+        saved = self._saved_compose_message_subfolders()
+        saved[str(radio.radio_id)] = str(subfolder or "").strip().replace("\\", "/")
+        try:
+            self.settings.set("messages_compose_subfolder_by_radio", saved)
+        except Exception:
+            pass
+
+    def _refresh_compose_message_folder_options(self, *, force: bool = False) -> None:
+        if not hasattr(self, "compose_message_folder_combo"):
+            return
+        target = self._selected_compose_radio_target()
+        root = self._compose_message_root_dir(target)
+        radio_id = target.radio_id if target is not None else 0
+        cache_key = f"{radio_id}:{Path(root).expanduser()}" if root else f"{radio_id}:"
+        if not force and getattr(self, "_compose_message_folder_root_cache", None) == cache_key:
+            return
+        self._compose_message_folder_root_cache = cache_key
+        saved = self._saved_compose_message_subfolder(target)
+        current = self._selected_compose_message_subfolder()
+        preferred = saved if force else (current or saved)
+        options = discover_compose_message_folders(root) if root else []
+        valid_relatives = {option.relative_path for option in options}
+        if preferred not in valid_relatives:
+            preferred = ""
+        self.compose_message_folder_combo.blockSignals(True)
+        try:
+            self.compose_message_folder_combo.clear()
+            for option in options:
+                self.compose_message_folder_combo.addItem(option.label, option.relative_path)
+            selected_index = 0
+            for idx in range(self.compose_message_folder_combo.count()):
+                if str(self.compose_message_folder_combo.itemData(idx) or "") == preferred:
+                    selected_index = idx
+                    break
+            if self.compose_message_folder_combo.count():
+                self.compose_message_folder_combo.setCurrentIndex(selected_index)
+        finally:
+            self.compose_message_folder_combo.blockSignals(False)
+        enabled = bool(options)
+        self.compose_message_folder_combo.setEnabled(enabled)
+        if hasattr(self, "compose_choose_message_folder_btn"):
+            self.compose_choose_message_folder_btn.setEnabled(enabled)
+        self._configure_compose_combo_width(self.compose_message_folder_combo, floor=180)
+
+    def _on_compose_message_folder_changed(self) -> None:
+        target = self._selected_compose_radio_target()
+        root = self._compose_message_root_dir(target)
+        subfolder = self._selected_compose_message_subfolder()
+        if root and resolve_compose_message_folder(root, subfolder) is not None:
+            self._save_compose_message_subfolder(subfolder, target)
+        self._update_compose_preview()
+
+    def _choose_compose_message_folder(self) -> None:
+        target = self._selected_compose_radio_target()
+        root_txt = self._compose_message_root_dir(target)
+        if not root_txt:
+            self._set_compose_status("Configure the selected radio's ICS/Messages path before choosing a compose folder.", role="warning")
+            return
+        root = Path(root_txt).expanduser()
+        if not root.exists() or not root.is_dir():
+            self._set_compose_status("The selected radio's ICS/Messages path is missing.", role="warning")
+            return
+        start = Path(self._selected_compose_message_dir(target) or str(root))
+        chosen = QFileDialog.getExistingDirectory(self, "Choose Messages Folder", str(start))
+        if not chosen:
+            return
+        rel = compose_message_relative_path(root, Path(chosen), max_depth=2)
+        if rel is None:
+            QMessageBox.warning(
+                self,
+                "Choose Messages Folder",
+                "Choose a folder under the selected radio's ICS/Messages root, no more than two levels deep.",
+            )
+            return
+        self._save_compose_message_subfolder(rel, target)
+        self._compose_message_folder_root_cache = None
+        self._refresh_compose_message_folder_options(force=True)
+        self._update_compose_preview()
+
     def _compose_destination_plans(self) -> List[ComposeDestinationPlan]:
         radio_target = self._selected_compose_radio_target()
         msg_paths = self._compose_radio_message_paths(radio_target)
@@ -4705,8 +4850,8 @@ class MessageViewerTab(QWidget):
             self._compose_base_filename(),
             send_target=self.compose_send_target_combo.currentText() if hasattr(self, "compose_send_target_combo") else "FLMsg",
             varac_target=self.compose_varac_target_combo.currentText() if hasattr(self, "compose_varac_target_combo") else "None",
-            flmsg_dir=str(msg_paths.get("flmsg", "") or "").strip(),
-            flamp_dir=str(msg_paths.get("flamp", "") or "").strip(),
+            flmsg_dir=self._selected_compose_message_dir(radio_target) or str(msg_paths.get("flmsg", "") or "").strip(),
+            flamp_dir=resolve_flamp_transmit_dir(str(msg_paths.get("flamp", "") or "").strip()),
             varac_outbox_dir=self._compose_varac_outbox_dir(radio_target),
             varac_bbs_dir=bbs_dir,
             sign_flamp_copy=bool(
@@ -4757,14 +4902,19 @@ class MessageViewerTab(QWidget):
                 return str(candidate)
         return ""
 
-    def _set_messages_mode(self, mode: str, *, save: bool = True) -> None:
+    def _set_messages_mode(self, mode: str, *, save: bool = False, reset_compose: bool = False) -> None:
         mode_txt = str(mode or "Inbox").strip().title()
         if mode_txt not in {"Inbox", "Compose"}:
             mode_txt = "Inbox"
         self._messages_mode = mode_txt
         self._update_messages_mode_ui()
+        if mode_txt == "Compose" and reset_compose:
+            self._reset_compose_draft(status_text="Compose is ready.")
         if save:
             self._save_settings()
+
+    def show_inbox_from_navigation(self) -> None:
+        self._set_messages_mode("Inbox", save=False)
 
     def _update_messages_mode_ui(self) -> None:
         if not hasattr(self, "messages_mode_stack"):
@@ -4905,7 +5055,7 @@ class MessageViewerTab(QWidget):
         self._refresh_compose_smart_defaults()
         self._update_compose_preview()
 
-    def _reset_compose_draft(self) -> None:
+    def _reset_compose_draft(self, *, status_text: str = "Compose draft reset.") -> None:
         self._compose_timestamp_utc = datetime.datetime.now(datetime.timezone.utc)
         if hasattr(self, "compose_priority_combo"):
             self.compose_priority_combo.setCurrentText("RR")
@@ -4920,7 +5070,7 @@ class MessageViewerTab(QWidget):
         self._compose_last_stage_paths = []
         self._compose_active_form_key = ""
         self._on_compose_form_changed()
-        self._set_compose_status("Compose draft reset.", role="info")
+        self._set_compose_status(status_text, role="info")
 
     def _open_compose_source_folder(self) -> None:
         if self._compose_last_source_dir is None:
@@ -5005,6 +5155,16 @@ class MessageViewerTab(QWidget):
             f"padding: 6px 8px; border-radius: 4px; background: {bg}; color: {color}; border: 1px solid {border};"
         )
 
+    @staticmethod
+    def _compose_signing_key_short_label(key) -> str:
+        uid = next((str(u).strip() for u in getattr(key, "user_ids", []) if str(u).strip()), "")
+        if uid:
+            return uid
+        fpr = normalize_fingerprint(str(getattr(key, "fingerprint", "") or ""))
+        key_id = str(getattr(key, "key_id", "") or "").strip()
+        short = fpr[-8:] if len(fpr) >= 8 else key_id[-8:]
+        return short or "(unnamed key)"
+
     def _refresh_compose_signing_keys(self, *, force: bool = False) -> None:
         if not hasattr(self, "compose_signing_key_combo"):
             return
@@ -5029,7 +5189,12 @@ class MessageViewerTab(QWidget):
                 if not fpr:
                     continue
                 count += 1
-                self.compose_signing_key_combo.addItem(gpg_key_display_label(key), fpr)
+                self.compose_signing_key_combo.addItem(self._compose_signing_key_short_label(key), fpr)
+                self.compose_signing_key_combo.setItemData(
+                    self.compose_signing_key_combo.count() - 1,
+                    gpg_key_display_label(key),
+                    Qt.ToolTipRole,
+                )
                 if preferred and fpr == preferred:
                     selected_index = self.compose_signing_key_combo.count() - 1
             if count == 1 and selected_index == 0:
@@ -5080,6 +5245,7 @@ class MessageViewerTab(QWidget):
         if not hasattr(self, "compose_summary_label"):
             return
         self._refresh_compose_radio_targets()
+        self._refresh_compose_message_folder_options()
         flamp_selected = self._ensure_compose_flamp_target_for_signing()
         if hasattr(self, "compose_sign_flamp_chk"):
             self.compose_sign_flamp_chk.setEnabled(True)
@@ -5089,6 +5255,11 @@ class MessageViewerTab(QWidget):
         )
         if hasattr(self, "compose_signing_row_widget"):
             self.compose_signing_row_widget.setVisible(sign_flamp_selected)
+        if hasattr(self, "compose_message_folder_combo"):
+            self.compose_message_folder_combo.setMaximumWidth(280 if sign_flamp_selected else 16777215)
+        if hasattr(self, "compose_signing_key_combo"):
+            self.compose_signing_key_combo.setMinimumWidth(180)
+            self.compose_signing_key_combo.setMaximumWidth(360)
         if sign_flamp_selected and not self._compose_signing_keys_loaded and not self._compose_signing_keys_loading:
             self._refresh_compose_signing_keys()
         bbs_selected = (
@@ -5104,15 +5275,14 @@ class MessageViewerTab(QWidget):
         self.compose_state_value.setText(self._compose_operator_state() or "Not set")
         self.compose_grid_value.setText(self._compose_operator_grid() or "Not set")
         filename = self._compose_base_filename()
-        report_component = sanitize_report_name(self.compose_report_title_edit.text())
         radio_target = self._selected_compose_radio_target()
         radio_label = radio_target.label if radio_target is not None else "No compose-capable radio"
-        self.compose_summary_label.setText(
-            "Stage only: FreqInOut creates files. The operator sends manually from FLMsg, FLAmp, or VarAC.\n"
-            f"Compose for: {radio_label}\n"
-            f"Filename preview: {filename}\n"
-            f"Report name component: {report_component}"
+        folder_label = (
+            self.compose_message_folder_combo.currentText()
+            if hasattr(self, "compose_message_folder_combo") and self.compose_message_folder_combo.count()
+            else "Messages"
         )
+        self.compose_summary_label.setText(f"Radio: {radio_label}  |  File: {filename}  |  Save under: {folder_label}")
         plans = self._compose_destination_plans()
         destination_lines: List[str] = []
         if radio_target is None:
@@ -5139,6 +5309,7 @@ class MessageViewerTab(QWidget):
         metadata = [
             f"<div><b>Compose For:</b> {html.escape(radio_label)}</div>",
             f"<div><b>Filename:</b> {html.escape(filename)}</div>",
+            f"<div><b>Save Under:</b> {html.escape(self.compose_message_folder_combo.currentText() if hasattr(self, 'compose_message_folder_combo') and self.compose_message_folder_combo.count() else 'Messages')}</div>",
             f"<div><b>Send Target:</b> {html.escape(self.compose_send_target_combo.currentText())}</div>",
             f"<div><b>VarAC Copy:</b> {html.escape(self.compose_varac_target_combo.currentText())}</div>",
         ]
@@ -5176,6 +5347,8 @@ class MessageViewerTab(QWidget):
             self.compose_open_folder_btn,
             self.compose_copy_paths_btn,
             self.compose_refresh_time_btn,
+            self.compose_choose_message_folder_btn,
+            self.compose_refresh_signing_keys_btn,
         ):
             btn.setStyleSheet(button_style("muted", theme))
         profile = radio_target.profile if radio_target is not None else {}
@@ -5204,6 +5377,7 @@ class MessageViewerTab(QWidget):
         skipped = [plan.note for plan in plans if plan.requested and not plan.ready and plan.note]
         outputs: List[Path] = []
         problems: List[str] = []
+        signature_notes: List[str] = []
         gpg_path = str(self.settings.get("gpg_executable_path", "") or "").strip()
         trusted_fingerprints = self.settings.get("gpg_trusted_signers", []) or []
         sign_flamp = self._compose_sign_flamp_selected()
@@ -5256,13 +5430,10 @@ class MessageViewerTab(QWidget):
                         )
                         if verify_result.status != "valid":
                             problems.append(f"FLAmp signature verification: {verify_result.detail}")
+                        else:
+                            signature_notes.append(f"FLAmp signed file verified: {dst.name}")
                     else:
-                        fallback = unique_destination(dst.parent / unsigned_name)
-                        if fallback is None:
-                            fallback = dst.parent / unsigned_name
-                        fallback.write_text(payload, encoding="utf-8")
-                        outputs.append(fallback)
-                        problems.append(f"FLAmp signing failed; staged unsigned file instead. {detail}")
+                        problems.append(f"FLAmp signing failed; no unsigned FLAmp fallback was staged. {detail}")
                     continue
                 dst.write_text(payload, encoding="utf-8")
                 outputs.append(dst)
@@ -5277,10 +5448,17 @@ class MessageViewerTab(QWidget):
         else:
             lines.append("No compose files were staged.")
         lines.extend(skipped)
+        lines.extend(signature_notes)
         lines.extend(problems)
         role = "success" if outputs and not problems and not skipped else "warning"
-        self._set_compose_status("\n".join(lines), role=role)
-        self._update_compose_preview()
+        status_text = "\n".join(lines)
+        if outputs:
+            status_text = f"{status_text}\nCompose draft reset for the next message."
+            self._reset_compose_draft(status_text=status_text)
+            self._set_compose_status(status_text, role=role)
+        else:
+            self._set_compose_status(status_text, role=role)
+            self._update_compose_preview()
 
     @staticmethod
     def _normalize_excluded_msg_types(values) -> set[str]:
