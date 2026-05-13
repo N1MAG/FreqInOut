@@ -43,6 +43,8 @@ It automatically:
 Default install location:
 - `~/FreqInOut`
 
+`requirements.txt` includes `keyring`, so the installer installs it during fresh installs, repairs, and updates. FIO uses `keyring` for secure GPG signing passphrase storage. Linux systems still need an OS credential backend such as Secret Service or KWallet; if no secure backend is available, FIO reports that passphrase storage is unavailable instead of storing plaintext.
+
 ---
 
 ## 3) Guided prompts (what to expect)
@@ -191,4 +193,3 @@ For **advanced users / automation**:
 - prefer explicit flags (`--dir`, `--repo`, `--branch`, `--yes`, policy flags)
 - use `--dry-run` before first unattended run
 - capture logs with `--log-file`
-
