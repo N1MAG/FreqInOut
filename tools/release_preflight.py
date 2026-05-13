@@ -45,7 +45,7 @@ def extract_version_from_inno(text: str) -> str | None:
 
 
 def extract_version_from_guide(text: str) -> str | None:
-    m = re.search(r"<strong>Current version</strong>:\s*([0-9]+\.[0-9]+\.[0-9]+)", text)
+    m = re.search(r"<strong>Current version</strong>:\s*([0-9]+(?:\.[0-9]+)+)", text)
     return m.group(1) if m else None
 
 

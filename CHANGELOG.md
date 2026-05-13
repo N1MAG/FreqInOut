@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.3.1]
+- Fixed: Windows release packaging now runs a packaged executable smoke test before publishing the installer, catching launch-time packaging failures before the `.exe` reaches GitHub releases.
+- Changed: startup failures now write `startup-error.log` beside the normal FreqInOut log directory so Windows users have a clear diagnostic file when the GUI cannot open.
+
 ## [1.2.3]
 - Changed: `Messages` now opens to Inbox from main navigation, shows Compose only after the internal Compose action is selected, starts each new compose draft from defaults, and resets the draft after successful staging while preserving durable station configuration such as selected folders and signing keys.
 - Changed: `Messages -> Compose` now uses a tighter drafting layout with a compact file/status strip, shorter compose utility buttons, shared `Save Under` / signing-key row, and operator-friendly signing-key labels with full key detail retained in tooltips.

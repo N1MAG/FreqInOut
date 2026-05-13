@@ -2,18 +2,15 @@
 import sys
 import os
 import argparse
+import tempfile
+import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile
+from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtGui import QIcon
-from freqinout.gui.main_window import MainWindow
-from freqinout.core import db_initializer
 from freqinout.core.logger import log
-from freqinout.core import updater
 from freqinout.core.config_paths import get_config_dir
-from freqinout.core.startup_lock import try_acquire_single_instance_lock
-from freqinout.gui.dialog_notifications import install_auto_closing_information_dialogs
 
 
 def _set_windows_app_user_model_id() -> None:
@@ -40,20 +37,55 @@ def _load_app_icon() -> QIcon:
         except Exception:
             continue
     return QIcon()
+
+
+def _write_fatal_startup_log(exc: BaseException) -> Path:
+    candidates = []
+    try:
+        candidates.append(get_config_dir())
+    except Exception:
+        pass
+    candidates.append(Path(tempfile.gettempdir()) / "FreqInOut")
+
+    detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    for base in candidates:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            path = base / "startup-error.log"
+            path.write_text(detail, encoding="utf-8")
+            return path
+        except Exception:
+            continue
+    return Path("startup-error.log")
+
+
 def main():
     parser = argparse.ArgumentParser(description="FreqInOut HF controller")
     parser.add_argument("--update", action="store_true", help="Check for and apply updates, then exit.")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
 
     if args.update:
+        from freqinout.core import updater
+
         updater.run_interactive_update()
         return
 
     # Ensure SQLite schema is present before the UI starts
     try:
+        from freqinout.core import db_initializer
+
         db_initializer.ensure_all_tables()
     except Exception as e:
         log.error("Database initialization failed: %s", e)
+
+    from freqinout.core.startup_lock import try_acquire_single_instance_lock
+    from freqinout.gui.dialog_notifications import install_auto_closing_information_dialogs
+    from freqinout.gui.main_window import MainWindow
 
     _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
@@ -71,6 +103,9 @@ def main():
     win = MainWindow()
     win.show()
     log.info("FreqInOut started.")
+    if args.smoke_test:
+        log.info("FreqInOut smoke test started.")
+        QTimer.singleShot(1000, app.quit)
     exit_code = app.exec()
     try:
         win.deleteLater()
@@ -89,4 +124,21 @@ def main():
     sys.exit(exit_code)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        try:
+            log.exception("Fatal startup error")
+        except Exception:
+            pass
+        path = _write_fatal_startup_log(exc)
+        try:
+            app = QApplication.instance() or QApplication(sys.argv)
+            QMessageBox.critical(
+                None,
+                "FreqInOut Startup Error",
+                f"FreqInOut could not start.\n\nDetails were written to:\n{path}",
+            )
+        except Exception:
+            pass
+        raise
