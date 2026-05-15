@@ -1,5 +1,8 @@
 # Changelog
 
+## [1.2.3.4]
+- Fixed: Windows launch after install resolved.
+
 ## [1.2.3.3]
 - Fixed: Windows installers now build the PyInstaller app without UPX compression. This avoids real-machine Windows 11 startup crashes and security-tool interference that can occur with compressed Qt/Python DLLs even when the package starts correctly on a clean CI runner.
 - Fixed: Windows packaged builds now default Qt to software rendering and disable WebEngine GPU acceleration, reducing startup access violations caused by local graphics drivers on operator machines.
