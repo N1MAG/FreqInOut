@@ -133,6 +133,21 @@ def _timezone_from_localtime_symlink() -> Optional[str]:
 
 
 def _command_output(args: list[str]) -> Optional[str]:
+    run_kwargs = {}
+    if os.name == "nt":
+        try:
+            creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+            if creationflags:
+                run_kwargs["creationflags"] = creationflags
+        except Exception:
+            pass
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = 0
+            run_kwargs["startupinfo"] = startupinfo
+        except Exception:
+            pass
     try:
         completed = subprocess.run(
             args,
@@ -140,6 +155,7 @@ def _command_output(args: list[str]) -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=1.5,
+            **run_kwargs,
         )
     except Exception:
         return None

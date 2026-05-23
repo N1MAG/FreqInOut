@@ -57,6 +57,8 @@ def ensure_commstat_artifact_tables(conn: sqlite3.Connection) -> None:
             title TEXT,
             body_text TEXT,
             remarks_text TEXT,
+            brevity_code TEXT,
+            brevity_summary TEXT,
             source_first TEXT,
             source_last TEXT,
             sources_json TEXT,
@@ -90,6 +92,8 @@ def ensure_commstat_artifact_tables(conn: sqlite3.Connection) -> None:
             "title": "TEXT",
             "body_text": "TEXT",
             "remarks_text": "TEXT",
+            "brevity_code": "TEXT",
+            "brevity_summary": "TEXT",
             "source_first": "TEXT",
             "source_last": "TEXT",
             "sources_json": "TEXT",
@@ -260,6 +264,8 @@ def upsert_commstat_artifact(
     title: str = "",
     body_text: str = "",
     remarks_text: str = "",
+    brevity_code: str = "",
+    brevity_summary: str = "",
     source: str = "",
     source_ref: str = "",
     external_ids: Iterable[str] | None = None,
@@ -277,7 +283,8 @@ def upsert_commstat_artifact(
         """
         SELECT id, event_ts, event_ts_utc, from_call, target, report_group, grid, state_code, scope,
                transport_mode, status_label, alert_color, title, body_text, remarks_text,
-               source_first, source_last, sources_json, source_refs_json, external_ids_json, payload_json, subtype
+               source_first, source_last, sources_json, source_refs_json, external_ids_json, payload_json, subtype,
+               brevity_code, brevity_summary
         FROM commstat_artifacts
         WHERE artifact_key=?
         """,
@@ -303,6 +310,8 @@ def upsert_commstat_artifact(
     title_txt = str(title or "").strip()
     body_txt = str(body_text or "").strip()
     remarks_txt = str(remarks_text or "").strip()
+    brevity_code_txt = str(brevity_code or "").strip().upper()
+    brevity_summary_txt = str(brevity_summary or "").strip()
 
     if not row:
         cur.execute(
@@ -310,9 +319,10 @@ def upsert_commstat_artifact(
             INSERT INTO commstat_artifacts (
                 artifact_key, artifact_kind, subtype, event_ts, event_ts_utc, from_call, target, report_group,
                 grid, state_code, scope, transport_mode, status_label, alert_color, title, body_text, remarks_text,
+                brevity_code, brevity_summary,
                 source_first, source_last, sources_json, source_count, source_refs_json, external_ids_json,
                 payload_json, inserted_ts, updated_ts
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 key,
@@ -332,6 +342,8 @@ def upsert_commstat_artifact(
                 title_txt,
                 body_txt,
                 remarks_txt,
+                brevity_code_txt,
+                brevity_summary_txt,
                 source_txt,
                 source_txt,
                 json.dumps([source_txt] if source_txt else [], separators=(",", ":"), ensure_ascii=True),
@@ -368,6 +380,8 @@ def upsert_commstat_artifact(
         ext_ids_json,
         existing_payload_json,
         existing_subtype,
+        existing_brevity_code,
+        existing_brevity_summary,
     ) = row
 
     sources = set(_safe_json_array_loads(sources_json))
@@ -413,6 +427,8 @@ def upsert_commstat_artifact(
             title=?,
             body_text=?,
             remarks_text=?,
+            brevity_code=?,
+            brevity_summary=?,
             source_first=?,
             source_last=?,
             sources_json=?,
@@ -439,6 +455,8 @@ def upsert_commstat_artifact(
             title_txt if richer and title_txt else str(existing_title or "").strip(),
             body_txt if richer and body_txt else str(existing_body or "").strip(),
             remarks_txt if richer and remarks_txt else str(existing_remarks or "").strip(),
+            brevity_code_txt if richer and brevity_code_txt else str(existing_brevity_code or "").strip().upper(),
+            brevity_summary_txt if richer and brevity_summary_txt else str(existing_brevity_summary or "").strip(),
             str(source_first or source_txt or "").strip().upper(),
             source_txt or str(_source_last or source_first or "").strip().upper(),
             json.dumps(source_list, separators=(",", ":"), ensure_ascii=True),

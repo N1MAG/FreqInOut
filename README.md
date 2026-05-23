@@ -29,6 +29,15 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
+## What's New in v1.2.4
+
+- FLDigi / SSB Net Control now lists scheduled nets that are active or coming up soon, so operators who start a little late can still select the intended scheduled net.
+- The FLDigi / SSB Net Roster now uses role-aware `Directed By` and `Acked By` chips, scoped live actions (`NCS`, `ANCS`, `Shared`, `All`), `ACK Needed`, `Next TFC`, traffic progress chips, and role-first macro files such as `NCS_ACK_Pending.txt` and `ANCS_Next_TFC.txt`.
+- The FLDigi macro area is collapsible and quieter during a net, with setup controls shown only when a macro is missing or needs mapping; the expanded Help guide now explains copy actions, macro files, and NCS/ANCS workflows in operator-friendly wording.
+- Station Health adds a dedicated view for external dependency responsiveness so operators can see when JS8Call, FLDigi, FLRig, background ingest, or other companion services are unreachable or backing off without confusing traffic-busy states with app health.
+- Messages filtering/export and FLAMP/CommStat handling were tightened for field use, including cleaner CSV export behavior and clearer incomplete-FLAMP/CommStat message handling.
+- Performance isolation work reduces the chance that slow or unreachable companion applications can make FIO feel like the culprit, with guarded background work, cooldowns, and clearer status reporting.
+
 ## What's New in v1.2.3
 
 - Messages Compose is now a fuller outbound staging workflow: it can create standard blank or custom FLMsg files, stage to FLMsg, FLAmp, VarAC Outbox, or VarAC BBS, choose ICS/Messages subfolders up to two levels deep, and reset cleanly between new drafts.
@@ -55,7 +64,7 @@ python -m freqinout.main
 
 ### Linux (Debian/Ubuntu)
 
-This path is a full source/developer checkout and includes tests.
+This path runs FreqInOut from a source checkout.
 
 ```bash
 sudo apt-get install python3 python3-venv python3-pip libxcb-cursor0 libxcb-xinerama0
@@ -239,20 +248,10 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 - Installation: `docs/Installation.md`
 - Linux installer guide: `docs/FreqInOut-linux-installer.md`
 - Linux installer guide (HTML): `docs/FreqInOut-linux-installer.html`
-- Database tools: `docs/db-tools.md`
-- Tools and scripts guide: `docs/tools-and-scripts.md`
 - User guide: `docs/guide.html`
 - Changelog: `CHANGELOG.md`
 - Contributing: `CONTRIBUTING.md`
 - Code of Conduct: `CODE_OF_CONDUCT.md`
-- Release checklist: `docs/release-checklist.md`
-
-## Maintainer Tools
-
-- Preflight release checks: `python tools/release_preflight.py`
-- Linux live-station benchmark capture: `bash tools/linux_fio_bench_capture.sh --duration 300`
-- Linux benchmark summary (rerun on a capture folder): `python tools/linux_fio_bench_summary.py <capture_dir>`
-- Optional release helper (run from active venv): `python release_builder.py --build-exe`
 
 ## License
 

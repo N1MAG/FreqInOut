@@ -643,6 +643,8 @@ def _upsert_commstat_statrep_artifact(
     remarks_text: str,
     payload: Dict,
     subtype: str = "COMMSTAT_12",
+    brevity_code: str = "",
+    brevity_summary: str = "",
     external_ids: Iterable[str] | None = None,
 ) -> None:
     status_signature = _commstat_status_signature(status_payload)
@@ -679,6 +681,8 @@ def _upsert_commstat_statrep_artifact(
         title=title,
         body_text=str(remarks_text or "").strip(),
         remarks_text=str(remarks_text or "").strip(),
+        brevity_code=brevity_code,
+        brevity_summary=brevity_summary,
         source=source,
         source_ref=f"{source_table}:{int(source_id or 0)}",
         external_ids=external_ids or [],
@@ -700,9 +704,11 @@ def _upsert_commstat_message_artifact(
     transport_mode: str,
     body_text: str,
     payload: Dict,
+    asset_dir: Optional[Path] = None,
     external_ids: Iterable[str] | None = None,
 ) -> None:
     body = str(body_text or "").strip()
+    brevity_code = extract_brevity_code(body)
     title = _preview_title(body, fallback="CommStat Message")
     upsert_commstat_artifact(
         local_conn,
@@ -723,6 +729,8 @@ def _upsert_commstat_message_artifact(
         status_label="INFO",
         title=title,
         body_text=body,
+        brevity_code=brevity_code,
+        brevity_summary=decode_brevity_summary(brevity_code, asset_dir),
         source=source,
         source_ref=f"{source_table}:{int(source_id or 0)}",
         external_ids=external_ids or [],
@@ -746,11 +754,14 @@ def _upsert_commstat_alert_artifact(
     title: str,
     body_text: str,
     payload: Dict,
+    asset_dir: Optional[Path] = None,
     external_ids: Iterable[str] | None = None,
 ) -> None:
     color_txt = str(alert_color or "").strip().upper()
     title_txt = _preview_title(title, fallback="CommStat Alert")
     body = str(body_text or "").strip()
+    brevity_source = " ".join(part for part in (title_txt, body) if part)
+    brevity_code = extract_brevity_code(brevity_source)
     visible_title = f"{color_txt} ALERT | {title_txt}" if color_txt else f"ALERT | {title_txt}"
     upsert_commstat_artifact(
         local_conn,
@@ -774,6 +785,8 @@ def _upsert_commstat_alert_artifact(
         alert_color=color_txt,
         title=visible_title,
         body_text=body,
+        brevity_code=brevity_code,
+        brevity_summary=decode_brevity_summary(brevity_code, asset_dir),
         source=source,
         source_ref=f"{source_table}:{int(source_id or 0)}",
         external_ids=external_ids or [],
@@ -1132,6 +1145,8 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
                         transport_mode=metadata["transport_mode"],
                         status_payload=status_payload,
                         remarks_text=remarks_text,
+                        brevity_code=metadata["brevity_code"],
+                        brevity_summary=metadata["brevity_summary"],
                         external_ids=[str(row[6] or "").strip()],
                         payload={
                             "source": source,
@@ -1235,6 +1250,8 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
                             status_payload=dict(parsed.get("status_payload") or {}),
                             remarks_text=metadata.get("remarks_text", ""),
                             subtype=str(parsed.get("subtype") or ""),
+                            brevity_code=metadata.get("brevity_code", ""),
+                            brevity_summary=metadata.get("brevity_summary", ""),
                             external_ids=[str(row[6] or "").strip()],
                             payload=raw_payload,
                         )
@@ -1259,6 +1276,7 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
                             report_group=metadata.get("report_group", ""),
                             transport_mode=metadata.get("transport_mode", ""),
                             body_text=message_text,
+                            asset_dir=asset_dir,
                             external_ids=[str(row[6] or "").strip()],
                             payload={
                                 "source": source,
@@ -1324,6 +1342,7 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
                         alert_color=str(row[9] or ""),
                         title=str(row[10] or ""),
                         body_text=str(row[11] or ""),
+                        asset_dir=asset_dir,
                         external_ids=[str(row[6] or "").strip()],
                         payload={
                             "source": source,
@@ -1471,6 +1490,8 @@ def _ingest_commstat23(local_conn: sqlite3.Connection, source_db: Path, *, max_r
                     "political": str(row[20] or ""),
                 },
                 remarks_text=remarks_text,
+                brevity_code=metadata["brevity_code"],
+                brevity_summary=metadata["brevity_summary"],
                 external_ids=[str(row[7] or "").strip()],
                 payload={
                     "source": source,

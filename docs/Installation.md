@@ -44,7 +44,7 @@ python -m freqinout.main
 ## 7) Configure paths
 - Open the Settings tab and set executable paths for FLRig, FLDigi, FLMsg, FLAmp, VarAC, JS8Call.
 - Set JS8Call DIRECTED.TXT path (for JS8 net control).
-- Watch the Settings left-nav for warning highlights. In `1.2.3`, these indicate sections where a companion field is still missing.
+- Watch the Settings left-nav for warning highlights. In `1.2.2`, these indicate sections where a companion field is still missing.
 - Typical examples:
   - `JS8Call Settings`: if `JS8Call Install Folder` is set, also set host, TCP port, and `DIRECTED.TXT`.
   - `JS8Call Settings`: if `JS8Spotter Launch Path` is set, also set `JS8Spotter forms`.

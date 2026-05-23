@@ -1422,7 +1422,11 @@ def publish_root_view(
         include_enabled_fallback=include_enabled_fallback,
     )
     if not virtual_files and include_enabled_fallback:
-        virtual_files = _filesystem_location_virtual_files(managed_root)
+        # Filesystem-only root discovery is intentionally disabled for normal
+        # operation. Configured-location fallback still happens inside
+        # _root_virtual_files; raw folders left on disk must not resurrect a
+        # location after it is deleted from FIO Settings.
+        virtual_files = []
     manifest, ignored_dirs = build_publish_manifest(default_location.source_dir, virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
@@ -2917,7 +2921,6 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         or DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS
     )
     locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
-    locations = _with_filesystem_location_fallbacks(locations, managed_root, default_location_id=default_location_id)
     runtime_state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
     initial_last_request_ts = float(runtime_state.last_request_ts or 0.0)
     global_allowed = parse_callsign_list(settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else "")

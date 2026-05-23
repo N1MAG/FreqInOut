@@ -5,7 +5,73 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import re
 
+from freqinout.core.config_paths import get_fldigi_checkin_dir
 from freqinout.core.fldigi_macro_parser import count_detected_file_references, scan_macro_profile
+
+
+CURRENT_ROSTER_SOURCE_FILENAMES = {
+    "checkins_tfc.txt": "CheckIns_TFC.txt",
+    "checkins_qru.txt": "CheckIns_QRU.txt",
+    "checkins_late.txt": "CheckIns_LATE.txt",
+    "checkins_all.txt": "CheckIns_ALL.txt",
+    "ncs_checkins_tfc.txt": "NCS_CheckIns_TFC.txt",
+    "ncs_checkins_qru.txt": "NCS_CheckIns_QRU.txt",
+    "ncs_checkins_late.txt": "NCS_CheckIns_LATE.txt",
+    "ncs_checkins_all.txt": "NCS_CheckIns_ALL.txt",
+    "ncs_ack_pending.txt": "NCS_ACK_Pending.txt",
+    "ncs_next_tfc.txt": "NCS_Next_TFC.txt",
+    "ancs_checkins_tfc.txt": "ANCS_CheckIns_TFC.txt",
+    "ancs_checkins_qru.txt": "ANCS_CheckIns_QRU.txt",
+    "ancs_checkins_late.txt": "ANCS_CheckIns_LATE.txt",
+    "ancs_checkins_all.txt": "ANCS_CheckIns_ALL.txt",
+    "ancs_ack_pending.txt": "ANCS_ACK_Pending.txt",
+    "ancs_next_tfc.txt": "ANCS_Next_TFC.txt",
+}
+
+LEGACY_ROSTER_SOURCE_FILENAMES = {
+    "main_checkins.txt": "CheckIns_TFC.txt",
+    "qru_checkins.txt": "CheckIns_QRU.txt",
+    "new-late_checkins.txt": "CheckIns_LATE.txt",
+    "all_checkins.txt": "CheckIns_ALL.txt",
+    "all_checkns.txt": "CheckIns_ALL.txt",
+}
+
+# Legacy names are accepted for macro migration/repair only. New default files
+# should be created with the CheckIns_* and role-first NCS_/ANCS_ names above.
+STANDARD_ROSTER_SOURCE_FILENAMES = {
+    **LEGACY_ROSTER_SOURCE_FILENAMES,
+    **CURRENT_ROSTER_SOURCE_FILENAMES,
+}
+
+
+def macro_mapping_path_leaf(path: object) -> str:
+    text = str(path or "").strip().rstrip("/\\")
+    if not text:
+        return ""
+    return re.split(r"[\\/]+", text)[-1]
+
+
+def standard_macro_mapping_source_filename(path: object) -> str:
+    return STANDARD_ROSTER_SOURCE_FILENAMES.get(macro_mapping_path_leaf(path).casefold(), "")
+
+
+def normalize_macro_mapping_source_path(path: object, settings) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    roster_filename = standard_macro_mapping_source_filename(text)
+    if not roster_filename:
+        return text
+
+    configured_dir = ""
+    if settings is not None:
+        try:
+            configured_dir = str(settings.get("fldigi_checkin_dir", "") or "").strip()
+        except Exception:
+            configured_dir = ""
+    if not configured_dir:
+        configured_dir = str(get_fldigi_checkin_dir())
+    return str(Path(configured_dir).expanduser() / roster_filename)
 
 
 @dataclass(slots=True)

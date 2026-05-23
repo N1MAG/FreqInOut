@@ -1014,7 +1014,6 @@ configure_runtime_sparse_checkout() {
     docs \
     freqinout \
     third_party \
-    tools \
     requirements.txt \
     README.md \
     CHANGELOG.md \

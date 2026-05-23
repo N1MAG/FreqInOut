@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -19,7 +20,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from freqinout.core.fldigi_macro_profile import FldigiMacroProfileStore
+from freqinout.core.fldigi_macro_parser import rewrite_macro_profile_file_reference
+from freqinout.core.fldigi_macro_profile import (
+    FldigiMacroProfileStore,
+    normalize_macro_mapping_source_path,
+    standard_macro_mapping_source_filename,
+)
 from freqinout.gui.theme import button_style, resolve_theme
 
 
@@ -34,6 +40,8 @@ class _RowData:
     custom_name: str = ""
     enabled: bool = False
     read_only: bool = False
+    source_warning: str = ""
+    macro_source_file: str = ""
 
 
 class FldigiMacroMappingDialog(QDialog):
@@ -121,16 +129,32 @@ class FldigiMacroMappingDialog(QDialog):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setAlternatingRowColors(True)
         self.table.setSortingEnabled(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(self.COLUMN_SOURCE_FILE, QHeaderView.Stretch)
+        for column in (
+            self.COLUMN_ENABLED,
+            self.COLUMN_SCOPE,
+            self.COLUMN_FUNCTION,
+            self.COLUMN_CUSTOM_NAME,
+            self.COLUMN_MACRO_ID,
+            self.COLUMN_MACRO_LABEL,
+            self.COLUMN_CONFIDENCE,
+            self.COLUMN_READ_ONLY,
+        ):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        self.table.setColumnWidth(self.COLUMN_SOURCE_FILE, 460)
         root.addWidget(self.table, stretch=1)
 
         controls = QHBoxLayout()
         self.rescan_btn = QPushButton("Rescan")
         self.add_manual_btn = QPushButton("Add Manual Row")
         self.browse_btn = QPushButton("Browse Selected Source...")
+        self.update_macro_path_btn = QPushButton("Update Macro Path")
         self.remove_btn = QPushButton("Remove Selected Row")
         controls.addWidget(self.rescan_btn)
         controls.addWidget(self.add_manual_btn)
         controls.addWidget(self.browse_btn)
+        controls.addWidget(self.update_macro_path_btn)
         controls.addWidget(self.remove_btn)
         controls.addStretch()
         root.addLayout(controls)
@@ -147,6 +171,8 @@ class FldigiMacroMappingDialog(QDialog):
         self.rescan_btn.setStyleSheet(button_style("info", theme))
         self.add_manual_btn.setStyleSheet(button_style("eligible_info", theme))
         self.browse_btn.setStyleSheet(button_style("eligible_success", theme))
+        self.update_macro_path_btn.setStyleSheet(button_style("warning", theme))
+        self.update_macro_path_btn.setToolTip("Back up and update the selected macro's <FILE:...> path when it should use FIO's configured check-in folder.")
         self.remove_btn.setStyleSheet(button_style("danger", theme))
         self.save_btn.setStyleSheet(button_style("success", theme))
         self.close_btn.setStyleSheet(button_style("muted", theme))
@@ -154,6 +180,7 @@ class FldigiMacroMappingDialog(QDialog):
         self.rescan_btn.clicked.connect(self._on_rescan)
         self.add_manual_btn.clicked.connect(self._add_manual_row)
         self.browse_btn.clicked.connect(self._browse_selected_source)
+        self.update_macro_path_btn.clicked.connect(self._update_selected_macro_path)
         self.remove_btn.clicked.connect(self._remove_selected_row)
         self.confidence_filter_combo.currentIndexChanged.connect(lambda _idx: self._apply_confidence_filter())
         self.save_btn.clicked.connect(self._save_mappings)
@@ -195,22 +222,30 @@ class FldigiMacroMappingDialog(QDialog):
 
         def find_mapping(macro_id: str, source_file: str) -> Optional[Dict[str, object]]:
             normalized_id = self._norm(macro_id)
-            normalized_source = self._norm(source_file)
+            normalized_source = self._source_norm(source_file)
+            macro_match: Optional[tuple[int, Dict[str, object]]] = None
+            source_match: Optional[tuple[int, Dict[str, object]]] = None
             for idx, mapping in enumerate(existing_mappings):
                 if idx in matched or not isinstance(mapping, dict):
                     continue
                 mapping_id = self._norm(mapping.get("macro_id", ""))
-                mapping_source = self._norm(mapping.get("source_file", ""))
-                if normalized_id and normalized_source:
-                    if mapping_id == normalized_id and mapping_source == normalized_source:
+                mapping_source = self._source_norm(mapping.get("source_file", ""))
+                if normalized_id and mapping_id == normalized_id:
+                    if normalized_source and mapping_source == normalized_source:
                         matched.add(idx)
                         return mapping
-                elif normalized_id and mapping_id == normalized_id:
-                    matched.add(idx)
-                    return mapping
-                elif normalized_source and mapping_source == normalized_source:
-                    matched.add(idx)
-                    return mapping
+                    if macro_match is None:
+                        macro_match = (idx, mapping)
+                if normalized_source and mapping_source == normalized_source and source_match is None:
+                    source_match = (idx, mapping)
+            if macro_match is not None:
+                idx, mapping = macro_match
+                matched.add(idx)
+                return mapping
+            if source_match is not None:
+                idx, mapping = source_match
+                matched.add(idx)
+                return mapping
             return None
 
         if isinstance(detected_macros, list):
@@ -265,6 +300,9 @@ class FldigiMacroMappingDialog(QDialog):
     def _norm(value: object) -> str:
         return str(value or "").strip().casefold()
 
+    def _source_norm(self, value: object) -> str:
+        return normalize_macro_mapping_source_path(value, self.settings).casefold()
+
     def _row_data_from_mapping(
         self,
         macro: Dict[str, object],
@@ -273,17 +311,41 @@ class FldigiMacroMappingDialog(QDialog):
         mapping: Optional[Dict[str, object]],
     ) -> _RowData:
         mapping = mapping or {}
+        saved_source = str(mapping.get("source_file") or "").strip()
+        discovered_source = normalize_macro_mapping_source_path(source_file, self.settings)
+        display_source = str(saved_source or discovered_source or "")
         return _RowData(
             macro_id=str(macro.get("macro_id") or mapping.get("macro_id") or ""),
             macro_label=str(macro.get("macro_label") or mapping.get("macro_label") or ""),
-            source_file=str(source_file or mapping.get("source_file") or ""),
+            source_file=display_source,
             confidence=str(confidence or mapping.get("confidence") or "low"),
             scope=str(mapping.get("scope") or ""),
             function=str(mapping.get("function") or ""),
             custom_name=str(mapping.get("custom_name") or ""),
             enabled=bool(mapping.get("enabled", False)),
             read_only=bool(mapping.get("read_only", False)),
+            source_warning=self._source_path_warning(source_file, display_source),
+            macro_source_file=str(source_file or "").strip(),
         )
+
+    def _source_path_warning(self, macro_source: object, configured_source: object) -> str:
+        macro_text = str(macro_source or "").strip()
+        configured_text = str(configured_source or "").strip()
+        if not macro_text or not configured_text:
+            return ""
+        if not standard_macro_mapping_source_filename(macro_text):
+            return ""
+        if self._path_compare_key(macro_text) == self._path_compare_key(configured_text):
+            return ""
+        return (
+            f"Macro text points to {macro_text}. FIO is using the configured file "
+            f"{configured_text}. Update the FLDigi macro if it should read FIO's live file."
+        )
+
+    @staticmethod
+    def _path_compare_key(path: object) -> str:
+        text = str(path or "").strip().replace("\\", "/").rstrip("/")
+        return text.casefold()
 
     def _row_snapshot(self, row: _RowData) -> Dict[str, object]:
         return {
@@ -301,7 +363,14 @@ class FldigiMacroMappingDialog(QDialog):
     def _append_row(self, row: _RowData, *, origin: str = "discovered", original: Optional[Dict[str, object]] = None) -> None:
         index = self.table.rowCount()
         self.table.insertRow(index)
-        self._row_sources.append({"origin": origin, "original": dict(original or {})})
+        self._row_sources.append(
+            {
+                "origin": origin,
+                "original": dict(original or {}),
+                "macro_source_file": row.macro_source_file,
+                "source_warning": row.source_warning,
+            }
+        )
 
         enabled_item = QTableWidgetItem()
         enabled_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
@@ -309,7 +378,7 @@ class FldigiMacroMappingDialog(QDialog):
         self.table.setItem(index, self.COLUMN_ENABLED, enabled_item)
 
         self.table.setCellWidget(index, self.COLUMN_SCOPE, self._build_combo(["", "NCS", "ANCS", "Joiner", "SHARED"], row.scope))
-        self.table.setCellWidget(index, self.COLUMN_FUNCTION, self._build_combo(["", "TFC", "QRU", "LATE", "CUSTOM"], row.function))
+        self.table.setCellWidget(index, self.COLUMN_FUNCTION, self._build_combo(["", "TFC", "QRU", "LATE", "ALL", "ACK_PENDING", "NEXT_TFC", "CUSTOM"], row.function))
 
         custom_edit = QLineEdit(row.custom_name)
         custom_edit.setPlaceholderText("Optional for CUSTOM")
@@ -320,6 +389,9 @@ class FldigiMacroMappingDialog(QDialog):
 
         source_edit = QLineEdit(row.source_file)
         source_edit.setPlaceholderText("Enter or browse file path")
+        if row.source_warning:
+            source_edit.setToolTip(row.source_warning)
+            source_edit.setStyleSheet("QLineEdit { background: #fff3cd; color: #111827; border: 1px solid #d9a441; }")
         self.table.setCellWidget(index, self.COLUMN_SOURCE_FILE, source_edit)
 
         self.table.setItem(index, self.COLUMN_CONFIDENCE, self._read_only_item(row.confidence))
@@ -409,6 +481,75 @@ class FldigiMacroMappingDialog(QDialog):
         )
         if fn:
             source_widget.setText(fn)
+
+    def _update_selected_macro_path(self) -> None:
+        row = self._selected_row()
+        if row < 0:
+            QMessageBox.information(self, "Macro Discovery & Mapping", "Select a mapped macro row first.")
+            return
+        if not self.profile_path or not Path(self.profile_path).exists():
+            QMessageBox.warning(self, "Macro Discovery & Mapping", "No macro profile file is selected.")
+            return
+
+        macro_id_item = self.table.item(row, self.COLUMN_MACRO_ID)
+        macro_label_item = self.table.item(row, self.COLUMN_MACRO_LABEL)
+        source_widget = self.table.cellWidget(row, self.COLUMN_SOURCE_FILE)
+        function_widget = self.table.cellWidget(row, self.COLUMN_FUNCTION)
+        macro_id = macro_id_item.text().strip() if macro_id_item else ""
+        macro_label = macro_label_item.text().strip() if macro_label_item else ""
+        configured_source = self._widget_text(source_widget)
+        function = self._widget_text(function_widget).upper()
+        row_source = self._row_sources[row] if row < len(self._row_sources) else {}
+        macro_source = str(row_source.get("macro_source_file") or "").strip() if isinstance(row_source, dict) else ""
+
+        if not macro_id:
+            QMessageBox.information(self, "Macro Discovery & Mapping", "This row is not tied to a specific FLDigi macro slot.")
+            return
+        if function == "CUSTOM" or not standard_macro_mapping_source_filename(configured_source):
+            QMessageBox.information(
+                self,
+                "Macro Discovery & Mapping",
+                "Only FIO-managed check-in files are repaired here. Custom macro files are left exactly where the operator placed them.",
+            )
+            return
+        if not macro_source:
+            QMessageBox.information(self, "Macro Discovery & Mapping", "No scanned macro file path is available for this row. Rescan the macro profile first.")
+            return
+        if self._path_compare_key(macro_source) == self._path_compare_key(configured_source):
+            QMessageBox.information(self, "Macro Discovery & Mapping", "This macro already points to the configured FIO file path.")
+            return
+
+        prompt = (
+            f"FIO will back up the macro file, then update {macro_id}"
+            f"{f' ({macro_label})' if macro_label else ''}.\n\n"
+            f"Current macro path:\n{macro_source}\n\n"
+            f"Configured FIO path:\n{configured_source}\n\n"
+            "After this, refresh or reload macros in FLDigi if FLDigi already has this profile open."
+        )
+        if QMessageBox.question(self, "Update FLDigi Macro Path", prompt) != QMessageBox.Yes:
+            return
+
+        result = rewrite_macro_profile_file_reference(
+            self.profile_path,
+            macro_id=macro_id,
+            old_path=macro_source,
+            new_path=configured_source,
+        )
+        if not result.get("ok"):
+            QMessageBox.warning(
+                self,
+                "Macro Discovery & Mapping",
+                "FIO could not find the selected <FILE:...> reference in that macro slot. Rescan the profile and try again.",
+            )
+            return
+
+        backup_path = str(result.get("backup_path") or "")
+        self._reload_profile(persist_scan=True)
+        QMessageBox.information(
+            self,
+            "Macro Discovery & Mapping",
+            f"Macro path updated. Backup saved at:\n{backup_path}",
+        )
 
     def _remove_selected_row(self) -> None:
         row = self._selected_row()

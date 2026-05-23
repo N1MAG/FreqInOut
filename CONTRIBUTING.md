@@ -70,6 +70,13 @@ Then verify packaging flows:
 - Windows build: PyInstaller + Inno setup.
 - Docs: user-facing behavior matches current UI.
 
+Repository split:
+- Push complete development work, including tests and specs, to the internal-testing repository.
+- Keep the production repository clean for operators and release builders.
+- Production should include only runtime/build files, installers, requirements, changelog, license, and operator-facing docs.
+- Do not push `tests/`, caches, benchmark captures, local runtime folders, scratch specs, temporary DBs/logs, or Codex work artifacts to production.
+- If production previously tracked development-only files, remove them in a production-clean commit so future pulls remove those tracked files for users.
+
 ## Tests and Verification
 
 There is no formal test suite yet. Please include manual verification steps, such as:

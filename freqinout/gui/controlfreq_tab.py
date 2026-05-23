@@ -1354,11 +1354,11 @@ class ControlFreqTab(QWidget):
             if self._freq_timer is None:
                 self._freq_timer = QTimer(self)
                 self._freq_timer.timeout.connect(self._refresh_frequency_control_tick)
-            self._freq_timer.start(2000)
+            self._freq_timer.start(5000)
             if self._status_timer is None:
                 self._status_timer = QTimer(self)
                 self._status_timer.timeout.connect(self._refresh_status_widgets)
-            self._status_timer.start(5000)
+            self._status_timer.start(10000)
             if self._clock_timer is None:
                 self._clock_timer = QTimer(self)
                 self._clock_timer.timeout.connect(self._refresh_clock_display)

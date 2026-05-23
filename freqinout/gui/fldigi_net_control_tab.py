@@ -22,8 +22,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QComboBox,
     QApplication,
+    QButtonGroup,
     QCompleter,
     QDialog,
+    QAbstractItemView,
     QHeaderView,
     QTableWidget,
     QTableWidgetItem,
@@ -31,6 +33,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QToolButton,
     QScrollArea,
+    QSplitter,
 )
 from PySide6.QtGui import QFontMetrics, QColor
 
@@ -41,6 +44,7 @@ from freqinout.core.checkins_db import upsert_checkins
 from freqinout.core.config_paths import get_fldigi_checkin_dir
 from freqinout.core.fldigi_log_checkin_parser import resolve_fldigi_log_path, scan_fldigi_log_file
 from freqinout.core.fldigi_macro_parser import scan_macro_profile, count_detected_file_references
+from freqinout.core.fldigi_macro_profile import macro_mapping_path_leaf
 from freqinout.core.fldigi_role_workspace import (
     default_role_workspace_prefs,
     get_role_workspace_preset,
@@ -76,6 +80,34 @@ from freqinout.gui.qsy_helper import (
 )
 from freqinout.gui.theme import resolve_theme, button_style
 
+CURRENT_CHECKIN_FILE_NAMES = {
+    "TFC": "CheckIns_TFC.txt",
+    "QRU": "CheckIns_QRU.txt",
+    "LATE": "CheckIns_LATE.txt",
+    "ALL": "CheckIns_ALL.txt",
+}
+
+ROLE_CHECKIN_FILE_NAMES = {
+    "NCS": {
+        "TFC": "NCS_CheckIns_TFC.txt",
+        "QRU": "NCS_CheckIns_QRU.txt",
+        "LATE": "NCS_CheckIns_LATE.txt",
+        "ALL": "NCS_CheckIns_ALL.txt",
+        "ACK_PENDING": "NCS_ACK_Pending.txt",
+        "NEXT_TFC": "NCS_Next_TFC.txt",
+    },
+    "ANCS": {
+        "TFC": "ANCS_CheckIns_TFC.txt",
+        "QRU": "ANCS_CheckIns_QRU.txt",
+        "LATE": "ANCS_CheckIns_LATE.txt",
+        "ALL": "ANCS_CheckIns_ALL.txt",
+        "ACK_PENDING": "ANCS_ACK_Pending.txt",
+        "NEXT_TFC": "ANCS_Next_TFC.txt",
+    },
+}
+
+ACTION_SCOPES = ("NCS", "ANCS", "SHARED", "ALL")
+
 
 class FldigiNetControlTab(QWidget):
     """
@@ -94,6 +126,17 @@ class FldigiNetControlTab(QWidget):
     FLDIGI_LOG_ASSISTED_ENABLED_KEY = "fldigi_log_assisted_enabled_v1"
     FLDIGI_LOG_ASSISTED_SHOW_REVIEW_KEY = "fldigi_log_assisted_show_review_v1"
     FLDIGI_LOG_ASSISTED_INCLUDE_TX_KEY = "fldigi_log_assisted_include_tx_v1"
+    LOG_ASSISTED_INTAKE_VISIBLE = False
+    COL_HEARD = 0
+    COL_ACKED = 1
+    COL_CALLSIGN = 2
+    COL_NAME = 3
+    COL_STATE = 4
+    COL_TRAFFIC = 5
+    COL_TFC_STATUS = 6
+    COL_CATEGORY = 7
+    COL_NOTES = 8
+    COL_ROLE = 9
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -135,6 +178,7 @@ class FldigiNetControlTab(QWidget):
         self._macro_profile_combo_loading = False
         self._setup_details_expanded = False
         self._compare_workspace_expanded = False
+        self._roster_dirty = False
         self._log_assisted_session_path: str = ""
         self._log_assisted_session_offset: int = 0
         self._log_assisted_session_start_utc: Optional[datetime.datetime] = None
@@ -145,6 +189,10 @@ class FldigiNetControlTab(QWidget):
         self._activation_secondary_refresh_inflight: bool = False
         self._ncs_partner_call: str = ""
         self._ancs_partner_call: str = ""
+        self._next_tfc_last_served: Dict[str, str] = {"NCS": "", "ANCS": ""}
+        self._next_tfc_called_by_role: Dict[str, set[str]] = {"NCS": set(), "ANCS": set()}
+        self._roster_action_scope: str = "NCS"
+        self._roster_action_scope_user_selected: bool = False
 
         self._build_ui()
         self._apply_theme()
@@ -153,6 +201,7 @@ class FldigiNetControlTab(QWidget):
         self._setup_timers()
         self._refresh_qsy_options()
         self._set_net_button_styles(active=False)
+        self._sync_roster_action_scope_to_role(force=True)
 
     # ---------------- UI BUILD ---------------- #
 
@@ -173,7 +222,7 @@ class FldigiNetControlTab(QWidget):
         title_row.addWidget(self.local_label)
         self.total_checkins_label = QLabel("Total Check-ins: 0")
         self.total_checkins_label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
-        title_row.addWidget(self.total_checkins_label)
+        self.total_checkins_label.setVisible(False)
         session_layout.addLayout(title_row)
 
         context_row = QHBoxLayout()
@@ -224,9 +273,17 @@ class FldigiNetControlTab(QWidget):
         partner_row.addWidget(self.joiner_ancs_edit)
         partner_row.addWidget(self.joiner_add_btn)
         partner_row.addWidget(self.partner_status_label, stretch=1)
-        session_layout.addLayout(partner_row)
 
         qsy_row = QHBoxLayout()
+        self.start_btn = QPushButton("Start Net")
+        self.end_btn = QPushButton("End Net")
+        qsy_row.addWidget(self.start_btn)
+        qsy_row.addWidget(self.end_btn)
+        qsy_row.addSpacing(16)
+        self.ad_hoc_btn = QPushButton("Ad Hoc Net")
+        self.ad_hoc_btn.clicked.connect(self._start_ad_hoc_net)
+        qsy_row.addWidget(self.ad_hoc_btn)
+        qsy_row.addSpacing(32)
         qsy_row.addStretch()
         self.qsy_combo = QComboBox()
         self.qsy_combo.currentIndexChanged.connect(self._update_qsy_button_enabled)
@@ -238,10 +295,8 @@ class FldigiNetControlTab(QWidget):
         self.suspend_btn = QPushButton("QSY + Hold")
         self.suspend_btn.clicked.connect(self._on_suspend_clicked)
         qsy_row.addWidget(self.suspend_btn)
-        self.ad_hoc_btn = QPushButton("Ad Hoc Net")
-        self.ad_hoc_btn.clicked.connect(self._start_ad_hoc_net)
-        qsy_row.addWidget(self.ad_hoc_btn)
         session_layout.addLayout(qsy_row)
+        session_layout.addLayout(partner_row)
 
         layout.addWidget(session_frame)
 
@@ -250,8 +305,26 @@ class FldigiNetControlTab(QWidget):
         setup_frame.setFrameShape(QFrame.StyledPanel)
         setup_frame.setFrameShadow(QFrame.Raised)
         setup_layout = QVBoxLayout(setup_frame)
-        setup_layout.setContentsMargins(10, 8, 10, 8)
-        setup_layout.setSpacing(6)
+        setup_layout.setContentsMargins(10, 6, 10, 6)
+        setup_layout.setSpacing(4)
+
+        self.macro_profile_details_btn = QToolButton()
+        self.macro_profile_details_btn.setCheckable(True)
+        self.macro_profile_details_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.macro_profile_details_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.macro_profile_details_btn.setMinimumHeight(28)
+        setup_layout.addWidget(self.macro_profile_details_btn)
+
+        self.setup_details_frame = QFrame()
+        self.setup_details_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        details_layout = QVBoxLayout(self.setup_details_frame)
+        details_layout.setContentsMargins(0, 4, 0, 0)
+        details_layout.setSpacing(4)
+
+        self.macro_setup_controls = QWidget()
+        macro_setup_controls_layout = QVBoxLayout(self.macro_setup_controls)
+        macro_setup_controls_layout.setContentsMargins(0, 0, 0, 0)
+        macro_setup_controls_layout.setSpacing(4)
 
         summary_row = QHBoxLayout()
         summary_row.addWidget(QLabel("Macro Set:"))
@@ -262,35 +335,9 @@ class FldigiNetControlTab(QWidget):
         summary_row.addWidget(self.macro_profile_combo, stretch=1)
         self.macro_profile_refresh_btn = QPushButton("Refresh")
         self.macro_profile_map_btn = QPushButton("Mappings...")
-        self.macro_profile_details_btn = QToolButton()
-        self.macro_profile_details_btn.setText("Details")
-        self.macro_profile_details_btn.setCheckable(True)
-        self.macro_profile_details_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         summary_row.addWidget(self.macro_profile_refresh_btn)
         summary_row.addWidget(self.macro_profile_map_btn)
-        summary_row.addWidget(self.macro_profile_details_btn)
-        setup_layout.addLayout(summary_row)
-
-        chip_row = QHBoxLayout()
-        self.macro_mode_chip = self._make_status_chip("Macro: None")
-        self.log_intake_chip = self._make_status_chip("Log Intake: Off")
-        self.review_mode_chip = self._make_status_chip("Review: Off")
-        self.tx_context_chip = self._make_status_chip("TX Context: Off")
-        for chip in (
-            self.macro_mode_chip,
-            self.log_intake_chip,
-            self.review_mode_chip,
-            self.tx_context_chip,
-        ):
-            chip_row.addWidget(chip)
-        chip_row.addStretch()
-        setup_layout.addLayout(chip_row)
-
-        self.setup_details_frame = QFrame()
-        self.setup_details_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        details_layout = QVBoxLayout(self.setup_details_frame)
-        details_layout.setContentsMargins(0, 4, 0, 0)
-        details_layout.setSpacing(4)
+        macro_setup_controls_layout.addLayout(summary_row)
 
         path_row = QHBoxLayout()
         path_row.addWidget(QLabel("Macro File:"))
@@ -302,7 +349,8 @@ class FldigiNetControlTab(QWidget):
         self.macro_profile_clear_btn = QPushButton("Clear")
         path_row.addWidget(self.macro_profile_browse_btn)
         path_row.addWidget(self.macro_profile_clear_btn)
-        details_layout.addLayout(path_row)
+        macro_setup_controls_layout.addLayout(path_row)
+        details_layout.addWidget(self.macro_setup_controls)
 
         self.macro_profile_status = QLabel("Legacy mode: no macro profile selected.")
         self.macro_profile_status.setWordWrap(True)
@@ -316,9 +364,9 @@ class FldigiNetControlTab(QWidget):
         log_controls_layout = QVBoxLayout()
         log_controls_layout.setSpacing(2)
         self.log_assisted_enable_chk = QCheckBox("Auto-add from FLDigi log")
-        self.log_assisted_enable_chk.setToolTip("Automatically pull likely check-ins from the FLDigi log into the local roster.")
+        self.log_assisted_enable_chk.setToolTip("Automatically pull likely check-ins from the FLDigi log into the net roster.")
         log_controls_layout.addWidget(self.log_assisted_enable_chk)
-        self.log_assisted_enable_help = QLabel("Pull likely check-ins from the FLDigi log into the local roster during the net.")
+        self.log_assisted_enable_help = QLabel("Pull likely check-ins from the FLDigi log into the net roster during the net.")
         self.log_assisted_enable_help.setWordWrap(True)
         self.log_assisted_enable_help.setStyleSheet("QLabel { color: #666666; margin-left: 24px; }")
         log_controls_layout.addWidget(self.log_assisted_enable_help)
@@ -341,6 +389,20 @@ class FldigiNetControlTab(QWidget):
         self.log_assisted_status = QLabel("Log-assisted intake disabled.")
         self.log_assisted_status.setWordWrap(True)
         details_layout.addWidget(self.log_assisted_status)
+        # Intentionally hidden for 1.2.4. Real FLDigi logs mix scripts, acks,
+        # repeats, form payloads, and noisy decodes; the current parser is kept
+        # for future RX-only/review-only work but must not drive normal NCS UI.
+        if not self.LOG_ASSISTED_INTAKE_VISIBLE:
+            for widget in (
+                self.log_assisted_enable_chk,
+                self.log_assisted_enable_help,
+                self.log_assisted_review_chk,
+                self.log_assisted_review_help,
+                self.log_assisted_tx_chk,
+                self.log_assisted_tx_help,
+                self.log_assisted_status,
+            ):
+                widget.setVisible(False)
         setup_layout.addWidget(self.setup_details_frame)
 
         layout.addWidget(setup_frame)
@@ -393,6 +455,23 @@ class FldigiNetControlTab(QWidget):
             " }"
         )
 
+    def _macro_header_style(self) -> str:
+        theme = resolve_theme(self.settings)
+        return (
+            "QToolButton {"
+            f" background-color: {theme.get('surface_alt', '#DDE1E6')};"
+            f" color: {theme.get('text', '#1C1F21')};"
+            f" border: 1px solid {theme.get('border', '#D3D7DD')};"
+            " border-radius: 5px;"
+            " padding: 4px 8px;"
+            " font-weight: 700;"
+            " text-align: left;"
+            " }"
+            "QToolButton:hover {"
+            f" background-color: {theme.get('surface', '#F0F2F4')};"
+            " }"
+        )
+
     def _set_status_chip(self, chip: QLabel, text: str, state: str) -> None:
         chip.setText(text)
         chip.setStyleSheet(self._status_chip_style(resolve_theme(self.settings), state))
@@ -402,9 +481,8 @@ class FldigiNetControlTab(QWidget):
         self.setup_details_frame.setVisible(self._setup_details_expanded)
         self.macro_profile_details_btn.setChecked(self._setup_details_expanded)
         self.macro_profile_details_btn.setArrowType(Qt.DownArrow if self._setup_details_expanded else Qt.RightArrow)
-        self.macro_profile_details_btn.setStyleSheet(
-            button_style("info", resolve_theme(self.settings)) if self._setup_details_expanded else ""
-        )
+        self.macro_profile_details_btn.setStyleSheet(self._macro_header_style())
+        self._refresh_setup_summary()
 
     def _build_operator_action_band(self, layout: QVBoxLayout) -> None:
         known_row = QHBoxLayout()
@@ -437,6 +515,14 @@ class FldigiNetControlTab(QWidget):
         }
         self._known_add_button_targets = {button: target for target, button in self._known_add_buttons.items()}
         known_btn_row.addStretch()
+        self.roster_total_label = QLabel("Total Check-ins: 0")
+        self.roster_total_label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
+        self.roster_tfc_label = QLabel("TFC: 0")
+        self.roster_qru_label = QLabel("QRU: 0")
+        self.roster_late_label = QLabel("LATE: 0")
+        for label in (self.roster_total_label, self.roster_tfc_label, self.roster_qru_label, self.roster_late_label):
+            label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
+            known_btn_row.addWidget(label)
         layout.addLayout(known_btn_row)
 
     def _build_ui(self):
@@ -458,12 +544,17 @@ class FldigiNetControlTab(QWidget):
         self._build_setup_strip(layout)
         self._build_operator_action_band(layout)
 
-        layout.addSpacing(24)
+        layout.addSpacing(6)
 
         # Bucket workspace panels
         self._left_bucket_col = QVBoxLayout()
         self._left_bucket_col.setSpacing(10)
-        layout.addLayout(self._left_bucket_col)
+        layout.addLayout(self._left_bucket_col, stretch=1)
+
+        self.roster_compare_splitter = QSplitter(Qt.Vertical)
+        self.roster_compare_splitter.setChildrenCollapsible(False)
+        self.roster_compare_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._left_bucket_col.addWidget(self.roster_compare_splitter, stretch=1)
 
         self.roster_frame = QFrame()
         self.roster_frame.setFrameShape(QFrame.StyledPanel)
@@ -474,41 +565,69 @@ class FldigiNetControlTab(QWidget):
         roster_layout.setSpacing(6)
 
         roster_header = QHBoxLayout()
-        roster_header.addWidget(QLabel("<h3>Local Roster</h3>"))
+        roster_header.addWidget(QLabel("<h3>Net Roster</h3>"))
         roster_header.addStretch()
-        self.roster_total_label = QLabel("Total Check-ins: 0")
-        self.roster_total_label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
-        roster_header.addWidget(self.roster_total_label)
-        self.roster_tfc_label = QLabel("TFC: 0")
-        self.roster_qru_label = QLabel("QRU: 0")
-        self.roster_late_label = QLabel("LATE: 0")
-        for label in (self.roster_tfc_label, self.roster_qru_label, self.roster_late_label):
-            label.setStyleSheet("QLabel { border: 1px solid #888888; padding: 2px 6px; border-radius: 3px; }")
-            roster_header.addWidget(label)
+        self.save_btn = QPushButton("Save Check-ins")
+        roster_header.addWidget(self.save_btn)
         roster_layout.addLayout(roster_header)
 
+        roster_scope_row = QHBoxLayout()
+        roster_scope_row.addWidget(QLabel("Action For:"))
+        self.roster_scope_group = QButtonGroup(self)
+        self.roster_scope_group.setExclusive(True)
+        self.roster_scope_buttons: Dict[str, QToolButton] = {}
+        for scope, label in (("NCS", "NCS"), ("ANCS", "ANCS"), ("SHARED", "Shared"), ("ALL", "All")):
+            scope_btn = QToolButton()
+            scope_btn.setText(label)
+            scope_btn.setCheckable(True)
+            scope_btn.setAutoRaise(False)
+            scope_btn.setProperty("roster_action_scope", scope)
+            scope_btn.setToolTip(f"Apply roster actions to {label}.")
+            scope_btn.clicked.connect(lambda _checked=False, s=scope: self._set_roster_action_scope(s, user_selected=True))
+            self.roster_scope_group.addButton(scope_btn)
+            self.roster_scope_buttons[scope] = scope_btn
+            roster_scope_row.addWidget(scope_btn)
+        roster_scope_row.addStretch()
+        roster_layout.addLayout(roster_scope_row)
+
         roster_actions = QHBoxLayout()
-        roster_actions.addWidget(QLabel("Roster Actions:"))
-        self.copy_tfc_btn = QPushButton("Copy TFC")
-        self.copy_qru_btn = QPushButton("Copy QRU")
-        self.copy_late_btn = QPushButton("Copy LATE")
+        roster_actions.addWidget(QLabel("Live Actions:"))
+        self.next_tfc_btn = QPushButton("Next TFC")
+        self.copy_tfc_btn = QPushButton("TFC")
+        self.copy_qru_btn = QPushButton("QRU")
+        self.copy_late_btn = QPushButton("LATE")
         self.copy_seen_locally_btn = QPushButton("Copy Seen Locally")
-        self.copy_roster_summary_btn = QPushButton("Copy All Check-ins")
+        self.copy_roster_summary_btn = QPushButton("All Check-ins")
+        self.copy_needs_sync_btn = QPushButton("ACK Needed")
+        for primary_btn in (self.copy_needs_sync_btn, self.next_tfc_btn):
+            primary_btn.setMinimumWidth(118)
+            font = primary_btn.font()
+            font.setBold(True)
+            primary_btn.setFont(font)
+        for btn in (
+            self.copy_needs_sync_btn,
+            self.next_tfc_btn,
+        ):
+            roster_actions.addWidget(btn)
+        roster_actions.addSpacing(12)
         for btn in (
             self.copy_tfc_btn,
             self.copy_qru_btn,
             self.copy_late_btn,
-            self.copy_seen_locally_btn,
             self.copy_roster_summary_btn,
         ):
             roster_actions.addWidget(btn)
-        roster_actions.addStretch()
+        self.roster_action_status = QLabel("")
+        self.roster_action_status.setWordWrap(False)
+        self.roster_action_status.setMinimumWidth(220)
+        self.roster_action_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        roster_actions.addWidget(self.roster_action_status, stretch=1)
         roster_layout.addLayout(roster_actions)
 
-        self.roster_table = QTableWidget(0, 6)
-        self.roster_table.setHorizontalHeaderLabels(["Callsign", "Name", "State", "Traffic", "Category", "Source"])
+        self.roster_table = QTableWidget(0, 10)
+        self.roster_table.setHorizontalHeaderLabels(["Directed By", "Acked By", "Callsign", "Name", "State", "Traffic", "TFC Status", "Category", "Notes", "Role"])
         self.roster_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.roster_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.roster_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.roster_table.setAlternatingRowColors(True)
         self.roster_table.setWordWrap(False)
         self.roster_table.setEditTriggers(
@@ -516,17 +635,26 @@ class FldigiNetControlTab(QWidget):
         )
         roster_header_view = self.roster_table.horizontalHeader()
         roster_header_view.setStretchLastSection(False)
-        roster_header_view.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        roster_header_view.setSectionResizeMode(1, QHeaderView.Stretch)
-        roster_header_view.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        roster_header_view.setSectionResizeMode(3, QHeaderView.Stretch)
-        roster_header_view.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        roster_header_view.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        roster_header_view.setSectionResizeMode(self.COL_HEARD, QHeaderView.ResizeToContents)
+        roster_header_view.setSectionResizeMode(self.COL_ACKED, QHeaderView.ResizeToContents)
+        roster_header_view.setSectionResizeMode(self.COL_CALLSIGN, QHeaderView.ResizeToContents)
+        roster_header_view.setSectionResizeMode(self.COL_NAME, QHeaderView.Interactive)
+        roster_header_view.setSectionResizeMode(self.COL_STATE, QHeaderView.ResizeToContents)
+        roster_header_view.setSectionResizeMode(self.COL_TRAFFIC, QHeaderView.Interactive)
+        roster_header_view.setSectionResizeMode(self.COL_TFC_STATUS, QHeaderView.ResizeToContents)
+        roster_header_view.setSectionResizeMode(self.COL_CATEGORY, QHeaderView.ResizeToContents)
+        roster_header_view.setSectionResizeMode(self.COL_NOTES, QHeaderView.Stretch)
+        roster_header_view.setSectionResizeMode(self.COL_ROLE, QHeaderView.ResizeToContents)
+        self.roster_table.setColumnWidth(self.COL_NAME, 150)
+        self.roster_table.setColumnWidth(self.COL_TRAFFIC, 110)
+        self.roster_table.setColumnWidth(self.COL_TFC_STATUS, 90)
+        self.roster_table.setColumnWidth(self.COL_NOTES, 320)
+        self.roster_table.setColumnHidden(self.COL_ROLE, True)
         self.roster_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.roster_table.setMinimumHeight(220)
+        self.roster_table.setMinimumHeight(300)
         roster_layout.addWidget(self.roster_table)
 
-        self._left_bucket_col.addWidget(self.roster_frame)
+        self.roster_compare_splitter.addWidget(self.roster_frame)
 
         # These cards remain as hidden compatibility buffers for derived file
         # output and legacy save/end-net code. The roster table is the sole
@@ -555,7 +683,7 @@ class FldigiNetControlTab(QWidget):
         )
         self.review_card = WorkspaceBucketCard(
             self.settings,
-            title="Log Review",
+            title="Review",
             allow_paste=True,
             on_paste=self._paste_into_review_card,
             secondary_label="Merge Reviewed",
@@ -571,8 +699,6 @@ class FldigiNetControlTab(QWidget):
             "review": self.review_card,
         }
 
-        self._left_bucket_col.addStretch()
-
         self.tfc_card.setVisible(False)
         self.qru_card.setVisible(False)
         self.late_card.setVisible(False)
@@ -580,7 +706,7 @@ class FldigiNetControlTab(QWidget):
         self.compare_workspace_frame = QFrame()
         self.compare_workspace_frame.setFrameShape(QFrame.StyledPanel)
         self.compare_workspace_frame.setFrameShadow(QFrame.Raised)
-        self.compare_workspace_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.compare_workspace_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         compare_workspace_layout = QVBoxLayout(self.compare_workspace_frame)
         compare_workspace_layout.setContentsMargins(10, 8, 10, 8)
         compare_workspace_layout.setSpacing(6)
@@ -596,17 +722,21 @@ class FldigiNetControlTab(QWidget):
         compare_workspace_layout.addLayout(compare_header)
 
         self.compare_workspace_body = QWidget()
+        self.compare_workspace_body.setMinimumHeight(260)
         compare_workspace_body_layout = QVBoxLayout(self.compare_workspace_body)
         compare_workspace_body_layout.setContentsMargins(0, 0, 0, 0)
         compare_workspace_body_layout.setSpacing(6)
         self.compare_workspace_tabs = QTabWidget()
         self.compare_workspace_tabs.setDocumentMode(True)
+        self.compare_workspace_tabs.setMinimumHeight(240)
         self.compare_workspace_tabs.addTab(self.reference_card, "Reference")
         self.compare_workspace_tabs.addTab(self.compare_results_card, "Compare Results")
         self.compare_workspace_tabs.addTab(self.review_card, "Review")
         compare_workspace_body_layout.addWidget(self.compare_workspace_tabs)
         compare_workspace_layout.addWidget(self.compare_workspace_body)
-        layout.addWidget(self.compare_workspace_frame)
+        self.roster_compare_splitter.addWidget(self.compare_workspace_frame)
+        self.roster_compare_splitter.setStretchFactor(0, 3)
+        self.roster_compare_splitter.setStretchFactor(1, 2)
         self._set_compare_workspace_expanded(False)
 
         # Legacy aliases kept for existing save/start/merge behavior.
@@ -616,28 +746,13 @@ class FldigiNetControlTab(QWidget):
         self.reference_text = self.reference_card.text_edit
         self.compare_results_text = self.compare_results_card.text_edit
 
-        # Buttons bottom row (all on one row)
-        btn_row = QHBoxLayout()
-        self.start_btn = QPushButton("Start Net")
-        self.save_btn = QPushButton("Save Check-ins")
-        self.merge_btn = QPushButton("Merge Check-ins")
-        self.end_btn = QPushButton("End Net")
-
         # Button colors
         theme = resolve_theme(self.settings)
         self.start_btn.setStyleSheet(button_style("success", theme))
         self.end_btn.setStyleSheet(button_style("danger", theme))
-        self.merge_btn.setStyleSheet(button_style("info", theme))
         self._start_btn_default_style = self.start_btn.styleSheet()
         self._save_btn_default_style = button_style("success", theme)
-        self.save_btn.setStyleSheet(self._save_btn_default_style)
-
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.save_btn)
-        btn_row.addWidget(self.end_btn)
-        btn_row.addStretch()
-
-        layout.addLayout(btn_row)
+        self._refresh_save_button_style()
 
         # Signals
         self.main_text.textChanged.connect(self._on_main_text_changed)
@@ -652,8 +767,10 @@ class FldigiNetControlTab(QWidget):
         self.copy_tfc_btn.clicked.connect(lambda: self._copy_roster_category("TFC"))
         self.copy_qru_btn.clicked.connect(lambda: self._copy_roster_category("QRU"))
         self.copy_late_btn.clicked.connect(lambda: self._copy_roster_category("LATE"))
+        self.next_tfc_btn.clicked.connect(self._copy_next_tfc)
         self.copy_seen_locally_btn.clicked.connect(self._copy_roster_seen_locally)
         self.copy_roster_summary_btn.clicked.connect(self._copy_roster_summary)
+        self.copy_needs_sync_btn.clicked.connect(self._copy_needs_sync)
         self.setTabOrder(self.known_op_edit, self.add_known_tfc_btn)
 
         self.start_btn.clicked.connect(self._start_net)
@@ -704,6 +821,9 @@ class FldigiNetControlTab(QWidget):
         self.compare_workspace_toggle_btn.setChecked(self._compare_workspace_expanded)
         self.compare_workspace_toggle_btn.setText("Hide" if self._compare_workspace_expanded else "Show")
         self.compare_workspace_toggle_btn.setArrowType(Qt.DownArrow if self._compare_workspace_expanded else Qt.RightArrow)
+        if hasattr(self, "roster_compare_splitter"):
+            sizes = [520, 360] if self._compare_workspace_expanded else [780, 60]
+            QTimer.singleShot(0, lambda: self.roster_compare_splitter.setSizes(sizes))
 
     def _toggle_compare_workspace(self, *_args) -> None:
         self._set_compare_workspace_expanded(not self._compare_workspace_expanded)
@@ -860,7 +980,7 @@ class FldigiNetControlTab(QWidget):
         visible_ids = set(self._workspace_visible_bucket_ids)
         visible_ids.add("roster")
         visible_ids.update({preset.compare_source_bucket_id, preset.compare_target_bucket_id})
-        options.append(("roster", "Local Roster"))
+        options.append(("roster", "Net Roster"))
         for bucket in preset.all_buckets():
             if bucket.bucket_id in visible_ids or bucket.visible_by_default:
                 card = self._workspace_bucket_cards.get(bucket.bucket_id)
@@ -877,7 +997,7 @@ class FldigiNetControlTab(QWidget):
 
     def _workspace_compare_defaults(self) -> Dict[str, str]:
         defaults = role_compare_defaults(self.role_combo.currentText(), self._role_workspace_prefs)
-        defaults["source_bucket_id"] = "roster"
+        defaults["source_bucket_id"] = "seen_locally" if normalize_role(self.role_combo.currentText()) == "JOINER" else "roster"
         return defaults
 
     def _workspace_bucket_text(self, bucket_id: str) -> str:
@@ -890,7 +1010,7 @@ class FldigiNetControlTab(QWidget):
         if bucket_id == "review":
             return self.review_card.text()
         if bucket_id == "seen_locally":
-            return self._roster_table_text()
+            return self.main_text.toPlainText()
         bucket = self._workspace_bucket_cards.get(bucket_id)
         return bucket.text() if bucket else ""
 
@@ -899,24 +1019,32 @@ class FldigiNetControlTab(QWidget):
         if not hasattr(self, "roster_table"):
             return rows
         for row in range(self.roster_table.rowCount()):
-            callsign_item = self.roster_table.item(row, 0)
-            name_item = self.roster_table.item(row, 1)
-            state_item = self.roster_table.item(row, 2)
-            traffic_item = self.roster_table.item(row, 3)
-            source_item = self.roster_table.item(row, 5)
-            category_widget = self.roster_table.cellWidget(row, 4)
+            callsign_item = self.roster_table.item(row, self.COL_CALLSIGN)
+            name_item = self.roster_table.item(row, self.COL_NAME)
+            state_item = self.roster_table.item(row, self.COL_STATE)
+            traffic_item = self.roster_table.item(row, self.COL_TRAFFIC)
+            notes_item = self.roster_table.item(row, self.COL_NOTES)
+            role_item = self.roster_table.item(row, self.COL_ROLE)
+            category_widget = self.roster_table.cellWidget(row, self.COL_CATEGORY)
             category = ""
             if category_widget is not None and hasattr(category_widget, "currentText"):
                 category = str(category_widget.currentText() or "").strip().upper()
-            elif self.roster_table.item(row, 4) is not None:
-                category = str(self.roster_table.item(row, 4).text() or "").strip().upper()
+            elif self.roster_table.item(row, self.COL_CATEGORY) is not None:
+                category = str(self.roster_table.item(row, self.COL_CATEGORY).text() or "").strip().upper()
+            heard_by = self._roster_side_value(row, self.COL_HEARD)
+            acked_by = self._roster_side_value(row, self.COL_ACKED)
+            station_role = (role_item.text() if role_item else "").strip().upper()
             rows.append({
                 "callsign": (callsign_item.text() if callsign_item else "").strip().upper(),
                 "name": (name_item.text() if name_item else "").strip(),
                 "state": (state_item.text() if state_item else "").strip().upper(),
                 "traffic": (traffic_item.text() if traffic_item else "").strip(),
                 "category": category or "TFC",
-                "source": (source_item.text() if source_item else "").strip(),
+                "notes": (notes_item.text() if notes_item else "").strip(),
+                "heard_by": self._roster_normalize_side(heard_by),
+                "acked_by": self._roster_normalize_side(acked_by),
+                "station_role": station_role,
+                "source": station_role,
             })
         return rows
 
@@ -926,12 +1054,126 @@ class FldigiNetControlTab(QWidget):
         for row in self._roster_table_rows():
             if wanted and row["category"].upper() != wanted:
                 continue
-            formatted = self._format_entry(row["callsign"], row["name"], row["state"])
-            if row["traffic"]:
-                formatted = f"{formatted} {row['traffic']}"
+            formatted = self._format_roster_row_for_copy(row)
             if formatted.strip():
                 lines.append(formatted)
         return "\n".join(lines)
+
+    def _roster_table_text_for_rows(self, rows: List[Dict[str, str]]) -> str:
+        lines: List[str] = []
+        for row in rows:
+            formatted = self._format_roster_row_for_copy(row)
+            if formatted.strip():
+                lines.append(formatted)
+        return "\n".join(lines)
+
+    def _roster_clipboard_text(self, text: str) -> str:
+        body = (text or "").strip()
+        return f"\n{body}\n" if body else ""
+
+    def _show_roster_action_status(self, message: str, level: str = "success", timeout_ms: int = 5000) -> None:
+        if not hasattr(self, "roster_action_status"):
+            return
+        text = (message or "").strip()
+        self.roster_action_status.setText(text)
+        theme = resolve_theme(self.settings)
+        if not text:
+            self.roster_action_status.setStyleSheet("")
+            return
+        if level == "warning":
+            bg = theme.get("warning_bg", "#FFF3CD")
+            fg = theme.get("warning_text", "#6B4F00")
+            border = theme.get("warning", "#D39E00")
+        elif level == "info":
+            bg = theme.get("surface_alt", "#DDE1E6")
+            fg = theme.get("text", "#1C1F21")
+            border = theme.get("accent", "#2E6F9E")
+        else:
+            bg = theme.get("success", "#2E7D32")
+            fg = "#FFFFFF"
+            border = bg
+        self.roster_action_status.setStyleSheet(
+            "QLabel {"
+            f" background-color: {bg}; color: {fg}; border: 1px solid {border};"
+            " border-radius: 5px; padding: 3px 8px; font-weight: 600;"
+            " }"
+        )
+        if timeout_ms > 0:
+            QTimer.singleShot(timeout_ms, lambda expected=text: self._clear_roster_action_status(expected))
+
+    def _clear_roster_action_status(self, expected: str = "") -> None:
+        if not hasattr(self, "roster_action_status"):
+            return
+        if expected and self.roster_action_status.text() != expected:
+            return
+        self.roster_action_status.setText("")
+        self.roster_action_status.setStyleSheet("")
+
+    def _roster_side_has_role(self, value: object, role: str) -> bool:
+        normalized = self._roster_normalize_side(value)
+        role_key = self._exact_net_control_role(role)
+        if role_key not in {"NCS", "ANCS"}:
+            return False
+        return normalized == "Both" or normalized.upper() == role_key
+
+    def _roster_directed_to_current_role(self, row: Dict[str, str], role: str = "") -> bool:
+        role_key = self._exact_net_control_role(role) or self._current_net_control_role()
+        return self._roster_side_has_role(row.get("heard_by", ""), role_key)
+
+    def _roster_acked_by_current_role(self, row: Dict[str, str], role: str = "") -> bool:
+        role_key = self._exact_net_control_role(role) or self._current_net_control_role()
+        return self._roster_side_has_role(row.get("acked_by", ""), role_key)
+
+    def _is_current_role_leadership_row(self, row: Dict[str, str], role: str = "") -> bool:
+        role_key = self._exact_net_control_role(role) or self._current_net_control_role()
+        return bool(role_key and self._roster_station_role(row) == role_key)
+
+    def _role_filtered_category_rows(self, category: str, role: str = "") -> List[Dict[str, str]]:
+        role_key = self._exact_net_control_role(role) or self._current_net_control_role()
+        wanted = (category or "").strip().upper()
+        if role_key not in {"NCS", "ANCS"} or wanted not in {"TFC", "QRU", "LATE"}:
+            return []
+        rows: List[Dict[str, str]] = []
+        for row in self._roster_table_rows():
+            if str(row.get("category") or "").strip().upper() != wanted:
+                continue
+            if not self._roster_directed_to_current_role(row, role_key):
+                continue
+            rows.append(row)
+        return rows
+
+    def _roster_row_matches_action_scope(self, row: Dict[str, str], scope: str) -> bool:
+        scope_key = str(scope or "").strip().upper()
+        directed = self._roster_normalize_side(row.get("heard_by", ""))
+        if scope_key == "ALL":
+            return True
+        if scope_key == "SHARED":
+            return directed == "Both"
+        if scope_key in {"NCS", "ANCS"}:
+            return self._roster_side_has_role(directed, scope_key)
+        return False
+
+    def _scope_filtered_rows(self, scope: str = "", category: str = "") -> List[Dict[str, str]]:
+        scope_key = str(scope or self._current_roster_action_scope()).strip().upper()
+        wanted = str(category or "").strip().upper()
+        rows: List[Dict[str, str]] = []
+        for row in self._roster_table_rows():
+            if wanted and str(row.get("category") or "").strip().upper() != wanted:
+                continue
+            if not self._roster_row_matches_action_scope(row, scope_key):
+                continue
+            rows.append(row)
+        return rows
+
+    def _format_roster_row_for_copy(self, row: Dict[str, str]) -> str:
+        formatted = self._format_entry(row.get("callsign", ""), row.get("name", ""), row.get("state", ""))
+        role = self._roster_station_role(row)
+        traffic = str(row.get("traffic") or "").strip()
+        if role:
+            formatted = f"{formatted} / {role}" if formatted else role
+        if traffic:
+            formatted = f"{formatted} {traffic}" if formatted else traffic
+        return formatted.strip()
 
     def _roster_role_for_source(self, source: object) -> str:
         text = str(source or "").strip().upper()
@@ -941,13 +1183,211 @@ class FldigiNetControlTab(QWidget):
             return "ANCS"
         return ""
 
-    def _roster_role_rank(self, row: Dict[str, str], index: int) -> tuple[int, int]:
-        role = self._roster_role_for_source(row.get("source"))
+    def _roster_station_role(self, row: Dict[str, str]) -> str:
+        role = str(row.get("station_role") or "").strip().upper()
+        if role in {"NCS", "ANCS"}:
+            return role
+        return self._roster_role_for_source(row.get("source"))
+
+    def _roster_normalize_side(self, value: object) -> str:
+        text = str(value or "").strip().upper()
+        if not text:
+            return ""
+        if text == "BOTH":
+            return "Both"
+        tokens = set(re.findall(r"ANCS|NCS", text))
+        if "ANCS" in tokens and "NCS" in tokens:
+            return "Both"
+        if "ANCS" in tokens:
+            return "ANCS"
+        if "NCS" in tokens:
+            return "NCS"
+        return ""
+
+    def _roster_promote_side(self, current: object, role: str) -> str:
+        normalized = self._roster_normalize_side(current)
+        incoming = self._roster_normalize_side(role)
+        if incoming == "Both":
+            return "Both"
+        role_key = self._exact_net_control_role(role)
+        if role_key not in {"NCS", "ANCS"}:
+            role_key = incoming.upper() if incoming in {"NCS", "ANCS"} else ""
+        if role_key not in {"NCS", "ANCS"}:
+            return normalized
+        if not normalized:
+            return role_key
+        if normalized.upper() == role_key:
+            return normalized
+        return "Both"
+
+    def _exact_net_control_role(self, value: object) -> str:
+        text = str(value or "").strip().upper()
+        return text if text in {"NCS", "ANCS"} else ""
+
+    def _current_net_control_role(self) -> str:
+        role = normalize_role(self.role_combo.currentText()) if hasattr(self, "role_combo") else ""
+        return role if role in {"NCS", "ANCS"} else ""
+
+    def _current_roster_action_scope(self) -> str:
+        scope = str(getattr(self, "_roster_action_scope", "") or "").strip().upper()
+        return scope if scope in ACTION_SCOPES else (self._current_net_control_role() or "ALL")
+
+    def _set_roster_action_scope(self, scope: str, *, user_selected: bool = False) -> None:
+        scope_key = str(scope or "").strip().upper()
+        if scope_key not in ACTION_SCOPES:
+            scope_key = self._current_net_control_role() or "ALL"
+        self._roster_action_scope = scope_key
+        if user_selected:
+            self._roster_action_scope_user_selected = True
+        if hasattr(self, "roster_scope_buttons"):
+            for key, button in self.roster_scope_buttons.items():
+                button.blockSignals(True)
+                try:
+                    button.setChecked(key == scope_key)
+                finally:
+                    button.blockSignals(False)
+        self._refresh_roster_action_scope_styles()
+
+    def _sync_roster_action_scope_to_role(self, *, force: bool = False) -> None:
+        role = self._current_net_control_role()
+        if role not in {"NCS", "ANCS"}:
+            return
+        if force or not getattr(self, "_roster_action_scope_user_selected", False):
+            self._set_roster_action_scope(role, user_selected=False)
+
+    def _roster_action_scope_label(self, scope: str = "") -> str:
+        scope_key = str(scope or self._current_roster_action_scope()).strip().upper()
+        return {"NCS": "NCS", "ANCS": "ANCS", "SHARED": "Shared", "ALL": "All"}.get(scope_key, "All")
+
+    def _refresh_roster_action_scope_styles(self) -> None:
+        if not hasattr(self, "roster_scope_buttons"):
+            return
+        theme = resolve_theme(self.settings)
+        surface = theme.get("surface", "#F0F2F4")
+        surface_alt = theme.get("surface_alt", "#DDE1E6")
+        border = theme.get("border", "#D3D7DD")
+        text = theme.get("text", "#1C1F21")
+        muted = theme.get("text_muted", "#5B6570")
+        accent = theme.get("accent", "#2E6F9E")
+        accent_active = theme.get("accent_active", accent)
+        selected = self._current_roster_action_scope()
+        for scope, button in self.roster_scope_buttons.items():
+            checked_bg = accent if scope in {"NCS", "ANCS"} else surface_alt
+            checked_border = accent_active if scope in {"NCS", "ANCS"} else accent
+            checked_text = "#FFFFFF" if scope in {"NCS", "ANCS"} else text
+            button.setStyleSheet(
+                "QToolButton {"
+                f" background-color: {surface}; color: {muted}; border: 1px solid {border};"
+                " border-radius: 5px; padding: 3px 8px; font-weight: 700;"
+                " }"
+                " QToolButton:hover {"
+                f" background-color: {surface_alt}; color: {text};"
+                " }"
+                " QToolButton:checked {"
+                f" background-color: {checked_bg}; color: {checked_text}; border: 2px solid {checked_border};"
+                " padding: 2px 7px;"
+                " }"
+            )
+            button.setChecked(scope == selected)
+
+    def _default_heard_by_for_source(self, source: object, station_role: str = "") -> str:
+        source_role = self._roster_role_for_source(source)
+        if source_role:
+            return source_role
+        role_key = self._exact_net_control_role(station_role)
+        if role_key in {"NCS", "ANCS"}:
+            return role_key
+        return self._current_net_control_role()
+
+    def _roster_role_rank(self, row: Dict[str, str], index: int) -> tuple:
+        role = self._roster_station_role(row)
         if role == "NCS":
-            return (0, index)
+            return (0, 0)
         if role == "ANCS":
-            return (1, index)
-        return (2, index)
+            return (1, 0)
+        return (2, row.get("callsign", ""), index)
+
+    def _roster_merge_duplicate_rows(self, rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        merged_by_call: Dict[str, Dict[str, str]] = {}
+        order: List[str] = []
+
+        def completeness(entry: Dict[str, str]) -> int:
+            return sum(1 for key in ("name", "state", "traffic", "notes") if str(entry.get(key) or "").strip())
+
+        def role_rank(entry: Dict[str, str]) -> int:
+            role = self._roster_station_role(entry)
+            if role == "NCS":
+                return 3
+            if role == "ANCS":
+                return 2
+            return 0
+
+        for row in rows:
+            cs = str(row.get("callsign") or "").strip().upper()
+            if not cs:
+                continue
+            normalized = dict(row)
+            normalized["callsign"] = cs
+            if cs not in merged_by_call:
+                merged_by_call[cs] = normalized
+                order.append(cs)
+                continue
+            current = merged_by_call[cs]
+            for key in ("name", "state", "traffic", "notes"):
+                if not str(current.get(key) or "").strip() and str(normalized.get(key) or "").strip():
+                    current[key] = normalized.get(key, "")
+            if completeness(normalized) > completeness(current):
+                for key in ("name", "state", "traffic", "notes"):
+                    if str(normalized.get(key) or "").strip():
+                        current[key] = normalized.get(key, "")
+            for key in ("heard_by", "acked_by"):
+                if normalized.get(key):
+                    current[key] = self._roster_promote_side(current.get(key), normalized.get(key, ""))
+            if role_rank(normalized) >= role_rank(current):
+                if str(normalized.get("station_role") or "").strip():
+                    current["station_role"] = normalized.get("station_role", "")
+                    current["source"] = normalized.get("station_role", "")
+            if current.get("category") == "TFC" and normalized.get("category") in {"QRU", "LATE"} and not current.get("traffic"):
+                current["category"] = normalized.get("category", "TFC")
+        return [merged_by_call[cs] for cs in order]
+
+    def _roster_deduplicate_callsigns(self) -> bool:
+        if self._roster_syncing or not hasattr(self, "roster_table"):
+            return False
+        rows = self._roster_table_rows()
+        merged = self._roster_merge_duplicate_rows(rows)
+        if len(merged) == len(rows) and merged == rows:
+            return False
+        self._roster_syncing = True
+        try:
+            self.roster_table.setRowCount(0)
+            for entry in merged:
+                row = self.roster_table.rowCount()
+                self.roster_table.insertRow(row)
+                for col in (self.COL_CALLSIGN, self.COL_NAME, self.COL_STATE, self.COL_TRAFFIC, self.COL_NOTES, self.COL_ROLE):
+                    item = QTableWidgetItem("")
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    self.roster_table.setItem(row, col, item)
+                self._roster_configure_category_editor(row)
+                self._roster_configure_tfc_status_cell(row)
+                self._roster_configure_side_editor(row, self.COL_HEARD)
+                self._roster_configure_side_editor(row, self.COL_ACKED)
+                self._roster_set_row(
+                    row,
+                    entry.get("callsign", ""),
+                    entry.get("name", ""),
+                    entry.get("state", ""),
+                    entry.get("traffic", ""),
+                    entry.get("category", "TFC"),
+                    entry.get("source", ""),
+                    entry.get("heard_by", ""),
+                    entry.get("acked_by", ""),
+                    entry.get("notes", ""),
+                    entry.get("station_role", ""),
+                )
+        finally:
+            self._roster_syncing = False
+        return True
 
     def _roster_apply_pinned_order(self) -> None:
         if self._roster_syncing or not hasattr(self, "roster_table"):
@@ -964,11 +1404,14 @@ class FldigiNetControlTab(QWidget):
             for entry in ordered:
                 row = self.roster_table.rowCount()
                 self.roster_table.insertRow(row)
-                for col in (0, 1, 2, 3, 5):
+                for col in (self.COL_CALLSIGN, self.COL_NAME, self.COL_STATE, self.COL_TRAFFIC, self.COL_NOTES, self.COL_ROLE):
                     item = QTableWidgetItem("")
                     item.setFlags(item.flags() | Qt.ItemIsEditable)
                     self.roster_table.setItem(row, col, item)
                 self._roster_configure_category_editor(row)
+                self._roster_configure_tfc_status_cell(row)
+                self._roster_configure_side_editor(row, self.COL_HEARD)
+                self._roster_configure_side_editor(row, self.COL_ACKED)
                 self._roster_set_row(
                     row,
                     entry.get("callsign", ""),
@@ -977,6 +1420,10 @@ class FldigiNetControlTab(QWidget):
                     entry.get("traffic", ""),
                     entry.get("category", "TFC"),
                     entry.get("source", ""),
+                    entry.get("heard_by", ""),
+                    entry.get("acked_by", ""),
+                    entry.get("notes", ""),
+                    entry.get("station_role", ""),
                 )
         finally:
             self._roster_syncing = False
@@ -1003,6 +1450,7 @@ class FldigiNetControlTab(QWidget):
             self.main_text.setPlainText(main_text)
             self.qru_text.setPlainText(qru_text)
             self.late_text.setPlainText(late_text)
+            self._refresh_tfc_status_cells()
             self._update_bucket_card_states()
             if write_files and self._net_in_progress:
                 main_path, qru_path, late_path = self._checkin_file_paths()
@@ -1010,8 +1458,43 @@ class FldigiNetControlTab(QWidget):
                 self._write_file(qru_path, qru_text)
                 self._write_file(late_path, late_text)
                 self._write_file(self._all_checkins_file_path(), self._roster_table_text())
+                self._sync_role_roster_files()
+                self._sync_role_ack_pending_files()
+                self._sync_next_tfc_action_files()
+                self._sync_mapped_roster_files()
         finally:
             self._roster_syncing = False
+
+    def _role_roster_text(self, role: str, category: str = "") -> str:
+        role_key = self._exact_net_control_role(role)
+        if role_key not in {"NCS", "ANCS"}:
+            return ""
+        return self._roster_table_text_for_rows(self._scope_filtered_rows(role_key, category))
+
+    def _sync_role_roster_files(self) -> None:
+        for role in ("NCS", "ANCS"):
+            for key in ("TFC", "QRU", "LATE"):
+                self._write_file(self._role_checkin_file_path(role, key), self._role_roster_text(role, key))
+            self._write_file(self._role_checkin_file_path(role, "ALL"), self._role_roster_text(role))
+
+    def _sync_role_ack_pending_files(self) -> None:
+        for role in ("NCS", "ANCS"):
+            text = self._needs_ack_text(role)
+            self._write_file(self._role_ack_pending_file_path(role), self._roster_clipboard_text(text) if text else "")
+
+    def _sync_next_tfc_action_files(self) -> None:
+        for role in ("NCS", "ANCS"):
+            last = str(self._next_tfc_last_served.get(role, "") or "").strip().upper()
+            eligible = {
+                str(row.get("callsign") or "").strip().upper()
+                for row in self._next_tfc_eligible_rows(role)
+            }
+            if last and last in eligible:
+                self._write_file(self._role_next_tfc_file_path(role), self._next_tfc_payload(last))
+                continue
+            if last and last not in eligible:
+                self._next_tfc_last_served[role] = ""
+            self._write_file(self._role_next_tfc_file_path(role), "")
 
     def _reference_source_label(self) -> str:
         role = normalize_role(self.role_combo.currentText())
@@ -1048,24 +1531,35 @@ class FldigiNetControlTab(QWidget):
 
     def _roster_clear(self) -> None:
         self.roster_table.setRowCount(0)
+        self._mark_roster_dirty()
 
     def _roster_find_row(self, callsign: str) -> int:
         target = (callsign or "").strip().upper()
         if not target:
             return -1
         for row in range(self.roster_table.rowCount()):
-            item = self.roster_table.item(row, 0)
+            item = self.roster_table.item(row, self.COL_CALLSIGN)
             if item is not None and item.text().strip().upper() == target:
                 return row
+        return -1
+
+    def _roster_find_role_row(self, role: str) -> int:
+        role_key = self._exact_net_control_role(role)
+        if role_key not in {"NCS", "ANCS"}:
+            return -1
+        for index, row in enumerate(self._roster_table_rows()):
+            if self._roster_station_role(row) == role_key:
+                return index
         return -1
 
     def _roster_remove_callsign(self, callsign: str) -> None:
         row = self._roster_find_row(callsign)
         if row >= 0:
             self.roster_table.removeRow(row)
+            self._mark_roster_dirty()
 
     def _roster_set_category(self, row: int, category: str) -> None:
-        widget = self.roster_table.cellWidget(row, 4)
+        widget = self.roster_table.cellWidget(row, self.COL_CATEGORY)
         target = (category or "TFC").strip().upper()
         if widget is not None and hasattr(widget, "setCurrentText"):
             widget.blockSignals(True)
@@ -1074,10 +1568,10 @@ class FldigiNetControlTab(QWidget):
             finally:
                 widget.blockSignals(False)
         else:
-            item = self.roster_table.item(row, 4)
+            item = self.roster_table.item(row, self.COL_CATEGORY)
             if item is None:
                 item = QTableWidgetItem(target)
-                self.roster_table.setItem(row, 4, item)
+                self.roster_table.setItem(row, self.COL_CATEGORY, item)
             item.setText(target)
 
     def _roster_set_row(
@@ -1089,34 +1583,56 @@ class FldigiNetControlTab(QWidget):
         traffic: str,
         category: str,
         source: str,
+        heard_by: str = "",
+        acked_by: str = "",
+        notes: str = "",
+        station_role: str = "",
     ) -> None:
+        previous_syncing = self._roster_syncing
         self._roster_syncing = True
         try:
+            role_value = self._exact_net_control_role(station_role) or self._roster_role_for_source(source)
+            heard_value = self._roster_normalize_side(heard_by) or self._default_heard_by_for_source(source, role_value)
             values = [
                 callsign.strip().upper(),
                 name.strip(),
                 state.strip().upper(),
                 traffic.strip(),
                 category.strip().upper() or "TFC",
-                source.strip(),
+                heard_value,
+                self._roster_normalize_side(acked_by),
+                notes.strip(),
+                role_value,
             ]
-            for col in range(4):
+            text_columns = [
+                self.COL_CALLSIGN,
+                self.COL_NAME,
+                self.COL_STATE,
+                self.COL_TRAFFIC,
+                self.COL_NOTES,
+            ]
+            for value, col in zip([values[0], values[1], values[2], values[3], values[7]], text_columns):
                 item = self.roster_table.item(row, col)
                 if item is None:
                     item = QTableWidgetItem("")
-                    if col != 4:
-                        item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
                     self.roster_table.setItem(row, col, item)
-                item.setText(values[col])
+                item.setText(value)
             self._roster_set_category(row, values[4])
-            source_item = self.roster_table.item(row, 5)
-            if source_item is None:
-                source_item = QTableWidgetItem("")
-                source_item.setFlags(source_item.flags() | Qt.ItemIsEditable)
-                self.roster_table.setItem(row, 5, source_item)
-            source_item.setText(values[5])
+            self._roster_set_side(row, self.COL_HEARD, values[5])
+            self._roster_set_side(row, self.COL_ACKED, values[6])
+            role_item = self.roster_table.item(row, self.COL_ROLE)
+            if role_item is None:
+                role_item = QTableWidgetItem("")
+                role_item.setFlags(role_item.flags() | Qt.ItemIsEditable)
+                self.roster_table.setItem(row, self.COL_ROLE, role_item)
+            role_item.setText(values[8])
+            if self.roster_table.cellWidget(row, self.COL_TFC_STATUS) is None:
+                self._roster_configure_tfc_status_cell(row)
+            else:
+                self._update_tfc_status_cell(row)
         finally:
-            self._roster_syncing = False
+            self._roster_syncing = previous_syncing
 
     def _roster_append_row(
         self,
@@ -1134,27 +1650,45 @@ class FldigiNetControlTab(QWidget):
             return -1
         existing = self._roster_find_row(cs)
         if existing >= 0:
-            current_source_item = self.roster_table.item(existing, 5)
-            current_source = (current_source_item.text() if current_source_item else "").strip()
-            next_source = source.strip() if overwrite_source or not current_source else current_source
-            self._roster_set_row(existing, cs, name, state, traffic, category, next_source)
+            current_rows = self._roster_table_rows()
+            current = current_rows[existing] if 0 <= existing < len(current_rows) else {}
+            next_role = self._roster_role_for_source(source) if overwrite_source else current.get("station_role", "")
+            if next_role not in {"NCS", "ANCS"}:
+                next_role = current.get("station_role", "")
+            heard = self._roster_promote_side(current.get("heard_by", ""), self._default_heard_by_for_source(source, next_role))
+            acked = current.get("acked_by", "")
+            notes = current.get("notes", "")
+            self._roster_set_row(existing, cs, name, state, traffic, category, source, heard, acked, notes, next_role)
             self._roster_apply_pinned_order()
             self._roster_sync_legacy_buffers()
+            self._mark_roster_dirty()
             return existing
         row = self.roster_table.rowCount()
-        self.roster_table.insertRow(row)
-        for col in (0, 1, 2, 3, 5):
-            item = QTableWidgetItem("")
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
-            self.roster_table.setItem(row, col, item)
-        self._roster_configure_category_editor(row)
-        self._roster_set_row(row, cs, name, state, traffic, category, source)
+        previous_syncing = self._roster_syncing
+        self._roster_syncing = True
+        try:
+            self.roster_table.insertRow(row)
+            for col in (self.COL_CALLSIGN, self.COL_NAME, self.COL_STATE, self.COL_TRAFFIC, self.COL_NOTES, self.COL_ROLE):
+                item = QTableWidgetItem("")
+                item.setFlags(item.flags() | Qt.ItemIsEditable)
+                self.roster_table.setItem(row, col, item)
+            self._roster_configure_category_editor(row)
+            self._roster_configure_tfc_status_cell(row)
+            self._roster_configure_side_editor(row, self.COL_HEARD)
+            self._roster_configure_side_editor(row, self.COL_ACKED)
+            role_value = self._roster_role_for_source(source) if overwrite_source else ""
+            if role_value not in {"NCS", "ANCS"}:
+                role_value = ""
+            self._roster_set_row(row, cs, name, state, traffic, category, source, station_role=role_value)
+        finally:
+            self._roster_syncing = previous_syncing
         self._roster_apply_pinned_order()
         self._roster_sync_legacy_buffers()
+        self._mark_roster_dirty()
         return row
 
     def _roster_row_widget(self, row: int) -> Optional[QComboBox]:
-        widget = self.roster_table.cellWidget(row, 4)
+        widget = self.roster_table.cellWidget(row, self.COL_CATEGORY)
         return widget if isinstance(widget, QComboBox) else None
 
     def _roster_configure_category_editor(self, row: int) -> None:
@@ -1168,17 +1702,253 @@ class FldigiNetControlTab(QWidget):
         def _on_category_changed(value: str, row_index: int = row) -> None:
             if self._roster_syncing:
                 return
+            self._mark_roster_dirty()
             self._roster_apply_pinned_order()
             self._roster_sync_legacy_buffers()
+            self._refresh_tfc_status_cells()
 
         combo.currentTextChanged.connect(_on_category_changed)
-        self.roster_table.setCellWidget(row, 4, combo)
+        self.roster_table.setCellWidget(row, self.COL_CATEGORY, combo)
+
+    def _roster_configure_tfc_status_cell(self, row: int) -> None:
+        label = QLabel("", self.roster_table)
+        label.setAlignment(Qt.AlignCenter)
+        label.setProperty("tfc_status_chip", True)
+        self.roster_table.setCellWidget(row, self.COL_TFC_STATUS, label)
+        self._update_tfc_status_cell(row)
+
+    def _tfc_status_style(self, status: str) -> str:
+        theme = resolve_theme(self.settings)
+        border = theme.get("border", "#D3D7DD")
+        muted = theme.get("text_muted", "#5B6570")
+        if status == "Now":
+            background = theme.get("accent", "#2E6F9E")
+            text = "#FFFFFF"
+            border = theme.get("accent_active", background)
+        elif status == "Called":
+            background = theme.get("success", "#2E7D32")
+            text = "#FFFFFF"
+            border = background
+        else:
+            background = theme.get("warning_bg", "#FFF3CD")
+            text = theme.get("warning_text", "#6B4F00")
+        return (
+            "QLabel {"
+            f" background-color: {background}; color: {text}; border: 1px solid {border};"
+            " border-radius: 5px; padding: 2px 7px; font-weight: 700;"
+            " }"
+        )
+
+    def _tfc_status_for_row(self, row_data: Dict[str, str], role: str = "") -> str:
+        if str(row_data.get("category") or "").strip().upper() != "TFC":
+            return ""
+        callsign = str(row_data.get("callsign") or "").strip().upper()
+        if not callsign:
+            return ""
+        role_key = self._exact_net_control_role(role) or self._current_net_control_role()
+        if role_key not in {"NCS", "ANCS"}:
+            return "Pending"
+        if self._next_tfc_last_served.get(role_key, "") == callsign:
+            return "Now"
+        if callsign in self._next_tfc_called_by_role.get(role_key, set()):
+            return "Called"
+        return "Pending"
+
+    def _update_tfc_status_cell(self, row: int) -> None:
+        if not hasattr(self, "roster_table") or row < 0 or row >= self.roster_table.rowCount():
+            return
+        widget = self.roster_table.cellWidget(row, self.COL_TFC_STATUS)
+        if not isinstance(widget, QLabel):
+            return
+        rows = self._roster_table_rows()
+        row_data = rows[row] if 0 <= row < len(rows) else {}
+        status = self._tfc_status_for_row(row_data)
+        widget.setText(status)
+        widget.setVisible(bool(status))
+        widget.setStyleSheet(self._tfc_status_style(status) if status else "")
+
+    def _refresh_tfc_status_cells(self) -> None:
+        if not hasattr(self, "roster_table"):
+            return
+        for row in range(self.roster_table.rowCount()):
+            if self.roster_table.cellWidget(row, self.COL_TFC_STATUS) is None:
+                self._roster_configure_tfc_status_cell(row)
+            else:
+                self._update_tfc_status_cell(row)
+
+    def _roster_configure_side_editor(self, row: int, column: int) -> None:
+        widget = QWidget(self.roster_table)
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(2, 0, 2, 0)
+        layout.setSpacing(2)
+        for role in ("NCS", "ANCS"):
+            chip = QToolButton(widget)
+            chip.setText(role)
+            chip.setCheckable(True)
+            chip.setAutoRaise(False)
+            chip.setToolTip(("Directed by " if column == self.COL_HEARD else "Acked by ") + role)
+            chip.setProperty("sync_role", role)
+            chip.setStyleSheet(self._roster_side_chip_style(role=role, column=column))
+            chip.toggled.connect(self._on_roster_side_chip_toggled)
+            layout.addWidget(chip)
+        layout.addStretch(1)
+        self.roster_table.setCellWidget(row, column, widget)
+
+    def _roster_side_chip_style(self, *, role: str = "", column: int = -1) -> str:
+        theme = resolve_theme(self.settings)
+        surface = theme.get("surface", "#F0F2F4")
+        surface_alt = theme.get("surface_alt", "#DDE1E6")
+        border = theme.get("border", "#D3D7DD")
+        text = theme.get("text", "#1C1F21")
+        muted = theme.get("text_muted", "#5B6570")
+        accent = theme.get("accent", "#2E6F9E")
+        accent_active = theme.get("accent_active", accent)
+        focus = theme.get("focus", accent)
+        checked_bg = accent
+        checked_border = accent_active
+        checked_text = "#FFFFFF"
+        if column == self.COL_HEARD and role and role != self._current_net_control_role():
+            checked_bg = surface_alt
+            checked_border = accent
+            checked_text = text
+        return (
+            "QToolButton {"
+            f" background-color: {surface}; color: {muted}; border: 1px solid {border};"
+            " border-radius: 5px; padding: 2px 7px; font-weight: 700;"
+            " min-width: 34px;"
+            " }"
+            " QToolButton:hover {"
+            f" background-color: {surface_alt}; color: {text};"
+            " }"
+            " QToolButton:checked {"
+            f" background-color: {checked_bg}; color: {checked_text}; border: 2px solid {checked_border};"
+            " padding: 1px 6px;"
+            " }"
+            " QToolButton:checked:hover {"
+            f" background-color: {checked_border}; color: #FFFFFF;"
+            " }"
+            " QToolButton:focus {"
+            f" border: 2px solid {focus}; padding: 1px 6px;"
+            " }"
+        )
+
+    def _refresh_roster_side_chip_styles(self) -> None:
+        if not hasattr(self, "roster_table"):
+            return
+        for row in range(self.roster_table.rowCount()):
+            for column in (self.COL_HEARD, self.COL_ACKED):
+                for role, button in self._roster_side_buttons(row, column).items():
+                    button.setStyleSheet(self._roster_side_chip_style(role=role, column=column))
+
+    def _roster_side_buttons(self, row: int, column: int) -> Dict[str, QToolButton]:
+        widget = self.roster_table.cellWidget(row, column)
+        buttons: Dict[str, QToolButton] = {}
+        if widget is None:
+            return buttons
+        for button in widget.findChildren(QToolButton):
+            role = str(button.property("sync_role") or "").strip().upper()
+            if role in {"NCS", "ANCS"}:
+                buttons[role] = button
+        return buttons
+
+    def _roster_side_value(self, row: int, column: int) -> str:
+        buttons = self._roster_side_buttons(row, column)
+        if buttons:
+            active = {role for role, button in buttons.items() if button.isChecked()}
+            if active == {"NCS", "ANCS"}:
+                return "Both"
+            if "ANCS" in active:
+                return "ANCS"
+            if "NCS" in active:
+                return "NCS"
+            return ""
+        item = self.roster_table.item(row, column)
+        return item.text().strip() if item else ""
+
+    def _set_roster_side_buttons_blocked(self, row: int, column: int, value: str) -> bool:
+        buttons = self._roster_side_buttons(row, column)
+        if not buttons:
+            return False
+        target = self._roster_normalize_side(value)
+        active = set()
+        if target == "Both":
+            active = {"NCS", "ANCS"}
+        elif target in {"NCS", "ANCS"}:
+            active = {target}
+        for role, button in buttons.items():
+            button.blockSignals(True)
+            try:
+                button.setChecked(role in active)
+            finally:
+                button.blockSignals(False)
+        return True
+
+    def _roster_side_sender_location(self, sender: object) -> tuple[int, int, str]:
+        if not isinstance(sender, QToolButton) or not hasattr(self, "roster_table"):
+            return -1, -1, ""
+        sender_role = str(sender.property("sync_role") or "").strip().upper()
+        for row in range(self.roster_table.rowCount()):
+            for column in (self.COL_HEARD, self.COL_ACKED):
+                if self._roster_side_buttons(row, column).get(sender_role) is sender:
+                    return row, column, sender_role
+        return -1, -1, sender_role
+
+    def _on_roster_side_chip_toggled(self, _checked: bool) -> None:
+        if self._roster_syncing:
+            return
+        sender = self.sender()
+        row, column, clicked_role = self._roster_side_sender_location(sender)
+        if column == self.COL_HEARD and row >= 0 and clicked_role in {"NCS", "ANCS"}:
+            current_role = self._current_net_control_role()
+            rows = self._roster_table_rows()
+            station_role = self._roster_station_role(rows[row]) if 0 <= row < len(rows) else ""
+            active_value = self._roster_side_value(row, column)
+            if (
+                station_role not in {"NCS", "ANCS"}
+                and current_role in {"NCS", "ANCS"}
+                and clicked_role != current_role
+                and isinstance(sender, QToolButton)
+                and sender.isChecked()
+                and active_value == "Both"
+            ):
+                self._set_roster_side_buttons_blocked(row, column, clicked_role)
+        self._mark_roster_dirty()
+        self._roster_sync_legacy_buffers()
+        self._refresh_tfc_status_cells()
+        self._update_bucket_card_states()
+
+    def _roster_set_side(self, row: int, column: int, value: str) -> None:
+        widget = self.roster_table.cellWidget(row, column)
+        target = self._roster_normalize_side(value)
+        if widget is None:
+            self._roster_configure_side_editor(row, column)
+            widget = self.roster_table.cellWidget(row, column)
+        if self._set_roster_side_buttons_blocked(row, column, target):
+            return
+        if widget is not None and hasattr(widget, "setCurrentText"):
+            widget.blockSignals(True)
+            try:
+                widget.setCurrentText(target)
+            finally:
+                widget.blockSignals(False)
+        else:
+            item = self.roster_table.item(row, column)
+            if item is None:
+                item = QTableWidgetItem("")
+                self.roster_table.setItem(row, column, item)
+            item.setText(target)
 
     def _roster_rebuild_category_editors(self) -> None:
         for row in range(self.roster_table.rowCount()):
-            if self.roster_table.cellWidget(row, 4) is None:
+            if self.roster_table.cellWidget(row, self.COL_CATEGORY) is None:
                 self._roster_configure_category_editor(row)
-            category = self.roster_table.item(row, 4).text().strip().upper() if self.roster_table.item(row, 4) else "TFC"
+            if self.roster_table.cellWidget(row, self.COL_TFC_STATUS) is None:
+                self._roster_configure_tfc_status_cell(row)
+            if self.roster_table.cellWidget(row, self.COL_HEARD) is None:
+                self._roster_configure_side_editor(row, self.COL_HEARD)
+            if self.roster_table.cellWidget(row, self.COL_ACKED) is None:
+                self._roster_configure_side_editor(row, self.COL_ACKED)
+            category = self.roster_table.item(row, self.COL_CATEGORY).text().strip().upper() if self.roster_table.item(row, self.COL_CATEGORY) else "TFC"
             self._roster_set_category(row, category or "TFC")
 
     def _roster_reset_from_text(self, text: str, category: str = "TFC") -> None:
@@ -1194,33 +1964,215 @@ class FldigiNetControlTab(QWidget):
                     continue
                 self.roster_table.insertRow(self.roster_table.rowCount())
                 row = self.roster_table.rowCount() - 1
-                for col in (0, 1, 2, 3, 5):
+                for col in (self.COL_CALLSIGN, self.COL_NAME, self.COL_STATE, self.COL_TRAFFIC, self.COL_NOTES, self.COL_ROLE):
                     item = QTableWidgetItem("")
                     item.setFlags(item.flags() | Qt.ItemIsEditable)
                     self.roster_table.setItem(row, col, item)
                 self._roster_configure_category_editor(row)
+                self._roster_configure_tfc_status_cell(row)
+                self._roster_configure_side_editor(row, self.COL_HEARD)
+                self._roster_configure_side_editor(row, self.COL_ACKED)
                 self._roster_set_row(row, cs, name, state, extra, category, "Local")
         finally:
             self._roster_syncing = False
         self._roster_apply_pinned_order()
         self._roster_sync_legacy_buffers(write_files=False)
+        self._mark_roster_dirty()
 
     def _copy_roster_category(self, category: str) -> None:
-        text = self._roster_table_text(category)
+        scope = self._current_roster_action_scope()
+        rows = self._scope_filtered_rows(scope, category)
+        text = self._roster_table_text_for_rows(rows)
+        wanted = (category or "").strip().upper()
+        scope_label = self._roster_action_scope_label(scope)
         if text:
-            QApplication.clipboard().setText(text)
+            QApplication.clipboard().setText(self._roster_clipboard_text(text))
+            self._show_roster_action_status(f"{wanted} list copied for {scope_label}.")
+            return
+        self._show_roster_action_status(f"No {wanted} stations for {scope_label}.", "info")
 
     def _copy_roster_seen_locally(self) -> None:
         text = self._roster_table_text()
         if text:
-            QApplication.clipboard().setText(text)
+            QApplication.clipboard().setText(self._roster_clipboard_text(text))
+            self._show_roster_action_status("Seen locally list copied.")
+        else:
+            self._show_roster_action_status("No seen locally rows to copy.", "info")
 
     def _copy_roster_summary(self) -> None:
-        text = self._roster_table_text()
+        scope = self._current_roster_action_scope()
+        rows = self._scope_filtered_rows(scope)
+        text = self._roster_table_text_for_rows(rows)
         if text:
-            QApplication.clipboard().setText(text)
-            self._write_file(self._all_checkins_file_path(), text)
-            QMessageBox.information(self, "Copied", "Check-ins copied to clipboard.")
+            QApplication.clipboard().setText(self._roster_clipboard_text(text))
+            self._roster_sync_legacy_buffers()
+            self._show_roster_action_status(f"Check-ins copied for {self._roster_action_scope_label(scope)}.")
+        else:
+            self._show_roster_action_status(f"No check-ins for {self._roster_action_scope_label(scope)}.", "info")
+
+    def _needs_ack_row_indexes(self, role: str = "") -> List[int]:
+        role_key = self._exact_net_control_role(role) or self._current_net_control_role()
+        indexes: List[int] = []
+        if role_key not in {"NCS", "ANCS"}:
+            return indexes
+        for index, row in enumerate(self._roster_table_rows()):
+            if not self._roster_directed_to_current_role(row, role_key):
+                continue
+            if self._roster_acked_by_current_role(row, role_key):
+                continue
+            if self._is_current_role_leadership_row(row, role_key):
+                continue
+            line = self._format_roster_row_for_copy(row)
+            if line:
+                indexes.append(index)
+        return indexes
+
+    def _row_needs_any_required_ack(self, row: Dict[str, str]) -> bool:
+        required_roles: List[str] = []
+        for role in ("NCS", "ANCS"):
+            if self._roster_directed_to_current_role(row, role):
+                required_roles.append(role)
+        for role in required_roles:
+            if self._is_current_role_leadership_row(row, role):
+                continue
+            if not self._roster_acked_by_current_role(row, role):
+                return True
+        return False
+
+    def _needs_ack_row_indexes_for_scope(self, scope: str = "") -> List[int]:
+        scope_key = str(scope or self._current_roster_action_scope()).strip().upper()
+        if scope_key in {"NCS", "ANCS"}:
+            return self._needs_ack_row_indexes(scope_key)
+        indexes: List[int] = []
+        for index, row in enumerate(self._roster_table_rows()):
+            if not self._roster_row_matches_action_scope(row, scope_key):
+                continue
+            if not self._row_needs_any_required_ack(row):
+                continue
+            line = self._format_roster_row_for_copy(row)
+            if line:
+                indexes.append(index)
+        return indexes
+
+    def _needs_ack_lines(self, role: str = "") -> List[str]:
+        rows = self._roster_table_rows()
+        lines: List[str] = []
+        for index in self._needs_ack_row_indexes(role):
+            if 0 <= index < len(rows):
+                line = self._format_roster_row_for_copy(rows[index])
+                if line:
+                    lines.append(line)
+        return lines
+
+    def _needs_ack_text(self, role: str = "") -> str:
+        return "\n".join(self._needs_ack_lines(role)).strip()
+
+    def _needs_ack_text_for_scope(self, scope: str = "") -> str:
+        rows = self._roster_table_rows()
+        lines: List[str] = []
+        for index in self._needs_ack_row_indexes_for_scope(scope):
+            if 0 <= index < len(rows):
+                line = self._format_roster_row_for_copy(rows[index])
+                if line:
+                    lines.append(line)
+        return "\n".join(lines).strip()
+
+    def _mark_needs_ack_rows_copied(self, role: str = "") -> int:
+        role_key = self._exact_net_control_role(role) or self._current_net_control_role()
+        if role_key not in {"NCS", "ANCS"}:
+            return 0
+        row_indexes = self._needs_ack_row_indexes(role_key)
+        if not row_indexes:
+            return 0
+        for row in row_indexes:
+            current = self._roster_side_value(row, self.COL_ACKED)
+            self._roster_set_side(row, self.COL_ACKED, self._roster_promote_side(current, role_key))
+        self._mark_roster_dirty()
+        self._roster_sync_legacy_buffers()
+        self._update_bucket_card_states()
+        return len(row_indexes)
+
+    def _copy_needs_sync(self) -> None:
+        scope = self._current_roster_action_scope()
+        scope_label = self._roster_action_scope_label(scope)
+        text = self._needs_ack_text_for_scope(scope)
+        if not text:
+            self._sync_role_ack_pending_files()
+            self._show_roster_action_status(f"No ACKs are pending for {scope_label}.", "info")
+            return
+        QApplication.clipboard().setText(self._roster_clipboard_text(text))
+        if scope in {"NCS", "ANCS"}:
+            mapped = self._macro_action_file_is_mapped("ACK_PENDING", ROLE_CHECKIN_FILE_NAMES[scope]["ACK_PENDING"])
+            marked = self._mark_needs_ack_rows_copied(scope)
+            if marked:
+                file_text = f" {ROLE_CHECKIN_FILE_NAMES[scope]['ACK_PENDING']} updated." if mapped else ""
+                self._show_roster_action_status(f"ACK list copied for {scope_label}.{file_text} {marked} marked acked by {scope_label}.")
+            else:
+                self._show_roster_action_status(f"ACK Needed list copied for {scope_label}.")
+        else:
+            self._show_roster_action_status(f"ACK Needed list copied for {scope_label}. No ACK chips changed.")
+
+    def _next_tfc_eligible_rows(self, role: str = "") -> List[Dict[str, str]]:
+        role_key = self._exact_net_control_role(role) or self._current_net_control_role()
+        if role_key not in {"NCS", "ANCS"}:
+            return []
+        rows: List[Dict[str, str]] = []
+        for row in self._role_filtered_category_rows("TFC", role_key):
+            if self._is_current_role_leadership_row(row, role_key):
+                continue
+            if not str(row.get("callsign") or "").strip():
+                continue
+            rows.append(row)
+        return rows
+
+    def _next_tfc_payload(self, callsign: str) -> str:
+        cs = (callsign or "").strip().upper()
+        return f"{cs} {cs}" if cs else ""
+
+    def _next_tfc_row(self, role: str = "") -> Optional[Dict[str, str]]:
+        role_key = self._exact_net_control_role(role) or self._current_net_control_role()
+        rows = self._next_tfc_eligible_rows(role_key)
+        if not rows:
+            return None
+        last = self._next_tfc_last_served.get(role_key, "")
+        if not last:
+            return rows[0]
+        callsigns = [str(row.get("callsign") or "").strip().upper() for row in rows]
+        if last not in callsigns:
+            return rows[0]
+        next_index = callsigns.index(last) + 1
+        if next_index >= len(rows):
+            return None
+        return rows[next_index]
+
+    def _copy_next_tfc(self) -> None:
+        role = self._current_roster_action_scope()
+        if role not in {"NCS", "ANCS"}:
+            self._show_roster_action_status("Select NCS or ANCS for Next TFC.", "info")
+            return
+        row = self._next_tfc_row(role)
+        if not row:
+            self._write_file(self._role_next_tfc_file_path(role), "")
+            if role in {"NCS", "ANCS"}:
+                last = self._next_tfc_last_served.get(role, "")
+                if last:
+                    self._next_tfc_called_by_role.setdefault(role, set()).add(last)
+                self._next_tfc_last_served[role] = ""
+            self._sync_mapped_roster_files()
+            self._show_roster_action_status(f"No more directed TFC stations for {role or 'this role'}.", "info")
+            self._refresh_tfc_status_cells()
+            return
+        callsign = str(row.get("callsign") or "").strip().upper()
+        payload = self._next_tfc_payload(callsign)
+        QApplication.clipboard().setText(payload)
+        self._write_file(self._role_next_tfc_file_path(role), payload)
+        self._next_tfc_last_served[role] = callsign
+        self._next_tfc_called_by_role.setdefault(role, set()).add(callsign)
+        self._refresh_tfc_status_cells()
+        self._sync_mapped_roster_files()
+        mapped = self._macro_action_file_is_mapped("NEXT_TFC", ROLE_CHECKIN_FILE_NAMES[role]["NEXT_TFC"])
+        suffix = f" {ROLE_CHECKIN_FILE_NAMES[role]['NEXT_TFC']} updated." if mapped else ""
+        self._show_roster_action_status(f"{payload} copied.{suffix}")
 
     def _workspace_custom_bucket_id(self, mapping: Dict[str, object], index: int) -> str:
         scope = str(mapping.get("scope") or "").strip().upper() or "SHARED"
@@ -1244,6 +2196,8 @@ class FldigiNetControlTab(QWidget):
         return f"CUSTOM_{index + 1}"
 
     def _log_assisted_enabled(self) -> bool:
+        if not self.LOG_ASSISTED_INTAKE_VISIBLE:
+            return False
         return bool(self.log_assisted_enable_chk.isChecked())
 
     def _log_assisted_show_review(self) -> bool:
@@ -1268,7 +2222,8 @@ class FldigiNetControlTab(QWidget):
     def _load_log_assisted_state(self) -> None:
         self._log_assisted_loading = True
         try:
-            self.log_assisted_enable_chk.setChecked(bool(self.settings.get(self.FLDIGI_LOG_ASSISTED_ENABLED_KEY, False)))
+            enabled = bool(self.settings.get(self.FLDIGI_LOG_ASSISTED_ENABLED_KEY, False))
+            self.log_assisted_enable_chk.setChecked(enabled and self.LOG_ASSISTED_INTAKE_VISIBLE)
             self.log_assisted_review_chk.setChecked(bool(self.settings.get(self.FLDIGI_LOG_ASSISTED_SHOW_REVIEW_KEY, True)))
             self.log_assisted_tx_chk.setChecked(bool(self.settings.get(self.FLDIGI_LOG_ASSISTED_INCLUDE_TX_KEY, True)))
         finally:
@@ -1507,6 +2462,56 @@ class FldigiNetControlTab(QWidget):
             custom_mappings.append(mapping)
         return custom_mappings
 
+    def _enabled_standard_roster_mappings(self, role: Optional[str] = None) -> List[Dict[str, object]]:
+        selected = self._selected_macro_profile_path()
+        record = self._macro_profile_record(selected)
+        mappings = record.get("mappings")
+        if not isinstance(mappings, list):
+            return []
+        standard_functions = {"TFC", "QRU", "LATE", "ALL", "ACK_PENDING", "NEXT_TFC"}
+        roster_mappings: List[Dict[str, object]] = []
+        for mapping in mappings:
+            if not self._macro_profile_mapping_is_complete(mapping):
+                continue
+            function = str(mapping.get("function") or "").strip().upper()
+            if function not in standard_functions:
+                continue
+            source_file = str(mapping.get("source_file") or "").strip()
+            if not source_file:
+                continue
+            roster_mappings.append(mapping)
+        return roster_mappings
+
+    def _mapping_scope_key(self, mapping: Dict[str, object]) -> str:
+        scope = str(mapping.get("scope") or "").strip().upper()
+        return scope if scope in ACTION_SCOPES else "ALL"
+
+    def _roster_text_for_mapping_function(self, function: object, scope: str = "") -> str:
+        normalized = str(function or "").strip().upper()
+        scope_key = str(scope or "").strip().upper()
+        if normalized in {"TFC", "QRU", "LATE"}:
+            if scope_key in ACTION_SCOPES:
+                return self._roster_table_text_for_rows(self._scope_filtered_rows(scope_key, normalized))
+            return self._roster_table_text(normalized)
+        if normalized == "ALL":
+            if scope_key in ACTION_SCOPES:
+                return self._roster_table_text_for_rows(self._scope_filtered_rows(scope_key))
+            return self._roster_table_text()
+        if normalized == "ACK_PENDING" and scope_key in {"NCS", "ANCS"}:
+            return self._roster_clipboard_text(self._needs_ack_text(scope_key))
+        if normalized == "NEXT_TFC" and scope_key in {"NCS", "ANCS"}:
+            last = str(self._next_tfc_last_served.get(scope_key, "") or "").strip().upper()
+            return self._next_tfc_payload(last) if last else ""
+        return ""
+
+    def _sync_mapped_roster_files(self) -> None:
+        for mapping in self._enabled_standard_roster_mappings():
+            source_file = str(mapping.get("source_file") or "").strip()
+            if not source_file:
+                continue
+            text = self._roster_text_for_mapping_function(mapping.get("function"), self._mapping_scope_key(mapping))
+            self._write_file(source_file, text)
+
     def _refresh_custom_bucket_cards(self, role: Optional[str] = None) -> None:
         active_role = normalize_role(role or self.role_combo.currentText())
         self._workspace_visible_bucket_ids.difference_update(self._custom_bucket_cards.keys())
@@ -1558,6 +2563,22 @@ class FldigiNetControlTab(QWidget):
             self.partner_primary_label.setText("ANCS Callsign:")
             self.partner_primary_btn.setText("Set ANCS")
             self.partner_primary_edit.setText(self._ancs_partner_call)
+        self._update_partner_action_state()
+
+    def _update_partner_action_state(self) -> None:
+        if not hasattr(self, "partner_primary_edit"):
+            return
+        enabled = bool(self._net_in_progress)
+        tooltip = "" if enabled else "Start the net before setting NCS/ANCS roster entries."
+        for widget in (
+            self.partner_primary_edit,
+            self.partner_primary_btn,
+            self.joiner_ncs_edit,
+            self.joiner_ancs_edit,
+            self.joiner_add_btn,
+        ):
+            widget.setEnabled(enabled)
+            widget.setToolTip(tooltip)
 
     def _add_net_control_roster_row(self, callsign: str, role: str, *, local: bool = False) -> int:
         cs = (callsign or "").strip().upper()
@@ -1569,52 +2590,111 @@ class FldigiNetControlTab(QWidget):
             name = (self.settings.get("operator_name", "") or "").strip() or name
             state = (self.settings.get("operator_state", "") or "").strip().upper() or state
         source = f"{role_key} - Net Control"
-        existing = self._roster_find_row(cs)
+        role_row = self._roster_find_role_row(role_key)
+        callsign_row = self._roster_find_row(cs)
+        existing = role_row if role_row >= 0 else callsign_row
+        if role_row >= 0 and callsign_row >= 0 and callsign_row != role_row:
+            self.roster_table.removeRow(role_row)
+            existing = callsign_row - 1 if role_row < callsign_row else callsign_row
         category = "QRU"
         traffic = ""
+        notes = ""
         if existing >= 0:
-            widget = self.roster_table.cellWidget(existing, 4)
+            widget = self.roster_table.cellWidget(existing, self.COL_CATEGORY)
             if widget is not None and hasattr(widget, "currentText"):
                 category = str(widget.currentText() or "").strip().upper() or "QRU"
-            item = self.roster_table.item(existing, 3)
+            item = self.roster_table.item(existing, self.COL_TRAFFIC)
             traffic = (item.text() if item else "").strip()
-        return self._roster_append_row(cs, name, state, traffic, category, source, overwrite_source=True)
+            notes_item = self.roster_table.item(existing, self.COL_NOTES)
+            notes = (notes_item.text() if notes_item else "").strip()
+            self._roster_set_row(existing, cs, name, state, traffic, category, source, "Both", "Both", notes, role_key)
+            row = existing
+        else:
+            row = self._roster_append_row(cs, name, state, traffic, category, source, overwrite_source=True)
+        if row >= 0:
+            self._roster_set_side(row, self.COL_HEARD, "Both")
+            self._roster_set_side(row, self.COL_ACKED, "Both")
+            self._sync_partner_fields_from_roster()
+            self._roster_apply_pinned_order()
+            self._roster_sync_legacy_buffers()
+            self._mark_roster_dirty()
+            self._update_bucket_card_states()
+        return row
+
+    def _sync_partner_fields_from_roster(self) -> None:
+        ncs_call = ""
+        ancs_call = ""
+        for row in self._roster_table_rows():
+            role = self._roster_station_role(row)
+            if role == "NCS" and not ncs_call:
+                ncs_call = row.get("callsign", "")
+            elif role == "ANCS" and not ancs_call:
+                ancs_call = row.get("callsign", "")
+        self._ncs_partner_call = ncs_call
+        self._ancs_partner_call = ancs_call
+        if not hasattr(self, "partner_primary_edit"):
+            return
+        active_role = normalize_role(self.role_combo.currentText()) if hasattr(self, "role_combo") else ""
+        self.partner_primary_edit.blockSignals(True)
+        try:
+            if active_role == "ANCS":
+                self.partner_primary_edit.setText(self._ncs_partner_call)
+            elif active_role == "NCS":
+                self.partner_primary_edit.setText(self._ancs_partner_call)
+        finally:
+            self.partner_primary_edit.blockSignals(False)
 
     def _apply_local_net_control_role(self) -> None:
+        if not self._net_in_progress:
+            return
         role = normalize_role(self.role_combo.currentText())
         cs = (self.settings.get("operator_callsign", "") or "").strip().upper()
         if cs and role in {"NCS", "ANCS"}:
             self._add_net_control_roster_row(cs, role, local=True)
 
     def _set_partner_from_primary_controls(self) -> None:
+        if not self._net_in_progress:
+            self.partner_status_label.setText("Start Net before setting NCS/ANCS.")
+            return
         role = normalize_role(self.role_combo.currentText())
-        cs = (self.partner_primary_edit.text() or "").strip().upper()
+        cs, match_status = self._resolve_role_callsign_from_field(self.partner_primary_edit)
         if not cs:
             self.partner_status_label.setText("No callsign entered.")
+            return
+        if match_status == "ambiguous":
+            self.partner_status_label.setText("Multiple HF operators match. Enter the callsign.")
             return
         if role == "ANCS":
             self._ncs_partner_call = cs
             self._add_net_control_roster_row(cs, "NCS")
             self._apply_local_net_control_role()
-            self.partner_status_label.setText(f"NCS {cs} added to roster.")
+            self.partner_status_label.setText(f"NCS {cs} set in roster.")
         else:
             self._ancs_partner_call = cs
             self._apply_local_net_control_role()
             self._add_net_control_roster_row(cs, "ANCS")
-            self.partner_status_label.setText(f"ANCS {cs} added to roster.")
+            self.partner_status_label.setText(f"ANCS {cs} set in roster.")
 
     def _add_joiner_net_control_rows(self) -> None:
-        ncs = (self.joiner_ncs_edit.text() or "").strip().upper()
-        ancs = (self.joiner_ancs_edit.text() or "").strip().upper()
+        if not self._net_in_progress:
+            self.partner_status_label.setText("Start Net before setting NCS/ANCS.")
+            return
+        ncs, ncs_status = self._resolve_role_callsign_from_field(self.joiner_ncs_edit)
+        ancs, ancs_status = self._resolve_role_callsign_from_field(self.joiner_ancs_edit)
+        if ncs_status == "ambiguous" or ancs_status == "ambiguous":
+            self.partner_status_label.setText("Multiple HF operators match. Enter each callsign.")
+            return
         added: List[str] = []
         if ncs:
             self._ncs_partner_call = ncs
-            self._add_net_control_roster_row(ncs, "NCS")
             added.append(f"NCS {ncs}")
         if ancs:
             self._ancs_partner_call = ancs
-            self._add_net_control_roster_row(ancs, "ANCS")
             added.append(f"ANCS {ancs}")
+        if ncs:
+            self._add_net_control_roster_row(ncs, "NCS")
+        if ancs:
+            self._add_net_control_roster_row(ancs, "ANCS")
         self.partner_status_label.setText(
             f"{', '.join(added)} added to roster." if added else "No net control callsigns entered."
         )
@@ -1625,7 +2705,11 @@ class FldigiNetControlTab(QWidget):
         self._apply_role_workspace(role)
         self._refresh_partner_controls()
         self._apply_local_net_control_role()
+        self._sync_roster_action_scope_to_role()
         self._roster_apply_pinned_order()
+        self._refresh_roster_side_chip_styles()
+        self._refresh_roster_action_scope_styles()
+        self._refresh_tfc_status_cells()
         self._roster_sync_legacy_buffers()
 
     def _on_workspace_text_changed(self) -> None:
@@ -1637,22 +2721,31 @@ class FldigiNetControlTab(QWidget):
         row = item.row()
         if row < 0:
             return
-        if item.column() == 0:
+        if item.column() == self.COL_CALLSIGN:
             item.setText(item.text().strip().upper())
-        elif item.column() == 2:
+            self._roster_deduplicate_callsigns()
+            self._roster_apply_pinned_order()
+            self._sync_partner_fields_from_roster()
+        elif item.column() == self.COL_STATE:
             item.setText(item.text().strip().upper())
-        elif item.column() == 5:
-            item.setText(item.text().strip())
+        elif item.column() in {self.COL_HEARD, self.COL_ACKED}:
+            item.setText(self._roster_normalize_side(item.text()))
+        elif item.column() == self.COL_ROLE:
+            item.setText(self._roster_role_for_source(item.text()))
+            self._roster_apply_pinned_order()
+        self._mark_roster_dirty()
         self._roster_sync_legacy_buffers()
 
     def _on_roster_model_data_changed(self, *_args) -> None:
         if self._roster_syncing or self._roster_loading:
             return
+        self._mark_roster_dirty()
         self._roster_sync_legacy_buffers()
 
     def _on_roster_model_rows_changed(self, *_args) -> None:
         if self._roster_syncing or self._roster_loading:
             return
+        self._mark_roster_dirty()
         self._roster_sync_legacy_buffers()
 
     def _known_add_button_role_map(self, role: Optional[str] = None) -> List[tuple[str, str, str]]:
@@ -1668,6 +2761,16 @@ class FldigiNetControlTab(QWidget):
     def _known_target_widget(self, target: str):
         return None
 
+    def _require_active_net_for_checkin_add(self) -> bool:
+        if self._net_in_progress:
+            return True
+        QMessageBox.information(
+            self,
+            "Start Net Required",
+            "Start the net before adding check-ins to the roster. Start Net clears pre-net roster entries so stale check-ins are not carried forward.",
+        )
+        return False
+
     def _refresh_known_action_band(self, role: Optional[str] = None) -> None:
         active_role = normalize_role(role or self.role_combo.currentText())
         visible_targets = {target for target, _, _ in self._known_add_button_role_map(active_role)}
@@ -1682,6 +2785,8 @@ class FldigiNetControlTab(QWidget):
         self._update_add_buttons_state()
 
     def _insert_known_into_bucket(self, target: str) -> None:
+        if not self._require_active_net_for_checkin_add():
+            return
         line = self.known_op_edit.text().strip()
         if not line:
             return
@@ -1791,10 +2896,10 @@ class FldigiNetControlTab(QWidget):
         ]
         compare_label = self._reference_compare_label() if target_bucket in {"reference", "ncs_reference", "ancs_reference"} else target_bucket
         lines = [
-            f"Local Roster: {len(local_entries)}",
+            f"Net Roster: {len(local_entries)}",
             f"{compare_label}: {len(compare_entries)}",
             "",
-            f"Entries in {compare_label} not in Local Roster:",
+            f"Entries in {compare_label} not in Net Roster:",
             "\n".join(mergeable_entries) if mergeable_entries else "(none)",
         ]
         return "\n".join(lines), "\n".join(mergeable_entries)
@@ -1818,9 +2923,11 @@ class FldigiNetControlTab(QWidget):
         QApplication.clipboard().setText(self._compare_missing_text)
 
     def _import_reference_missing(self) -> None:
+        if not self._require_active_net_for_checkin_add():
+            return
         missing_entries = self._reference_entries_missing_from_roster()
         if not missing_entries:
-            QMessageBox.information(self, "Reference Import", "No reference entries are missing from the local roster.")
+            QMessageBox.information(self, "Reference Import", "No reference entries are missing from the net roster.")
             return
         source_label = self._reference_source_label()
         added = 0
@@ -1837,12 +2944,14 @@ class FldigiNetControlTab(QWidget):
             added += 1
         self._compare_reference_missing_entries = self._reference_entries_missing_from_roster()
         self._run_inline_compare()
-        QMessageBox.information(self, "Reference Import", f"Added {added} reference entr{'y' if added == 1 else 'ies'} to the local roster.")
+        QMessageBox.information(self, "Reference Import", f"Added {added} reference entr{'y' if added == 1 else 'ies'} to the net roster.")
 
     def _merge_compare_missing(self) -> None:
+        if not self._require_active_net_for_checkin_add():
+            return
         missing_entries = self._reference_entries_missing_from_roster()
         if not missing_entries:
-            QMessageBox.information(self, "Merge Missing", f"No entries from {self._reference_compare_label()} are missing from the local roster.")
+            QMessageBox.information(self, "Merge Missing", f"No entries from {self._reference_compare_label()} are missing from the net roster.")
             return
         source_label = self._reference_source_label()
         added = 0
@@ -1857,12 +2966,14 @@ class FldigiNetControlTab(QWidget):
             )
             added += 1
         self._run_inline_compare()
-        QMessageBox.information(self, "Merge Missing", f"Added {added} entr{'y' if added == 1 else 'ies'} from {source_label} to the local roster.")
+        QMessageBox.information(self, "Merge Missing", f"Added {added} entr{'y' if added == 1 else 'ies'} from {source_label} to the net roster.")
 
     def _merge_review_candidates(self) -> None:
+        if not self._require_active_net_for_checkin_add():
+            return
         missing_entries = self._review_entries_missing_from_roster()
         if not missing_entries:
-            QMessageBox.information(self, "Merge Reviewed", "No reviewed entries are missing from the local roster.")
+            QMessageBox.information(self, "Merge Reviewed", "No reviewed entries are missing from the net roster.")
             return
         added_calls = {entry["callsign"] for entry in missing_entries}
         added = 0
@@ -1885,7 +2996,7 @@ class FldigiNetControlTab(QWidget):
             remaining_lines.append(raw_line)
         self.review_card.set_text("\n".join(remaining_lines).strip())
         self._run_inline_compare()
-        QMessageBox.information(self, "Merge Reviewed", f"Added {added} reviewed entr{'y' if added == 1 else 'ies'} to the local roster.")
+        QMessageBox.information(self, "Merge Reviewed", f"Added {added} reviewed entr{'y' if added == 1 else 'ies'} to the net roster.")
 
     def _apply_role_workspace(self, role: str) -> None:
         normalized = normalize_role(role)
@@ -1893,18 +3004,25 @@ class FldigiNetControlTab(QWidget):
         self._workspace_role_loading = True
         try:
             self.roster_frame.setVisible(True)
-            self.roster_table.setColumnHidden(4, normalized == "JOINER")
-            self.roster_table.setColumnHidden(5, False)
+            self.roster_table.setColumnHidden(self.COL_CATEGORY, normalized == "JOINER")
+            self.roster_table.setColumnHidden(self.COL_TFC_STATUS, normalized == "JOINER")
+            self.roster_table.setColumnHidden(self.COL_HEARD, False)
+            self.roster_table.setColumnHidden(self.COL_ACKED, False)
+            self.roster_table.setColumnHidden(self.COL_ROLE, True)
             if normalized == "JOINER":
                 self.copy_tfc_btn.setVisible(False)
+                self.next_tfc_btn.setVisible(False)
                 self.copy_qru_btn.setVisible(False)
                 self.copy_late_btn.setVisible(False)
                 self.copy_seen_locally_btn.setVisible(True)
+                self.copy_needs_sync_btn.setVisible(False)
             else:
                 self.copy_tfc_btn.setVisible(True)
+                self.next_tfc_btn.setVisible(True)
                 self.copy_qru_btn.setVisible(True)
                 self.copy_late_btn.setVisible(True)
                 self.copy_seen_locally_btn.setVisible(False)
+                self.copy_needs_sync_btn.setVisible(True)
             self.tfc_card.set_title("Seen Locally" if normalized == "JOINER" else f"{normalized} / TFC")
             self.qru_card.set_title(f"{normalized} / QRU")
             self.late_card.set_title(f"{normalized} / LATE")
@@ -1924,12 +3042,12 @@ class FldigiNetControlTab(QWidget):
             if normalized != "NCS":
                 self.reference_card.set_placeholder("Paste or edit the NCS reference list here.")
             self.compare_results_card.set_read_only(True)
-            self.compare_results_card.set_placeholder("Run Compare to list entries that can be merged into the local roster.")
+            self.compare_results_card.set_placeholder("Run Compare to list entries that can be merged into the net roster.")
             self.compare_results_card.set_count(len(self._reference_entries_missing_from_roster()))
             review_visible = self._log_assisted_enabled() and self._log_assisted_show_review()
             self.review_card.setVisible(review_visible)
             self.review_card.set_read_only(False)
-            self.review_card.set_placeholder("Review lower-confidence log-assisted candidates here.")
+            self.review_card.set_placeholder("Review held candidates here.")
             self._workspace_bucket_defaults = {
                 "source_bucket_id": "roster",
                 "target_bucket_id": preset.compare_target_bucket_id,
@@ -1971,11 +3089,26 @@ class FldigiNetControlTab(QWidget):
         bucket_states = [
             (card, bool(card.text().strip()), "eligible_success" if bucket_id in {"tfc", "late"} else "eligible_info")
             for bucket_id, card in self._workspace_bucket_cards.items()
-            if card.isVisible()
         ]
         for card, has_text, role in bucket_states:
             if hasattr(card, "copy_btn") and card.copy_btn is not None:
                 card.copy_btn.setStyleSheet(button_style(role if has_text else "muted", theme))
+        self._refresh_save_button_style()
+
+    def _set_roster_dirty(self, dirty: bool) -> None:
+        self._roster_dirty = bool(dirty)
+        self._refresh_save_button_style()
+
+    def _mark_roster_dirty(self) -> None:
+        if self._roster_loading:
+            return
+        self._set_roster_dirty(True)
+
+    def _refresh_save_button_style(self) -> None:
+        if not hasattr(self, "save_btn"):
+            return
+        theme = resolve_theme(self.settings)
+        self.save_btn.setStyleSheet(button_style("eligible_success" if self._roster_dirty else "muted", theme))
 
     def _set_net_button_styles(self, active: bool):
         """
@@ -1984,20 +3117,20 @@ class FldigiNetControlTab(QWidget):
         theme = resolve_theme(self.settings)
         if active:
             self.start_btn.setStyleSheet(button_style("muted", theme))
-            self.save_btn.setStyleSheet(button_style("eligible_success", theme))
-            self.merge_btn.setStyleSheet(button_style("eligible_info", theme))
+            self._refresh_save_button_style()
             self.end_btn.setStyleSheet(button_style("eligible_danger", theme))
             self.ad_hoc_btn.setStyleSheet(button_style("muted", theme))
             self.start_btn.setEnabled(False)
             self.ad_hoc_btn.setEnabled(False)
         else:
             self.start_btn.setStyleSheet(button_style("eligible_success", theme))
-            self.save_btn.setStyleSheet(button_style("muted", theme))
-            self.merge_btn.setStyleSheet(button_style("muted", theme))
+            self._refresh_save_button_style()
             self.end_btn.setStyleSheet(button_style("muted", theme))
             self.ad_hoc_btn.setStyleSheet(button_style("eligible_info", theme))
             self.start_btn.setEnabled(True)
             self.ad_hoc_btn.setEnabled(True)
+        self._update_partner_action_state()
+        self._update_add_buttons_state()
 
     def _refresh_operator_history_views(self) -> None:
         try:
@@ -2300,12 +3433,13 @@ class FldigiNetControlTab(QWidget):
         theme = resolve_theme(self.settings)
         self.start_btn.setStyleSheet(button_style("success", theme))
         self.end_btn.setStyleSheet(button_style("danger", theme))
-        self.merge_btn.setStyleSheet(button_style("info", theme))
         self._start_btn_default_style = self.start_btn.styleSheet()
         self._save_btn_default_style = button_style("success", theme)
         self.save_btn.setStyleSheet(self._save_btn_default_style)
         self.suspend_btn.setStyleSheet(button_style("warning", theme))
         self._set_net_button_styles(self._net_in_progress)
+        self._refresh_roster_side_chip_styles()
+        self._refresh_tfc_status_cells()
         self._update_copy_buttons_state()
         self._apply_known_op_styles(theme)
         self._update_add_buttons_state()
@@ -2717,46 +3851,39 @@ class FldigiNetControlTab(QWidget):
         self._save_macro_profile_selection(path, refresh_metadata=True)
 
     def _refresh_setup_summary(self) -> None:
+        if not hasattr(self, "macro_profile_details_btn"):
+            return
         mode = self._macro_profile_mode()
         record = self._macro_profile_record(self._selected_macro_profile_path())
         mapping_count = len(record.get("mappings", [])) if isinstance(record.get("mappings", []), list) else 0
+        selected_path = self._selected_macro_profile_path()
+        selected_name = Path(selected_path).stem if selected_path else ""
+        needs_mapping = bool(selected_path and mode != "mapped")
         if not self._selected_macro_profile_path():
-            self._set_status_chip(self.macro_mode_chip, "Macro: None", "neutral")
+            header_text = "Macro: None"
         elif mode == "mapped":
-            self._set_status_chip(self.macro_mode_chip, "Macro: Mapped", "ready")
+            header_text = f"Macro: Mapped - {selected_name}" if selected_name else "Macro: Mapped"
         elif mapping_count:
-            self._set_status_chip(self.macro_mode_chip, "Macro: Draft", "warning")
+            header_text = f"Macro: Needs Mapping - {selected_name}" if selected_name else "Macro: Needs Mapping"
         else:
-            self._set_status_chip(self.macro_mode_chip, "Macro: Selected", "active")
-
-        log_path = resolve_fldigi_log_path(self.settings.get("fldigi_log_path", ""))
-        if not self._log_assisted_enabled():
-            self._set_status_chip(self.log_intake_chip, "Log Intake: Off", "neutral")
-        elif log_path is None:
-            self._set_status_chip(self.log_intake_chip, "Log Intake: Waiting", "warning")
-        else:
-            self._set_status_chip(self.log_intake_chip, "Log Intake: On", "ready")
-
-        self._set_status_chip(
-            self.review_mode_chip,
-            "Review: Hold" if self._log_assisted_show_review() else "Review: Off",
-            "active" if self._log_assisted_show_review() else "neutral",
-        )
-        self._set_status_chip(
-            self.tx_context_chip,
-            "TX Context: On" if self._log_assisted_include_tx() else "TX Context: Off",
-            "active" if self._log_assisted_include_tx() else "neutral",
-        )
+            header_text = f"Macro: Needs Mapping - {selected_name}" if selected_name else "Macro: Needs Mapping"
+        self.macro_profile_details_btn.setText(header_text)
+        self.macro_profile_details_btn.setStyleSheet(self._macro_header_style())
+        if hasattr(self, "macro_setup_controls"):
+            self.macro_setup_controls.setVisible(not selected_path or needs_mapping)
         self._refresh_macro_mapping_locations()
 
     def _macro_mapping_locations_text(self) -> str:
         checkin_dir = self._resolve_checkin_dir()
         default_paths = [
-            ("TFC", checkin_dir / "main_checkins.txt"),
-            ("QRU", checkin_dir / "qru_checkins.txt"),
-            ("LATE", checkin_dir / "new-late_checkins.txt"),
-            ("ALL", checkin_dir / "all_checkins.txt"),
+            (label, checkin_dir / filename)
+            for label, filename in CURRENT_CHECKIN_FILE_NAMES.items()
         ]
+        for role in ("NCS", "ANCS"):
+            default_paths.extend(
+                (f"{role}_{label}", checkin_dir / filename)
+                for label, filename in ROLE_CHECKIN_FILE_NAMES[role].items()
+            )
         lines = ["Macro check-in files:"]
         lines.extend(f"{label}: {path}" for label, path in default_paths)
         lines.append(f"Archive: {checkin_dir / 'archive'}")
@@ -2785,6 +3912,23 @@ class FldigiNetControlTab(QWidget):
     def _refresh_macro_mapping_locations(self) -> None:
         if hasattr(self, "macro_mapping_locations_label"):
             self.macro_mapping_locations_label.setText(self._macro_mapping_locations_text())
+
+    def _macro_action_file_is_mapped(self, function: str, filename: str) -> bool:
+        selected = self._normalize_macro_profile_path(self._selected_macro_profile_path())
+        record = self._macro_profile_record(selected)
+        mappings = record.get("mappings")
+        wanted_function = str(function or "").strip().upper()
+        wanted_filename = str(filename or "").strip().casefold()
+        if not isinstance(mappings, list):
+            return False
+        for mapping in mappings:
+            if not self._macro_profile_mapping_is_complete(mapping):
+                continue
+            mapped_function = str(mapping.get("function") or "").strip().upper()
+            source_name = macro_mapping_path_leaf(mapping.get("source_file") or "").casefold()
+            if mapped_function == wanted_function or source_name == wanted_filename:
+                return True
+        return False
 
     # ---------------- SETTINGS LOAD ---------------- #
 
@@ -3061,11 +4205,25 @@ class FldigiNetControlTab(QWidget):
             self._known_operator_rows.append(row)
             self._known_operator_by_callsign[cs] = row
 
-        if suggestions:
-            completer = QCompleter(sorted(suggestions), self)
-            completer.setCaseSensitivity(Qt.CaseInsensitive)
-            completer.setFilterMode(Qt.MatchContains)
-            self.known_op_edit.setCompleter(completer)
+        self._install_known_operator_completers(suggestions)
+
+    def _build_known_operator_completer(self, suggestions: List[str], parent=None) -> Optional[QCompleter]:
+        if not suggestions:
+            return None
+        completer = QCompleter(sorted(suggestions), parent or self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        return completer
+
+    def _install_known_operator_completers(self, suggestions: List[str]) -> None:
+        self.known_op_edit.setCompleter(self._build_known_operator_completer(suggestions, self.known_op_edit))
+        for field in (
+            getattr(self, "partner_primary_edit", None),
+            getattr(self, "joiner_ncs_edit", None),
+            getattr(self, "joiner_ancs_edit", None),
+        ):
+            if field is not None:
+                field.setCompleter(self._build_known_operator_completer(suggestions, field))
 
     def _matching_known_operators(self, query: str) -> List[Dict[str, str]]:
         needle = (query or "").strip().lower()
@@ -3076,6 +4234,36 @@ class FldigiNetControlTab(QWidget):
             if needle in row.get("display", "").lower():
                 matches.append(row)
         return matches
+
+    def _resolve_known_operator_callsign(self, text: str) -> tuple[str, Optional[Dict[str, str]], str]:
+        raw = (text or "").strip()
+        if not raw:
+            return "", None, "empty"
+        token_match = re.search(r"[A-Za-z0-9/]+", raw)
+        token = (token_match.group(0) if token_match else raw).strip().upper()
+        if not token:
+            return "", None, "empty"
+        exact = self._known_operator_by_callsign.get(token)
+        if exact:
+            return exact.get("callsign", token), exact, "exact"
+        matches = self._matching_known_operators(raw)
+        unique_by_call: Dict[str, Dict[str, str]] = {}
+        for row in matches:
+            cs = (row.get("callsign") or "").strip().upper()
+            if cs:
+                unique_by_call[cs] = row
+        if len(unique_by_call) == 1:
+            cs, row = next(iter(unique_by_call.items()))
+            return cs, row, "unique"
+        if len(unique_by_call) > 1:
+            return token, None, "ambiguous"
+        return token, None, "manual"
+
+    def _resolve_role_callsign_from_field(self, field: QLineEdit) -> tuple[str, str]:
+        callsign, _row, status = self._resolve_known_operator_callsign(field.text())
+        if callsign and status in {"exact", "unique"}:
+            field.setText(callsign)
+        return callsign, status
 
     def _extract_extra_after_tokens(self, text: str, *, min_tokens: int) -> str:
         matches = list(re.finditer(r"[A-Za-z0-9]+", text))
@@ -3225,6 +4413,12 @@ class FldigiNetControlTab(QWidget):
 
     def _update_add_buttons_state(self) -> None:
         theme = resolve_theme(self.settings)
+        net_active = bool(self._net_in_progress)
+        if hasattr(self, "known_op_edit"):
+            self.known_op_edit.setEnabled(net_active)
+            self.known_op_edit.setToolTip(
+                "" if net_active else "Start the net before entering check-ins."
+            )
         text = self.known_op_edit.text().strip()
         cs, name, state = self._parse_checkin_line(text)
         ready = bool(cs and name and state)
@@ -3232,7 +4426,11 @@ class FldigiNetControlTab(QWidget):
             if not button.isVisible():
                 continue
             role = {"tfc": "success", "qru": "info", "late": "warning", "seen_locally": "success"}.get(target, "info")
-            button.setStyleSheet(self._known_action_button_style(role, theme, ready))
+            button.setEnabled(net_active)
+            button.setToolTip(
+                "" if net_active else "Start the net before adding check-ins to the roster."
+            )
+            button.setStyleSheet(self._known_action_button_style(role, theme, ready and net_active))
 
     def _apply_known_op_styles(self, theme: Dict[str, str]) -> None:
         focus = theme.get("focus", "#7FB5FF")
@@ -3271,14 +4469,19 @@ class FldigiNetControlTab(QWidget):
     # ---------------- Net name auto-fill ---------------- #
 
     def _next_net_from_schedule(self) -> Optional[Dict]:
+        occurrences = self._net_schedule_occurrences()
+        return occurrences[0] if occurrences else None
+
+    def _net_schedule_occurrences(self, *, window_hours: int = 12) -> List[Dict]:
         data = self.settings.all()
         net_sched = data.get("net_schedule", [])
         if not isinstance(net_sched, list):
-            return None
+            return []
 
         now = datetime.datetime.now(datetime.timezone.utc)
-        best_active = None
-        best_future = None
+        window_end = now + datetime.timedelta(hours=max(1, int(window_hours or 12)))
+        occurrences: List[Dict] = []
+        seen_keys: set[tuple[str, str, str, str, str]] = set()
 
         for row in net_sched:
             if not isinstance(row, dict):
@@ -3286,40 +4489,61 @@ class FldigiNetControlTab(QWidget):
             occ = self._next_net_occurrence(row, now)
             if not occ:
                 continue
-            if occ["active"]:
-                if best_active is None or occ["start_dt"] < best_active["start_dt"]:
-                    best_active = occ
-            else:
-                if occ["window_start"] >= now and (
-                    best_future is None or occ["start_dt"] < best_future["start_dt"]
-                ):
-                    best_future = occ
+            start_dt = occ.get("start_dt")
+            end_dt = occ.get("end_dt")
+            if not isinstance(start_dt, datetime.datetime) or not isinstance(end_dt, datetime.datetime):
+                continue
+            if not occ.get("active") and start_dt > window_end:
+                continue
+            if end_dt < now:
+                continue
+            key = (
+                str(row.get("net_name") or "").strip().upper(),
+                str(row.get("mode") or "").strip().upper(),
+                str(row.get("band") or "").strip().upper(),
+                str(row.get("frequency") or "").strip(),
+                str(row.get("start_utc") or "").strip(),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            occurrences.append(occ)
 
-        if best_active:
-            return best_active
-        return best_future
+        occurrences.sort(key=lambda item: (0 if item.get("active") else 1, item.get("start_dt")))
+        return occurrences
 
     def _populate_net_name_from_schedule(self):
-        occ = self._next_net_from_schedule()
-        if not occ:
+        occurrences = self._net_schedule_occurrences()
+        if not occurrences:
             return
-        row = occ["row"]
-        net_name = (row.get("net_name") or "").strip()
-        mode = (row.get("mode") or "").strip()
-        band = (row.get("band") or "").strip()
-        freq = (row.get("frequency") or "").strip()
-        start = (row.get("start_utc") or "").strip()
-        group = net_name  # No group field in net schedule; reuse net name for display
-        day = (row.get("day_utc") or "").strip()
-        parts = [group, net_name, mode, band, freq, day, f"{start} UTC"]
-        formatted = " - ".join([p for p in parts if p])
-        if formatted:
-            idx = self.net_name_combo.findText(formatted)
-            if idx < 0:
+        selected_text = self.net_name_combo.currentText().strip()
+        self.net_name_combo.blockSignals(True)
+        try:
+            self.net_name_combo.clear()
+            first_active_idx = -1
+            for occ in occurrences:
+                row = occ["row"]
+                net_name = (row.get("net_name") or "").strip()
+                mode = (row.get("mode") or "").strip()
+                band = (row.get("band") or "").strip()
+                freq = (row.get("frequency") or "").strip()
+                start_dt = occ.get("start_dt")
+                start = start_dt.strftime("%a %H:%M UTC") if isinstance(start_dt, datetime.datetime) else f"{(row.get('start_utc') or '').strip()} UTC"
+                status = "ACTIVE" if occ.get("active") else "UPCOMING"
+                parts = [status, net_name, mode, band, freq, start]
+                formatted = " - ".join([p for p in parts if p])
+                if not formatted:
+                    continue
                 self.net_name_combo.addItem(formatted)
-                idx = self.net_name_combo.count() - 1
+                if occ.get("active") and first_active_idx < 0:
+                    first_active_idx = self.net_name_combo.count() - 1
+            idx = self.net_name_combo.findText(selected_text) if selected_text else -1
+            if idx < 0:
+                idx = first_active_idx if first_active_idx >= 0 else 0
             self.net_name_combo.setCurrentIndex(idx)
-            self._update_net_name_min_width()
+        finally:
+            self.net_name_combo.blockSignals(False)
+        self._update_net_name_min_width()
 
     def _update_net_name_min_width(self):
         """
@@ -3392,32 +4616,53 @@ class FldigiNetControlTab(QWidget):
     def _checkin_file_paths(self) -> tuple[str, str, str]:
         base = self._resolve_checkin_dir()
         return (
-            str(base / "main_checkins.txt"),
-            str(base / "qru_checkins.txt"),
-            str(base / "new-late_checkins.txt"),
+            str(base / CURRENT_CHECKIN_FILE_NAMES["TFC"]),
+            str(base / CURRENT_CHECKIN_FILE_NAMES["QRU"]),
+            str(base / CURRENT_CHECKIN_FILE_NAMES["LATE"]),
         )
 
     def _all_checkins_file_path(self) -> str:
-        return str(self._resolve_checkin_dir() / "all_checkins.txt")
+        return str(self._resolve_checkin_dir() / CURRENT_CHECKIN_FILE_NAMES["ALL"])
+
+    def _role_checkin_file_path(self, role: str, key: str) -> str:
+        role_key = self._exact_net_control_role(role)
+        file_key = str(key or "").strip().upper()
+        filename = ROLE_CHECKIN_FILE_NAMES.get(role_key, {}).get(file_key, "")
+        if not filename:
+            filename = f"{role_key}_{file_key}.txt" if role_key and file_key else ""
+        return str(self._resolve_checkin_dir() / filename)
+
+    def _role_ack_pending_file_path(self, role: str) -> str:
+        return self._role_checkin_file_path(role, "ACK_PENDING")
+
+    def _role_next_tfc_file_path(self, role: str) -> str:
+        return self._role_checkin_file_path(role, "NEXT_TFC")
+
+    def _generated_checkin_file_paths(self) -> List[Path]:
+        base = self._resolve_checkin_dir()
+        paths = [base / filename for filename in CURRENT_CHECKIN_FILE_NAMES.values()]
+        for role in ("NCS", "ANCS"):
+            paths.extend(base / filename for filename in ROLE_CHECKIN_FILE_NAMES[role].values())
+        return paths
+
+    def _ack_pending_file_path(self) -> str:
+        return self._role_ack_pending_file_path(self._current_net_control_role() or "NCS")
+
+    def _next_tfc_file_path(self) -> str:
+        return self._role_next_tfc_file_path(self._current_net_control_role() or "NCS")
 
     def _checkin_archive_dir(self) -> Path:
         return self._resolve_checkin_dir() / "archive"
 
     def _ensure_checkin_files(self) -> tuple[str, str, str]:
         base = self._resolve_checkin_dir()
-        main_path = base / "main_checkins.txt"
-        qru_path = base / "qru_checkins.txt"
-        late_path = base / "new-late_checkins.txt"
-        all_path = base / "all_checkins.txt"
+        main_path = base / CURRENT_CHECKIN_FILE_NAMES["TFC"]
+        qru_path = base / CURRENT_CHECKIN_FILE_NAMES["QRU"]
+        late_path = base / CURRENT_CHECKIN_FILE_NAMES["LATE"]
         base.mkdir(parents=True, exist_ok=True)
-        if not main_path.exists():
-            main_path.touch()
-        if not qru_path.exists():
-            qru_path.touch()
-        if not late_path.exists():
-            late_path.touch()
-        if not all_path.exists():
-            all_path.touch()
+        for path in self._generated_checkin_file_paths():
+            if not path.exists():
+                path.touch()
         return str(main_path), str(qru_path), str(late_path)
 
     def _archive_checkin_files(self) -> List[Path]:
@@ -3428,8 +4673,7 @@ class FldigiNetControlTab(QWidget):
         net_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", net_name).strip("._-")
         prefix = f"{stamp}_{net_slug}" if net_slug else stamp
         archived: List[Path] = []
-        paths = [Path(path) for path in self._checkin_file_paths()]
-        paths.append(Path(self._all_checkins_file_path()))
+        paths = self._generated_checkin_file_paths()
         for source in paths:
             if not source.exists() or not source.is_file():
                 continue
@@ -3440,9 +4684,34 @@ class FldigiNetControlTab(QWidget):
                 counter += 1
             target.write_text(source.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
             archived.append(target)
+        notes_text = self._roster_notes_archive_text(net_name=net_name, archived_utc=stamp)
+        if notes_text:
+            target = archive_dir / f"{prefix}_checkin_notes.txt"
+            counter = 2
+            while target.exists():
+                target = archive_dir / f"{prefix}_checkin_notes-{counter}.txt"
+                counter += 1
+            target.write_text(notes_text, encoding="utf-8")
+            archived.append(target)
         if archived:
             log.info("Archived %d FLDigi check-in files to %s", len(archived), archive_dir)
         return archived
+
+    def _roster_notes_archive_text(self, *, net_name: str = "", archived_utc: str = "") -> str:
+        note_rows = [row for row in self._roster_table_rows() if str(row.get("notes") or "").strip()]
+        if not note_rows:
+            return ""
+        title = (net_name or "").strip() or "FLDigi Net"
+        stamp = (archived_utc or datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%SZ")).strip()
+        lines = [f"Check-in Notes - {title}", f"Archived: {stamp}", ""]
+        for row in note_rows:
+            base = self._format_entry(row.get("callsign", ""), row.get("name", ""), row.get("state", ""))
+            role = self._roster_station_role(row) or "-"
+            category = str(row.get("category") or "-").strip().upper() or "-"
+            notes = str(row.get("notes") or "").strip()
+            if base and notes:
+                lines.append(f"{base} / {role} / {category} / {notes}")
+        return "\n".join(lines).strip() + "\n"
 
     # ---------------- BUTTON LOGIC ---------------- #
 
@@ -3473,16 +4742,23 @@ class FldigiNetControlTab(QWidget):
             return
         main_path, qru_path, late_path = self._ensure_checkin_files()
 
-        # Load existing file contents
         # Clear files to avoid loading stale/pre-populated data
-        self._write_file(main_path, "")
-        self._write_file(qru_path, "")
-        self._write_file(late_path, "")
-        self._write_file(self._all_checkins_file_path(), "")
+        for path in self._generated_checkin_file_paths():
+            self._write_file(path, "")
+        self._next_tfc_last_served = {"NCS": "", "ANCS": ""}
+        self._next_tfc_called_by_role = {"NCS": set(), "ANCS": set()}
+        self._roster_action_scope_user_selected = False
+        self._sync_roster_action_scope_to_role(force=True)
         self._roster_clear()
+        self._sync_mapped_roster_files()
         self.main_text.setPlainText("")
         self.qru_text.setPlainText("")
         self.late_text.setPlainText("")
+        self.known_op_edit.clear()
+        self._known_op_autofilled_prefix = ""
+        self._known_op_autofill_consumed = False
+        self._known_op_tab_stage = 0
+        self._known_op_pending_focus = None
         self.reference_card.set_text("")
         self.compare_results_card.set_text("")
         self.review_card.set_text("")
@@ -3508,6 +4784,7 @@ class FldigiNetControlTab(QWidget):
         else:
             self._add_joiner_net_control_rows()
         self._roster_sync_legacy_buffers(write_files=True)
+        self._set_roster_dirty(False)
         self._capture_log_assisted_session()
         self.net_status_changed.emit("FLDIGI", True)
         self._set_net_button_styles(active=True)
@@ -3547,6 +4824,11 @@ class FldigiNetControlTab(QWidget):
         self._write_file(qru_path, qru_text)
         self._write_file(late_path, late_text)
         self._write_file(self._all_checkins_file_path(), self._roster_table_text())
+        self._sync_role_roster_files()
+        self._sync_role_ack_pending_files()
+        self._sync_next_tfc_action_files()
+        self._sync_mapped_roster_files()
+        self._set_roster_dirty(False)
 
         QMessageBox.information(self, "Saved", "Check-in logs saved.")
         self._refresh_operator_history_views()
@@ -3566,8 +4848,8 @@ class FldigiNetControlTab(QWidget):
                 continue
             self._roster_append_row(cs, name, state, extra, "TFC")
         for row in range(self.roster_table.rowCount()):
-            item = self.roster_table.item(row, 4)
-            widget = self.roster_table.cellWidget(row, 4)
+            item = self.roster_table.item(row, self.COL_CATEGORY)
+            widget = self.roster_table.cellWidget(row, self.COL_CATEGORY)
             current = ""
             if widget is not None and hasattr(widget, "currentText"):
                 current = str(widget.currentText() or "").strip().upper()
@@ -3586,9 +4868,11 @@ class FldigiNetControlTab(QWidget):
         """
         text = self._roster_table_text()
         if text:
-            QApplication.clipboard().setText(text)
+            QApplication.clipboard().setText(self._roster_clipboard_text(text))
             self._write_file(self._all_checkins_file_path(), text)
-        QMessageBox.information(self, "Copied", "Check-ins copied to clipboard.")
+            self._show_roster_action_status("Check-ins copied.")
+        else:
+            self._show_roster_action_status("No check-ins to copy.", "info")
 
     def _copy_text_to_clipboard(self, text: str):
         """
@@ -3773,6 +5057,8 @@ class FldigiNetControlTab(QWidget):
     # ---------------- INSERT KNOWN OPERATOR ---------------- #
 
     def _insert_known_into_main(self):
+        if not self._require_active_net_for_checkin_add():
+            return
         line = self.known_op_edit.text().strip()
         if not line:
             return
@@ -3789,6 +5075,8 @@ class FldigiNetControlTab(QWidget):
         self.known_op_edit.setFocus()
 
     def _insert_known_into_late(self):
+        if not self._require_active_net_for_checkin_add():
+            return
         line = self.known_op_edit.text().strip()
         if not line:
             return

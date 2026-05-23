@@ -31,7 +31,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.2.3.3</p>
+  <p><strong>Current version</strong>: 1.2.4</p>
   <p>This guide is a complete reference for the current FreqInOut interface. It documents each main-menu area, tab, button, table, and nested action so both new and advanced operators can move quickly and confidently.</p>
   <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
   <p><strong>How to use this guide</strong>: if you are new, read the sections in operational order instead of treating this as a pure control catalog. Start with <a href="#settings">Settings</a>, then the schedule tabs, then the live operating tabs such as <a href="#controlfreq">ControlFreq</a>, <a href="#messages">Messages</a>, and <a href="#map">Map</a>. If you are already operating, use the guide as a workflow map: when one tab seems confusing, the answer is often explained in a related tab or settings section.</p>
@@ -76,7 +76,7 @@
       <tr><td>NCS</td><td><code>FLDigi / SSB</code>, <code>JS8Call</code>, <code>VHF/UHF</code></td></tr>
       <tr><td>Schedules</td><td><code>HF Daily</code>, <code>HF Nets</code>, <code>HF Peers</code></td></tr>
       <tr><td>Operators</td><td><code>HF Callsigns</code>, <code>Local Callsigns</code></td></tr>
-      <tr><td>Other</td><td><code>SOP Builder</code>, <code>Settings</code>, <code>Help</code></td></tr>
+      <tr><td>Other</td><td><code>SOP Builder</code>, <code>Station Health</code>, <code>Settings</code>, <code>Help</code></td></tr>
     </tbody>
   </table>
 
@@ -112,9 +112,15 @@
         <td>Use Map for decision support, not certainty. It combines schedules, activity, operator data, and SitRep/CommStat evidence into a visual operating picture.</td>
       </tr>
       <tr>
+        <td><a href="#station-health">Station Health</a></td>
+        <td>This shows whether the station software FIO depends on is answering normally.</td>
+        <td>The summary tells you if anything needs attention. The table shows the software or background job, what FIO is doing about it, when the issue started, and when it was last checked.</td>
+        <td>Use this when FIO seems to be waiting on JS8Call, FLDigi, FLRig, VarAC, CommStat, JS8Spotter, or background ingest. It separates real responsiveness trouble from normal radio traffic busy states.</td>
+      </tr>
+      <tr>
         <td><a href="#ncs-fldigi-ssb">FLDigi / SSB</a></td>
         <td>This is the live FLDigi or voice net-control desk.</td>
-        <td>Session and Macro Workspace defines the net and macro behavior. Local Roster tracks live check-ins. Compare/Reference/Review reconciles outside lists and uncertain log candidates. Macro Mapping teaches FIO what each macro means.</td>
+        <td>Session and Macro Workspace defines the net and macro behavior. Net Roster tracks live check-ins. Compare/Reference reconciles outside lists. Macro Mapping teaches FIO what each macro means.</td>
         <td>Use this only once station setup and schedules are stable. It turns a live net into organized categories, generated macro files, and saved check-in history.</td>
       </tr>
       <tr>
@@ -198,9 +204,10 @@
       <tr><td><a href="#map-top-controls">Top Map Controls</a></td><td>These quickly answer “which operators, paths, bands, regions, or recent traffic do I want to see?”</td></tr>
       <tr><td><a href="#map-drawer">Map Control Drawer</a></td><td>This is for deeper map display choices such as layers, city density, grids, and propagation overlays.</td></tr>
       <tr><td><a href="#map-paths">Paths, Paths To, and Peer Sched Now</a></td><td>Use these when you are thinking about reachability, relay possibilities, or who is likely scheduled now.</td></tr>
+      <tr><td><a href="#station-health">Station Health</a></td><td>Use this when you need to know whether another station program is slow, unreachable, or being temporarily backed off so FIO stays responsive.</td></tr>
       <tr><td><a href="#ncs-fldigi-session-workspace">FLDigi Session and Macro Workspace</a></td><td>This tells the tab what net you are running and how your FLDigi macros should support that net.</td></tr>
-      <tr><td><a href="#ncs-fldigi-roster">FLDigi Local Roster and Categories</a></td><td>This is the live check-in list, organized into practical buckets like traffic, no traffic, late, and seen locally.</td></tr>
-      <tr><td><a href="#ncs-fldigi-compare-workspace">FLDigi Compare, Reference, and Review</a></td><td>Use this to compare your roster with another list and to approve uncertain log-assisted check-ins before they become real roster entries.</td></tr>
+      <tr><td><a href="#ncs-fldigi-roster">FLDigi Net Roster and Categories</a></td><td>This is the live check-in list, organized into practical buckets like traffic, no traffic, and late arrivals.</td></tr>
+      <tr><td><a href="#ncs-fldigi-compare-workspace">FLDigi Compare and Reference</a></td><td>Use this to compare your roster with another list and merge missing entries only when that matches the operator's net picture.</td></tr>
       <tr><td><a href="#ncs-fldigi-macro-mapping">FLDigi Macro Mapping Dialog</a></td><td>This is where you teach FIO what your FLDigi macro buttons mean so generated check-in files and labels line up with your workflow.</td></tr>
       <tr><td><a href="#ncs-fldigi-lifecycle">FLDigi Net Lifecycle</a></td><td>Start, save, and end the net here so the working files and final archive match what actually happened.</td></tr>
       <tr><td><a href="#ncs-js8-session-controls">JS8 Session, Group, and Expect-Query Controls</a></td><td>This sets the role, group target, refresh timing, and expected follow-up form for JS8 net work.</td></tr>
@@ -474,78 +481,165 @@
     <li><strong>SitRep summary</strong>: in sitrep-focused views, a bottom-left state summary panel can show per-state counts and receipt mix without requiring raw table scans on every refresh.</li>
   </ul>
 
-  <h2 id="ncs-fldigi-ssb">NCS: FLDigi / SSB</h2>
-  <p><strong>Purpose</strong>: FLDigi/SSB net-control workflow for building and maintaining a working net roster from manual operator entry, FLDigi macro discipline, and optional log-assisted intake.</p>
-  <p><strong>Why you use it</strong>: this tab is for a live net where you need a disciplined local roster, structured category buckets such as <code>TFC</code> and <code>QRU</code>, and a controlled way to compare outside check-in lists against your local picture.</p>
+  <h2 id="station-health">Station Health</h2>
+  <p><strong>Purpose</strong>: Station Health shows whether the outside station programs FIO depends on are answering normally.</p>
+  <p><strong>Why you use it</strong>: if a tab feels delayed, a status indicator says a program is unreachable, or the left menu highlights Station Health, open this tab to see what FIO is waiting on. It is meant to answer “is another station program slow or unavailable?” without turning that into a technical log.</p>
   <ul class="section-list">
-    <li><strong>Best use</strong>: use this during an active FLDigi or voice-supported net when one operator is managing the roster and wants help keeping categories, late check-ins, and references organized.</li>
-    <li><strong>What it is not for</strong>: this is not a general-purpose message browser and not a replacement for the schedule tabs. Build the net plan elsewhere, then use this tab to run the live session.</li>
-    <li><strong>Cross-tab interaction</strong>: this tab depends on Settings for macro-profile paths and optional log-assisted behavior, on Operators data for lookup and enrichment, and on the shared QSY/hold helpers used elsewhere in FIO.</li>
+    <li><strong>What belongs here</strong>: JS8Call API, FLRig, FLDigi, rigctld, observer endpoints, background ingest, and other companion software that FIO checks while building the operating picture.</li>
+    <li><strong>What does not belong here</strong>: normal radio traffic busy states. A program can be busy sending or receiving and still be healthy. Station Health is about whether the program responds when FIO asks for status.</li>
+    <li><strong>Left menu alert</strong>: when FIO already knows about a responsiveness issue, the Station Health button shows an alert count. That alert is based on known health state; it does not create extra checks just to light the button.</li>
+  </ul>
+  <table>
+    <thead>
+      <tr><th>Column</th><th>How to Read It</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Scope</code></td><td>Shows whether the row belongs to the whole station or a specific radio profile in multi-rig.</td></tr>
+      <tr><td><code>Dependency</code></td><td>The outside program or background job involved. Local API endpoints such as <code>127.0.0.1:2442</code> mean “this computer, this port.”</td></tr>
+      <tr><td><code>State</code></td><td><code>OK</code> means FIO has no current concern. <code>Warning</code> means the last check had trouble. <code>Backoff</code> means FIO is deliberately waiting before trying again so the UI stays responsive.</td></tr>
+      <tr><td><code>What FIO Is Doing</code></td><td>Plain-language explanation of whether FIO is operating normally, waiting for the next normal check, or backing off temporarily.</td></tr>
+      <tr><td><code>Last Issue</code></td><td>The most recent short reason, such as unreachable or worker failed.</td></tr>
+      <tr><td><code>Issue Since</code></td><td>How long the current issue streak has been present in this FIO session.</td></tr>
+      <tr><td><code>Cooldown</code></td><td>How long FIO will wait before another normal attempt when repeated failures or slow responses have been detected.</td></tr>
+      <tr><td><code>Last Check</code></td><td>How recently FIO learned this state.</td></tr>
+      <tr><td><code>Last Duration</code></td><td>How long the last known check took. A blank value usually means the row is a grouped summary rather than one exact check.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Operator note</strong>: Station Health is a current-condition view, not a long event history. It keeps the most useful recent state visible and preserves the start time for the current issue so you can tell whether a problem is new or has been present for a while.</p>
+
+  <h2 id="ncs-fldigi-ssb">NCS: FLDigi / SSB</h2>
+  <p><strong>Purpose</strong>: this is the live net-control desk for an FLDigi-supported or voice-supported directed net. It helps NCS and ANCS build one clean roster, keep track of who is handling each station, copy the right lines at the right time, and feed FLDigi macros from files that FIO keeps current.</p>
+  <p><strong>Why you use it</strong>: during a busy net, the hard part is not just writing callsigns down. You need to know who has checked in, who still needs an ACK, who has traffic, who is being handled by NCS versus ANCS, and what text should be pasted or transmitted next. This tab turns that working picture into both clipboard text and macro-readable files.</p>
+  <ul class="section-list">
+    <li><strong>Best use</strong>: use this when an operator is actively running or assisting a directed net and needs a roster that stays organized while stations are being acknowledged, sorted, called for traffic, and reported.</li>
+    <li><strong>What it is not for</strong>: it is not a message inbox and it is not the place to design the schedule. Set up the station, groups, and net schedule elsewhere; use this tab once you are ready to run the live session.</li>
+    <li><strong>The key idea</strong>: the roster is the source of truth. If you correct a callsign, change a category, mark a station ACKed, or change who is directing the station, FIO rewrites the generated files from the current roster instead of leaving old lines behind.</li>
   </ul>
   <table>
     <thead>
       <tr><th>Area</th><th>Actions</th></tr>
     </thead>
     <tbody>
-      <tr><td>Session bar</td><td><code>Role</code> (NCS/ANCS/Joiner), Net Name selector, next scheduled net indicator, QSY dropdown, <code>Hold</code>, <code>QSY + Hold</code>, <code>Ad Hoc Net</code>.</td></tr>
-      <tr><td>Macro workspace</td><td><code>Macro Set</code>, <code>Refresh</code>, <code>Mappings...</code>, <code>Details</code>, macro-status chips, macro-file picker, and log-assisted intake controls.</td></tr>
-      <tr><td>Operator lookup</td><td>Lookup field plus <code>Add to TFC</code>, <code>Add to QRU</code>, <code>Add to LATE</code>, and <code>Add to Seen Locally</code>.</td></tr>
-      <tr><td>Local roster</td><td>Roster table with category/source tracking and copy actions such as <code>Copy TFC</code>, <code>Copy QRU</code>, <code>Copy LATE</code>, <code>Copy Seen Locally</code>, and <code>Copy All Check-ins</code>.</td></tr>
-      <tr><td>Compare / Reference workspace</td><td>Expandable tabbed workspace with <code>Reference</code>, <code>Compare Results</code>, and <code>Review</code>.</td></tr>
-      <tr><td>Net lifecycle</td><td><code>Start Net</code>, <code>Save Check-ins</code>, and <code>End Net</code>.</td></tr>
+      <tr><td>Session</td><td>Choose your role, choose or name the net, start/end the session, and use QSY/hold tools when the net needs a frequency move.</td></tr>
+      <tr><td>Macro support</td><td>Collapse or expand macro setup, select a macro profile when needed, review generated file paths, and map macro files so FLDigi can read live roster outputs.</td></tr>
+      <tr><td>Operator entry</td><td>Look up or type a station, then add it to <code>TFC</code>, <code>QRU</code>, or <code>LATE</code>.</td></tr>
+      <tr><td>Roster</td><td>Track callsign, name, state, traffic, category, who is directing the station, who has ACKed it, traffic progress, and local notes.</td></tr>
+      <tr><td>Live actions</td><td>Use <code>Action For</code>, <code>ACK Needed</code>, <code>Next TFC</code>, and copy buttons to send or paste the right subset of the roster.</td></tr>
+      <tr><td>Compare / Reference</td><td>Open this only when you need to compare your roster with another list and bring the lists back into agreement.</td></tr>
     </tbody>
   </table>
-  <p><strong>Operator lookup concept</strong>: the lookup field is not just a search bar. It is a staging point for inserting known operators into the live local roster with the right category, which is why the add buttons matter operationally.</p>
+  <p><strong>Plain-language workflow</strong>: start the net, add stations as they check in, mark who is directing and who has ACKed each station, then use the live action buttons when you need to paste an ACK list, call the next traffic station, or copy a category list. Operators who prefer FLDigi macros can point those macros at the generated files instead of copy/pasting manually.</p>
 
   <h3 id="ncs-fldigi-session-workspace">Session and Macro Workspace</h3>
   <ul class="section-list">
-    <li><strong>Role</strong>: choose <code>NCS</code>, <code>ANCS</code>, or <code>Joiner</code> based on your current duty in the net. This affects the workspace defaults and how some compare/reference helpers are framed.</li>
-    <li><strong>Net Name</strong>: identifies the current net session and helps the tab keep your local activity organized.</li>
-    <li><strong>QSY tools</strong>: the shared QSY/hold controls let you move the station and temporarily suspend scheduler control in the same way other operating tabs do.</li>
-    <li><strong>Macro Set</strong>: choose the FLDigi macro profile you want this session to follow. This matters because the macro map helps FIO understand which files and labels belong to which operational function.</li>
-    <li><strong>Mappings...</strong>: opens the macro discovery and mapping dialog, which is where you review detected macros, enable or disable rows, and give operational meaning to each mapped item.</li>
-    <li><strong>Details</strong>: expands the setup panel so you can inspect the macro file path, browse for another profile, clear a legacy path, see the generated macro check-in file locations, see active mapped macro source files, and manage log-assisted intake settings. When expanded, the button is highlighted and the tab can scroll so the details remain readable instead of being squeezed into a small area.</li>
-    <li><strong>Macro check-in file locations</strong>: the Details panel shows the live files FIO writes for FLDigi macros: <code>main_checkins.txt</code> for <code>TFC</code>, <code>qru_checkins.txt</code> for <code>QRU</code>, <code>new-late_checkins.txt</code> for <code>LATE</code>, and <code>all_checkins.txt</code> for the consolidated roster. It also shows the archive directory under the configured check-in path.</li>
-    <li><strong>Status chips</strong>: the chips summarize the current macro-mode state, whether log intake is active, whether uncertain decodes are being held for review, and whether transmitted text is being used as decode context only.</li>
-    <li><strong>Log-assisted intake</strong>: <code>Auto-add from FLDigi log</code> lets FIO watch likely check-ins from the FLDigi log; <code>Hold uncertain decodes for review</code> keeps questionable candidates out of the roster until checked; <code>Use sent TX as context</code> allows sent text to improve interpretation without turning TX lines into check-ins themselves.</li>
+    <li><strong>Role</strong>: choose <code>NCS</code>, <code>ANCS</code>, or <code>Joiner</code>. NCS and ANCS are the active net-control roles. Joiner is for an operator who is following along and may want to record both leadership callsigns without acting as either one.</li>
+    <li><strong>Net Name</strong>: names the session so saved and archived files make sense later. Scheduled nets that are active now or coming up soon appear here, so joining a few minutes late does not force you into an ad hoc name.</li>
+    <li><strong>Start Net</strong>: turns on the live working state. FIO clears the generated macro files, clears the previous working roster, resets traffic progress, and starts writing new roster changes to the live files. Adding check-ins is intentionally blocked until the net is started, so old draft entries do not accidentally become part of a new session.</li>
+    <li><strong>Set NCS / Set ANCS</strong>: after the net starts, use these to place the leadership station in the roster. FIO looks up the callsign when it can and fills known name/state details. Leadership rows are pinned at the top.</li>
+    <li><strong>Ad Hoc Net</strong>: creates a timestamped net name and starts a session when the net is not on the schedule or you need a quick practice/test session.</li>
+    <li><strong>QSY + Hold</strong>: changes frequency using the same station-control helpers used elsewhere in FIO and temporarily holds scheduler control for the chosen time. Use this when the net intentionally moves and you do not want scheduler corrections fighting the move.</li>
+    <li><strong>Macro header</strong>: this collapsible row tells you whether FIO understands your selected FLDigi macro set. <code>Macro: None</code> means no profile is selected. <code>Macro: Needs Mapping</code> means a profile exists but FIO does not yet know which macro files mean ACKs, traffic, QRU, and so on. <code>Macro: Mapped</code> means at least one usable mapping is ready.</li>
+    <li><strong>Macro setup controls</strong>: when no macro is selected or a macro needs mapping, the expanded panel shows the selector, refresh, mappings, and browse controls. When the macro is already mapped, FIO hides those setup controls because most operators use the same macro set repeatedly and need the roster space more than setup buttons.</li>
+    <li><strong>Macro files in normal language</strong>: FIO writes text files that FLDigi macros can read. If your macro contains a file-read command for one of these files, the macro transmits the current roster text without you copying it manually. If you do not use file-reading macros, the same buttons still copy the text to your clipboard.</li>
   </ul>
 
-  <h3 id="ncs-fldigi-roster">Local Roster and Categories</h3>
+  <h3 id="ncs-fldigi-roster">Net Roster and Categories</h3>
   <ul class="section-list">
-    <li><strong>Category model</strong>: <code>TFC</code>, <code>QRU</code>, <code>LATE</code>, and <code>Seen Locally</code> are operational buckets that help you track who has traffic, who has none, who arrived late, and who has been observed locally but not necessarily merged into the main roster picture.</li>
-    <li><strong>Roster table columns</strong>: <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Traffic</code>, <code>Category</code>, and <code>Source</code>. This is the primary operator-facing working surface for the current net.</li>
-    <li><strong>Copy actions</strong>: the copy buttons produce roster slices or a full consolidated list you can paste into FLDigi, a message, a document, or another operator workflow without manually rebuilding the list. <code>Copy All Check-ins</code> uses the same consolidated roster format as the generated all-check-ins macro file.</li>
-    <li><strong>Category changes</strong>: the roster is the source of truth. If an entry starts as <code>TFC</code> and you later change it to <code>QRU</code>, FIO rewrites the generated check-in files so the entry moves into the QRU file and is removed from the TFC file. This avoids stale copies from earlier classifications.</li>
-    <li><strong>Source awareness</strong>: the roster keeps track of where an entry came from so you can distinguish direct operator lookup insertion, reference imports, review merges, or other local workflow paths.</li>
+    <li><strong>Operator Lookup/Add</strong>: type a callsign, name, and state, or start typing a known operator. FIO can complete known operators from the operator database. Then choose <code>Add to TFC</code>, <code>Add to QRU</code>, or <code>Add to LATE</code>. The add buttons place the station directly into the roster category you intend.</li>
+    <li><strong>TFC</strong>: use this for stations with traffic. The traffic text can hold a short note such as <code>1RR</code> or <code>1RR QST</code>. These rows are eligible for <code>Next TFC</code>.</li>
+    <li><strong>QRU</strong>: use this for stations that checked in with no traffic. QRU rows are still part of the net roster and can still be copied or saved.</li>
+    <li><strong>LATE</strong>: use this for late check-ins or end-of-net additions. It keeps those entries visible as a separate category while still preserving them in the final roster.</li>
+    <li><strong>Roster columns</strong>: <code>Directed By</code>, <code>Acked By</code>, <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Traffic</code>, <code>TFC Status</code>, <code>Category</code>, and <code>Notes</code>. Think of this as the working net sheet, not a static export.</li>
+    <li><strong>Directed By</strong>: this answers "who is managing this station right now?" If NCS heard and is handling the station, mark NCS. If ANCS is handling it, mark ANCS. If both are intentionally tracking or handling the station, mark both. When you click the partner chip on a row you just added, FIO switches that row to partner-only first; this makes it easy to record "my partner is directing this station" without accidentally making every correction shared.</li>
+    <li><strong>Acked By</strong>: this answers "who has already acknowledged this station?" This is separate from Directed By because a station may be directed by one role but later acknowledged by the other. When a leadership row is created for NCS or ANCS, FIO marks both Directed and ACKed by default because setting those roles implies the leaders can hear and acknowledge each other.</li>
+    <li><strong>Category changes</strong>: if you change a station from QRU to TFC, or from TFC to LATE, FIO rewrites the generated files from the current roster. That means the old category file does not keep a stale copy of the station.</li>
+    <li><strong>Sorting and duplicates</strong>: NCS and ANCS stay at the top. Other stations sort by callsign. If the same callsign is entered more than once, FIO merges it into one corrected row instead of cluttering the table with duplicates.</li>
+    <li><strong>Notes</strong>: notes are for local operator awareness, such as a welfare concern, relay note, or follow-up reminder. Notes are not included in copied radio text or live macro files, so private context is not transmitted by accident. End Net saves noted rows to a separate notes archive.</li>
+    <li><strong>Counters</strong>: the total, TFC, QRU, and LATE counters near the add buttons give you a quick roster picture without taking your eyes far from the entry workflow.</li>
   </ul>
 
-  <h3 id="ncs-fldigi-compare-workspace">Compare, Reference, and Review Workspace</h3>
-  <p>The expandable <code>Compare / Reference</code> area is a tabbed workspace for reconciling your local roster with outside lists and lower-confidence intake.</p>
+  <h3 id="ncs-fldigi-live-actions">Live Actions, Copying, and Macro Files</h3>
+  <p>This is the unusual part of the tab, and it is also the most powerful. The live action buttons do two related things: they copy text to your clipboard, and they keep macro-readable files current for operators who transmit with FLDigi macros. You can use either method. You do not have to use both.</p>
   <ul class="section-list">
-    <li><strong>Reference tab</strong>: a place to paste or maintain an outside NCS list. From here you can compare that reference against your local roster and add missing entries when appropriate.</li>
-    <li><strong>Compare Results tab</strong>: shows what is missing between the compared lists, lets you copy those differences, and supports merging missing entries into the local roster when that is operationally appropriate.</li>
-    <li><strong>Review tab</strong>: holds lower-confidence log-assisted candidates so they can be inspected before they become real roster entries. This is a protection feature, not just a convenience surface.</li>
-    <li><strong>Show/Hide</strong>: the compare workspace is collapsible so you can keep the net roster dominant when you are not actively reconciling lists.</li>
+    <li><strong>Action For</strong>: choose the roster scope before clicking a live action. <code>NCS</code> means stations directed by NCS, including shared rows. <code>ANCS</code> means stations directed by ANCS, including shared rows. <code>Shared</code> means only rows directed by both roles. <code>All</code> means the full roster, ignoring Directed By.</li>
+    <li><strong>ACK Needed</strong>: this copies the stations that still need an acknowledgement for the selected role. If <code>Action For</code> is NCS, FIO finds stations directed by NCS that NCS has not ACKed yet, copies those station lines, and then marks them ACKed by NCS. ANCS works the same way for ANCS. If <code>Shared</code> or <code>All</code> is selected, FIO copies a reference list but does not change ACK chips because no single role is acting.</li>
+    <li><strong>Next TFC</strong>: this is for the traffic-handling part of the net. With NCS or ANCS selected, each click picks the next directed TFC station for that role and copies the callsign twice, for example <code>W1ABC W1ABC</code>. The repeated callsign matches common radio practice for clarity. The row changes from <code>Pending</code> to <code>Now</code>, and previously selected rows become <code>Called</code>. When no more traffic stations are available, FIO clears the current next-traffic file so a macro does not replay an old callsign.</li>
+    <li><strong>TFC / QRU / LATE</strong>: these copy the selected category using the current <code>Action For</code> scope. For example, with ANCS selected, <code>QRU</code> copies QRU stations directed by ANCS. With All selected, it copies the whole QRU category.</li>
+    <li><strong>All Check-ins</strong>: this copies every station in the selected scope. Use <code>Action For: All</code> when you want the full roster, or NCS/ANCS when you only want the stations managed by that role.</li>
+    <li><strong>Action status</strong>: after a live action, FIO shows a short message near the buttons and then clears it. Routine live-net actions do not interrupt you with an OK popup.</li>
+    <li><strong>Save Check-ins</strong>: generated macro files update automatically as the roster changes. Save Check-ins is a manual checkpoint and final-log helper; it is not required before using ACK Needed, Next TFC, or the category files. FIO highlights it when roster edits have not yet been saved.</li>
+  </ul>
+  <p><strong>How the copied station lines look</strong>: copied lists use a simple station-line format such as <code>N1MAG / Bill / CO / NCS 1RR</code>. The role appears only for NCS/ANCS leadership rows, and traffic appears at the end. Notes are left out.</p>
+  <p><strong>How macro files fit in</strong>: FLDigi can read text from a file when a macro is written to do so. FIO keeps those files updated from the roster, so a macro can transmit the current ACK list, current TFC list, or next traffic callsign without you editing a text file during the net.</p>
+  <p><strong>Copy combinations in plain language</strong>: choose <code>Action For</code> first, then choose the action. The scope decides which rows are eligible; the action decides what kind of text is copied.</p>
+  <table>
+    <thead>
+      <tr><th>Action For</th><th>Which Rows Are Used</th><th>Typical Use</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>NCS</code></td><td>Rows directed by NCS, including rows marked for both NCS and ANCS.</td><td>NCS is preparing an ACK list, traffic call, or category list for stations NCS is managing.</td></tr>
+      <tr><td><code>ANCS</code></td><td>Rows directed by ANCS, including rows marked for both NCS and ANCS.</td><td>ANCS is preparing an ACK list, traffic call, or category list for stations ANCS is managing.</td></tr>
+      <tr><td><code>Shared</code></td><td>Only rows directed by both NCS and ANCS.</td><td>Useful when both leaders are intentionally tracking the same stations and you want just that shared subset.</td></tr>
+      <tr><td><code>All</code></td><td>All roster rows, regardless of Directed By.</td><td>Useful for a complete roster copy or end-of-net reference.</td></tr>
+    </tbody>
+  </table>
+  <table>
+    <thead>
+      <tr><th>Action</th><th>Clipboard Result</th><th>Generated File Behavior</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>ACK Needed</code> with NCS</td><td>Full station lines for stations directed by NCS that NCS has not ACKed yet.</td><td>After the copy, FIO marks those rows ACKed by NCS. <code>NCS_ACK_Pending.txt</code> is then rewritten to show what still needs an NCS ACK.</td></tr>
+      <tr><td><code>ACK Needed</code> with ANCS</td><td>Full station lines for stations directed by ANCS that ANCS has not ACKed yet.</td><td>After the copy, FIO marks those rows ACKed by ANCS. <code>ANCS_ACK_Pending.txt</code> is then rewritten to show what still needs an ANCS ACK.</td></tr>
+      <tr><td><code>ACK Needed</code> with Shared or All</td><td>A reference list of rows in that scope that still need at least one required ACK.</td><td>No ACK chips are changed because the action is not assigned to one role. Role ACK pending files still reflect the current roster state.</td></tr>
+      <tr><td><code>Next TFC</code> with NCS</td><td>One callsign, repeated twice, for the next NCS-directed traffic station, such as <code>W1ABC W1ABC</code>.</td><td><code>NCS_Next_TFC.txt</code> receives the same callsign text. It clears when there is no next NCS traffic station.</td></tr>
+      <tr><td><code>Next TFC</code> with ANCS</td><td>One callsign, repeated twice, for the next ANCS-directed traffic station.</td><td><code>ANCS_Next_TFC.txt</code> receives the same callsign text. It clears when there is no next ANCS traffic station.</td></tr>
+      <tr><td><code>Next TFC</code> with Shared or All</td><td>No traffic callsign is copied; FIO asks you to select NCS or ANCS.</td><td>No next-traffic file is changed because traffic calling is tracked separately for NCS and ANCS.</td></tr>
+      <tr><td><code>TFC</code>, <code>QRU</code>, or <code>LATE</code></td><td>Full station lines for that category within the selected Action For scope.</td><td>Category files are maintained continuously from the roster. Full files use <code>CheckIns_*.txt</code>; role files use <code>NCS_CheckIns_*.txt</code> or <code>ANCS_CheckIns_*.txt</code>.</td></tr>
+      <tr><td><code>All Check-ins</code></td><td>Full station lines for every row in the selected Action For scope.</td><td><code>CheckIns_ALL.txt</code>, <code>NCS_CheckIns_ALL.txt</code>, and <code>ANCS_CheckIns_ALL.txt</code> are maintained continuously from the roster.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Important ACK file note</strong>: the ACK pending files are "what is still pending now" files. When <code>ACK Needed</code> marks stations ACKed, those stations correctly disappear from that role's pending file. Operators who use a macro to read an ACK pending file should think of that file as the current pending list, while the button's clipboard text is the just-selected ACK list.</p>
+  <table>
+    <thead>
+      <tr><th>File</th><th>What It Contains</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>CheckIns_TFC.txt</code>, <code>CheckIns_QRU.txt</code>, <code>CheckIns_LATE.txt</code>, <code>CheckIns_ALL.txt</code></td><td>Full-roster category files. These are not filtered by NCS or ANCS.</td></tr>
+      <tr><td><code>NCS_CheckIns_TFC.txt</code>, <code>NCS_CheckIns_QRU.txt</code>, <code>NCS_CheckIns_LATE.txt</code>, <code>NCS_CheckIns_ALL.txt</code></td><td>NCS-scoped roster files. Shared rows appear here because NCS is one of the directing roles.</td></tr>
+      <tr><td><code>ANCS_CheckIns_TFC.txt</code>, <code>ANCS_CheckIns_QRU.txt</code>, <code>ANCS_CheckIns_LATE.txt</code>, <code>ANCS_CheckIns_ALL.txt</code></td><td>ANCS-scoped roster files. Shared rows appear here because ANCS is one of the directing roles.</td></tr>
+      <tr><td><code>NCS_ACK_Pending.txt</code>, <code>ANCS_ACK_Pending.txt</code></td><td>Stations directed by that role that still need that role's ACK. These are rewritten as ACK chips change.</td></tr>
+      <tr><td><code>NCS_Next_TFC.txt</code>, <code>ANCS_Next_TFC.txt</code></td><td>The current next traffic callsign for that role, written as <code>CALLSIGN CALLSIGN</code>. These change when <code>Next TFC</code> is clicked and clear when no next station is available.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="ncs-fldigi-compare-workspace">Compare and Reference Workspace</h3>
+  <p>The expandable <code>Compare / Reference</code> area is for list reconciliation. Keep it collapsed while you are simply taking check-ins; open it when you need to compare your roster against a list from another operator.</p>
+  <ul class="section-list">
+    <li><strong>Reference tab</strong>: paste another NCS/ANCS list here. FIO compares callsigns, not your memory, so you can quickly see what is missing.</li>
+    <li><strong>Compare Results tab</strong>: shows callsigns found in the reference list but missing from your roster. You can copy the differences or add missing entries when that matches what happened on the air.</li>
+    <li><strong>Show/Hide</strong>: collapse this area when you need roster height. When expanded, the splitter lets you give either the roster or the pasted reference list more room.</li>
   </ul>
 
   <h3 id="ncs-fldigi-macro-mapping">Macro Discovery and Mapping Dialog</h3>
-  <p><strong>Purpose</strong>: translate an FLDigi macro file into an operational map FIO can reason about.</p>
+  <p><strong>Purpose</strong>: tell FIO what your FLDigi macro buttons mean. FLDigi stores macros by position and text; FIO needs your help connecting those buttons to plain operating functions such as TFC, QRU, ACK pending, or Next TFC.</p>
   <ul class="section-list">
-    <li><strong>Confidence filter</strong>: the default view shows high-confidence discovered rows first. Use this when you want a clean starting point instead of every ambiguous match.</li>
-    <li><strong>Mapping columns</strong>: <code>Enabled</code>, <code>Scope</code>, <code>Function</code>, <code>Custom Name</code>, <code>Macro ID</code>, <code>Macro Label</code>, <code>Source File</code>, <code>Confidence</code>, and <code>Read Only</code>.</li>
-    <li><strong>Rescan</strong>: re-runs discovery against the selected profile.</li>
-    <li><strong>Add Manual Row</strong>: use this when the macro exists operationally but cannot be discovered confidently from the profile alone.</li>
-    <li><strong>Browse Selected Source...</strong>: opens the selected source reference so you can inspect the underlying file or location.</li>
-    <li><strong>Save Mappings</strong>: stores the mapping model so later sessions can work from the curated interpretation instead of rediscovering everything from scratch.</li>
-    <li><strong>Why this matters</strong>: macro mapping is not just labeling. It is how FIO learns enough structure to support the net workflow cleanly and avoid treating every macro profile as an undifferentiated file.</li>
+    <li><strong>Confidence filter</strong>: starts with the rows FIO is most confident about. This keeps the first view readable when a macro file contains many buttons.</li>
+    <li><strong>Scope</strong>: tells FIO who the macro belongs to: NCS, ANCS, Shared, or All.</li>
+    <li><strong>Function</strong>: tells FIO what the macro is for, such as TFC, QRU, LATE, ALL, ACK_PENDING, NEXT_TFC, or CUSTOM.</li>
+    <li><strong>Source File</strong>: the file a macro reads. For FIO-managed files, this should usually point into the configured FLDigi check-in folder. If the macro points somewhere else, FIO highlights it so you can repair the path safely.</li>
+    <li><strong>Update Macro Path</strong>: for standard FIO-managed files, FIO can update the selected macro's file path and save a backup of the macro profile first. This is meant to prevent operators from having to edit FLDigi macro syntax by hand.</li>
+    <li><strong>Save Mappings</strong>: saves your interpretation of the macro set. After that, the macro header can show <code>Macro: Mapped</code> and the live NCS tab can stay clean.</li>
+    <li><strong>What mapping does not do</strong>: it does not transmit by itself. It only helps FIO keep the right files current and helps you confirm that your FLDigi macros are reading the expected files.</li>
   </ul>
 
   <h3 id="ncs-fldigi-lifecycle">Net Lifecycle</h3>
   <ul class="section-list">
-    <li><strong>Start Net</strong>: begins the live session state for this tab, clears the generated macro check-in files, clears the working roster/review surfaces, and then starts writing the current roster into the live macro files as the net develops.</li>
-    <li><strong>Save Check-ins</strong>: reconciles the current roster into the generated check-in files. This is a full rewrite from the current roster state, not an append-only log, so removed entries and changed categories do not linger in the wrong file.</li>
-    <li><strong>End Net</strong>: saves the final roster, imports valid check-ins into the operator database, and archives the generated check-in files under <code>&lt;fldigi_checkin_dir&gt;/archive</code>. Archive filenames include a UTC timestamp, the net name, and the original file name; for example <code>20260508_231455Z_Weekly_Net_main_checkins.txt</code>.</li>
-    <li><strong>Why archives matter</strong>: the live macro files are working files that are cleared at the next <code>Start Net</code>. The archive directory is the historical record of what the generated files looked like at end-of-net.</li>
+    <li><strong>Before Start Net</strong>: choose your role, select the net name, confirm the partner callsign if you have one, and make sure the macro header is acceptable for how you plan to operate. You can run the net with clipboard actions even if no macro is mapped.</li>
+    <li><strong>Start Net</strong>: clears old working files and begins a fresh session. This is the point where roster entry becomes active.</li>
+    <li><strong>During the net</strong>: add stations, correct the roster, use ACK Needed and Next TFC as often as needed, and let FIO keep the live files synchronized.</li>
+    <li><strong>Save Check-ins</strong>: writes a manual checkpoint of the current roster and clears the unsaved-change highlight. It is useful before a long pause or before ending the net, but it is not required for macro files to stay current.</li>
+    <li><strong>End Net</strong>: asks for confirmation, saves the final roster, imports valid check-ins into the operator database, archives the generated files, and ends the live session state.</li>
+    <li><strong>Archive folder</strong>: archived files are stored under <code>&lt;fldigi_checkin_dir&gt;/archive</code>. Live files are working files and are cleared at the next Start Net; the archive is the record you keep after the net.</li>
   </ul>
 
   <h2 id="ncs-js8call">NCS: JS8Call</h2>
@@ -1015,7 +1109,7 @@
       </tr>
     </tbody>
   </table>
-  <p><strong>Enforcement and prompt intervals</strong> control how schedule corrections behave when the station drifts off schedule. <code>On Schedule Change</code> applies corrections when the scheduler moves to a new schedule row. <code>Prompt</code> raises an off-schedule prompt and waits for user action. FLDigi mode and FLDigi offset may be prompted separately.</p>
+  <p><strong>Enforcement and prompt intervals</strong> decide how FIO should help when your station is not matching the active schedule. If a setting is <code>On Schedule Change</code>, FIO corrects it when the schedule moves to a new row. If it is <code>Prompt</code>, FIO asks before changing anything. The prompt interval is simply the reminder pace: if you leave the station off schedule, FIO waits that long before asking again. A shorter interval is more insistent; a longer interval gives you more quiet time while you are intentionally working off schedule. FLDigi mode and FLDigi offset can be prompted separately because one may need attention while the other is already correct.</p>
   <ul class="section-list">
     <li><strong>Section-health warnings</strong>: warning-highlighted sections usually mean you configured part of an integration but left out a required companion field.</li>
     <li><strong>JS8Call completeness</strong>: when <code>JS8Call Install Folder</code> is set, FreqInOut expects host, TCP port, and <code>DIRECTED.TXT</code>. If <code>JS8Spotter Launch Path</code> is set, FreqInOut also expects <code>JS8Spotter forms</code>.</li>
@@ -1050,7 +1144,7 @@
     <li><strong>Software paths</strong>: configure FLRig, FLDigi, FLMsg, and FLAmp launch paths or executables.</li>
     <li><strong>Endpoint pairing</strong>: when FLRig or FLDigi paths are configured, confirm their companion fields: <code>FLRig XMLRPC Port</code>, <code>FLDigi XMLRPC Host</code>, and <code>FLDigi XMLRPC Port</code>. These are the names shown in the UI.</li>
     <li><strong>Check-in File Path</strong>: folder where the FLDigi NCS tab writes its generated macro check-in files and end-net archive folder.</li>
-    <li><strong>FLDigi Log Path</strong>: folder or log location used by log-assisted intake.</li>
+    <li><strong>FLDigi Log Path</strong>: folder or log location retained for future FLDigi log review features. Automatic roster intake from this path is hidden in 1.2.4 because noisy log parsing should not alter a live net roster.</li>
     <li><strong>Message folders</strong>: FLMsg and FLAmp workflows rely on their companion message-path settings for imports, exports, and compose staging.</li>
     <li><strong>Auto-Fill / Attempt Auto-Fill</strong>: asks FreqInOut to inspect likely local software folders and populate the Fast Light paths it can identify.</li>
   </ul>
@@ -1180,6 +1274,15 @@
     <li><strong>Operational caution</strong>: do not treat a matching name or callsign in a key's user ID as sufficient proof by itself. The fingerprint is the safer identity anchor.</li>
   </ul>
 
+  <h3 id="settings-sop-export-details">SOP Export Details</h3>
+  <p><strong>Concept of use</strong>: SOP Export text lets you add station-specific context to the PDF version of your SOP without editing the generated tables themselves. Use it for a short introduction, local handling notes, distribution reminders, or closing instructions that should travel with the exported SOP.</p>
+  <ul class="section-list">
+    <li><strong>Preamble</strong>: appears before the SOP export tables. This is a good place to explain the purpose, scope, effective time, or operator context for the document.</li>
+    <li><strong>Postamble</strong>: appears after the SOP export tables. This is useful for closing reminders, document-control notes, or local operating cautions.</li>
+    <li><strong>Placeholders</strong>: simple placeholders such as <code>{{operator_callsign}}</code>, <code>{{as_of_local}}</code>, <code>{{as_of_utc}}</code>, <code>{{scope}}</code>, and <code>{{timezone}}</code> are replaced during export.</li>
+    <li><strong>Best practice</strong>: keep this text short and operational. The SOP tables carry the structured information; the preamble and postamble should explain how the operator should use or share the export.</li>
+  </ul>
+
   <h3 id="settings-custom-tools-details">Custom Tools Details</h3>
   <p><strong>Concept of use</strong>: Custom Tools let you teach FreqInOut about helper programs that are specific to your station workflow but are not one of the built-in supported radio applications. Most often these are Python scripts, shell scripts, wrappers, emulators, or small utility launchers you want available from the same operational surface as the rest of the station tools.</p>
   <ul class="section-list">
@@ -1218,7 +1321,7 @@
     <li><strong>How to use it well</strong>: if a help button opens a specific section, read at least the purpose text and the nearby workflow notes, not only the control list. Those notes usually explain why the screen exists and what other tabs it depends on.</li>
     <li><strong>When something feels wrong</strong>: use Help as a relationship map. If a tab seems confusing, look for references to Settings, Messages, Map, Operators, or the schedule tabs nearby in the guide. Many support questions are really cross-tab workflow questions.</li>
   </ul>
-  <p><strong>Off-schedule prompt note</strong>: When enforcement is set to <code>Prompt</code>, the scheduler can raise an off-schedule prompt for items such as <code>Frequency</code>, <code>FLDigi Mode</code>, and <code>FLDigi Offset</code> (these may appear separately). <code>Apply</code> corrects the selected items, <code>Ignore/Skip</code> leaves them off-schedule for now, and <code>Suspend/Pause</code> temporarily suspends scheduler corrections.</p>
+  <p><strong>Off-schedule prompt note</strong>: When enforcement is set to <code>Prompt</code>, FIO acts like a careful helper instead of grabbing the controls. It may ask about <code>Frequency</code>, <code>FLDigi Mode</code>, or <code>FLDigi Offset</code> when one of those does not match the active schedule. Choose <code>Apply</code> when you want FIO to fix it, <code>Ignore/Skip</code> when you know you are off schedule and want to stay there for now, or <code>Suspend/Pause</code> when you want FIO to stop nudging you temporarily. The prompt interval controls how soon FIO may remind you again if the mismatch is still there.</p>
 
   <h2 id="logs-viewer">Logs Viewer (from Settings)</h2>
   <p>Logs are opened from <code>Settings &gt; Logging &amp; Diagnostics &gt; Open Logs</code>.</p>

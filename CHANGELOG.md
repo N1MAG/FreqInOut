@@ -1,7 +1,21 @@
 # Changelog
 
-## [1.2.3.4]
-- Fixed: Windows launch after install resolved.
+## [1.2.4]
+- Changed: FLDigi / SSB Net Control now lists scheduled nets that are currently active or coming up within the near operating window, avoiding duplicate daily repeats while still letting late-starting operators select the intended net.
+- Changed: FLDigi Net Control roster copy output now includes the station role for NCS and ANCS rows, followed by traffic when present, and repeated callsign rows are merged so corrections do not create duplicate check-ins.
+- Added: FLDigi Net Control now tracks `Directed By` and `Acked By` with visible row chips, scoped action buttons for `NCS`, `ANCS`, `Shared`, and `All`, `ACK Needed` for unacknowledged check-ins, and `Next TFC` for stepping through one directed traffic station at a time.
+- Added: FLDigi Net Control now writes role-first macro files such as `NCS_ACK_Pending.txt`, `ANCS_ACK_Pending.txt`, `NCS_Next_TFC.txt`, and `ANCS_Next_TFC.txt`, while keeping full and role-scoped check-in files current from the roster without requiring `Save Check-ins`.
+- Fixed: Map JS8 link rendering now resolves portable suffixes such as `/P` through the base station position while preserving the displayed callsign, and map-triggered JS8/VarAC ingest now runs in a guarded background worker instead of the UI thread.
+- Added: FLDigi Net Control adds an editable roster `Notes` column that stretches into available table width and archives local operational notes at end-net without including them in copied roster text or live FLDigi macro files.
+- Changed: FLDigi Net Control now places the Net Roster and Compare/Reference workspace in an adjustable vertical splitter so the roster uses the available space when Compare is collapsed and pasted comparison lists get useful room when expanded.
+- Changed: FLDigi Net Control now defaults NCS and ANCS role rows to heard-by-both and acked-by-both when the roles are set, while still allowing operators to uncheck those chips if the exception does not fit the net.
+- Changed: FLDigi Net Control moves `Start Net` and `End Net` into the session/QSY row, separates `Save Check-ins` from live actions, highlights that save action only when roster edits are unsaved, renames `Local Roster` to `Net Roster`, and gives the roster table more practical column sizing.
+- Changed: FLDigi macro setup is now a compact collapsible header that shows `Macro: None`, `Macro: Needs Mapping`, or `Macro: Mapped`, hiding setup controls during normal mapped operation so the roster gets more room.
+- Added: Station Health provides a dedicated view of external dependency responsiveness, including grouped background ingest health and issue-since/cooldown context, while keeping traffic-busy state separate from app/dependency health.
+- Changed: Messages export/filtering, FLAMP incomplete awareness, and CommStat message handling were tightened for clearer field review and spreadsheet export behavior.
+- Changed: external dependency polling and background ingest paths now use stronger isolation/backoff behavior so slow or unreachable companion applications are less likely to stall visible UI workflows.
+- Changed: FLDigi log-assisted auto-add controls are hidden for 1.2.4 because real FLDigi logs can contain scripts, acknowledgements, repeated text, form payloads, and noisy decodes; the code is retained with comments for a future review-only/RX-only design.
+- Changed: the in-app Help guide now explains the updated FLDigi / SSB Net Control workflow, including scheduled-net selection, role-aware roster copying, copy/file combinations, macro file behavior, deduplication behavior, save highlighting, and visible-only NCS controls.
 
 ## [1.2.3.3]
 - Fixed: Windows installers now build the PyInstaller app without UPX compression. This avoids real-machine Windows 11 startup crashes and security-tool interference that can occur with compressed Qt/Python DLLs even when the package starts correctly on a clean CI runner.
@@ -22,7 +36,7 @@
 - Fixed: GPG setup now detects Kleopatra/GPA/GpgEX GUI executables before running them as command-line GPG, auto-uses a sibling `gpg.exe` when available, and reports a clear Settings warning when the selected Windows path is not a usable command-line executable.
 - Added: GPG compose signing now supports passphrase-protected keys through the OS credential store, with Settings-side passphrase confirmation and documentation that `keyring` must be installed and backed by a real OS keyring service.
 - Changed: Message Auth signature/hash verification now applies to VarAC and VarAC BBS `.k2s/.b2s` files and signature sidecars using the same trusted-key/hash workflow already used for signed FLAmp files.
-- Changed: `FLDigi Net Control` now offers `Copy Check-ins` instead of the callsign-only summary button, copying the full consolidated TFC/QRU/LATE check-in log and maintaining an `all_checkins.txt` macro feed beside the existing per-category check-in files.
+- Changed: `FLDigi Net Control` now offers `Copy Check-ins` instead of the callsign-only summary button, copying the full consolidated TFC/QRU/LATE check-in log and maintaining a `CheckIns_ALL.txt` macro feed beside the existing per-category check-in files.
 - Changed: the in-app Help guide now teaches the major FreqInOut tabs more explicitly, expanding the purpose, workflow, and cross-tab interaction notes for ControlFreq, Messages, Map, schedules, operators, SOP Builder, and Settings so operators can learn not only how controls work, but why those screens matter and how related settings influence them.
 - Fixed: VarAC schedule protection now also watches recent `VarAC.db` transfer lifecycle events, so scheduler-driven frequency changes are more reliably deferred during inbound or outbound file transfers even when log-tail visibility is incomplete.
 - Changed: `Map` now skips no-op refresh rebuilds when its lightweight input signature has not changed, reducing repeated redraw work during clustered filter and visibility activity while keeping full reloads for real config changes.
@@ -115,7 +129,7 @@
 - Fixed: Scheduler shutdown now stops and tears down the serialized control executor cleanly, best-effort cancels any in-flight control future, and ignores stale control callbacks during app exit to reduce shutdown hangs and orphaned worker-thread risk.
 - Fixed: `SettingsManager` now enforces thread affinity at runtime so cross-thread reuse fails fast with a clear SQLite-style programming error instead of surfacing as intermittent thread-bound connection failures later.
 - Changed: Main-window teardown now emits targeted debug logging when scheduler/background-ingest/JS8/widget shutdown steps fail, and adds focused regression coverage for scheduler-stop cleanup and settings thread-affinity guardrails.
-- Changed: WebEngine startup prewarm now defaults to enabled on Windows and disabled on macOS/Linux unless `map_webengine_startup_prewarm` explicitly overrides the platform default.
+- Changed: WebEngine startup prewarm now defaults to disabled for quiet startup; the first Windows Map open shows a contextual `Preparing Map...` indicator while on-demand warmup runs. The hidden `map_webengine_startup_prewarm` setting can still opt back into startup warmup.
 - Changed: App/documentation/installer version references updated to `1.2.2`.
 
 ## [1.2.1]

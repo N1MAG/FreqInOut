@@ -256,6 +256,14 @@ class SchedulerEngine(QObject):
         self._status_flrig_ptt: bool = False
         self._status_flrig_ptt_ts: float = 0.0
         self._status_flrig_retry_ts: float = 0.0
+        self._status_summary_cache: Optional[Dict[str, object]] = None
+        self._status_summary_cache_ts: float = 0.0
+        self._status_summary_cache_ttl_s: float = 2.5
+        self._fldigi_mode_cache: Optional[str] = None
+        self._fldigi_mode_cache_ts: float = 0.0
+        self._fldigi_offset_cache: Optional[int] = None
+        self._fldigi_offset_cache_ts: float = 0.0
+        self._fldigi_status_cache_ttl_s: float = 5.0
         self._control_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-control")
         self._control_future = None
         self._control_future_token: int = 0
@@ -856,10 +864,16 @@ class SchedulerEngine(QObject):
     def _current_fldigi_offset(self) -> Optional[int]:
         if not self.rig or not hasattr(self.rig, "get_fldigi_offset"):
             return None
+        now_ts = time.time()
+        if now_ts - self._fldigi_offset_cache_ts < self._fldigi_status_cache_ttl_s:
+            return self._fldigi_offset_cache
         try:
-            return self.rig.get_fldigi_offset()
+            offset = self.rig.get_fldigi_offset()
         except Exception:
             return None
+        self._fldigi_offset_cache = offset
+        self._fldigi_offset_cache_ts = now_ts
+        return offset
 
     def _fldigi_available(self) -> bool:
         if not self.rig or not hasattr(self.rig, "is_fldigi_available"):
@@ -878,11 +892,17 @@ class SchedulerEngine(QObject):
     def _current_fldigi_mode(self) -> Optional[str]:
         if not self.rig or not hasattr(self.rig, "get_fldigi_mode"):
             return None
+        now_ts = time.time()
+        if now_ts - self._fldigi_mode_cache_ts < self._fldigi_status_cache_ttl_s:
+            return self._fldigi_mode_cache
         try:
             mode = self.rig.get_fldigi_mode()
         except Exception:
             return None
-        return mode.strip().upper() if isinstance(mode, str) else None
+        normalized = mode.strip().upper() if isinstance(mode, str) else None
+        self._fldigi_mode_cache = normalized
+        self._fldigi_mode_cache_ts = now_ts
+        return normalized
 
     def _enforcement_mode(self, key: str, default: str = "On Schedule Change") -> str:
         try:
@@ -1344,6 +1364,12 @@ class SchedulerEngine(QObject):
         return "none", "No active schedule row."
 
     def get_status_summary(self) -> Dict[str, object]:
+        now_cache = time.time()
+        if (
+            self._status_summary_cache is not None
+            and now_cache - self._status_summary_cache_ts < self._status_summary_cache_ttl_s
+        ):
+            return dict(self._status_summary_cache)
         try:
             use_scheduler = bool(self.settings.get("use_scheduler", True))
         except Exception:
@@ -1398,7 +1424,7 @@ class SchedulerEngine(QObject):
         # in status-heavy UI refresh paths (sidebar + ControlFreq).
         fldigi_mode_off = bool(flags.get("mode"))
         fldigi_offset_off = bool(flags.get("fldigi_offset"))
-        return {
+        summary = {
             "use_scheduler": use_scheduler,
             "control_mode": control_mode,
             "off_schedule": off_schedule,
@@ -1433,6 +1459,9 @@ class SchedulerEngine(QObject):
             "fldigi_mode_off": fldigi_mode_off,
             "fldigi_offset_off": fldigi_offset_off,
         }
+        self._status_summary_cache = dict(summary)
+        self._status_summary_cache_ts = now_cache
+        return summary
 
     def _off_schedule_flags(
         self,
@@ -1448,6 +1477,7 @@ class SchedulerEngine(QObject):
         if not entry:
             return flags
         active_control_mode = (control_mode or self._control_mode()).strip().upper()
+        display_only_manual = active_control_mode in {"MANUAL", "NONE"}
         if check_frequency:
             freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
             if freq_hz:
@@ -1459,6 +1489,8 @@ class SchedulerEngine(QObject):
                     )
                 if cur is not None and abs(cur - freq_hz) > 5:
                     flags["frequency"] = True
+        if display_only_manual:
+            return flags
         if check_offset and self._js8_running() and self.js8:
             try:
                 desired_js8 = self._js8_offset_setting()
@@ -1916,6 +1948,10 @@ class SchedulerEngine(QObject):
             return
         if self.rig.set_fldigi_mode_offset(self._desired_fldigi_mode, self._desired_fldigi_offset):
             self._last_fldigi_apply = desired
+            self._fldigi_mode_cache = self._desired_fldigi_mode.strip().upper() if self._desired_fldigi_mode else None
+            self._fldigi_offset_cache = self._desired_fldigi_offset
+            self._fldigi_mode_cache_ts = time.time()
+            self._fldigi_offset_cache_ts = self._fldigi_mode_cache_ts
             self._fldigi_apply_after_ts = None
             self._fldigi_apply_pending = False
             self._fldigi_force_apply_once = False

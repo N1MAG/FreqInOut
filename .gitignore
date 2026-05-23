@@ -45,7 +45,6 @@ freqinout/config/freqinout.db
 freqinout/logs/
 venv/
 *.log
-tools/publish-release.ps1
 
 # Python tooling caches / reports
 .coverage
@@ -60,46 +59,13 @@ htmlcov/
 # Local planning/docs artifacts (Codex workflow)
 AGENTS.md
 SPEC*.md
-!SPEC.md
 
 # Local runtime/user artifacts
 VarAC.ini
 js8spotter.db
+FIO_BBS_Vault/
 tmp_gpg_guidance.txt
 freqinout-review.zip
 
-# Local test workspace artifacts
-tests/
-!tests/
-tests/*
-!tests/__init__.py
-!tests/test_reliability_phase1.py
-!tests/test_background_ingest_phase2.py
-!tests/test_varac_bbs_vault_1_2_3.py
-!tests/test_operator_checkins_schema_phase3.py
-!tests/test_software_status_phase4.py
-!tests/test_varac_schema_phase5.py
-!tests/test_manual_peer_schedule_ui_1_2_3.py
-!tests/test_pre_merge_runtime.py
-!tests/test_updater_security.py
-!tests/test_software_status_endpoints.py
-!tests/test_scheduler_shutdown.py
-!tests/test_settings_manager_thread_affinity.py
-!tests/test_auto_closing_information_dialogs_1_2_3.py
-!tests/test_flamp_signature_verification_1_2_3.py
-!tests/test_nbems_compose_stage_1_2_3.py
-!tests/test_commstat_artifacts_1_2_3.py
-!tests/test_varac_bbs_filename_normalization_1_2_3.py
-!tests/test_release_1_2_2_followup.py
-!tests/test_operator_activity_phase1.py
-!tests/test_operator_history_varac_sync.py
-!tests/test_controlfreq_activity_phase1.py
-!tests/test_settings_section_health_phase1.py
-!tests/test_commstat_sitrep_slice1.py
-!tests/test_commstat_sitrep_remaining_slices.py
-
 # Local benchmark/smoke artifacts
 .benchmarks/
-
-# Local README screenshot staging (use GitHub release assets instead)
-docs/internal/ScreenShots/

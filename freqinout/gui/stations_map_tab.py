@@ -14,8 +14,9 @@ import time
 import logging
 import sys
 import queue
+from concurrent.futures import Future, ThreadPoolExecutor
 
-from PySide6.QtCore import QUrl, Qt, QTimer, QCoreApplication, QSize
+from PySide6.QtCore import QUrl, Qt, QTimer, QCoreApplication, QSize, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QWidget,
@@ -418,6 +419,7 @@ class StationsMapTab(QWidget):
     Displays JS8Call-heard stations on an OSM-based map with a Maidenhead overlay.
     USA/Canada stations are shown; map tiles are streamed from OSM (requires network).
     """
+    _map_ingest_finished = Signal(int, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -480,6 +482,8 @@ class StationsMapTab(QWidget):
         self._js8_rx_hub: Optional[JS8RxHub] = None
         self._js8_rx_registered = False
         self._js8_indexer: Optional[JS8LogLinkIndexer] = None
+        self._map_ingest_executor: Optional[ThreadPoolExecutor] = None
+        self._map_ingest_future: Optional[Future] = None
         self._is_shutting_down = False
         self._js8_polling = False
         self._js8_net_started = False
@@ -553,6 +557,7 @@ class StationsMapTab(QWidget):
         self._map_refresh_timer.setSingleShot(True)
         self._map_refresh_timer.setInterval(160)
         self._map_refresh_timer.timeout.connect(self._flush_requested_map_refresh)
+        self._map_ingest_finished.connect(self._on_map_ingest_finished)
 
         self._build_ui()
         self._refresh_group_filter_options()
@@ -1155,23 +1160,76 @@ class StationsMapTab(QWidget):
             log.error("StationsMap: JS8 log ingest failed: %s", e)
             return 0
 
+    def _ensure_map_ingest_executor(self) -> ThreadPoolExecutor:
+        if self._map_ingest_executor is None:
+            self._map_ingest_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-map-ingest")
+        return self._map_ingest_executor
+
+    def _run_map_ingest_job(self, since_ts: Optional[float]) -> tuple[int, float]:
+        worker_settings = SettingsManager()
+        try:
+            db_path = worker_settings.config_dir / "freqinout_nets.db"
+            indexer = JS8LogLinkIndexer(worker_settings, db_path)
+            count = indexer.update(since_ts=since_ts)
+            latest_ts = max(indexer._ensure_latest_ts(last_default=time.time()), time.time())
+            try:
+                worker_settings.set("js8_links_last_load_utc", latest_ts)
+            except Exception:
+                pass
+            try:
+                ingest_varac(worker_settings)
+            except Exception:
+                pass
+            return count, latest_ts
+        finally:
+            try:
+                worker_settings.close()
+            except Exception:
+                pass
+
+    def _on_map_ingest_done(self, future: Future) -> None:
+        try:
+            count, latest_ts = future.result()
+        except Exception as exc:
+            log.error("StationsMap: background map ingest failed: %s", exc)
+            count, latest_ts = 0, 0.0
+        self._map_ingest_finished.emit(int(count or 0), float(latest_ts or 0.0))
+
+    def _on_map_ingest_finished(self, count: int, latest_ts: float) -> None:
+        self._map_ingest_future = None
+        if latest_ts:
+            self._last_js8_load_ts = max(float(self._last_js8_load_ts or 0.0), float(latest_ts))
+        if count:
+            log.info("StationsMap: JS8 traffic ingested in background (%s rows)", count)
+        if self._map_visible and not self._is_shutting_down:
+            self._schedule_render()
+
     def _auto_ingest_and_refresh(self, initial: bool = False):
         """
         Background ingest and refresh map. Used on timer and manual refresh.
         """
         if self._is_shutting_down:
             return
+        future = self._map_ingest_future
+        if future is not None and not future.done():
+            self._emit_map_event("ingest_skipped_active")
+            return
         since = None
         if initial:
             since = max(self._last_js8_load_ts, self._last_exit_ts)
         elif self._js8_rx_hub and self._js8_rx_hub.is_active():
             since = self._last_js8_load_ts
-        self._ingest_js8_logs(since_ts=since)
         try:
-            ingest_varac(self.settings)
-        except Exception:
-            pass
-        self._schedule_render()
+            self._set_map_runtime_state("warming", "Refreshing JS8/VarAC traffic in the background.")
+            executor = self._ensure_map_ingest_executor()
+            future = executor.submit(self._run_map_ingest_job, since)
+            self._map_ingest_future = future
+            future.add_done_callback(self._on_map_ingest_done)
+            self._emit_map_event("ingest_started", initial=bool(initial))
+        except Exception as exc:
+            self._map_ingest_future = None
+            log.error("StationsMap: failed to start background map ingest: %s", exc)
+            self._schedule_render()
 
     def shutdown(self) -> None:
         self._is_shutting_down = True
@@ -1186,6 +1244,22 @@ class StationsMapTab(QWidget):
                 self._js8_rx_registered = False
         except Exception:
             pass
+        future = self._map_ingest_future
+        self._map_ingest_future = None
+        if future is not None:
+            try:
+                future.cancel()
+            except Exception:
+                pass
+        executor = self._map_ingest_executor
+        self._map_ingest_executor = None
+        if executor is not None:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=False)
+            except Exception as exc:
+                log.debug("StationsMap: map ingest executor shutdown failed: %s", exc)
         try:
             if self.web is not None:
                 try:
@@ -2667,6 +2741,21 @@ class StationsMapTab(QWidget):
         for pt in self.stations:
             pos_map[pt.callsign.upper()] = (pt.lat, pt.lon)
 
+        def _base_call(cs: str) -> str:
+            return JS8LogLinkIndexer._base_callsign(cs)
+
+        def _position_for(cs: str) -> Optional[tuple[float, float]]:
+            key = (cs or "").strip().upper()
+            if not key:
+                return None
+            return pos_map.get(key) or pos_map.get(_base_call(key))
+
+        def _operator_meta(cs: str) -> Dict:
+            key = (cs or "").strip().upper()
+            if not key:
+                return {}
+            return self.operator_index.get(key) or self.operator_index.get(_base_call(key), {})
+
         if isinstance(link_selection, (list, tuple)) and len(link_selection) >= 2:
             mode, selection_value = link_selection[0], link_selection[1]
         else:
@@ -2710,8 +2799,6 @@ class StationsMapTab(QWidget):
             return links, {}
 
         try:
-            from freqinout.core.config_paths import get_config_dir
-
             db_path = get_config_dir() / "config" / "freqinout_nets.db"
         except Exception as e:
             log.error("StationsMap: failed to resolve DB path for links: %s", e)
@@ -2781,11 +2868,11 @@ class StationsMapTab(QWidget):
             if not cs:
                 return False
             if group_filter:
-                groups = self.operator_index.get(cs, {}).get("groups", set())
+                groups = _operator_meta(cs).get("groups", set())
                 if group_filter not in groups:
                     return False
             if region_filter:
-                region = self.operator_index.get(cs, {}).get("region")
+                region = _operator_meta(cs).get("region")
                 if region != region_filter:
                     return False
             return True
@@ -2793,7 +2880,7 @@ class StationsMapTab(QWidget):
         for ts, o, d, snr, band, freq_hz, is_spotter in rows:
             o = (o or "").upper()
             d = (d or "").upper()
-            if o == "" or d == "" or o not in pos_map or d not in pos_map:
+            if o == "" or d == "" or _position_for(o) is None or _position_for(d) is None:
                 continue
             bf = band_filter or {"type": "all"}
             try:
@@ -2821,34 +2908,34 @@ class StationsMapTab(QWidget):
             elif mode == "all":
                 include = True
             elif mode == "region" and selection_value:
-                region_o = self.operator_index.get(o, {}).get("region")
-                region_d = self.operator_index.get(d, {}).get("region")
+                region_o = _operator_meta(o).get("region")
+                region_d = _operator_meta(d).get("region")
                 if region_o == selection_value and region_d == selection_value:
                     include = True
                 elif my_call and my_call in {o, d}:
                     other = d if o == my_call else o
-                    include = self.operator_index.get(other, {}).get("region") == selection_value
+                    include = _operator_meta(other).get("region") == selection_value
             elif mode == "group" and selection_value:
-                groups_o = self.operator_index.get(o, {}).get("groups", set())
-                groups_d = self.operator_index.get(d, {}).get("groups", set())
+                groups_o = _operator_meta(o).get("groups", set())
+                groups_d = _operator_meta(d).get("groups", set())
                 if selection_value in groups_o and selection_value in groups_d:
                     include = True
                 elif my_call and my_call in {o, d}:
                     other = d if o == my_call else o
-                    include = selection_value in self.operator_index.get(other, {}).get("groups", set())
+                    include = selection_value in _operator_meta(other).get("groups", set())
             if include and group_filter:
                 if my_call and my_call in {o, d}:
                     other = d if o == my_call else o
-                    include = group_filter in self.operator_index.get(other, {}).get("groups", set())
+                    include = group_filter in _operator_meta(other).get("groups", set())
                 else:
-                    include = group_filter in self.operator_index.get(o, {}).get("groups", set()) and group_filter in self.operator_index.get(d, {}).get("groups", set())
+                    include = group_filter in _operator_meta(o).get("groups", set()) and group_filter in _operator_meta(d).get("groups", set())
             if include and region_filter:
                 if my_call and my_call in {o, d}:
                     other = d if o == my_call else o
-                    include = self.operator_index.get(other, {}).get("region") == region_filter
+                    include = _operator_meta(other).get("region") == region_filter
                 else:
-                    region_o = self.operator_index.get(o, {}).get("region")
-                    region_d = self.operator_index.get(d, {}).get("region")
+                    region_o = _operator_meta(o).get("region")
+                    region_d = _operator_meta(d).get("region")
                     include = region_o == region_filter and region_d == region_filter
             if include and reachable_calls:
                 include = (o in reachable_calls or d in reachable_calls)
@@ -2920,8 +3007,8 @@ class StationsMapTab(QWidget):
             k = tuple(sorted((a, b)))
             if k not in key_map:
                 return
-            p1 = pos_map.get(a)
-            p2 = pos_map.get(b)
+            p1 = _position_for(a)
+            p2 = _position_for(b)
             if not p1 or not p2:
                 return
             links.append(
@@ -5179,8 +5266,14 @@ class StationsMapTab(QWidget):
             dest = (link.get("destination") or "").strip().upper()
             if origin:
                 traffic_calls.add(origin)
+                base_origin = JS8LogLinkIndexer._base_callsign(origin)
+                if base_origin:
+                    traffic_calls.add(base_origin)
             if dest:
                 traffic_calls.add(dest)
+                base_dest = JS8LogLinkIndexer._base_callsign(dest)
+                if base_dest:
+                    traffic_calls.add(base_dest)
         for cs in varac_stats.keys():
             if cs:
                 traffic_calls.add(cs)
@@ -5788,8 +5881,18 @@ function addGridLabels(res, level, bounds, maxLabels) {
                     "level": level,
                 }
         prop_colors = self._resolve_prop_band_colors()
-        label_color = "#E6E8EE" if is_dark else "#000"
-        region_label_color = "#B8C7FF" if is_dark else "#1E88E5"
+        label_color = theme.get("text", "#E6E8EE" if is_dark else "#1C1F21")
+        state_label_color = theme.get("text_muted", "#A3ACB8" if is_dark else "#5B6570")
+        region_label_color = theme.get("info", theme.get("accent", "#B8C7FF" if is_dark else "#1E88E5"))
+        callsign_label_color = theme.get("text", label_color)
+        region_band_label_color = theme.get("text", label_color)
+        label_halo = (
+            "0 1px 2px rgba(0,0,0,0.88), 0 0 3px rgba(0,0,0,0.72)"
+            if is_dark
+            else "0 1px 2px rgba(255,255,255,0.92), 0 0 3px rgba(255,255,255,0.82)"
+        )
+        callsign_chip_bg = self._hex_to_rgba(theme.get("surface", "#171B21" if is_dark else "#F0F2F4"), 0.78 if is_dark else 0.84)
+        callsign_chip_border = self._hex_to_rgba(theme.get("border", "#2A313A" if is_dark else "#D3D7DD"), 0.88 if is_dark else 0.80)
         tooltip_bg = "#1A1F26" if is_dark else "#fff"
         tooltip_text = "#E6E8EE" if is_dark else "#000"
         tooltip_border = "#3A4452" if is_dark else "#444"
@@ -5845,7 +5948,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
             }}
             const displayLabel = stateAbbr || (props.name || props.STATE_NAME || props.state);
             if ({str(self.show_states).lower()} && displayLabel) {{
-              const tooltip = L.tooltip({{direction:'center', permanent:true, className:'label-text no-border'}});
+              const tooltip = L.tooltip({{direction:'center', permanent:true, className:'label-text no-border state-label'}});
               tooltip.setContent(displayLabel);
               layer.bindTooltip(tooltip);
             }}
@@ -6010,6 +6113,10 @@ function addGridLabels(res, level, bounds, maxLabels) {
         dark_map_filter = "filter: brightness(0.75) saturate(0.85) contrast(1.05);" if is_dark else ""
         ui_text_scale = resolve_ui_text_scale(self.settings)
         label_font_px = max(10.0, 10.0 * float(ui_text_scale))
+        state_label_font_px = max(10.0, 10.0 * float(ui_text_scale))
+        callsign_label_font_px = max(11.0, 11.0 * float(ui_text_scale))
+        region_label_font_px = max(12.0, 12.0 * float(ui_text_scale))
+        region_band_label_font_px = max(10.0, 10.0 * float(ui_text_scale))
         panel_font_px = max(11.0, 11.0 * float(ui_text_scale))
         legend_font_px = max(12.0, 12.0 * float(ui_text_scale))
         return f"""
@@ -6026,10 +6133,12 @@ function addGridLabels(res, level, bounds, maxLabels) {
     #map-wrap {{ position: relative; flex: 1 1 auto; min-height: 0; }}
     #map {{ height: 100%; {dark_map_filter} }}
     #legendDock {{ flex: 0 0 auto; display: flex; justify-content: center; padding: 6px 10px 10px; }}
-    .label-text {{ font-size: {label_font_px:.1f}px; color: {label_color}; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; text-shadow: 0 1px 2px #000; }}
+    .label-text {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; font-size: {label_font_px:.1f}px; line-height: 1; letter-spacing: 0; color: {label_color}; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; text-shadow: {label_halo}; white-space: nowrap; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }}
     .label-text.no-border {{ background: transparent; border: none; box-shadow: none; pointer-events: none; }}
-    .region-label {{ color: {region_label_color}; font-weight: 700; pointer-events: auto; }}
-    .region-band-label {{ color: #000; font-weight: 400; pointer-events: none; }}
+    .state-label {{ color: {state_label_color}; font-size: {state_label_font_px:.1f}px; font-weight: 600; opacity: 0.88; text-transform: uppercase; }}
+    .region-label {{ color: {region_label_color}; font-size: {region_label_font_px:.1f}px; font-weight: 800; pointer-events: auto; }}
+    .callsign-label {{ color: {callsign_label_color}; font-size: {callsign_label_font_px:.1f}px; font-weight: 700; padding: 1px 4px; border: 1px solid {callsign_chip_border}; border-radius: 3px; background: {callsign_chip_bg}; box-shadow: 0 1px 2px rgba(0,0,0,0.18); pointer-events: auto; }}
+    .region-band-label {{ color: {region_band_label_color}; font-size: {region_band_label_font_px:.1f}px; font-weight: 600; pointer-events: none; }}
     .cs-tooltip {{ background: {tooltip_bg}; color: {tooltip_text}; border: 1px solid {tooltip_border}; padding: 5px 7px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.4); z-index: 10000; }}
     .leaflet-tooltip.cs-tooltip {{ z-index: 10000; pointer-events: none; }}
     .leaflet-popup.cs-tooltip {{ z-index: 10001; }}
@@ -6359,7 +6468,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
         // Permanent label only when show_callsigns is on
         if (m.label) {{
           const icon = L.divIcon({{
-            className: 'label-text',
+            className: 'label-text callsign-label',
             html: m.label
           }});
           const labelMarker = L.marker([m.lat, m.lon], {{icon, pane:'stationsPane'}});

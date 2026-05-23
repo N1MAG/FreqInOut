@@ -452,6 +452,7 @@ class SettingsTab(QWidget):
         self.software_path_detector = SoftwarePathDetector(self.settings)
         self._settings_dirty = False
         self._loading_settings = False
+        self._shutdown_autosave = False
         self._op_group_condition_sync = False
         self._op_group_rows_by_group: Dict[str, List[int]] = {}
         self.loading_label: QLabel | None = None
@@ -471,6 +472,8 @@ class SettingsTab(QWidget):
         self._status_text_labels: Dict[str, QLabel] = {}
         self.path_edits: Dict[str, QLineEdit] = {}
         self._autofill_status_labels: Dict[str, QLabel] = {}
+        self._contextual_autofill_buttons: Dict[str, QPushButton] = {}
+        self._contextual_autofill_rules: Dict[str, Dict[str, object]] = {}
         self.js8_groups_edits: List[QLineEdit] = []
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
@@ -522,7 +525,7 @@ class SettingsTab(QWidget):
 
         # process status timer
         self.status_timer = QTimer(self)
-        self.status_timer.setInterval(5000)
+        self.status_timer.setInterval(10000)
         self.status_timer.timeout.connect(self._refresh_running_status)
 
         self._update_clock_labels()
@@ -886,12 +889,16 @@ class SettingsTab(QWidget):
                 root = Path(root_txt).expanduser()
                 try:
                     rel = path.relative_to(root)
-                    return str(Path("FIO_BBS_Vault") / rel)
+                    display_root = root.name or "Managed BBS Vault"
+                    return str(Path(display_root) / rel)
                 except ValueError:
                     pass
             parts = path.parts
             if "FIO_BBS_Vault" in parts:
                 idx = parts.index("FIO_BBS_Vault")
+                return str(Path(*parts[idx:]))
+            if "FIO_Managed_Vault" in parts:
+                idx = parts.index("FIO_Managed_Vault")
                 return str(Path(*parts[idx:]))
         except Exception:
             pass
@@ -912,6 +919,15 @@ class SettingsTab(QWidget):
         self.varac_bbs_vault_source_dir_edit.setProperty("full_path", full)
         self.varac_bbs_vault_source_dir_edit.setText(self._display_varac_bbs_vault_location_path(full))
         self.varac_bbs_vault_source_dir_edit.setToolTip(full)
+
+    def _on_varac_bbs_vault_source_path_edited(self, _text: str) -> None:
+        if not hasattr(self, "varac_bbs_vault_source_dir_edit"):
+            return
+        self.varac_bbs_vault_source_dir_edit.setProperty("full_path", "")
+        self.varac_bbs_vault_source_dir_edit.setToolTip(self.varac_bbs_vault_source_dir_edit.text().strip())
+        self._varac_bbs_vault_auto_source_dir = ""
+        self._mark_settings_dirty()
+        self._refresh_varac_bbs_vault_source_hint()
 
     def _load_varac_bbs_vault_editor_from_selection(self) -> None:
         selected = self._selected_varac_bbs_vault_location()
@@ -1211,7 +1227,7 @@ class SettingsTab(QWidget):
             self._varac_bbs_vault_auto_description = self.varac_bbs_vault_description_edit.text().strip()
         suggested_source = self._suggest_varac_bbs_vault_location_source_dir(current_name)
         if suggested_source and hasattr(self, "varac_bbs_vault_source_dir_edit"):
-            current_source = self.varac_bbs_vault_source_dir_edit.text().strip()
+            current_source = self._varac_bbs_vault_source_path_text()
             if force or not current_source or current_source == self._varac_bbs_vault_auto_source_dir:
                 if current_source != suggested_source:
                     self._set_varac_bbs_vault_source_path(suggested_source)
@@ -1594,6 +1610,20 @@ class SettingsTab(QWidget):
             self.varac_bbs_vault_alias_edit.blockSignals(False)
         self._mark_settings_dirty()
 
+    def _confirm_readd_varac_bbs_vault_location_folder(self, source_path: Path) -> bool:
+        response = QMessageBox.question(
+            self,
+            "Re-add Existing Location Folder",
+            "A managed BBS folder already exists for this location.\n\n"
+            "Re-add this folder to FIO Settings without changing files on disk?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        return response == QMessageBox.Yes
+
+    def _should_offer_readd_varac_bbs_vault_location_folder(self, location_id: str, source_path: Path) -> bool:
+        return not str(location_id or "").strip() and source_path.exists() and source_path.is_dir()
+
     def _save_varac_bbs_vault_location(self) -> bool:
         name = (
             self.varac_bbs_vault_location_name_edit.text().strip()
@@ -1625,7 +1655,9 @@ class SettingsTab(QWidget):
             QMessageBox.warning(self, "Managed BBS Vault", "Set a valid alias before saving.")
             return False
         source_path = Path(source_dir).expanduser()
-        selected = self._selected_varac_bbs_vault_location() or {}
+        is_new_location = not str(self._varac_bbs_vault_selected_location_id or "").strip()
+        selected = {} if is_new_location else (self._selected_varac_bbs_vault_location() or {})
+        location_id = str(selected.get("id", "") or "").strip()
         old_source_txt = str(selected.get("source_dir", "") or "").strip()
         old_source_path = Path(old_source_txt).expanduser() if old_source_txt else None
         if not source_path.exists():
@@ -1663,6 +1695,9 @@ class SettingsTab(QWidget):
             )
             if response != QMessageBox.Yes:
                 return False
+        elif self._should_offer_readd_varac_bbs_vault_location_folder(location_id, source_path):
+            if not self._confirm_readd_varac_bbs_vault_location_folder(source_path):
+                return False
         if not source_path.is_dir():
             QMessageBox.warning(self, "Managed BBS Vault", "Location source must be a directory.")
             return False
@@ -1676,7 +1711,6 @@ class SettingsTab(QWidget):
             if hasattr(self, "varac_bbs_vault_access_code_confirm_edit")
             else ""
         )
-        location_id = str(selected.get("id", "") or "").strip()
         for existing in self._varac_bbs_vault_locations_cache:
             existing_id = str(existing.get("id", "") or "").strip()
             existing_alias = normalize_location_alias(existing.get("alias", ""), existing.get("name", ""))
@@ -2689,7 +2723,6 @@ class SettingsTab(QWidget):
             op_container,
             checked=True,
             fit_content=True,
-            help_context_key="settings.freqinout",
         )
         self._register_collapsible_group(op_group, self._summary_freqinout_settings)
         self._set_section_health_key(op_group, "freqinout")
@@ -2901,7 +2934,7 @@ class SettingsTab(QWidget):
         js8_mark_row.addStretch()
         js8_v.addLayout(js8_mark_row)
 
-        def build_js8_path_row(label: str, edit: QLineEdit, browse_cb) -> QWidget:
+        def build_js8_path_row(label: str, edit: QLineEdit, browse_cb, autofill_btn: QPushButton | None = None) -> QWidget:
             row = QHBoxLayout()
             row.setSpacing(8)
             row.setContentsMargins(0, 0, 0, 0)
@@ -2913,6 +2946,8 @@ class SettingsTab(QWidget):
             browse_btn.setFixedWidth(70)
             browse_btn.clicked.connect(browse_cb)
             row.addWidget(browse_btn)
+            if autofill_btn is not None:
+                row.addWidget(autofill_btn)
             w = QWidget()
             w.setLayout(row)
             w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -2920,8 +2955,21 @@ class SettingsTab(QWidget):
 
         self.js8call_path_edit = QLineEdit()
         self.js8call_path_edit.setPlaceholderText("Folder containing JS8Call")
+        js8call_autofill_btn = self._make_contextual_autofill_button(
+            "js8call_core",
+            "Auto-Fill",
+            "js8",
+            ["path_js8call", "js8_directed_path"],
+            base_edit=self.js8call_path_edit,
+            tooltip="Use the JS8Call install folder to find related JS8Call paths.",
+        )
         js8_v.addWidget(
-            build_js8_path_row("JS8Call Install Folder:", self.js8call_path_edit, self._choose_js8call_install_path)
+            build_js8_path_row(
+                "JS8Call Install Folder:",
+                self.js8call_path_edit,
+                self._choose_js8call_install_path,
+                js8call_autofill_btn,
+            )
         )
 
         self.js8_directed_edit = QLineEdit()
@@ -2930,20 +2978,32 @@ class SettingsTab(QWidget):
         )
 
         self.js8_forms_edit = QLineEdit()
-        js8_v.addWidget(
-            build_js8_path_row("JS8Spotter forms:", self.js8_forms_edit, self._choose_js8_forms_path)
+        self.js8_forms_edit.setPlaceholderText("Select your JS8Spotter forms folder")
+        self.js8_forms_edit.setToolTip(
+            "JS8Spotter is commonly installed in custom locations. Use Browse to select the forms folder you use."
         )
+        js8_v.addWidget(build_js8_path_row("JS8Spotter forms:", self.js8_forms_edit, self._choose_js8_forms_path))
 
         self.js8spotter_path_edit = QLineEdit()
-        self.js8spotter_path_edit.setPlaceholderText("Executable/script/.desktop path")
+        self.js8spotter_path_edit.setPlaceholderText("Select your JS8Spotter launcher/script/shortcut")
+        self.js8spotter_path_edit.setToolTip(
+            "JS8Spotter launchers are often stored in custom locations. Use Browse to select the launcher, "
+            "script, or shortcut you use."
+        )
         js8_v.addWidget(
             build_js8_path_row(
-                "JS8Spotter Script/Launcher:", self.js8spotter_path_edit, self._choose_js8spotter_launch_path
+                "JS8Spotter Script/Launcher:",
+                self.js8spotter_path_edit,
+                self._choose_js8spotter_launch_path,
             )
         )
 
         self.commstat_path_edit = QLineEdit()
-        self.commstat_path_edit.setPlaceholderText("Executable/script/.desktop path")
+        self.commstat_path_edit.setPlaceholderText("Select your CommStat launcher/script/shortcut")
+        self.commstat_path_edit.setToolTip(
+            "CommStat launchers are often stored in custom locations. Use Browse to select the launcher, "
+            "script, or shortcut you use."
+        )
         js8_v.addWidget(
             build_js8_path_row(
                 "CommStat Script/Launcher:", self.commstat_path_edit, self._choose_commstat_launch_path
@@ -2958,18 +3018,6 @@ class SettingsTab(QWidget):
         self.js8call_path_edit.textChanged.connect(self._on_launch_paths_changed)
         self.js8spotter_path_edit.textChanged.connect(self._on_launch_paths_changed)
         self.commstat_path_edit.textChanged.connect(self._on_launch_paths_changed)
-
-        js8_autofill_row = QHBoxLayout()
-        js8_autofill_row.setSpacing(8)
-        js8_autofill_row.setContentsMargins(0, 0, 0, 0)
-        js8_autofill_label = QLabel("Auto-Fill")
-        js8_autofill_label.setFixedWidth(js8_label_width)
-        js8_autofill_row.addWidget(js8_autofill_label)
-        self.js8_autofill_btn = QPushButton("Attempt Auto-Fill")
-        self.js8_autofill_btn.clicked.connect(self._attempt_js8_autofill)
-        js8_autofill_row.addWidget(self.js8_autofill_btn)
-        js8_autofill_row.addStretch()
-        js8_v.addLayout(js8_autofill_row)
 
         js8_autofill_status_row = QHBoxLayout()
         js8_autofill_status_row.setSpacing(8)
@@ -3019,7 +3067,11 @@ class SettingsTab(QWidget):
 
         msg_label_width = 170
 
-        def build_prog_row(name: str, label: str | None = None) -> QWidget:
+        def build_prog_row(
+            name: str,
+            label: str | None = None,
+            autofill: tuple[str, str, str, List[str]] | None = None,
+        ) -> QWidget:
             row = QHBoxLayout()
             row.setSpacing(8)
             row.setContentsMargins(0, 0, 0, 0)
@@ -3038,6 +3090,17 @@ class SettingsTab(QWidget):
             browse_btn.setFixedWidth(70)
             browse_btn.clicked.connect(lambda _, n=name: self._choose_program_path(n))
             row.addWidget(browse_btn)
+            if autofill is not None:
+                rule_id, text, section, keys = autofill
+                row.addWidget(
+                    self._make_contextual_autofill_button(
+                        rule_id,
+                        text,
+                        section,
+                        keys,
+                        base_edit=path_edit if len(keys) > 1 else None,
+                    )
+                )
             w = QWidget()
             w.setLayout(row)
             w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -3075,7 +3138,7 @@ class SettingsTab(QWidget):
         fast_light_v.setSpacing(6)
         fast_light_v.setAlignment(Qt.AlignTop)
         fast_light_group.setLayout(fast_light_v)
-        fast_light_v.addWidget(build_prog_row("FLRig", "FLRig"))
+        fast_light_v.addWidget(build_prog_row("FLRig", "FLRig", ("flrig_launch", "Find", "fast_light", ["path_flrig"])))
 
         flrig_port_row = QHBoxLayout()
         flrig_port_row.setContentsMargins(0, 0, 0, 0)
@@ -3093,7 +3156,9 @@ class SettingsTab(QWidget):
         flrig_port_row.addWidget(flrig_port_spacer)
         fast_light_v.addLayout(flrig_port_row)
 
-        fast_light_v.addWidget(build_prog_row("FLDigi", "FLDigi"))
+        fast_light_v.addWidget(
+            build_prog_row("FLDigi", "FLDigi", ("fldigi_core", "Auto-Fill", "fast_light", ["path_fldigi", "fldigi_log_path"]))
+        )
         fldigi_host_row = QHBoxLayout()
         fldigi_host_row.setContentsMargins(0, 0, 0, 0)
         fldigi_host_row.setSpacing(8)
@@ -3146,7 +3211,9 @@ class SettingsTab(QWidget):
             build_msg_row("FLDigi Log Path", self.fldigi_log_path_edit, self._choose_fldigi_log_path)
         )
 
-        fast_light_v.addWidget(build_prog_row("FLMsg", "FLMsg"))
+        fast_light_v.addWidget(
+            build_prog_row("FLMsg", "FLMsg", ("flmsg_core", "Auto-Fill", "fast_light", ["path_flmsg", "message_paths.flmsg"]))
+        )
         fast_light_v.addWidget(
             build_msg_row(
                 "ICS/Messages",
@@ -3155,7 +3222,9 @@ class SettingsTab(QWidget):
             )
         )
 
-        fast_light_v.addWidget(build_prog_row("FLAmp", "FLAmp"))
+        fast_light_v.addWidget(
+            build_prog_row("FLAmp", "FLAmp", ("flamp_core", "Auto-Fill", "fast_light", ["path_flamp", "message_paths.flamp"]))
+        )
         fast_light_v.addWidget(
             build_msg_row(
                 "FLAMP/rx",
@@ -3163,18 +3232,6 @@ class SettingsTab(QWidget):
                 lambda: self._choose_msg_path("flamp", flamp_edit),
             )
         )
-
-        fast_light_autofill_row = QHBoxLayout()
-        fast_light_autofill_row.setContentsMargins(0, 0, 0, 0)
-        fast_light_autofill_row.setSpacing(8)
-        fast_light_autofill_label = QLabel("Auto-Fill")
-        fast_light_autofill_label.setFixedWidth(msg_label_width)
-        fast_light_autofill_row.addWidget(fast_light_autofill_label)
-        self.fast_light_autofill_btn = QPushButton("Attempt Auto-Fill")
-        self.fast_light_autofill_btn.clicked.connect(self._attempt_fast_light_autofill)
-        fast_light_autofill_row.addWidget(self.fast_light_autofill_btn)
-        fast_light_autofill_row.addStretch()
-        fast_light_v.addLayout(fast_light_autofill_row)
 
         fast_light_autofill_status_row = QHBoxLayout()
         fast_light_autofill_status_row.setContentsMargins(0, 0, 0, 0)
@@ -3204,16 +3261,52 @@ class SettingsTab(QWidget):
         gpg_group = QGroupBox("Message Auth (Key/Hash)")
         gpg_v = QVBoxLayout()
         gpg_v.setContentsMargins(0, 0, 0, 0)
-        gpg_v.setSpacing(4)
+        gpg_v.setSpacing(6)
         gpg_v.setAlignment(Qt.AlignTop)
         gpg_group.setLayout(gpg_v)
+
+        def _make_message_auth_subsection(title: str, content: QWidget, *, checked: bool = True) -> QFrame:
+            section = QFrame()
+            section.setFrameShape(QFrame.StyledPanel)
+            section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            section_layout = QVBoxLayout(section)
+            section_layout.setContentsMargins(8, 6, 8, 8)
+            section_layout.setSpacing(6)
+
+            header_btn = QToolButton()
+            header_btn.setCheckable(True)
+            header_btn.setChecked(checked)
+            header_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            header_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+            header_btn.setText(title)
+            header_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            header_btn.setMinimumHeight(26)
+            header_btn.setStyleSheet(self._section_header_style("neutral", resolve_theme(self.settings)))
+            content.setVisible(checked)
+
+            def _toggle(opened: bool, *, body: QWidget = content, button: QToolButton = header_btn) -> None:
+                body.setVisible(opened)
+                button.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
+                section.updateGeometry()
+                self._sync_current_section_scroll_size()
+
+            header_btn.toggled.connect(_toggle)
+            section_layout.addWidget(header_btn)
+            section_layout.addWidget(content)
+            return section
+
+        gpg_overview_tab = QWidget()
+        gpg_overview_v = QVBoxLayout(gpg_overview_tab)
+        gpg_overview_v.setContentsMargins(8, 8, 8, 8)
+        gpg_overview_v.setSpacing(8)
+        gpg_overview_v.setAlignment(Qt.AlignTop)
 
         self.gpg_verify_enabled_chk = QCheckBox("Verify signed .k2s/.b2s message files and signature sidecars")
         self.gpg_verify_enabled_chk.setToolTip(
             "When enabled, Message Viewer verifies detached sidecars and embedded clearsigned content "
             "for FLAmp, VarAC, and BBS .k2s/.b2s files, canonical '-sig' files, and .sig/.asc/.gpg sidecars."
         )
-        gpg_v.addWidget(self.gpg_verify_enabled_chk)
+        gpg_overview_v.addWidget(self.gpg_verify_enabled_chk)
 
         self.hash_verify_enabled_chk = QCheckBox(
             "Verify .k2s/.b2s checksum sidecars (SHA-256/SHA-512 preferred)"
@@ -3221,7 +3314,20 @@ class SettingsTab(QWidget):
         self.hash_verify_enabled_chk.setToolTip(
             "When enabled, Message Viewer checks checksum sidecar files for tamper/corruption detection."
         )
-        gpg_v.addWidget(self.hash_verify_enabled_chk)
+        gpg_overview_v.addWidget(self.hash_verify_enabled_chk)
+        overview_note = QLabel(
+            "Use this section to verify received message files, manage trusted hashes, review trusted GPG keys, "
+            "and choose the signing identity used for FLAmp compose."
+        )
+        overview_note.setWordWrap(True)
+        gpg_overview_v.addWidget(overview_note)
+        gpg_v.addWidget(_make_message_auth_subsection("Overview", gpg_overview_tab, checked=True))
+
+        trusted_hash_tab = QWidget()
+        trusted_hash_v = QVBoxLayout(trusted_hash_tab)
+        trusted_hash_v.setContentsMargins(8, 8, 8, 8)
+        trusted_hash_v.setSpacing(8)
+        trusted_hash_v.setAlignment(Qt.AlignTop)
 
         trusted_hash_row = QHBoxLayout()
         trusted_hash_row.setContentsMargins(0, 0, 0, 0)
@@ -3243,7 +3349,7 @@ class SettingsTab(QWidget):
         self.trusted_hash_add_btn = QPushButton("Add")
         self.trusted_hash_add_btn.setFixedWidth(70)
         trusted_hash_row.addWidget(self.trusted_hash_add_btn)
-        gpg_v.addLayout(trusted_hash_row)
+        trusted_hash_v.addLayout(trusted_hash_row)
 
         trusted_hash_actions = QHBoxLayout()
         trusted_hash_actions.setContentsMargins(0, 0, 0, 0)
@@ -3257,7 +3363,7 @@ class SettingsTab(QWidget):
         trusted_hash_actions.addWidget(self.trusted_hash_import_btn)
         trusted_hash_actions.addWidget(self.trusted_hash_remove_btn)
         trusted_hash_actions.addStretch()
-        gpg_v.addLayout(trusted_hash_actions)
+        trusted_hash_v.addLayout(trusted_hash_actions)
 
         self.trusted_hash_table = QTableWidget(0, 4)
         self.trusted_hash_table.setHorizontalHeaderLabels(["Use", "Algorithm", "Hash", "Label"])
@@ -3271,10 +3377,16 @@ class SettingsTab(QWidget):
         th_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         th_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
         th_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.trusted_hash_table.setMinimumHeight(58)
-        self.trusted_hash_table.setMaximumHeight(72)
-        self.trusted_hash_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        gpg_v.addWidget(self.trusted_hash_table)
+        self.trusted_hash_table.setMinimumHeight(180)
+        self.trusted_hash_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        trusted_hash_v.addWidget(self.trusted_hash_table, 1)
+        gpg_v.addWidget(_make_message_auth_subsection("Trusted Hashes", trusted_hash_tab, checked=False))
+
+        gpg_keys_tab = QWidget()
+        gpg_keys_v = QVBoxLayout(gpg_keys_tab)
+        gpg_keys_v.setContentsMargins(8, 8, 8, 8)
+        gpg_keys_v.setSpacing(8)
+        gpg_keys_v.setAlignment(Qt.AlignTop)
 
         gpg_path_row = QHBoxLayout()
         gpg_path_row.setContentsMargins(0, 0, 0, 0)
@@ -3294,7 +3406,7 @@ class SettingsTab(QWidget):
         gpg_path_row.addWidget(self.gpg_browse_btn)
         gpg_path_row.addWidget(self.gpg_test_btn)
         gpg_path_row.addWidget(self.gpg_refresh_keys_btn)
-        gpg_v.addLayout(gpg_path_row)
+        gpg_keys_v.addLayout(gpg_path_row)
 
         gpg_action_row = QHBoxLayout()
         gpg_action_row.setContentsMargins(0, 0, 0, 0)
@@ -3310,7 +3422,7 @@ class SettingsTab(QWidget):
         gpg_action_row.addWidget(self.gpg_import_text_btn)
         gpg_action_row.addWidget(self.gpg_sign_key_btn)
         gpg_action_row.addStretch()
-        gpg_v.addLayout(gpg_action_row)
+        gpg_keys_v.addLayout(gpg_action_row)
 
         gpg_status_row = QHBoxLayout()
         gpg_status_row.setContentsMargins(0, 0, 0, 0)
@@ -3322,7 +3434,18 @@ class SettingsTab(QWidget):
         self.gpg_status_label.setWordWrap(True)
         self.gpg_status_label.setMaximumHeight(40)
         gpg_status_row.addWidget(self.gpg_status_label, 1)
-        gpg_v.addLayout(gpg_status_row)
+        gpg_keys_v.addLayout(gpg_status_row)
+
+        gpg_filter_row = QHBoxLayout()
+        gpg_filter_row.setContentsMargins(0, 0, 0, 0)
+        gpg_filter_row.setSpacing(8)
+        gpg_filter_label = QLabel("Filter Keys")
+        gpg_filter_label.setFixedWidth(msg_label_width)
+        gpg_filter_row.addWidget(gpg_filter_label)
+        self.gpg_key_filter_edit = QLineEdit()
+        self.gpg_key_filter_edit.setPlaceholderText("Search trusted, fingerprint, callsign, email, or user ID")
+        gpg_filter_row.addWidget(self.gpg_key_filter_edit, 1)
+        gpg_keys_v.addLayout(gpg_filter_row)
 
         self.gpg_keys_table = QTableWidget(0, 3)
         self.gpg_keys_table.setHorizontalHeaderLabels(["Trusted", "Fingerprint", "User IDs"])
@@ -3335,13 +3458,24 @@ class SettingsTab(QWidget):
         gpg_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         gpg_hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         gpg_hdr.setSectionResizeMode(2, QHeaderView.Stretch)
-        self.gpg_keys_table.setMinimumHeight(64)
-        self.gpg_keys_table.setMaximumHeight(84)
-        self.gpg_keys_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        gpg_v.addWidget(self.gpg_keys_table)
+        self.gpg_keys_table.setMinimumHeight(280)
+        self.gpg_keys_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        gpg_keys_v.addWidget(self.gpg_keys_table, 1)
+        self.gpg_key_detail_label = QLabel("Select a key to view details.")
+        self.gpg_key_detail_label.setWordWrap(True)
+        self.gpg_key_detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.gpg_key_detail_label.setMaximumHeight(72)
+        gpg_keys_v.addWidget(self.gpg_key_detail_label)
+        gpg_v.addWidget(_make_message_auth_subsection("GPG Keys", gpg_keys_tab, checked=True))
+
+        signing_tab = QWidget()
+        signing_v = QVBoxLayout(signing_tab)
+        signing_v.setContentsMargins(8, 8, 8, 8)
+        signing_v.setSpacing(8)
+        signing_v.setAlignment(Qt.AlignTop)
 
         signing_title = QLabel("<b>Signing Identity</b>")
-        gpg_v.addWidget(signing_title)
+        signing_v.addWidget(signing_title)
         signing_row = QHBoxLayout()
         signing_row.setContentsMargins(0, 0, 0, 0)
         signing_row.setSpacing(8)
@@ -3353,7 +3487,7 @@ class SettingsTab(QWidget):
         signing_row.addWidget(self.gpg_signing_key_combo, 1)
         self.gpg_refresh_signing_keys_btn = QPushButton("Refresh Signing Keys")
         signing_row.addWidget(self.gpg_refresh_signing_keys_btn)
-        gpg_v.addLayout(signing_row)
+        signing_v.addLayout(signing_row)
         passphrase_row = QHBoxLayout()
         passphrase_row.setContentsMargins(0, 0, 0, 0)
         passphrase_row.setSpacing(8)
@@ -3368,7 +3502,7 @@ class SettingsTab(QWidget):
         self.gpg_clear_passphrase_btn = QPushButton("Clear Saved")
         passphrase_row.addWidget(self.gpg_check_save_passphrase_btn)
         passphrase_row.addWidget(self.gpg_clear_passphrase_btn)
-        gpg_v.addLayout(passphrase_row)
+        signing_v.addLayout(passphrase_row)
         passphrase_confirm_row = QHBoxLayout()
         passphrase_confirm_row.setContentsMargins(0, 0, 0, 0)
         passphrase_confirm_row.setSpacing(8)
@@ -3379,13 +3513,14 @@ class SettingsTab(QWidget):
         self.gpg_signing_passphrase_confirm_edit.setEchoMode(QLineEdit.Password)
         passphrase_confirm_row.addWidget(self.gpg_signing_passphrase_confirm_edit, 1)
         passphrase_confirm_row.addStretch()
-        gpg_v.addLayout(passphrase_confirm_row)
+        signing_v.addLayout(passphrase_confirm_row)
         self.gpg_signing_status_label = QLabel(
             "FIO stores the selected key fingerprint in settings. Saved passphrases use the OS credential store."
         )
         self.gpg_signing_status_label.setWordWrap(True)
         self.gpg_signing_status_label.setMaximumHeight(36)
-        gpg_v.addWidget(self.gpg_signing_status_label)
+        signing_v.addWidget(self.gpg_signing_status_label)
+        gpg_v.addWidget(_make_message_auth_subsection("Signing", signing_tab, checked=False))
 
         self.gpg_verify_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
         self.hash_verify_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
@@ -3404,6 +3539,8 @@ class SettingsTab(QWidget):
         self.gpg_sign_key_btn.clicked.connect(self._local_sign_selected_gpg_key)
         self.gpg_keys_table.itemChanged.connect(self._on_gpg_keys_table_item_changed)
         self.gpg_keys_table.itemSelectionChanged.connect(self._update_gpg_sign_button_state)
+        self.gpg_keys_table.itemSelectionChanged.connect(self._refresh_gpg_key_detail)
+        self.gpg_key_filter_edit.textChanged.connect(self._apply_gpg_key_filter)
         self.gpg_refresh_signing_keys_btn.clicked.connect(self._refresh_gpg_signing_keys)
         self.gpg_signing_key_combo.currentIndexChanged.connect(self._on_gpg_signing_key_changed)
         self.gpg_check_save_passphrase_btn.clicked.connect(self._check_and_save_gpg_signing_passphrase)
@@ -3411,7 +3548,7 @@ class SettingsTab(QWidget):
 
         gpg_container = QWidget()
         gpg_container.setLayout(gpg_v)
-        gpg_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        gpg_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         gpg_group = self._make_collapsible_group(
             "Message Auth (Key/Hash)",
             gpg_container,
@@ -3420,7 +3557,6 @@ class SettingsTab(QWidget):
             help_context_key="settings.message-auth",
         )
         self._register_collapsible_group(gpg_group, self._summary_gpg_settings)
-        self._section_meta[gpg_group]["fit_content_in_stack"] = True
         self._apply_collapsed_state(gpg_group, gpg_container, True)
 
         # VarAC Settings
@@ -3430,35 +3566,65 @@ class SettingsTab(QWidget):
         varac_v.setAlignment(Qt.AlignTop)
         varac_group.setLayout(varac_v)
 
-        def _make_varac_subgroup(title: str, description: str = "") -> QVBoxLayout:
-            group = QGroupBox(title)
-            group.setStyleSheet("QGroupBox::title { font-weight: 700; }")
-            layout = QVBoxLayout()
-            layout.setContentsMargins(8, 10, 8, 10)
+        def _make_varac_subgroup(title: str, description: str = "", *, checked: bool = True) -> QVBoxLayout:
+            section = QFrame()
+            section.setFrameShape(QFrame.StyledPanel)
+            section.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            section_layout = QVBoxLayout(section)
+            section_layout.setContentsMargins(8, 6, 8, 8)
+            section_layout.setSpacing(6)
+
+            header_btn = QToolButton()
+            header_btn.setCheckable(True)
+            header_btn.setChecked(checked)
+            header_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            header_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+            header_btn.setText(title)
+            header_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            header_btn.setMinimumHeight(26)
+            header_btn.setStyleSheet(self._section_header_style("neutral", resolve_theme(self.settings)))
+            section_layout.addWidget(header_btn)
+
+            content = QWidget()
+            content.setVisible(checked)
+            layout = QVBoxLayout(content)
+            layout.setContentsMargins(8, 8, 8, 8)
             layout.setSpacing(6)
             if description:
                 hint = QLabel(description)
                 hint.setWordWrap(True)
                 layout.addWidget(hint)
-            group.setLayout(layout)
-            varac_v.addWidget(group)
+
+            def _toggle(opened: bool, *, body: QWidget = content, button: QToolButton = header_btn) -> None:
+                body.setVisible(opened)
+                button.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
+                section.updateGeometry()
+                self._sync_current_section_scroll_size()
+
+            header_btn.toggled.connect(_toggle)
+            section_layout.addWidget(content)
+            varac_v.addWidget(section)
             return layout
 
         varac_paths_v = _make_varac_subgroup(
             "VarAC Paths and Launch",
             "Configure the VarAC application location, launch behavior, and the folders FreqInOut uses for file exchange.",
+            checked=True,
         )
         bbs_settings_v = _make_varac_subgroup(
             "BBS Management",
             "These settings control the live VarAC BBS folder, access policy, archive behavior, and allowed callsigns.",
+            checked=False,
         )
         vault_guard_v = _make_varac_subgroup(
             "BBS Vault Settings",
             "FIO can publish a simple menu of BBS locations into the live VarAC BBS folder.",
+            checked=False,
         )
         vguard_v = _make_varac_subgroup(
             "BBS VGuard Settings",
             "VGuard checks received VarAC files against your allowed BBS callers. It is separate from the BBS vault.",
+            checked=False,
         )
 
         varac_row = QHBoxLayout()
@@ -3475,6 +3641,23 @@ class SettingsTab(QWidget):
         varac_browse.setFixedWidth(70)
         varac_browse.clicked.connect(self._choose_varac_install_path)
         varac_row.addWidget(varac_browse)
+        varac_row.addWidget(
+            self._make_contextual_autofill_button(
+                "varac_core",
+                "Auto-Fill",
+                "varac",
+                [
+                    "varac_path",
+                    "varac_ini_path",
+                    "message_paths.varac",
+                    "varac_outbox_dir",
+                    "varac_bbs_dir",
+                    "varac_bbs_archive_dir",
+                ],
+                base_edit=self.varac_path_edit,
+                tooltip="Use the VarAC install folder to find VarAC INI and message/BBS folders.",
+            )
+        )
         varac_paths_v.addLayout(varac_row)
 
         varac_launch_row = QHBoxLayout()
@@ -3673,25 +3856,11 @@ class SettingsTab(QWidget):
         bbs_sync_status_row.addWidget(self.varac_bbs_sync_status_label, 1)
         bbs_settings_v.addLayout(bbs_sync_status_row)
 
-        varac_autofill_label = QLabel("Auto-Fill")
-        varac_autofill_label.hide()
-        varac_paths_v.addWidget(varac_autofill_label)
-        varac_autofill_row = QHBoxLayout()
-        varac_autofill_row.setContentsMargins(0, 0, 0, 0)
-        varac_autofill_row.setSpacing(8)
-        self.varac_autofill_btn = QPushButton("Attempt Auto-Fill")
-        self.varac_autofill_btn.clicked.connect(self._attempt_varac_autofill)
-        self.varac_autofill_btn.hide()
-        varac_autofill_row.addWidget(self.varac_autofill_btn)
-        varac_autofill_row.addStretch()
-        varac_paths_v.addLayout(varac_autofill_row)
-
         varac_autofill_status_row = QHBoxLayout()
         varac_autofill_status_row.setContentsMargins(0, 0, 0, 0)
         varac_autofill_status_row.setSpacing(8)
         self.varac_autofill_status_label = QLabel("No auto-fill attempt yet.")
         self.varac_autofill_status_label.setWordWrap(True)
-        self.varac_autofill_status_label.hide()
         self._autofill_status_labels["varac"] = self.varac_autofill_status_label
         varac_autofill_status_row.addWidget(self.varac_autofill_status_label, 1)
         varac_paths_v.addLayout(varac_autofill_status_row)
@@ -3959,12 +4128,10 @@ class SettingsTab(QWidget):
         vault_editor_grid.addWidget(self.varac_bbs_vault_helper_preview_label, 2, 1, 1, 3)
         vault_editor_grid.addWidget(QLabel("Location Folder"), 3, 0)
         self.varac_bbs_vault_source_dir_edit = QLineEdit()
-        self.varac_bbs_vault_source_dir_edit.setReadOnly(True)
         self.varac_bbs_vault_source_dir_edit.setPlaceholderText("Managed Root/locations/<Location Name> is the usual pattern")
         vault_editor_grid.addWidget(self.varac_bbs_vault_source_dir_edit, 3, 1, 1, 2)
         self.varac_bbs_vault_source_dir_browse_btn = QPushButton("Browse")
         self.varac_bbs_vault_source_dir_browse_btn.clicked.connect(self._choose_varac_bbs_vault_location_source)
-        self.varac_bbs_vault_source_dir_browse_btn.hide()
         vault_editor_grid.addWidget(self.varac_bbs_vault_source_dir_browse_btn, 3, 3)
         self.varac_bbs_vault_source_hint_label = QLabel(
             "Typical pattern in the VarAC BBS area: Managed Root / locations / <Location Name>. Save Location can create that folder."
@@ -4076,6 +4243,7 @@ class SettingsTab(QWidget):
             lambda _text: self._refresh_varac_bbs_vault_helper_preview()
         )
         self.varac_bbs_vault_source_dir_edit.textChanged.connect(self._mark_settings_dirty)
+        self.varac_bbs_vault_source_dir_edit.textEdited.connect(self._on_varac_bbs_vault_source_path_edited)
         self.varac_bbs_vault_source_dir_edit.textChanged.connect(
             lambda _text: self._refresh_varac_bbs_vault_source_hint()
         )
@@ -4217,6 +4385,7 @@ class SettingsTab(QWidget):
             custom_tools_container,
             checked=True,
             fit_content=True,
+            help_context_key="settings.custom-tools",
         )
         self._register_collapsible_group(custom_tools_group, self._summary_custom_tools)
         custom_tools_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -4329,7 +4498,13 @@ class SettingsTab(QWidget):
 
         sop_export_container = QWidget()
         sop_export_container.setLayout(sop_export_v)
-        sop_export_group = self._make_collapsible_group("SOP Export", sop_export_container, checked=True, fit_content=True)
+        sop_export_group = self._make_collapsible_group(
+            "SOP Export",
+            sop_export_container,
+            checked=True,
+            fit_content=True,
+            help_context_key="settings.sop-export",
+        )
         self._register_collapsible_group(sop_export_group, self._summary_sop_export)
         sop_export_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._add_settings_section(sop_export_group)
@@ -4376,7 +4551,7 @@ class SettingsTab(QWidget):
 
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.addWidget(header_btn)
+        header_row.addWidget(header_btn, 1)
         if help_context_key:
             header_row.addWidget(
                 self._make_context_help_button(
@@ -4384,7 +4559,6 @@ class SettingsTab(QWidget):
                     tooltip=f"Open help for {title}.",
                 )
             )
-        header_row.addStretch()
 
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 10, 10, 12)
@@ -4584,6 +4758,7 @@ class SettingsTab(QWidget):
         with perf_span("settings.section_switch", settings=self.settings, min_ms=10.0):
             self.sections_stack.setCurrentIndex(row)
             self._sync_current_section_scroll_size()
+            self._reset_sections_scroll_to_top()
             self._apply_sections_nav_style()
             try:
                 page = self.sections_stack.currentWidget()
@@ -4608,6 +4783,21 @@ class SettingsTab(QWidget):
                         QTimer.singleShot(0, lambda: self._refresh_gpg_keys_table(show_dialog_on_error=False))
             except Exception:
                 pass
+
+    def _reset_sections_scroll_to_top(self) -> None:
+        scroll = getattr(self, "sections_scroll", None)
+        if scroll is None:
+            return
+
+        def _reset() -> None:
+            try:
+                scroll.verticalScrollBar().setValue(0)
+                scroll.horizontalScrollBar().setValue(0)
+            except Exception:
+                pass
+
+        _reset()
+        QTimer.singleShot(0, _reset)
 
     def _sync_current_section_scroll_size(self) -> None:
         if not hasattr(self, "sections_stack"):
@@ -5033,6 +5223,101 @@ class SettingsTab(QWidget):
         except Exception:
             pass
 
+    def _make_contextual_autofill_button(
+        self,
+        rule_id: str,
+        text: str,
+        section: str,
+        keys: List[str],
+        *,
+        base_edit: Optional[QLineEdit] = None,
+        tooltip: str = "",
+    ) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setFixedWidth(96 if len(text) <= 9 else 112)
+        btn.setToolTip(tooltip or "Attempt to fill related settings.")
+        btn.clicked.connect(lambda _checked=False, s=section, k=tuple(keys): self._attempt_scoped_autofill(s, list(k)))
+        self._contextual_autofill_buttons[rule_id] = btn
+        self._contextual_autofill_rules[rule_id] = {
+            "section": section,
+            "keys": list(keys),
+            "base_edit": base_edit,
+            "tooltip": tooltip or "Attempt to fill related settings.",
+        }
+        if base_edit is not None:
+            base_edit.textChanged.connect(lambda _text: self._refresh_contextual_autofill_buttons())
+        QTimer.singleShot(0, lambda rid=rule_id: self._wire_contextual_autofill_rule(rid))
+        QTimer.singleShot(0, self._refresh_contextual_autofill_buttons)
+        return btn
+
+    def _wire_contextual_autofill_rule(self, rule_id: str) -> None:
+        rule = self._contextual_autofill_rules.get(rule_id, {})
+        edits: List[QLineEdit] = []
+        base_edit = rule.get("base_edit")
+        if isinstance(base_edit, QLineEdit):
+            edits.append(base_edit)
+        for key in [str(key) for key in (rule.get("keys") or [])]:
+            edit = self._autofill_target_edit(key)
+            if isinstance(edit, QLineEdit):
+                edits.append(edit)
+        prop_name = f"fio_autofill_wired_{rule_id}"
+        for edit in edits:
+            if bool(edit.property(prop_name)):
+                continue
+            edit.setProperty(prop_name, True)
+            edit.textChanged.connect(lambda _text: self._refresh_contextual_autofill_buttons())
+
+    def _detect_autofill_results(self, section: str) -> Dict[str, PathDetectionResult]:
+        normalized = str(section or "").strip().lower()
+        if normalized == "fast_light":
+            return self.software_path_detector.detect_fast_light()
+        if normalized == "js8":
+            return self.software_path_detector.detect_js8()
+        if normalized == "varac":
+            return self.software_path_detector.detect_varac()
+        return {}
+
+    def _attempt_scoped_autofill(self, section: str, keys: List[str]) -> None:
+        all_results = self._detect_autofill_results(section)
+        wanted = set(keys)
+        scoped = {key: result for key, result in all_results.items() if key in wanted}
+        self._apply_autofill_results(section, scoped)
+
+    def _refresh_contextual_autofill_buttons(self) -> None:
+        if not hasattr(self, "_contextual_autofill_buttons"):
+            return
+        theme = resolve_theme(self.settings)
+        for rule_id, btn in self._contextual_autofill_buttons.items():
+            rule = self._contextual_autofill_rules.get(rule_id, {})
+            base_edit = rule.get("base_edit")
+            keys = [str(key) for key in (rule.get("keys") or [])]
+            base_ready = True
+            if isinstance(base_edit, QLineEdit):
+                base_ready = bool(base_edit.text().strip())
+            target_edits: List[QLineEdit] = []
+            for key in keys:
+                edit = self._autofill_target_edit(key)
+                if edit is None:
+                    continue
+                if isinstance(base_edit, QLineEdit) and edit is base_edit:
+                    continue
+                target_edits.append(edit)
+            if not target_edits:
+                target_edits = [
+                    edit
+                    for key in keys
+                    for edit in [self._autofill_target_edit(key)]
+                    if isinstance(edit, QLineEdit)
+                ]
+            missing_target = any(not edit.text().strip() for edit in target_edits)
+            role = "eligible_warning" if base_ready and missing_target else "secondary"
+            btn.setStyleSheet(button_style(role, theme))
+            base_tip = str(rule.get("tooltip") or "Attempt to fill related settings.").strip()
+            if role == "eligible_warning":
+                btn.setToolTip(f"{base_tip}\nSome related fields are still blank.")
+            else:
+                btn.setToolTip(base_tip)
+
     def _attempt_fast_light_autofill(self) -> None:
         self._apply_autofill_results("fast_light", self.software_path_detector.detect_fast_light())
 
@@ -5083,6 +5368,7 @@ class SettingsTab(QWidget):
         self._set_autofill_status(section, " ".join(summary_parts), "\n".join(detail_lines))
         self._refresh_section_titles()
         self._refresh_section_nav_health()
+        self._refresh_contextual_autofill_buttons()
 
     def _set_autofill_status(self, section: str, text: str, tooltip: str) -> None:
         label = self._autofill_status_labels.get(section)
@@ -5609,6 +5895,7 @@ class SettingsTab(QWidget):
         self._settings_dirty = False
         self._set_save_button_state("success")
         self._refresh_section_titles()
+        self._refresh_contextual_autofill_buttons()
         emit_span(
             "settings.load_settings",
             (time.perf_counter() - _perf_t0) * 1000.0,
@@ -5633,7 +5920,11 @@ class SettingsTab(QWidget):
 
     def _save_settings_quiet(self):
         """Auto-save on application exit (no dialog)."""
-        self._save_settings(show_message=False)
+        self._shutdown_autosave = True
+        try:
+            self._save_settings(show_message=False)
+        finally:
+            self._shutdown_autosave = False
 
     def _resolved_fldigi_host_value(self, data: Optional[Dict[str, object]] = None) -> str:
         if isinstance(data, dict):
@@ -5660,6 +5951,9 @@ class SettingsTab(QWidget):
     def _save_settings(self, show_message: bool = True):
         _perf_t0 = time.perf_counter()
         if self._varac_bbs_vault_editor_has_pending_changes():
+            if not show_message:
+                log.info("SettingsTab: skipped pending Managed BBS location editor changes during quiet shutdown save.")
+                return
             if not self._save_varac_bbs_vault_location():
                 return
         data = self.settings.all()
@@ -5715,8 +6009,23 @@ class SettingsTab(QWidget):
         if any([data["use_js8call"], data["use_js8spotter"], data["use_commstat"]]) and js8_mode == "Prompt" and js8_prompt == "Select Interval":
             missing.append("JS8 Prompt Interval")
         if missing:
-            QMessageBox.warning(self, "Settings", f"Please select: {', '.join(missing)}.")
-            return
+            if not show_message:
+                if freq_mode == "Prompt" and freq_prompt == "Select Interval":
+                    freq_prompt = str(data.get("freq_prompt_interval", "Hourly") or "Hourly")
+                    if freq_prompt == "Select Interval":
+                        freq_prompt = "Hourly"
+                if fldigi_mode == "Prompt" and fldigi_prompt == "Select Interval":
+                    fldigi_prompt = str(data.get("fldigi_prompt_interval", "Hourly") or "Hourly")
+                    if fldigi_prompt == "Select Interval":
+                        fldigi_prompt = "Hourly"
+                if js8_mode == "Prompt" and js8_prompt == "Select Interval":
+                    js8_prompt = str(data.get("js8_prompt_interval", "Hourly") or "Hourly")
+                    if js8_prompt == "Select Interval":
+                        js8_prompt = "Hourly"
+                log.info("SettingsTab: defaulted missing prompt interval(s) during quiet shutdown save: %s", ", ".join(missing))
+            else:
+                QMessageBox.warning(self, "Settings", f"Please select: {', '.join(missing)}.")
+                return
         data["freq_enforcement_mode"] = freq_mode
         data["freq_prompt_interval"] = freq_prompt
         data["fldigi_enforcement_mode"] = fldigi_mode
@@ -7520,6 +7829,7 @@ class SettingsTab(QWidget):
                     btn.setStyleSheet(button_style("secondary", theme))
                 except Exception:
                     continue
+            self._refresh_contextual_autofill_buttons()
             self._update_enforcement_visibility()
             self._update_logging_actions_layout()
             self._apply_accessibility_width_guards()
@@ -8620,6 +8930,84 @@ class SettingsTab(QWidget):
             return
         self.gpg_status_label.setText(str(text or "").strip() or ("GPG status: error" if error else "GPG status: ready"))
 
+    def _gpg_key_row_filter_text(self, row: int) -> str:
+        if not hasattr(self, "gpg_keys_table") or row < 0:
+            return ""
+        fpr_item = self.gpg_keys_table.item(row, 1)
+        uid_item = self.gpg_keys_table.item(row, 2)
+        parts = [
+            fpr_item.text() if fpr_item else "",
+            uid_item.text() if uid_item else "",
+        ]
+        return " ".join(str(part or "").lower() for part in parts)
+
+    def _gpg_key_row_is_trusted(self, row: int) -> bool:
+        if not hasattr(self, "gpg_keys_table") or row < 0:
+            return False
+        trusted_item = self.gpg_keys_table.item(row, 0)
+        return bool(trusted_item and trusted_item.checkState() == Qt.Checked)
+
+    def _gpg_key_row_matches_filter(self, row: int, tokens: List[str]) -> bool:
+        row_text = self._gpg_key_row_filter_text(row)
+        trusted = self._gpg_key_row_is_trusted(row)
+        for token in tokens:
+            if token == "trusted":
+                if not trusted:
+                    return False
+                continue
+            if token in {"untrusted", "unchecked", "not-trusted"}:
+                if trusted:
+                    return False
+                continue
+            if token not in row_text:
+                return False
+        return True
+
+    def _apply_gpg_key_filter(self, *_args) -> None:
+        if not hasattr(self, "gpg_keys_table"):
+            return
+        query = ""
+        if hasattr(self, "gpg_key_filter_edit"):
+            query = self.gpg_key_filter_edit.text().strip().lower()
+        tokens = [token for token in query.split() if token]
+        first_visible = -1
+        current_row = self.gpg_keys_table.currentRow()
+        current_hidden = False
+        for row in range(self.gpg_keys_table.rowCount()):
+            visible = self._gpg_key_row_matches_filter(row, tokens)
+            self.gpg_keys_table.setRowHidden(row, not visible)
+            if visible and first_visible < 0:
+                first_visible = row
+            if row == current_row and not visible:
+                current_hidden = True
+        if current_hidden and first_visible >= 0:
+            self.gpg_keys_table.selectRow(first_visible)
+        elif first_visible < 0 and tokens:
+            self.gpg_keys_table.clearSelection()
+        self._update_gpg_sign_button_state()
+        self._refresh_gpg_key_detail()
+
+    def _refresh_gpg_key_detail(self) -> None:
+        if not hasattr(self, "gpg_key_detail_label") or not hasattr(self, "gpg_keys_table"):
+            return
+        row = self.gpg_keys_table.currentRow()
+        if row < 0 or self.gpg_keys_table.isRowHidden(row):
+            if not self.gpg_keys_table.rowCount():
+                text = "No GPG keys loaded."
+            elif any(not self.gpg_keys_table.isRowHidden(idx) for idx in range(self.gpg_keys_table.rowCount())):
+                text = "Select a key to view details."
+            else:
+                text = "No keys match the current filter."
+            self.gpg_key_detail_label.setText(text)
+            return
+        trusted_item = self.gpg_keys_table.item(row, 0)
+        fpr_item = self.gpg_keys_table.item(row, 1)
+        uid_item = self.gpg_keys_table.item(row, 2)
+        trust_text = "Trusted" if trusted_item and trusted_item.checkState() == Qt.Checked else "Not trusted"
+        fpr = fpr_item.text() if fpr_item else ""
+        uid_text = uid_item.text() if uid_item else "(no user id)"
+        self.gpg_key_detail_label.setText(f"{trust_text} | Fingerprint: {fpr} | User IDs: {uid_text}")
+
     def _refresh_gpg_keys_table(self, *, show_dialog_on_error: bool = True) -> None:
         if not hasattr(self, "gpg_keys_table"):
             return
@@ -8635,6 +9023,7 @@ class SettingsTab(QWidget):
                     self.gpg_keys_table.setRowCount(0)
                 finally:
                     self._gpg_keys_table_loading = False
+                self._refresh_gpg_key_detail()
                 self._update_gpg_sign_button_state()
                 if show_dialog_on_error:
                     QMessageBox.warning(
@@ -8679,6 +9068,7 @@ class SettingsTab(QWidget):
                     self.gpg_keys_table.setItem(row_idx, 2, uid_item)
             finally:
                 self._gpg_keys_table_loading = False
+            self._apply_gpg_key_filter()
             self._update_gpg_sign_button_state()
             self._refresh_gpg_signing_keys(show_dialog_on_error=False)
 
@@ -8867,6 +9257,8 @@ class SettingsTab(QWidget):
             self._gpg_trusted_fingerprints.discard(fpr)
         self._mark_settings_dirty()
         self._refresh_section_titles()
+        self._apply_gpg_key_filter()
+        self._refresh_gpg_key_detail()
 
     def _update_gpg_sign_button_state(self) -> None:
         if not hasattr(self, "gpg_sign_key_btn"):
@@ -8878,6 +9270,8 @@ class SettingsTab(QWidget):
             return ""
         row = self.gpg_keys_table.currentRow()
         if row < 0:
+            return ""
+        if self.gpg_keys_table.isRowHidden(row):
             return ""
         item = self.gpg_keys_table.item(row, 1)
         return normalize_fingerprint(item.text() if item else "")
@@ -9621,8 +10015,8 @@ class SettingsTab(QWidget):
         base = self.fldigi_checkin_dir_edit.text().strip()
         if not base:
             base = str(get_fldigi_checkin_dir())
-        main_path = str(Path(base) / "main_checkins.txt")
-        late_path = str(Path(base) / "new-late_checkins.txt")
+        main_path = str(Path(base) / "CheckIns_TFC.txt")
+        late_path = str(Path(base) / "CheckIns_LATE.txt")
         if hasattr(self, "fldigi_main_file_edit"):
             self.fldigi_main_file_edit.setText(main_path)
         if hasattr(self, "fldigi_late_file_edit"):
@@ -9634,10 +10028,10 @@ class SettingsTab(QWidget):
             base = str(get_fldigi_checkin_dir())
             self.fldigi_checkin_dir_edit.setText(base)
         folder = Path(base)
-        main_path = folder / "main_checkins.txt"
-        qru_path = folder / "qru_checkins.txt"
-        late_path = folder / "new-late_checkins.txt"
-        all_path = folder / "all_checkins.txt"
+        main_path = folder / "CheckIns_TFC.txt"
+        qru_path = folder / "CheckIns_QRU.txt"
+        late_path = folder / "CheckIns_LATE.txt"
+        all_path = folder / "CheckIns_ALL.txt"
         try:
             folder.mkdir(parents=True, exist_ok=True)
             if not main_path.exists():
