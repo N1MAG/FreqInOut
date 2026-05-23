@@ -12,8 +12,10 @@ from freqinout.core import db_initializer
 from freqinout.core.logger import log
 from freqinout.core import updater
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.startup_lock import try_acquire_single_instance_lock
 from freqinout.gui.dialog_notifications import install_auto_closing_information_dialogs
+from freqinout.gui.theme import apply_app_theme, resolve_theme, resolve_ui_text_scale
 
 
 def _set_windows_app_user_model_id() -> None:
@@ -40,6 +42,16 @@ def _load_app_icon() -> QIcon:
         except Exception:
             continue
     return QIcon()
+
+
+def _apply_startup_theme(app: QApplication) -> None:
+    try:
+        settings = SettingsManager()
+        apply_app_theme(app, resolve_theme(settings), ui_text_scale=resolve_ui_text_scale(settings))
+    except Exception as e:
+        log.debug("Startup theme/text-size application failed: %s", e)
+
+
 def main():
     parser = argparse.ArgumentParser(description="FreqInOut HF controller")
     parser.add_argument("--update", action="store_true", help="Check for and apply updates, then exit.")
@@ -57,6 +69,7 @@ def main():
 
     _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
+    _apply_startup_theme(app)
     app_icon = _load_app_icon()
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
