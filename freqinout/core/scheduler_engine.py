@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import psutil
 from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
@@ -209,6 +209,7 @@ class SchedulerEngine(QObject):
     varac_wait_cleared = Signal()
     coordination_conflict_detected = Signal(dict)
     coordination_conflict_cleared = Signal()
+    _scheduler_thread_call = Signal(object)
 
     def __init__(
         self,
@@ -223,6 +224,7 @@ class SchedulerEngine(QObject):
         super().__init__(parent)
         self._assert_scheduler_thread_contract()
         self.settings = SettingsManager()
+        self._scheduler_thread_call.connect(self._run_scheduler_thread_call)
         self.rig: Optional[RigControlClient] = rig
         self.js8: Optional[JS8ControlClient] = js8
         self.varac: Optional[object] = varac
@@ -345,6 +347,17 @@ class SchedulerEngine(QObject):
             except Exception as e:
                 log.error("SchedulerEngine: error probing rig control availability: %s", e)
         self._ensure_js8_offset_default()
+
+    def _run_scheduler_thread_call(self, callback: object) -> None:
+        if not callable(callback):
+            return
+        try:
+            callback()
+        except Exception as e:
+            log.debug("SchedulerEngine: queued scheduler-thread callback failed: %s", e)
+
+    def _queue_scheduler_thread_call(self, callback: Callable[[], None]) -> None:
+        self._scheduler_thread_call.emit(callback)
 
     def set_runtime_scheduler_enabled(self, enabled: Optional[bool]) -> None:
         self._runtime_scheduler_enabled_override = None if enabled is None else bool(enabled)
@@ -913,7 +926,7 @@ class SchedulerEngine(QObject):
                             ignore_suspend=True,
                         ),
                     )
-            QTimer.singleShot(0, _apply_result)
+            self._queue_scheduler_thread_call(_apply_result)
 
         self._control_future = self._control_executor.submit(_task)
         self._control_future_started_at = time.time()
