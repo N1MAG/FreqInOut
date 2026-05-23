@@ -246,20 +246,10 @@ sudo apt-get install libxcb-cursor0 libxcb-xinerama0
 - Installation: `docs/Installation.md`
 - Linux installer guide: `docs/FreqInOut-linux-installer.md`
 - Linux installer guide (HTML): `docs/FreqInOut-linux-installer.html`
-- Database tools: `docs/db-tools.md`
-- Tools and scripts guide: `docs/tools-and-scripts.md`
 - User guide: `docs/guide.html`
 - Changelog: `CHANGELOG.md`
 - Contributing: `CONTRIBUTING.md`
 - Code of Conduct: `CODE_OF_CONDUCT.md`
-- Release checklist: `docs/release-checklist.md`
-
-## Maintainer Tools
-
-- Preflight release checks: `python tools/release_preflight.py`
-- Linux live-station benchmark capture: `bash tools/linux_fio_bench_capture.sh --duration 300`
-- Linux benchmark summary (rerun on a capture folder): `python tools/linux_fio_bench_summary.py <capture_dir>`
-- Optional release helper (run from active venv): `python release_builder.py --build-exe`
 
 ## License
 
