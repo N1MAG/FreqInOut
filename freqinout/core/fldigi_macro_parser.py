@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import unquote
 
 _MACRO_HEADER_RE = re.compile(r"^\s*//\s*Macro\s*#\s*(\d+)\s*$")
 _MACRO_META_RE = re.compile(r"^\s*/\$\s*(\d+)\s*(.*)$")
@@ -12,6 +15,22 @@ _PATH_REF_RE = re.compile(
     r"(?<!\w)(?:[A-Za-z]:\\[^\s<>\"']+\.[A-Za-z0-9]{1,8}|/[^\s<>\"']+\.[A-Za-z0-9]{1,8})"
 )
 _TRAILING_REF_PUNCTUATION = ".,;:)]}>'\""
+_LOCAL_POSIX_ROOTS = {
+    "Applications",
+    "Library",
+    "Network",
+    "System",
+    "Users",
+    "Volumes",
+    "bin",
+    "etc",
+    "home",
+    "opt",
+    "private",
+    "tmp",
+    "usr",
+    "var",
+}
 
 
 @dataclass(slots=True)
@@ -59,7 +78,20 @@ def _normalize_path_value(value: str) -> str:
     if not text:
         return ""
     text = re.sub(r"(?:\\n|\\r)+$", "", text)
-    return text.rstrip(_TRAILING_REF_PUNCTUATION).strip()
+    text = unquote(text.rstrip(_TRAILING_REF_PUNCTUATION).strip())
+    if text.lower().startswith("file://"):
+        text = text[7:]
+        if re.match(r"^[A-Za-z]:[\\/]", text):
+            return text
+        if not text.startswith("/"):
+            text = "/" + text
+    if text.startswith("//") and not text.startswith("///"):
+        first_segment = text.lstrip("/").split("/", 1)[0]
+        if first_segment in _LOCAL_POSIX_ROOTS:
+            text = "/" + text.lstrip("/")
+    elif text.startswith("///"):
+        text = "/" + text.lstrip("/")
+    return text
 
 
 def _dedupe_preserve(values: List[str]) -> List[str]:
@@ -112,6 +144,114 @@ def _macro_identity_from_meta_line(header_index: int, meta_line: str) -> tuple[i
     if label:
         macro_label = label
     return macro_index, macro_id, macro_label
+
+
+def _macro_id_to_index(macro_id: object) -> Optional[int]:
+    text = str(macro_id or "").strip().casefold()
+    match = re.fullmatch(r"slot_(\d{1,2})", text)
+    if not match:
+        return None
+    try:
+        return max(0, int(match.group(1)) - 1)
+    except Exception:
+        return None
+
+
+def _path_compare_key(path: object) -> str:
+    return _normalize_path_value(str(path or "")).replace("\\", "/").rstrip("/").casefold()
+
+
+def rewrite_macro_file_reference_text(
+    text: str,
+    *,
+    macro_id: str,
+    old_path: str,
+    new_path: str,
+) -> tuple[str, int]:
+    """Rewrite one structured <FILE:...> reference inside one macro slot."""
+    target_index = _macro_id_to_index(macro_id)
+    old_key = _path_compare_key(old_path)
+    replacement = str(new_path or "").strip()
+    if target_index is None or not old_key or not replacement:
+        return text, 0
+
+    lines = (text or "").splitlines(keepends=True)
+    output: List[str] = []
+    replacements = 0
+    i = 0
+
+    while i < len(lines):
+        header_match = _MACRO_HEADER_RE.match(lines[i])
+        if not header_match:
+            output.append(lines[i])
+            i += 1
+            continue
+
+        start = i
+        header_index = int(header_match.group(1))
+        j = i + 1
+        while j < len(lines) and not _MACRO_HEADER_RE.match(lines[j]):
+            j += 1
+
+        block_lines = lines[start:j]
+        block_index = header_index
+        for candidate in block_lines[1:]:
+            meta_match = _MACRO_META_RE.match(candidate)
+            if meta_match:
+                try:
+                    block_index = int(meta_match.group(1))
+                except Exception:
+                    block_index = header_index
+                break
+            if candidate.strip():
+                break
+
+        block_text = "".join(block_lines)
+        if block_index != target_index:
+            output.append(block_text)
+            i = j
+            continue
+
+        def replace_file_ref(match: re.Match[str]) -> str:
+            nonlocal replacements
+            found_path = _normalize_path_value(match.group("path"))
+            if _path_compare_key(found_path) != old_key:
+                return match.group(0)
+            replacements += 1
+            return f"<FILE:{replacement}>"
+
+        output.append(_STRUCTURED_FILE_REF_RE.sub(replace_file_ref, block_text))
+        i = j
+
+    return "".join(output), replacements
+
+
+def rewrite_macro_profile_file_reference(
+    profile_path: str,
+    *,
+    macro_id: str,
+    old_path: str,
+    new_path: str,
+) -> Dict[str, object]:
+    path = Path(str(profile_path or "").strip()).expanduser()
+    if not path.exists():
+        return {"ok": False, "error": "profile_not_found", "replacements": 0, "backup_path": ""}
+
+    original = path.read_text(encoding="utf-8", errors="ignore")
+    updated, replacements = rewrite_macro_file_reference_text(
+        original,
+        macro_id=macro_id,
+        old_path=old_path,
+        new_path=new_path,
+    )
+    if replacements <= 0 or updated == original:
+        return {"ok": False, "error": "reference_not_found", "replacements": 0, "backup_path": ""}
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = path.with_name(f"{path.name}.fio-backup-{timestamp}")
+    shutil.copy2(path, backup_path)
+    path.write_text(updated, encoding="utf-8")
+    return {"ok": True, "error": "", "replacements": replacements, "backup_path": str(backup_path)}
 
 
 def parse_macro_profile_text(text: str, *, profile_path: str = "", profile_name: str = "") -> MacroProfileScan:

@@ -324,3 +324,5 @@ def test_messages_source_contains_compose_mode_and_varac_copy_controls() -> None
     assert "FLAmp signed file verified:" in text
     assert "FLAmp signing failed; no unsigned FLAmp fallback was staged." in text
     assert "FLAmp signing failed; staged unsigned file instead" not in text
+    assert "self._compose_software_status.program_is_running(app_name)" in text
+    assert "No second instance was opened." in text

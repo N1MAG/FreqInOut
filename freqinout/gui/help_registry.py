@@ -64,6 +64,12 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         title="Map Help",
         summary="Map layers, filters, traffic overlays, and station-visibility controls.",
     ),
+    "tab.station-health": HelpContext(
+        key="tab.station-health",
+        anchor="station-health",
+        title="Station Health Help",
+        summary="External station software responsiveness, backoff status, and what FIO is waiting on.",
+    ),
     "map.controls": HelpContext(
         key="map.controls",
         anchor="map-top-controls",
@@ -147,6 +153,18 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         anchor="settings-launch-control",
         title="Launch Control Help",
         summary="Launch order, startup behavior, and software enablement for supported tools.",
+    ),
+    "settings.custom-tools": HelpContext(
+        key="settings.custom-tools",
+        anchor="settings-custom-tools-details",
+        title="Custom Tools Help",
+        summary="Station-specific helper tools, launch commands, ordering, and Launch Control crossover.",
+    ),
+    "settings.sop-export": HelpContext(
+        key="settings.sop-export",
+        anchor="settings-sop-export-details",
+        title="SOP Export Help",
+        summary="Preamble and postamble text used to add local context to SOP PDF exports.",
     ),
     "settings.logging": HelpContext(
         key="settings.logging",

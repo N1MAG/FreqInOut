@@ -103,6 +103,7 @@ tests/*
 !tests/test_settings_section_health_phase1.py
 !tests/test_commstat_sitrep_slice1.py
 !tests/test_commstat_sitrep_remaining_slices.py
+!tests/test_fldigi_ncs_workflow_1_2_4.py
 !tests/test_multi_rig_wave1_slice_a.py
 !tests/test_multi_rig_wave1_slice_b.py
 !tests/test_multi_rig_wave1_slice_c.py

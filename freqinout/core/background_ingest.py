@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional
 
 from PySide6.QtCore import QObject, QTimer
 
+from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
 from freqinout.core.message_ingest import MessageIngestor
 from freqinout.core.peer_schedule_infer import infer_peer_schedules
@@ -26,6 +27,7 @@ class BackgroundIngestController(QObject):
     """
 
     _VARAC_VAULT_ENABLED_INTERVAL_MS = 5_000
+    _VARAC_VAULT_DEGRADED_INTERVAL_MS = 60_000
     _VARAC_VAULT_DISABLED_INTERVAL_MS = 30_000
 
     def __init__(self, settings: SettingsManager):
@@ -45,6 +47,8 @@ class BackgroundIngestController(QObject):
         self._realtime_executor: Optional[ThreadPoolExecutor] = None
         self._realtime_executor_lock = threading.RLock()
         self._realtime_job_futures: Dict[str, Future] = {}
+        self._job_skipped_counts: Dict[str, int] = {}
+        self._health = get_dependency_health_registry()
         self._running = False
 
     def start(self, *, initial_stagger: bool = True) -> None:
@@ -211,8 +215,12 @@ class BackgroundIngestController(QObject):
         if timer is None:
             return
         enabled = self._varac_vault_enabled()
+        health = self._health.snapshot(self._job_health_key("varac_vault"))
+        degraded = bool(health.get("degraded")) and float(health.get("cooldown_remaining_sec") or 0.0) > 0
         timer.setInterval(
-            self._VARAC_VAULT_ENABLED_INTERVAL_MS
+            self._VARAC_VAULT_DEGRADED_INTERVAL_MS
+            if enabled and degraded
+            else self._VARAC_VAULT_ENABLED_INTERVAL_MS
             if enabled
             else self._VARAC_VAULT_DISABLED_INTERVAL_MS
         )
@@ -229,9 +237,20 @@ class BackgroundIngestController(QObject):
     def _submit_job(self, job_name: str, job_func: Callable[[], None]) -> None:
         if not self._running:
             return
+        health_key = self._job_health_key(job_name)
+        may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
+        if not may_run:
+            self._job_skipped_counts[job_name] = self._job_skipped_counts.get(job_name, 0) + 1
+            log.debug(
+                "BackgroundIngest: backing off %s for %.1fs",
+                job_name,
+                float(health.get("cooldown_remaining_sec") or 0.0),
+            )
+            return
         with self._executor_lock:
             future = self._job_futures.get(job_name)
             if future is not None and not future.done():
+                self._job_skipped_counts[job_name] = self._job_skipped_counts.get(job_name, 0) + 1
                 log.debug("BackgroundIngest: job already running, skipping trigger: %s", job_name)
                 return
             executor = self._ensure_executor()
@@ -241,12 +260,30 @@ class BackgroundIngestController(QObject):
 
     def _run_job(self, job_name: str, job_func: Callable[[], None]) -> None:
         started_at = time.time()
+        failed = False
         try:
             job_func()
         except Exception as e:
+            failed = True
             log.debug("BackgroundIngest: %s worker failed: %s", job_name, e)
         finally:
             elapsed = time.time() - started_at
+            elapsed_ms = elapsed * 1000.0
+            health_key = self._job_health_key(job_name)
+            if failed:
+                self._health.record_failure(
+                    health_key,
+                    owner="BackgroundIngest",
+                    error="worker failed",
+                    duration_ms=elapsed_ms,
+                )
+            else:
+                self._health.record_success(
+                    health_key,
+                    owner="BackgroundIngest",
+                    duration_ms=elapsed_ms,
+                    slow_ms=5000.0,
+                )
             if elapsed >= 1.0:
                 log.debug("BackgroundIngest: %s completed in %.2fs", job_name, elapsed)
 
@@ -263,9 +300,22 @@ class BackgroundIngestController(QObject):
     def _submit_realtime_job(self, job_name: str, job_func: Callable[[], None]) -> None:
         if not self._running:
             return
+        health_key = self._job_health_key(job_name)
+        may_run, health = self._health.may_run(health_key, owner="BackgroundIngest")
+        if not may_run:
+            self._job_skipped_counts[job_name] = self._job_skipped_counts.get(job_name, 0) + 1
+            if job_name == "varac_vault":
+                self._update_varac_vault_timer_state()
+            log.debug(
+                "BackgroundIngest: backing off realtime %s for %.1fs",
+                job_name,
+                float(health.get("cooldown_remaining_sec") or 0.0),
+            )
+            return
         with self._realtime_executor_lock:
             future = self._realtime_job_futures.get(job_name)
             if future is not None and not future.done():
+                self._job_skipped_counts[job_name] = self._job_skipped_counts.get(job_name, 0) + 1
                 return
             executor = self._ensure_realtime_executor()
             future = executor.submit(self._run_job, job_name, job_func)
@@ -277,6 +327,8 @@ class BackgroundIngestController(QObject):
             current = self._realtime_job_futures.get(job_name)
             if current is future:
                 self._realtime_job_futures.pop(job_name, None)
+        if job_name == "varac_vault":
+            self._update_varac_vault_timer_state()
         try:
             future.result()
         except Exception as e:
@@ -329,6 +381,10 @@ class BackgroundIngestController(QObject):
         if not self._varac_vault_enabled():
             return
         self._submit_realtime_job("varac_vault", self._run_varac_vault_job)
+
+    @staticmethod
+    def _job_health_key(job_name: str) -> str:
+        return f"background-ingest:{str(job_name or '').strip().lower() or 'unknown'}"
 
     def _ingest_varac_guard(self) -> None:
         self._submit_job("varac_guard", self._run_varac_guard_job)

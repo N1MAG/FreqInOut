@@ -100,6 +100,7 @@ from freqinout.core.hash_tools import (
 )
 from freqinout.core.secret_store import load_gpg_signing_passphrase
 from freqinout.core.launch_orchestrator import LaunchOrchestrator
+from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.nbems_compose import (
     ComposeDestinationPlan,
     ComposeFieldDefinition,
@@ -2255,6 +2256,7 @@ class MessageViewerTab(QWidget):
         self._compose_last_stage_paths: List[Path] = []
         self._compose_last_source_dir: Optional[Path] = None
         self._compose_launch_orchestrator = LaunchOrchestrator(self.settings, self)
+        self._compose_software_status = SoftwareStatusService(self.settings)
         self._compose_timestamp_utc: datetime.datetime = datetime.datetime.now(datetime.timezone.utc)
         self._compose_status_role: str = "info"
         self._compose_radio_targets: List[ComposeRadioTarget] = []
@@ -5098,6 +5100,13 @@ class MessageViewerTab(QWidget):
 
     def _launch_compose_app(self, app_name: str) -> None:
         target = self._selected_compose_radio_target()
+        label = target.label if target is not None else "the selected radio"
+        try:
+            if self._compose_software_status.program_is_running(app_name):
+                self._set_compose_status(f"{app_name} is already running for {label}. No second instance was opened.", role="info")
+                return
+        except Exception:
+            pass
         profile = target.profile if target is not None else {}
         path_key = "flmsg_path" if app_name == "FLMsg" else "flamp_path" if app_name == "FLAmp" else ""
         configured_path = self._compose_profile_text(profile, path_key) if path_key else ""
@@ -5107,14 +5116,12 @@ class MessageViewerTab(QWidget):
                     subprocess.Popen(["open", configured_path])
                 else:
                     subprocess.Popen([configured_path])
-                label = target.label if target is not None else "selected radio"
                 self._set_compose_status(f"Launching {app_name} for {label}...", role="info")
                 return
             except Exception as e:
                 self._set_compose_status(f"Could not launch {app_name}: {e}", role="warning")
                 return
         if not self._compose_launch_orchestrator.is_configured(app_name):
-            label = target.label if target is not None else "the selected radio"
             self._set_compose_status(f"{app_name} is not configured for {label}.", role="warning")
             return
         started = self._compose_launch_orchestrator.start_manual_sequence(

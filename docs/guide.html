@@ -31,14 +31,14 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.2.3</p>
+  <p><strong>Current version</strong>: 1.2.4</p>
   <p>This guide is a complete reference for the current FreqInOut interface. It documents each main-menu area, tab, button, table, and nested action so both new and advanced operators can move quickly and confidently.</p>
   <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
-  <p><strong>How to use this guide</strong>: if you are new, read the sections in operational order instead of treating this as a pure control catalog. Start with <a href="#settings">Settings</a> and <a href="#multi-rig-configuration">Multi-Rig Configuration</a>, then the schedule tabs, then the live operating tabs such as <a href="#controlfreq">ControlFreq</a>, <a href="#messages">Messages</a>, and <a href="#map">Map</a>. If you are already operating, use the guide as a workflow map: when one tab seems confusing, the answer is often explained in a related tab or settings section.</p>
+  <p><strong>How to use this guide</strong>: if you are new, read the sections in operational order instead of treating this as a pure control catalog. Start with <a href="#settings">Settings</a>, then the schedule tabs, then the live operating tabs such as <a href="#controlfreq">ControlFreq</a>, <a href="#messages">Messages</a>, and <a href="#map">Map</a>. If you are already operating, use the guide as a workflow map: when one tab seems confusing, the answer is often explained in a related tab or settings section.</p>
   <ul class="section-list">
     <li><strong>How</strong>: each section explains what the controls do and what operator decision they support.</li>
     <li><strong>Why</strong>: each major tab, tab section, and nested workflow explains what operational problem it solves so you know when to use it.</li>
-    <li><strong>Where it interacts</strong>: FreqInOut is intentionally cross-connected. In multi-rig, many surfaces also depend on which device is currently the <code>Station Default</code> shell.</li>
+    <li><strong>Where it interacts</strong>: FreqInOut is intentionally cross-connected. Schedules affect ControlFreq and Map, operator rosters affect labeling and filtering, and Settings shapes nearly every workflow in the application.</li>
   </ul>
 
   <div class="callout">
@@ -46,61 +46,21 @@
   </div>
 
   <h2 id="quick-start">Quick Start</h2>
-  <p><strong>Goal</strong>: build a multi-radio station in the same order the application expects to reason about it. Multi-rig becomes much easier to use when you think in layers: operator identity first, then device definitions, then operating profiles, then assignments, then schedules, then operating tabs. Quick Start is intentionally explanatory so a new user understands not only what to click, but why the sequence matters.</p>
+  <p><strong>Goal</strong>: get one station configured in the same order FreqInOut expects to use it, so the scheduler, message workflows, map, and launch controls all agree with each other. Quick Start is intentionally more guided than brief. If a step feels unfamiliar, follow the link in that step before moving on.</p>
   <ol class="section-list">
-    <li><strong>Begin with <a href="#settings-operator-info">Operator Information</a></strong>: callsign, name, state, and grid still matter globally in multi-rig. These values drive filenames, compose defaults, operator matching, map context, and several station-level workflows even though device control is split across profiles.</li>
-    <li><strong>Read <a href="#multi-rig-configuration">Multi-Rig Configuration</a> before building anything else</strong>: this section explains the most important concept in the current design, which is that one device acts as the <code>Station Default</code> compatibility shell even while other devices may be active. If you understand that idea early, the rest of Settings becomes much more intuitive.</li>
-    <li><strong>Build <a href="#settings-device-profiles">Device Profiles</a> first</strong>: define each radio or observer endpoint, its control method, launch behavior, shared RF/PTT groups, and device-local VarAC data. Device Profiles are the source of truth for what each radio actually is.</li>
-    <li><strong>Build <a href="#settings-operating-profiles">Operating Profiles</a> next</strong>: decide how each device should behave when it becomes the Station Default shell. This is where you choose whether scheduler automation, Messages, Map, Launch Control, and other major surfaces are active for that operating style.</li>
-    <li><strong>Apply <a href="#settings-device-assignments">Device Assignments</a> and choose the <code>Station Default</code></strong>: assignments connect devices to operating intent. The Station Default selection determines which radio the legacy/core tabs are currently projecting. This is why a user can have several active radios but still see one primary shell in ControlFreq, Messages, and most operating tabs.</li>
-    <li><strong>Configure projected software sections only after the Station Default is understood</strong>: review <a href="#settings-js8call-details">JS8Call Settings Details</a>, <a href="#settings-fast-light-details">Fast Light Settings Details</a>, and <a href="#settings-varac-details">VarAC Settings Details</a> as the current projection of the Station Default device. These sections are still important, but in multi-rig they are easier to understand after the device/profile/assignment model is clear.</li>
-    <li><strong>Add optional station-wide helpers only after the primary device model works</strong>: use <a href="#settings-custom-tools-details">Custom Tools Details</a> for scripts and helper launchers that are not radio-specific integrations, then review <a href="#settings-launch-control">Launch Control</a> if you want FIO to launch software for the current shell.</li>
-    <li><strong>Build your operating plan</strong>: define your shared operating logic in <a href="#settings-hf-groups">HF Operating Groups</a>, then create schedules in <a href="#hf-daily">HF Daily</a> and <a href="#hf-nets">HF Nets</a>. In multi-rig, schedules only make good sense after the Station Default and assignment logic are settled.</li>
-    <li><strong>Use <a href="#station-overview">Station Overview</a> as your truth-check</strong>: confirm which device is the current <code>Station Default</code>, which profiles are active, whether temporary overrides are in effect, and whether RF/PTT or VarAC cluster warnings need attention. This tab is one of the most important “why does the app look this way right now?” tools in multi-rig.</li>
-    <li><strong>Validate the live operating picture in <a href="#freqplanner">FreqPlanner</a> and <a href="#controlfreq">ControlFreq</a></strong>: FreqPlanner helps verify plan logic; ControlFreq shows what the current Station Default shell believes it should do now. If either looks wrong, revisit Settings and Station Overview before assuming the scheduler is incorrect.</li>
-    <li><strong>Move into operating tabs only after the shell is trustworthy</strong>: use <a href="#messages">Messages</a>, <a href="#map">Map</a>, and <a href="#sop-builder">SOP Builder</a> once the device and assignment model is stable. These tabs are powerful, but they are much easier to interpret when you already know which radio/profile shell they are following.</li>
-    <li><strong>Use the NCS tabs only for active role-based operation</strong>: <a href="#ncs-fldigi-ssb">FLDigi / SSB</a>, <a href="#ncs-js8call">JS8Call</a>, and <a href="#ncs-vhf-uhf">VHF/UHF</a> assume you already have a coherent multi-rig station definition and now need operating support for a specific net-control role.</li>
+    <li><strong>Start in <a href="#settings">Settings</a> and complete <a href="#settings-operator-info">Operator Information</a></strong>: enter your callsign, name, state, and grid. This identity is reused throughout FreqInOut in filenames, message composition, operator matching, map context, and some automated defaults. If this section is wrong, later tabs can look confusing even when the software itself is working.</li>
+    <li><strong>Tell FreqInOut which software you actually use</strong>: in <a href="#settings">Settings</a>, choose the software stack that belongs to your station. This matters because setup review, status LEDs, launch behavior, and readiness guidance should reflect your real workflow, not every program FreqInOut is capable of supporting.</li>
+    <li><strong>Configure the core station behavior in <a href="#settings-freqinout-details">FreqInOut Settings Details</a></strong>: this is where you decide how strongly the scheduler should enforce frequency changes, how prompts should behave, and what operating assumptions FreqInOut should make while you are active. Read this section if you are unsure why ControlFreq seems advisory in one case and corrective in another.</li>
+    <li><strong>Configure the radio software sections that match your station</strong>: use <a href="#settings-js8call-details">JS8Call Settings Details</a>, <a href="#settings-fast-light-details">Fast Light Settings Details</a>, and <a href="#settings-varac-details">VarAC Settings Details</a> as needed. Do not rush this step. These sections do more than store paths; they determine how Messages, Map, scheduler busy-state protection, launch behavior, BBS handling, and other workflows interact with the outside radio software.</li>
+    <li><strong>Add optional helpers only after the core paths work</strong>: if you use station-specific scripts or support utilities, add them in <a href="#settings-custom-tools-details">Custom Tools Details</a>. If you plan to launch supported software from FIO, finish by reviewing <a href="#settings-launch-control">Launch Control</a>. This keeps the launch surface clean and prevents helper tools from being mistaken for primary integrations.</li>
+    <li><strong>Build your operating plan</strong>: define your baseline station logic in <a href="#settings-hf-groups">HF Operating Groups</a>, then build the actual schedule in <a href="#hf-daily">HF Daily</a> and <a href="#hf-nets">HF Nets</a>. Think of Settings as the station definition and the schedule tabs as the operating plan that station will follow.</li>
+    <li><strong>Save, then read the setup review before moving on</strong>: after clicking <em>Save Settings</em>, use the readiness guidance shown in Settings and <a href="#controlfreq">ControlFreq</a>. That review is meant to catch the most common causes of “the app looks wrong” before you begin operating.</li>
+    <li><strong>Validate the plan in <a href="#freqplanner">FreqPlanner</a> and <a href="#controlfreq">ControlFreq</a></strong>: FreqPlanner helps you inspect the schedule you built; ControlFreq shows what the live station thinks it should be doing now. If those two views disagree, the issue is usually in schedule design, group configuration, or software readiness rather than in ControlFreq itself.</li>
+    <li><strong>Move into operating tabs only after the station definition is stable</strong>: use <a href="#messages">Messages</a> for traffic review, compose, authentication, and BBS workflows; use <a href="#map">Map</a> for geographic context and SitRep visibility; and use <a href="#sop-builder">SOP Builder</a> for condition-driven action planning. These tabs become much easier to trust once the Settings and schedule foundation is correct.</li>
+    <li><strong>If you are performing live net work, use the dedicated NCS tabs for that role</strong>: <a href="#ncs-fldigi-ssb">FLDigi / SSB</a>, <a href="#ncs-js8call">JS8Call</a>, and <a href="#ncs-vhf-uhf">VHF/UHF</a> are not general setup tabs. They assume you already have a working station definition and now need role-specific operating support.</li>
   </ol>
   <div class="callout">
-    Recommended first-run mindset: in multi-rig, do not start with the schedule tabs. Start by teaching FreqInOut what radios exist, how they behave, and which one currently owns the compatibility shell. Once that foundation is correct, schedule behavior and operating tabs become much easier to trust.
-  </div>
-
-  <h2 id="multi-rig-configuration">Multi-Rig Configuration</h2>
-  <p><strong>Purpose</strong>: configure multiple device profiles while keeping the current <code>1.2.2</code> compatibility shell predictable.</p>
-  <p><strong>Compatibility model</strong>: one or more device profiles can be runtime-active at the same time, but exactly one non-observer device is the <code>Station Default</code>. Current tabs such as ControlFreq, FreqPlanner, Messages, Map, scheduler control, launch behavior, and the NCS tabs continue to follow that Station Default device unless this guide explicitly says otherwise.</p>
-  <p><strong>Observer / SDR note</strong>: <code>Observer / SDR</code> device profiles can be active and visible in <a href="#station-overview">Station Overview</a>, but they never become the <code>Station Default</code> shell and cannot be used as temporary-swap targets.</p>
-
-  <h3 id="multi-rig-setup-order">Recommended Setup Order</h3>
-  <ol class="section-list">
-    <li><strong>Build <a href="#settings-device-profiles">Device Profiles</a> first</strong>: create one row for each radio/control endpoint you want to manage. This is where you define control backend, deployment mode, backend endpoints, launch path, device-local VarAC paths, optional observer/SDR endpoint, and shared resource labels such as <code>PTT Group</code>, <code>Antenna Group</code>, <code>Front-End Group</code>, and <code>Amplifier Group</code>.</li>
-    <li><strong>Mark the runtime-active devices and choose one <code>Station Default</code></strong>: use <code>Activate</code> for devices that should participate in the running station, then use <code>Set Station Default</code> on the one device that should drive the current compatibility shell. Existing primary tabs continue to control that device.</li>
-    <li><strong>Create <a href="#settings-operating-profiles">Operating Profiles</a></strong>: define the shell policy you want a device to use when it becomes the Station Default. This is where you enable or suppress scheduler automation, Messages, Map, background ingest, Launch Control, and the net-control tabs. Preferred bands and <code>Allow profile swap coordination</code> also live here.</li>
-    <li><strong>Apply <a href="#settings-device-assignments">Device Assignments</a></strong>: assign the intended operating profile to each device. Use <code>Temporary Override</code> when you want a different shell policy now without rewriting the baseline assignment, and use <code>Restore Default</code> when that temporary policy is no longer needed.</li>
-    <li><strong>Use <code>Temporary Swap...</code> only when you need to move the Station Default runtime temporarily</strong>: the recommended mode is <code>Use target device profile</code>, which changes the Station Default device without rewriting that target device's current effective profile. <code>Carry current primary profile</code> is only available when the current primary operating profile explicitly allows it.</li>
-    <li><strong>Group shared transmit and RF resources before operating</strong>: matching <code>PTT Group</code> values create hard shared-PTT protection, while matching antenna/front-end/amplifier groups raise prompt-first RF conflict warnings before scheduler or QSY changes proceed.</li>
-    <li><strong>Configure device-local VarAC data in Device Profiles before you build clusters</strong>: per-device VarAC install path, DB path, INI path, and optional launch command stay with the device profile. Shared-cluster identity is configured later in <a href="#settings-varac-clusters">VarAC Clusters</a> and <a href="#settings-varac-memberships">VarAC Memberships</a>.</li>
-    <li><strong>Create VarAC clusters, then memberships, then select the gateway handler</strong>: create the cluster record first, assign enabled non-observer devices with unique instance numbers, and then return to the cluster editor to choose the gateway handler from the enabled members.</li>
-    <li><strong>Confirm the result in Station Overview before trusting live control</strong>: verify the Station Default badge, active device cards, shared PTT/RF warnings, observer follow guidance, VarAC cluster summaries, and any temporary-swap notices.</li>
-  </ol>
-
-  <h3 id="multi-rig-settings-reference">Settings Configuration Reference</h3>
-  <table>
-    <thead>
-      <tr><th>Settings Section</th><th>How Multi-Rig Uses It</th></tr>
-    </thead>
-    <tbody>
-      <tr><td><a href="#settings-device-profiles">Device Profiles</a></td><td>Stores one row per radio/control endpoint, including backend endpoints, deployment mode, observer/SDR data, shared PTT/RF group labels, launch settings, and device-local VarAC paths. This is the source of truth for per-device connectivity.</td></tr>
-      <tr><td><a href="#settings-operating-profiles">Operating Profiles</a></td><td>Defines the compatibility shell policy that follows a device when it is assigned to the Station Default runtime. Use this section to decide whether scheduler automation, Messages, Map, background ingest, Launch Control, and net-control tabs stay available.</td></tr>
-      <tr><td><a href="#settings-device-assignments">Device Assignments</a></td><td>Chooses which operating profile each device uses right now. This section also starts and restores temporary Station Default swaps.</td></tr>
-      <tr><td><a href="#settings-varac-clusters">VarAC Clusters</a></td><td>Defines the shared cluster identity, optional shared DB path, refresh cadence, optional PTT lock metadata, and gateway handler selection.</td></tr>
-      <tr><td><a href="#settings-varac-memberships">VarAC Memberships</a></td><td>Maps non-observer device profiles into VarAC clusters with unique instance numbers and enabled/disabled membership state.</td></tr>
-      <tr><td>FreqInOut Settings</td><td>Scheduler enablement, prompt behavior, diagnostics, and compatibility-shell controls still apply to the current Station Default runtime.</td></tr>
-      <tr><td>JS8Call Settings, Fast Light Settings, VarAC Settings</td><td>These legacy endpoint/path sections show the current Station Default projection. Use Device Profiles to define separate device endpoints, then verify the projected values here after choosing the Station Default.</td></tr>
-      <tr><td>Launch Control</td><td>Launch actions still follow the current Station Default shell. Operating-profile suppression or Minimal deployment mode can disable launch behavior even when paths exist.</td></tr>
-    </tbody>
-  </table>
-  <div class="callout">
-    Tip: multi-rig CRUD actions in <code>Device Profiles</code>, <code>Operating Profiles</code>, <code>Device Assignments</code>, <code>VarAC Clusters</code>, and <code>VarAC Memberships</code> save immediately through their dialogs and action buttons. <code>Save Settings</code> still matters for the legacy station-global sections and for refreshing the projected Station Default compatibility fields across tabs.
+    Recommended first-run mindset: finish the Settings sequence first, then the schedule sequence, then the operating tabs. If you jump straight into Messages, Map, or an NCS tab before identity, software, and schedule are coherent, FreqInOut may still be functioning correctly but the experience will feel harder to interpret.
   </div>
 
   <h2 id="main-menu">Main Menu and Left Rail</h2>
@@ -112,11 +72,11 @@
       <tr><th>Group</th><th>Buttons</th></tr>
     </thead>
     <tbody>
-      <tr><td>Core</td><td><code>ControlFreq</code>, <code>Station Overview</code>, <code>FreqPlanner</code>, <code>Messages</code>, <code>Map</code></td></tr>
+      <tr><td>Core</td><td><code>ControlFreq</code>, <code>FreqPlanner</code>, <code>Messages</code>, <code>Map</code></td></tr>
       <tr><td>NCS</td><td><code>FLDigi / SSB</code>, <code>JS8Call</code>, <code>VHF/UHF</code></td></tr>
       <tr><td>Schedules</td><td><code>HF Daily</code>, <code>HF Nets</code>, <code>HF Peers</code></td></tr>
       <tr><td>Operators</td><td><code>HF Callsigns</code>, <code>Local Callsigns</code></td></tr>
-      <tr><td>Other</td><td><code>SOP Builder</code>, <code>Settings</code>, <code>Help</code></td></tr>
+      <tr><td>Other</td><td><code>SOP Builder</code>, <code>Station Health</code>, <code>Settings</code>, <code>Help</code></td></tr>
     </tbody>
   </table>
 
@@ -129,20 +89,14 @@
     <tbody>
       <tr>
         <td><a href="#controlfreq">ControlFreq</a></td>
-        <td>This is the live "what now?" screen for the current Station Default.</td>
+        <td>This is the live "what now?" screen.</td>
         <td>Actions control refresh, filters, time display, focus mode, QSY, and temporary holds. Tables explain recent activity, schedule intersections, message status, upcoming schedule rows, and propagation.</td>
-        <td>Use this as the live dashboard. It does not create the plan; it tells you what the selected station shell, saved plan, current software status, and recent evidence mean right now.</td>
-      </tr>
-      <tr>
-        <td><a href="#station-overview">Station Overview</a></td>
-        <td>This shows which radio/device profile is active and whether the multi-rig model is healthy.</td>
-        <td>The overview summarizes device profiles, station-default state, runtime readiness, and profile relationships.</td>
-        <td>Use it when something looks like it belongs to the wrong radio. In multi-rig, many screens follow the Station Default projection.</td>
+        <td>Use this as the live dashboard. It does not create the plan; it tells you what the saved plan, current software status, and recent evidence mean right now.</td>
       </tr>
       <tr>
         <td><a href="#freqplanner">FreqPlanner</a></td>
         <td>This is the week-at-a-glance schedule sanity check.</td>
-        <td>The display toggles help you compare Local/UTC time and Band/Frequency views without editing the schedule.</td>
+        <td>The display toggles teach you to compare Local/UTC time and Band/Frequency views without editing the schedule.</td>
         <td>Use it after schedule or SOP edits to catch coverage gaps, crowded periods, or surprising active windows before operating.</td>
       </tr>
       <tr>
@@ -155,31 +109,37 @@
         <td><a href="#map">Map</a></td>
         <td>This is the visual operating picture.</td>
         <td>Top controls filter the view. The control drawer manages layers and propagation. Paths, Paths To, Peer Sched Now, and SitRep Status explain different kinds of evidence.</td>
-        <td>Use Map for decision support, not certainty. It combines schedules, activity, operator data, and SitRep/CommStat evidence for the current shell owner.</td>
+        <td>Use Map for decision support, not certainty. It combines schedules, activity, operator data, and SitRep/CommStat evidence into a visual operating picture.</td>
+      </tr>
+      <tr>
+        <td><a href="#station-health">Station Health</a></td>
+        <td>This shows whether the station software FIO depends on is answering normally.</td>
+        <td>The summary tells you if anything needs attention. The table shows the software or background job, what FIO is doing about it, when the issue started, and when it was last checked.</td>
+        <td>Use this when FIO seems to be waiting on JS8Call, FLDigi, FLRig, VarAC, CommStat, JS8Spotter, or background ingest. It separates real responsiveness trouble from normal radio traffic busy states.</td>
       </tr>
       <tr>
         <td><a href="#ncs-fldigi-ssb">FLDigi / SSB</a></td>
         <td>This is the live FLDigi or voice net-control desk.</td>
-        <td>Session and Macro Workspace defines the net and macro behavior. Local Roster tracks live check-ins. Compare/Reference/Review reconciles outside lists and uncertain log candidates. Macro Mapping teaches FIO what each macro means.</td>
-        <td>Use this once station setup and schedules are stable. It turns a live net into organized categories, generated macro files, and saved check-in history.</td>
+        <td>Session and Macro Workspace defines the net and macro behavior. Net Roster tracks live check-ins. Compare/Reference reconciles outside lists. Macro Mapping teaches FIO what each macro means.</td>
+        <td>Use this only once station setup and schedules are stable. It turns a live net into organized categories, generated macro files, and saved check-in history.</td>
       </tr>
       <tr>
         <td><a href="#ncs-js8call">JS8Call</a></td>
         <td>This is the JS8 net-control desk.</td>
         <td>Session controls define role, group target, and expected query. Check-ins show who has participated. ACK and Query actions send group or callsign-specific responses.</td>
-        <td>Use this to decide who has checked in, who has been acknowledged, and who still needs a requested response.</td>
+        <td>Use this as the operator-driven JS8 NCS workspace. It helps you decide who has checked in and who still needs acknowledgement or a requested form.</td>
       </tr>
       <tr>
         <td><a href="#ncs-vhf-uhf">VHF/UHF</a></td>
         <td>This is the local net log and status board.</td>
         <td>Session Workflow starts or joins the local net. Lookup and filters manage entries. The selected-entry editor records status and persistent notes.</td>
-        <td>Use this for local operator status that may never arrive through JS8, FLDigi, or VarAC.</td>
+        <td>Use this for local operator status that may never arrive through JS8, FLDigi, or VarAC. It is a structured local log rather than a radio-software parser.</td>
       </tr>
       <tr>
         <td><a href="#hf-daily">HF Daily</a></td>
         <td>This is the normal HF schedule.</td>
         <td>Active Schedule is the live baseline. Schedule Resources is a candidate library. SOP Schedule Status shows how active SOP windows modify or conflict with the baseline.</td>
-        <td>Rows saved here drive scheduler behavior, ControlFreq, FreqPlanner, and Map schedule context.</td>
+        <td>Rows saved here drive scheduler behavior, ControlFreq, FreqPlanner, and Map schedule context. Treat it as the station's ordinary plan.</td>
       </tr>
       <tr>
         <td><a href="#hf-nets">HF Nets</a></td>
@@ -197,7 +157,7 @@
         <td><a href="#hf-callsigns">HF Callsigns</a></td>
         <td>This is the HF operator roster.</td>
         <td>Search and filters find operators. Manage Operators edits roster records. Import/Export moves roster data. SitRep actions set latest operator status.</td>
-        <td>This roster gives names, state, grid, groups, trust, and history to many other tabs.</td>
+        <td>This roster gives names, state, grid, groups, trust, and history to many other tabs. Good roster data makes Messages and Map much easier to read.</td>
       </tr>
       <tr>
         <td><a href="#local-callsigns">Local Callsigns</a></td>
@@ -213,9 +173,9 @@
       </tr>
       <tr>
         <td><a href="#settings">Settings</a></td>
-        <td>This tells FIO who you are, which radios exist, and what station software they use.</td>
-        <td>Operator, FreqInOut, device profiles, operating profiles, assignments, JS8Call, Fast Light, groups, VarAC, Message Auth, Custom Tools, Launch Control, and Diagnostics sections each define one part of station behavior.</td>
-        <td>Most other tabs are downstream of Settings. In multi-rig, Settings is also where the compatibility view for the current Station Default is projected.</td>
+        <td>This tells FIO who you are and what station software you use.</td>
+        <td>Operator, FreqInOut, JS8Call, Fast Light, groups, VarAC, Message Auth, Custom Tools, Launch Control, and Diagnostics sections each define one part of station behavior.</td>
+        <td>Most other tabs are downstream of Settings. When a feature is missing, disabled, or confusing, confirm the related Settings section first.</td>
       </tr>
       <tr>
         <td><a href="#help">Help</a></td>
@@ -234,10 +194,8 @@
       <tr><th>Section or Sub-Tab</th><th>Plain Explanation</th></tr>
     </thead>
     <tbody>
-      <tr><td><a href="#multi-rig-setup-order">Multi-Rig Setup Order</a></td><td>This is the safest order for defining radios, operating profiles, assignments, and the Station Default shell.</td></tr>
-      <tr><td><a href="#multi-rig-settings-reference">Multi-Rig Settings Reference</a></td><td>This explains which Settings sections are global and which ones are projected from the selected device profile.</td></tr>
       <tr><td><a href="#controlfreq-actions">ControlFreq Actions</a></td><td>Use these when you need to refresh the live picture, narrow it down, move frequency, or pause schedule control temporarily.</td></tr>
-      <tr><td><a href="#controlfreq-tables">ControlFreq Tables</a></td><td>These tables explain why ControlFreq thinks the current shell is on schedule, busy, changing soon, or seeing activity.</td></tr>
+      <tr><td><a href="#controlfreq-tables">ControlFreq Tables</a></td><td>These tables explain why ControlFreq thinks the station is on schedule, busy, changing soon, or seeing activity.</td></tr>
       <tr><td><a href="#messages-header-actions">Messages Header Actions</a></td><td>These are inbox-wide tools: refresh, export, delete selected rows, mark traffic read, and hide noisy message types.</td></tr>
       <tr><td><a href="#messages-pending">Pending JS8 MSGs</a></td><td>This is the to-do list for JS8 messages that have been announced but still need retrieval or acknowledgement.</td></tr>
       <tr><td><a href="#messages-main-table">Messages Table</a></td><td>This is the main traffic list. Use the filters first, then open, flag, archive, delete, or publish the rows that matter.</td></tr>
@@ -246,9 +204,10 @@
       <tr><td><a href="#map-top-controls">Top Map Controls</a></td><td>These quickly answer “which operators, paths, bands, regions, or recent traffic do I want to see?”</td></tr>
       <tr><td><a href="#map-drawer">Map Control Drawer</a></td><td>This is for deeper map display choices such as layers, city density, grids, and propagation overlays.</td></tr>
       <tr><td><a href="#map-paths">Paths, Paths To, and Peer Sched Now</a></td><td>Use these when you are thinking about reachability, relay possibilities, or who is likely scheduled now.</td></tr>
+      <tr><td><a href="#station-health">Station Health</a></td><td>Use this when you need to know whether another station program is slow, unreachable, or being temporarily backed off so FIO stays responsive.</td></tr>
       <tr><td><a href="#ncs-fldigi-session-workspace">FLDigi Session and Macro Workspace</a></td><td>This tells the tab what net you are running and how your FLDigi macros should support that net.</td></tr>
-      <tr><td><a href="#ncs-fldigi-roster">FLDigi Local Roster and Categories</a></td><td>This is the live check-in list, organized into practical buckets like traffic, no traffic, late, and seen locally.</td></tr>
-      <tr><td><a href="#ncs-fldigi-compare-workspace">FLDigi Compare, Reference, and Review</a></td><td>Use this to compare your roster with another list and to approve uncertain log-assisted check-ins before they become real roster entries.</td></tr>
+      <tr><td><a href="#ncs-fldigi-roster">FLDigi Net Roster and Categories</a></td><td>This is the live check-in list, organized into practical buckets like traffic, no traffic, and late arrivals.</td></tr>
+      <tr><td><a href="#ncs-fldigi-compare-workspace">FLDigi Compare and Reference</a></td><td>Use this to compare your roster with another list and merge missing entries only when that matches the operator's net picture.</td></tr>
       <tr><td><a href="#ncs-fldigi-macro-mapping">FLDigi Macro Mapping Dialog</a></td><td>This is where you teach FIO what your FLDigi macro buttons mean so generated check-in files and labels line up with your workflow.</td></tr>
       <tr><td><a href="#ncs-fldigi-lifecycle">FLDigi Net Lifecycle</a></td><td>Start, save, and end the net here so the working files and final archive match what actually happened.</td></tr>
       <tr><td><a href="#ncs-js8-session-controls">JS8 Session, Group, and Expect-Query Controls</a></td><td>This sets the role, group target, refresh timing, and expected follow-up form for JS8 net work.</td></tr>
@@ -278,11 +237,8 @@
       <tr><td><a href="#settings-sections">Settings Sections</a></td><td>This is the index of station setup areas. Start here when a feature is missing or disabled.</td></tr>
       <tr><td><a href="#settings-operator-info">Operator Information</a></td><td>This is your station identity. It affects filenames, messages, map position, and operator matching.</td></tr>
       <tr><td><a href="#settings-freqinout-details">FreqInOut Settings Details</a></td><td>These choices control the app's look, scheduler behavior, and how strongly FIO should correct off-schedule conditions.</td></tr>
-      <tr><td><a href="#settings-js8call-details">JS8Call Settings Details</a></td><td>These tell FIO where JS8Call is and where its traffic files live for the current Station Default projection.</td></tr>
-      <tr><td><a href="#settings-fast-light-details">Fast Light Settings Details</a></td><td>These connect FIO to FLRig, FLDigi, FLMsg, and FLAmp paths, ports, logs, and message folders for the current projection.</td></tr>
-      <tr><td><a href="#settings-device-profiles-details">Device Profiles and Station Default</a></td><td>This is where each radio/software bundle is defined and where one bundle is chosen as the active compatibility shell.</td></tr>
-      <tr><td><a href="#settings-operating-profiles-details">Operating Profiles and Assignments</a></td><td>This groups devices into operating roles so multi-rig behavior can be managed intentionally instead of as loose paths.</td></tr>
-      <tr><td><a href="#settings-varac-clusters-details">VarAC Clusters and Memberships</a></td><td>This explains how multiple VarAC-capable device profiles share cluster identity, instance numbers, and enabled membership.</td></tr>
+      <tr><td><a href="#settings-js8call-details">JS8Call Settings Details</a></td><td>These tell FIO where JS8Call is and where its traffic files live.</td></tr>
+      <tr><td><a href="#settings-fast-light-details">Fast Light Settings Details</a></td><td>These connect FIO to FLRig, FLDigi, FLMsg, and FLAmp paths, ports, logs, and message folders.</td></tr>
       <tr><td><a href="#settings-hf-groups-details">HF Operating Groups Details</a></td><td>These define the named HF groups, expected modes, bands, frequencies, offsets, and optional condition-level behavior.</td></tr>
       <tr><td><a href="#settings-local-comms-details">Local Comms Groups Details</a></td><td>These define local communication resources that support VHF/UHF or nearby coordination work.</td></tr>
       <tr><td><a href="#settings-varac-details">VarAC Settings Details</a></td><td>These connect FIO to VarAC files, BBS behavior, Managed BBS Services, FLAMP relay, and VGuard protection.</td></tr>
@@ -322,11 +278,11 @@
 
   <h2 id="controlfreq">ControlFreq</h2>
   <p><strong>Purpose</strong>: primary operating dashboard for station state, schedule actions, and near-term decision support.</p>
-  <p><strong>Why you use it</strong>: ControlFreq is the best first tab to watch during live operation. It answers the practical questions “What should the current Station Default radio be doing now?”, “What is changing next?”, “Am I on schedule?”, and “Is software activity making an immediate QSY unsafe?”</p>
+  <p><strong>Why you use it</strong>: ControlFreq is the best first tab to watch during live operation. It answers the practical questions “What should I be doing now?”, “What is changing next?”, “Am I on schedule?”, and “Is some software activity making an immediate QSY unsafe?”</p>
   <ul class="section-list">
-    <li><strong>What belongs here</strong>: short-horizon operating decisions, temporary holds, schedule confidence, and quick status review for the current shell.</li>
-    <li><strong>What does not belong here</strong>: building schedules, maintaining rosters, or deep device configuration. Use the schedule tabs, Operators tabs, Station Overview, and Settings for that work.</li>
-    <li><strong>Cross-tab interaction</strong>: ControlFreq reflects results from Settings, Device Profiles, Device Assignments, HF Daily, HF Nets, SOP Builder, Messages, and the software status providers.</li>
+    <li><strong>What belongs here</strong>: short-horizon operating decisions, temporary holds, schedule confidence, and quick status review.</li>
+    <li><strong>What does not belong here</strong>: building schedules, maintaining rosters, or deep software configuration. Use the schedule tabs, Operators tabs, and Settings for that work.</li>
+    <li><strong>Cross-tab interaction</strong>: ControlFreq reflects results from Settings, HF Daily, HF Nets, SOP Builder, Messages, and the software status providers. If this tab looks wrong, the cause is often upstream in one of those areas.</li>
   </ul>
 
   <h3 id="controlfreq-actions">Actions</h3>
@@ -372,38 +328,13 @@
       <tr><td>Propagation Forecast</td><td><code>Zone</code>, <code>Morning</code>, <code>Day</code>, <code>Night</code></td></tr>
     </tbody>
   </table>
-  <p><strong>Multi-rig scope</strong>: ControlFreq remains bound to the current <code>Station Default</code> device profile. Targeted HF and Net rows only participate here when they match that Station Default device or its effective operating profile, and shared PTT / RF-conflict warnings are resolved from this shell before scheduler or <code>QSY + Hold</code> actions proceed.</p>
-
-  <h2 id="station-overview">Station Overview</h2>
-  <p><strong>Purpose</strong>: read-only multi-rig dashboard for all runtime-active device profiles.</p>
-  <p><strong>Why you use it</strong>: Station Overview is the fastest way to understand which radios are active, which one currently owns the compatibility shell, and whether shared-resource or cluster warnings need attention before you trust the rest of the UI.</p>
-  <table>
-    <thead>
-      <tr><th>Area</th><th>What It Shows</th></tr>
-    </thead>
-    <tbody>
-      <tr><td>Summary line</td><td>Active device count, current <code>Station Default</code>, warning count, observer profile count, VarAC cluster-member count, and temporary-swap status.</td></tr>
-      <tr><td>Alerts line</td><td>Combined warning text for shared PTT blocks, RF conflict warnings, missing VarAC cluster requirements, or other runtime attention items.</td></tr>
-      <tr><td>Device card header</td><td>Device name, <code>Observer / SDR</code> badge when applicable, <code>Station Default</code> badge for the current compatibility owner, and the overall device state badge.</td></tr>
-      <tr><td>Device card metadata</td><td>Control endpoint summary, deployment mode, PTT group, assigned operating profile, assignment state, current tuning/band, and shared RF resource groups.</td></tr>
-      <tr><td>Policy line</td><td>Whether the assigned operating profile leaves the shell in <code>Full shell</code> mode or suppresses items such as scheduler automation, Messages, Map, ingest, Launch Control, or net-control tabs.</td></tr>
-      <tr><td>Runtime details</td><td>Status summary, shared PTT ownership/block state, observer follow guidance, VarAC cluster summary, temporary-swap summary, and any warning text.</td></tr>
-      <tr><td>Service LEDs</td><td>Compact per-service state for backend/API readiness and cluster visibility.</td></tr>
-    </tbody>
-  </table>
-  <ul class="section-list">
-    <li><strong>Read-only dashboard</strong>: Station Overview is an operating picture, not a replacement for <a href="#settings">Settings</a>. Use Settings to activate devices, change Station Default, edit assignments, or modify clusters.</li>
-    <li><strong>Station Default reminder</strong>: a device can be active without owning the current compatibility shell. The <code>Station Default</code> badge is the one that matters for current scheduler control, Messages, Map, NCS, and launch behavior.</li>
-    <li><strong>Observer guidance</strong>: observer/SDR cards can show follow guidance and endpoint status, but they do not take over the main shell.</li>
-    <li><strong>Swap visibility</strong>: when a temporary swap is active, the summary line and the affected cards show it clearly so you can restore the normal primary device before ending the operating event.</li>
-  </ul>
 
   <h2 id="freqplanner">FreqPlanner</h2>
   <p><strong>Purpose</strong>: read-only visual planner for HF, Net, and SOP-effective schedule coverage.</p>
-  <p><strong>Why you use it</strong>: FreqPlanner is the easiest place to sanity-check the overall plan at a glance once you know which device owns the current Station Default shell.</p>
+  <p><strong>Why you use it</strong>: FreqPlanner is the easiest place to sanity-check the whole week at a glance. Use it after schedule edits, after SOP changes, or whenever you want to see coverage and congestion without reading every row in the schedule editors.</p>
   <ul class="section-list">
-    <li><strong>Best use</strong>: validate structure after editing HF Daily, HF Nets, or SOP Builder and after changing assignments that affect which device is Station Default.</li>
-    <li><strong>Important limit</strong>: this tab is intentionally read-only. If something is wrong here, fix it in the schedule, SOP, or Settings surfaces that feed it.</li>
+    <li><strong>Best use</strong>: validate structure after editing <a href="#hf-daily">HF Daily</a>, <a href="#hf-nets">HF Nets</a>, or <a href="#sop-builder">SOP Builder</a>.</li>
+    <li><strong>Important limit</strong>: this tab is intentionally read-only. If something is wrong here, fix it in the schedule or SOP tabs rather than expecting FreqPlanner to be the editing surface.</li>
   </ul>
   <table>
     <thead>
@@ -416,11 +347,10 @@
     </tbody>
   </table>
   <p><strong>Planner columns</strong>: <code>UTC Hour</code>, <code>Local Time (TZ)</code>, <code>Sunday</code> ... <code>Saturday</code>.</p>
-  <p><strong>Multi-rig scope</strong>: FreqPlanner still renders the schedule that is eligible for the current <code>Station Default</code> runtime. Rows targeted to a different device profile or operating profile stay out of the planner until that target becomes the current Station Default match. This tab can also be hidden by the Station Default operating profile or by Minimal deployment mode.</p>
 
   <h2 id="messages">Messages</h2>
   <p><strong>Purpose</strong>: unified traffic review, filtering, read state, and file-level actions.</p>
-  <p><strong>Why you use it</strong>: Messages is where FreqInOut turns many traffic sources into one operational inbox. In multi-rig, it still follows the Station Default shell, so this tab answers “What traffic belongs to the radio bundle I am currently operating?”</p>
+  <p><strong>Why you use it</strong>: Messages is where FreqInOut turns many traffic sources into one operational inbox. It is the right place to answer “What came in?”, “What still needs attention?”, “What should be staged for sending?”, and “What did this report look like in its original form?”</p>
   <ul class="section-list">
     <li><strong>Traffic model</strong>: some rows are files, some are software-originated message artifacts, and some are reporting artifacts that also influence Map and operator-history views.</li>
     <li><strong>Cross-tab interaction</strong>: if a report changes Map pins or SitRep rollups, the original artifact is usually visible here. If a BBS or compose workflow seems confusing, pair this section with <a href="#settings-varac-details">VarAC Settings Details</a>.</li>
@@ -468,7 +398,6 @@
   </ul>
   <p><code>Open Image</code> appears when selected content is an image-capable file and opens it externally.</p>
   <p><strong>Transport forms</strong>: received <code>.b2s</code> and <code>.k2s</code> transport files use the same form-friendly decode path when the payload can be interpreted as a supported transport form.</p>
-  <p><strong>Multi-rig scope</strong>: Messages remains a Station Default shell view in this branch. JS8, VarAC, and file-backed refreshes follow the current Station Default projection, and the tab itself can be hidden by the Station Default operating profile or Minimal deployment mode.</p>
   <ol class="section-list">
     <li><strong>1) Use <code>Hide Types</code> to hide noisy traffic from the default view</strong>: check one or more message types you do not want to see every time you open Messages.</li>
     <li><strong>2) Leave <code>MSG Type...</code> unselected for the normal default view</strong>: hidden message types stay out of the list while all other filters continue to work normally.</li>
@@ -492,7 +421,7 @@
   <ul class="section-list">
     <li><strong>BBS concept</strong>: in VarAC, the <code>BBS Directory</code> is the live folder remote stations can browse and pull from. It is not the same as <code>Incoming Files</code>, which is where files addressed to you arrive, and it is not the same as <code>Outbox</code>, which is where files you want to send directly are staged.</li>
     <li><strong>Ordinary workflow</strong>: use <code>+BBS</code> or a compose-stage copy choice when you want a file offered through the VarAC BBS. Use <code>Outbox</code> when you want VarAC to send a file directly to a station instead of publishing it for later pickup.</li>
-    <li><strong>Manage VarAC BBS &amp; Vault</strong>: opens <code>Settings &gt; VarAC Settings</code>, which is the authoritative place to configure BBS folders, access controls, Managed BBS Vault, and INI sync for the current Station Default radio context.</li>
+    <li><strong>Manage VarAC BBS &amp; Vault</strong>: opens <code>Settings &gt; VarAC Settings</code>, which is the authoritative place to configure BBS folders, access controls, Managed BBS Vault, and INI sync.</li>
     <li><strong>Managed BBS Services concept</strong>: FreqInOut keeps the live BBS path stable for VarAC while publishing a virtual menu and selected file set into that folder. Think of it as changing what the BBS is offering without changing the BBS directory path itself.</li>
     <li><strong>Virtual folders</strong>: menu names such as <code>DOCDROP</code>, <code>INTEL</code>, <code>MISC</code>, and <code>ROOT</code> are virtual aliases, not real nested folders inside the live BBS directory.</li>
     <li><strong>When to use Managed BBS Services</strong>: use the normal BBS workflow when one shared BBS folder is enough. Use Managed BBS Services when you need controlled alternate file sets, menu-style browsing, callsign-aware visibility, or FLAMP relay block support.</li>
@@ -506,10 +435,10 @@
 
   <h2 id="map">Map</h2>
   <p><strong>Purpose</strong>: map-based station, path, and propagation context.</p>
-  <p><strong>Why you use it</strong>: Map is a decision-support surface, not just a picture. It helps you compare who is active, which regions are reporting, who may be reachable now, and where a relay path may be plausible based on recent evidence and schedules for the current shell owner.</p>
+  <p><strong>Why you use it</strong>: Map is a decision-support surface, not just a picture. It helps you compare who is active, which regions are reporting, who may be reachable now, and where a relay path may be plausible based on recent evidence and schedules.</p>
   <ul class="section-list">
     <li><strong>Best use</strong>: pair Map with ControlFreq when deciding where to spend time next, and pair it with Messages when you want geographic context for a report or operator.</li>
-    <li><strong>Cross-tab interaction</strong>: Map consumes operator data, schedule data, JS8/VarAC/CommStat evidence, and SitRep summaries. In multi-rig, it also depends on which radio currently owns the Station Default shell.</li>
+    <li><strong>Cross-tab interaction</strong>: Map consumes operator data, schedule data, JS8/VarAC/CommStat evidence, and SitRep summaries. If labels, groups, or status colors look wrong here, the source is usually in Operators, Settings, or Messages rather than the map itself.</li>
     <li><strong>Operational caution</strong>: path overlays and peer schedule overlays are aids, not guarantees. Treat them as clues that help you make a better radio decision, not as proof that a path is available right now.</li>
   </ul>
 
@@ -551,81 +480,166 @@
     <li><strong>Bottom legend</strong>: the link-SNR and sitrep legend is docked across the bottom of the map. Optional <code>Peer Sched Now</code> and <code>Best Band Now</code> rows appear only when those overlays are active.</li>
     <li><strong>SitRep summary</strong>: in sitrep-focused views, a bottom-left state summary panel can show per-state counts and receipt mix without requiring raw table scans on every refresh.</li>
   </ul>
-  <p><strong>Multi-rig scope</strong>: Map remains tied to the current <code>Station Default</code> shell. It does not select the active device for you, and it can be hidden by the Station Default operating profile or Minimal deployment mode. Use <a href="#station-overview">Station Overview</a> to confirm which device currently owns the shell before you trust map context during a swap.</p>
+
+  <h2 id="station-health">Station Health</h2>
+  <p><strong>Purpose</strong>: Station Health shows whether the outside station programs FIO depends on are answering normally.</p>
+  <p><strong>Why you use it</strong>: if a tab feels delayed, a status indicator says a program is unreachable, or the left menu highlights Station Health, open this tab to see what FIO is waiting on. It is meant to answer “is another station program slow or unavailable?” without turning that into a technical log.</p>
+  <ul class="section-list">
+    <li><strong>What belongs here</strong>: JS8Call API, FLRig, FLDigi, rigctld, observer endpoints, background ingest, and other companion software that FIO checks while building the operating picture.</li>
+    <li><strong>What does not belong here</strong>: normal radio traffic busy states. A program can be busy sending or receiving and still be healthy. Station Health is about whether the program responds when FIO asks for status.</li>
+    <li><strong>Left menu alert</strong>: when FIO already knows about a responsiveness issue, the Station Health button shows an alert count. That alert is based on known health state; it does not create extra checks just to light the button.</li>
+  </ul>
+  <table>
+    <thead>
+      <tr><th>Column</th><th>How to Read It</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Scope</code></td><td>Shows whether the row belongs to the whole station or a specific radio profile in multi-rig.</td></tr>
+      <tr><td><code>Dependency</code></td><td>The outside program or background job involved. Local API endpoints such as <code>127.0.0.1:2442</code> mean “this computer, this port.”</td></tr>
+      <tr><td><code>State</code></td><td><code>OK</code> means FIO has no current concern. <code>Warning</code> means the last check had trouble. <code>Backoff</code> means FIO is deliberately waiting before trying again so the UI stays responsive.</td></tr>
+      <tr><td><code>What FIO Is Doing</code></td><td>Plain-language explanation of whether FIO is operating normally, waiting for the next normal check, or backing off temporarily.</td></tr>
+      <tr><td><code>Last Issue</code></td><td>The most recent short reason, such as unreachable or worker failed.</td></tr>
+      <tr><td><code>Issue Since</code></td><td>How long the current issue streak has been present in this FIO session.</td></tr>
+      <tr><td><code>Cooldown</code></td><td>How long FIO will wait before another normal attempt when repeated failures or slow responses have been detected.</td></tr>
+      <tr><td><code>Last Check</code></td><td>How recently FIO learned this state.</td></tr>
+      <tr><td><code>Last Duration</code></td><td>How long the last known check took. A blank value usually means the row is a grouped summary rather than one exact check.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Operator note</strong>: Station Health is a current-condition view, not a long event history. It keeps the most useful recent state visible and preserves the start time for the current issue so you can tell whether a problem is new or has been present for a while.</p>
 
   <h2 id="ncs-fldigi-ssb">NCS: FLDigi / SSB</h2>
-  <p><strong>Purpose</strong>: FLDigi/SSB net-control workflow for building and maintaining a working net roster from manual operator entry, FLDigi macro discipline, and optional log-assisted intake.</p>
-  <p><strong>Why you use it</strong>: this tab is for a live net where you need a disciplined local roster, structured category buckets such as <code>TFC</code> and <code>QRU</code>, and a controlled way to compare outside check-in lists against your local picture.</p>
+  <p><strong>Purpose</strong>: this is the live net-control desk for an FLDigi-supported or voice-supported directed net. It helps NCS and ANCS build one clean roster, keep track of who is handling each station, copy the right lines at the right time, and feed FLDigi macros from files that FIO keeps current.</p>
+  <p><strong>Why you use it</strong>: during a busy net, the hard part is not just writing callsigns down. You need to know who has checked in, who still needs an ACK, who has traffic, who is being handled by NCS versus ANCS, and what text should be pasted or transmitted next. This tab turns that working picture into both clipboard text and macro-readable files.</p>
   <ul class="section-list">
-    <li><strong>Best use</strong>: use this during an active FLDigi or voice-supported net when one operator is managing the roster and wants help keeping categories, late check-ins, and references organized.</li>
-    <li><strong>What it is not for</strong>: this is not a general-purpose message browser and not a replacement for the schedule tabs. Build the net plan elsewhere, then use this tab to run the live session.</li>
-    <li><strong>Cross-tab interaction</strong>: this tab depends on Settings for macro-profile paths and optional log-assisted behavior, on Operators data for lookup and enrichment, on the shared QSY/hold helpers used elsewhere in FIO, and in multi-rig it follows the current <code>Station Default</code> shell.</li>
+    <li><strong>Best use</strong>: use this when an operator is actively running or assisting a directed net and needs a roster that stays organized while stations are being acknowledged, sorted, called for traffic, and reported.</li>
+    <li><strong>What it is not for</strong>: it is not a message inbox and it is not the place to design the schedule. Set up the station, groups, and net schedule elsewhere; use this tab once you are ready to run the live session.</li>
+    <li><strong>The key idea</strong>: the roster is the source of truth. If you correct a callsign, change a category, mark a station ACKed, or change who is directing the station, FIO rewrites the generated files from the current roster instead of leaving old lines behind.</li>
   </ul>
   <table>
     <thead>
       <tr><th>Area</th><th>Actions</th></tr>
     </thead>
     <tbody>
-      <tr><td>Session bar</td><td><code>Role</code> (NCS/ANCS/Joiner), Net Name selector, next scheduled net indicator, QSY dropdown, <code>Hold</code>, <code>QSY + Hold</code>, <code>Ad Hoc Net</code>.</td></tr>
-      <tr><td>Macro workspace</td><td><code>Macro Set</code>, <code>Refresh</code>, <code>Mappings...</code>, <code>Details</code>, macro-status chips, macro-file picker, and log-assisted intake controls.</td></tr>
-      <tr><td>Operator lookup</td><td>Lookup field plus <code>Add to TFC</code>, <code>Add to QRU</code>, <code>Add to LATE</code>, and <code>Add to Seen Locally</code>.</td></tr>
-      <tr><td>Local roster</td><td>Roster table with category/source tracking and copy actions such as <code>Copy TFC</code>, <code>Copy QRU</code>, <code>Copy LATE</code>, <code>Copy Seen Locally</code>, and <code>Copy All Check-ins</code>.</td></tr>
-      <tr><td>Compare / Reference workspace</td><td>Expandable tabbed workspace with <code>Reference</code>, <code>Compare Results</code>, and <code>Review</code>.</td></tr>
-      <tr><td>Net lifecycle</td><td><code>Start Net</code>, <code>Save Check-ins</code>, and <code>End Net</code>.</td></tr>
+      <tr><td>Session</td><td>Choose your role, choose or name the net, start/end the session, and use QSY/hold tools when the net needs a frequency move.</td></tr>
+      <tr><td>Macro support</td><td>Collapse or expand macro setup, select a macro profile when needed, review generated file paths, and map macro files so FLDigi can read live roster outputs.</td></tr>
+      <tr><td>Operator entry</td><td>Look up or type a station, then add it to <code>TFC</code>, <code>QRU</code>, or <code>LATE</code>.</td></tr>
+      <tr><td>Roster</td><td>Track callsign, name, state, traffic, category, who is directing the station, who has ACKed it, traffic progress, and local notes.</td></tr>
+      <tr><td>Live actions</td><td>Use <code>Action For</code>, <code>ACK Needed</code>, <code>Next TFC</code>, and copy buttons to send or paste the right subset of the roster.</td></tr>
+      <tr><td>Compare / Reference</td><td>Open this only when you need to compare your roster with another list and bring the lists back into agreement.</td></tr>
     </tbody>
   </table>
-  <p><strong>Operator lookup concept</strong>: the lookup field is not just a search bar. It is a staging point for inserting known operators into the live local roster with the right category, which is why the add buttons matter operationally.</p>
+  <p><strong>Plain-language workflow</strong>: start the net, add stations as they check in, mark who is directing and who has ACKed each station, then use the live action buttons when you need to paste an ACK list, call the next traffic station, or copy a category list. Operators who prefer FLDigi macros can point those macros at the generated files instead of copy/pasting manually.</p>
 
   <h3 id="ncs-fldigi-session-workspace">Session and Macro Workspace</h3>
   <ul class="section-list">
-    <li><strong>Role</strong>: choose <code>NCS</code>, <code>ANCS</code>, or <code>Joiner</code> based on your current duty in the net. This affects the workspace defaults and how some compare/reference helpers are framed.</li>
-    <li><strong>Net Name</strong>: identifies the current net session and helps the tab keep your local activity organized.</li>
-    <li><strong>QSY tools</strong>: the shared QSY/hold controls let you move the station and temporarily suspend scheduler control in the same way other operating tabs do.</li>
-    <li><strong>Macro Set</strong>: choose the FLDigi macro profile you want this session to follow. This matters because the macro map helps FIO understand which files and labels belong to which operational function.</li>
-    <li><strong>Mappings...</strong>: opens the macro discovery and mapping dialog, which is where you review detected macros, enable or disable rows, and give operational meaning to each mapped item.</li>
-    <li><strong>Details</strong>: expands the setup panel so you can inspect the macro file path, browse for another profile, clear a legacy path, see the generated macro check-in file locations, see active mapped macro source files, and manage log-assisted intake settings. When expanded, the button is highlighted and the tab can scroll so the details remain readable instead of being squeezed into a small area.</li>
-    <li><strong>Macro check-in file locations</strong>: the Details panel shows the live files FIO writes for FLDigi macros: <code>main_checkins.txt</code> for <code>TFC</code>, <code>qru_checkins.txt</code> for <code>QRU</code>, <code>new-late_checkins.txt</code> for <code>LATE</code>, and <code>all_checkins.txt</code> for the consolidated roster. It also shows the archive directory under the configured check-in path.</li>
-    <li><strong>Status chips</strong>: the chips summarize the current macro-mode state, whether log intake is active, whether uncertain decodes are being held for review, and whether transmitted text is being used as decode context only.</li>
-    <li><strong>Log-assisted intake</strong>: <code>Auto-add from FLDigi log</code> lets FIO watch likely check-ins from the FLDigi log; <code>Hold uncertain decodes for review</code> keeps questionable candidates out of the roster until checked; <code>Use sent TX as context</code> allows sent text to improve interpretation without turning TX lines into check-ins themselves.</li>
-    <li><strong>Multi-rig note</strong>: in multi-rig, this NCS workflow follows the current <code>Station Default</code> device shell, so verify that shell in <a href="#station-overview">Station Overview</a> if the tab seems to be looking at the wrong radio context.</li>
+    <li><strong>Role</strong>: choose <code>NCS</code>, <code>ANCS</code>, or <code>Joiner</code>. NCS and ANCS are the active net-control roles. Joiner is for an operator who is following along and may want to record both leadership callsigns without acting as either one.</li>
+    <li><strong>Net Name</strong>: names the session so saved and archived files make sense later. Scheduled nets that are active now or coming up soon appear here, so joining a few minutes late does not force you into an ad hoc name.</li>
+    <li><strong>Start Net</strong>: turns on the live working state. FIO clears the generated macro files, clears the previous working roster, resets traffic progress, and starts writing new roster changes to the live files. Adding check-ins is intentionally blocked until the net is started, so old draft entries do not accidentally become part of a new session.</li>
+    <li><strong>Set NCS / Set ANCS</strong>: after the net starts, use these to place the leadership station in the roster. FIO looks up the callsign when it can and fills known name/state details. Leadership rows are pinned at the top.</li>
+    <li><strong>Ad Hoc Net</strong>: creates a timestamped net name and starts a session when the net is not on the schedule or you need a quick practice/test session.</li>
+    <li><strong>QSY + Hold</strong>: changes frequency using the same station-control helpers used elsewhere in FIO and temporarily holds scheduler control for the chosen time. Use this when the net intentionally moves and you do not want scheduler corrections fighting the move.</li>
+    <li><strong>Macro header</strong>: this collapsible row tells you whether FIO understands your selected FLDigi macro set. <code>Macro: None</code> means no profile is selected. <code>Macro: Needs Mapping</code> means a profile exists but FIO does not yet know which macro files mean ACKs, traffic, QRU, and so on. <code>Macro: Mapped</code> means at least one usable mapping is ready.</li>
+    <li><strong>Macro setup controls</strong>: when no macro is selected or a macro needs mapping, the expanded panel shows the selector, refresh, mappings, and browse controls. When the macro is already mapped, FIO hides those setup controls because most operators use the same macro set repeatedly and need the roster space more than setup buttons.</li>
+    <li><strong>Macro files in normal language</strong>: FIO writes text files that FLDigi macros can read. If your macro contains a file-read command for one of these files, the macro transmits the current roster text without you copying it manually. If you do not use file-reading macros, the same buttons still copy the text to your clipboard.</li>
   </ul>
 
-  <h3 id="ncs-fldigi-roster">Local Roster and Categories</h3>
+  <h3 id="ncs-fldigi-roster">Net Roster and Categories</h3>
   <ul class="section-list">
-    <li><strong>Category model</strong>: <code>TFC</code>, <code>QRU</code>, <code>LATE</code>, and <code>Seen Locally</code> are operational buckets that help you track who has traffic, who has none, who arrived late, and who has been observed locally but not necessarily merged into the main roster picture.</li>
-    <li><strong>Roster table columns</strong>: <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Traffic</code>, <code>Category</code>, and <code>Source</code>. This is the primary operator-facing working surface for the current net.</li>
-    <li><strong>Copy actions</strong>: the copy buttons produce roster slices or a full consolidated list you can paste into FLDigi, a message, a document, or another operator workflow without manually rebuilding the list. <code>Copy All Check-ins</code> uses the same consolidated roster format as the generated all-check-ins macro file.</li>
-    <li><strong>Category changes</strong>: the roster is the source of truth. If an entry starts as <code>TFC</code> and you later change it to <code>QRU</code>, FIO rewrites the generated check-in files so the entry moves into the QRU file and is removed from the TFC file. This avoids stale copies from earlier classifications.</li>
-    <li><strong>Source awareness</strong>: the roster keeps track of where an entry came from so you can distinguish direct operator lookup insertion, reference imports, review merges, or other local workflow paths.</li>
+    <li><strong>Operator Lookup/Add</strong>: type a callsign, name, and state, or start typing a known operator. FIO can complete known operators from the operator database. Then choose <code>Add to TFC</code>, <code>Add to QRU</code>, or <code>Add to LATE</code>. The add buttons place the station directly into the roster category you intend.</li>
+    <li><strong>TFC</strong>: use this for stations with traffic. The traffic text can hold a short note such as <code>1RR</code> or <code>1RR QST</code>. These rows are eligible for <code>Next TFC</code>.</li>
+    <li><strong>QRU</strong>: use this for stations that checked in with no traffic. QRU rows are still part of the net roster and can still be copied or saved.</li>
+    <li><strong>LATE</strong>: use this for late check-ins or end-of-net additions. It keeps those entries visible as a separate category while still preserving them in the final roster.</li>
+    <li><strong>Roster columns</strong>: <code>Directed By</code>, <code>Acked By</code>, <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Traffic</code>, <code>TFC Status</code>, <code>Category</code>, and <code>Notes</code>. Think of this as the working net sheet, not a static export.</li>
+    <li><strong>Directed By</strong>: this answers "who is managing this station right now?" If NCS heard and is handling the station, mark NCS. If ANCS is handling it, mark ANCS. If both are intentionally tracking or handling the station, mark both. When you click the partner chip on a row you just added, FIO switches that row to partner-only first; this makes it easy to record "my partner is directing this station" without accidentally making every correction shared.</li>
+    <li><strong>Acked By</strong>: this answers "who has already acknowledged this station?" This is separate from Directed By because a station may be directed by one role but later acknowledged by the other. When a leadership row is created for NCS or ANCS, FIO marks both Directed and ACKed by default because setting those roles implies the leaders can hear and acknowledge each other.</li>
+    <li><strong>Category changes</strong>: if you change a station from QRU to TFC, or from TFC to LATE, FIO rewrites the generated files from the current roster. That means the old category file does not keep a stale copy of the station.</li>
+    <li><strong>Sorting and duplicates</strong>: NCS and ANCS stay at the top. Other stations sort by callsign. If the same callsign is entered more than once, FIO merges it into one corrected row instead of cluttering the table with duplicates.</li>
+    <li><strong>Notes</strong>: notes are for local operator awareness, such as a welfare concern, relay note, or follow-up reminder. Notes are not included in copied radio text or live macro files, so private context is not transmitted by accident. End Net saves noted rows to a separate notes archive.</li>
+    <li><strong>Counters</strong>: the total, TFC, QRU, and LATE counters near the add buttons give you a quick roster picture without taking your eyes far from the entry workflow.</li>
   </ul>
 
-  <h3 id="ncs-fldigi-compare-workspace">Compare, Reference, and Review Workspace</h3>
-  <p>The expandable <code>Compare / Reference</code> area is a tabbed workspace for reconciling your local roster with outside lists and lower-confidence intake.</p>
+  <h3 id="ncs-fldigi-live-actions">Live Actions, Copying, and Macro Files</h3>
+  <p>This is the unusual part of the tab, and it is also the most powerful. The live action buttons do two related things: they copy text to your clipboard, and they keep macro-readable files current for operators who transmit with FLDigi macros. You can use either method. You do not have to use both.</p>
   <ul class="section-list">
-    <li><strong>Reference tab</strong>: a place to paste or maintain an outside NCS list. From here you can compare that reference against your local roster and add missing entries when appropriate.</li>
-    <li><strong>Compare Results tab</strong>: shows what is missing between the compared lists, lets you copy those differences, and supports merging missing entries into the local roster when that is operationally appropriate.</li>
-    <li><strong>Review tab</strong>: holds lower-confidence log-assisted candidates so they can be inspected before they become real roster entries. This is a protection feature, not just a convenience surface.</li>
-    <li><strong>Show/Hide</strong>: the compare workspace is collapsible so you can keep the net roster dominant when you are not actively reconciling lists.</li>
+    <li><strong>Action For</strong>: choose the roster scope before clicking a live action. <code>NCS</code> means stations directed by NCS, including shared rows. <code>ANCS</code> means stations directed by ANCS, including shared rows. <code>Shared</code> means only rows directed by both roles. <code>All</code> means the full roster, ignoring Directed By.</li>
+    <li><strong>ACK Needed</strong>: this copies the stations that still need an acknowledgement for the selected role. If <code>Action For</code> is NCS, FIO finds stations directed by NCS that NCS has not ACKed yet, copies those station lines, and then marks them ACKed by NCS. ANCS works the same way for ANCS. If <code>Shared</code> or <code>All</code> is selected, FIO copies a reference list but does not change ACK chips because no single role is acting.</li>
+    <li><strong>Next TFC</strong>: this is for the traffic-handling part of the net. With NCS or ANCS selected, each click picks the next directed TFC station for that role and copies the callsign twice, for example <code>W1ABC W1ABC</code>. The repeated callsign matches common radio practice for clarity. The row changes from <code>Pending</code> to <code>Now</code>, and previously selected rows become <code>Called</code>. When no more traffic stations are available, FIO clears the current next-traffic file so a macro does not replay an old callsign.</li>
+    <li><strong>TFC / QRU / LATE</strong>: these copy the selected category using the current <code>Action For</code> scope. For example, with ANCS selected, <code>QRU</code> copies QRU stations directed by ANCS. With All selected, it copies the whole QRU category.</li>
+    <li><strong>All Check-ins</strong>: this copies every station in the selected scope. Use <code>Action For: All</code> when you want the full roster, or NCS/ANCS when you only want the stations managed by that role.</li>
+    <li><strong>Action status</strong>: after a live action, FIO shows a short message near the buttons and then clears it. Routine live-net actions do not interrupt you with an OK popup.</li>
+    <li><strong>Save Check-ins</strong>: generated macro files update automatically as the roster changes. Save Check-ins is a manual checkpoint and final-log helper; it is not required before using ACK Needed, Next TFC, or the category files. FIO highlights it when roster edits have not yet been saved.</li>
+  </ul>
+  <p><strong>How the copied station lines look</strong>: copied lists use a simple station-line format such as <code>N1MAG / Bill / CO / NCS 1RR</code>. The role appears only for NCS/ANCS leadership rows, and traffic appears at the end. Notes are left out.</p>
+  <p><strong>How macro files fit in</strong>: FLDigi can read text from a file when a macro is written to do so. FIO keeps those files updated from the roster, so a macro can transmit the current ACK list, current TFC list, or next traffic callsign without you editing a text file during the net.</p>
+  <p><strong>Copy combinations in plain language</strong>: choose <code>Action For</code> first, then choose the action. The scope decides which rows are eligible; the action decides what kind of text is copied.</p>
+  <table>
+    <thead>
+      <tr><th>Action For</th><th>Which Rows Are Used</th><th>Typical Use</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>NCS</code></td><td>Rows directed by NCS, including rows marked for both NCS and ANCS.</td><td>NCS is preparing an ACK list, traffic call, or category list for stations NCS is managing.</td></tr>
+      <tr><td><code>ANCS</code></td><td>Rows directed by ANCS, including rows marked for both NCS and ANCS.</td><td>ANCS is preparing an ACK list, traffic call, or category list for stations ANCS is managing.</td></tr>
+      <tr><td><code>Shared</code></td><td>Only rows directed by both NCS and ANCS.</td><td>Useful when both leaders are intentionally tracking the same stations and you want just that shared subset.</td></tr>
+      <tr><td><code>All</code></td><td>All roster rows, regardless of Directed By.</td><td>Useful for a complete roster copy or end-of-net reference.</td></tr>
+    </tbody>
+  </table>
+  <table>
+    <thead>
+      <tr><th>Action</th><th>Clipboard Result</th><th>Generated File Behavior</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>ACK Needed</code> with NCS</td><td>Full station lines for stations directed by NCS that NCS has not ACKed yet.</td><td>After the copy, FIO marks those rows ACKed by NCS. <code>NCS_ACK_Pending.txt</code> is then rewritten to show what still needs an NCS ACK.</td></tr>
+      <tr><td><code>ACK Needed</code> with ANCS</td><td>Full station lines for stations directed by ANCS that ANCS has not ACKed yet.</td><td>After the copy, FIO marks those rows ACKed by ANCS. <code>ANCS_ACK_Pending.txt</code> is then rewritten to show what still needs an ANCS ACK.</td></tr>
+      <tr><td><code>ACK Needed</code> with Shared or All</td><td>A reference list of rows in that scope that still need at least one required ACK.</td><td>No ACK chips are changed because the action is not assigned to one role. Role ACK pending files still reflect the current roster state.</td></tr>
+      <tr><td><code>Next TFC</code> with NCS</td><td>One callsign, repeated twice, for the next NCS-directed traffic station, such as <code>W1ABC W1ABC</code>.</td><td><code>NCS_Next_TFC.txt</code> receives the same callsign text. It clears when there is no next NCS traffic station.</td></tr>
+      <tr><td><code>Next TFC</code> with ANCS</td><td>One callsign, repeated twice, for the next ANCS-directed traffic station.</td><td><code>ANCS_Next_TFC.txt</code> receives the same callsign text. It clears when there is no next ANCS traffic station.</td></tr>
+      <tr><td><code>Next TFC</code> with Shared or All</td><td>No traffic callsign is copied; FIO asks you to select NCS or ANCS.</td><td>No next-traffic file is changed because traffic calling is tracked separately for NCS and ANCS.</td></tr>
+      <tr><td><code>TFC</code>, <code>QRU</code>, or <code>LATE</code></td><td>Full station lines for that category within the selected Action For scope.</td><td>Category files are maintained continuously from the roster. Full files use <code>CheckIns_*.txt</code>; role files use <code>NCS_CheckIns_*.txt</code> or <code>ANCS_CheckIns_*.txt</code>.</td></tr>
+      <tr><td><code>All Check-ins</code></td><td>Full station lines for every row in the selected Action For scope.</td><td><code>CheckIns_ALL.txt</code>, <code>NCS_CheckIns_ALL.txt</code>, and <code>ANCS_CheckIns_ALL.txt</code> are maintained continuously from the roster.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Important ACK file note</strong>: the ACK pending files are "what is still pending now" files. When <code>ACK Needed</code> marks stations ACKed, those stations correctly disappear from that role's pending file. Operators who use a macro to read an ACK pending file should think of that file as the current pending list, while the button's clipboard text is the just-selected ACK list.</p>
+  <table>
+    <thead>
+      <tr><th>File</th><th>What It Contains</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>CheckIns_TFC.txt</code>, <code>CheckIns_QRU.txt</code>, <code>CheckIns_LATE.txt</code>, <code>CheckIns_ALL.txt</code></td><td>Full-roster category files. These are not filtered by NCS or ANCS.</td></tr>
+      <tr><td><code>NCS_CheckIns_TFC.txt</code>, <code>NCS_CheckIns_QRU.txt</code>, <code>NCS_CheckIns_LATE.txt</code>, <code>NCS_CheckIns_ALL.txt</code></td><td>NCS-scoped roster files. Shared rows appear here because NCS is one of the directing roles.</td></tr>
+      <tr><td><code>ANCS_CheckIns_TFC.txt</code>, <code>ANCS_CheckIns_QRU.txt</code>, <code>ANCS_CheckIns_LATE.txt</code>, <code>ANCS_CheckIns_ALL.txt</code></td><td>ANCS-scoped roster files. Shared rows appear here because ANCS is one of the directing roles.</td></tr>
+      <tr><td><code>NCS_ACK_Pending.txt</code>, <code>ANCS_ACK_Pending.txt</code></td><td>Stations directed by that role that still need that role's ACK. These are rewritten as ACK chips change.</td></tr>
+      <tr><td><code>NCS_Next_TFC.txt</code>, <code>ANCS_Next_TFC.txt</code></td><td>The current next traffic callsign for that role, written as <code>CALLSIGN CALLSIGN</code>. These change when <code>Next TFC</code> is clicked and clear when no next station is available.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="ncs-fldigi-compare-workspace">Compare and Reference Workspace</h3>
+  <p>The expandable <code>Compare / Reference</code> area is for list reconciliation. Keep it collapsed while you are simply taking check-ins; open it when you need to compare your roster against a list from another operator.</p>
+  <ul class="section-list">
+    <li><strong>Reference tab</strong>: paste another NCS/ANCS list here. FIO compares callsigns, not your memory, so you can quickly see what is missing.</li>
+    <li><strong>Compare Results tab</strong>: shows callsigns found in the reference list but missing from your roster. You can copy the differences or add missing entries when that matches what happened on the air.</li>
+    <li><strong>Show/Hide</strong>: collapse this area when you need roster height. When expanded, the splitter lets you give either the roster or the pasted reference list more room.</li>
   </ul>
 
   <h3 id="ncs-fldigi-macro-mapping">Macro Discovery and Mapping Dialog</h3>
-  <p><strong>Purpose</strong>: translate an FLDigi macro file into an operational map FIO can reason about.</p>
+  <p><strong>Purpose</strong>: tell FIO what your FLDigi macro buttons mean. FLDigi stores macros by position and text; FIO needs your help connecting those buttons to plain operating functions such as TFC, QRU, ACK pending, or Next TFC.</p>
   <ul class="section-list">
-    <li><strong>Confidence filter</strong>: the default view shows high-confidence discovered rows first. Use this when you want a clean starting point instead of every ambiguous match.</li>
-    <li><strong>Mapping columns</strong>: <code>Enabled</code>, <code>Scope</code>, <code>Function</code>, <code>Custom Name</code>, <code>Macro ID</code>, <code>Macro Label</code>, <code>Source File</code>, <code>Confidence</code>, and <code>Read Only</code>.</li>
-    <li><strong>Rescan</strong>: re-runs discovery against the selected profile.</li>
-    <li><strong>Add Manual Row</strong>: use this when the macro exists operationally but cannot be discovered confidently from the profile alone.</li>
-    <li><strong>Browse Selected Source...</strong>: opens the selected source reference so you can inspect the underlying file or location.</li>
-    <li><strong>Save Mappings</strong>: stores the mapping model so later sessions can work from the curated interpretation instead of rediscovering everything from scratch.</li>
-    <li><strong>Why this matters</strong>: macro mapping is not just labeling. It is how FIO learns enough structure to support the net workflow cleanly and avoid treating every macro profile as an undifferentiated file.</li>
+    <li><strong>Confidence filter</strong>: starts with the rows FIO is most confident about. This keeps the first view readable when a macro file contains many buttons.</li>
+    <li><strong>Scope</strong>: tells FIO who the macro belongs to: NCS, ANCS, Shared, or All.</li>
+    <li><strong>Function</strong>: tells FIO what the macro is for, such as TFC, QRU, LATE, ALL, ACK_PENDING, NEXT_TFC, or CUSTOM.</li>
+    <li><strong>Source File</strong>: the file a macro reads. For FIO-managed files, this should usually point into the configured FLDigi check-in folder. If the macro points somewhere else, FIO highlights it so you can repair the path safely.</li>
+    <li><strong>Update Macro Path</strong>: for standard FIO-managed files, FIO can update the selected macro's file path and save a backup of the macro profile first. This is meant to prevent operators from having to edit FLDigi macro syntax by hand.</li>
+    <li><strong>Save Mappings</strong>: saves your interpretation of the macro set. After that, the macro header can show <code>Macro: Mapped</code> and the live NCS tab can stay clean.</li>
+    <li><strong>What mapping does not do</strong>: it does not transmit by itself. It only helps FIO keep the right files current and helps you confirm that your FLDigi macros are reading the expected files.</li>
   </ul>
 
   <h3 id="ncs-fldigi-lifecycle">Net Lifecycle</h3>
   <ul class="section-list">
-    <li><strong>Start Net</strong>: begins the live session state for this tab, clears the generated macro check-in files, clears the working roster/review surfaces, and then starts writing the current roster into the live macro files as the net develops.</li>
-    <li><strong>Save Check-ins</strong>: reconciles the current roster into the generated check-in files. This is a full rewrite from the current roster state, not an append-only log, so removed entries and changed categories do not linger in the wrong file.</li>
-    <li><strong>End Net</strong>: saves the final roster, imports valid check-ins into the operator database, and archives the generated check-in files under <code>&lt;fldigi_checkin_dir&gt;/archive</code>. Archive filenames include a UTC timestamp, the net name, and the original file name; for example <code>20260508_231455Z_Weekly_Net_main_checkins.txt</code>.</li>
-    <li><strong>Why archives matter</strong>: the live macro files are working files that are cleared at the next <code>Start Net</code>. The archive directory is the historical record of what the generated files looked like at end-of-net.</li>
+    <li><strong>Before Start Net</strong>: choose your role, select the net name, confirm the partner callsign if you have one, and make sure the macro header is acceptable for how you plan to operate. You can run the net with clipboard actions even if no macro is mapped.</li>
+    <li><strong>Start Net</strong>: clears old working files and begins a fresh session. This is the point where roster entry becomes active.</li>
+    <li><strong>During the net</strong>: add stations, correct the roster, use ACK Needed and Next TFC as often as needed, and let FIO keep the live files synchronized.</li>
+    <li><strong>Save Check-ins</strong>: writes a manual checkpoint of the current roster and clears the unsaved-change highlight. It is useful before a long pause or before ending the net, but it is not required for macro files to stay current.</li>
+    <li><strong>End Net</strong>: asks for confirmation, saves the final roster, imports valid check-ins into the operator database, archives the generated files, and ends the live session state.</li>
+    <li><strong>Archive folder</strong>: archived files are stored under <code>&lt;fldigi_checkin_dir&gt;/archive</code>. Live files are working files and are cleared at the next Start Net; the archive is the record you keep after the net.</li>
   </ul>
 
   <h2 id="ncs-js8call">NCS: JS8Call</h2>
@@ -633,7 +647,7 @@
   <p><strong>Why you use it</strong>: this tab helps an NCS manage JS8-driven participation where check-ins, acknowledgements, query requests, and follow-up message retrieval all happen in a more structured directed-message environment than FLDigi/SSB.</p>
   <ul class="section-list">
     <li><strong>Best use</strong>: use this when the net is operating through JS8Call and you want one place to manage group intent, expected forms, check-in state, and acknowledgement/query actions.</li>
-    <li><strong>Cross-tab interaction</strong>: this tab depends on JS8Call paths and refresh settings from Settings, shares QSY/hold logic with other operating tabs, can enrich later Messages/Map interpretation through the operator data it collects, and in multi-rig it follows the current <code>Station Default</code> shell.</li>
+    <li><strong>Cross-tab interaction</strong>: this tab depends on JS8Call paths and refresh settings from Settings, shares QSY/hold logic with other operating tabs, and can enrich later Messages/Map interpretation through the operator data it collects.</li>
     <li><strong>Operational caution</strong>: follow-up query handling is still operator-driven in the visible workflow. Use the acknowledgement and <code>E?</code> actions intentionally instead of assuming every missing detail will be gathered automatically.</li>
   </ul>
   <table>
@@ -647,7 +661,6 @@
     </tbody>
   </table>
   <p><strong>Check-in table columns</strong>: <code>CALLSIGN</code>, <code>NAME</code>, <code>ST</code>, <code>GRID</code>, <code>REGION</code>, <code>MODE</code>, <code>SNR</code>, <code>OFFSET</code>, <code>STATUS</code>, action column.</p>
-  <p><strong>Multi-rig scope</strong>: JS8Call net control follows the current <code>Station Default</code> JS8 endpoint and can be hidden by the assigned operating profile. Multi-rig device and endpoint changes are configured in <a href="#settings-device-profiles">Device Profiles</a>, not inside this tab.</p>
 
   <h3 id="ncs-js8-session-controls">Session, Group, and Expect-Query Controls</h3>
   <ul class="section-list">
@@ -687,7 +700,7 @@
   <p><strong>Why you use it</strong>: this tab is designed for local nets where you want a structured session log, lightweight SitRep handling, and notes that can be updated as the local situation changes.</p>
   <ul class="section-list">
     <li><strong>Best use</strong>: use this when the radio workflow is local and operator-driven rather than driven by JS8 or FLDigi message parsing.</li>
-    <li><strong>Cross-tab interaction</strong>: the lookup field depends on Local Callsigns/operator data, while saved session context and exported CSV outputs support later review outside the tab. In multi-rig, this tab still follows the current <code>Station Default</code> shell for the broader operating context.</li>
+    <li><strong>Cross-tab interaction</strong>: the lookup field depends on Local Callsigns/operator data, while saved session context and exported CSV outputs support later review outside the tab.</li>
   </ul>
   <table>
     <thead>
@@ -703,7 +716,6 @@
   </table>
   <p><strong>Check-in table columns</strong>: <code>Check-in UTC</code>, <code>Callsign</code>, <code>Name</code>, <code>City</code>, <code>State</code>, <code>Category</code>, <code>SitRep</code>, <code>Notes</code>.</p>
   <p><strong>Session behavior</strong>: each net is a unique session. <code>End Net</code> clears session check-in rows while keeping roster/operator data.</p>
-  <p><strong>Multi-rig scope</strong>: the Local NCS workflow remains part of the current Station Default shell. It does not create a second independently targeted shell for another active device.</p>
 
   <h3 id="ncs-vhf-session-workflow">Session Workflow</h3>
   <ul class="section-list">
@@ -731,11 +743,11 @@
 
   <h2 id="hf-daily">Schedules: HF Daily</h2>
   <p><strong>Purpose</strong>: manage active HF daily schedule rows and resource-backed schedule candidates.</p>
-  <p><strong>Why you use it</strong>: HF Daily defines the backbone of routine HF operation for the current compatibility shell. This is where you decide what the scheduler should normally follow when no special SOP or net priority rule is taking precedence.</p>
+  <p><strong>Why you use it</strong>: HF Daily defines the backbone of routine HF operation. This is where you decide what the scheduler should normally follow when no special SOP or net priority rule is taking precedence.</p>
   <ul class="section-list">
-    <li><strong>Think of it as baseline intent</strong>: if SOP Builder expresses a temporary operational posture, HF Daily expresses the normal everyday HF plan that the shell returns to.</li>
-    <li><strong>Cross-tab interaction</strong>: rows saved here influence ControlFreq, FreqPlanner, Map schedule context, and scheduler-driven QSY behavior for the current Station Default device.</li>
-    <li><strong>Common mistake</strong>: when operators see a mismatch in ControlFreq, they often adjust the radio first. Usually it is better to confirm the HF Daily row, the active SOP state, and which radio currently owns the shell.</li>
+    <li><strong>Think of it as baseline intent</strong>: if SOP Builder expresses a temporary operational posture, HF Daily expresses the normal everyday HF plan that the station returns to.</li>
+    <li><strong>Cross-tab interaction</strong>: rows saved here directly influence ControlFreq, FreqPlanner, Map schedule context, and scheduler-driven QSY behavior.</li>
+    <li><strong>Common mistake</strong>: when operators see a mismatch in ControlFreq, they often adjust the radio first. Usually it is better to confirm the HF Daily row and the active SOP state first.</li>
   </ul>
 
   <h3 id="hf-daily-active">Active Schedule Section</h3>
@@ -755,9 +767,8 @@
       <tr><td><code>Save HF Schedule</code></td><td>Persists active HF rows.</td></tr>
     </tbody>
   </table>
-  <p><strong>Active Schedule columns</strong>: <code>Selected</code>, <code>Day</code>, <code>Source</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Auto-Tune</code>, <code>Target Scope</code>, <code>Target</code>.</p>
+  <p><strong>Active Schedule columns</strong>: <code>Selected</code>, <code>Day</code>, <code>Source</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Auto-Tune</code>.</p>
   <p>Rows are shown in time sequence by default to simplify conflict review.</p>
-  <p><strong>Multi-rig scope</strong>: use <code>Target Scope</code> and <code>Target</code> to decide whether an HF row applies station-wide, to one device profile, or to one operating profile. Station rows apply to any current Station Default runtime, device-profile rows apply only when that device is the Station Default, and operating-profile rows apply only when the Station Default device carries that effective operating profile.</p>
 
   <h3 id="hf-daily-resources">Schedule Resources Section</h3>
   <table>
@@ -797,9 +808,9 @@
 
   <h2 id="hf-nets">Schedules: HF Nets</h2>
   <p><strong>Purpose</strong>: manage net schedule rows and the net resource catalog.</p>
-  <p><strong>Why you use it</strong>: HF Nets is where you define structured scheduled net activity, especially when that activity has its own timing, FLDigi expectations, targeting, and conflict rules that should not be treated as generic baseline HF presence.</p>
+  <p><strong>Why you use it</strong>: HF Nets is where you define structured scheduled net activity, especially when that activity has its own timing, FLDigi expectations, and conflict rules that should not be treated as generic baseline HF presence.</p>
   <ul class="section-list">
-    <li><strong>Best use</strong>: use HF Nets for recurring organized activity that needs its own identity, offsets, targeting, and optional priority decisions against SOP windows.</li>
+    <li><strong>Best use</strong>: use HF Nets for recurring organized activity that needs its own identity, offsets, and optional priority decisions against SOP windows.</li>
     <li><strong>Cross-tab interaction</strong>: saved net rows influence ControlFreq outlook, scheduler decisions, net-control workflows, and policy prompts when SOP windows overlap.</li>
     <li><strong>Why a separate tab exists</strong>: net operations usually need more structure than ordinary HF presence, so FreqInOut keeps the planning surface separate from HF Daily on purpose.</li>
   </ul>
@@ -819,9 +830,8 @@
       <tr><td><code>Save Net Schedule</code></td><td>Persists net schedule rows.</td></tr>
     </tbody>
   </table>
-  <p><strong>Net Schedule columns</strong>: <code>Select</code>, <code>Day</code>, <code>Recurrence</code>, <code>Weeks of Month</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Early (min)</code>, <code>FLDigi Mode</code>, <code>FLDigi Offset</code>, <code>Net Name</code>, <code>Auto-Tune</code>, <code>Target Scope</code>, <code>Target</code>.</p>
+  <p><strong>Net Schedule columns</strong>: <code>Select</code>, <code>Day</code>, <code>Recurrence</code>, <code>Weeks of Month</code>, <code>Group Name</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>Start</code>, <code>End</code>, <code>Early (min)</code>, <code>FLDigi Mode</code>, <code>FLDigi Offset</code>, <code>Net Name</code>, <code>Auto-Tune</code>.</p>
   <p><strong>Recurrence values</strong>: <code>Weekly</code>, <code>Daily</code>, <code>Periodic</code>. Periodic rows use <code>Weeks of Month</code>.</p>
-  <p><strong>Multi-rig scope</strong>: Net rows use the same targeting rules as HF Daily. The row can be station-wide, bound to one device profile, or bound to one operating profile, but the current compatibility shell still follows only the current Station Default device.</p>
 
   <h3 id="hf-nets-resources">Net Resources Section</h3>
   <table>
@@ -927,12 +937,11 @@
   <p><strong>Purpose</strong>: build and activate one HF SOP and one Local Comms SOP with conflict-aware HF activation.</p>
   <p><strong>Model</strong>: SOP action rows are daily by design (no periodic row mode in SOP Builder).</p>
   <p><strong>If you are new</strong>: build the SOP here first, then use HF Daily and HF Nets to confirm the runtime schedule and any priority decisions.</p>
-  <p><strong>Why you use it</strong>: SOP Builder is where you describe how the current shell should pivot when conditions change. The scheduler tabs define the standing plan; SOP Builder defines the alternate operational posture that may temporarily override parts of that plan.</p>
+  <p><strong>Why you use it</strong>: SOP Builder is where you describe how the station should pivot when conditions change. The scheduler tabs define the standing plan; SOP Builder defines the alternate operational posture that may temporarily override parts of that plan.</p>
   <ul class="section-list">
     <li><strong>Cross-tab interaction</strong>: activating an HF SOP affects HF Daily effective schedule, can trigger Net/SOP conflict handling, and changes what ControlFreq treats as the current intended operating posture.</li>
     <li><strong>Why separate from schedules</strong>: SOPs are not just another schedule list. They represent an operational state change, so FreqInOut keeps them in a dedicated builder with versioning and conflict handling.</li>
   </ul>
-  <p><strong>Multi-rig scope</strong>: SOP Builder remains a Station Default compatibility-shell tool in this branch. Use HF Daily/HF Nets target scoping plus <a href="#station-overview">Station Overview</a> to verify which active device currently owns the shell before you trust the live runtime result.</p>
 
   <h3 id="sop-builder-actions">Top-Level Actions</h3>
   <table>
@@ -1032,12 +1041,12 @@
   <h2 id="settings">Settings</h2>
   <p><strong>Purpose</strong>: configure station identity, scheduler behavior, integration paths, data trust, and launch behavior.</p>
   <p>The Settings tab uses a left section list and collapsible section cards. Select a section in the list to jump directly.</p>
-  <p><strong>Warning highlights</strong>: the left section list uses warning highlighting to call out incomplete setup for the current <code>Station Default</code> compatibility shell. Multi-rig sections also surface contextual hints for active profiles, temporary swaps, shared PTT / RF groups, and VarAC cluster safety.</p>
-  <p><strong>Why you use it</strong>: Settings is where you teach FreqInOut what kind of multi-radio station you are running. Almost every other tab depends on this information, and many apparent “app issues” are really about which device owns the Station Default shell or which operating profile is in effect.</p>
+  <p><strong>Warning highlights</strong>: the left section list uses warning highlighting to call out incomplete setup for the current single-radio station. This is meant as inline guidance, not as a generic error state for every optional integration.</p>
+  <p><strong>Why you use it</strong>: Settings is where you teach FreqInOut what kind of station you are running. Almost every other tab depends on this information. When something elsewhere in the app feels incomplete, missing, or inconsistent, Settings is often the real starting point.</p>
   <ul class="section-list">
-    <li><strong>Good setup order</strong>: start with Operator Information, then Device Profiles, Operating Profiles, Device Assignments, software paths, schedules, and finally advanced areas like clusters, Managed BBS Services, Launch Control, and message-auth trust.</li>
-    <li><strong>Cross-tab interaction</strong>: scheduler behavior, message actions, map evidence, launch readiness, BBS management, and shell visibility all draw from what is configured here.</li>
-    <li><strong>How to read warnings</strong>: a warning highlight usually means “this projected workflow is incomplete for the current shell,” not “every device in the station must run this software.”</li>
+    <li><strong>Good setup order</strong>: start with Operator Information, then software paths and operating groups, then schedules, then optional advanced features like Managed BBS Services, Launch Control, and message-auth trust.</li>
+    <li><strong>Cross-tab interaction</strong>: scheduler behavior, message actions, map evidence, launch readiness, BBS management, and even help-button setup review all draw from what is configured here.</li>
+    <li><strong>How to read warnings</strong>: a warning highlight usually means “you started configuring this workflow but left out a required companion field,” not “every operator must use this feature.”</li>
   </ul>
 
   <h3 id="settings-sections">Settings Sections</h3>
@@ -1052,31 +1061,7 @@
       </tr>
       <tr>
         <td>FreqInOut Settings</td>
-        <td>Theme, Text Size (Normal/Medium/Large), Frequency Control mode, scheduler enable, enforcement and prompt intervals, logging level and diagnostics controls for the current Station Default shell</td>
-      </tr>
-      <tr id="settings-device-profiles">
-        <td>Device Profiles</td>
-        <td><code>Add Profile</code>, <code>Edit Selected</code>, <code>Activate</code>, <code>Deactivate</code>, <code>Set Station Default</code>, <code>Delete Selected</code>; table columns: <code>Selected</code>, <code>Active</code>, <code>Default</code>, <code>Name</code>, <code>Backend</code>, <code>Deploy</code>, <code>Endpoint</code>, <code>Launch</code>, <code>PTT Group</code>, <code>Class</code>, <code>Notes</code></td>
-      </tr>
-      <tr id="settings-operating-profiles">
-        <td>Operating Profiles</td>
-        <td><code>Add Profile</code>, <code>Edit Selected</code>, <code>Delete Selected</code>; table columns: <code>Selected</code>, <code>Enabled</code>, <code>Name</code>, <code>Scheduler</code>, <code>Shell</code>, <code>Description</code></td>
-      </tr>
-      <tr id="settings-device-assignments">
-        <td>Device Assignments</td>
-        <td><code>Assign / Override...</code>, <code>Temporary Swap...</code>, <code>Restore Swap</code>, <code>Restore Default</code>; table columns: <code>Selected</code>, <code>Active</code>, <code>Default</code>, <code>Device</code>, <code>Operating Profile</code>, <code>State</code>, <code>Policy</code>, <code>Endpoint</code></td>
-      </tr>
-      <tr id="settings-varac-clusters">
-        <td>VarAC Clusters</td>
-        <td><code>Add Cluster</code>, <code>Edit Selected</code>, <code>Delete Selected</code>; table columns: <code>Selected</code>, <code>Name</code>, <code>Cluster ID</code>, <code>Shared DB</code>, <code>Members</code>, <code>Gateway</code>, <code>PTT Lock</code>, <code>Refresh</code></td>
-      </tr>
-      <tr id="settings-varac-memberships">
-        <td>VarAC Memberships</td>
-        <td><code>Add / Edit Selected</code>, <code>Remove Selected</code>; table columns: <code>Selected</code>, <code>Cluster</code>, <code>Device</code>, <code>Runtime</code>, <code>Class</code>, <code>Instance</code>, <code>Enabled</code>, <code>Gateway</code></td>
-      </tr>
-      <tr>
-        <td>Logging &amp; Diagnostics</td>
-        <td><code>Enable DEBUG For</code>, <code>Open Logs</code>, <code>Open Log Folder</code>, <code>Export Diagnostics</code></td>
+        <td>Theme, Text Size (Normal/Medium/Large), Frequency Control mode, scheduler enable, enforcement and prompt intervals, logging level and diagnostics controls</td>
       </tr>
       <tr id="settings-hf-groups">
         <td>HF Operating Groups</td>
@@ -1092,11 +1077,11 @@
       </tr>
       <tr>
         <td>JS8Call Settings</td>
-        <td>Station Default JS8 projection: TCP host/IP (default <code>127.0.0.1</code>), TCP port, offset, mark-read option, path fields, and <code>Load JS8 Traffic</code> (manual rebuild with in-process indicator)</td>
+        <td>TCP host/IP (default <code>127.0.0.1</code>), TCP port, offset, mark-read option, path fields, and <code>Load JS8 Traffic</code> (manual rebuild with in-process indicator)</td>
       </tr>
       <tr>
         <td>Fast Light Settings</td>
-        <td>Station Default FLRig/FLDigi/FLMsg/FLAmp projection, FLRig XMLRPC port, check-in/log paths, copy path helpers</td>
+        <td>FLRig/FLDigi/FLMsg/FLAmp paths, FLRig/FLDigi XMLRPC settings, FLDigi check-in/log paths, and Fast Light auto-fill helpers</td>
       </tr>
       <tr>
         <td>Message Auth (Key/Hash)</td>
@@ -1104,7 +1089,7 @@
       </tr>
       <tr>
         <td>VarAC Settings</td>
-        <td>Station Default VarAC projection: install path, optional Linux launch command (Wine), incoming files path, BBS directory/archive, auto-archive policy</td>
+        <td>Install path, optional Linux launch command (Wine), incoming files path, BBS directory/archive, auto-archive policy</td>
       </tr>
       <tr>
         <td>Custom Tools</td>
@@ -1112,7 +1097,11 @@
       </tr>
       <tr>
         <td>Launch Control</td>
-        <td>Per-app enable/startup toggles, order management (<code>Up</code>, <code>Down</code>, <code>Reset Default Order</code>), launch/stop controls, and dependency-aware readiness pacing for the current Station Default shell</td>
+        <td>Per-app enable/startup toggles, order management (<code>Up</code>, <code>Down</code>, <code>Reset Default Order</code>), launch/stop controls, and dependency-aware readiness pacing (JS8 API + targeted settle delays)</td>
+      </tr>
+      <tr>
+        <td>Logging &amp; Diagnostics</td>
+        <td><code>Enable DEBUG For</code>, <code>Open Logs</code>, <code>Open Log Folder</code>, <code>Export Diagnostics</code></td>
       </tr>
       <tr>
         <td>Save</td>
@@ -1120,11 +1109,9 @@
       </tr>
     </tbody>
   </table>
-  <p><strong>Enforcement and prompt intervals</strong> control how schedule corrections behave when the station drifts off schedule. <code>On Schedule Change</code> applies corrections when the scheduler moves to a new schedule row. <code>Prompt</code> raises an off-schedule prompt and waits for user action. FLDigi mode and FLDigi offset may be prompted separately.</p>
+  <p><strong>Enforcement and prompt intervals</strong> decide how FIO should help when your station is not matching the active schedule. If a setting is <code>On Schedule Change</code>, FIO corrects it when the schedule moves to a new row. If it is <code>Prompt</code>, FIO asks before changing anything. The prompt interval is simply the reminder pace: if you leave the station off schedule, FIO waits that long before asking again. A shorter interval is more insistent; a longer interval gives you more quiet time while you are intentionally working off schedule. FLDigi mode and FLDigi offset can be prompted separately because one may need attention while the other is already correct.</p>
   <ul class="section-list">
     <li><strong>Section-health warnings</strong>: warning-highlighted sections usually mean you configured part of an integration but left out a required companion field.</li>
-    <li><strong>Projection rule</strong>: <code>JS8Call Settings</code>, <code>Fast Light Settings</code>, <code>VarAC Settings</code>, and <code>Launch Control</code> show the current Station Default device projection. Use <code>Device Profiles</code> to define per-device endpoints, then confirm the projection here after selecting the Station Default.</li>
-    <li><strong>Immediate-save multi-rig sections</strong>: <code>Device Profiles</code>, <code>Operating Profiles</code>, <code>Device Assignments</code>, <code>VarAC Clusters</code>, and <code>VarAC Memberships</code> persist through their own dialogs and actions immediately; <code>Save Settings</code> remains the commit point for the legacy station-global sections.</li>
     <li><strong>JS8Call completeness</strong>: when <code>JS8Call Install Folder</code> is set, FreqInOut expects host, TCP port, and <code>DIRECTED.TXT</code>. If <code>JS8Spotter Launch Path</code> is set, FreqInOut also expects <code>JS8Spotter forms</code>.</li>
     <li><strong>Fast Light completeness</strong>: warning highlights can appear when FLRig/FLDigi executables are set without endpoint values, or when FLMsg/FLAmp executables are set without their companion message folders.</li>
     <li><strong>VarAC completeness</strong>: warning highlights can appear when <code>VarAC Install Folder</code> is set without <code>Incoming Files</code>.</li>
@@ -1154,39 +1141,12 @@
 
   <h3 id="settings-fast-light-details">Fast Light Settings Details</h3>
   <ul class="section-list">
-    <li><strong>Projection view</strong>: this section shows the current FLRig, FLDigi, FLMsg, and FLAmp compatibility shell for the selected <code>Station Default</code> device.</li>
-    <li><strong>Endpoint readiness</strong>: use it to confirm XMLRPC, message-folder, and launch-path values before relying on schedule-driven workflows.</li>
-  </ul>
-
-  <h3 id="settings-device-profiles-details">Device Profiles and Station Default Details</h3>
-  <ul class="section-list">
-    <li><strong>Runtime-active vs Station Default</strong>: <code>Active</code> means the device participates in runtime monitoring. <code>Default</code> marks the one non-observer device that owns the current compatibility shell.</li>
-    <li><strong>Endpoint ownership</strong>: backend and endpoint fields in the device dialog are the per-device source of truth. Changing the Station Default re-projects that device into the legacy JS8/Fast Light/VarAC sections.</li>
-    <li><strong>Observer / SDR behavior</strong>: observer profiles may be active and visible in Station Overview, but they do not become Station Default and cannot be used for temporary swaps.</li>
-    <li><strong>Shared PTT</strong>: matching <code>PTT Group</code> values create the shared-transmit interlock. If another linked device is keyed, scheduler/QSY actions warn or block from the Station Default shell.</li>
-    <li><strong>RF resource warnings</strong>: matching antenna/front-end/amplifier groups do not rewrite assignments automatically; they raise operator-readable RF conflict warnings so you can decide whether to proceed.</li>
-    <li><strong>Delete rule</strong>: active device profiles cannot be deleted. Deactivate them first, and if the profile is the Station Default choose another default before removal.</li>
-  </ul>
-
-  <h3 id="settings-operating-profiles-details">Operating Profiles and Device Assignments Details</h3>
-  <ul class="section-list">
-    <li><strong>Operating profile purpose</strong>: an operating profile defines the compatibility shell used by the Station Default device, including scheduler automation, Messages, Map, background ingest, Launch Control, and net-control visibility.</li>
-    <li><strong>Shell summary</strong>: <code>Full shell</code> means no feature suppression. A summary such as <code>Messages Off</code> or <code>NetCtrl Off</code> means those surfaces are suppressed when that profile is active on the Station Default device.</li>
-    <li><strong>Preferred bands</strong>: this is advisory policy metadata for the assigned operating profile. It does not independently retarget current tabs by itself.</li>
-    <li><strong>Assign / Override...</strong>: use <code>Active</code> for the normal effective profile or <code>Temporary Override</code> when you need a different shell policy now without rewriting the device's baseline role.</li>
-    <li><strong>Restore Default</strong>: removes the effective override and returns the device to the default operating profile assignment.</li>
-    <li><strong>Temporary Swap...</strong>: moves the Station Default runtime temporarily to one active non-primary non-observer device. <code>Restore Swap</code> returns the prior primary device and, if needed, restores the target device's prior effective operating profile.</li>
-    <li><strong>Carry-profile rule</strong>: the swap dialog only offers <code>Carry current primary profile</code> when the current primary operating profile has <code>Allow profile swap coordination</code> enabled.</li>
-  </ul>
-
-  <h3 id="settings-varac-clusters-details">VarAC Clusters and Memberships Details</h3>
-  <ul class="section-list">
-    <li><strong>Cluster workflow</strong>: create the cluster first, then assign memberships, then return to the cluster editor to choose the gateway handler from the enabled members.</li>
-    <li><strong>Cluster fields</strong>: <code>Name</code>, <code>Cluster ID</code>, optional <code>Shared DB</code>, refresh interval, optional <code>PTT Lock</code>, and gateway-handler selection.</li>
-    <li><strong>Membership fields</strong>: cluster, device, instance number, enabled state, and gateway-role visibility.</li>
-    <li><strong>Eligibility rule</strong>: observer / SDR device profiles are not eligible for VarAC cluster memberships.</li>
-    <li><strong>Membership safety</strong>: each device may hold one enabled cluster membership in this phase, enabled instance numbers must be unique inside a cluster, and the gateway handler must be one of that cluster's enabled members.</li>
-    <li><strong>Node-local settings</strong>: device-local VarAC install path, DB path, INI path, and optional launch command remain on the device profile. Clusters describe the shared relationship, not the per-device local installation.</li>
+    <li><strong>Software paths</strong>: configure FLRig, FLDigi, FLMsg, and FLAmp launch paths or executables.</li>
+    <li><strong>Endpoint pairing</strong>: when FLRig or FLDigi paths are configured, confirm their companion fields: <code>FLRig XMLRPC Port</code>, <code>FLDigi XMLRPC Host</code>, and <code>FLDigi XMLRPC Port</code>. These are the names shown in the UI.</li>
+    <li><strong>Check-in File Path</strong>: folder where the FLDigi NCS tab writes its generated macro check-in files and end-net archive folder.</li>
+    <li><strong>FLDigi Log Path</strong>: folder or log location retained for future FLDigi log review features. Automatic roster intake from this path is hidden in 1.2.4 because noisy log parsing should not alter a live net roster.</li>
+    <li><strong>Message folders</strong>: FLMsg and FLAmp workflows rely on their companion message-path settings for imports, exports, and compose staging.</li>
+    <li><strong>Auto-Fill / Attempt Auto-Fill</strong>: asks FreqInOut to inspect likely local software folders and populate the Fast Light paths it can identify.</li>
   </ul>
 
   <h3 id="settings-hf-groups-details">HF Operating Groups Details</h3>
@@ -1202,72 +1162,93 @@
 
   <h3 id="settings-local-comms-details">Local Comms Groups Details</h3>
   <ul class="section-list">
-    <li><strong>Local planning rows</strong>: capture nearby resources, targets, and notes used for local coordination.</li>
-    <li><strong>Reusable structure</strong>: keep local operating information consistent so it can be reused across tabs and workflows.</li>
+    <li><strong>Purpose</strong>: local comms groups let you maintain non-HF resource profiles such as VHF/UHF or local coordination channels.</li>
+    <li><strong>Core fields</strong>: group, resource, mode, target, and notes define how the local profile should appear in the operator workflow.</li>
+    <li><strong>Practical use</strong>: keep the entries concise and operator-readable so they serve as quick references during local operations.</li>
   </ul>
 
   <h3 id="settings-varac-details">VarAC Settings Details</h3>
-  <p><strong>Concept of use</strong>: treat the VarAC paths as three different jobs. <code>Incoming Files</code> is where files addressed to you arrive. <code>VarAC Outbox Directory</code> is where FreqInOut stages files that VarAC should transmit directly. <code>BBS Directory</code> is the live published file shelf remote stations can browse and pull from. In multi-rig, the section shows the current Station Default projection, so always confirm which radio bundle you are editing.</p>
+  <p><strong>Concept of use</strong>: treat the VarAC paths as three different jobs. <code>Incoming Files</code> is where files addressed to you arrive. <code>VarAC Outbox Directory</code> is where FreqInOut stages files that VarAC should transmit directly. <code>BBS Directory</code> is the live published file shelf remote stations can browse and pull from.</p>
   <ul class="section-list">
-    <li><strong>VarAC Install Folder</strong>: the VarAC program location for the selected radio bundle. FreqInOut uses this for launch/orchestration and to help infer other VarAC resources.</li>
-    <li><strong>VarAC Launch Command</strong>: advanced override. Leave this blank unless you need a special launch method, most often on Linux/Wine.</li>
-    <li><strong>Incoming Files</strong>: VarAC's receive folder for files delivered to you. This is not your BBS folder.</li>
+    <li><strong>VarAC Paths and Launch</strong>: section for the VarAC application path, launch command, INI path, incoming-file folder, and outbox folder.</li>
+    <li><strong>BBS Management</strong>: section for the live BBS folder, BBS archive folder, BBS access settings, and allowed callsigns.</li>
+    <li><strong>BBS Vault Settings</strong>: section for Managed BBS Services, vault session settings, FLAMP relay, and FIO managed locations.</li>
+    <li><strong>BBS VGuard Settings</strong>: separate section for inbound file protection. VGuard is not the same service as the vault.</li>
+    <li><strong>VarAC Install Folder</strong>: the VarAC program location. FreqInOut uses this for launch/orchestration and to help infer other VarAC resources.</li>
+    <li><strong>VarAC Launch Command (Advanced):</strong> advanced override. Leave this blank unless you need a special launch method, most often on Linux/Wine.</li>
+    <li><strong>VarAC Incoming Files</strong>: VarAC's receive folder for files delivered to you. This is not your BBS folder.</li>
     <li><strong>VarAC Outbox Directory</strong>: where FreqInOut stages files that VarAC should send directly. Use this for operator-to-operator delivery, not public BBS publication.</li>
-    <li><strong>VarAC INI File</strong>: direct path to the selected radio's <code>VarAC.ini</code>. Use this when auto-detection is not enough or when you want to sync BBS policy from the authoritative INI.</li>
-    <li><strong>BBS Directory</strong>: the live published VarAC BBS folder for the selected radio. Remote stations see the files in this directory when they browse your BBS.</li>
+    <li><strong>VarAC INI File</strong>: optional direct path to <code>VarAC.ini</code>. Use this when auto-detection is not enough or when you want to sync BBS policy from the authoritative INI.</li>
+    <li><strong>BBS Directory</strong>: the live published VarAC BBS folder. Remote stations see the files in this directory when they browse your BBS.</li>
     <li><strong>BBS Archive</strong>: where archived BBS files are moved. This keeps the live BBS tidy without deleting older files.</li>
-    <li><strong>Enable BBS</strong>: turns VarAC BBS service on or off in FreqInOut's BBS policy view for the current radio projection.</li>
+    <li><strong>Auto-Archive Policy</strong>: group containing <code>Enable Auto-Archive</code>, <code>After</code>, and <code>days</code>. It moves files older than the selected age from <code>BBS Directory</code> to <code>BBS Archive</code>.</li>
+    <li><strong>Enable BBS</strong>: turns VarAC BBS service on or off in FreqInOut's BBS policy view.</li>
     <li><strong>Limit Access To Callsigns</strong>: restricts BBS access to a defined allow-list. This is strongly recommended if you want a controlled BBS.</li>
-    <li><strong>Allowed Callsigns</strong>: the allow-list used when access limiting is enabled. FreqInOut supports lookup-assisted management to reduce typos. In multi-rig, this list belongs to the selected radio's VarAC bundle.</li>
+    <li><strong>Allowed Callsigns</strong>: the allow-list used when access limiting is enabled. FreqInOut supports lookup-assisted management to reduce typos. In single-rig, this list applies to the station's VarAC BBS policy.</li>
     <li><strong>Announce</strong>: mirrors VarAC's BBS announcement behavior so users can choose whether the BBS is advertised.</li>
-    <li><strong>Sync From VarAC.ini</strong>: reads the <code>[BBS]</code> section and applies BBS enablement, directory, access rules, and announcement behavior to the current radio-scoped VarAC view.</li>
-    <li><strong>Write to VarAC.ini</strong>: pushes the current BBS policy values back into <code>VarAC.ini</code> when you want FreqInOut's view to become the authoritative one.</li>
-    <li><strong>Enable Auto-Archive</strong>: turns on background checks (first Messages open after startup, then about daily).</li>
-    <li><strong>After &lt;days&gt; days</strong>: older files are moved from <code>BBS Directory</code> to <code>BBS Archive</code>.</li>
+    <li><strong>Import VarAC BBS Settings</strong>: reads the <code>[BBS]</code> section from the configured <code>VarAC INI File</code> and applies BBS enablement, directory, access rules, and announcement behavior to the current FreqInOut settings view.</li>
+    <li><strong>Apply VarAC BBS Settings</strong>: writes the current BBS policy values back into the configured <code>VarAC INI File</code> when you want FreqInOut's view to become the authoritative one for the VarAC <code>[BBS]</code> section.</li>
     <li><strong>Managed BBS Services</strong>: the combined virtual-folder vault and FLAMP relay workflow. It publishes one selected view into the live VarAC BBS directory at a time while keeping the live folder stable for VarAC.</li>
-    <li><strong>Vault vs live BBS</strong>: think of the live <code>BBS Directory</code> as the on-air shelf and the Managed Vault as the backstage storage plus control logic. Operators edit source folders in the vault; FreqInOut projects only the active view into the live BBS.</li>
-    <li><strong>Enable Managed BBS Vault</strong>: turns on the virtual-folder and relay service processing for the projected radio bundle. Only enable it after you have a valid live <code>BBS Directory</code> and at least one location.</li>
-    <li><strong>Initialize Managed Vault</strong>: creates the managed vault folder structure in the VarAC BBS area and imports the current live BBS contents into the default location so you can start from your existing BBS instead of rebuilding it by hand.</li>
-    <li><strong>Reset To Default</strong>: republishes the default location into the live BBS folder. Use this if you want to end a special-access session immediately.</li>
+    <li><strong>Vault vs live BBS</strong>: think of the live <code>BBS Directory</code> as the on-air shelf and the Managed Vault as the storage room plus menu system behind it. VarAC only needs to know about the live shelf. FreqInOut decides which vault location is placed on that shelf right now.</li>
+    <li><strong>Managed BBS Services</strong>: label above the main vault controls. This is where <code>Enable Managed BBS Vault</code>, <code>Initialize Managed Vault</code>, and <code>Reset To Default</code> live.</li>
+    <li><strong>Enable Managed BBS Vault</strong>: turns on the service that watches VarAC session traffic and publishes managed views into the live BBS folder. This is the operational on/off switch for the vault workflow; it does not erase your vault folders.</li>
+    <li><strong>Turn on FIO-managed BBS menus.</strong>: the short UI explanation shown beside <code>Enable Managed BBS Vault</code>.</li>
+    <li><strong>Initialize Managed Vault</strong>: creates the managed vault folder structure in the VarAC BBS area and imports the current live BBS contents into the default location so you can start from your existing BBS instead of rebuilding it by hand. After you confirm the import, the live BBS folder should be treated as FreqInOut's published output, not the long-term storage place for managed files.</li>
+    <li><strong>Create the FIO_BBS_Vault folders next to the live VarAC BBS folder.</strong>: the short UI explanation shown beside <code>Initialize Managed Vault</code>.</li>
+    <li><strong>Reset To Default</strong>: republishes the default location into the live BBS folder. Use this when you want the BBS to go back to the main menu immediately, for example after a caller opened a controlled location or after testing a special view.</li>
+    <li><strong>Return callers to the root BBS menu and publish the helper files.</strong>: the short UI explanation shown beside <code>Reset To Default</code>.</li>
     <li><strong>Managed Root</strong>: automatic FreqInOut-managed storage for named locations, audit state, and publish manifests. In the current release it is always created next to the live <code>BBS Directory</code> as <code>FIO_BBS_Vault</code>; it is not a free-form operator override.</li>
     <li><strong>Managed Root structure</strong>: the normal layout is <code>Managed Root/locations/&lt;Location Name&gt;</code> for operator-maintained source folders, plus <code>Managed Root/runtime/manifests</code>, <code>runtime/logs</code>, and <code>runtime/tmp</code> for FreqInOut bookkeeping.</li>
     <li><strong>Managed Root example</strong>: if your live BBS is <code>/Users/you/Radio/VarAC_files/BBS</code>, the vault root will be <code>/Users/you/Radio/VarAC_files/FIO_BBS_Vault</code>, and a location named <code>TEST_A</code> will normally use <code>FIO_BBS_Vault/locations/TEST_A</code>.</li>
     <li><strong>Manifest concept</strong>: each publish operation records what FreqInOut projected into the live BBS. That manifest lets FreqInOut reset safely, avoid clobbering unrelated live files, and explain what the last vault action actually published.</li>
-    <li><strong>Default Location</strong>: the normal published BBS set for the selected Station Default radio. FreqInOut returns to this location on the selected return rule, or when you click <code>Reset To Default</code>.</li>
-    <li><strong>Global Code Policy</strong>: decides whether alternate locations may stay public, whether non-default locations should normally require codes, or whether all restricted locations must require codes.</li>
-    <li><strong>Request Parsing</strong>: Vault watches VarAC session traffic and reacts to root requests, alias opens, root returns, and FLAMP commands. The normal human workflow is still command-prefix style: refresh the root view, type the location alias, and refresh again. Compatibility parsing still accepts forms such as <code>BBS OPEN TEST_A</code> and exact-code-only workflows where configured.</li>
-    <li><strong>Return Mode</strong>: decides when the BBS should go back to the default location. <code>On disconnect</code> is the most direct. <code>After inactivity timeout</code> is useful when disconnect lines are unreliable. <code>Manual operator reset only</code> keeps the special location active until you explicitly reset it.</li>
-    <li><strong>Idle Timeout</strong>: used with inactivity-based return mode. Choose a value long enough to avoid interrupting a legitimate session.</li>
-    <li><strong>Failed Attempts</strong>: how many bad codes are tolerated before cooldown is applied.</li>
-    <li><strong>Cooldown</strong>: how long FreqInOut will ignore more bad-code attempts from that sender after the failure threshold is reached.</li>
+    <li><strong>Vault Session</strong>: section for default-menu identity, timers, bad-code behavior, request parsing, and FLAMP relay options.</li>
+    <li><strong>Default Location</strong>: read-only display for the FIO-managed root BBS menu. This is not the same thing as the VarAC <code>BBS Directory</code>. The VarAC folder is the live shelf callers browse; <code>Default</code> is the managed source view that FIO publishes there when the BBS is at the main menu. The adjacent <code>Info</code> button explains this distinction in the UI.</li>
+    <li><strong>Why Default exists</strong>: it gives the caller a predictable starting point. The default view normally contains helper files such as <code>BBS MSG - Type INTEL to open Intel then refresh BBS.txt</code>, not every file from every location. That keeps the first BBS listing readable and lets callers choose the location they need.</li>
+    <li><strong>Global Code Policy</strong>: the station-wide default for how cautious alternate locations should be. The normal friendly default is to allow public locations, then set access rules per location. Use stricter global policy only when your operating plan says non-default locations should normally require codes.</li>
+    <li><strong>Request Parsing</strong>: controls how FIO recognizes caller commands in VarAC traffic. The normal mode is command-prefix style: a caller refreshes the BBS, types an alias such as <code>INTEL</code>, then refreshes again. Compatibility parsing also accepts more explicit forms such as <code>BBS OPEN INTEL</code>. Exact-code-oriented workflows are available for stations that want the code itself to be the access command, but alias-plus-code is usually easier to explain on-air.</li>
+    <li><strong>Return Mode</strong>: decides when the BBS goes back to the Default menu. <code>On disconnect</code> is the cleanest normal choice because each caller gets a fresh menu. <code>After inactivity timeout</code> is useful when disconnect lines are unreliable. <code>Manual operator reset only</code> is for deliberate operator-controlled sessions where a special location should remain published until you reset it.</li>
+    <li><strong>Return Timer</strong>: used with inactivity-based return behavior. Choose a value long enough that a slow operator has time to read, request, and refresh without being pushed back to the main menu mid-session.</li>
+    <li><strong>Bad Code Limit</strong>: how many bad codes are tolerated before cooldown is applied. This is a guardrail against repeated mistakes or guessing, not a cryptographic security system.</li>
+    <li><strong>Cooldown</strong>: how long FIO waits before accepting another bad-code attempt from that sender after the failure threshold is reached. It keeps a caller from hammering the same protected location while still allowing them to try again later.</li>
+    <li><strong>FLAMP Relay</strong>: row that contains <code>Enable FLAMP relay service</code>, the relay folder field, and a <code>Browse</code> button.</li>
     <li><strong>Enable FLAMP relay service</strong>: allows remote queue browsing and block requests using commands such as <code>LIST Q</code>, <code>LIST BLKS F277</code>, and <code>BLK 0,1 F277</code>.</li>
     <li><strong>FLAMP relay concept</strong>: this is not ordinary file browsing. It is a command-driven assist for block-based FLAMP transfer workflows. FreqInOut temporarily publishes helper files that let a remote operator discover queues, inspect available blocks, and request only the blocks they need.</li>
-    <li><strong>FLAMP relay folder</strong>: the source folder where FreqInOut looks for relay queue files to advertise and serve as temporary synthetic BBS responses for the selected radio.</li>
+    <li><strong>FLAMP relay folder</strong>: placeholder text in the relay folder field. This is the source folder where FreqInOut looks for relay queue files to advertise and serve as temporary synthetic BBS responses.</li>
+    <li><strong>Limit FLAMP listing to files newer than</strong>: limits queue listings to recent relay files, with choices such as <code>3 days</code>, <code>5 days</code>, <code>7 days</code>, <code>10 days</code>, <code>14 days</code>, and <code>30 days</code>.</li>
     <li><strong>FLAMP relay auto-fill</strong>: if your <code>FLAMP/rx</code> path is set, FreqInOut will usually suggest a sibling <code>relay</code> folder automatically. This is a convenience default; you can override it whenever your station uses a different relay path.</li>
-    <li><strong>Locations</strong>: named virtual folders that can be published into the live BBS. The <code>Default</code> location is your normal BBS. Other locations are optional controlled alternatives.</li>
+    <li><strong>FIO Managed Locations</strong>: section for named virtual folders that can be published into the live BBS. The table columns are <code>Name</code>, <code>Alias</code>, <code>Filesystem Location</code>, <code>Enabled</code>, <code>Visible</code>, and <code>Code Active</code>.</li>
+    <li><strong>New Location</strong>: starts a new managed location definition.</li>
+    <li><strong>Save Location</strong>: stores the current location definition in FreqInOut so it can be published later.</li>
+    <li><strong>Delete Location</strong>: deletes the selected non-default location definition from FreqInOut. The <code>Default</code> location cannot be deleted.</li>
+    <li><strong>Locations</strong>: named virtual folders that can be published into the live BBS. The <code>Default</code> location is your root BBS menu. Other locations are optional controlled alternatives.</li>
     <li><strong>Location Name</strong>: operator-friendly label for the file set, such as <code>Default</code>, <code>Logistics</code>, or <code>Exercises</code>.</li>
     <li><strong>Alias</strong>: the short command a remote station types, such as <code>INTEL</code> or <code>DOCDROP</code>.</li>
-    <li><strong>Description</strong>: the helper text shown in the root menu entry so the remote operator knows what the alias is for. The most readable pattern is a short phrase that finishes the generated instruction, such as <code>to open Logistics</code>.</li>
-    <li><strong>Source Folder</strong>: the real folder whose files will be published when that location is active. The safest normal pattern is a dedicated folder under <code>Managed Root/locations</code> in the VarAC BBS area. This is where you place files from your computer when you want that location to publish them. In the current release, nested subfolders are ignored.</li>
-    <li><strong>Source Folder defaults</strong>: when you create a new location, FreqInOut suggests <code>Managed Root/locations/&lt;Location Name&gt;</code>, shows likely live-BBS name matches, and can create the missing folder on save so you do not have to hand-build the layout first.</li>
-    <li><strong>Enabled</strong>: whether that location can be published.</li>
-    <li><strong>List In Root Menu</strong>: controls whether the alias is advertised in the root menu. Hidden locations can still exist for controlled direct access workflows.</li>
-    <li><strong>Visibility</strong>: controls whether everyone sees the alias, only allowed callsigns see it, or it stays hidden from the generated root menu.</li>
-    <li><strong>Open Rule</strong>: controls whether the location is public, callsign-limited, or requires both an allowed callsign and a code.</li>
+    <li><strong>Custom Helper Text</strong>: optional operator-written text appended to the generated helper filename. FIO writes the command instruction automatically; your custom text should tell the caller what the location holds. For example, the generated portion might say <code>Type AIB to open AIB then refresh BBS</code>, and your custom text might add <code>weekly AIB reports</code>.</li>
+    <li><strong>Helper Filename</strong>: live preview of the helper file name FIO will publish for this location in the root BBS menu.</li>
+    <li><strong>Location Folder</strong>: the managed folder whose files will be published when that location is active. The safest normal pattern is a dedicated folder under <code>Managed Root/locations</code> in the VarAC BBS area. This is where you place files from your computer when you want that location to publish them. In the current release, nested subfolders are ignored.</li>
+    <li><strong>Location Folder defaults</strong>: when you create a new location, FreqInOut suggests <code>Managed Root/locations/&lt;Location Name&gt;</code>, shows likely live-BBS name matches, and can create the missing folder on save so you do not have to hand-build the layout first.</li>
+    <li><strong>Enabled</strong>: table checkbox/column for whether that location can be published.</li>
+    <li><strong>Visible in Root Menu</strong>: controls whether the alias is advertised in the root menu. Hidden locations can still exist for controlled direct-access workflows.</li>
+    <li><strong>Visible</strong>: table column that mirrors whether the location is visible in the root menu.</li>
+    <li><strong>Access Policy</strong>: controls whether the location is public, callsign-limited, requires an access code, or requires both an allowed callsign and a code.</li>
     <li><strong>Inherit Global Allowed Callsigns</strong>: applies the normal BBS allow-list to that location. This is the safest default.</li>
     <li><strong>Location Allowed Callsigns</strong>: optional stricter subset for that location. Use this when a special location should be opened only by certain stations even if the main BBS allow-list is broader.</li>
-    <li><strong>Access Code / Confirm Code</strong>: write-only operational code used to open a non-default location. FreqInOut stores only a salted hash and shows only <code>Code configured</code> in the UI. This is workflow control, not strong secrecy.</li>
+    <li><strong>Access Code / Confirm Code</strong>: operational code used to open a non-default location. FIO stores the code locally for the station operator to view later and also keeps a hash for caller verification. This is workflow control for off-grid operations, not strong secrecy; if a code changes, you still need an operational way to share the new code with the right stations.</li>
     <li><strong>Root menu helper files</strong>: when the vault is at the default location, FreqInOut injects synthetic BBS helper entries into the live BBS such as <code>BBS MSG - Type TEST_A ... then refresh BBS</code>. These are instructions for the remote station, not operator source files.</li>
-    <li><strong>Remote workflow</strong>: a caller usually sends <code>&lt;BLR&gt;</code> to refresh the root view, reads the helper entry for the location, types the alias such as <code>TEST_A</code> or <code>TEST_A BLUEBELL</code> depending on the location policy, and then refreshes again. After that refresh, the live BBS view contains the actual files from that location. <code>ROOT</code>, <code>BACK</code>, <code>EXIT</code>, or <code>LOCK</code> returns them to the main menu.</li>
-    <li><strong>Location view behavior</strong>: only one vault view is published into the live BBS at a time. When a location is open, the remote station sees that location's files plus a helper entry telling them to type <code>ROOT</code> to return.</li>
-    <li><strong>Callsign-aware menus</strong>: root menu entries can be filtered by the requestor's callsign, so a station may only see the aliases it is allowed to use.</li>
-    <li><strong>FLAMP relay workflow</strong>: remote stations can ask for queue listings, available blocks, and individual block payloads without you manually swapping files in and out of the live BBS folder.</li>
-    <li><strong>Save Location</strong>: stores the location definition in FreqInOut so it can be published later.</li>
-    <li><strong>Remove</strong>: deletes the selected non-default location definition from FreqInOut. The <code>Default</code> location cannot be removed.</li>
+    <li><strong>Remote workflow</strong>: a caller usually sends <code>&lt;BLR&gt;</code> to refresh the root view, reads the helper entry for the location, types the alias such as <code>INTEL</code> or <code>HUBS BLUEBELL</code> depending on the location policy, and then refreshes again. After that refresh, the live BBS view contains the actual files from that location. <code>ROOT</code>, <code>BACK</code>, <code>EXIT</code>, or <code>LOCK</code> returns them to the main menu.</li>
+    <li><strong>Protected-location helper</strong>: if a caller types an alias that requires a code but does not include the code, FIO can publish a helper message for that alias instead of leaving the caller stuck in the current view. The intent is friendly: tell them what went wrong and how to try again, for example <code>Incorrect Code provided for HUBS - try again or return to ROOT</code>.</li>
+    <li><strong>Location view behavior</strong>: only one vault view is published into the live BBS at a time. When a location is open, the remote station sees that location's files plus a helper entry telling them to type <code>ROOT</code> to return. The files are copied into the live BBS for pull; the source location remains in the managed vault.</li>
+    <li><strong>Callsign-aware menus</strong>: root menu helper files should only be shown for aliases the caller is allowed to see. If a location is callsign-limited, stations outside that policy should not get a menu entry that invites them into a location they cannot use.</li>
+    <li><strong>List in root menu</strong>: the clearest normal administration model is to list locations in the root menu and let access policy decide who sees them. Hide a location only when you deliberately want direct-access behavior with no menu advertisement.</li>
+    <li><strong>FLAMP relay workflow</strong>: remote stations can ask for queue listings, available blocks, and individual block payloads without you manually swapping files in and out of the live BBS folder. The root menu can show <code>BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - then refresh BBS.txt</code>. After the caller types <code>FLAMP</code>, FIO publishes separate helper files such as <code>LIST Q</code>, <code>LIST BLKS F277</code>, <code>BLK 0,8,9 F277</code>, and <code>ROOT</code>.</li>
     <li><strong>Vault runtime status</strong>: <code>Settings</code>, <code>ControlFreq</code>, and the <code>Messages</code> BBS summary surface the last vault action so operators can tell whether the vault is enabled, active, reset, or degraded without opening logs.</li>
     <li><strong>Recommended first setup</strong>: start with normal BBS folders and verify BBS copy/archive behavior first. Then initialize the Managed Vault, confirm the imported default location looks right, and only after that add protected alternate locations.</li>
     <li><strong>Credit</strong>: advanced VarAC BBS management in FreqInOut is being shaped with explicit credit to KG5RKW for the operational ideas behind Vault and VGuard.</li>
     <li><strong>VGuard concept</strong>: VGuard is not the same feature as Managed Vault. Vault decides what you publish into the live BBS. VGuard watches inbound VarAC file transfers and can log, delete, or quarantine files from unauthorized senders before they quietly blend into operator workflows.</li>
+    <li><strong>Enable VGuard File Protection</strong>: turns on inbound file protection for received VarAC files.</li>
+    <li><strong>VGuard mode</strong>: choose <code>Log only</code>, <code>Delete unauthorized files</code>, or <code>Quarantine unauthorized files</code>.</li>
+    <li><strong>Quarantine Dir</strong>: destination used when quarantine mode is selected. The field defaults toward <code>Managed Root/quarantine</code>.</li>
+    <li><strong>Retry</strong>: how long VGuard waits between checks when VarAC has logged a receive event but the file is not fully visible yet.</li>
   </ul>
 
   <h3 id="settings-message-auth">Message Auth (Key/Hash) Details</h3>
@@ -1293,6 +1274,15 @@
     <li><strong>Operational caution</strong>: do not treat a matching name or callsign in a key's user ID as sufficient proof by itself. The fingerprint is the safer identity anchor.</li>
   </ul>
 
+  <h3 id="settings-sop-export-details">SOP Export Details</h3>
+  <p><strong>Concept of use</strong>: SOP Export text lets you add station-specific context to the PDF version of your SOP without editing the generated tables themselves. Use it for a short introduction, local handling notes, distribution reminders, or closing instructions that should travel with the exported SOP.</p>
+  <ul class="section-list">
+    <li><strong>Preamble</strong>: appears before the SOP export tables. This is a good place to explain the purpose, scope, effective time, or operator context for the document.</li>
+    <li><strong>Postamble</strong>: appears after the SOP export tables. This is useful for closing reminders, document-control notes, or local operating cautions.</li>
+    <li><strong>Placeholders</strong>: simple placeholders such as <code>{{operator_callsign}}</code>, <code>{{as_of_local}}</code>, <code>{{as_of_utc}}</code>, <code>{{scope}}</code>, and <code>{{timezone}}</code> are replaced during export.</li>
+    <li><strong>Best practice</strong>: keep this text short and operational. The SOP tables carry the structured information; the preamble and postamble should explain how the operator should use or share the export.</li>
+  </ul>
+
   <h3 id="settings-custom-tools-details">Custom Tools Details</h3>
   <p><strong>Concept of use</strong>: Custom Tools let you teach FreqInOut about helper programs that are specific to your station workflow but are not one of the built-in supported radio applications. Most often these are Python scripts, shell scripts, wrappers, emulators, or small utility launchers you want available from the same operational surface as the rest of the station tools.</p>
   <ul class="section-list">
@@ -1303,7 +1293,6 @@
     <li><strong>Ordering</strong>: <code>Up</code> and <code>Down</code> control the order Custom Tools appear when surfaced in Launch Control.</li>
     <li><strong>Add / Edit / Remove</strong>: these manage the saved Custom Tool definitions only. They do not automatically start the tool.</li>
     <li><strong>Cross-tab interaction</strong>: configured Custom Tools also appear in <code>Launch Control</code>, so the same named helper can be launched alongside your station software instead of living only as an external script on disk.</li>
-    <li><strong>Multi-rig scope</strong>: Custom Tools are global helpers, not radio-bound device profiles. They remain available as station utilities even though built-in software projections follow the current Station Default shell.</li>
     <li><strong>Best practice</strong>: if a command depends on a specific working directory, interpreter, virtual environment, or shell wrapper, include that intentionally in the command so the tool behaves the same way every time FIO launches it.</li>
     <li><strong>Operational caution</strong>: FreqInOut can launch a Custom Tool, but it does not automatically understand that tool's internal readiness or state unless you build a separate integration for it. Treat Custom Tools as assisted launch helpers, not as full protocol integrations.</li>
   </ul>
@@ -1329,10 +1318,10 @@
     <li><strong>Table of Contents</strong> (left): click headings to navigate.</li>
     <li><strong>Guide viewer</strong> (right): renders <code>docs/guide.html</code>.</li>
     <li><strong>Export to PDF</strong>: exports the displayed guide.</li>
-    <li><strong>How to use it well</strong>: if a help button opens a specific section, read at least the purpose text and the nearby workflow notes, not only the control list. Those notes usually explain why the screen exists and what other tabs or settings it depends on.</li>
-    <li><strong>When something feels wrong</strong>: use Help as a relationship map. In multi-rig especially, many questions are really about Station Default ownership, assignment state, or projected settings rather than the tab you are currently viewing.</li>
+    <li><strong>How to use it well</strong>: if a help button opens a specific section, read at least the purpose text and the nearby workflow notes, not only the control list. Those notes usually explain why the screen exists and what other tabs it depends on.</li>
+    <li><strong>When something feels wrong</strong>: use Help as a relationship map. If a tab seems confusing, look for references to Settings, Messages, Map, Operators, or the schedule tabs nearby in the guide. Many support questions are really cross-tab workflow questions.</li>
   </ul>
-  <p><strong>Off-schedule prompt note</strong>: When enforcement is set to <code>Prompt</code>, the scheduler can raise an off-schedule prompt for items such as <code>Frequency</code>, <code>FLDigi Mode</code>, and <code>FLDigi Offset</code> (these may appear separately). <code>Apply</code> corrects the selected items, <code>Ignore/Skip</code> leaves them off-schedule for now, and <code>Suspend/Pause</code> temporarily suspends scheduler corrections.</p>
+  <p><strong>Off-schedule prompt note</strong>: When enforcement is set to <code>Prompt</code>, FIO acts like a careful helper instead of grabbing the controls. It may ask about <code>Frequency</code>, <code>FLDigi Mode</code>, or <code>FLDigi Offset</code> when one of those does not match the active schedule. Choose <code>Apply</code> when you want FIO to fix it, <code>Ignore/Skip</code> when you know you are off schedule and want to stay there for now, or <code>Suspend/Pause</code> when you want FIO to stop nudging you temporarily. The prompt interval controls how soon FIO may remind you again if the mismatch is still there.</p>
 
   <h2 id="logs-viewer">Logs Viewer (from Settings)</h2>
   <p>Logs are opened from <code>Settings &gt; Logging &amp; Diagnostics &gt; Open Logs</code>.</p>
@@ -1349,14 +1338,10 @@
   <ul class="section-list">
     <li>If a button appears disabled, confirm required row selection or required fields.</li>
     <li>If schedule behavior is unexpected, check <code>Schedule Status</code> first (paused/off-schedule/manual mode reasons).</li>
-    <li>If the wrong radio appears to own ControlFreq, Messages, Map, or an NCS tab, check <code>Settings &gt; Device Profiles</code> for the current <code>Station Default</code> and check <code>Settings &gt; Device Assignments</code> for an active temporary swap.</li>
-    <li>If an HF Daily or HF Nets row never becomes active, verify its <code>Target Scope</code> and <code>Target</code> against the current Station Default device and its effective operating profile.</li>
     <li>If a Settings section stays highlighted, open that section and look for a missing companion field such as <code>DIRECTED.TXT</code>, an endpoint port, a forms path, or <code>Incoming Files</code>.</li>
-    <li>If Map, Messages, or NCS buttons disappear, review the current Station Default operating profile and deployment mode. Those surfaces can be intentionally suppressed.</li>
     <li>If FLDigi offset returns unexpectedly, check <code>Settings &gt; FreqInOut Settings</code> for FLDigi enforcement mode (<code>On Schedule Change</code> vs <code>Prompt</code>) and confirm whether a new schedule row transition occurred.</li>
     <li>If message actions are missing (for example <code>+BBS</code>), verify required Settings paths are configured.</li>
     <li>If VarAC does not launch from Launch Control on Linux, first clear <code>VarAC Launch Command</code> and test auto-launch from <code>VarAC Install Folder</code>. If needed, then set a custom Wine command using absolute paths.</li>
-    <li>If VarAC cluster warnings persist, confirm the cluster shared DB path, ensure enabled memberships have device-local VarAC settings, and make sure any multi-member cluster has one enabled gateway handler selected.</li>
     <li>If JS8Spotter/CommStat launch too early, keep JS8Call earlier in Launch Control order; FreqInOut now waits for JS8 API readiness before proceeding.</li>
     <li>If BBS auto-archive does not run, turn on <code>Enable Auto-Archive</code>, confirm both BBS paths are valid and different, then open Messages once after startup.</li>
     <li>If signature/hash states are neutral, verify Message Auth settings and trusted key/hash entries.</li>

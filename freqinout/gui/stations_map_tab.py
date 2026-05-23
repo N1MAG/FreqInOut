@@ -5716,8 +5716,18 @@ function addGridLabels(res, level, bounds, maxLabels) {
                     "level": level,
                 }
         prop_colors = self._resolve_prop_band_colors()
-        label_color = "#E6E8EE" if is_dark else "#000"
-        region_label_color = "#B8C7FF" if is_dark else "#1E88E5"
+        label_color = theme.get("text", "#E6E8EE" if is_dark else "#1C1F21")
+        state_label_color = theme.get("text_muted", "#A3ACB8" if is_dark else "#5B6570")
+        region_label_color = theme.get("info", theme.get("accent", "#B8C7FF" if is_dark else "#1E88E5"))
+        callsign_label_color = theme.get("text", label_color)
+        region_band_label_color = theme.get("text", label_color)
+        label_halo = (
+            "0 1px 2px rgba(0,0,0,0.88), 0 0 3px rgba(0,0,0,0.72)"
+            if is_dark
+            else "0 1px 2px rgba(255,255,255,0.92), 0 0 3px rgba(255,255,255,0.82)"
+        )
+        callsign_chip_bg = self._hex_to_rgba(theme.get("surface", "#171B21" if is_dark else "#F0F2F4"), 0.78 if is_dark else 0.84)
+        callsign_chip_border = self._hex_to_rgba(theme.get("border", "#2A313A" if is_dark else "#D3D7DD"), 0.88 if is_dark else 0.80)
         tooltip_bg = "#1A1F26" if is_dark else "#fff"
         tooltip_text = "#E6E8EE" if is_dark else "#000"
         tooltip_border = "#3A4452" if is_dark else "#444"
@@ -5773,7 +5783,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
             }}
             const displayLabel = stateAbbr || (props.name || props.STATE_NAME || props.state);
             if ({str(self.show_states).lower()} && displayLabel) {{
-              const tooltip = L.tooltip({{direction:'center', permanent:true, className:'label-text no-border'}});
+              const tooltip = L.tooltip({{direction:'center', permanent:true, className:'label-text no-border state-label'}});
               tooltip.setContent(displayLabel);
               layer.bindTooltip(tooltip);
             }}
@@ -5938,6 +5948,10 @@ function addGridLabels(res, level, bounds, maxLabels) {
         dark_map_filter = "filter: brightness(0.75) saturate(0.85) contrast(1.05);" if is_dark else ""
         ui_text_scale = resolve_ui_text_scale(self.settings)
         label_font_px = max(10.0, 10.0 * float(ui_text_scale))
+        state_label_font_px = max(10.0, 10.0 * float(ui_text_scale))
+        callsign_label_font_px = max(11.0, 11.0 * float(ui_text_scale))
+        region_label_font_px = max(12.0, 12.0 * float(ui_text_scale))
+        region_band_label_font_px = max(10.0, 10.0 * float(ui_text_scale))
         panel_font_px = max(11.0, 11.0 * float(ui_text_scale))
         legend_font_px = max(12.0, 12.0 * float(ui_text_scale))
         return f"""
@@ -5954,10 +5968,12 @@ function addGridLabels(res, level, bounds, maxLabels) {
     #map-wrap {{ position: relative; flex: 1 1 auto; min-height: 0; }}
     #map {{ height: 100%; {dark_map_filter} }}
     #legendDock {{ flex: 0 0 auto; display: flex; justify-content: center; padding: 6px 10px 10px; }}
-    .label-text {{ font-size: {label_font_px:.1f}px; color: {label_color}; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; text-shadow: 0 1px 2px #000; }}
+    .label-text {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; font-size: {label_font_px:.1f}px; line-height: 1; letter-spacing: 0; color: {label_color}; background: transparent; padding: 0; border: none; box-shadow: none; pointer-events: none; text-shadow: {label_halo}; white-space: nowrap; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }}
     .label-text.no-border {{ background: transparent; border: none; box-shadow: none; pointer-events: none; }}
-    .region-label {{ color: {region_label_color}; font-weight: 700; pointer-events: auto; }}
-    .region-band-label {{ color: #000; font-weight: 400; pointer-events: none; }}
+    .state-label {{ color: {state_label_color}; font-size: {state_label_font_px:.1f}px; font-weight: 600; opacity: 0.88; text-transform: uppercase; }}
+    .region-label {{ color: {region_label_color}; font-size: {region_label_font_px:.1f}px; font-weight: 800; pointer-events: auto; }}
+    .callsign-label {{ color: {callsign_label_color}; font-size: {callsign_label_font_px:.1f}px; font-weight: 700; padding: 1px 4px; border: 1px solid {callsign_chip_border}; border-radius: 3px; background: {callsign_chip_bg}; box-shadow: 0 1px 2px rgba(0,0,0,0.18); pointer-events: auto; }}
+    .region-band-label {{ color: {region_band_label_color}; font-size: {region_band_label_font_px:.1f}px; font-weight: 600; pointer-events: none; }}
     .cs-tooltip {{ background: {tooltip_bg}; color: {tooltip_text}; border: 1px solid {tooltip_border}; padding: 5px 7px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.4); z-index: 10000; }}
     .leaflet-tooltip.cs-tooltip {{ z-index: 10000; pointer-events: none; }}
     .leaflet-popup.cs-tooltip {{ z-index: 10001; }}
@@ -6284,7 +6300,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
         // Permanent label only when show_callsigns is on
         if (m.label) {{
           const icon = L.divIcon({{
-            className: 'label-text',
+            className: 'label-text callsign-label',
             html: m.label
           }});
           const labelMarker = L.marker([m.lat, m.lon], {{icon, pane:'stationsPane'}});

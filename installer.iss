@@ -1,6 +1,6 @@
 ; installer.iss
 #define MyAppName "FreqInOut"
-#define MyAppVersion "1.2.3"
+#define MyAppVersion "1.2.4"
 #define MyAppExeName "FreqInOut.exe"
 
 [Setup]

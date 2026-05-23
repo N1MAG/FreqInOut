@@ -42,6 +42,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
+from freqinout.core.station_health_summary import summarize_station_health
 from freqinout.radio_interface.rigctl_client import rig_control_client_from_settings
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
@@ -72,6 +73,7 @@ from freqinout.gui.help_tab import HelpTab
 from freqinout.gui.help_registry import get_help_context
 from freqinout.gui.controlfreq_tab import ControlFreqTab
 from freqinout.gui.station_overview_tab import StationOverviewTab
+from freqinout.gui.station_health_tab import StationHealthTab
 from freqinout.gui.qsy_helper import (
     refresh_hold_duration_combo,
     selected_hold_duration,
@@ -117,6 +119,7 @@ class MainWindow(QMainWindow):
         self._active_runtime_policy = self._primary_runtime_policy()
         self._suppressed_screen_labels: set[str] = set()
         self._launch_startup_suppressed = False
+        self._station_health_scope_map: dict[str, str] = {}
         self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
         self._set_window_icon()
 
@@ -147,6 +150,9 @@ class MainWindow(QMainWindow):
         self.controlfreq_tab = ControlFreqTab(self)
         self.station_overview_tab = StationOverviewTab(self)
         self.station_overview_tab.set_runtime_manager(self.station_runtime_manager)
+        self.station_health_tab = StationHealthTab(self)
+        self._refresh_station_health_scope_map()
+        self.station_health_tab.set_scope_resolver(self._station_health_scope_resolver)
         self._sop_data_refresh_pending = False
         self._sop_data_refresh_timer = QTimer(self)
         self._sop_data_refresh_timer.setSingleShot(True)
@@ -181,6 +187,7 @@ class MainWindow(QMainWindow):
             ("HF Schedule", self.hf_schedule_tab),
             ("Net Schedule", self.net_tab),
             ("Peer Schedules", self.peer_sched_tab),
+            ("Station Health", self.station_health_tab),
             ("Settings", self.settings_tab),
             ("Help", self.help_tab),
         ]
@@ -207,6 +214,7 @@ class MainWindow(QMainWindow):
             ("HF Callsigns", "HF Operators"),
             ("Local Callsigns", "Local Operators"),
             ("SOP Builder", "SOP"),
+            ("Station Health", "Station Health"),
             ("Settings", "Settings"),
             ("Help", "Help"),
         ]
@@ -245,6 +253,8 @@ class MainWindow(QMainWindow):
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)
         self._map_nav_index = None
+        self._station_health_nav_index = None
+        self._station_health_alert_signature: tuple[object, ...] | None = None
         self._ncs_nav_indices: dict[str, int] = {}
         self._ncs_net_active: dict[str, bool] = {"FLDIGI": False, "JS8": False, "LOCAL": False}
         self._nav_group_headers: dict[str, QPushButton] = {}
@@ -276,6 +286,8 @@ class MainWindow(QMainWindow):
             target_layout.addWidget(btn)
             if screen_label == "Map":
                 self._map_nav_index = nav_idx
+            elif screen_label == "Station Health":
+                self._station_health_nav_index = btn_idx
             elif screen_label == "NCS-FLDigi/SSB":
                 self._ncs_nav_indices["FLDIGI"] = btn_idx
             elif screen_label == "NCS-JS8":
@@ -545,10 +557,11 @@ class MainWindow(QMainWindow):
             pass
 
         self._status_timer = QTimer(self)
-        self._status_timer.setInterval(2000)
+        self._status_timer.setInterval(5000)
         self._status_timer.timeout.connect(self._refresh_scheduler_status_panel)
         self._status_timer.timeout.connect(self._refresh_condition_level_panel)
         self._status_timer.timeout.connect(self._refresh_station_overview)
+        self._status_timer.timeout.connect(self._refresh_station_health_alert)
         self._status_timer.timeout.connect(self._check_timed_debug_expiry)
         self._status_timer.start()
         self._condition_levels_refresh_timer = QTimer(self)
@@ -646,6 +659,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self.settings_tab.settings_saved.connect(self._on_station_health_settings_saved)
+        except Exception:
+            pass
+        try:
             self.settings_tab.open_logs_requested.connect(self._open_logs_window)
         except Exception:
             pass
@@ -667,6 +684,7 @@ class MainWindow(QMainWindow):
         self._refresh_scheduler_status_panel()
         self._refresh_condition_level_panel()
         self._refresh_station_overview(force=True)
+        self._refresh_station_health_alert()
         self._apply_runtime_profile_state(force=True)
 
         try:
@@ -1803,6 +1821,7 @@ class MainWindow(QMainWindow):
         if self._shutting_down:
             return
         self._shutting_down = True
+        self._close_transient_shutdown_ui()
         try:
             if hasattr(self, "_sop_data_refresh_timer"):
                 self._sop_data_refresh_timer.stop()
@@ -1881,6 +1900,41 @@ class MainWindow(QMainWindow):
             set_scheduler_enabled_override(None)
         except Exception:
             pass
+
+    def _close_transient_shutdown_ui(self) -> None:
+        try:
+            self._dismiss_off_schedule_prompt()
+            self._dismiss_varac_wait_prompt()
+        except Exception:
+            pass
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            popup = app.activePopupWidget()
+            if popup is not None:
+                popup.close()
+        except Exception as e:
+            log.debug("MainWindow shutdown: active popup close failed: %s", e)
+        try:
+            modal = app.activeModalWidget()
+            if modal is not None and modal is not self:
+                if isinstance(modal, QDialog):
+                    modal.reject()
+                else:
+                    modal.close()
+        except Exception as e:
+            log.debug("MainWindow shutdown: active modal close failed: %s", e)
+        try:
+            for widget in list(app.topLevelWidgets()):
+                if widget is self or not widget.isVisible():
+                    continue
+                if isinstance(widget, QDialog):
+                    widget.reject()
+                elif widget.windowModality() != Qt.NonModal or widget.parent() is not None:
+                    widget.close()
+        except Exception as e:
+            log.debug("MainWindow shutdown: transient widget close failed: %s", e)
 
     def closeEvent(self, event):
         self._on_app_about_to_quit()
@@ -2259,6 +2313,8 @@ class MainWindow(QMainWindow):
                 if idx < len(self.nav_buttons):
                     self.nav_buttons[idx].setText(base)
             self._update_nav_layout_metrics()
+            self._station_health_alert_signature = None
+            self._refresh_station_health_alert()
             return
 
         for idx, base in enumerate(base_labels):
@@ -2266,6 +2322,8 @@ class MainWindow(QMainWindow):
             if idx < len(self.nav_buttons):
                 self.nav_buttons[idx].setText(lbl)
         self._update_nav_layout_metrics()
+        self._station_health_alert_signature = None
+        self._refresh_station_health_alert()
 
     def open_help_anchor(self, anchor: str | None, *, title: str | None = None) -> None:
         help_index = next((idx for idx, (label, _) in enumerate(self._screens) if label == "Help"), -1)
@@ -2349,6 +2407,8 @@ class MainWindow(QMainWindow):
             self.peer_sched_tab,
             self.settings_tab,
             self.controlfreq_tab,
+            self.station_overview_tab,
+            self.station_health_tab,
             self.help_tab,
         ):
             if widget is None:
@@ -2964,6 +3024,76 @@ class MainWindow(QMainWindow):
                 self.station_overview_tab.refresh_from_manager(force=force)
         except Exception:
             pass
+
+    def _on_station_health_settings_saved(self) -> None:
+        self._refresh_station_health_scope_map()
+        try:
+            self.station_health_tab.refresh_from_registry()
+        except Exception:
+            pass
+        self._station_health_alert_signature = None
+        self._refresh_station_health_alert()
+
+    def _refresh_station_health_scope_map(self) -> None:
+        scope_map: dict[str, str] = {}
+        try:
+            profiles = list(self.multi_radio_store.list_runtime_active_device_profiles())
+        except Exception:
+            profiles = []
+
+        def _profile_name(profile: dict) -> str:
+            name = str(profile.get("name", "") or profile.get("label", "") or "").strip()
+            if name:
+                return name
+            ident = profile.get("id", "")
+            return f"Radio {ident}" if ident not in (None, "") else "Station-wide"
+
+        def _host(value: object, default: str = "127.0.0.1") -> str:
+            return str(value or default or "127.0.0.1").strip().lower() or str(default or "127.0.0.1")
+
+        def _port(value: object, default: int) -> int:
+            try:
+                return int(value if value not in (None, "") else default)
+            except Exception:
+                return int(default)
+
+        def _add(service: str, host: object, port: object, name: str, *, default_port: int) -> None:
+            host_text = _host(host)
+            port_text = str(_port(port, default_port))
+            scope_map[f"{service.lower()}:{host_text}:{port_text}"] = name
+            if host_text in {"127.0.0.1", "localhost"}:
+                scope_map[f"{service.lower()}:loopback:{port_text}"] = name
+
+        for raw_profile in profiles:
+            if not isinstance(raw_profile, dict):
+                continue
+            name = _profile_name(raw_profile)
+            _add("JS8CALL", raw_profile.get("js8_host"), raw_profile.get("js8_port"), name, default_port=2442)
+            _add("FLRIG", raw_profile.get("flrig_host"), raw_profile.get("flrig_port"), name, default_port=12345)
+            fldigi_host = raw_profile.get("fldigi_host") or raw_profile.get("flrig_host")
+            _add("FLDIGI", fldigi_host, raw_profile.get("fldigi_port"), name, default_port=7362)
+            backend = str(raw_profile.get("control_backend", "") or "").strip().lower()
+            if backend == "rigctld":
+                _add("RIGCTLD", raw_profile.get("rig_host"), raw_profile.get("rig_port"), name, default_port=4532)
+            if str(raw_profile.get("device_class", "") or "").strip().lower() == "observer":
+                _add("OBSERVER", raw_profile.get("sdr_host"), raw_profile.get("sdr_port"), name, default_port=0)
+        self._station_health_scope_map = scope_map
+
+    def _station_health_scope_resolver(self, key: str, metadata: dict[str, object]) -> str:
+        for meta_key in ("scope", "radio_name", "radio", "profile_name", "device_name"):
+            text = str(metadata.get(meta_key, "") or "").strip()
+            if text:
+                return text
+        normalized = str(key or "").strip().lower()
+        scope_map = getattr(self, "_station_health_scope_map", {}) or {}
+        if normalized in scope_map:
+            return scope_map[normalized]
+        parts = normalized.split(":")
+        if len(parts) >= 3:
+            compact = ":".join(parts[:3])
+            if compact in scope_map:
+                return scope_map[compact]
+        return ""
 
     def _runtime_client_signature_for_settings(self) -> tuple[object, ...]:
         manager = getattr(self, "station_runtime_manager", None)
@@ -3819,3 +3949,62 @@ class MainWindow(QMainWindow):
                 btn.setStyleSheet(button_style("warning", theme) + align_style)
             except Exception:
                 pass
+        self._apply_station_health_nav_alert(theme, align_style)
+
+    def _station_health_nav_label(self, issue_count: int = 0) -> str:
+        idx = getattr(self, "_station_health_nav_index", None)
+        if idx is None or idx < 0 or idx >= len(getattr(self, "_nav_base_labels", [])):
+            return "Station Health"
+        label = str(self._nav_base_labels[idx] or "Station Health")
+        try:
+            callsign = str(self.settings.get("callsign", "") or "").strip().upper()
+        except Exception:
+            callsign = ""
+        if callsign:
+            label = f"{label} [{callsign}]"
+        if issue_count > 0:
+            label = f"{label} ({issue_count})"
+        return label
+
+    def _refresh_station_health_alert(self) -> None:
+        try:
+            summary = summarize_station_health(include_ok=False)
+        except Exception:
+            summary = {"issue_count": 0, "severity": "ok", "issue_items": []}
+        issue_count = int(summary.get("issue_count", 0) or 0)
+        severity = str(summary.get("severity", "ok") or "ok")
+        signature = (issue_count, severity)
+        if signature != getattr(self, "_station_health_alert_signature", None):
+            self._station_health_alert_signature = signature
+            idx = getattr(self, "_station_health_nav_index", None)
+            if idx is not None and 0 <= idx < len(getattr(self, "nav_buttons", [])):
+                try:
+                    self.nav_buttons[idx].setText(self._station_health_nav_label(issue_count))
+                    self._update_nav_layout_metrics()
+                except Exception:
+                    pass
+        self._station_health_alert_summary = dict(summary)
+        self._update_ncs_nav_button_styles()
+
+    def _apply_station_health_nav_alert(self, theme: dict[str, str], align_style: str) -> None:
+        idx = getattr(self, "_station_health_nav_index", None)
+        if idx is None or idx < 0 or idx >= len(getattr(self, "nav_buttons", [])):
+            return
+        btn = self.nav_buttons[idx]
+        try:
+            summary = getattr(self, "_station_health_alert_summary", None)
+            if not isinstance(summary, dict):
+                summary = summarize_station_health(include_ok=False)
+            issue_count = int(summary.get("issue_count", 0) or 0)
+            severity = str(summary.get("severity", "ok") or "ok")
+            if issue_count <= 0:
+                btn.setToolTip("Station Health: no known external software responsiveness issues.")
+                return
+            role = "danger" if severity == "danger" else "warning"
+            btn.setStyleSheet(button_style(role, theme) + align_style)
+            btn.setToolTip(
+                f"Station Health: {issue_count} responsiveness issue"
+                f"{'s' if issue_count != 1 else ''}. Open Station Health for details."
+            )
+        except Exception:
+            pass

@@ -668,7 +668,7 @@ def test_reset_to_default_falls_back_to_enabled_locations_when_root_menu_empty(t
     assert not any("HIDDEN" in name for name in names)
 
 
-def test_reset_to_default_falls_back_to_filesystem_locations(tmp_path: Path) -> None:
+def test_reset_to_default_does_not_resurrect_deleted_filesystem_locations(tmp_path: Path) -> None:
     live_bbs = tmp_path / "BBS"
     live_bbs.mkdir()
     managed_root = tmp_path / "FIO_BBS_Vault"
@@ -690,13 +690,13 @@ def test_reset_to_default_falls_back_to_filesystem_locations(tmp_path: Path) -> 
     )
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert any("AIB" in name for name in names)
-    assert any("HUBS" in name for name in names)
-    assert any("INTEL" in name for name in names)
-    assert any("MR08" in name for name in names)
+    assert not any("AIB" in name for name in names)
+    assert not any("HUBS" in name for name in names)
+    assert not any("INTEL" in name for name in names)
+    assert not any("MR08" in name for name in names)
 
 
-def test_background_reconcile_keeps_filesystem_fallback_root_menu(tmp_path: Path) -> None:
+def test_background_reconcile_does_not_resurrect_deleted_filesystem_locations(tmp_path: Path) -> None:
     live_bbs = tmp_path / "BBS"
     live_bbs.mkdir()
     managed_root = tmp_path / "FIO_BBS_Vault"
@@ -739,8 +739,8 @@ def test_background_reconcile_keeps_filesystem_fallback_root_menu(tmp_path: Path
     run_varac_bbs_vault(settings)
 
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert any("AIB" in name for name in names)
-    assert any("INTEL" in name for name in names)
+    assert not any("AIB" in name for name in names)
+    assert not any("INTEL" in name for name in names)
 
 
 def test_run_varac_bbs_vault_processes_alias_navigation_from_varac_db(tmp_path: Path) -> None:
@@ -1254,7 +1254,7 @@ def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: 
     assert "NATL-RR-260427-1500Z-AIB-sig.k2s" not in names
 
 
-def test_run_varac_bbs_vault_opens_filesystem_fallback_location_from_alias(tmp_path: Path) -> None:
+def test_run_varac_bbs_vault_ignores_unconfigured_filesystem_alias(tmp_path: Path) -> None:
     varac_root = tmp_path / "varac"
     varac_root.mkdir()
     varac_db = varac_root / "VarAC.db"
@@ -1320,13 +1320,11 @@ def test_run_varac_bbs_vault_opens_filesystem_fallback_location_from_alias(tmp_p
     result = run_varac_bbs_vault(settings)
 
     assert result.enabled
-    assert result.processed_events == 2
+    assert result.processed_events == 1
     state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
-    assert state.current_view_mode == "location"
-    assert state.current_view_label == "AIB"
+    assert state.current_view_mode == "root"
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "NATL-RR-260427-1500Z-AIB-sig.k2s" in names
-    assert any("ROOT" in name for name in names)
+    assert "NATL-RR-260427-1500Z-AIB-sig.k2s" not in names
     assert not any("Type AIB" in name for name in names)
 
 
@@ -2508,6 +2506,45 @@ def test_settings_tab_autofills_vault_location_defaults(tmp_path: Path) -> None:
     full_path = tab.varac_bbs_vault_source_dir_edit.property("full_path")
     assert full_path in {None, str(managed_root / "locations" / "Logistics")}
     assert "Live BBS likely match: Logistics.txt" in tab.varac_bbs_vault_source_hint_label.text()
+
+
+def test_settings_tab_location_autofill_tracks_full_path_after_first_character(tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    managed_root = tmp_path / "FIO_Managed_Vault"
+
+    tab = SettingsTab()
+    tab.varac_bbs_vault_root_edit.setText(str(managed_root))
+    tab._new_varac_bbs_vault_location()
+
+    for text in ("A", "Am", "AmR", "AmRR", "AmRRO", "AmRRON"):
+        tab.varac_bbs_vault_location_name_edit.setText(text)
+
+    assert tab.varac_bbs_vault_source_dir_edit.text() == str(managed_root / "locations" / "AmRRON")
+
+
+def test_settings_tab_detects_existing_vault_folder_as_readd(tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+
+    from freqinout.gui.settings_tab import SettingsTab
+
+    existing = tmp_path / "FIO_Managed_Vault" / "locations" / "AmRRON"
+    existing.mkdir(parents=True)
+    keep_file = existing / "existing.txt"
+    keep_file.write_text("keep", encoding="utf-8")
+
+    tab = SettingsTab()
+
+    assert tab._should_offer_readd_varac_bbs_vault_location_folder("", existing) is True
+    assert tab._should_offer_readd_varac_bbs_vault_location_folder("amrron", existing) is False
+    assert tab._should_offer_readd_varac_bbs_vault_location_folder("", existing / "missing") is False
+    assert keep_file.read_text(encoding="utf-8") == "keep"
 
 
 def test_settings_tab_helper_preview_matches_pause_helper_text(tmp_path: Path) -> None:

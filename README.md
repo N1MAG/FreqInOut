@@ -29,6 +29,15 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
+## What's New in v1.2.4
+
+- FLDigi / SSB Net Control now lists scheduled nets that are active or coming up soon, so operators who start a little late can still select the intended scheduled net.
+- The FLDigi / SSB Net Roster now uses role-aware `Directed By` and `Acked By` chips, scoped live actions (`NCS`, `ANCS`, `Shared`, `All`), `ACK Needed`, `Next TFC`, traffic progress chips, and role-first macro files such as `NCS_ACK_Pending.txt` and `ANCS_Next_TFC.txt`.
+- The FLDigi macro area is collapsible and quieter during a net, with setup controls shown only when a macro is missing or needs mapping; the expanded Help guide now explains copy actions, macro files, and NCS/ANCS workflows in operator-friendly wording.
+- Station Health adds a dedicated view for external dependency responsiveness, including per-radio context for multi-rig companion software.
+- Messages filtering/export and FLAMP/CommStat handling were tightened for field use, including cleaner CSV export behavior and clearer incomplete-FLAMP/CommStat message handling.
+- Performance isolation work reduces the chance that slow or unreachable companion applications can make FIO feel like the culprit, with guarded background work, cooldowns, and clearer status reporting.
+
 ## What's New in v1.2.3
 
 - FLDigi Net Control now uses a unified editable local roster table for the left-side working area, with category outputs and live check-in file sync derived from the roster rather than the legacy TFC/QRU/LATE text buckets.
@@ -53,7 +62,7 @@ python -m freqinout.main
 
 ### Linux (Debian/Ubuntu)
 
-This path is a full source/developer checkout and includes tests.
+This path runs FreqInOut from a source checkout.
 
 ```bash
 sudo apt-get install python3 python3-venv python3-pip libxcb-cursor0 libxcb-xinerama0

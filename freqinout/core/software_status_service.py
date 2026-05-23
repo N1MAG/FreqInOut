@@ -9,6 +9,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import psutil
 
+from freqinout.core.dependency_health import get_dependency_health_registry
+
 
 PROGRAM_TOKENS: Dict[str, Sequence[str]] = {
     "FLRig": ("flrig", "flrig.exe"),
@@ -67,17 +69,21 @@ class SoftwareStatusService:
     _shared_proc_snapshot_ts: float = 0.0
     _shared_js8_api_cache: Dict[tuple[str, int, bool], tuple[float, bool]] = {}
     _shared_service_probe_cache: Dict[tuple[str, ...], tuple[float, bool]] = {}
+    _shared_process_exe_cache: Dict[str, tuple[float, Optional[str]]] = {}
 
     def __init__(self, settings: Any) -> None:
         self.settings = settings
         self._proc_snapshot: List[str] = []
         self._proc_snapshot_ts: float = 0.0
-        self._snapshot_ttl_sec: float = 2.0
+        self._snapshot_ttl_sec: float = 5.0
         self._js8_api_cache_key: tuple[str, int, bool] | None = None
         self._js8_api_cache_ok: bool = False
         self._js8_api_cache_ts: float = 0.0
-        self._js8_api_cache_ttl_sec: float = 4.0
-        self._service_probe_ttl_sec: float = 4.0
+        self._api_success_ttl_sec: float = 15.0
+        self._api_failure_ttl_sec: float = 30.0
+        self._service_probe_success_ttl_sec: float = 15.0
+        self._service_probe_failure_ttl_sec: float = 30.0
+        self._health = get_dependency_health_registry()
 
     def _settings_text(self, key: str, default: str = "") -> str:
         try:
@@ -123,14 +129,48 @@ class SoftwareStatusService:
         cached = cls._shared_service_probe_cache.get(cache_key)
         if not force and cached:
             cached_ts, cached_ok = cached
-            if (now - float(cached_ts or 0.0)) < float(self._service_probe_ttl_sec):
+            ttl = self._service_probe_success_ttl_sec if cached_ok else self._service_probe_failure_ttl_sec
+            if (now - float(cached_ts or 0.0)) < float(ttl):
                 return bool(cached_ok)
+        health_key = self._health_key(cache_key)
+        allowed, _health = self._health.may_run(health_key, owner="SoftwareStatusService", force=force)
+        if not allowed and cached:
+            return bool(cached[1])
+        if not allowed:
+            return False
+        started = time.monotonic()
         try:
             ok = bool(probe())
-        except Exception:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+        except Exception as exc:
             ok = False
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            self._health.record_failure(
+                health_key,
+                owner="SoftwareStatusService",
+                error=str(exc or "probe failed"),
+                duration_ms=elapsed_ms,
+            )
+        else:
+            if ok:
+                self._health.record_success(health_key, owner="SoftwareStatusService", duration_ms=elapsed_ms)
+            else:
+                self._health.record_failure(
+                    health_key,
+                    owner="SoftwareStatusService",
+                    error="unreachable",
+                    duration_ms=elapsed_ms,
+                )
         cls._shared_service_probe_cache[cache_key] = (now, ok)
         return ok
+
+    @staticmethod
+    def _health_key(cache_key: tuple[object, ...]) -> str:
+        parts = [str(part or "").strip().lower() for part in cache_key]
+        return ":".join(part for part in parts if part) or "software-status"
+
+    def _health_snapshot_for(self, cache_key: tuple[object, ...]) -> Dict[str, object]:
+        return self._health.snapshot(self._health_key(cache_key))
 
     def _refresh_process_snapshot(self, *, force: bool = False) -> None:
         cls = type(self)
@@ -206,6 +246,12 @@ class SoftwareStatusService:
         return any(token in targets for token in self._proc_snapshot)
 
     def find_process_exe(self, program_name: str) -> Optional[str]:
+        cls = type(self)
+        now = time.monotonic()
+        cache_key = str(program_name or "").strip()
+        cached = cls._shared_process_exe_cache.get(cache_key)
+        if cached and (now - float(cached[0] or 0.0)) < self._snapshot_ttl_sec:
+            return cached[1]
         targets = set(self._target_tokens(program_name))
         if not targets:
             targets = {program_name.strip().lower(), f"{program_name.strip().lower()}.exe"}
@@ -219,12 +265,16 @@ class SoftwareStatusService:
                 second_arg = os.path.basename(cmdline[1]).strip().lower() if len(cmdline) > 1 else ""
                 if any(token in targets for token in (name, exe_base, first_arg, second_arg)):
                     if exe:
+                        cls._shared_process_exe_cache[cache_key] = (now, exe)
                         return exe
                     if cmdline:
+                        cls._shared_process_exe_cache[cache_key] = (now, cmdline[0])
                         return cmdline[0]
+                    cls._shared_process_exe_cache[cache_key] = (now, None)
                     return None
             except Exception:
                 continue
+        cls._shared_process_exe_cache[cache_key] = (now, None)
         return None
 
     def js8_api_reachable(
@@ -259,15 +309,23 @@ class SoftwareStatusService:
         cache_entry = cls._shared_js8_api_cache.get(cache_key)
         if not force and cache_entry:
             cached_ts, cached_ok = cache_entry
-            if (now - float(cached_ts or 0.0)) < float(self._js8_api_cache_ttl_sec):
+            ttl = self._api_success_ttl_sec if cached_ok else self._api_failure_ttl_sec
+            if (now - float(cached_ts or 0.0)) < float(ttl):
                 self._js8_api_cache_key = cache_key
                 self._js8_api_cache_ok = bool(cached_ok)
                 self._js8_api_cache_ts = float(cached_ts or now)
                 return bool(cached_ok)
+        health_key = self._health_key(("JS8CALL", cache_host or "loopback", int(port), bool(allow_fallback)))
+        allowed, _health = self._health.may_run(health_key, owner="SoftwareStatusService", force=force)
+        if not allowed and cache_entry:
+            return bool(cache_entry[1])
+        if not allowed:
+            return False
 
         primary_host = hosts[0] if hosts else None
         if not hosts:
             hosts.extend(["127.0.0.1", "localhost", "::1"])
+        started = time.monotonic()
         reachable = False
         for host in hosts:
             try:
@@ -291,6 +349,16 @@ class SoftwareStatusService:
         self._js8_api_cache_ok = bool(reachable)
         self._js8_api_cache_ts = time.monotonic()
         cls._shared_js8_api_cache[cache_key] = (self._js8_api_cache_ts, self._js8_api_cache_ok)
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        if reachable:
+            self._health.record_success(health_key, owner="SoftwareStatusService", duration_ms=elapsed_ms)
+        else:
+            self._health.record_failure(
+                health_key,
+                owner="SoftwareStatusService",
+                error="unreachable",
+                duration_ms=elapsed_ms,
+            )
         return bool(reachable)
 
     def flrig_api_reachable(
@@ -398,38 +466,58 @@ class SoftwareStatusService:
         port: int,
         reachable: bool,
         process_running: bool,
+        health: Optional[Dict[str, object]] = None,
     ) -> Dict[str, object]:
         endpoint = self._format_endpoint(host, port)
+        degraded = bool((health or {}).get("degraded"))
+        cooldown = float((health or {}).get("cooldown_remaining_sec") or 0.0)
+        reason = str((health or {}).get("last_error") or "").strip()
+        suffix = ""
+        if degraded and cooldown > 0:
+            suffix = f" FIO is backing off for {cooldown:.0f}s to keep the UI responsive."
+        elif degraded and reason:
+            suffix = f" Last issue: {reason}."
         if reachable:
             return {
                 "state": "ok",
-                "tooltip": f"Configured {endpoint_label} reachable at {endpoint}",
+                "tooltip": f"Configured {endpoint_label} reachable at {endpoint}{suffix}",
                 "running": True,
                 "reachable": True,
                 "endpoint": endpoint,
+                "degraded": degraded,
+                "stale": bool(cooldown > 0),
+                "health": health or {},
             }
         if process_running:
             return {
                 "state": "warn",
                 "tooltip": (
                     f"Process running, configured {endpoint_label} unreachable at {endpoint} "
-                    "(possible instance/port mismatch)"
+                    f"(possible instance/port mismatch).{suffix}"
                 ),
                 "running": True,
                 "reachable": False,
                 "endpoint": endpoint,
+                "degraded": degraded,
+                "stale": bool(cooldown > 0),
+                "health": health or {},
             }
         tooltip = (
             f"Not running at configured {endpoint_label} {endpoint}"
             if self._is_loopback_host(host)
             else f"Configured {endpoint_label} unreachable at {endpoint}"
         )
+        if suffix:
+            tooltip = f"{tooltip}.{suffix}"
         return {
             "state": "idle",
             "tooltip": tooltip,
             "running": False,
             "reachable": False,
             "endpoint": endpoint,
+            "degraded": degraded,
+            "stale": bool(cooldown > 0),
+            "health": health or {},
         }
 
     def generic_endpoint_status(
@@ -463,6 +551,9 @@ class SoftwareStatusService:
             port=port_value,
             reachable=reachable,
             process_running=False,
+            health=self._health_snapshot_for(
+                (str(service_name or "TCP").strip().upper() or "TCP", host_value.lower(), str(port_value))
+            ),
         )
 
     def status_snapshot(
@@ -483,6 +574,10 @@ class SoftwareStatusService:
         running_js8 = self.program_is_running("JS8Call")
         js8_host = (host_override or "").strip() or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST
         js8_port = int(port_override) if port_override is not None else self._settings_int("js8_port", JS8_DEFAULT_PORT)
+        js8_cache_host = str(js8_host or "").strip().lower()
+        js8_health = self._health.snapshot(
+            self._health_key(("JS8CALL", js8_cache_host or "loopback", int(js8_port), False))
+        )
         js8_api_ok = self.js8_api_reachable(
             port_override=port_override,
             host_override=host_override,
@@ -496,6 +591,7 @@ class SoftwareStatusService:
             if flrig_port_override is not None
             else self._settings_int("flrig_port", FLRIG_DEFAULT_PORT)
         )
+        flrig_key = ("FLRIG", flrig_host.strip().lower(), str(int(flrig_port)))
         flrig_api_ok = self.flrig_api_reachable(
             port_override=flrig_port_override,
             host_override=flrig_host_override,
@@ -514,6 +610,7 @@ class SoftwareStatusService:
             if rigctld_port_override is not None
             else self._settings_int("rig_port", RIGCTLD_DEFAULT_PORT)
         )
+        rigctld_key = ("RIGCTLD", rigctld_host.strip().lower(), str(int(rigctld_port)))
         rigctld_api_ok = (
             self.rigctld_api_reachable(
                 port_override=rigctld_port_override,
@@ -530,6 +627,13 @@ class SoftwareStatusService:
             if fldigi_port_override is not None
             else self._settings_int("fldigi_port", FLDIGI_DEFAULT_PORT)
         )
+        fldigi_key = (
+            "FLDIGI",
+            fldigi_host.strip().lower(),
+            str(int(fldigi_port)),
+            flrig_host.strip().lower(),
+            str(int(flrig_port)),
+        )
         fldigi_api_ok = self.fldigi_api_reachable(
             port_override=fldigi_port_override,
             host_override=fldigi_host_override,
@@ -545,6 +649,7 @@ class SoftwareStatusService:
             port=js8_port,
             reachable=js8_api_ok,
             process_running=running_js8,
+            health=js8_health,
         )
 
         for key in STATUS_KEYS:
@@ -557,6 +662,7 @@ class SoftwareStatusService:
                     port=flrig_port,
                     reachable=flrig_api_ok,
                     process_running=running_flrig,
+                    health=self._health_snapshot_for(flrig_key),
                 )
                 continue
             if key == "RigCtlD":
@@ -574,6 +680,7 @@ class SoftwareStatusService:
                         port=rigctld_port,
                         reachable=rigctld_api_ok,
                         process_running=running_rigctld,
+                        health=self._health_snapshot_for(rigctld_key),
                     )
                 continue
             if key == "FLDigi":
@@ -583,6 +690,7 @@ class SoftwareStatusService:
                     port=fldigi_port,
                     reachable=fldigi_api_ok,
                     process_running=running_fldigi,
+                    health=self._health_snapshot_for(fldigi_key),
                 )
                 continue
             running = self.program_is_running(key)
