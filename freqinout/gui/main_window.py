@@ -43,6 +43,7 @@ from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
 from freqinout.core.station_health_summary import summarize_station_health
+from freqinout.core.ui_watchdog import UiEventLoopWatchdog
 from freqinout.radio_interface.rigctl_client import rig_control_client_from_settings
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
@@ -436,6 +437,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 600)
 
         self._apply_app_theme()
+        self._ui_watchdog = UiEventLoopWatchdog(self)
+        self._ui_watchdog.start()
         self._sop_next_due_cache_ts = 0.0
         self._sop_next_due_minutes = None
         self._active_tab_index = None
@@ -1822,6 +1825,11 @@ class MainWindow(QMainWindow):
             return
         self._shutting_down = True
         self._close_transient_shutdown_ui()
+        try:
+            if hasattr(self, "_ui_watchdog"):
+                self._ui_watchdog.stop()
+        except Exception:
+            pass
         try:
             if hasattr(self, "_sop_data_refresh_timer"):
                 self._sop_data_refresh_timer.stop()
