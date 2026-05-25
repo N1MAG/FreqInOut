@@ -90,10 +90,11 @@ def test_scheduler_status_summary_reports_next_transition_frequency(monkeypatch,
         engine._next_net_kind = "HF Schedule"
         engine._next_transition_freq_hz = 7_115_000
 
-        summary = engine.get_status_summary()
+        summary = engine.get_status_summary(live=True)
         assert summary["next_frequency_label"] == "7.115"
         assert summary["next_frequency_mhz"] == pytest.approx(7.115)
     finally:
+        engine.stop()
         engine.deleteLater()
 
 

@@ -57,6 +57,7 @@ def test_scheduler_stop_cancels_future_and_shuts_down_executor(monkeypatch, tmp_
         assert engine._shutdown_requested is True
         assert future.cancel_calls == 1
         assert executor.shutdown_calls == [(False, True)]
+        assert engine._status_executor.shutdown_calls == [(False, True)]
         assert engine._control_future is None
         assert engine._pending_entry_key is None
     finally:

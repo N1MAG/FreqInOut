@@ -29,6 +29,7 @@ from freqinout.core.checkins_db import upsert_operator_metadata
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.utils.timezones import get_timezone
+from freqinout.gui.help_registry import resolve_help_host
 from freqinout.gui.theme import resolve_theme, button_style
 
 
@@ -451,29 +452,53 @@ class PeerSchedTab(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setSpacing(8)
 
         header = QHBoxLayout()
         header.addWidget(QLabel("<h3>Peer HF Schedules</h3>"))
         header.addStretch()
-        self.add_btn = QPushButton("Add Schedule")
-        self.edit_btn = QPushButton("Edit Selected")
-        self.delete_row_btn = QPushButton("Delete Row")
-        self.import_btn = QPushButton("Import Schedule")
         self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setToolTip("Reload peer schedule data from the database.")
+        self.tz_toggle_btn = QPushButton("Showing: UTC")
+        self.tz_toggle_btn.setToolTip("Switch the table between UTC and local time display.")
+        self.help_btn = QPushButton("Help")
+        self.help_btn.setToolTip("Open HF Peers help.")
+        header.addWidget(self.refresh_btn)
+        header.addWidget(self.tz_toggle_btn)
+        header.addWidget(self.help_btn)
+        layout.addLayout(header)
+
+        action_row = QHBoxLayout()
+        action_row.addWidget(QLabel("Schedule Source:"))
+        self.add_btn = QPushButton("Add Manual Row...")
+        self.add_btn.setToolTip("Type one explicit peer schedule row by hand.")
+        self.import_btn = QPushButton("Import Schedule File...")
+        self.import_btn.setToolTip("Import a peer schedule JSON file.")
+        action_row.addWidget(self.add_btn)
+        action_row.addWidget(self.import_btn)
+        action_row.addSpacing(20)
+        action_row.addWidget(QLabel("Selected Row:"))
+        self.edit_btn = QPushButton("Edit Selected Row")
+        self.edit_btn.setToolTip("Edit the selected explicit row.")
+        self.delete_row_btn = QPushButton("Delete Selected Row")
+        self.delete_row_btn.setToolTip("Delete the selected explicit row.")
+        action_row.addWidget(self.edit_btn)
+        action_row.addWidget(self.delete_row_btn)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+
+        cleanup_row = QHBoxLayout()
+        cleanup_row.addWidget(QLabel("Cleanup:"))
+        cleanup_row.addWidget(QLabel("Remove schedule for callsign:"))
         self.delete_callsign_combo = QComboBox()
         self.delete_callsign_combo.addItem("Select callsign", None)
-        self.delete_btn = QPushButton("Delete Schedule")
-        self.tz_toggle_btn = QPushButton("Showing: UTC")
-        header.addWidget(self.add_btn)
-        header.addWidget(self.edit_btn)
-        header.addWidget(self.delete_row_btn)
-        header.addWidget(self.import_btn)
-        header.addWidget(self.refresh_btn)
-        header.addWidget(QLabel("Delete:"))
-        header.addWidget(self.delete_callsign_combo)
-        header.addWidget(self.delete_btn)
-        header.addWidget(self.tz_toggle_btn)
-        layout.addLayout(header)
+        self.delete_callsign_combo.setMinimumWidth(150)
+        cleanup_row.addWidget(self.delete_callsign_combo)
+        self.delete_btn = QPushButton("Delete Callsign Schedule...")
+        self.delete_btn.setToolTip("Delete all explicit schedule rows for the selected callsign.")
+        cleanup_row.addWidget(self.delete_btn)
+        cleanup_row.addStretch()
+        layout.addLayout(cleanup_row)
 
         # Filters
         filter_row = QHBoxLayout()
@@ -530,6 +555,7 @@ class PeerSchedTab(QWidget):
         self.delete_callsign_combo.currentIndexChanged.connect(self._update_delete_button_state)
         self.delete_btn.clicked.connect(self._delete_selected)
         self.tz_toggle_btn.clicked.connect(self._toggle_timezone_view)
+        self.help_btn.clicked.connect(lambda: self._open_context_help("tab.hf-peers"))
         self.table.cellClicked.connect(self._on_table_cell_clicked)
         self.table.itemSelectionChanged.connect(self._update_row_action_state)
         self.tz_toggle_btn.setText("Showing: Local" if self._show_local_times else "Showing: UTC")
@@ -1186,6 +1212,9 @@ class PeerSchedTab(QWidget):
     def _apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
         self.add_btn.setStyleSheet(button_style("primary", theme))
+        self.import_btn.setStyleSheet(button_style("secondary", theme))
+        self.refresh_btn.setStyleSheet(button_style("muted", theme))
+        self.help_btn.setStyleSheet(button_style("secondary", theme))
         self.delete_btn.setStyleSheet(button_style("muted", theme))
         self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
         self._update_timezone_button_style()
@@ -1209,13 +1238,13 @@ class PeerSchedTab(QWidget):
         )
         if selection == "__CLEAR_ALL__":
             enabled = has_rows
-            label = "Clear All"
+            label = "Clear All Schedules..."
         elif selection:
             enabled = True
-            label = "Delete Schedule"
+            label = "Delete Callsign Schedule..."
         else:
             enabled = False
-            label = "Delete Schedule"
+            label = "Delete Callsign Schedule..."
         self.delete_btn.setEnabled(enabled)
         self.delete_btn.setText(label)
         role = "danger" if enabled else "muted"
@@ -1243,6 +1272,14 @@ class PeerSchedTab(QWidget):
         theme = resolve_theme(self.settings)
         role = "info" if not self._show_local_times else "muted"
         self.tz_toggle_btn.setStyleSheet(button_style(role, theme))
+
+    def _open_context_help(self, context_key: str) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help(context_key)
+            except Exception:
+                pass
 
     def _notify_peer_schedule_changed(self) -> None:
         self._load_data()

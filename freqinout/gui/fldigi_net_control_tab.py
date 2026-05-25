@@ -54,6 +54,7 @@ from freqinout.core.fldigi_role_workspace import (
 )
 from freqinout.gui.fldigi_macro_mapping_dialog import FldigiMacroMappingDialog
 from freqinout.gui.fldigi_workspace_cards import WorkspaceBucketCard
+from freqinout.gui.help_registry import resolve_help_host
 from freqinout.utils.timezones import get_timezone
 from freqinout.gui.qsy_helper import (
     load_operating_groups as qsy_load_operating_groups,
@@ -263,6 +264,9 @@ class FldigiNetControlTab(QWidget):
         self.joiner_ancs_edit.setMaximumWidth(130)
         self.joiner_add_btn = QPushButton("Add to Roster")
         self.partner_status_label = QLabel("")
+        self.help_btn = QPushButton("Help")
+        self.help_btn.setToolTip("Open FLDigi / SSB Net Control help.")
+        self.help_btn.clicked.connect(lambda: self._open_context_help("tab.ncs-fldigi"))
         partner_row.addWidget(self.partner_primary_label)
         partner_row.addWidget(self.partner_primary_edit)
         partner_row.addWidget(self.partner_primary_btn)
@@ -273,6 +277,7 @@ class FldigiNetControlTab(QWidget):
         partner_row.addWidget(self.joiner_ancs_edit)
         partner_row.addWidget(self.joiner_add_btn)
         partner_row.addWidget(self.partner_status_label, stretch=1)
+        partner_row.addWidget(self.help_btn, 0, Qt.AlignRight)
 
         qsy_row = QHBoxLayout()
         self.start_btn = QPushButton("Start Net")
@@ -3436,6 +3441,8 @@ class FldigiNetControlTab(QWidget):
         self._start_btn_default_style = self.start_btn.styleSheet()
         self._save_btn_default_style = button_style("success", theme)
         self.save_btn.setStyleSheet(self._save_btn_default_style)
+        if hasattr(self, "help_btn"):
+            self.help_btn.setStyleSheet(button_style("secondary", theme))
         self.suspend_btn.setStyleSheet(button_style("warning", theme))
         self._set_net_button_styles(self._net_in_progress)
         self._refresh_roster_side_chip_styles()
@@ -3447,6 +3454,14 @@ class FldigiNetControlTab(QWidget):
 
     def apply_theme(self) -> None:
         self._apply_theme()
+
+    def _open_context_help(self, context_key: str) -> None:
+        host = resolve_help_host(self)
+        if host is not None and hasattr(host, "open_context_help"):
+            try:
+                host.open_context_help(context_key)
+            except Exception:
+                pass
 
     def _on_suspend_clicked(self):
         if self._suspend_active():

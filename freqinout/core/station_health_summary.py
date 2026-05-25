@@ -79,6 +79,8 @@ def _dependency_label(key: str, owner: str = "") -> str:
         "JS8CALL": "JS8Call API",
         "FLRIG": "FLRig API",
         "FLDIGI": "FLDigi XML-RPC",
+        "COMMSTAT": "CommStat data",
+        "VARAC": "VarAC data",
         "RIGCTLD": "rigctld",
         "OBSERVER": "Observer SDR",
         "BACKGROUND_INGEST": "Background ingest",

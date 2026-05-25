@@ -5726,8 +5726,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
             if is_dark
             else "0 1px 2px rgba(255,255,255,0.92), 0 0 3px rgba(255,255,255,0.82)"
         )
-        callsign_chip_bg = self._hex_to_rgba(theme.get("surface", "#171B21" if is_dark else "#F0F2F4"), 0.78 if is_dark else 0.84)
-        callsign_chip_border = self._hex_to_rgba(theme.get("border", "#2A313A" if is_dark else "#D3D7DD"), 0.88 if is_dark else 0.80)
+        to_rgba = getattr(self, "_hex_to_rgba", StationsMapTab._hex_to_rgba)
+        callsign_chip_bg = to_rgba(theme.get("surface", "#171B21" if is_dark else "#F0F2F4"), 0.78 if is_dark else 0.84)
+        callsign_chip_border = to_rgba(theme.get("border", "#2A313A" if is_dark else "#D3D7DD"), 0.88 if is_dark else 0.80)
         tooltip_bg = "#1A1F26" if is_dark else "#fff"
         tooltip_text = "#E6E8EE" if is_dark else "#000"
         tooltip_border = "#3A4452" if is_dark else "#444"

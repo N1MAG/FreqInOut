@@ -28,6 +28,7 @@ from freqinout.core.commstat_artifacts import (
     upsert_commstat_artifact,
 )
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.logger import log
 
@@ -339,7 +340,39 @@ def _pick_existing_path(candidates: Iterable[Path]) -> Optional[Path]:
 
 def _open_source_db(path: Path) -> sqlite3.Connection:
     uri = f"file:{path.as_posix()}?mode=ro"
-    return sqlite3.connect(uri, uri=True, timeout=2.0)
+    conn = sqlite3.connect(uri, uri=True, timeout=0.35)
+    try:
+        conn.execute("PRAGMA busy_timeout=350")
+    except Exception:
+        pass
+    return conn
+
+
+def _record_source_db_success(key: str, source_db: Path, started: float) -> None:
+    try:
+        get_dependency_health_registry().record_success(
+            key,
+            owner="SitrepIngest",
+            duration_ms=(time.monotonic() - started) * 1000.0,
+            slow_ms=500.0,
+            metadata={"path": str(source_db)},
+        )
+    except Exception:
+        pass
+
+
+def _record_source_db_failure(key: str, source_db: Path, started: float, error: object) -> None:
+    try:
+        get_dependency_health_registry().record_failure(
+            key,
+            owner="SitrepIngest",
+            error=f"data unavailable: {error}",
+            duration_ms=(time.monotonic() - started) * 1000.0,
+            cooldown_sec=30.0,
+            metadata={"path": str(source_db)},
+        )
+    except Exception:
+        pass
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -1023,12 +1056,16 @@ def _ingest_commstat3(local_conn: sqlite3.Connection, source_db: Path, *, max_ro
     source = "COMMSTAT3"
     source_db_path = str(source_db)
     asset_dir = _commstat_asset_dir(source_db)
+    health_key = "commstat:db:3"
+    started = time.monotonic()
     try:
         src = _open_source_db(source_db)
     except Exception as e:
         log.debug("SitrepIngest: cannot open CommStat3 DB %s: %s", source_db, e)
+        _record_source_db_failure(health_key, source_db, started, e)
         out["errors"] += 1
         return out
+    _record_source_db_success(health_key, source_db, started)
     try:
         has_statrep = _table_exists(src, "statrep")
         has_messages = _table_exists(src, "messages")
@@ -1356,12 +1393,16 @@ def _ingest_commstat23(local_conn: sqlite3.Connection, source_db: Path, *, max_r
     source = "COMMSTAT23"
     source_db_path = str(source_db)
     asset_dir = _commstat_asset_dir(source_db)
+    health_key = "commstat:db:23"
+    started = time.monotonic()
     try:
         src = _open_source_db(source_db)
     except Exception as e:
         log.debug("SitrepIngest: cannot open CommStat2.3 DB %s: %s", source_db, e)
+        _record_source_db_failure(health_key, source_db, started, e)
         out["errors"] += 1
         return out
+    _record_source_db_success(health_key, source_db, started)
     try:
         table = "StatRep_Data"
         if not _table_exists(src, table):
