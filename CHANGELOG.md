@@ -1,5 +1,8 @@
 # Changelog
 
+## [1.2.5.2]
+- Fixed: VarAC Managed BBS FLAMP block-fill files now remain stable after `BLK ...` requests. A follow-up `<BLR>` refresh republishes the same block-fill file, and FIO recreates the live overlay if VarAC consumes or removes it during download handling.
+
 ## [1.2.5.1]
 - Fixed: VarAC Managed BBS now treats the VarAC traffic log as the authoritative command source and tracks a durable per-log cursor instead of using `last_request_ts` to skip command rows.
 - Fixed: Managed BBS views now remain published until a new command is received or the VarAC session disconnects, preventing long file-transfer or multi-file retrieval sessions from being reset back to root too early.
