@@ -33,7 +33,7 @@ _LOCAL_POSIX_ROOTS = {
 }
 
 
-@dataclass(slots=True)
+@dataclass
 class DetectedMacro:
     macro_index: int
     macro_id: str
@@ -55,7 +55,7 @@ class DetectedMacro:
         }
 
 
-@dataclass(slots=True)
+@dataclass
 class MacroProfileScan:
     profile_path: str
     profile_name: str

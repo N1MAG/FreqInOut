@@ -7,6 +7,7 @@
 - Added: Regression coverage now exercises real managed-BBS traffic samples from the 2026-05-25 production log set and the BBSExamples field package.
 - Fixed: startup/background Qt timer updates are now marshaled back to the Qt controller thread for scheduler and background-ingest completion paths, reducing `QObject::startTimer/killTimer` warnings and unsafe timer handling during startup or Managed BBS activity.
 - Changed: runtime/package diagnostics were hardened with explicit runtime dependency checks, a Help-tab `Recent Issues` viewer for warning/error support context, and safer database migration guards.
+- Fixed: FLDigi Net Control and macro helper dataclasses no longer use the Python 3.10-only `slots=True` option, restoring launch compatibility with supported Python 3.9 environments.
 
 ## [1.2.4]
 - Changed: FLDigi / SSB Net Control now lists scheduled nets that are currently active or coming up within the near operating window, avoiding duplicate daily repeats while still letting late-starting operators select the intended net.

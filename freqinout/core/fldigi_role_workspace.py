@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 ROLE_WORKSPACE_PREFS_KEY = "fldigi_role_workspace_prefs_v1"
 
 
-@dataclass(slots=True)
+@dataclass
 class WorkspaceBucketDefinition:
     bucket_id: str
     title: str
@@ -34,7 +34,7 @@ class WorkspaceBucketDefinition:
         }
 
 
-@dataclass(slots=True)
+@dataclass
 class RoleWorkspacePreset:
     role: str
     local_buckets: List[WorkspaceBucketDefinition] = field(default_factory=list)
