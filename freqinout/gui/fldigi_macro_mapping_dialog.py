@@ -29,7 +29,7 @@ from freqinout.core.fldigi_macro_profile import (
 from freqinout.gui.theme import button_style, resolve_theme
 
 
-@dataclass(slots=True)
+@dataclass
 class _RowData:
     macro_id: str = ""
     macro_label: str = ""

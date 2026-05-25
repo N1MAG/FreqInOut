@@ -20,7 +20,7 @@ _TRAILING_CALL_NOISE_RE = re.compile(r"[^A-Z0-9/]+$")
 _PORTABLE_SUFFIX_RE = re.compile(r"/(P|M|MM|QRP|SOTA|ROVER|[A-Z0-9]{1,4})$")
 
 
-@dataclass(slots=True)
+@dataclass
 class FldigiLogCheckinCandidate:
     raw_line: str
     normalized_line: str

@@ -74,7 +74,7 @@ def normalize_macro_mapping_source_path(path: object, settings) -> str:
     return str(Path(configured_dir).expanduser() / roster_filename)
 
 
-@dataclass(slots=True)
+@dataclass
 class MacroMapping:
     scope: str
     function: str
@@ -98,7 +98,7 @@ class MacroMapping:
         }
 
 
-@dataclass(slots=True)
+@dataclass
 class MacroProfileRecord:
     profile_path: str
     profile_name: str
