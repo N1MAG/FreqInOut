@@ -15,6 +15,7 @@ import psutil
 
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp
+from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 
 log = logging.getLogger(__name__)
@@ -566,6 +567,9 @@ class VarACStatusClient:
         )
 
     def _db_transfer_status(self) -> Dict[str, object]:
+        health = get_dependency_health_registry()
+        health_key = "varac:db_transfer"
+        started = time.monotonic()
         db_path = self._resolve_db_path()
         if db_path is None or not db_path.exists():
             self._last_db_transfer_status = {
@@ -593,6 +597,17 @@ class VarACStatusClient:
             conn = sqlite3.connect(uri, uri=True, timeout=1.0)
         except Exception as exc:
             log.debug("VarACStatusClient: failed to open VarAC.db %s: %s", db_path, exc)
+            try:
+                health.record_failure(
+                    health_key,
+                    owner="VarACStatusClient",
+                    error=f"VarAC DB unavailable: {exc}",
+                    duration_ms=(time.monotonic() - started) * 1000.0,
+                    cooldown_sec=30.0,
+                    metadata={"path": str(db_path)},
+                )
+            except Exception:
+                pass
             return dict(self._last_db_transfer_status)
 
         last_transfer: Optional[datetime.datetime] = None
@@ -619,6 +634,17 @@ class VarACStatusClient:
         except Exception as exc:
             log.debug("VarACStatusClient: failed to query VarAC.db transfer rows: %s", exc)
             conn.close()
+            try:
+                health.record_failure(
+                    health_key,
+                    owner="VarACStatusClient",
+                    error=f"VarAC DB query failed: {exc}",
+                    duration_ms=(time.monotonic() - started) * 1000.0,
+                    cooldown_sec=30.0,
+                    metadata={"path": str(db_path)},
+                )
+            except Exception:
+                pass
             return dict(self._last_db_transfer_status)
         finally:
             try:
@@ -671,6 +697,16 @@ class VarACStatusClient:
             "transfer_active": bool(transfer_active),
             "cooldown_active": bool(cooldown_active),
         }
+        try:
+            health.record_success(
+                health_key,
+                owner="VarACStatusClient",
+                duration_ms=(time.monotonic() - started) * 1000.0,
+                slow_ms=500.0,
+                metadata={"path": str(db_path)},
+            )
+        except Exception:
+            pass
         return dict(self._last_db_transfer_status)
     @staticmethod
     def _read_tail(path: Path, max_bytes: int = 16384) -> str:
@@ -684,7 +720,7 @@ class VarACStatusClient:
         except Exception:
             return ""
 
-    def get_status(self) -> Dict[str, object]:
+    def get_status(self, *, include_db_transfer: bool = False) -> Dict[str, object]:
         log_paths = self._resolve_log_paths()
         status = {"busy": False, "waiting_for_frequency": False, "reason": None}
         try:
@@ -696,7 +732,7 @@ class VarACStatusClient:
                 status = self._evaluate_status(text)
         except Exception as e:
             log.debug("VarACStatusClient: failed to read log: %s", e)
-        db_status = self._db_transfer_status()
+        db_status = self._db_transfer_status() if include_db_transfer else {}
         if bool(db_status.get("busy")):
             status["busy"] = True
             if not bool(status.get("waiting_for_frequency")):

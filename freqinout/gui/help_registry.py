@@ -70,6 +70,12 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         title="Station Health Help",
         summary="External station software responsiveness, backoff status, and what FIO is waiting on.",
     ),
+    "tab.ncs-fldigi": HelpContext(
+        key="tab.ncs-fldigi",
+        anchor="ncs-fldigi-ssb",
+        title="FLDigi / SSB Net Control Help",
+        summary="Directed net workflow, roster actions, ACK/TFC handling, macro files, and net lifecycle.",
+    ),
     "map.controls": HelpContext(
         key="map.controls",
         anchor="map-top-controls",
@@ -93,6 +99,12 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         anchor="hf-nets",
         title="Net Schedules Help",
         summary="Net schedule editing, net resources, and Net or SOP policy decisions.",
+    ),
+    "tab.hf-peers": HelpContext(
+        key="tab.hf-peers",
+        anchor="hf-peers",
+        title="HF Peers Help",
+        summary="Peer schedule imports, manual entries, cleanup actions, filters, and overlap review.",
     ),
     "tab.settings": HelpContext(
         key="tab.settings",

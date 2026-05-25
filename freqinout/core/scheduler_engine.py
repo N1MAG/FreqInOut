@@ -14,8 +14,10 @@ from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 from freqinout.core.logger import log
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
 from freqinout.core.settings_manager import SettingsManager
-from freqinout.radio_interface.rigctl_client import FLRigClient, FrequencyCommand
-from freqinout.radio_interface.js8_status import JS8ControlClient
+from freqinout.radio_interface.rigctl_client import FLRigClient, FrequencyCommand, flrig_client_from_settings
+from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
+from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
+from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 
 
 # ---------------------------------------------------------------------------
@@ -261,12 +263,21 @@ class SchedulerEngine(QObject):
         self._status_summary_cache: Optional[Dict[str, object]] = None
         self._status_summary_cache_ts: float = 0.0
         self._status_summary_cache_ttl_s: float = 2.5
+        self._status_summary_external_ts: float = 0.0
+        self._status_snapshot_refresh_ts: float = 0.0
+        self._status_snapshot_refresh_interval_s: float = 5.0
+        self._status_snapshot_future = None
+        self._last_varac_status: Dict[str, object] = {"busy": False, "waiting_for_frequency": False, "reason": None}
+        self._last_js8_busy: bool = False
+        self._last_fldigi_status: Dict[str, object] = {"busy": False, "reason": None, "last_valid_age_s": None}
+        self._last_ptt_active: bool = False
         self._fldigi_mode_cache: Optional[str] = None
         self._fldigi_mode_cache_ts: float = 0.0
         self._fldigi_offset_cache: Optional[int] = None
         self._fldigi_offset_cache_ts: float = 0.0
         self._fldigi_status_cache_ttl_s: float = 5.0
         self._control_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-control")
+        self._status_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-status")
         self._control_future = None
         self._control_future_token: int = 0
         self._control_future_started_at: Optional[float] = None
@@ -458,6 +469,16 @@ class SchedulerEngine(QObject):
             return "JS8CALL" if self._js8_running() else "NONE"
         return "NONE"
 
+    def _cached_control_mode(self) -> str:
+        mode = (self.settings.get("control_via", "FLRig") or "FLRig").upper()
+        if mode == "MANUAL":
+            return "MANUAL"
+        if mode == "FLRIG":
+            return "FLRIG" if self.rig is not None else "NONE"
+        if mode == "JS8CALL":
+            return "JS8CALL" if self.js8 is not None else "NONE"
+        return "NONE"
+
     def _js8_offset_setting(self) -> int:
         try:
             val = int(self.settings.get("js8_offset_hz", 0) or 0)
@@ -490,9 +511,14 @@ class SchedulerEngine(QObject):
                 max_workers=1,
                 thread_name_prefix="freqinout-control",
             )
+            self._status_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="freqinout-status",
+            )
         self._shutdown_requested = False
         if not self.timer.isActive():
             self.timer.start()
+        self._maybe_refresh_external_status_snapshot(force=True)
         self._apply_js8_offset_startup()
         # Perform an immediate evaluation so UI sees something right away.
         try:
@@ -511,6 +537,7 @@ class SchedulerEngine(QObject):
         self._force_retry_after_control = False
         self._forced_retry_attempts_left = 0
         self._shutdown_control_executor("stop")
+        self._shutdown_status_executor("stop")
 
     def _ensure_js8_offset_default(self) -> None:
         try:
@@ -698,6 +725,119 @@ class SchedulerEngine(QObject):
                 log.debug("SchedulerEngine: control executor shutdown failed during %s: %s", reason, e)
         except Exception as e:
             log.debug("SchedulerEngine: control executor shutdown failed during %s: %s", reason, e)
+
+    def _shutdown_status_executor(self, reason: str) -> None:
+        future = self._status_snapshot_future
+        if future is not None and not future.done():
+            try:
+                future.cancel()
+            except Exception as e:
+                log.debug("SchedulerEngine: status future cancel failed during %s: %s", reason, e)
+        try:
+            self._status_executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            try:
+                self._status_executor.shutdown(wait=False)
+            except Exception as e:
+                log.debug("SchedulerEngine: status executor shutdown failed during %s: %s", reason, e)
+        except Exception as e:
+            log.debug("SchedulerEngine: status executor shutdown failed during %s: %s", reason, e)
+        self._status_snapshot_future = None
+
+    def _maybe_refresh_external_status_snapshot(self, *, force: bool = False) -> None:
+        if self._shutdown_requested:
+            return
+        now_ts = time.time()
+        future = self._status_snapshot_future
+        if future is not None and not future.done():
+            return
+        if not force and now_ts - float(self._status_snapshot_refresh_ts or 0.0) < self._status_snapshot_refresh_interval_s:
+            return
+        self._status_snapshot_refresh_ts = now_ts
+        try:
+            hub = JS8RxHub.instance()
+            self._last_js8_busy = bool(
+                hub.is_active()
+                and (hub.ptt_active() or (time.time() - hub.last_rx_activity_ts()) <= 12.0)
+            )
+        except Exception:
+            pass
+
+        def _task() -> Dict[str, object]:
+            settings = SettingsManager()
+            try:
+                control_mode = (settings.get("control_via", "FLRig") or "FLRig").upper()
+                out: Dict[str, object] = {
+                    "varac_status": {"busy": False, "waiting_for_frequency": False, "reason": None},
+                    "fldigi_status": {"busy": False, "reason": None, "last_valid_age_s": None},
+                    "flrig_ptt": False,
+                    "flrig_freq_hz": None,
+                    "checked_ts": time.time(),
+                }
+                try:
+                    varac = VarACStatusClient()
+                    out["varac_status"] = varac.get_status(include_db_transfer=False)
+                    try:
+                        varac._db_transfer_status()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log.debug("SchedulerEngine: background VarAC status failed: %s", e)
+                try:
+                    fldigi = FldigiLogStatusClient()
+                    fldigi_status = fldigi.get_status()
+                    out["fldigi_status"] = {
+                        "busy": bool(getattr(fldigi_status, "busy", False)),
+                        "reason": getattr(fldigi_status, "reason", None),
+                        "last_valid_age_s": getattr(fldigi_status, "last_valid_age_s", None),
+                    }
+                except Exception as e:
+                    log.debug("SchedulerEngine: background FLDigi status failed: %s", e)
+                if control_mode == "FLRIG":
+                    try:
+                        rig = flrig_client_from_settings(settings)
+                        out["flrig_ptt"] = bool(rig.get_ptt())
+                        out["flrig_freq_hz"] = rig.get_vfo_frequency()
+                    except Exception as e:
+                        log.debug("SchedulerEngine: background FLRig status failed: %s", e)
+                return out
+            finally:
+                try:
+                    settings.close()
+                except Exception:
+                    pass
+
+        def _on_done(done) -> None:
+            def _apply() -> None:
+                if self._shutdown_requested:
+                    return
+                try:
+                    data = done.result()
+                except Exception as e:
+                    log.debug("SchedulerEngine: background status snapshot failed: %s", e)
+                    return
+                varac_status = data.get("varac_status")
+                if isinstance(varac_status, dict):
+                    self._last_varac_status = dict(varac_status)
+                fldigi_status = data.get("fldigi_status")
+                if isinstance(fldigi_status, dict):
+                    self._last_fldigi_status = dict(fldigi_status)
+                self._last_ptt_active = bool(data.get("flrig_ptt", False))
+                freq = data.get("flrig_freq_hz")
+                if isinstance(freq, (int, float)) and freq > 0:
+                    self._status_flrig_freq_hz = int(freq)
+                    self._status_flrig_freq_ts = time.time()
+                self._status_summary_external_ts = float(data.get("checked_ts") or time.time())
+                self._status_summary_cache = None
+
+            self._queue_scheduler_thread_call(_apply)
+
+        try:
+            self._status_snapshot_future = self._status_executor.submit(_task)
+            self._status_snapshot_future.add_done_callback(_on_done)
+        except RuntimeError:
+            if not self._shutdown_requested:
+                self._status_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-status")
         self._control_future = None
         self._control_future_started_at = None
         self._pending_entry_key = None
@@ -1048,18 +1188,25 @@ class SchedulerEngine(QObject):
 
     def _varac_status(self) -> Dict[str, object]:
         if not self.varac or not self._varac_running():
-            return {"busy": False, "waiting_for_frequency": False, "reason": None}
+            self._last_varac_status = {"busy": False, "waiting_for_frequency": False, "reason": None}
+            return dict(self._last_varac_status)
         if hasattr(self.varac, "get_status"):
             try:
                 status = self.varac.get_status()
                 if isinstance(status, dict):
+                    self._last_varac_status = dict(status)
+                    self._status_summary_external_ts = time.time()
                     return status
             except Exception:
-                return {"busy": False, "waiting_for_frequency": False, "reason": None}
+                self._last_varac_status = {"busy": False, "waiting_for_frequency": False, "reason": None}
+                return dict(self._last_varac_status)
         try:
-            return {"busy": bool(self.varac.is_busy()), "waiting_for_frequency": False, "reason": None}
+            self._last_varac_status = {"busy": bool(self.varac.is_busy()), "waiting_for_frequency": False, "reason": None}
+            self._status_summary_external_ts = time.time()
+            return dict(self._last_varac_status)
         except Exception:
-            return {"busy": False, "waiting_for_frequency": False, "reason": None}
+            self._last_varac_status = {"busy": False, "waiting_for_frequency": False, "reason": None}
+            return dict(self._last_varac_status)
 
     def _varac_busy_ok(self, status: Optional[Dict[str, object]] = None) -> bool:
         status = status or self._varac_status()
@@ -1075,19 +1222,28 @@ class SchedulerEngine(QObject):
             try:
                 status = self.fldigi_log.get_status()
                 if isinstance(status, dict):
+                    self._last_fldigi_status = dict(status)
+                    self._status_summary_external_ts = time.time()
                     return status
                 if hasattr(status, "busy"):
-                    return {
+                    out = {
                         "busy": bool(getattr(status, "busy", False)),
                         "reason": getattr(status, "reason", None),
                         "last_valid_age_s": getattr(status, "last_valid_age_s", None),
                     }
+                    self._last_fldigi_status = dict(out)
+                    self._status_summary_external_ts = time.time()
+                    return out
             except Exception:
-                return {"busy": False, "reason": None, "last_valid_age_s": None}
+                self._last_fldigi_status = {"busy": False, "reason": None, "last_valid_age_s": None}
+                return dict(self._last_fldigi_status)
         try:
-            return {"busy": bool(self.fldigi_log.is_busy()), "reason": None, "last_valid_age_s": None}
+            self._last_fldigi_status = {"busy": bool(self.fldigi_log.is_busy()), "reason": None, "last_valid_age_s": None}
+            self._status_summary_external_ts = time.time()
+            return dict(self._last_fldigi_status)
         except Exception:
-            return {"busy": False, "reason": None, "last_valid_age_s": None}
+            self._last_fldigi_status = {"busy": False, "reason": None, "last_valid_age_s": None}
+            return dict(self._last_fldigi_status)
 
     def _should_delay_for_fldigi(
         self,
@@ -1104,9 +1260,7 @@ class SchedulerEngine(QObject):
             return False, None
         if (source or "").upper() == "NET":
             return False, None
-        if not self._fldigi_available():
-            return False, None
-        status = self._fldigi_log_status()
+        status = dict(self._last_fldigi_status or {})
         busy = bool(status.get("busy"))
         if not busy:
             self._fldigi_busy_entry_key = None
@@ -1376,9 +1530,11 @@ class SchedulerEngine(QObject):
             return "hf_fallback", "No active Net/SOP layer row; baseline HF schedule is active."
         return "none", "No active schedule row."
 
-    def get_status_summary(self) -> Dict[str, object]:
+    def get_status_summary(self, *, live: bool = False) -> Dict[str, object]:
         now_cache = time.time()
         if (
+            not live
+            and
             self._status_summary_cache is not None
             and now_cache - self._status_summary_cache_ts < self._status_summary_cache_ttl_s
         ):
@@ -1387,38 +1543,56 @@ class SchedulerEngine(QObject):
             use_scheduler = bool(self.settings.get("use_scheduler", True))
         except Exception:
             use_scheduler = True
-        control_mode = self._control_mode()
+        control_mode = self._control_mode() if live else self._cached_control_mode()
         entry = self.current_schedule_entry or {}
-        freq_hz = self._current_rig_frequency(control_mode=control_mode, status_cached=True)
-        flags = (
-            self._off_schedule_flags(
-                entry,
-                control_mode=control_mode,
-                current_freq_hz=freq_hz,
+        if live:
+            freq_hz = self._current_rig_frequency(control_mode=control_mode, status_cached=True)
+            flags = (
+                self._off_schedule_flags(
+                    entry,
+                    control_mode=control_mode,
+                    current_freq_hz=freq_hz,
+                )
+                if entry
+                else {"frequency": False, "mode": False, "offset": False, "fldigi_offset": False}
             )
-            if entry
-            else {"frequency": False, "mode": False, "offset": False, "fldigi_offset": False}
-        )
+        else:
+            freq_hz = self._status_flrig_freq_hz or self._last_freq_hz
+            if freq_hz is None and entry:
+                freq_hz = self._parse_freq_hz((entry.get("frequency") or "").strip())
+            flags = dict(self._last_off_schedule_flags or {})
+            for key in ("frequency", "mode", "offset", "fldigi_offset"):
+                flags.setdefault(key, False)
         off_schedule = any(flags.values())
-        varac_status = self._varac_status()
-        js8_busy = False
-        if self.js8 and self._js8_running():
-            try:
-                js8_busy = bool(self.js8.is_busy())
-            except Exception:
-                js8_busy = False
-        fldigi_busy = False
-        fldigi_busy_reason = None
-        try:
-            fldigi_status = self._fldigi_log_status()
-            fldigi_busy = bool(fldigi_status.get("busy"))
-            fldigi_busy_reason = fldigi_status.get("reason")
-        except Exception:
+        if live:
+            varac_status = self._varac_status()
+            js8_busy = False
+            if self.js8 and self._js8_running():
+                try:
+                    js8_busy = bool(self.js8.is_busy())
+                except Exception:
+                    js8_busy = False
+            self._last_js8_busy = bool(js8_busy)
             fldigi_busy = False
             fldigi_busy_reason = None
-        ptt_active = False
-        if control_mode == "FLRIG":
-            ptt_active = self._status_poll_flrig_ptt()
+            try:
+                fldigi_status = self._fldigi_log_status()
+                fldigi_busy = bool(fldigi_status.get("busy"))
+                fldigi_busy_reason = fldigi_status.get("reason")
+            except Exception:
+                fldigi_busy = False
+                fldigi_busy_reason = None
+            ptt_active = False
+            if control_mode == "FLRIG":
+                ptt_active = self._status_poll_flrig_ptt()
+            self._last_ptt_active = bool(ptt_active)
+        else:
+            varac_status = dict(self._last_varac_status or {})
+            js8_busy = bool(self._last_js8_busy)
+            fldigi_status = dict(self._last_fldigi_status or {})
+            fldigi_busy = bool(fldigi_status.get("busy"))
+            fldigi_busy_reason = fldigi_status.get("reason")
+            ptt_active = bool(self._last_ptt_active)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         suspended_until = self._suspend_until_dt()
         auto_resume_utc, auto_resume_source = self._auto_resume_utc(now_utc, suspended_until, flags)
@@ -1471,6 +1645,15 @@ class SchedulerEngine(QObject):
             "next_source_change": bool(self._next_source_change),
             "fldigi_mode_off": fldigi_mode_off,
             "fldigi_offset_off": fldigi_offset_off,
+            "status_live": bool(live),
+            "status_age_s": max(0.0, now_cache - float(self._status_summary_external_ts or 0.0))
+            if self._status_summary_external_ts
+            else None,
+            "status_stale": bool(
+                not live
+                and self._status_summary_external_ts
+                and now_cache - float(self._status_summary_external_ts or 0.0) > 30.0
+            ),
         }
         self._status_summary_cache = dict(summary)
         self._status_summary_cache_ts = now_cache
@@ -1740,6 +1923,7 @@ class SchedulerEngine(QObject):
     def _on_timer(self) -> None:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         try:
+            self._maybe_refresh_external_status_snapshot()
             self._evaluate(now_utc=now_utc)
             self._maybe_apply_fldigi()
             self._maybe_prompt_enforcement()
@@ -3324,10 +3508,12 @@ class SchedulerEngine(QObject):
         if freq_hz is None:
             log.error("SchedulerEngine: invalid frequency text '%s'; skipping.", freq_text)
             return
-        current_freq_hz = self._current_rig_frequency(control_mode=control_mode)
+        current_freq_hz = self._status_flrig_freq_hz if control_mode == "FLRIG" else None
+        if current_freq_hz is None:
+            current_freq_hz = self._last_freq_hz
         freq_matches = current_freq_hz is not None and abs(current_freq_hz - freq_hz) <= 5
         want_freq_change = current_freq_hz is None or not freq_matches
-        varac_status = self._varac_status()
+        varac_status = dict(self._last_varac_status or {})
         if self._varac_wait_prompt_active and not bool(varac_status.get("waiting_for_frequency")):
             self._varac_wait_prompt_active = False
             self._varac_wait_prompt_entry_key = None
@@ -3353,14 +3539,10 @@ class SchedulerEngine(QObject):
         )
         # Safety: avoid changing frequency while a backend is busy transmitting.
         busy_reasons = []
-        if control_mode == "FLRIG" and self.rig and hasattr(self.rig, "get_ptt"):
-            try:
-                if self.rig.get_ptt():
-                    busy_reasons.append("FLRig PTT is active")
-            except Exception as e:
-                log.warning("SchedulerEngine: get_ptt() failed: %s", e)
+        if control_mode == "FLRIG" and self._last_ptt_active:
+            busy_reasons.append("FLRig PTT is active")
 
-        if source != "NET" and not self._js8_busy_ok():
+        if source != "NET" and bool(self._last_js8_busy):
             busy_reasons.append("JS8Call is busy (RX/TX)")
 
         if source != "NET" and not self._varac_busy_ok(status=varac_status):
