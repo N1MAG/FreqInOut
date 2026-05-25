@@ -29,13 +29,21 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
+## What's New in v1.2.5.1
+
+- VarAC Managed BBS now uses the VarAC traffic log as the command authority and tracks a durable log cursor so valid commands are not skipped by stale runtime timestamps.
+- Managed BBS listings stay published until the remote station sends another command or disconnects, which supports long BBS refreshes and multiple file downloads from the same listing.
+- Public-visible code-protected BBS folders now show in the root menu, while the access code is still enforced when a station opens the folder.
+- FLAMP BBS helper views are clean standalone views instead of being mixed with the current managed folder.
+- Access codes are more forgiving for operators: `HUBS MRHUB`, `hubs mrhub`, and `HUBS [MRHUB]` are handled as the same request.
+- Startup and background timer handling was tightened so worker-thread completions marshal Qt timer updates back to the Qt thread, reducing `QObject::startTimer/killTimer` warnings.
+- Diagnostics are easier to share: the Help tab now includes `Recent Issues`, and release preflight checks runtime dependencies against installation requirements.
+
 ## What's New in v1.2.5
 
 - VarAC Managed BBS command handling is more reliable in field use: FIO now reads the visible VarAC traffic log first, handles `/P` portable callsigns, local-vs-remote session direction, `<BLR>` refreshes, and noisy file-transfer lines more safely.
 - Managed BBS refreshes now update the current BBS or FLAMP view from traffic-log activity instead of leaving stale listings visible after a remote station refreshes.
 - FIO reduces reliance on VarAC database command scanning during live BBS operation, using it as fallback when no traffic-log command events are available.
-- Startup and background timer handling was tightened so worker-thread completions marshal Qt timer updates back to the Qt thread, reducing `QObject::startTimer/killTimer` warnings.
-- Diagnostics are easier to share: the Help tab now includes `Recent Issues`, and release preflight checks runtime dependencies against installation requirements.
 
 ## What's New in v1.2.4
 

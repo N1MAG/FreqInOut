@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.5.1]
+- Fixed: VarAC Managed BBS now treats the VarAC traffic log as the authoritative command source and tracks a durable per-log cursor instead of using `last_request_ts` to skip command rows.
+- Fixed: Managed BBS views now remain published until a new command is received or the VarAC session disconnects, preventing long file-transfer or multi-file retrieval sessions from being reset back to root too early.
+- Fixed: Public-visible code-protected BBS locations now appear in the root listing while access enforcement still happens when the remote station opens the location.
+- Fixed: FLAMP Managed BBS helper views are now standalone and no longer blend with the current managed location's files.
+- Fixed: Access-code commands are case-insensitive and accept bracketed entry such as `HUBS [MRHUB]`.
+
 ## [1.2.5]
 - Fixed: VarAC Managed BBS now uses a hardened traffic-log command parser as the primary command source, handling glued timestamp records, prefixed status text, portable callsigns such as `/P`, remote/local session direction, bare `<BLR>` refreshes, and VarAC file-transfer noise more deterministically.
 - Fixed: Managed BBS refresh commands from the VarAC traffic log now refresh the current location or FLAMP view instead of allowing stale BBS output to linger after a remote operator requests a listing refresh.
