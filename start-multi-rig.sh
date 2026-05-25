@@ -3,7 +3,7 @@ set -euo pipefail
 
 WORKTREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$WORKTREE/.venv"
-RUNTIME_ROOT="/Users/bill/RadioCode/runtime/multi-rig"
+RUNTIME_ROOT="${FREQINOUT_RUNTIME_ROOT:-$HOME/.freqinout/runtime/multi-rig}"
 CONFIG_ROOT="$RUNTIME_ROOT/config"
 
 if [[ ! -x "$VENV/bin/python" ]]; then

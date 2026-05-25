@@ -582,97 +582,61 @@ class MainWindow(QMainWindow):
         self.on_hold_state_changed(force_reload=True)
 
         # Wire settings_saved signal
-        try:
-            self.settings_tab.settings_saved.connect(self.js8_tab.on_settings_saved)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.settings_saved.connect(self.hf_schedule_tab.on_settings_saved)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.settings_saved.connect(self.fldigi_tab.on_settings_saved)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.settings_saved.connect(self.net_tab.on_settings_saved)
-        except Exception:
-            pass
+        def _connect_or_log(label, signal, slot) -> None:
+            try:
+                signal.connect(slot)
+            except Exception as e:
+                log.debug("MainWindow signal wiring failed: %s: %s", label, e)
+
+        _connect_or_log("settings_saved -> js8_tab", self.settings_tab.settings_saved, self.js8_tab.on_settings_saved)
+        _connect_or_log("settings_saved -> hf_schedule_tab", self.settings_tab.settings_saved, self.hf_schedule_tab.on_settings_saved)
+        _connect_or_log("settings_saved -> fldigi_tab", self.settings_tab.settings_saved, self.fldigi_tab.on_settings_saved)
+        _connect_or_log("settings_saved -> net_tab", self.settings_tab.settings_saved, self.net_tab.on_settings_saved)
         self.settings_tab.settings_saved.connect(self._on_settings_saved_for_lazy_tabs)
-        try:
-            self.settings_tab.settings_saved.connect(self.sop_tab.on_settings_saved)
-        except Exception:
-            pass
+        _connect_or_log("settings_saved -> sop_tab", self.settings_tab.settings_saved, self.sop_tab.on_settings_saved)
         try:
             if hasattr(self.settings_tab, "local_net_profiles_changed"):
                 self.settings_tab.local_net_profiles_changed.connect(self.sop_tab.on_local_net_profiles_updated)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow signal wiring failed: local_net_profiles_changed -> sop_tab: %s", e)
         try:
             if hasattr(self.sop_tab, "sop_data_changed"):
                 self.sop_tab.sop_data_changed.connect(self._on_sop_data_changed)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.settings_saved.connect(self.local_operator_tab.on_settings_saved)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.settings_saved.connect(self.local_ncs_tab.on_settings_saved)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow signal wiring failed: sop_data_changed -> main_window: %s", e)
+        _connect_or_log("settings_saved -> local_operator_tab", self.settings_tab.settings_saved, self.local_operator_tab.on_settings_saved)
+        _connect_or_log("settings_saved -> local_ncs_tab", self.settings_tab.settings_saved, self.local_ncs_tab.on_settings_saved)
         # Message tab settings saved handled by _on_settings_saved_for_lazy_tabs
         try:
             if hasattr(self.operator_history_tab, "operator_history_updated"):
                 self.operator_history_tab.operator_history_updated.connect(
                     self._on_operator_history_local_update
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow signal wiring failed: operator_history_updated -> main_window: %s", e)
         try:
             if hasattr(self.local_operator_tab, "local_operator_updated"):
                 self.local_operator_tab.local_operator_updated.connect(self.local_ncs_tab.reload_operator_lookup)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow signal wiring failed: local_operator_updated -> local_ncs_tab: %s", e)
         try:
             if hasattr(self.local_ncs_tab, "local_data_updated"):
                 self.local_ncs_tab.local_data_updated.connect(self.local_operator_tab._load_data)
                 self.local_ncs_tab.local_data_updated.connect(self.local_ncs_tab.reload_operator_lookup)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.settings_saved.connect(self._apply_app_theme)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.settings_saved.connect(self._on_runtime_settings_saved)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow signal wiring failed: local_data_updated fanout: %s", e)
+        _connect_or_log("settings_saved -> apply theme", self.settings_tab.settings_saved, self._apply_app_theme)
+        _connect_or_log("settings_saved -> runtime settings", self.settings_tab.settings_saved, self._on_runtime_settings_saved)
         try:
             if hasattr(self.settings_tab, "device_profiles_changed"):
                 self.settings_tab.device_profiles_changed.connect(self._on_runtime_device_profiles_changed)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.settings_saved.connect(self._update_log_indicator)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.settings_saved.connect(self.background_ingest.refresh_runtime_settings)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.settings_saved.connect(self._on_station_health_settings_saved)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.open_logs_requested.connect(self._open_logs_window)
-        except Exception:
-            pass
-        try:
-            self.settings_tab.log_level_changed.connect(self._update_log_indicator)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("MainWindow signal wiring failed: device_profiles_changed -> runtime profile: %s", e)
+        _connect_or_log("settings_saved -> log indicator", self.settings_tab.settings_saved, self._update_log_indicator)
+        _connect_or_log("settings_saved -> background ingest", self.settings_tab.settings_saved, self.background_ingest.refresh_runtime_settings)
+        _connect_or_log("settings_saved -> station health", self.settings_tab.settings_saved, self._on_station_health_settings_saved)
+        _connect_or_log("open_logs_requested -> log window", self.settings_tab.open_logs_requested, self._open_logs_window)
+        _connect_or_log("log_level_changed -> log indicator", self.settings_tab.log_level_changed, self._update_log_indicator)
         self.hf_schedule_tab.schedule_saved.connect(self._refresh_freq_planner_if_loaded)
         self.hf_schedule_tab.schedule_saved.connect(self.scheduler.force_refresh)
         if hasattr(self.sop_tab, "on_hf_schedule_saved"):

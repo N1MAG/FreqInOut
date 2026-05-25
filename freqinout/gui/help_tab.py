@@ -19,10 +19,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFileDialog,
     QMessageBox,
+    QDialog,
+    QPlainTextEdit,
+    QApplication,
 )
 
 from freqinout.gui.theme import resolve_theme, button_style
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.logger import get_recent_issues
 
 
 class HelpTab(QWidget):
@@ -58,6 +62,10 @@ class HelpTab(QWidget):
         self.export_pdf_btn.setStyleSheet(button_style("primary", theme))
         self.export_pdf_btn.clicked.connect(self._export_pdf)
         header_row.addWidget(self.export_pdf_btn)
+        self.recent_issues_btn = QPushButton("Recent Issues")
+        self.recent_issues_btn.setStyleSheet(button_style("secondary", theme))
+        self.recent_issues_btn.clicked.connect(self._show_recent_issues)
+        header_row.addWidget(self.recent_issues_btn)
         viewer_col.addLayout(header_row)
 
         self.viewer = QTextBrowser()
@@ -73,6 +81,35 @@ class HelpTab(QWidget):
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
         self.export_pdf_btn.setStyleSheet(button_style("primary", theme))
+        self.recent_issues_btn.setStyleSheet(button_style("secondary", theme))
+
+    def _show_recent_issues(self) -> None:
+        issues = get_recent_issues()
+        text = "\n".join(issues) if issues else "No recent warnings or errors have been recorded in this session."
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Recent Issues")
+        dialog.resize(820, 420)
+        layout = QVBoxLayout(dialog)
+        intro = QLabel("Recent warnings and errors from this FIO session.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        box = QPlainTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText(text)
+        layout.addWidget(box, stretch=1)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        copy_btn = QPushButton("Copy")
+        close_btn = QPushButton("Close")
+        theme = resolve_theme(self.settings)
+        copy_btn.setStyleSheet(button_style("secondary", theme))
+        close_btn.setStyleSheet(button_style("primary", theme))
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(box.toPlainText()))
+        close_btn.clicked.connect(dialog.accept)
+        btn_row.addWidget(copy_btn)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        dialog.exec()
 
     def _export_pdf(self) -> None:
         if not self._doc_path.exists():

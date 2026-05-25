@@ -191,10 +191,18 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str
     cur = conn.cursor()
     cur.execute(f"PRAGMA table_info({table})")
     existing = {row[1] for row in cur.fetchall()}
-    for name, col_type in columns.items():
-        if name in existing:
-            continue
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
+    missing = [(name, col_type) for name, col_type in columns.items() if name not in existing]
+    if not missing:
+        return
+    cur.execute("SAVEPOINT fio_ensure_columns")
+    try:
+        for name, col_type in missing:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
+    except Exception:
+        cur.execute("ROLLBACK TO SAVEPOINT fio_ensure_columns")
+        cur.execute("RELEASE SAVEPOINT fio_ensure_columns")
+        raise
+    cur.execute("RELEASE SAVEPOINT fio_ensure_columns")
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> Set[str]:

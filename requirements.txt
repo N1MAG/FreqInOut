@@ -5,9 +5,9 @@ PySide6-Addons==6.8.1.1
 psutil>=5.9.0
 requests>=2.31.0
 pytz>=2023.3
-PyYAML>=6.0
-packaging>=23.1
 tzdata>=2024.1
 keyring>=25.0
 # js8net is vendored at third_party/js8net/js8net-main
 reportlab>=4.0
+# Internal tooling only (tools/update_changelog_from_security.py)
+PyYAML>=6.0

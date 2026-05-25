@@ -5,11 +5,15 @@ import os
 import sys
 import tempfile
 import time
+from collections import deque
 from pathlib import Path
 
 from freqinout.core.config_paths import get_config_dir as shared_get_config_dir
 
 APP_NAME = "FreqInOut"
+_RECENT_ISSUES_MAX = 200
+_recent_issues = deque(maxlen=_RECENT_ISSUES_MAX)
+_current_log_level_name = "INFO"
 
 # Optional env override for log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)
 _ENV_LOG_LEVEL = os.getenv("FREQINOUT_LOG_LEVEL", "").strip().upper()
@@ -119,25 +123,63 @@ class ResilientRotatingFileHandler(logging.handlers.RotatingFileHandler):
         except Exception:
             self.handleError(record)
 
+
+class RecentIssueHandler(logging.Handler):
+    """Always-on in-memory ring buffer for field diagnostics."""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            _recent_issues.append(self.format(record))
+        except Exception:
+            pass
+
+
+def _add_recent_issue_handler(logger: logging.Logger) -> None:
+    if any(isinstance(h, RecentIssueHandler) for h in logger.handlers):
+        return
+    logger.addHandler(RecentIssueHandler())
+
+
+def _has_output_handler(logger: logging.Logger) -> bool:
+    return any(not isinstance(h, RecentIssueHandler) for h in logger.handlers)
+
+
+def get_recent_issues() -> list[str]:
+    return list(_recent_issues)
+
+
 def setup_logger(name: str = "freqinout", log_to_console=True, log_level=logging.INFO):
+    global _current_log_level_name
     # Allow env var override
     if _ENV_LOG_LEVEL in _LEVEL_MAP:
         log_level = _LEVEL_MAP[_ENV_LOG_LEVEL]
+        _current_log_level_name = _ENV_LOG_LEVEL
     logger = logging.getLogger(name)
-    if logger.handlers and log_level is not None:
+    if _has_output_handler(logger) and log_level is not None:
         # Update existing handlers if already configured
         for h in logger.handlers:
-            h.setLevel(log_level)
+            if isinstance(h, RecentIssueHandler):
+                h.setLevel(logging.WARNING)
+            else:
+                h.setLevel(log_level)
+        _add_recent_issue_handler(logger)
         logger.setLevel(log_level)
         logger.disabled = False
         return logger
 
     logger.handlers = []
+    _add_recent_issue_handler(logger)
     if log_level is None:
-        logger.setLevel(logging.CRITICAL + 1)
-        logger.disabled = True
+        _current_log_level_name = "DISABLED"
+        logger.setLevel(logging.WARNING)
+        logger.disabled = False
         return logger
 
+    _current_log_level_name = logging.getLevelName(log_level)
     logger.setLevel(log_level)
     logger.disabled = False
 
@@ -177,28 +219,34 @@ def set_log_level(level_name: str) -> None:
     Update the global logger level (both console and file handlers) at runtime.
     """
     level_name = level_name.strip().upper()
+    global _current_log_level_name
     lvl = _LEVEL_MAP.get(level_name, logging.INFO)
     logger = logging.getLogger("freqinout")
     if lvl is None:
-        logger.disabled = True
+        _current_log_level_name = "DISABLED"
         for h in list(logger.handlers):
             logger.removeHandler(h)
-        logger.setLevel(logging.CRITICAL + 1)
+        _add_recent_issue_handler(logger)
+        logger.setLevel(logging.WARNING)
+        logger.disabled = False
         return
 
     # Re-enable if previously disabled
+    _current_log_level_name = logging.getLevelName(lvl)
     logger.disabled = False
-    if not logger.handlers:
+    if not _has_output_handler(logger):
         setup_logger(name="freqinout", log_level=lvl)
         return
     logger.setLevel(lvl)
     for h in logger.handlers:
-        h.setLevel(lvl)
+        if isinstance(h, RecentIssueHandler):
+            h.setLevel(logging.WARNING)
+        else:
+            h.setLevel(lvl)
 
 
 def get_log_level() -> str:
     """
     Return the current global log level name.
     """
-    logger = logging.getLogger("freqinout")
-    return logging.getLevelName(logger.getEffectiveLevel())
+    return _current_log_level_name

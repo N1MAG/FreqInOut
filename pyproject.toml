@@ -16,8 +16,9 @@ dependencies = [
   "pytz>=2023.3",
   "psutil>=5.9.0",
   "PySide6>=6.7.0",
-  "PyYAML>=6.0",
   "keyring>=25.0",
+  "reportlab>=4.0",
+  "tzdata>=2024.1; platform_system == 'Windows'",
 ]
 
 [project.scripts]
