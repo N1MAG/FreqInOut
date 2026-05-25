@@ -1502,7 +1502,9 @@ def test_run_varac_bbs_vault_processes_flamp_commands(tmp_path: Path) -> None:
     (live_bbs / state.current_overlay_file).unlink()
     result = run_varac_bbs_vault(settings)
     state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
-    assert state.current_view_mode in {"root", "location"}
+    assert state.current_view_mode == "flamp-block-overlay"
+    assert state.current_overlay_file.startswith("BBS_F277_BLK_0_1")
+    assert (live_bbs / state.current_overlay_file).exists()
 
 
 def test_publish_root_view_lists_flamp_menu_helper(tmp_path: Path) -> None:

@@ -2291,6 +2291,21 @@ def _flamp_queue_from_view_label(label: object) -> str:
     return str(match.group(1) or "").strip().upper() if match else ""
 
 
+def _flamp_overlay_request_from_state(state: VaultRuntimeState) -> Tuple[str, Tuple[int, ...]]:
+    queue_id = _flamp_queue_from_view_label(state.current_view_label)
+    overlay_name = str(state.current_overlay_file or "").strip()
+    file_match = re.match(
+        rf"^{re.escape(DEFAULT_FLAMP_FILE_PREFIX)}_([A-Z0-9]{{3,12}})_BLK_([0-9_Øø]+)\.txt$",
+        overlay_name,
+        re.IGNORECASE,
+    )
+    if file_match and not queue_id:
+        queue_id = str(file_match.group(1) or "").upper()
+    block_text = str(file_match.group(2) if file_match else "").replace("Ø", "0").replace("ø", "0")
+    block_numbers = tuple(int(part) for part in block_text.split("_") if part.isdigit())
+    return queue_id, block_numbers
+
+
 def _publish_flamp_refresh_action(
     *,
     sender: str,
@@ -2313,6 +2328,7 @@ def _publish_flamp_refresh_action(
     base_source_dir = base_location.source_dir if base_location is not None else ""
     store = FlampRelayStore(flamp_relay_dir)
     try:
+        overlay_file = ""
         if mode in {"flamp-help"}:
             publish_result = publish_flamp_command_help_view(
                 base_source_dir=base_source_dir,
@@ -2344,6 +2360,19 @@ def _publish_flamp_refresh_action(
             )
             label = f"FLAMP {queue_id} blocks"
             action_text = f"Managed Vault refreshed FLAMP block list {queue_id} for {sender or 'public'}."
+        elif mode == "flamp-block-overlay":
+            queue_id, block_numbers = _flamp_overlay_request_from_state(state)
+            if not queue_id or not block_numbers:
+                return None
+            publish_result, overlay_file = publish_flamp_block_overlay_view(
+                store,
+                queue_id,
+                block_numbers,
+                live_bbs_dir=live_bbs_dir,
+                managed_root=managed_root,
+            )
+            label = f"FLAMP {queue_id}"
+            action_text = f"Managed Vault refreshed FLAMP overlay {overlay_file} for {sender or 'public'}."
         else:
             return None
     except Exception as exc:
@@ -2374,6 +2403,7 @@ def _publish_flamp_refresh_action(
         current_session_qso_guid=str(qso_guid or "").strip(),
         current_view_mode=mode,
         current_view_label=label,
+        current_overlay_file=overlay_file,
         last_publish_manifest_path=publish_result.manifest_path,
         last_publish_ts=now_ts,
         last_action=action_text,
@@ -2975,18 +3005,37 @@ def _reconcile_current_location(
             if overlay_name:
                 live_dir = _resolve_path(live_bbs_dir)
                 if live_dir is not None and not (live_dir / overlay_name).exists():
-                    restored = _restore_previous_view(
-                        locations=locations,
-                        live_bbs_dir=live_bbs_dir,
-                        managed_root=managed_root,
-                        default_location_id=default_location_id,
-                        runtime_state=runtime_state,
-                        global_allowed_callsigns=global_allowed_callsigns,
-                        limit_access_enabled=limit_access_enabled,
-                        global_code_policy=global_code_policy,
-                        flamp_enabled=flamp_enabled,
+                    flamp_relay_dir = (
+                        str(settings.get("varac_bbs_vault_flamp_relay_dir", "") or "").strip()
+                        if settings is not None
+                        else ""
                     )
-                    return restored.runtime_state, bool(restored.publish_result and restored.publish_result.changed)
+                    queue_id, block_numbers = _flamp_overlay_request_from_state(runtime_state)
+                    if flamp_enabled and flamp_relay_dir and queue_id and block_numbers:
+                        store = FlampRelayStore(flamp_relay_dir)
+                        publish_result, refreshed_overlay = publish_flamp_block_overlay_view(
+                            store,
+                            queue_id,
+                            block_numbers,
+                            live_bbs_dir=live_bbs_dir,
+                            managed_root=managed_root,
+                        )
+                        next_state = _update_state(
+                            runtime_state,
+                            current_overlay_file=refreshed_overlay,
+                            last_publish_manifest_path=publish_result.manifest_path,
+                            last_publish_ts=time.time(),
+                            last_action=f"Managed Vault restored FLAMP overlay {refreshed_overlay}.",
+                            last_error="",
+                            unmanaged_live_files=list(publish_result.unmanaged_live_files),
+                        )
+                        return next_state, bool(publish_result.changed)
+                    next_state = _update_state(
+                        runtime_state,
+                        last_action=f"Managed Vault is keeping FLAMP overlay {overlay_name} active, but it could not be recreated.",
+                        last_error="FLAMP overlay source unavailable",
+                    )
+                    return next_state, False
             return runtime_state, False
         elif runtime_state.current_view_mode.startswith("flamp"):
             return runtime_state, False
@@ -3084,25 +3133,6 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
 
     if not runtime_state.last_publish_manifest_path:
         runtime_state = _update_state(runtime_state, last_publish_manifest_path=str(_manifest_path_for(managed_root)))
-
-    if runtime_state.current_view_mode == "flamp-block-overlay" and runtime_state.current_overlay_file:
-        live_dir = _resolve_path(live_bbs_dir)
-        if live_dir is not None and not (live_dir / runtime_state.current_overlay_file).exists():
-            restored = _restore_previous_view(
-                locations=locations,
-                live_bbs_dir=live_bbs_dir,
-                managed_root=managed_root,
-                default_location_id=default_location_id,
-                runtime_state=runtime_state,
-                global_allowed_callsigns=global_allowed,
-                limit_access_enabled=limit_access_enabled,
-                global_code_policy=global_code_policy,
-                flamp_enabled=flamp_enabled,
-                now_ts=now_ts,
-                reason="overlay_restore",
-            )
-            runtime_state = restored.runtime_state
-            published = published or bool(restored.publish_result and restored.publish_result.changed)
 
     configured_local_calls = [
         settings.get("operator_callsign", "") if settings is not None else "",

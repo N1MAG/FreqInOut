@@ -29,6 +29,10 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
+## What's New in v1.2.5.2
+
+- VarAC Managed BBS FLAMP block fills are more reliable per radio profile: when a station requests blocks such as `BLK 0,1 E957`, FIO keeps that block-fill file available through refreshes and recreates it if VarAC consumes the live file during download handling.
+
 ## What's New in v1.2.5.1
 
 - Multi-rig VarAC Managed BBS now uses each active radio profile's VarAC traffic log as the command authority, with durable log cursors so valid commands are not skipped by stale runtime timestamps.

@@ -231,6 +231,42 @@ def test_managed_bbs_ignores_varac_db_when_traffic_log_exists(tmp_path: Path) ->
     assert "AIB_Report.txt" not in names
 
 
+def test_flamp_block_overlay_survives_refresh_and_recreates_live_file(tmp_path: Path) -> None:
+    settings, varac_root, live_bbs = _base_settings(tmp_path, flamp=True)
+    relay_dir = Path(settings.get("varac_bbs_vault_flamp_relay_dir"))
+    (relay_dir / "E957_MAGNET-S2-RR.sig.b2s").write_text(
+        "<PROG 1.0>{E957}\n<SIZE xx>{E957}2119 2 1024\n{E957:1}BLOCK1\n{E957:2}BLOCK2\n",
+        encoding="utf-8",
+    )
+    log_path = varac_root / "VarAC_traffic.log"
+    _append_log(
+        log_path,
+        [
+            "25/05/2026 21:40:00 - CONNECTED TO N5TNT (BANDWIDTH: 500 FREQUENCY: 14.115.000)",
+            "25/05/2026 21:40:43 - N5TNT> BLK 0,1 E957",
+            "25/05/2026 21:40:51 - N5TNT> <BLR>",
+        ],
+    )
+
+    run_varac_bbs_vault(settings)
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1"))
+    assert state.current_view_mode == "flamp-block-overlay"
+    assert state.current_overlay_file == "BBS_E957_BLK_0_1.txt"
+    assert state.current_session_callsign == "N5TNT"
+    assert state.current_overlay_file in _names(live_bbs)
+
+    (live_bbs / state.current_overlay_file).unlink()
+    run_varac_bbs_vault(settings)
+    state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1"))
+    assert state.current_view_mode == "flamp-block-overlay"
+    assert state.current_overlay_file == "BBS_E957_BLK_0_1.txt"
+    assert state.current_overlay_file in _names(live_bbs)
+
+    _append_log(log_path, ["25/05/2026 21:45:14 - N5TNT> <BLR>"])
+    run_varac_bbs_vault(settings)
+    assert "BBS_E957_BLK_0_1.txt" in _names(live_bbs)
+
+
 def test_public_visible_code_location_is_listed_but_access_is_enforced(tmp_path: Path) -> None:
     settings, varac_root, live_bbs = _base_settings(tmp_path)
     (varac_root / "VarAC_traffic.log").write_text("25/05/2026 17:37:00 - W0IFM> <BLR>\n", encoding="utf-8")
