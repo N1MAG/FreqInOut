@@ -45,6 +45,7 @@ freqinout/config/freqinout.db
 freqinout/logs/
 venv/
 *.log
+tools/publish-release.ps1
 
 # Python tooling caches / reports
 .coverage
@@ -67,5 +68,12 @@ FIO_BBS_Vault/
 tmp_gpg_guidance.txt
 freqinout-review.zip
 
+# Local development/test workspace artifacts
+tests/
+tools/
+
 # Local benchmark/smoke artifacts
 .benchmarks/
+
+# Local README screenshot staging (use GitHub release assets instead)
+docs/internal/ScreenShots/

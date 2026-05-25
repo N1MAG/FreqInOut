@@ -29,6 +29,14 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
+## What's New in v1.2.5
+
+- VarAC Managed BBS command handling is more reliable in field use: FIO now reads the visible VarAC traffic log first, handles `/P` portable callsigns, local-vs-remote session direction, `<BLR>` refreshes, and noisy file-transfer lines more safely.
+- Managed BBS refreshes now update the current BBS or FLAMP view from traffic-log activity instead of leaving stale listings visible after a remote station refreshes.
+- FIO reduces reliance on VarAC database command scanning during live BBS operation, using it as fallback when no traffic-log command events are available.
+- Startup and background timer handling was tightened so worker-thread completions marshal Qt timer updates back to the Qt thread, reducing `QObject::startTimer/killTimer` warnings.
+- Diagnostics are easier to share: the Help tab now includes `Recent Issues`, and release preflight checks runtime dependencies against installation requirements.
+
 ## What's New in v1.2.4
 
 - FLDigi / SSB Net Control now lists scheduled nets that are active or coming up soon, so operators who start a little late can still select the intended scheduled net.

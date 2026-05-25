@@ -5,7 +5,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Dict, Optional
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
@@ -29,6 +29,7 @@ class BackgroundIngestController(QObject):
     _VARAC_VAULT_ENABLED_INTERVAL_MS = 5_000
     _VARAC_VAULT_DEGRADED_INTERVAL_MS = 60_000
     _VARAC_VAULT_DISABLED_INTERVAL_MS = 30_000
+    _controller_thread_call = Signal(object)
 
     def __init__(self, settings: SettingsManager):
         super().__init__()
@@ -50,6 +51,18 @@ class BackgroundIngestController(QObject):
         self._job_skipped_counts: Dict[str, int] = {}
         self._health = get_dependency_health_registry()
         self._running = False
+        self._controller_thread_call.connect(self._run_controller_thread_call)
+
+    def _run_controller_thread_call(self, callback: object) -> None:
+        if not callable(callback):
+            return
+        try:
+            callback()
+        except Exception as e:
+            log.debug("BackgroundIngest: queued controller-thread callback failed: %s", e)
+
+    def _queue_controller_thread_call(self, callback: Callable[[], None]) -> None:
+        self._controller_thread_call.emit(callback)
 
     def start(self, *, initial_stagger: bool = True) -> None:
         if self._running:
@@ -328,7 +341,7 @@ class BackgroundIngestController(QObject):
             if current is future:
                 self._realtime_job_futures.pop(job_name, None)
         if job_name == "varac_vault":
-            self._update_varac_vault_timer_state()
+            self._queue_controller_thread_call(self._update_varac_vault_timer_state)
         try:
             future.result()
         except Exception as e:

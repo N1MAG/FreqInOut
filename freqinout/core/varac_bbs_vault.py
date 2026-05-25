@@ -43,6 +43,9 @@ DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS = 14
 DEFAULT_BBS_REFRESH_PAUSE_SECONDS = 10
 
 EVENT_TS_RE = re.compile(r"^(?P<stamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\s+-\s+(?P<body>.*)$")
+EVENT_TS_SCAN_RE = re.compile(r"(?P<stamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\s+-\s+")
+CHAT_SENDER_RE = re.compile(r"^\s*([A-Z0-9/]{3,15})>\s*(.*)$", re.IGNORECASE)
+CONNECTED_RE = re.compile(r"\bCONNECTED\s+(?:TO|FROM)\s+([A-Z0-9/]{3,15})\b", re.IGNORECASE)
 COMMAND_RE = re.compile(r"\bBBS\s+OPEN\s+([A-Z0-9][A-Z0-9_.:/+\-]{0,63})\b", re.IGNORECASE)
 DISCONNECT_RE = re.compile(r"\bDISCONNECTED(?:\s+(?:FROM|BY|TO)\s+[A-Z0-9/+\-]+)?\b", re.IGNORECASE)
 CALLSIGN_PATTERNS = (
@@ -275,7 +278,7 @@ def _state_key(event: VaultLogEvent) -> str:
     )
 
 
-def _read_tail(path: Path, max_bytes: int = 65536) -> str:
+def _read_tail(path: Path, max_bytes: int = 262144) -> str:
     try:
         with path.open("rb") as handle:
             try:
@@ -313,18 +316,42 @@ def _parse_db_timestamp(value: object) -> float:
 
 
 def _split_log_events(text: str) -> List[str]:
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    matches = list(EVENT_TS_SCAN_RE.finditer(raw))
+    if not matches:
+        return []
     events: List[str] = []
-    current: List[str] = []
-    for raw_line in str(text or "").splitlines():
-        if EVENT_TS_RE.match(raw_line):
-            if current:
-                events.append("\n".join(current))
-            current = [raw_line]
-        elif current:
-            current.append(raw_line)
-    if current:
-        events.append("\n".join(current))
+    for idx, match in enumerate(matches):
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw)
+        segment = raw[match.start() : end].strip("\n")
+        if segment:
+            events.append(segment)
     return events
+
+
+def _base_callsign(value: object) -> str:
+    return _normalize_callsign(value).split("/", 1)[0]
+
+
+def _callsign_matches(candidate: object, expected: object) -> bool:
+    left = _normalize_callsign(candidate)
+    right = _normalize_callsign(expected)
+    if not left or not right:
+        return False
+    return left == right or _base_callsign(left) == _base_callsign(right)
+
+
+def _local_callsign_set(values: Iterable[object]) -> set[str]:
+    out: set[str] = set()
+    for value in values:
+        call = _normalize_callsign(value)
+        if not call:
+            continue
+        out.add(call)
+        base = _base_callsign(call)
+        if base:
+            out.add(base)
+    return out
 
 
 def _extract_sender(body: str) -> str:
@@ -376,10 +403,13 @@ def parse_vault_log_events(
     trigger_mode: str = DEFAULT_TRIGGER_MODE,
     log_path: str = "",
     alias_map: Optional[Mapping[str, str]] = None,
+    local_callsigns: Optional[Iterable[object]] = None,
 ) -> List[VaultLogEvent]:
     events: List[VaultLogEvent] = []
     exact_mode = str(trigger_mode or DEFAULT_TRIGGER_MODE).strip().lower() == "exact code only"
     aliases = alias_map or {}
+    local_set = _local_callsign_set(local_callsigns or ())
+    active_remote = ""
     for block in _split_log_events(text):
         lines = [line for line in block.splitlines() if line.strip()]
         if not lines:
@@ -388,7 +418,39 @@ def parse_vault_log_events(
         if not match:
             continue
         body = "\n".join([match.group("body")] + lines[1:]).strip()
-        sender = _extract_sender(body)
+        timestamp_utc = _parse_timestamp(match.group("stamp"))
+        upper_body = body.upper()
+        connected = CONNECTED_RE.search(upper_body)
+        if connected:
+            active_remote = _normalize_callsign(connected.group(1))
+            continue
+        disconnect_match = DISCONNECT_RE.search(upper_body)
+        if disconnect_match:
+            sender = active_remote or _extract_sender(body)
+            events.append(
+                VaultLogEvent(
+                    timestamp_utc=timestamp_utc,
+                    kind="disconnect",
+                    sender=sender,
+                    body=body,
+                    raw_line=block,
+                    log_path=log_path,
+                )
+            )
+            active_remote = ""
+            continue
+
+        chat_match = CHAT_SENDER_RE.match(lines[0])
+        sender = _normalize_callsign(chat_match.group(1)) if chat_match else _extract_sender(body)
+        if sender and local_set and (_normalize_callsign(sender) in local_set or _base_callsign(sender) in local_set):
+            continue
+        if active_remote and sender and not _callsign_matches(sender, active_remote):
+            continue
+        if re.search(r"(?i)^[A-Z0-9/]{3,15}>\s*<BL:", lines[0].strip()):
+            continue
+        if re.search(r"(?i)^[A-Z0-9/]{3,15}>\s*<(?:BG|SF|SFRD|SFOK)[:>]", lines[0].strip()):
+            continue
+
         message_text = _extract_log_message_text(body)
         command_text = _normalize_bbs_command_text(message_text)
         refresh_requested = _entry_includes_bbs_refresh(body)
@@ -407,6 +469,8 @@ def parse_vault_log_events(
                 kind = "unlock"
         if not kind and ROOT_CMD_RE.match(command_text):
             kind = "root_return"
+        if not kind and refresh_requested and command_text in {"", "<BLR>"}:
+            kind = "root_request"
         if not kind and FLAMP_CMD_RE.match(command_text):
             kind = "flamp_help"
             code_text = command_text
@@ -2270,8 +2334,7 @@ def _publish_refresh_action(
     qso_guid_text = str(qso_guid or "").strip()
     same_session_location_refresh = (
         state.current_view_mode in {"location", "access-prompt"}
-        and bool(state.current_session_qso_guid)
-        and state.current_session_qso_guid == qso_guid_text
+        and (not state.current_session_qso_guid or not qso_guid_text or state.current_session_qso_guid == qso_guid_text)
         and (not state.current_session_callsign or state.current_session_callsign == sender_norm)
     )
     if not same_session_location_refresh:
@@ -2972,9 +3035,35 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
             runtime_state = restored.runtime_state
             published = published or bool(restored.publish_result and restored.publish_result.changed)
 
+    configured_local_calls = [
+        settings.get("operator_callsign", "") if settings is not None else "",
+        settings.get("callsign", "") if settings is not None else "",
+    ]
+    log_paths = resolve_varac_traffic_log_paths(settings)
+    seen_keys = set(runtime_state.processed_event_keys)
+    log_events_for_run: List[VaultLogEvent] = []
+    for log_path in log_paths:
+        for event in parse_vault_log_events(
+            _read_tail(log_path),
+            trigger_mode=trigger_mode,
+            log_path=str(log_path),
+            alias_map=alias_map,
+            local_callsigns=configured_local_calls,
+        ):
+            if (
+                initial_last_request_ts
+                and event.timestamp_utc
+                and event.timestamp_utc <= initial_last_request_ts
+                and not (event.kind == "open_alias" and bool(event.code_text))
+            ):
+                continue
+            if _state_key(event) in seen_keys:
+                continue
+            log_events_for_run.append(event)
+
     events: Tuple[VaultDbEvent, ...] = ()
     max_scanned_datastream_id = int(runtime_state.last_datastream_id or 0)
-    if varac_db_path is not None:
+    if varac_db_path is not None and not log_events_for_run:
         db_scan = _load_db_events(varac_db_path, last_datastream_id=runtime_state.last_datastream_id, alias_map=alias_map)
         events = db_scan.events
         max_scanned_datastream_id = max(max_scanned_datastream_id, int(db_scan.max_scanned_row_id or 0))
@@ -3268,24 +3357,48 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     if max_scanned_datastream_id > int(runtime_state.last_datastream_id or 0):
         runtime_state = _update_state(runtime_state, last_datastream_id=max_scanned_datastream_id)
 
-    log_paths = resolve_varac_traffic_log_paths(settings)
-    seen_keys = set(runtime_state.processed_event_keys)
-    for log_path in log_paths:
-        log_events = parse_vault_log_events(
-            _read_tail(log_path),
-            trigger_mode=trigger_mode,
-            log_path=str(log_path),
-            alias_map=alias_map,
-        )
-        for event in log_events:
+    for event in log_events_for_run:
             scanned += 1
-            if initial_last_request_ts and event.timestamp_utc and event.timestamp_utc <= initial_last_request_ts:
-                continue
             key = _state_key(event)
-            if key in seen_keys:
+            if key in seen_keys and not (event.kind == "open_alias" and bool(event.code_text)):
                 continue
             seen_keys.add(key)
-            if event.kind == "unlock":
+            if event.kind == "root_request":
+                result = None
+                if flamp_enabled and flamp_relay_dir:
+                    result = _publish_flamp_refresh_action(
+                        sender=event.sender,
+                        qso_guid=runtime_state.current_session_qso_guid,
+                        locations=locations,
+                        live_bbs_dir=live_bbs_dir,
+                        managed_root=managed_root,
+                        default_location_id=default_location_id,
+                        runtime_state=runtime_state,
+                        now_ts=event.timestamp_utc or now_ts,
+                        flamp_relay_dir=flamp_relay_dir,
+                        flamp_listing_max_age_days=flamp_listing_max_age_days,
+                        reason="log_root_request",
+                    )
+                if result is None:
+                    result = _publish_refresh_action(
+                        sender=event.sender,
+                        qso_guid=runtime_state.current_session_qso_guid,
+                        locations=locations,
+                        live_bbs_dir=live_bbs_dir,
+                        managed_root=managed_root,
+                        default_location_id=default_location_id,
+                        global_allowed_callsigns=global_allowed,
+                        limit_access_enabled=limit_access_enabled,
+                        global_code_policy=global_code_policy,
+                        runtime_state=runtime_state,
+                        now_ts=event.timestamp_utc or now_ts,
+                        flamp_enabled=flamp_enabled,
+                        reason="log_root_request",
+                    )
+                runtime_state = result.runtime_state
+                published = published or bool(result.publish_result and result.publish_result.changed)
+                processed += 1
+            elif event.kind == "unlock":
                 result = _apply_open_request(
                     sender=event.sender,
                     qso_guid=runtime_state.current_session_qso_guid,

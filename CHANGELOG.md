@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.5]
+- Fixed: VarAC Managed BBS now uses a hardened traffic-log command parser as the primary command source, handling glued timestamp records, prefixed status text, portable callsigns such as `/P`, remote/local session direction, bare `<BLR>` refreshes, and VarAC file-transfer noise more deterministically.
+- Fixed: Managed BBS refresh commands from the VarAC traffic log now refresh the current location or FLAMP view instead of allowing stale BBS output to linger after a remote operator requests a listing refresh.
+- Changed: Managed BBS falls back to VarAC database scanning only when no traffic-log command events are available, reducing exposure to VarAC database locking/index issues during live operation.
+- Added: Regression coverage now exercises real managed-BBS traffic samples from the 2026-05-25 production log set and the BBSExamples field package.
+- Fixed: startup/background Qt timer updates are now marshaled back to the Qt controller thread for scheduler and background-ingest completion paths, reducing `QObject::startTimer/killTimer` warnings and unsafe timer handling during startup or Managed BBS activity.
+- Changed: runtime/package diagnostics were hardened with explicit runtime dependency checks, a Help-tab `Recent Issues` viewer for warning/error support context, and safer database migration guards.
+
 ## [1.2.4]
 - Changed: FLDigi / SSB Net Control now lists scheduled nets that are currently active or coming up within the near operating window, avoiding duplicate daily repeats while still letting late-starting operators select the intended net.
 - Changed: FLDigi Net Control roster copy output now includes the station role for NCS and ANCS rows, followed by traffic when present, and repeated callsign rows are merged so corrections do not create duplicate check-ins.
