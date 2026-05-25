@@ -512,8 +512,8 @@ def test_publish_root_view_only_lists_helpers_available_to_caller(tmp_path: Path
     )
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert any("PUBLIC" in name for name in names)
-    assert not any("RESTRICTED" in name for name in names)
-    assert not any("CODE" in name for name in names)
+    assert any("RESTRICTED" in name for name in names)
+    assert any("CODE [CODE]" in name for name in names)
 
     publish_root_view(
         sender="W5TTA",
@@ -544,8 +544,8 @@ def test_publish_root_view_only_lists_helpers_available_to_caller(tmp_path: Path
     )
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
     assert any("PUBLIC" in name for name in names)
-    assert not any("RESTRICTED" in name for name in names)
-    assert "21 type CODE [CODE] - open CODE with access code.txt" in names
+    assert any("RESTRICTED" in name for name in names)
+    assert "22 type CODE [CODE] - open CODE with access code.txt" in names
 
 
 def test_reset_to_default_uses_configured_root_visibility_policy(tmp_path: Path) -> None:
@@ -2290,7 +2290,7 @@ def test_run_varac_bbs_vault_db_new_qso_does_not_drop_first_command(tmp_path: Pa
     assert (live_bbs / "BBS_BLOCK_LIST_41D6.txt").exists()
 
 
-def test_run_varac_bbs_vault_db_command_is_not_overwritten_by_stale_log_tail(tmp_path: Path) -> None:
+def test_run_varac_bbs_vault_log_remains_authoritative_when_db_has_newer_command(tmp_path: Path) -> None:
     varac_root = tmp_path / "varac"
     varac_root.mkdir()
     varac_db = varac_root / "VarAC.db"
@@ -2377,10 +2377,10 @@ def test_run_varac_bbs_vault_db_command_is_not_overwritten_by_stale_log_tail(tmp
 
     run_varac_bbs_vault(settings)
 
-    assert not (live_bbs / "BBS_BLOCK_LIST_2A0C.txt").exists()
-    assert (live_bbs / "BBS_BLOCK_LIST_1AD1.txt").exists()
+    assert (live_bbs / "BBS_BLOCK_LIST_2A0C.txt").exists()
+    assert not (live_bbs / "BBS_BLOCK_LIST_1AD1.txt").exists()
     state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
-    assert state.current_view_label == "FLAMP 1AD1 blocks"
+    assert state.current_view_label == "FLAMP 2A0C blocks"
 
 
 def test_flamp_queue_listing_filters_age_and_unassigned_files(tmp_path: Path) -> None:

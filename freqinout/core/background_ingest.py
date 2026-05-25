@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -10,6 +11,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
 from freqinout.core.message_ingest import MessageIngestor
+from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.peer_schedule_infer import infer_peer_schedules
 from freqinout.core.propagation_outcome_ingest import ingest_propagation_outcomes
 from freqinout.core.settings_manager import SettingsManager
@@ -19,6 +21,41 @@ from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.varac_bbs_vault import run_varac_bbs_vault
 from freqinout.core.varac_guard import run_varac_guard
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
+
+
+class _DeviceProfileVaultSettings:
+    def __init__(self, profile: Dict[str, object], fallback_settings: SettingsManager, store: MultiRadioStore) -> None:
+        self.profile = dict(profile)
+        self.fallback_settings = fallback_settings
+        self.store = store
+
+    def _profile_value(self, *keys: str) -> object:
+        for key in keys:
+            value = self.profile.get(key)
+            if value not in (None, ""):
+                return value
+        return ""
+
+    def get(self, key: str, default=None):
+        if key == "varac_path":
+            return self._profile_value("varac_path", "varac_install_path") or self.fallback_settings.get(key, default)
+        if key == "message_paths":
+            merged = dict(self.fallback_settings.get("message_paths", {}) or {})
+            incoming = str(self._profile_value("varac_incoming_path") or "").strip()
+            if incoming:
+                merged["varac"] = incoming
+            return merged or default
+        if key in self.profile:
+            return self.profile.get(key, default)
+        return self.fallback_settings.get(key, default)
+
+    def set(self, key: str, value) -> None:
+        self.profile[key] = value
+        if key in {"varac_bbs_vault_runtime_state_v1", "varac_bbs_vault_last_summary"}:
+            try:
+                self.store.save_device_profile(self.profile)
+            except Exception as exc:
+                log.debug("BackgroundIngest: failed to persist VarAC vault profile state: %s", exc)
 
 
 class BackgroundIngestController(QObject):
@@ -204,6 +241,30 @@ class BackgroundIngestController(QObject):
     def _new_worker_settings(self) -> SettingsManager:
         return SettingsManager()
 
+    def _active_varac_vault_profiles(self) -> list[Dict[str, object]]:
+        try:
+            store = MultiRadioStore()
+            profiles = [dict(row) for row in store.list_runtime_active_device_profiles()]
+        except Exception:
+            return []
+        return [
+            profile
+            for profile in profiles
+            if self._truthy(profile.get("use_varac", False), False)
+            and self._truthy(profile.get("varac_bbs_vault_enabled", False), False)
+            and str(profile.get("varac_bbs_dir", "") or "").strip()
+        ]
+
+    @staticmethod
+    def _normalized_bbs_dir(value: object) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        try:
+            return str(Path(raw).expanduser().resolve()).lower()
+        except Exception:
+            return str(Path(raw).expanduser()).lower()
+
     @staticmethod
     def _truthy(value: object, default: bool = False) -> bool:
         if isinstance(value, bool):
@@ -219,6 +280,8 @@ class BackgroundIngestController(QObject):
 
     def _varac_vault_enabled(self) -> bool:
         try:
+            if self._active_varac_vault_profiles():
+                return True
             return self._truthy(self.settings.get("varac_bbs_vault_enabled", False), False)
         except Exception:
             return False
@@ -414,11 +477,39 @@ class BackgroundIngestController(QObject):
     def _run_varac_vault_job(self) -> None:
         worker_settings = self._new_worker_settings()
         try:
-            vault_result = run_varac_bbs_vault(worker_settings)
-            if bool(vault_result.enabled) and (
-                int(vault_result.processed_events or 0) > 0 or bool(vault_result.published)
-            ):
-                log.debug("BackgroundIngest: VarAC vault %s", vault_result.summary)
+            profiles = self._active_varac_vault_profiles()
+            if profiles:
+                store = MultiRadioStore()
+                by_live_dir: Dict[str, list[Dict[str, object]]] = {}
+                for profile in profiles:
+                    key = self._normalized_bbs_dir(profile.get("varac_bbs_dir", ""))
+                    if key:
+                        by_live_dir.setdefault(key, []).append(profile)
+                duplicate_dirs = {key for key, rows in by_live_dir.items() if len(rows) > 1}
+                for profile in profiles:
+                    profile_name = str(profile.get("name", "") or profile.get("system_key", "") or profile.get("id", "") or "radio").strip()
+                    live_key = self._normalized_bbs_dir(profile.get("varac_bbs_dir", ""))
+                    if live_key in duplicate_dirs:
+                        profile["varac_bbs_vault_last_summary"] = (
+                            "Managed Vault skipped: duplicate live BBS directory is configured on more than one active radio."
+                        )
+                        try:
+                            store.save_device_profile(profile)
+                        except Exception as exc:
+                            log.debug("BackgroundIngest: failed to persist duplicate BBS warning for %s: %s", profile_name, exc)
+                        log.warning("BackgroundIngest: VarAC vault skipped duplicate live BBS directory for %s", profile_name)
+                        continue
+                    vault_result = run_varac_bbs_vault(_DeviceProfileVaultSettings(profile, worker_settings, store))
+                    if bool(vault_result.enabled) and (
+                        int(vault_result.processed_events or 0) > 0 or bool(vault_result.published)
+                    ):
+                        log.debug("BackgroundIngest: VarAC vault [%s] %s", profile_name, vault_result.summary)
+            else:
+                vault_result = run_varac_bbs_vault(worker_settings)
+                if bool(vault_result.enabled) and (
+                    int(vault_result.processed_events or 0) > 0 or bool(vault_result.published)
+                ):
+                    log.debug("BackgroundIngest: VarAC vault %s", vault_result.summary)
         except Exception as e:
             log.debug("BackgroundIngest: VarAC vault failed: %s", e)
         finally:

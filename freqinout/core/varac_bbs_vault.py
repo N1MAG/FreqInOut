@@ -115,6 +115,7 @@ class VaultRuntimeState:
     last_error: str = ""
     unmanaged_live_files: Tuple[str, ...] = ()
     last_datastream_id: int = 0
+    log_cursors: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,13 @@ def normalize_location_alias(value: object, fallback_name: object = "") -> str:
     return raw[:32]
 
 
+def _normalize_access_code_text(value: object) -> str:
+    clean = " ".join(str(value or "").strip().split())
+    while len(clean) >= 2 and clean.startswith("[") and clean.endswith("]"):
+        clean = clean[1:-1].strip()
+    return clean.upper()
+
+
 def _location_id_from_name(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9]+", "-", str(name or "").strip().lower()).strip("-")
     return cleaned or DEFAULT_LOCATION_ID
@@ -276,6 +284,69 @@ def _state_key(event: VaultLogEvent) -> str:
             ",".join(str(num) for num in event.block_numbers),
         ]
     )
+
+
+def _log_cursor_key(path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve())
+    except Exception:
+        return str(path)
+
+
+def _read_log_increment(path: Path, cursor: Mapping[str, object], *, initial_max_bytes: int = 262144, overlap_bytes: int = 4096) -> Tuple[str, Dict[str, object], bool]:
+    try:
+        stat = path.stat()
+    except Exception as exc:
+        log.debug("varac_bbs_vault: failed to stat %s: %s", path, exc)
+        return "", dict(cursor or {}), False
+
+    size = int(getattr(stat, "st_size", 0) or 0)
+    inode = int(getattr(stat, "st_ino", 0) or 0)
+    device = int(getattr(stat, "st_dev", 0) or 0)
+    previous_offset = int((cursor or {}).get("offset", 0) or 0)
+    previous_inode = int((cursor or {}).get("inode", 0) or 0)
+    previous_device = int((cursor or {}).get("device", 0) or 0)
+    previous_mtime_ns = int((cursor or {}).get("mtime_ns", 0) or 0)
+    current_mtime_ns = int(getattr(stat, "st_mtime_ns", 0) or 0)
+
+    rotated = bool(previous_offset and (size < previous_offset or (previous_inode and inode and previous_inode != inode) or (previous_device and device and previous_device != device)))
+    if rotated:
+        start = max(0, size - max(1, int(initial_max_bytes)))
+    elif previous_offset > 0:
+        if size <= previous_offset:
+            if size == previous_offset and previous_mtime_ns and current_mtime_ns and current_mtime_ns != previous_mtime_ns:
+                start = max(0, size - max(1, int(initial_max_bytes)))
+            else:
+                return "", {
+                    "path": str(path),
+                    "offset": size,
+                    "size": size,
+                    "mtime_ns": current_mtime_ns,
+                    "inode": inode,
+                    "device": device,
+                }, True
+        else:
+            start = max(0, previous_offset - max(0, int(overlap_bytes)))
+    else:
+        start = max(0, size - max(1, int(initial_max_bytes)))
+
+    try:
+        with path.open("rb") as handle:
+            handle.seek(start)
+            text = handle.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        log.debug("varac_bbs_vault: failed to read %s: %s", path, exc)
+        return "", dict(cursor or {}), False
+
+    next_cursor = {
+        "path": str(path),
+        "offset": size,
+        "size": size,
+        "mtime_ns": current_mtime_ns,
+        "inode": inode,
+        "device": device,
+    }
+    return text, next_cursor, True
 
 
 def _read_tail(path: Path, max_bytes: int = 262144) -> str:
@@ -524,7 +595,7 @@ def parse_vault_log_events(
 
 
 def hash_access_code(code: str, *, salt: Optional[str] = None, iterations: int = DEFAULT_ACCESS_CODE_ITERATIONS) -> Dict[str, object]:
-    clean = str(code or "").strip()
+    clean = _normalize_access_code_text(code)
     if not clean:
         return {
             "access_code_hash": "",
@@ -541,7 +612,7 @@ def hash_access_code(code: str, *, salt: Optional[str] = None, iterations: int =
 
 
 def verify_access_code(code: str, *, access_code_hash: str, access_code_salt: str, access_code_iterations: int) -> bool:
-    clean = str(code or "").strip()
+    clean = _normalize_access_code_text(code)
     if not clean or not access_code_hash or not access_code_salt:
         return False
     try:
@@ -550,8 +621,15 @@ def verify_access_code(code: str, *, access_code_hash: str, access_code_salt: st
         iterations = int(access_code_iterations or DEFAULT_ACCESS_CODE_ITERATIONS)
     except Exception:
         return False
-    actual = hashlib.pbkdf2_hmac("sha256", clean.encode("utf-8"), salt, iterations)
-    return hmac.compare_digest(actual, expected)
+    candidates = []
+    for candidate in (clean, clean.upper(), clean.lower()):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    for candidate in candidates:
+        actual = hashlib.pbkdf2_hmac("sha256", candidate.encode("utf-8"), salt, iterations)
+        if hmac.compare_digest(actual, expected):
+            return True
+    return False
 
 
 def load_vault_locations(value: object) -> List[VaultLocation]:
@@ -625,6 +703,9 @@ def load_vault_runtime_state(value: object) -> VaultRuntimeState:
     failed_attempts = parsed.get("failed_attempts", {})
     if not isinstance(failed_attempts, dict):
         failed_attempts = {}
+    log_cursors = parsed.get("log_cursors", {})
+    if not isinstance(log_cursors, dict):
+        log_cursors = {}
     return VaultRuntimeState(
         current_location_id=str(parsed.get("current_location_id", DEFAULT_LOCATION_ID) or DEFAULT_LOCATION_ID).strip() or DEFAULT_LOCATION_ID,
         current_session_callsign=_normalize_callsign(parsed.get("current_session_callsign", "")),
@@ -657,6 +738,11 @@ def load_vault_runtime_state(value: object) -> VaultRuntimeState:
             if str(item or "").strip()
         ),
         last_datastream_id=int(parsed.get("last_datastream_id", 0) or 0),
+        log_cursors={
+            str(key or "").strip(): dict(value)
+            for key, value in log_cursors.items()
+            if str(key or "").strip() and isinstance(value, dict)
+        },
     )
 
 
@@ -681,6 +767,7 @@ def vault_runtime_state_to_data(state: VaultRuntimeState) -> Dict[str, object]:
         "last_error": state.last_error,
         "unmanaged_live_files": list(state.unmanaged_live_files),
         "last_datastream_id": int(state.last_datastream_id or 0),
+        "log_cursors": {str(key): dict(value) for key, value in state.log_cursors.items()},
     }
 
 
@@ -1168,32 +1255,16 @@ def _location_visible_in_root(
     if not location.enabled or location.id == default_location_id or not location.list_in_root_menu:
         return False
     rule = str(location.visibility_rule or "Public").strip()
-    open_rule = str(location.open_rule or "Public").strip()
     if rule == "Hidden":
         return False
+    if rule == "Public":
+        return True
     if not _normalize_callsign(sender):
-        return rule == "Public" and open_rule == "Public"
+        return False
     if rule == "Allowed callsigns only":
         return _location_sender_allowed(
             sender,
             location=location,
-            global_allowed_callsigns=global_allowed_callsigns,
-            limit_access_enabled=limit_access_enabled,
-        )
-    if open_rule in {"Allowed callsigns only", "Allowed callsigns + access code"}:
-        return _location_sender_allowed(
-            sender,
-            location=location,
-            global_allowed_callsigns=global_allowed_callsigns,
-            limit_access_enabled=limit_access_enabled,
-        )
-    if rule == "Public":
-        return True
-    if open_rule == "Public":
-        return True
-    if _location_requires_code(location, default_location_id=default_location_id, global_code_policy=global_code_policy):
-        return _sender_globally_allowed(
-            sender,
             global_allowed_callsigns=global_allowed_callsigns,
             limit_access_enabled=limit_access_enabled,
         )
@@ -1235,7 +1306,7 @@ def _extract_alias_request(text: str, alias_map: Mapping[str, str]) -> Tuple[str
             continue
         alias = normalize_location_alias(parts[start])
         if alias and alias in alias_map:
-            return alias, " ".join(parts[start + 1 :]).strip()
+            return alias, _normalize_access_code_text(" ".join(parts[start + 1 :]).strip())
     return "", ""
 
 
@@ -1673,10 +1744,10 @@ def publish_flamp_command_help_view(
     refresh_retry_command: object = "",
 ) -> VaultPublishResult:
     virtual_files = _flamp_command_help_files(refresh_retry_command=refresh_retry_command)
-    manifest, ignored_dirs = build_publish_manifest(base_source_dir, virtual_files=virtual_files)
+    manifest, ignored_dirs = build_publish_manifest("", virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
-        source_dir=base_source_dir,
+        source_dir="",
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         virtual_files=virtual_files,
@@ -1715,10 +1786,10 @@ def publish_flamp_queue_list_view(
     ]
     if refresh_retry_command:
         virtual_files.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
-    manifest, ignored_dirs = build_publish_manifest(base_source_dir, virtual_files=virtual_files)
+    manifest, ignored_dirs = build_publish_manifest("", virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
-        source_dir=base_source_dir,
+        source_dir="",
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         virtual_files=virtual_files,
@@ -1764,10 +1835,10 @@ def publish_flamp_block_list_view(
     ]
     if refresh_retry_command:
         virtual_files.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
-    manifest, ignored_dirs = build_publish_manifest(base_source_dir, virtual_files=virtual_files)
+    manifest, ignored_dirs = build_publish_manifest("", virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
-        source_dir=base_source_dir,
+        source_dir="",
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         virtual_files=virtual_files,
@@ -1798,10 +1869,10 @@ def publish_flamp_notice_view(
     ]
     if refresh_retry_command:
         virtual_files.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
-    manifest, ignored_dirs = build_publish_manifest(base_source_dir, virtual_files=virtual_files)
+    manifest, ignored_dirs = build_publish_manifest("", virtual_files=virtual_files)
     result = _publish_manifest_entries(
         manifest,
-        source_dir=base_source_dir,
+        source_dir="",
         live_bbs_dir=live_bbs_dir,
         managed_root=managed_root,
         virtual_files=virtual_files,
@@ -2556,7 +2627,7 @@ def _apply_open_request(
 ) -> VaultActionResult:
     now_ts = float(now_ts if now_ts is not None else time.time())
     sender = _normalize_callsign(sender)
-    code_text = str(code_text or "").strip()
+    code_text = _normalize_access_code_text(code_text)
     state = load_vault_runtime_state(vault_runtime_state_to_data(runtime_state))
     if not sender:
         summary = "Managed Vault ignored request with no identifiable callsign."
@@ -2975,7 +3046,6 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     failed_attempt_limit = int(settings.get("varac_bbs_vault_failed_attempt_limit", DEFAULT_FAILED_ATTEMPT_LIMIT) or DEFAULT_FAILED_ATTEMPT_LIMIT)
     failed_attempt_window_seconds = int(settings.get("varac_bbs_vault_failed_attempt_window_seconds", DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS) or DEFAULT_FAILED_ATTEMPT_WINDOW_SECONDS)
     cooldown_seconds = int(settings.get("varac_bbs_vault_cooldown_seconds", DEFAULT_COOLDOWN_SECONDS) or DEFAULT_COOLDOWN_SECONDS)
-    idle_timeout_seconds = int(settings.get("varac_bbs_vault_idle_timeout_seconds", DEFAULT_IDLE_TIMEOUT_SECONDS) or DEFAULT_IDLE_TIMEOUT_SECONDS)
     global_code_policy = DEFAULT_GLOBAL_CODE_POLICY
     flamp_enabled = bool(settings.get("varac_bbs_vault_flamp_enabled", False) if settings is not None else False)
     flamp_relay_dir = str(settings.get("varac_bbs_vault_flamp_relay_dir", "") or "").strip() if settings is not None else ""
@@ -2985,7 +3055,6 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     )
     locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
     runtime_state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
-    initial_last_request_ts = float(runtime_state.last_request_ts or 0.0)
     global_allowed = parse_callsign_list(settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else "")
     limit_access_enabled = bool(settings.get("varac_bbs_limit_access_enabled", False) if settings is not None else False)
 
@@ -3041,32 +3110,32 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     ]
     log_paths = resolve_varac_traffic_log_paths(settings)
     seen_keys = set(runtime_state.processed_event_keys)
+    log_cursor_map = {str(key): dict(value) for key, value in runtime_state.log_cursors.items()}
     log_events_for_run: List[VaultLogEvent] = []
     for log_path in log_paths:
+        cursor_key = _log_cursor_key(log_path)
+        text, next_cursor, readable = _read_log_increment(log_path, log_cursor_map.get(cursor_key, {}))
+        if readable:
+            log_cursor_map[cursor_key] = next_cursor
         for event in parse_vault_log_events(
-            _read_tail(log_path),
+            text,
             trigger_mode=trigger_mode,
             log_path=str(log_path),
             alias_map=alias_map,
             local_callsigns=configured_local_calls,
         ):
-            if (
-                initial_last_request_ts
-                and event.timestamp_utc
-                and event.timestamp_utc <= initial_last_request_ts
-                and not (event.kind == "open_alias" and bool(event.code_text))
-            ):
-                continue
             if _state_key(event) in seen_keys:
                 continue
             log_events_for_run.append(event)
 
     events: Tuple[VaultDbEvent, ...] = ()
     max_scanned_datastream_id = int(runtime_state.last_datastream_id or 0)
-    if varac_db_path is not None and not log_events_for_run:
+    if varac_db_path is not None and not log_paths:
         db_scan = _load_db_events(varac_db_path, last_datastream_id=runtime_state.last_datastream_id, alias_map=alias_map)
         events = db_scan.events
         max_scanned_datastream_id = max(max_scanned_datastream_id, int(db_scan.max_scanned_row_id or 0))
+        if events:
+            runtime_state = _update_state(runtime_state, last_error="traffic_log_unavailable")
 
     for event in events:
         scanned += 1
@@ -3621,24 +3690,10 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                 processed += 1
     runtime_state = _update_state(runtime_state, processed_event_keys=list(tuple(list(seen_keys)[-MAX_PROCESSED_EVENT_KEYS:])))
 
-    if processed == 0 and runtime_state.current_session_callsign and return_mode != "Manual operator reset only":
-        last_request_ts = float(runtime_state.last_request_ts or 0.0)
-        if last_request_ts and (now_ts - last_request_ts) >= max(60, int(idle_timeout_seconds)):
-            result = reset_to_default_location(
-                locations=locations,
-                live_bbs_dir=live_bbs_dir,
-                managed_root=managed_root,
-                default_location_id=default_location_id,
-                runtime_state=runtime_state,
-                global_allowed_callsigns=global_allowed,
-                limit_access_enabled=limit_access_enabled,
-                global_code_policy=global_code_policy,
-                flamp_enabled=flamp_enabled,
-                reason="idle_timeout",
-                now_ts=now_ts,
-            )
-            runtime_state = result.runtime_state
-            published = published or bool(result.publish_result and result.publish_result.changed)
+    # Do not reset the BBS on idle. VarAC file transfers and repeated file
+    # retrievals can take a long time; the active listing stays live until a
+    # new command changes it or the session disconnects.
+    runtime_state = _update_state(runtime_state, log_cursors=log_cursor_map)
 
     runtime_state, reconciled = _reconcile_current_location(
         settings,

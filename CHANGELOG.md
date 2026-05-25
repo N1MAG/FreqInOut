@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.5.1]
+- Fixed: Multi-rig VarAC Managed BBS now treats each active radio profile's VarAC traffic log as the authoritative command source and tracks durable per-log cursors instead of relying on `last_request_ts`.
+- Fixed: Managed BBS views remain published until a new command or session disconnect, preventing long file-transfer or multi-file retrieval sessions from being reset back to root too early.
+- Fixed: active radio profiles with duplicate live VarAC BBS directories are skipped with a clear warning so concurrent radios cannot overwrite each other's BBS listing.
+- Fixed: Public-visible code-protected BBS locations now appear in the root listing while access enforcement still happens when the remote station opens the location.
+- Fixed: FLAMP Managed BBS helper views are standalone and no longer blend with the selected managed location's files.
+- Fixed: Access-code commands are case-insensitive and accept bracketed entry such as `HUBS [MRHUB]`.
+
 ## [1.2.4]
 - Changed: FLDigi / SSB Net Control now lists scheduled nets that are currently active or coming up within the near operating window, avoiding duplicate daily repeats while still letting late-starting operators select the intended net.
 - Changed: FLDigi Net Control roster copy output now includes the station role for NCS and ANCS rows, followed by traffic when present, and repeated callsign rows are merged so corrections do not create duplicate check-ins.
