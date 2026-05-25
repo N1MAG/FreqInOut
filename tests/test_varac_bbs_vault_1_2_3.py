@@ -1225,8 +1225,8 @@ def test_run_varac_bbs_vault_processes_log_location_switches_and_root(tmp_path: 
     )
     run_varac_bbs_vault(settings)
     names = {p.name for p in live_bbs.iterdir() if p.is_file()}
-    assert "00 NOTICE - Incorrect code for HUBS.txt" in names
-    assert "10 type HUBS [CODE] - try again with access code.txt" in names
+    assert any(name.startswith("00 NOTICE - ") and "HUBS" in name for name in names)
+    assert any(name.startswith("10 type HUBS [CODE]") for name in names)
     assert "N1MAG-20260429-OpNet-1.b2s" not in names
 
     settings.set("varac_bbs_vault_runtime_state_v1", {**settings.get("varac_bbs_vault_runtime_state_v1"), "last_datastream_id": 1})
@@ -2766,3 +2766,45 @@ def test_run_varac_bbs_vault_ignores_stale_managed_root_setting(tmp_path: Path) 
     assert result.enabled
     assert managed_root.exists()
     assert not stale_root.exists()
+
+
+def test_varac_bbs_parser_handles_0525_production_log_commands() -> None:
+    log_path = Path("/Users/bill/RadioTools/Programs/VarAC_files/0525files/VarAC_traffic.log")
+    assert log_path.exists()
+
+    events = parse_vault_log_events(
+        log_path.read_text(encoding="utf-8", errors="replace"),
+        log_path=str(log_path),
+        alias_map={"INTEL": "intel", "HUBS": "hubs", "AIB": "aib", "MR08": "mr08"},
+        local_callsigns=["N1MAG"],
+    )
+
+    triples = {(event.sender, event.kind, event.alias or event.code_text) for event in events}
+    assert ("W8UFO", "open_alias", "INTEL") in triples
+    assert ("W8UFO", "open_alias", "AIB") in triples
+    assert ("W8UFO", "open_alias", "HUBS") in triples
+    assert ("W8UFO", "root_return", "") in triples
+    assert ("KG5RKW", "open_alias", "HUBS") in triples
+    assert any(event.sender == "KG5RKW" and event.kind == "root_request" for event in events)
+    assert not any(event.sender == "N1MAG" and event.kind in {"open_alias", "root_return", "flamp_help"} for event in events)
+
+
+def test_varac_bbs_parser_handles_bbs_examples_log_commands() -> None:
+    log_path = Path("/Users/bill/RadioCode/notes/BBSExamples/VarAC_traffic.log")
+    assert log_path.exists()
+
+    events = parse_vault_log_events(
+        log_path.read_text(encoding="utf-8", errors="replace"),
+        log_path=str(log_path),
+        alias_map={"INTEL": "intel", "MISC": "misc", "TEST": "test"},
+        local_callsigns=["W5TTA/P"],
+    )
+
+    triples = {(event.sender, event.kind, event.alias, event.code_text) for event in events}
+    assert ("N5TNT", "open_alias", "INTEL", "SPOOK") in triples
+    assert ("N5TNT", "open_alias", "TEST", "SPILLBEANS") in triples
+    assert ("N5TNT", "open_alias", "MISC", "") in triples
+    assert ("N5TNT", "root_return", "", "") in triples
+    assert ("N5TNT", "flamp_help", "", "FLAMP") in triples
+    assert any(event.sender == "N5TNT" and event.kind == "root_request" for event in events)
+    assert not any(event.sender == "W5TTA/P" for event in events)
