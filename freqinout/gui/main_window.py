@@ -1250,6 +1250,9 @@ class MainWindow(QMainWindow):
                         force=True,
                         ignore_wait_prompt=True,
                         ignore_suspend=True,
+                        ignore_js8_busy=True,
+                        ignore_varac_busy=True,
+                        ignore_fldigi_busy=True,
                     )
                     resumed = True
         except Exception:

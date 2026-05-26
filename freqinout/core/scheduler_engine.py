@@ -739,6 +739,8 @@ class SchedulerEngine(QObject):
         ignore_suspend: bool = False,
         ignore_wait_prompt: bool = False,
         ignore_coordination_prompt: bool = False,
+        ignore_js8_busy: bool = False,
+        ignore_varac_busy: bool = False,
         ignore_fldigi_busy: bool = False,
         apply_js8_offset: bool = True,
         apply_fldigi: bool = True,
@@ -751,6 +753,8 @@ class SchedulerEngine(QObject):
             "ignore_suspend": bool(ignore_suspend),
             "ignore_wait_prompt": bool(ignore_wait_prompt),
             "ignore_coordination_prompt": bool(ignore_coordination_prompt),
+            "ignore_js8_busy": bool(ignore_js8_busy),
+            "ignore_varac_busy": bool(ignore_varac_busy),
             "ignore_fldigi_busy": bool(ignore_fldigi_busy),
             "apply_js8_offset": bool(apply_js8_offset),
             "apply_fldigi": bool(apply_fldigi),
@@ -776,6 +780,8 @@ class SchedulerEngine(QObject):
             ignore_suspend=bool(intent.get("ignore_suspend")),
             ignore_wait_prompt=bool(intent.get("ignore_wait_prompt")),
             ignore_coordination_prompt=bool(intent.get("ignore_coordination_prompt")),
+            ignore_js8_busy=bool(intent.get("ignore_js8_busy")),
+            ignore_varac_busy=bool(intent.get("ignore_varac_busy")),
             ignore_fldigi_busy=bool(intent.get("ignore_fldigi_busy")),
             apply_js8_offset=bool(intent.get("apply_js8_offset")),
             apply_fldigi=bool(intent.get("apply_fldigi")),
@@ -1377,6 +1383,8 @@ class SchedulerEngine(QObject):
         ignore_coordination_prompt: bool = False,
         ignore_suspend: bool = False,
         ignore_net_suppression: bool = False,
+        ignore_js8_busy: bool = False,
+        ignore_varac_busy: bool = False,
         ignore_fldigi_busy: bool = False,
         apply_js8_offset: bool = True,
         apply_fldigi: bool = True,
@@ -1395,6 +1403,8 @@ class SchedulerEngine(QObject):
             ignore_coordination_prompt=ignore_coordination_prompt,
             ignore_suspend=ignore_suspend,
             ignore_net_suppression=ignore_net_suppression,
+            ignore_js8_busy=ignore_js8_busy,
+            ignore_varac_busy=ignore_varac_busy,
             ignore_fldigi_busy=ignore_fldigi_busy,
             apply_js8_offset=apply_js8_offset,
             apply_fldigi=apply_fldigi,
@@ -1507,6 +1517,8 @@ class SchedulerEngine(QObject):
             ignore_wait_prompt=True,
             ignore_suspend=True,
             ignore_net_suppression=True,
+            ignore_js8_busy=True,
+            ignore_varac_busy=True,
             ignore_fldigi_busy=True,
             apply_fldigi=not resume_skip_fldigi_apply,
         )
@@ -3724,6 +3736,8 @@ class SchedulerEngine(QObject):
         ignore_wait_prompt: bool = False,
         ignore_coordination_prompt: bool = False,
         ignore_net_suppression: bool = False,
+        ignore_js8_busy: bool = False,
+        ignore_varac_busy: bool = False,
         ignore_fldigi_busy: bool = False,
         apply_js8_offset: bool = True,
         apply_fldigi: bool = True,
@@ -3842,10 +3856,10 @@ class SchedulerEngine(QObject):
                 str(shared_ptt.get("reason", "") or "").strip() or "Shared PTT interlock is active"
             )
 
-        if source != "NET" and bool(self._last_js8_busy):
+        if source != "NET" and bool(self._last_js8_busy) and not ignore_js8_busy:
             busy_reasons.append("JS8Call is busy (RX/TX)")
 
-        if source != "NET" and not self._varac_busy_ok(status=varac_status):
+        if source != "NET" and not self._varac_busy_ok(status=varac_status) and not ignore_varac_busy:
             varac_reason = str(varac_status.get("reason") or "").strip()
             if varac_reason:
                 busy_reasons.append(f"VarAC is busy ({varac_reason})")
@@ -3983,6 +3997,8 @@ class SchedulerEngine(QObject):
                 ignore_suspend=ignore_suspend,
                 ignore_wait_prompt=ignore_wait_prompt,
                 ignore_coordination_prompt=ignore_coordination_prompt,
+                ignore_js8_busy=ignore_js8_busy,
+                ignore_varac_busy=ignore_varac_busy,
                 ignore_fldigi_busy=ignore_fldigi_busy,
                 apply_js8_offset=apply_js8_offset,
                 apply_fldigi=apply_fldigi,

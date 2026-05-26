@@ -1870,6 +1870,11 @@ class ControlFreqTab(QWidget):
                 self._update_frequency_action_styles()
             return
         self._freq_action_busy_reason_label = reason
+        if str(self._primary_freq_action_mode or "").strip().lower() == "resume":
+            self.freq_action_btn.setToolTip(
+                f"Resume Schedule (Ctrl+Shift+R). Traffic appears busy ({reason}), but resume is an operator override."
+            )
+            return
         self.freq_action_btn.setText(f"Busy: {reason}")
         self.freq_action_btn.setToolTip(
             f"Busy: {reason}. Frequency changes are blocked while traffic or PTT is active."
@@ -3259,7 +3264,14 @@ class ControlFreqTab(QWidget):
                 resume_schedule_hold(self.window(), self.settings)
                 resumed = True
             elif sched:
-                sched.apply_current_entry(force=True, ignore_wait_prompt=True, ignore_suspend=True)
+                sched.apply_current_entry(
+                    force=True,
+                    ignore_wait_prompt=True,
+                    ignore_suspend=True,
+                    ignore_js8_busy=True,
+                    ignore_varac_busy=True,
+                    ignore_fldigi_busy=True,
+                )
                 resumed = True
         except Exception:
             pass
