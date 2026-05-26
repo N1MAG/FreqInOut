@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.5.3]
+- Fixed: VarAC Managed BBS FLAMP block requests now accept clear operator-intent forms such as `BLKS 7,8 E957`, `BLOCK 7,8 E957`, `BLOCKS 7,8 E957`, and glued final-token forms such as `BLKS 8E957`, while keeping `LIST E957` / `LIST BLKS E957` as block-list inspection commands.
+- Changed: FLAMP BBS helper files now teach `LIST <queue>` for inspection and `BLKS <blocks> <queue>` for block-file generation, and incomplete commands such as `BLKS E957` publish a helper notice instead of being silently ignored or guessed.
+- Fixed: `Resume Schedule` actions from the left ledge and ControlFreq are now authoritative operator actions even when JS8Call, VarAC, or FLDigi appear RX-busy; PTT protection still prevents unsafe immediate changes while a transmitter is actively keyed.
+
 ## [1.2.5.2]
 - Fixed: VarAC Managed BBS FLAMP block-fill files now remain stable after `BLK ...` requests. A follow-up `<BLR>` refresh republishes the same block-fill file, and FIO recreates the live overlay if VarAC consumes or removes it during download handling.
 

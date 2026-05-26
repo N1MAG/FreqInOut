@@ -29,6 +29,12 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
+## What's New in v1.2.5.3
+
+- VarAC Managed BBS FLAMP block requests are more forgiving during live operation: `BLKS 7,8 E957`, `BLK 7,8 E957`, `BLOCK 7,8 E957`, and `BLOCKS 7,8 E957` all request a generated block-fill file.
+- FLAMP BBS helpers now separate the commands more clearly: use `LIST E957` to inspect a queue's blocks, and use `BLKS 7,8 E957` to generate a block file. If a station types `BLKS E957` without block numbers, FIO publishes a helper notice instead of guessing.
+- `Resume Schedule` is now treated as an operator override from both the left ledge and ControlFreq even when companion apps appear RX-busy, while active PTT protection remains in place.
+
 ## What's New in v1.2.5.2
 
 - VarAC Managed BBS FLAMP block fills are more reliable: when a station requests blocks such as `BLK 0,1 E957`, FIO keeps that block-fill file available through refreshes and recreates it if VarAC consumes the live file during download handling.

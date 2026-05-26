@@ -70,8 +70,9 @@ IGNORED_CALLSIGN_TOKENS = {
 ROOT_CMD_RE = re.compile(r"^(ROOT|LOCK|EXIT|BACK)\s*$", re.IGNORECASE)
 FLAMP_CMD_RE = re.compile(r"^FLAMP\s*$", re.IGNORECASE)
 LIST_Q_RE = re.compile(r"^LIST\s+Q\s*$", re.IGNORECASE)
-LIST_BLOCKS_RE = re.compile(r"^(?:LIST\s+BLKS|LIST\s+BLOCKS|BLKS\?)\s+([A-F0-9]{4})\s*$", re.IGNORECASE)
-BLOCK_REQUEST_RE = re.compile(r"^(?:REQ\s+)?BLK\s+([0-9,\s]+)\s+([A-F0-9]{4})\s*$", re.IGNORECASE)
+LIST_BLOCKS_RE = re.compile(r"^(?:LIST\s+(?:BLKS|BLOCKS)\s+|LIST\s+)([A-F0-9]{4})\s*$", re.IGNORECASE)
+BLOCK_REQUEST_RE = re.compile(r"^(?:REQ\s+)?(?:BLK|BLKS|BLOCK|BLOCKS)\s+([0-9][0-9,\s]*?)\s*([A-F0-9]{4})\s*$", re.IGNORECASE)
+INVALID_BLOCK_REQUEST_RE = re.compile(r"^(?:REQ\s+)?(?:BLK|BLKS|BLOCK|BLOCKS)\s+([A-F0-9]{4})\s*$", re.IGNORECASE)
 ALIAS_RE = re.compile(r"^[A-Z0-9][A-Z0-9_.:/+\-]{0,31}$")
 
 
@@ -452,6 +453,14 @@ def _entry_includes_bbs_refresh(value: object) -> bool:
     return bool(re.search(r"(?i)(?:^|\s)<BLR>(?:\s|$)", str(value or "")))
 
 
+def _parse_flamp_block_numbers(value: object) -> Tuple[int, ...]:
+    return tuple(
+        int(part.strip())
+        for part in str(value or "").split(",")
+        if part.strip().isdigit()
+    )
+
+
 def _normalize_bbs_command_text(value: object) -> str:
     text = _extract_log_message_text(str(value or ""))
     text = text.replace("Ø", "0").replace("ø", "0")
@@ -557,10 +566,16 @@ def parse_vault_log_events(
         if not kind:
             block_match = BLOCK_REQUEST_RE.match(command_text)
             if block_match:
-                nums = [int(part.strip()) for part in str(block_match.group(1) or "").split(",") if part.strip().isdigit()]
+                nums = _parse_flamp_block_numbers(block_match.group(1))
                 kind = "flamp_block_request"
                 queue_id = str(block_match.group(2) or "").upper()
-                block_numbers = tuple(nums)
+                block_numbers = nums
+                code_text = command_text
+        if not kind:
+            invalid_block_match = INVALID_BLOCK_REQUEST_RE.match(command_text)
+            if invalid_block_match:
+                kind = "flamp_invalid_block_request"
+                queue_id = str(invalid_block_match.group(1) or "").upper()
                 code_text = command_text
         if not kind and exact_mode:
             stripped = command_text
@@ -1718,7 +1733,7 @@ def _flamp_queue_files(store: FlampRelayStore) -> List[_VirtualFile]:
     command_entries: List[_VirtualFile] = []
     order = 20
     for queue_id, path in sorted(store.queue_index().items()):
-        command_entries.append(_command_helper_entry(order, f"LIST BLKS {queue_id}", f"blocks for {path.name}"))
+        command_entries.append(_command_helper_entry(order, f"LIST {queue_id}", f"blocks for {path.name}"))
         order += 1
     return [*_standard_helper_header_entries(), _command_helper_entry(10, "ROOT", "return to main menu"), *command_entries]
 
@@ -1728,8 +1743,8 @@ def _flamp_command_help_files(*, refresh_retry_command: object = "") -> List[_Vi
         *_standard_helper_header_entries(),
         _command_helper_entry(10, "ROOT", "return to main menu"),
         _command_helper_entry(20, "LIST Q", "list available Flamp files"),
-        _command_helper_entry(21, "LIST BLKS F277", "show blocks for queue F277"),
-        _command_helper_entry(22, "BLK 0,8,9 F277", "request blocks 0,8,9"),
+        _command_helper_entry(21, "LIST F277", "show blocks for queue F277"),
+        _command_helper_entry(22, "BLKS 0,8,9 F277", "request blocks 0,8,9"),
     ]
     if refresh_retry_command:
         entries.insert(0, _quick_refresh_notice_entry(refresh_retry_command))
@@ -1776,7 +1791,7 @@ def publish_flamp_queue_list_view(
     queue_helpers: List[_VirtualFile] = []
     order = 20
     for queue_id, path in sorted(queues.items()):
-        queue_helpers.append(_command_helper_entry(order, f"LIST BLKS {queue_id}", f"blocks for {path.name}"))
+        queue_helpers.append(_command_helper_entry(order, f"LIST {queue_id}", f"blocks for {path.name}"))
         order += 1
     virtual_files = [
         *_standard_helper_header_entries(),
@@ -1827,7 +1842,7 @@ def publish_flamp_block_list_view(
     virtual_files = [
         *_standard_helper_header_entries(),
         _command_helper_entry(10, "ROOT", "return to main menu"),
-        _command_helper_entry(20, f"BLK 0,8,9 {requested_queue_id}", "request example blocks"),
+        _command_helper_entry(20, f"BLKS 0,8,9 {requested_queue_id}", "request example blocks"),
         _VirtualFile(
             name=f"{DEFAULT_FLAMP_BLOCK_PREFIX}_{requested_queue_id}.txt",
             content="\n".join(lines) + "\n",
@@ -2124,7 +2139,7 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
             continue
         match = BLOCK_REQUEST_RE.match(upper)
         if match:
-            nums = [int(part.strip()) for part in str(match.group(1) or "").split(",") if part.strip().isdigit()]
+            nums = _parse_flamp_block_numbers(match.group(1))
             events.append(
                 VaultDbEvent(
                     row_id,
@@ -2136,7 +2151,24 @@ def _load_db_events(varac_db_path: Path, *, last_datastream_id: int, alias_map: 
                     entry_text,
                     "flamp_block_request",
                     queue_id=str(match.group(2) or "").upper(),
-                    block_numbers=tuple(nums),
+                    block_numbers=nums,
+                    refresh_requested=refresh_requested,
+                )
+            )
+            continue
+        match = INVALID_BLOCK_REQUEST_RE.match(upper)
+        if match:
+            events.append(
+                VaultDbEvent(
+                    row_id,
+                    timestamp_utc,
+                    qso_guid,
+                    remote_callsign,
+                    my_callsign,
+                    entry_callsign,
+                    entry_text,
+                    "flamp_invalid_block_request",
+                    queue_id=str(match.group(1) or "").upper(),
                     refresh_requested=refresh_requested,
                 )
             )
@@ -2208,6 +2240,11 @@ def _refresh_retry_command_for_event(event: object) -> str:
     if code_text:
         return code_text
     return _normalize_bbs_command_text(str(getattr(event, "entry_text", "") or getattr(event, "body", "") or ""))
+
+
+def _invalid_flamp_block_request_message(queue_id: object) -> str:
+    qid = str(queue_id or "QNUM").strip().upper() or "QNUM"
+    return f"Use LIST {qid} to show blocks, or BLKS 7,8 {qid} to request blocks"
 
 
 def _persist_runtime_state(settings, state: VaultRuntimeState, summary: str) -> None:
@@ -3419,6 +3456,32 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     published = published or bool(notice_result.changed)
                     processed += 1
             continue
+        if event.kind == "flamp_invalid_block_request" and flamp_enabled and flamp_relay_dir:
+            base_location = _location_by_id(locations, runtime_state.current_location_id) or _location_by_id(locations, default_location_id)
+            if base_location is not None:
+                notice_result = publish_flamp_notice_view(
+                    message=_invalid_flamp_block_request_message(event.queue_id),
+                    base_source_dir=base_location.source_dir,
+                    live_bbs_dir=live_bbs_dir,
+                    managed_root=managed_root,
+                    refresh_retry_command=_refresh_retry_command_for_event(event),
+                )
+                runtime_state = _update_state(
+                    runtime_state,
+                    current_session_callsign=event.remote_callsign,
+                    current_session_qso_guid=event.qso_guid,
+                    current_view_mode="flamp-notice",
+                    current_view_label=f"FLAMP {event.queue_id}",
+                    last_publish_manifest_path=notice_result.manifest_path,
+                    last_publish_ts=event.timestamp_utc or now_ts,
+                    last_action=f"FLAMP block request missing block numbers for {event.remote_callsign}.",
+                    last_request_ts=event.timestamp_utc or now_ts,
+                    last_error="flamp_invalid_block_request",
+                    unmanaged_live_files=list(notice_result.unmanaged_live_files),
+                )
+                published = published or bool(notice_result.changed)
+                processed += 1
+            continue
         if event.kind == "flamp_block_request" and flamp_enabled and flamp_relay_dir:
             store = FlampRelayStore(flamp_relay_dir)
             try:
@@ -3672,6 +3735,32 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
                     )
                     published = published or bool(notice_result.changed)
                     processed += 1
+            elif event.kind == "flamp_invalid_block_request" and flamp_enabled and flamp_relay_dir:
+                base_location = _location_by_id(locations, runtime_state.current_location_id) or _location_by_id(
+                    locations, default_location_id
+                )
+                notice_result = publish_flamp_notice_view(
+                    message=_invalid_flamp_block_request_message(event.queue_id),
+                    base_source_dir=base_location.source_dir if base_location is not None else "",
+                    live_bbs_dir=live_bbs_dir,
+                    managed_root=managed_root,
+                    refresh_retry_command=_refresh_retry_command_for_event(event),
+                )
+                runtime_state = _update_state(
+                    runtime_state,
+                    current_session_callsign=event.sender,
+                    current_session_qso_guid=runtime_state.current_session_qso_guid,
+                    current_view_mode="flamp-notice",
+                    current_view_label=f"FLAMP {event.queue_id}",
+                    last_publish_manifest_path=notice_result.manifest_path,
+                    last_publish_ts=event.timestamp_utc or now_ts,
+                    last_action=f"FLAMP block request missing block numbers for {event.sender}.",
+                    last_request_ts=event.timestamp_utc or now_ts,
+                    last_error="flamp_invalid_block_request",
+                    unmanaged_live_files=list(notice_result.unmanaged_live_files),
+                )
+                published = published or bool(notice_result.changed)
+                processed += 1
             elif event.kind == "flamp_block_request" and flamp_enabled and flamp_relay_dir:
                 store = FlampRelayStore(flamp_relay_dir)
                 try:
