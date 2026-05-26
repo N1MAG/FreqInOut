@@ -284,6 +284,43 @@ def test_varac_guard_and_vault_timestamp_parsers_accept_day_first_logs() -> None
     assert block_events[0].queue_id == "F277"
     assert block_events[0].block_numbers == (0, 8, 9)
 
+    forgiving_block_events = parse_vault_log_events(
+        "\n".join(
+            [
+                "26/05/2026 00:23:54 - N5TNT> BLKS 7,8 E957",
+                "26/05/2026 00:25:15 - N5TNT> BLKS 10,11 E957",
+                "26/05/2026 00:26:21 - N5TNT> BLOCKS 12,13 E957",
+                "26/05/2026 00:28:28 - N5TNT> BLKS 14E957",
+                "",
+            ]
+        ),
+        log_path="VarAC_traffic.log",
+        local_callsigns=["W5TTA/P", "W5TTA"],
+    )
+    assert [(event.queue_id, event.block_numbers) for event in forgiving_block_events] == [
+        ("E957", (7, 8)),
+        ("E957", (10, 11)),
+        ("E957", (12, 13)),
+        ("E957", (14,)),
+    ]
+    assert all(event.kind == "flamp_block_request" for event in forgiving_block_events)
+
+    concise_list_events = parse_vault_log_events(
+        "26/05/2026 00:23:54 - N5TNT> LIST E957\n",
+        log_path="VarAC_traffic.log",
+    )
+    assert concise_list_events
+    assert concise_list_events[0].kind == "flamp_list_blocks"
+    assert concise_list_events[0].queue_id == "E957"
+
+    invalid_blocks_events = parse_vault_log_events(
+        "26/05/2026 00:23:54 - N5TNT> BLKS E957\n",
+        log_path="VarAC_traffic.log",
+    )
+    assert invalid_blocks_events
+    assert invalid_blocks_events[0].kind == "flamp_invalid_block_request"
+    assert invalid_blocks_events[0].queue_id == "E957"
+
     exact_code_refresh_events = parse_vault_log_events(
         "06/05/2026 19:55:12 - W8UFO> HUBCODE\n<BLR>\n",
         trigger_mode="exact code only",
@@ -292,6 +329,26 @@ def test_varac_guard_and_vault_timestamp_parsers_accept_day_first_logs() -> None
     assert exact_code_refresh_events
     assert exact_code_refresh_events[0].kind == "unlock"
     assert exact_code_refresh_events[0].code_text == "HUBCODE"
+
+
+def test_varac_log_parser_reads_flamp_tta_user_log_when_available() -> None:
+    sample_log = Path("/Users/bill/RadioTools/Programs/VarAC_files/flampTTA1/VarAC_traffic.log")
+    if not sample_log.exists():
+        return
+    events = parse_vault_log_events(
+        sample_log.read_text(encoding="utf-8", errors="replace"),
+        log_path=str(sample_log),
+        local_callsigns=["W5TTA/P", "W5TTA"],
+    )
+    block_requests = [
+        (event.queue_id, event.block_numbers)
+        for event in events
+        if event.kind == "flamp_block_request" and event.sender == "N5TNT"
+    ]
+    assert ("E957", (7, 8)) in block_requests
+    assert ("E957", (10, 11)) in block_requests
+    assert ("E957", (12, 13)) in block_requests
+    assert ("E957", (13, 14)) in block_requests
 
 
 def test_initialize_and_import_live_bbs(tmp_path: Path) -> None:
@@ -1593,8 +1650,8 @@ def test_run_varac_bbs_vault_flamp_command_publishes_separate_helpers(tmp_path: 
     assert state.current_view_mode == "flamp-help"
     assert "10 type ROOT - return to main menu.txt" in names
     assert "20 type LIST Q - list available Flamp files.txt" in names
-    assert "21 type LIST BLKS F277 - show blocks for queue F277.txt" in names
-    assert "22 type BLK 0,8,9 F277 - request blocks 0,8,9.txt" in names
+    assert "21 type LIST F277 - show blocks for queue F277.txt" in names
+    assert "22 type BLKS 0,8,9 F277 - request blocks 0,8,9.txt" in names
 
 
 def test_run_varac_bbs_vault_flamp_command_accepts_varac_prefixed_db_entry(tmp_path: Path) -> None:
@@ -2417,7 +2474,7 @@ def test_flamp_queue_listing_filters_age_and_unassigned_files(tmp_path: Path) ->
     assert "2A0C_NATL-RR-260504-1430Z-AIB-sig.k2s" in queue_text
     assert "837C_NATL-RR-260427-1500Z-AIB-sig.k2s" not in queue_text
     assert "Unassigned" not in queue_text
-    assert any("LIST BLKS 2A0C" in name for name in names)
+    assert any("LIST 2A0C" in name for name in names)
     assert not any("LIST BLKS 837C" in name for name in names)
     assert not any("1A72" in name for name in names)
 
