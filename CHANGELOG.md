@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.5.6]
+- Fixed: VarAC VGuard now validates inbound file senders with session-aware traffic-log evidence before applying trust policy, including portable/mobile base-callsign matching such as `W1ABC/P` to `W1ABC`.
+- Added: VGuard trust policy can now allow VarAC BBS Allowed Callsigns, Operator History `TRUSTED` callsigns, or both, giving operators a narrow allow-list mode or a broader FIO-trusted-operator mode.
+- Changed: VGuard records clearer reasons for file decisions, including sender conflicts and unresolved senders, so support can distinguish a truly unauthorized file from an ambiguous VarAC log event.
+
 ## [1.2.5.5]
 - Fixed: JS8Call API/live-queue messages are now normalized before listener fan-out so malformed queue entries, non-dictionary params, null bytes, and oversized fields cannot reach Map or JS8 NCS listeners in unsafe shapes.
 - Fixed: JS8 inbox DB ingest now validates and bounds each new row before it enters FIO's local message cache. Unreadable rows are quarantined in `js8_bad_records` and included in the ingest checkpoint so one bad JS8 row is not retried forever.

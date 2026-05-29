@@ -1261,6 +1261,8 @@
     <li><strong>VGuard concept</strong>: VGuard is not the same feature as Managed Vault. Vault decides what you publish into the live BBS. VGuard watches inbound VarAC file transfers and can log, delete, or quarantine files from unauthorized senders before they quietly blend into operator workflows.</li>
     <li><strong>Enable VGuard File Protection</strong>: turns on inbound file protection for received VarAC files.</li>
     <li><strong>VGuard mode</strong>: choose <code>Log only</code>, <code>Delete unauthorized files</code>, or <code>Quarantine unauthorized files</code>.</li>
+    <li><strong>VGuard trust sources</strong>: choose whether files are allowed from <code>BBS Management</code> allowed callsigns, from callsigns marked <code>TRUSTED</code> in Operator History, or both. This is sender trust, not GPG/message-auth signature trust.</li>
+    <li><strong>Sender validation</strong>: VGuard uses VarAC traffic-log/session evidence before applying trust. Portable forms such as <code>W1ABC/P</code> can match the base callsign <code>W1ABC</code>. If VarAC log evidence conflicts or the sender cannot be resolved, VGuard treats that as a protection event and records the reason.</li>
     <li><strong>Quarantine Dir</strong>: destination used when quarantine mode is selected. The field defaults toward <code>Managed Root/quarantine</code>.</li>
     <li><strong>Retry</strong>: how long VGuard waits between checks when VarAC has logged a receive event but the file is not fully visible yet.</li>
   </ul>

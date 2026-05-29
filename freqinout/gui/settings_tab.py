@@ -2196,6 +2196,16 @@ class SettingsTab(QWidget):
                 if hasattr(self, "varac_guard_mode_combo")
                 else "Log only"
             ),
+            "varac_guard_allow_bbs_allowed_callsigns": bool(
+                self.varac_guard_allow_bbs_chk.isChecked()
+                if hasattr(self, "varac_guard_allow_bbs_chk")
+                else True
+            ),
+            "varac_guard_allow_operator_trusted": bool(
+                self.varac_guard_allow_trusted_chk.isChecked()
+                if hasattr(self, "varac_guard_allow_trusted_chk")
+                else True
+            ),
             "varac_guard_quarantine_dir": (
                 self.varac_guard_quarantine_dir_edit.text().strip()
                 if hasattr(self, "varac_guard_quarantine_dir_edit")
@@ -4277,6 +4287,20 @@ class SettingsTab(QWidget):
         guard_row.addStretch()
         vguard_v.addLayout(guard_row)
 
+        guard_trust_row = QHBoxLayout()
+        guard_trust_row.setContentsMargins(0, 0, 0, 0)
+        guard_trust_row.setSpacing(16)
+        self.varac_guard_allow_bbs_chk = QCheckBox("Allow BBS allowed callsigns")
+        self.varac_guard_allow_bbs_chk.setChecked(True)
+        self.varac_guard_allow_bbs_chk.setToolTip("Allow files from callsigns in BBS Management -> Allowed Callsigns.")
+        self.varac_guard_allow_trusted_chk = QCheckBox("Allow Operator History TRUSTED")
+        self.varac_guard_allow_trusted_chk.setChecked(True)
+        self.varac_guard_allow_trusted_chk.setToolTip("Allow files from callsigns marked TRUSTED in Operator History.")
+        guard_trust_row.addWidget(self.varac_guard_allow_bbs_chk)
+        guard_trust_row.addWidget(self.varac_guard_allow_trusted_chk)
+        guard_trust_row.addStretch()
+        vguard_v.addLayout(guard_trust_row)
+
         guard_dir_row = QHBoxLayout()
         guard_dir_row.setContentsMargins(0, 0, 0, 0)
         guard_dir_row.setSpacing(8)
@@ -5709,6 +5733,10 @@ class SettingsTab(QWidget):
             if guard_mode not in {"Log only", "Delete unauthorized files", "Quarantine unauthorized files"}:
                 guard_mode = "Log only"
             self.varac_guard_mode_combo.setCurrentText(guard_mode)
+        if hasattr(self, "varac_guard_allow_bbs_chk"):
+            self.varac_guard_allow_bbs_chk.setChecked(bool(data.get("varac_guard_allow_bbs_allowed_callsigns", True)))
+        if hasattr(self, "varac_guard_allow_trusted_chk"):
+            self.varac_guard_allow_trusted_chk.setChecked(bool(data.get("varac_guard_allow_operator_trusted", True)))
         if hasattr(self, "varac_guard_quarantine_dir_edit"):
             quarantine_txt = str(data.get("varac_guard_quarantine_dir", "") or "").strip()
             if not quarantine_txt:
@@ -6152,6 +6180,12 @@ class SettingsTab(QWidget):
         data["varac_guard_mode"] = (
             self.varac_guard_mode_combo.currentText().strip() if hasattr(self, "varac_guard_mode_combo") else "Log only"
         )
+        data["varac_guard_allow_bbs_allowed_callsigns"] = bool(
+            self.varac_guard_allow_bbs_chk.isChecked() if hasattr(self, "varac_guard_allow_bbs_chk") else True
+        )
+        data["varac_guard_allow_operator_trusted"] = bool(
+            self.varac_guard_allow_trusted_chk.isChecked() if hasattr(self, "varac_guard_allow_trusted_chk") else True
+        )
         retry_txt = self.varac_guard_retry_combo.currentText().strip() if hasattr(self, "varac_guard_retry_combo") else "120"
         if retry_txt not in {"30", "60", "120", "300", "600"}:
             retry_txt = "120"
@@ -6478,6 +6512,8 @@ class SettingsTab(QWidget):
                 "varac_bbs_allowed_callsigns": data.get("varac_bbs_allowed_callsigns", ""),
                 "varac_guard_enabled": data.get("varac_guard_enabled", False),
                 "varac_guard_mode": data.get("varac_guard_mode", "Log only"),
+                "varac_guard_allow_bbs_allowed_callsigns": data.get("varac_guard_allow_bbs_allowed_callsigns", True),
+                "varac_guard_allow_operator_trusted": data.get("varac_guard_allow_operator_trusted", True),
                 "varac_guard_retry_seconds": data.get("varac_guard_retry_seconds", 120),
                 "varac_guard_quarantine_dir": data.get("varac_guard_quarantine_dir", ""),
                 "varac_bbs_vault_enabled": data.get("varac_bbs_vault_enabled", False),
@@ -6580,6 +6616,8 @@ class SettingsTab(QWidget):
             self.settings.set("varac_bbs_allowed_callsigns", data.get("varac_bbs_allowed_callsigns", ""))
             self.settings.set("varac_guard_enabled", data.get("varac_guard_enabled", False))
             self.settings.set("varac_guard_mode", data.get("varac_guard_mode", "Log only"))
+            self.settings.set("varac_guard_allow_bbs_allowed_callsigns", data.get("varac_guard_allow_bbs_allowed_callsigns", True))
+            self.settings.set("varac_guard_allow_operator_trusted", data.get("varac_guard_allow_operator_trusted", True))
             self.settings.set("varac_guard_retry_seconds", data.get("varac_guard_retry_seconds", 120))
             self.settings.set("varac_guard_quarantine_dir", data.get("varac_guard_quarantine_dir", ""))
             self.settings.set("varac_bbs_vault_enabled", data.get("varac_bbs_vault_enabled", False))
@@ -7110,6 +7148,8 @@ class SettingsTab(QWidget):
             self.js8_mark_retrieved_chk,
             self.varac_bbs_auto_archive_chk,
             self.varac_guard_enabled_chk,
+            self.varac_guard_allow_bbs_chk,
+            self.varac_guard_allow_trusted_chk,
             self.launch_all_with_startup_chk,
         ]
         checks.extend(self.radio_checkboxes.values())
