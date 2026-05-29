@@ -31,7 +31,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.2.5</p>
+  <p><strong>Current version</strong>: 1.2.5.4</p>
   <p>This guide is a complete reference for the current FreqInOut interface. It documents each main-menu area, tab, button, table, and nested action so both new and advanced operators can move quickly and confidently.</p>
   <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
   <p><strong>How to use this guide</strong>: if you are new, read the sections in operational order instead of treating this as a pure control catalog. Start with <a href="#settings">Settings</a>, then the schedule tabs, then the live operating tabs such as <a href="#controlfreq">ControlFreq</a>, <a href="#messages">Messages</a>, and <a href="#map">Map</a>. If you are already operating, use the guide as a workflow map: when one tab seems confusing, the answer is often explained in a related tab or settings section.</p>
@@ -482,11 +482,15 @@
   </ul>
 
   <h2 id="station-health">Station Health</h2>
-  <p><strong>Purpose</strong>: Station Health shows whether the outside station programs FIO depends on are answering normally.</p>
-  <p><strong>Why you use it</strong>: if a tab feels delayed, a status indicator says a program is unreachable, or the left menu highlights Station Health, open this tab to see what FIO is waiting on. It is meant to answer “is another station program slow or unavailable?” without turning that into a technical log.</p>
+  <p><strong>Purpose</strong>: Station Health shows what FIO knows about the programs and scheduler checks that can affect station control.</p>
+  <p><strong>Explain this to me</strong>: FIO is the operating console, but it still depends on other programs. FLRig may answer for the radio. FLDigi may provide receive-state clues. JS8Call or VarAC may be busy moving traffic. Background ingest jobs may be reading message stores. Station Health is the plain-language place where FIO says, “Here is what I checked, here is the last thing I saw, and here is whether I am waiting, backing off, or working normally.”</p>
+  <p><strong>Why you use it</strong>: if a tab feels delayed, a status indicator says a program is unreachable, a schedule change did not happen when expected, or the left menu highlights Station Health, open this tab to see what FIO is waiting on. It is meant to answer “what is FIO seeing right now?” without making the operator read a technical log first.</p>
   <ul class="section-list">
-    <li><strong>What belongs here</strong>: JS8Call API, FLRig, FLDigi, rigctld, observer endpoints, background ingest, and other companion software that FIO checks while building the operating picture.</li>
-    <li><strong>What does not belong here</strong>: normal radio traffic busy states. A program can be busy sending or receiving and still be healthy. Station Health is about whether the program responds when FIO asks for status.</li>
+    <li><strong>What belongs here</strong>: JS8Call API, FLRig, FLDigi, rigctld, observer endpoints, background ingest, scheduler status snapshots, scheduler control tasks, and other checks FIO uses while building the operating picture.</li>
+    <li><strong>What the states mean in normal language</strong>: <code>OK</code> means the last known check is current enough and FIO has no concern. <code>Stale</code> means the last OK check is old enough that FIO should not pretend it is fresh. <code>Warning</code> means FIO saw a problem or a scheduler hold that deserves attention. <code>Backoff</code> means FIO is deliberately waiting before trying again so the rest of the app stays responsive.</li>
+    <li><strong>Busy is not automatically broken</strong>: a program can be legitimately busy receiving, transmitting, or holding traffic and still be healthy. FIO separates normal traffic protection from responsiveness problems where possible.</li>
+    <li><strong>Scheduler holds are now visible</strong>: if FIO delays a schedule change because FLRig PTT is active, JS8Call/VarAC is busy, or FLDigi appears to be receiving, Station Health can show that hold as something FIO observed.</li>
+    <li><strong>FLDigi busy break-away</strong>: for HF/SOP schedule changes, FIO will hold briefly when FLDigi appears RX-busy. If that condition lasts 3 minutes, FIO forces a fresh recheck. If FLDigi still reports busy, FIO breaks away and allows the schedule change, then records the event as a possible stale/hung external app busy state. This is not proof that FLDigi hung; it is FIO preserving scheduler reliability while showing the clue that made the break-away necessary.</li>
     <li><strong>Left menu alert</strong>: when FIO already knows about a responsiveness issue, the Station Health button shows an alert count. That alert is based on known health state; it does not create extra checks just to light the button.</li>
   </ul>
   <table>
@@ -505,7 +509,7 @@
       <tr><td><code>Last Duration</code></td><td>How long the last known check took. A blank value usually means the row is a grouped summary rather than one exact check.</td></tr>
     </tbody>
   </table>
-  <p><strong>Operator note</strong>: Station Health is a current-condition view, not a long event history. It keeps the most useful recent state visible and preserves the start time for the current issue so you can tell whether a problem is new or has been present for a while.</p>
+  <p><strong>Operator note</strong>: Station Health is a current-condition view, not a long event history. It keeps the most useful recent state visible and preserves the start time for the current issue so you can tell whether a problem is new or has been present for a while. For deeper support, pair this screen with the normal FIO logs.</p>
 
   <h2 id="ncs-fldigi-ssb">NCS: FLDigi / SSB</h2>
   <p><strong>Purpose</strong>: this is the live net-control desk for an FLDigi-supported or voice-supported directed net. It helps NCS and ANCS build one clean roster, keep track of who is handling each station, copy the right lines at the right time, and feed FLDigi macros from files that FIO keeps current.</p>
@@ -546,14 +550,19 @@
   <h3 id="ncs-fldigi-roster">Net Roster and Categories</h3>
   <ul class="section-list">
     <li><strong>Operator Lookup/Add</strong>: type a callsign, name, and state, or start typing a known operator. FIO can complete known operators from the operator database. Then choose <code>Add to TFC</code>, <code>Add to QRU</code>, or <code>Add to LATE</code>. The add buttons place the station directly into the roster category you intend.</li>
-    <li><strong>TFC</strong>: use this for stations with traffic. The traffic text can hold a short note such as <code>1RR</code> or <code>1RR QST</code>. These rows are eligible for <code>Next TFC</code>.</li>
+    <li><strong>TFC</strong>: use this for stations with traffic. Traffic can be marked as <code>1PP</code> for one priority piece or <code>1RR</code> for one routine piece. FIO uses the PP/RR value when building the default roster order.</li>
     <li><strong>QRU</strong>: use this for stations that checked in with no traffic. QRU rows are still part of the net roster and can still be copied or saved.</li>
     <li><strong>LATE</strong>: use this for late check-ins or end-of-net additions. It keeps those entries visible as a separate category while still preserving them in the final roster.</li>
-    <li><strong>Roster columns</strong>: <code>Directed By</code>, <code>Acked By</code>, <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Traffic</code>, <code>TFC Status</code>, <code>Category</code>, and <code>Notes</code>. Think of this as the working net sheet, not a static export.</li>
+    <li><strong>Roster columns</strong>: <code>#</code>, <code>Directed By</code>, <code>Acked By</code>, <code>Callsign</code>, <code>Name</code>, <code>State</code>, <code>Keyword</code>, <code>Traffic</code>, <code>TFC Status</code>, <code>Category</code>, and <code>Notes</code>. Think of this as the working net sheet, not a static export.</li>
+    <li><strong>The number column</strong>: the <code>#</code> column is the check-in sequence. It records the order in which stations were added to the roster. Some NCS reports are built in check-in order, so FIO keeps that order available even when the screen is sorted another way.</li>
+    <li><strong>Keyword and traffic parsing</strong>: some nets put a keyword between state and traffic, such as <code>W1ABC / Joe / FL / Psalms 4:20 / 1PP</code>. FIO keeps the keyword separate and treats the PP/RR traffic marker as the traffic signal. During compare, the identity match is callsign, name, and state; the keyword and traffic do not decide whether two rows are the same station.</li>
     <li><strong>Directed By</strong>: this answers "who is managing this station right now?" If NCS heard and is handling the station, mark NCS. If ANCS is handling it, mark ANCS. If both are intentionally tracking or handling the station, mark both. When you click the partner chip on a row you just added, FIO switches that row to partner-only first; this makes it easy to record "my partner is directing this station" without accidentally making every correction shared.</li>
     <li><strong>Acked By</strong>: this answers "who has already acknowledged this station?" This is separate from Directed By because a station may be directed by one role but later acknowledged by the other. When a leadership row is created for NCS or ANCS, FIO marks both Directed and ACKed by default because setting those roles implies the leaders can hear and acknowledge each other.</li>
     <li><strong>Category changes</strong>: if you change a station from QRU to TFC, or from TFC to LATE, FIO rewrites the generated files from the current roster. That means the old category file does not keep a stale copy of the station.</li>
-    <li><strong>Sorting and duplicates</strong>: NCS and ANCS stay at the top. Other stations sort by callsign. If the same callsign is entered more than once, FIO merges it into one corrected row instead of cluttering the table with duplicates.</li>
+    <li><strong>Default Sort</strong>: the normal working order is NCS, ANCS, PP traffic, RR traffic, other traffic, then QRU. Inside each group, stations keep check-in order. Use <code>Default Sort</code> to return the table to that order after clicking a column header.</li>
+    <li><strong>UI sorting versus file order</strong>: you may click column headers to view the table alphabetically or by another column, but the generated roster files keep the operational order. This protects macros and copied lists from changing just because the operator briefly sorted the screen for review.</li>
+    <li><strong>Selection</strong>: click a row to select it. Use Shift-click for a range or Command/Ctrl-click for non-adjacent rows. Selected rows are highlighted strongly so you can see exactly what will be used by row-based actions such as relay copying.</li>
+    <li><strong>Duplicates</strong>: if the same callsign is entered more than once, FIO merges it into one corrected row instead of cluttering the table with duplicates.</li>
     <li><strong>Notes</strong>: notes are for local operator awareness, such as a welfare concern, relay note, or follow-up reminder. Notes are not included in copied radio text or live macro files, so private context is not transmitted by accident. End Net saves noted rows to a separate notes archive.</li>
     <li><strong>Counters</strong>: the total, TFC, QRU, and LATE counters near the add buttons give you a quick roster picture without taking your eyes far from the entry workflow.</li>
   </ul>
@@ -566,6 +575,8 @@
     <li><strong>Next TFC</strong>: this is for the traffic-handling part of the net. With NCS or ANCS selected, each click picks the next directed TFC station for that role and copies the callsign twice, for example <code>W1ABC W1ABC</code>. The repeated callsign matches common radio practice for clarity. The row changes from <code>Pending</code> to <code>Now</code>, and previously selected rows become <code>Called</code>. When no more traffic stations are available, FIO clears the current next-traffic file so a macro does not replay an old callsign.</li>
     <li><strong>TFC / QRU / LATE</strong>: these copy the selected category using the current <code>Action For</code> scope. For example, with ANCS selected, <code>QRU</code> copies QRU stations directed by ANCS. With All selected, it copies the whole QRU category.</li>
     <li><strong>All Check-ins</strong>: this copies every station in the selected scope. Use <code>Action For: All</code> when you want the full roster, or NCS/ANCS when you only want the stations managed by that role.</li>
+    <li><strong>Stations to Relay</strong>: this compare action is for the ANCS/NCS mismatch case. If your local roster has stations the partner list does not, FIO shows the stations that should be relayed back to the partner.</li>
+    <li><strong>Copy Relays</strong>: select one or more relay rows, then copy them for paste into TX. FIO also writes the current relay selection to the role-specific relay file so macro-based operators have the same text available.</li>
     <li><strong>Action status</strong>: after a live action, FIO shows a short message near the buttons and then clears it. Routine live-net actions do not interrupt you with an OK popup.</li>
     <li><strong>Save Check-ins</strong>: generated macro files update automatically as the roster changes. Save Check-ins is a manual checkpoint and final-log helper; it is not required before using ACK Needed, Next TFC, or the category files. FIO highlights it when roster edits have not yet been saved.</li>
   </ul>

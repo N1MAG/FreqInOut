@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.5.4]
+- Added: FLDigi Net Control roster rows now carry a stable check-in sequence number so operators can sort or report stations in the order they were added.
+- Changed: FLDigi Net Control default roster order is now operational: NCS, ANCS, PP traffic, RR traffic, other traffic, then QRU, preserving check-in order inside each group. UI column sorting remains available, but generated roster files continue to use the operational order.
+- Added: FLDigi Net Control can parse optional keyword text before PP/RR traffic, keeps callsign/name/state as the compare identity, and writes relay selections to role-specific `*_CheckIns_Relays.txt` files.
+- Added: ANCS relay compare now supports the case where the local ANCS roster has stations the NCS list missed, making those stations available as `Stations to Relay to NCS`.
+- Changed: Station Health now reports scheduler holds alongside external dependency responsiveness, marks stale OK checks as warnings, and describes FLDigi busy watchdog break-aways as possible stale/hung external app busy states.
+- Fixed: FLDigi busy schedule holds now force a fresh recheck after 3 minutes and break away if FLDigi still reports busy, preventing stale receive-state indications from blocking HF/SOP schedule changes indefinitely.
+- Fixed: Scheduler status snapshot and control-task stalls are now logged and surfaced through Station Health so support can distinguish FIO scheduler recovery from companion-app responsiveness problems.
+
 ## [1.2.5.3]
 - Fixed: VarAC Managed BBS FLAMP block requests now accept clear operator-intent forms such as `BLKS 7,8 E957`, `BLOCK 7,8 E957`, `BLOCKS 7,8 E957`, and glued final-token forms such as `BLKS 8E957`, while keeping `LIST E957` / `LIST BLKS E957` as block-list inspection commands.
 - Changed: FLAMP BBS helper files now teach `LIST <queue>` for inspection and `BLKS <blocks> <queue>` for block-file generation, and incomplete commands such as `BLKS E957` publish a helper notice instead of being silently ignored or guessed.

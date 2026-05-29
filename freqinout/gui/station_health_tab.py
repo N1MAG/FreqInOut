@@ -59,7 +59,7 @@ class StationHealthTab(QWidget):
         layout.addWidget(self.summary_label)
 
         self.note_label = QLabel(
-            "This view shows external software responsiveness only. Traffic busy states are handled separately."
+            "This view shows external software responsiveness and scheduler holds based on what FIO has observed."
         )
         self.note_label.setWordWrap(True)
         layout.addWidget(self.note_label)
