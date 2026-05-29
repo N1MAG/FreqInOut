@@ -75,6 +75,8 @@ def _dependency_label(key: str, owner: str = "") -> str:
     if service == "BACKGROUND_INGEST":
         job = _background_job_label(parts[1] if len(parts) > 1 else "")
         return f"Background ingest: {job}" if job else "Background ingest jobs"
+    if service == "SCHEDULER":
+        return _scheduler_health_label(parts[1] if len(parts) > 1 else "")
     labels = {
         "JS8CALL": "JS8Call API",
         "FLRIG": "FLRig API",
@@ -91,6 +93,21 @@ def _dependency_label(key: str, owner: str = "") -> str:
         endpoint_host = _display_host(parts[1])
         endpoint = f" ({endpoint_host}:{parts[2]})"
     return f"{label}{endpoint}"
+
+
+def _scheduler_health_label(value: object) -> str:
+    raw = str(value or "").strip().replace("-", "_")
+    labels = {
+        "fldigi_busy": "Scheduler hold: FLDigi RX activity",
+        "js8_busy": "Scheduler hold: JS8Call busy",
+        "varac_busy": "Scheduler hold: VarAC busy",
+        "flrig_ptt": "Scheduler hold: FLRig PTT",
+        "status_snapshot": "Scheduler status snapshot",
+        "control_task": "Scheduler control task",
+    }
+    if not raw:
+        return "Scheduler"
+    return labels.get(raw.lower(), f"Scheduler: {raw.replace('_', ' ').title()}")
 
 
 def _display_host(value: object) -> str:
@@ -155,12 +172,25 @@ def _item_from_snapshot(
     failures = _int_value(snapshot.get("consecutive_failures"))
     slow = _int_value(snapshot.get("consecutive_slow"))
     cooldown = _float_value(snapshot.get("cooldown_remaining_sec"))
-    backoff = cooldown > 0 or failures >= 3
-    warning = failures > 0 or slow > 0 or bool(str(snapshot.get("last_error", "") or "").strip())
+    service = str(key or "").split(":", 1)[0].strip().lower().replace("-", "_")
+    backoff = cooldown > 0 or (failures >= 3 and service != "scheduler")
+    last_checked_ts = _float_value(snapshot.get("last_checked_ts"))
+    stale_ok = bool(
+        service != "scheduler"
+        and last_checked_ts > 0
+        and failures <= 0
+        and slow <= 0
+        and (now or time.monotonic()) - last_checked_ts > 600.0
+    )
+    warning = stale_ok or failures > 0 or slow > 0 or bool(str(snapshot.get("last_error", "") or "").strip())
     if backoff:
         severity = "danger"
         state = "Backoff"
         action = "Backing off to keep FIO responsive"
+    elif stale_ok:
+        severity = "warning"
+        state = "Stale"
+        action = "Last OK check is stale; waiting for the next fresh check"
     elif warning:
         severity = "warning"
         state = "Warning"
@@ -169,6 +199,9 @@ def _item_from_snapshot(
         severity = "ok"
         state = "OK"
         action = "Normal"
+    action_override = str(metadata.get("action", "") or "").strip()
+    if action_override:
+        action = action_override
     scope = ""
     if scope_resolver is not None:
         try:

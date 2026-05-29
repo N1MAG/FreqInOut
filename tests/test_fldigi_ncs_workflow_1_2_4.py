@@ -39,7 +39,7 @@ def test_role_aware_copy_format_puts_role_before_traffic():
         }
     )
 
-    assert line == "N1MAG / Bill / CO / NCS 1RR QST"
+    assert line == "N1MAG / Bill / CO / NCS / 1RR QST"
 
 
 def test_role_aware_copy_omits_role_for_non_ncs_sources():
@@ -55,7 +55,7 @@ def test_role_aware_copy_omits_role_for_non_ncs_sources():
         }
     )
 
-    assert line == "W1ABC / Bob / CA 1RR"
+    assert line == "W1ABC / Bob / CA / 1RR"
 
 
 def test_duplicate_roster_rows_merge_corrections_without_repeating_callsign():
@@ -102,7 +102,7 @@ def test_needs_ack_text_is_role_specific_and_uses_directed_by():
 
     text = tab._needs_ack_text()
 
-    assert text == "W1ABC / Bob / CA 1RR\nK0XYZ / Lee / WY"
+    assert text == "W1ABC / Bob / CA / 1RR\nK0XYZ / Lee / WY"
     assert "N1MAG" not in text
     assert "K7BTH" not in text
     assert "NCS1" not in text
@@ -112,7 +112,7 @@ def test_needs_ack_text_is_role_specific_and_uses_directed_by():
 def test_roster_clipboard_text_adds_blank_line_before_and_after():
     tab = _tab()
 
-    assert tab._roster_clipboard_text("W1ABC / Bob / CA 1RR") == "\nW1ABC / Bob / CA 1RR\n"
+    assert tab._roster_clipboard_text("W1ABC / Bob / CA / 1RR") == "\nW1ABC / Bob / CA / 1RR\n"
     assert tab._roster_clipboard_text("") == ""
 
 
@@ -139,8 +139,20 @@ def test_roster_copy_text_excludes_operational_notes():
         {"callsign": "N1MAG", "name": "Bill", "state": "CO", "traffic": "", "category": "QRU", "station_role": "ANCS", "notes": "needs relief"},
     ]
 
-    assert tab._roster_table_text() == "W1ABC / Bob / CA 1RR\nN1MAG / Bill / CO / ANCS"
+    assert tab._roster_table_text() == "N1MAG / Bill / CO / ANCS\nW1ABC / Bob / CA / 1RR"
     assert "generator" not in tab._roster_table_text("TFC")
+
+
+def test_keyword_and_slash_traffic_parse_to_separate_fields():
+    _app()
+    tab = FldigiNetControlTab()
+
+    tab._roster_append_row("W1ABC", "Joe", "FL", "Psalms 4:20 / 1PP", "TFC", "Local")
+
+    row = tab._roster_table_rows()[0]
+    assert row["keyword"] == "Psalms 4:20"
+    assert row["traffic"] == "1PP"
+    assert tab._roster_table_text() == "W1ABC / Joe / FL / Psalms 4:20 / 1PP"
 
 
 def test_roster_notes_archive_text_includes_only_noted_rows():
@@ -158,18 +170,54 @@ def test_roster_notes_archive_text_includes_only_noted_rows():
     assert "N1MAG" not in text
 
 
-def test_roster_sort_keeps_control_rows_pinned_then_callsigns_alpha():
+def test_roster_sort_keeps_control_rows_pinned_then_traffic_before_qru_by_sequence():
     tab = _tab()
     rows = [
-        {"callsign": "W9ZZZ", "station_role": ""},
-        {"callsign": "ANCS1", "station_role": "ANCS"},
-        {"callsign": "A1AAA", "station_role": ""},
-        {"callsign": "NCS1", "station_role": "NCS"},
+        {"callsign": "W9ZZZ", "station_role": "", "traffic": "", "checkin_seq": "1"},
+        {"callsign": "ANCS1", "station_role": "ANCS", "checkin_seq": "2"},
+        {"callsign": "A1AAA", "station_role": "", "traffic": "1PP", "checkin_seq": "4"},
+        {"callsign": "B2BBB", "station_role": "", "traffic": "1RR", "checkin_seq": "3"},
+        {"callsign": "NCS1", "station_role": "NCS", "checkin_seq": "5"},
     ]
 
     ordered = [row["callsign"] for _rank, row in sorted(((tab._roster_role_rank(row, idx), row) for idx, row in enumerate(rows)), key=lambda item: item[0])]
 
-    assert ordered == ["NCS1", "ANCS1", "A1AAA", "W9ZZZ"]
+    assert ordered == ["NCS1", "ANCS1", "A1AAA", "B2BBB", "W9ZZZ"]
+
+
+def test_ui_column_sort_keeps_ncs_and_ancs_pinned():
+    _app()
+    tab = FldigiNetControlTab()
+    tab._roster_append_row("W9ZZZ", "Zulu", "WY", "", "QRU", "Local")
+    tab._roster_append_row("ANCS1", "Relay", "CO", "", "QRU", "ANCS - Net Control", overwrite_source=True)
+    tab._roster_append_row("A1AAA", "Alpha", "AZ", "1RR", "TFC", "Local")
+    tab._roster_append_row("NCS1", "Net", "CO", "", "QRU", "NCS - Net Control", overwrite_source=True)
+
+    tab._sort_roster_table_by_column(tab.COL_CALLSIGN)
+    ascending = [row["callsign"] for row in tab._roster_table_rows()]
+    tab._sort_roster_table_by_column(tab.COL_CALLSIGN)
+    descending = [row["callsign"] for row in tab._roster_table_rows()]
+
+    assert ascending == ["NCS1", "ANCS1", "A1AAA", "W9ZZZ"]
+    assert descending == ["NCS1", "ANCS1", "W9ZZZ", "A1AAA"]
+
+
+def test_default_sort_restores_traffic_priority_after_column_sort():
+    _app()
+    tab = FldigiNetControlTab()
+    tab._show_roster_action_status = lambda *args, **kwargs: None
+    tab._roster_append_row("W1AAA", "Alpha", "CO", "1RR", "TFC", "Local")
+    tab._roster_append_row("W2BBB", "Bravo", "CO", "", "QRU", "Local")
+    tab._roster_append_row("W3CCC", "Charlie", "CO", "", "QRU", "Local")
+    tab._roster_append_row("W4DDD", "Delta", "CO", "1PP", "TFC", "Local")
+
+    tab._sort_roster_table_by_column(tab.COL_CALLSIGN)
+    tab._sort_roster_table_by_column(tab.COL_CALLSIGN)
+    assert [row["callsign"] for row in tab._roster_table_rows()] == ["W4DDD", "W3CCC", "W2BBB", "W1AAA"]
+
+    tab._restore_default_roster_sort()
+
+    assert [row["callsign"] for row in tab._roster_table_rows()] == ["W4DDD", "W1AAA", "W2BBB", "W3CCC"]
 
 
 def test_roster_append_populates_visible_table_row_for_manual_checkin():
@@ -185,11 +233,11 @@ def test_roster_append_populates_visible_table_row_for_manual_checkin():
     assert rows[0]["callsign"] == "N1MAG"
     assert rows[0]["heard_by"] == "ANCS"
     assert rows[0]["station_role"] == ""
-    heard_buttons = {button.text(): button.isChecked() for button in tab.roster_table.cellWidget(0, 0).findChildren(QToolButton)}
-    acked_buttons = {button.text(): button.isChecked() for button in tab.roster_table.cellWidget(0, 1).findChildren(QToolButton)}
+    heard_buttons = {button.text(): button.isChecked() for button in tab.roster_table.cellWidget(0, tab.COL_HEARD).findChildren(QToolButton)}
+    acked_buttons = {button.text(): button.isChecked() for button in tab.roster_table.cellWidget(0, tab.COL_ACKED).findChildren(QToolButton)}
     assert heard_buttons == {"NCS": False, "ANCS": True}
     assert acked_buttons == {"NCS": False, "ANCS": False}
-    heard_chip = tab.roster_table.cellWidget(0, 0).findChildren(QToolButton)[0]
+    heard_chip = tab.roster_table.cellWidget(0, tab.COL_HEARD).findChildren(QToolButton)[0]
     assert "QToolButton:checked" in heard_chip.styleSheet()
     assert heard_chip.autoRaise() is False
     assert not hasattr(tab, "mark_heard_btn")
@@ -246,10 +294,43 @@ def test_action_scope_filters_roster_rows_by_role_and_shared():
     tab._roster_append_row("K7BTH", "Beth", "AZ", "1RR", "TFC", "Local")
     tab._roster_set_side(tab._roster_find_row("K7BTH"), tab.COL_HEARD, "Both")
 
-    assert [row["callsign"] for row in tab._scope_filtered_rows("NCS", "TFC")] == ["K7BTH", "W1ABC"]
+    assert [row["callsign"] for row in tab._scope_filtered_rows("NCS", "TFC")] == ["W1ABC", "K7BTH"]
     assert [row["callsign"] for row in tab._scope_filtered_rows("ANCS", "TFC")] == ["K0XYZ", "K7BTH"]
     assert [row["callsign"] for row in tab._scope_filtered_rows("SHARED", "TFC")] == ["K7BTH"]
-    assert [row["callsign"] for row in tab._scope_filtered_rows("ALL", "TFC")] == ["K0XYZ", "K7BTH", "W1ABC"]
+    assert [row["callsign"] for row in tab._scope_filtered_rows("ALL", "TFC")] == ["W1ABC", "K0XYZ", "K7BTH"]
+
+
+def test_relay_compare_includes_qru_rows_missing_from_partner_reference():
+    _app()
+    tab = FldigiNetControlTab()
+    tab.role_combo.setCurrentText("ANCS")
+    tab._roster_append_row("W1ABC", "Bob", "CA", "1PP", "TFC", "Local")
+    tab._roster_append_row("K0XYZ", "Lee", "WY", "", "QRU", "Local")
+    tab._roster_append_row("N5REF", "Sue", "AZ", "1RR", "TFC", "Local")
+    tab.reference_card.set_text("N5REF / Sue / AZ / 1RR")
+
+    rows = tab._relay_entries_missing_from_reference("ANCS")
+
+    assert [row["callsign"] for row in rows] == ["W1ABC", "K0XYZ"]
+    assert tab._roster_table_text_for_rows(rows) == "W1ABC / Bob / CA / 1PP\nK0XYZ / Lee / WY"
+
+
+def test_inline_compare_for_ancs_shows_copyable_relays_to_ncs():
+    _app()
+    tab = FldigiNetControlTab()
+    tab.role_combo.setCurrentText("ANCS")
+    tab._workspace_bucket_defaults = {"source_bucket_id": "roster", "target_bucket_id": "reference"}
+    tab._roster_append_row("W1ABC", "Bob", "CA", "1PP", "TFC", "Local")
+    tab._roster_append_row("K0XYZ", "Lee", "WY", "", "QRU", "Local")
+    tab._roster_append_row("N5REF", "Sue", "AZ", "1RR", "TFC", "Local")
+    tab.reference_card.set_text("N5REF / Sue / AZ / 1RR")
+
+    tab._run_inline_compare()
+
+    assert "Stations to Relay to NCS" in tab.compare_results_card.title()
+    assert "W1ABC / Bob / CA / 1PP" in tab.compare_results_text.toPlainText()
+    assert "K0XYZ / Lee / WY" in tab._compare_missing_text
+    assert "N5REF" not in tab._compare_missing_text
 
 
 def test_role_first_macro_files_stay_current_from_roster(tmp_path):
@@ -264,10 +345,10 @@ def test_role_first_macro_files_stay_current_from_roster(tmp_path):
     tab._roster_set_side(tab._roster_find_row("K0XYZ"), tab.COL_HEARD, "ANCS")
     tab._roster_sync_legacy_buffers()
 
-    assert (tmp_path / "CheckIns_TFC.txt").read_text(encoding="utf-8") == "W1ABC / Bob / CA 1RR"
-    assert "W1ABC / Bob / CA 1RR" in (tmp_path / "NCS_CheckIns_TFC.txt").read_text(encoding="utf-8")
+    assert (tmp_path / "CheckIns_TFC.txt").read_text(encoding="utf-8") == "W1ABC / Bob / CA / 1RR"
+    assert "W1ABC / Bob / CA / 1RR" in (tmp_path / "NCS_CheckIns_TFC.txt").read_text(encoding="utf-8")
     assert (tmp_path / "ANCS_CheckIns_QRU.txt").read_text(encoding="utf-8") == "K0XYZ / Lee / WY"
-    assert "W1ABC / Bob / CA 1RR" in (tmp_path / "NCS_ACK_Pending.txt").read_text(encoding="utf-8")
+    assert "W1ABC / Bob / CA / 1RR" in (tmp_path / "NCS_ACK_Pending.txt").read_text(encoding="utf-8")
     assert not (tmp_path / "ACK_Pending.txt").exists()
     assert not (tmp_path / "Next_TFC.txt").exists()
 
@@ -326,8 +407,8 @@ def test_net_control_role_rows_default_heard_and_acked_to_both():
     assert rows[0]["station_role"] == "NCS"
     assert rows[0]["heard_by"] == "Both"
     assert rows[0]["acked_by"] == "Both"
-    heard_buttons = {button.text(): button.isChecked() for button in tab.roster_table.cellWidget(0, 0).findChildren(QToolButton)}
-    acked_buttons = {button.text(): button.isChecked() for button in tab.roster_table.cellWidget(0, 1).findChildren(QToolButton)}
+    heard_buttons = {button.text(): button.isChecked() for button in tab.roster_table.cellWidget(0, tab.COL_HEARD).findChildren(QToolButton)}
+    acked_buttons = {button.text(): button.isChecked() for button in tab.roster_table.cellWidget(0, tab.COL_ACKED).findChildren(QToolButton)}
     assert heard_buttons == {"NCS": True, "ANCS": True}
     assert acked_buttons == {"NCS": True, "ANCS": True}
 

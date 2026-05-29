@@ -12,6 +12,7 @@ import psutil
 from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 
 from freqinout.core.logger import log
+from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
 from freqinout.core.schedule_targeting import (
@@ -281,6 +282,8 @@ class SchedulerEngine(QObject):
         self._status_snapshot_refresh_ts: float = 0.0
         self._status_snapshot_refresh_interval_s: float = 5.0
         self._status_snapshot_future = None
+        self._status_snapshot_started_at: Optional[float] = None
+        self._status_snapshot_timeout_s: float = 15.0
         self._last_varac_status: Dict[str, object] = {"busy": False, "waiting_for_frequency": False, "reason": None}
         self._last_js8_busy: bool = False
         self._last_fldigi_status: Dict[str, object] = {"busy": False, "reason": None, "last_valid_age_s": None}
@@ -324,6 +327,8 @@ class SchedulerEngine(QObject):
         self._fldigi_busy_entry_key: Optional[Tuple] = None
         self._fldigi_busy_since_ts: Optional[float] = None
         self._fldigi_busy_last_reason: Optional[str] = None
+        self._fldigi_busy_watchdog_s: float = 180.0
+        self._health = get_dependency_health_registry()
 
         self.current_source: str = "NONE"
         self.current_schedule_entry: Dict = {}
@@ -729,6 +734,33 @@ class SchedulerEngine(QObject):
         max_backoff = 300.0
         return min(base * (2 ** max(0, self._control_fail_count - 1)), max_backoff)
 
+    @staticmethod
+    def _scheduler_health_key(name: str) -> str:
+        return f"scheduler:{str(name or '').strip().lower().replace('_', '-') or 'unknown'}"
+
+    def _record_scheduler_health_issue(self, name: str, message: str, *, cooldown_sec: float = 0.0, **metadata) -> None:
+        try:
+            action = str(metadata.pop("action", "") or "").strip() or message
+            self._health.record_failure(
+                self._scheduler_health_key(name),
+                owner="SchedulerEngine",
+                error=message,
+                cooldown_sec=cooldown_sec,
+                metadata={"scope": "Station-wide", "action": action, **{k: v for k, v in metadata.items() if v is not None}},
+            )
+        except Exception:
+            pass
+
+    def _clear_scheduler_health_issue(self, name: str, **metadata) -> None:
+        try:
+            self._health.record_success(
+                self._scheduler_health_key(name),
+                owner="SchedulerEngine",
+                metadata={"scope": "Station-wide", **{k: v for k, v in metadata.items() if v is not None}},
+            )
+        except Exception:
+            pass
+
     def _record_latest_intent(
         self,
         entry: Dict,
@@ -800,6 +832,12 @@ class SchedulerEngine(QObject):
         self._control_backoff_until = 0.0
         self._control_fail_count = 0
         log.warning("SchedulerEngine: control executor reset (%s).", reason)
+        self._record_scheduler_health_issue(
+            "control-task",
+            f"control executor reset: {reason}",
+            cooldown_sec=30.0,
+            reason=reason,
+        )
 
     def _shutdown_control_executor(self, reason: str) -> None:
         self._control_future_token += 1
@@ -844,6 +882,23 @@ class SchedulerEngine(QObject):
         if self._shutdown_requested:
             return
         now_ts = time.time()
+        future = self._status_snapshot_future
+        if future is not None and not future.done():
+            started = float(self._status_snapshot_started_at or 0.0)
+            if started and (now_ts - started) > self._status_snapshot_timeout_s:
+                age = now_ts - started
+                log.warning("SchedulerEngine: status snapshot worker timed out after %.1fs; resetting.", age)
+                self._record_scheduler_health_issue(
+                    "status-snapshot",
+                    f"status snapshot worker timed out after {age:.1f}s; reset",
+                    cooldown_sec=30.0,
+                    age_s=round(age, 1),
+                )
+                self._shutdown_status_executor("status snapshot timeout")
+                self._status_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-status")
+                self._status_snapshot_refresh_ts = 0.0
+            else:
+                return
         future = self._status_snapshot_future
         if future is not None and not future.done():
             return
@@ -911,6 +966,8 @@ class SchedulerEngine(QObject):
                     data = done.result()
                 except Exception as e:
                     log.debug("SchedulerEngine: background status snapshot failed: %s", e)
+                    self._status_snapshot_started_at = None
+                    self._record_scheduler_health_issue("status-snapshot", f"status snapshot failed: {e}", cooldown_sec=30.0)
                     return
                 varac_status = data.get("varac_status")
                 if isinstance(varac_status, dict):
@@ -925,11 +982,14 @@ class SchedulerEngine(QObject):
                     self._status_flrig_freq_ts = time.time()
                 self._status_summary_external_ts = float(data.get("checked_ts") or time.time())
                 self._status_summary_cache = None
+                self._status_snapshot_started_at = None
+                self._clear_scheduler_health_issue("status-snapshot")
 
             self._queue_scheduler_thread_call(_apply)
 
         try:
             self._status_snapshot_future = self._status_executor.submit(_task)
+            self._status_snapshot_started_at = time.time()
             self._status_snapshot_future.add_done_callback(_on_done)
         except RuntimeError:
             if not self._shutdown_requested:
@@ -1050,6 +1110,7 @@ class SchedulerEngine(QObject):
                     self._last_source = source
                     self._last_freq_hz = freq_hz
                     self._last_band = band
+                    self._clear_scheduler_health_issue("control-task", source=source, frequency_hz=freq_hz)
                 else:
                     self._control_fail_count += 1
                     backoff = self._control_backoff()
@@ -1058,6 +1119,14 @@ class SchedulerEngine(QObject):
                         "SchedulerEngine: control action failed; backing off %.1fs (failures=%d)",
                         backoff,
                         self._control_fail_count,
+                    )
+                    self._record_scheduler_health_issue(
+                        "control-task",
+                        f"control action failed; backing off {backoff:.1f}s",
+                        cooldown_sec=min(backoff, 60.0),
+                        source=source,
+                        frequency_hz=freq_hz,
+                        failures=self._control_fail_count,
                     )
                 if self._latest_intent:
                     self._force_retry_after_control = False
@@ -1338,6 +1407,23 @@ class SchedulerEngine(QObject):
             self._last_fldigi_status = {"busy": False, "reason": None, "last_valid_age_s": None}
             return dict(self._last_fldigi_status)
 
+    def _force_fldigi_status_recheck(self) -> Dict[str, object]:
+        try:
+            status = FldigiLogStatusClient(status_cache_ttl_seconds=0.0, path_cache_ttl_seconds=0.0).get_status()
+            out = {
+                "busy": bool(getattr(status, "busy", False)),
+                "reason": getattr(status, "reason", None),
+                "last_valid_age_s": getattr(status, "last_valid_age_s", None),
+            }
+            self._last_fldigi_status = dict(out)
+            self._status_summary_external_ts = time.time()
+            return out
+        except Exception as e:
+            log.warning("SchedulerEngine: forced FLDigi busy recheck failed: %s", e)
+            out = {"busy": False, "reason": None, "last_valid_age_s": None, "recheck_error": str(e)}
+            self._last_fldigi_status = dict(out)
+            return out
+
     def _should_delay_for_fldigi(
         self,
         *,
@@ -1359,20 +1445,68 @@ class SchedulerEngine(QObject):
             self._fldigi_busy_entry_key = None
             self._fldigi_busy_since_ts = None
             self._fldigi_busy_last_reason = None
+            self._clear_scheduler_health_issue("fldigi-busy")
             return False, None
         now_ts = now_ts if now_ts is not None else time.time()
         if entry_key != self._fldigi_busy_entry_key:
             self._fldigi_busy_entry_key = entry_key
             self._fldigi_busy_since_ts = now_ts
         self._fldigi_busy_last_reason = str(status.get("reason") or "") or None
-        if (source or "").upper() == "HF":
-            since = self._fldigi_busy_since_ts or now_ts
-            if now_ts - since > 600:
-                # Max 10-minute delay for HF schedule changes.
-                self._fldigi_busy_entry_key = None
-                self._fldigi_busy_since_ts = None
-                self._fldigi_busy_last_reason = None
-                return False, None
+        since = self._fldigi_busy_since_ts or now_ts
+        hold_age = max(0.0, now_ts - since)
+        reason = self._fldigi_busy_last_reason or "RX activity"
+        if (source or "").upper() in {"HF", "SOP"} and hold_age >= self._fldigi_busy_watchdog_s:
+            log.warning(
+                "SchedulerEngine: FLDigi busy watchdog forcing recheck after %.1fs hold (reason=%s).",
+                hold_age,
+                reason,
+            )
+            self._record_scheduler_health_issue(
+                "fldigi-busy",
+                f"FLDigi busy watchdog recheck after {hold_age:.0f}s; verifying possible stale busy state ({reason})",
+                cooldown_sec=0.0,
+                reason=reason,
+                hold_age_s=round(hold_age, 1),
+                source=source,
+            )
+            fresh = self._force_fldigi_status_recheck()
+            fresh_busy = bool(fresh.get("busy"))
+            fresh_reason = str(fresh.get("reason") or "") or "RX activity"
+            self._fldigi_busy_entry_key = None
+            self._fldigi_busy_since_ts = None
+            self._fldigi_busy_last_reason = None
+            if fresh_busy:
+                log.warning(
+                    "SchedulerEngine: FLDigi still appears busy after watchdog recheck; proceeding with schedule change after %.1fs hold (reason=%s).",
+                    hold_age,
+                    fresh_reason,
+                )
+                self._record_scheduler_health_issue(
+                    "fldigi-busy",
+                    (
+                        f"watchdog break-away after {hold_age:.0f}s; possible stale/hung external app "
+                        f"busy state because FLDigi still reports {fresh_reason}"
+                    ),
+                    cooldown_sec=30.0,
+                    reason=fresh_reason,
+                    hold_age_s=round(hold_age, 1),
+                    source=source,
+                )
+            else:
+                log.warning(
+                    "SchedulerEngine: FLDigi busy cleared by watchdog recheck after %.1fs hold; proceeding with schedule change.",
+                    hold_age,
+                )
+                self._clear_scheduler_health_issue("fldigi-busy", source=source)
+            return False, None
+        self._record_scheduler_health_issue(
+            "fldigi-busy",
+            f"holding schedule change for FLDigi RX activity ({reason})",
+            cooldown_sec=0.0,
+            reason=reason,
+            hold_age_s=round(hold_age, 1),
+            source=source,
+        )
         return True, self._fldigi_busy_last_reason or "RX activity"
 
     def apply_current_entry(
@@ -3848,16 +3982,37 @@ class SchedulerEngine(QObject):
         )
         # Safety: avoid changing frequency while a backend is busy transmitting.
         busy_reasons = []
+        ptt_hold_active = False
         if control_mode in {"FLRIG", "RIGCTLD"} and self._last_ptt_active:
             busy_reasons.append(f"{control_mode} PTT is active")
+            ptt_hold_active = True
+            self._record_scheduler_health_issue(
+                "flrig-ptt",
+                f"holding schedule change because {control_mode} PTT is active",
+                source=source,
+                frequency_hz=freq_hz,
+                control_mode=control_mode,
+            )
         shared_ptt = self._shared_ptt_lock_status(force=bool(force))
         if bool(shared_ptt.get("blocked")):
-            busy_reasons.append(
-                str(shared_ptt.get("reason", "") or "").strip() or "Shared PTT interlock is active"
+            shared_reason = str(shared_ptt.get("reason", "") or "").strip() or "Shared PTT interlock is active"
+            busy_reasons.append(shared_reason)
+            ptt_hold_active = True
+            self._record_scheduler_health_issue(
+                "flrig-ptt",
+                f"holding schedule change because {shared_reason}",
+                source=source,
+                frequency_hz=freq_hz,
+                control_mode=control_mode,
             )
+        if not ptt_hold_active:
+            self._clear_scheduler_health_issue("flrig-ptt")
 
         if source != "NET" and bool(self._last_js8_busy) and not ignore_js8_busy:
             busy_reasons.append("JS8Call is busy (RX/TX)")
+            self._record_scheduler_health_issue("js8-busy", "holding schedule change because JS8Call is busy (RX/TX)", source=source, frequency_hz=freq_hz)
+        else:
+            self._clear_scheduler_health_issue("js8-busy")
 
         if source != "NET" and not self._varac_busy_ok(status=varac_status) and not ignore_varac_busy:
             varac_reason = str(varac_status.get("reason") or "").strip()
@@ -3865,6 +4020,15 @@ class SchedulerEngine(QObject):
                 busy_reasons.append(f"VarAC is busy ({varac_reason})")
             else:
                 busy_reasons.append("VarAC is busy")
+            self._record_scheduler_health_issue(
+                "varac-busy",
+                f"holding schedule change because VarAC is busy{f' ({varac_reason})' if varac_reason else ''}",
+                source=source,
+                frequency_hz=freq_hz,
+                reason=varac_reason,
+            )
+        else:
+            self._clear_scheduler_health_issue("varac-busy")
 
         if fldigi_delay:
             reason = "FLDigi RX activity"

@@ -4,6 +4,7 @@ import csv
 import datetime as dt
 import os
 import sqlite3
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -93,6 +94,107 @@ def test_scheduler_status_summary_reports_next_transition_frequency(monkeypatch,
         summary = engine.get_status_summary(live=True)
         assert summary["next_frequency_label"] == "7.115"
         assert summary["next_frequency_mhz"] == pytest.approx(7.115)
+    finally:
+        engine.stop()
+        engine.deleteLater()
+
+
+def test_station_health_marks_stale_ok_checks_as_warning():
+    from freqinout.core.station_health_summary import summarize_station_health
+
+    stale_ts = time.monotonic() - (23 * 3600)
+    summary = summarize_station_health(
+        {
+            "fldigi:127.0.0.1:7362": {
+                "key": "fldigi:127.0.0.1:7362",
+                "owner": "test",
+                "consecutive_failures": 0,
+                "consecutive_slow": 0,
+                "last_success_ts": stale_ts,
+                "last_failure_ts": 0.0,
+                "issue_started_ts": 0.0,
+                "last_checked_ts": stale_ts,
+                "last_duration_ms": 3.0,
+                "cooldown_remaining_sec": 0.0,
+                "degraded": False,
+                "last_error": "",
+                "metadata": {},
+            }
+        }
+    )
+
+    item = summary["items"][0]
+    assert summary["issue_count"] == 1
+    assert item["state"] == "Stale"
+    assert item["severity"] == "warning"
+    assert "stale" in item["action"].lower()
+
+
+def test_scheduler_busy_health_rows_are_warning_not_backoff():
+    from freqinout.core.station_health_summary import summarize_station_health
+
+    now = time.monotonic()
+    summary = summarize_station_health(
+        {
+            "scheduler:fldigi-busy": {
+                "key": "scheduler:fldigi-busy",
+                "owner": "SchedulerEngine",
+                "consecutive_failures": 5,
+                "consecutive_slow": 0,
+                "last_success_ts": 0.0,
+                "last_failure_ts": now,
+                "issue_started_ts": now - 60,
+                "last_checked_ts": now,
+                "last_duration_ms": 0.0,
+                "cooldown_remaining_sec": 0.0,
+                "degraded": True,
+                "last_error": "holding schedule change for FLDigi RX activity",
+                "metadata": {"action": "holding schedule change for FLDigi RX activity"},
+            }
+        }
+    )
+
+    item = summary["items"][0]
+    assert item["dependency"] == "Scheduler hold: FLDigi RX activity"
+    assert item["state"] == "Warning"
+    assert item["severity"] == "warning"
+    assert item["action"] == "holding schedule change for FLDigi RX activity"
+
+
+def test_fldigi_busy_watchdog_rechecks_and_overrides_after_three_minutes(monkeypatch, tmp_path):
+    app = _app()
+    assert app is not None
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(tmp_path / "profile"))
+
+    from freqinout.core.scheduler_engine import SchedulerEngine
+
+    engine = SchedulerEngine()
+    try:
+        engine._last_fldigi_status = {"busy": True, "reason": "text", "last_valid_age_s": 1.0}
+        engine._fldigi_busy_watchdog_s = 180.0
+        engine._fldigi_busy_entry_key = ("40M", 7_100_000)
+        engine._fldigi_busy_since_ts = 1000.0
+        monkeypatch.setattr(
+            engine,
+            "_force_fldigi_status_recheck",
+            lambda: {"busy": True, "reason": "text", "last_valid_age_s": 1.0},
+        )
+
+        delay, reason = engine._should_delay_for_fldigi(
+            entry_key=("40M", 7_100_000),
+            source="HF",
+            want_freq_change=True,
+            ignore_fldigi_busy=False,
+            now_ts=1181.0,
+        )
+
+        assert delay is False
+        assert reason is None
+        assert engine._fldigi_busy_entry_key is None
+        assert engine._fldigi_busy_since_ts is None
+        health = engine._health.snapshot(engine._scheduler_health_key("fldigi-busy"))
+        assert "watchdog break-away" in health["last_error"]
+        assert "possible stale/hung external app busy state" in health["last_error"]
     finally:
         engine.stop()
         engine.deleteLater()

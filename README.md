@@ -29,6 +29,13 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
+## What's New in v1.2.5.4
+
+- FLDigi / SSB Net Control now keeps an explicit check-in order number, supports PP/RR traffic sorting, keeps NCS/ANCS pinned at the top, and adds a Default Sort button so operators can get back to the working net order quickly.
+- ANCS relay work is clearer: Compare can show stations your local roster has but the partner NCS list does not, and Copy Relays writes the selected relay set to role-specific relay files for paste or macro use.
+- Station Health now explains both external app responsiveness and scheduler holds. Stale OK checks are called out, and FLDigi busy break-away events are shown as possible stale/hung external app busy states instead of leaving FIO trapped behind a stale receive indication.
+- Multi-rig scheduler protection was hardened so FLDigi busy holds force a fresh recheck after 3 minutes, status snapshot workers can be reset if they stall, and scheduler/control-task issues are visible in Station Health without losing shared PTT protection.
+
 ## What's New in v1.2.5.3
 
 - VarAC Managed BBS FLAMP block requests are more forgiving during live operation: `BLKS 7,8 E957`, `BLK 7,8 E957`, `BLOCK 7,8 E957`, and `BLOCKS 7,8 E957` all request a generated block-fill file for the selected radio profile.
