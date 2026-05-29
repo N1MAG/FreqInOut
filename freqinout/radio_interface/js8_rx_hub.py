@@ -23,6 +23,57 @@ except Exception:  # pragma: no cover
     js8net = None
 
 
+_JS8_HUB_TEXT_LIMIT = 8192
+_JS8_HUB_FIELD_LIMIT = 256
+
+
+def _safe_js8_hub_text(value: object, *, limit: int = _JS8_HUB_TEXT_LIMIT) -> str:
+    try:
+        if value is None:
+            text = ""
+        elif isinstance(value, bytes):
+            text = value.decode("utf-8", errors="replace")
+        elif isinstance(value, bytearray):
+            text = bytes(value).decode("utf-8", errors="replace")
+        else:
+            text = str(value)
+    except Exception:
+        text = ""
+    if "\x00" in text:
+        text = text.replace("\x00", "")
+    text = "".join(ch if ch in "\t\n\r" or ord(ch) >= 32 else " " for ch in text).strip()
+    if limit > 0 and len(text) > limit:
+        return text[:limit]
+    return text
+
+
+def _safe_js8_hub_params(params: object) -> Dict[str, str]:
+    if not isinstance(params, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for key, value in list(params.items())[:64]:
+        key_txt = _safe_js8_hub_text(key, limit=_JS8_HUB_FIELD_LIMIT)
+        if not key_txt:
+            continue
+        out[key_txt] = _safe_js8_hub_text(value)
+    return out
+
+
+def _safe_js8_hub_message(msg: object) -> Optional[dict]:
+    if not isinstance(msg, dict):
+        return None
+    out = {
+        "type": _safe_js8_hub_text(msg.get("type"), limit=_JS8_HUB_FIELD_LIMIT),
+        "value": _safe_js8_hub_text(msg.get("value")),
+        "params": _safe_js8_hub_params(msg.get("params")),
+    }
+    if "time" in msg:
+        out["time"] = _safe_js8_hub_text(msg.get("time"), limit=_JS8_HUB_FIELD_LIMIT)
+    if not out["type"] and not out["params"] and not out["value"]:
+        return None
+    return out
+
+
 class JS8RxHub(QObject):
     """
     Single-consumer hub for js8net.rx_queue with listener fan-out.
@@ -138,21 +189,29 @@ class JS8RxHub(QObject):
             return
         messages: List[dict] = []
         lock = getattr(js8net, "rx_lock", None)
+        acquired = False
         try:
             if lock:
                 lock.acquire()
+                acquired = True
             while True:
                 try:
                     msg = js8net.rx_queue.get_nowait()  # type: ignore[attr-defined]
                 except queue.Empty:
                     break
-                if isinstance(msg, dict):
-                    messages.append(msg)
+                except Exception:
+                    break
+                safe_msg = _safe_js8_hub_message(msg)
+                if safe_msg is not None:
+                    messages.append(safe_msg)
                 if len(messages) >= self._max_msgs:
                     break
         finally:
-            if lock:
-                lock.release()
+            if lock and acquired:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
         if not messages:
             return
         now_ts = time.time()
@@ -165,7 +224,7 @@ class JS8RxHub(QObject):
             elif mtype == "RIG.PTT":
                 self._last_ptt_ts = now_ts
                 params = msg.get("params") or {}
-                if "PTT" in params:
+                if isinstance(params, dict) and "PTT" in params:
                     self._ptt_active = bool(params.get("PTT"))
                 else:
                     self._ptt_active = str(msg.get("value") or "").lower() == "on"

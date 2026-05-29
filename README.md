@@ -29,6 +29,11 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
+## What's New in v1.2.5.5
+
+- JS8 intake is more defensive around malformed, partial, or unusually large JS8Call API/DB records. FIO now normalizes incoming JS8 fields before they reach message display, link parsing, or net-control listeners, and quarantines unreadable DB rows instead of reprocessing them repeatedly.
+- The Messages table is hardened against corrupt local JS8 cache rows and out-of-range Qt model requests, reducing the chance that unexpected JS8 traffic or JS8Call database changes can destabilize the UI.
+
 ## What's New in v1.2.5.4
 
 - FLDigi / SSB Net Control now keeps an explicit check-in order number, supports PP/RR traffic sorting, keeps NCS/ANCS pinned at the top, and adds a Default Sort button so operators can get back to the working net order quickly.

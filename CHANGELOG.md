@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.5.5]
+- Fixed: JS8Call API/live-queue messages are now normalized before listener fan-out so malformed queue entries, non-dictionary params, null bytes, and oversized fields cannot reach Map or JS8 NCS listeners in unsafe shapes.
+- Fixed: JS8 inbox DB ingest now validates and bounds each new row before it enters FIO's local message cache. Unreadable rows are quarantined in `js8_bad_records` and included in the ingest checkpoint so one bad JS8 row is not retried forever.
+- Fixed: Messages now skips malformed local JS8 cache rows and guards table-model row access, preserving currently supported JS8 message display while reducing native Qt crash exposure from corrupt or unexpected data.
+
 ## [1.2.5.4]
 - Added: FLDigi Net Control roster rows now carry a stable check-in sequence number so operators can sort or report stations in the order they were added.
 - Changed: FLDigi Net Control default roster order is now operational: NCS, ANCS, PP traffic, RR traffic, other traffic, then QRU, preserving check-in order inside each group. UI column sorting remains available, but generated roster files continue to use the operational order.
