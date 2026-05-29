@@ -188,6 +188,10 @@ SCAN_CHOICES = [1, 15, 30, 60]  # minutes
 JS8_POLL_SECONDS = 90  # 90 seconds
 PENDING_POLL_SECONDS = 30
 JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
+JS8_SAFE_TEXT_LIMIT = 8192
+JS8_SAFE_FIELD_LIMIT = 256
+JS8_SAFE_CALL_LIMIT = 32
+JS8_BAD_PREVIEW_LIMIT = 1024
 BBS_AUTO_ARCHIVE_INTERVAL_SECONDS = 24 * 60 * 60  # once daily max
 BBS_AUTO_ARCHIVE_LAST_CHECK_KEY = "varac_bbs_auto_archive_last_check_ts"
 BBS_HELPER_FILE_PREFIXES = (
@@ -217,6 +221,50 @@ def _message_display_target(target: object, report_group: object = "") -> str:
     if not target_txt and group_txt:
         return group_txt
     return target_txt
+
+
+def _safe_js8_text(value: object, *, limit: int = JS8_SAFE_TEXT_LIMIT, upper: bool = False) -> str:
+    try:
+        if value is None:
+            text = ""
+        elif isinstance(value, bytes):
+            text = value.decode("utf-8", errors="replace")
+        elif isinstance(value, bytearray):
+            text = bytes(value).decode("utf-8", errors="replace")
+        elif isinstance(value, memoryview):
+            text = value.tobytes().decode("utf-8", errors="replace")
+        elif isinstance(value, (dict, list, tuple)):
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+        else:
+            text = str(value)
+    except Exception:
+        text = ""
+    if "\x00" in text:
+        text = text.replace("\x00", "")
+    text = "".join(ch if ch in "\t\n\r" or ord(ch) >= 32 else " " for ch in text).strip()
+    if upper:
+        text = text.upper()
+    if limit > 0 and len(text) > limit:
+        return text[:limit]
+    return text
+
+
+def _safe_js8_int(value: object, default: Optional[int] = None) -> Optional[int]:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_js8_float(value: object, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
 
 
 def _is_fio_bbs_helper_file_name(name: object) -> bool:
@@ -1644,6 +1692,10 @@ class MessageTableModel(QAbstractTableModel):
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
             return None
+        if index.row() < 0 or index.row() >= len(self._rows):
+            return None
+        if index.column() < 0 or index.column() >= len(self._headers):
+            return None
         row = self._rows[index.row()]
         col = index.column()
         if role == Qt.CheckStateRole and col == 0:
@@ -1724,6 +1776,8 @@ class MessageTableModel(QAbstractTableModel):
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
         if not index.isValid():
             return Qt.NoItemFlags
+        if index.row() < 0 or index.row() >= len(self._rows):
+            return Qt.NoItemFlags
         row = self._rows[index.row()]
         if index.column() == 0 and self._row_key(row) is not None:
             return Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsEditable
@@ -1731,6 +1785,8 @@ class MessageTableModel(QAbstractTableModel):
 
     def setData(self, index: QModelIndex, value, role: int = Qt.EditRole) -> bool:
         if not index.isValid():
+            return False
+        if index.row() < 0 or index.row() >= len(self._rows):
             return False
         if index.column() != 0 or role != Qt.CheckStateRole:
             return False
@@ -11157,6 +11213,20 @@ class MessageViewerTab(QWidget):
         cur.execute(
             "CREATE TABLE IF NOT EXISTS js8_inbox_state (id INTEGER PRIMARY KEY, state TEXT, last_seen REAL, read_ts REAL, last_ingested_id INTEGER)"
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS js8_bad_records (
+                source TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                raw_preview TEXT,
+                first_seen_ts REAL,
+                last_seen_ts REAL,
+                count INTEGER DEFAULT 1,
+                PRIMARY KEY (source, source_id, reason)
+            )
+            """
+        )
         # Add columns if missing
         try:
             cur.execute("ALTER TABLE js8_messages ADD COLUMN read_ts REAL")
@@ -11184,12 +11254,158 @@ class MessageViewerTab(QWidget):
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute("SELECT MAX(id) FROM js8_messages")
+            cur.execute(
+                """
+                SELECT MAX(max_id) FROM (
+                    SELECT MAX(id) AS max_id FROM js8_messages
+                    UNION ALL
+                    SELECT MAX(source_id) AS max_id FROM js8_bad_records
+                )
+                """
+            )
             row = cur.fetchone()
             conn.close()
             return int(row[0]) if row and row[0] is not None else 0
         except Exception:
             return 0
+
+    def _record_bad_js8_record(self, *, source: str, source_id: int, reason: str, raw: object) -> None:
+        db_path = self._local_js8_db()
+        if not db_path:
+            return
+        source_id = int(source_id or 0)
+        if source_id <= 0:
+            return
+        source_txt = _safe_js8_text(source, limit=JS8_SAFE_FIELD_LIMIT) or "unknown"
+        reason_txt = _safe_js8_text(reason, limit=JS8_SAFE_FIELD_LIMIT) or "unhandled"
+        preview = _safe_js8_text(raw, limit=JS8_BAD_PREVIEW_LIMIT)
+        now_ts = time.time()
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO js8_bad_records (source, source_id, reason, raw_preview, first_seen_ts, last_seen_ts, count)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(source, source_id, reason) DO UPDATE SET
+                    raw_preview=excluded.raw_preview,
+                    last_seen_ts=excluded.last_seen_ts,
+                    count=COALESCE(js8_bad_records.count, 0) + 1
+                """,
+                (source_txt, source_id, reason_txt, preview, now_ts, now_ts),
+            )
+            conn.commit()
+            conn.close()
+            log.debug("MessageViewer: quarantined JS8 record %s/%s: %s", source_txt, source_id, reason_txt)
+        except Exception as e:
+            log.debug("MessageViewer: failed to quarantine JS8 record: %s", e)
+
+    def _js8_message_from_cache_row(self, r: object) -> Optional[JS8Message]:
+        try:
+            msg_id = _safe_js8_int(r[0], None)  # type: ignore[index]
+            if msg_id is None or msg_id <= 0:
+                return None
+            return JS8Message(
+                msg_id=msg_id,
+                from_call=_safe_js8_text(r[1], limit=JS8_SAFE_CALL_LIMIT, upper=True),  # type: ignore[index]
+                to_call=_safe_js8_text(r[2], limit=JS8_SAFE_FIELD_LIMIT),  # type: ignore[index]
+                msg_type=_safe_js8_text(r[3], limit=JS8_SAFE_FIELD_LIMIT),  # type: ignore[index]
+                utc_str=_safe_js8_text(r[4], limit=JS8_SAFE_FIELD_LIMIT),  # type: ignore[index]
+                utc_ts=_safe_js8_float(r[5], 0.0),  # type: ignore[index]
+                raw_text=_safe_js8_text(r[6], limit=JS8_SAFE_TEXT_LIMIT),  # type: ignore[index]
+                decoded_text=_safe_js8_text(r[7], limit=JS8_SAFE_TEXT_LIMIT),  # type: ignore[index]
+                state=(_safe_js8_text(r[8], limit=JS8_SAFE_FIELD_LIMIT, upper=True) or "UNREAD"),  # type: ignore[index]
+                read_ts=_safe_js8_float(r[9], 0.0),  # type: ignore[index]
+                flag_state=int(_safe_js8_int(r[10], 0) or 0),  # type: ignore[index]
+            )
+        except Exception as e:
+            log.debug("MessageViewer: skipped malformed local JS8 cache row: %s", e)
+            return None
+
+    def _normalize_js8_inbox_row(
+        self,
+        row: object,
+        *,
+        source: str,
+        state_map: Dict[int, Tuple[str, float]],
+        now_ts: float,
+    ) -> Optional[JS8Message]:
+        try:
+            row_len = len(row)  # type: ignore[arg-type]
+        except Exception:
+            return None
+        rid = _safe_js8_int(row[0] if row_len > 0 else None, None)  # type: ignore[index]
+        if rid is None or rid <= 0:
+            return None
+        blob = row[1] if row_len > 1 else ""  # type: ignore[index]
+        state = _safe_js8_text(row[2] if row_len > 2 else "", limit=JS8_SAFE_FIELD_LIMIT)  # type: ignore[index]
+        try:
+            parsed = json.loads(blob or "{}")
+        except Exception:
+            self._record_bad_js8_record(source=source, source_id=rid, reason="invalid_json", raw=blob)
+            return None
+        if not isinstance(parsed, dict):
+            self._record_bad_js8_record(source=source, source_id=rid, reason="json_not_object", raw=blob)
+            return None
+        if "params" not in parsed and row_len >= 4:
+            parsed = {
+                "params": parsed,
+                "type": row[2] if row_len > 2 else "",  # type: ignore[index]
+                "value": row[3] if row_len > 3 else "",  # type: ignore[index]
+            }
+        params = parsed.get("params", {})
+        if not isinstance(params, dict):
+            self._record_bad_js8_record(source=source, source_id=rid, reason="params_not_object", raw=blob)
+            return None
+        if not state:
+            state = _safe_js8_text(parsed.get("type") or parsed.get("TYPE") or "", limit=JS8_SAFE_FIELD_LIMIT)
+        text = _safe_js8_text(params.get("TEXT"), limit=JS8_SAFE_TEXT_LIMIT)
+        from_call = _safe_js8_text(params.get("FROM"), limit=JS8_SAFE_CALL_LIMIT, upper=True)
+        to_call = _safe_js8_text(params.get("TO"), limit=JS8_SAFE_FIELD_LIMIT)
+        utc_str = _safe_js8_text(params.get("UTC"), limit=JS8_SAFE_FIELD_LIMIT)
+        if not any((text, from_call, to_call, utc_str)):
+            self._record_bad_js8_record(source=source, source_id=rid, reason="no_message_fields", raw=blob)
+            return None
+        try:
+            from datetime import datetime
+
+            utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
+        except Exception:
+            utc_ts = 0.0
+        if utc_ts and (now_ts - utc_ts) > JS8_MAX_AGE_SECONDS:
+            return None
+        msg_type = "MSG"
+        decoded = text
+        if text.startswith("F!"):
+            parts = text.split()
+            form_part = _safe_js8_text(parts[0][2:] if parts else "", limit=JS8_SAFE_FIELD_LIMIT)
+            resp = _safe_js8_text(parts[1] if len(parts) > 1 else "", limit=JS8_SAFE_FIELD_LIMIT)
+            comment = _safe_js8_text(" ".join(parts[2:]) if len(parts) > 2 else "", limit=JS8_SAFE_TEXT_LIMIT)
+            msg_type = f"F!{form_part}" if form_part else "MSG"
+            try:
+                decoded = self._decode_form(form_part, resp, comment, raw=text) or text
+            except Exception as e:
+                log.debug("MessageViewer: JS8 form decode failed for row %s: %s", rid, e)
+                decoded = text
+        saved_state = state_map.get(rid)
+        if saved_state:
+            eff_state = _safe_js8_text(saved_state[0], limit=JS8_SAFE_FIELD_LIMIT, upper=True) or "UNREAD"
+            read_ts = _safe_js8_float(saved_state[1], 0.0)
+        else:
+            eff_state = _safe_js8_text(state, limit=JS8_SAFE_FIELD_LIMIT, upper=True) or "UNREAD"
+            read_ts = 0.0
+        return JS8Message(
+            msg_id=rid,
+            from_call=from_call,
+            to_call=to_call,
+            msg_type=msg_type,
+            utc_str=utc_str,
+            utc_ts=utc_ts,
+            raw_text=text,
+            decoded_text=_safe_js8_text(decoded, limit=JS8_SAFE_TEXT_LIMIT),
+            state=eff_state,
+            read_ts=read_ts,
+        )
 
     def _insert_js8_local(self, msg: JS8Message) -> None:
         db_path = self._local_js8_db()
@@ -11274,19 +11490,9 @@ class MessageViewerTab(QWidget):
             log.debug("MessageViewer: failed to load local js8 messages: %s", e)
             rows = []
         for r in rows:
-            msg = JS8Message(
-                msg_id=int(r[0]),
-                from_call=(r[1] or ""),
-                to_call=(r[2] or ""),
-                msg_type=(r[3] or ""),
-                utc_str=(r[4] or ""),
-                utc_ts=float(r[5] or 0.0),
-                raw_text=(r[6] or ""),
-                decoded_text=(r[7] or ""),
-                state=(r[8] or "UNREAD").upper(),
-                read_ts=float(r[9] or 0.0),
-                flag_state=int(r[10] or 0),
-            )
+            msg = self._js8_message_from_cache_row(r)
+            if msg is None:
+                continue
             # If older than retention and read, skip
             now_ts = time.time()
             if msg.state == "READ" and msg.read_ts and (now_ts - msg.read_ts) > (24 * 60 * 60):
@@ -11368,10 +11574,12 @@ class MessageViewerTab(QWidget):
                 ("inbox", "id, message, type, value"),
             ]
             rows = []
+            source_table = ""
             for table, cols in queries:
                 try:
                     cur.execute(f"SELECT {cols} FROM {table} WHERE id > ?", (max_local_id,))
                     rows = cur.fetchall()
+                    source_table = table
                     break
                 except Exception:
                     rows = []
@@ -11383,62 +11591,17 @@ class MessageViewerTab(QWidget):
         state_map = self._load_js8_state_map()
         now_ts = time.time()
         for row in rows:
-            rid = row[0] if len(row) > 0 else 0
-            if rid <= max_local_id:
+            rid = _safe_js8_int(row[0] if len(row) > 0 else None, None)
+            if rid is None or rid <= max_local_id:
                 continue
-            blob = row[1] if len(row) > 1 else ""
-            state = row[2] if len(row) > 2 else ""
-            js = blob
-            try:
-                parsed = json.loads(js or "{}")
-                if "params" not in parsed and len(row) >= 4:
-                    parsed = {"params": parsed, "type": row[2] if len(row) > 2 else "", "value": row[3] if len(row) > 3 else ""}
-                params = parsed.get("params", {})
-                if not state:
-                    state = parsed.get("type", "") or parsed.get("TYPE", "")
-            except Exception:
-                params = {}
-            text = (params.get("TEXT") or "").strip()
-            from_call = (params.get("FROM") or "").strip().upper()
-            to_call = (params.get("TO") or "").strip()
-            utc_str = (params.get("UTC") or "").strip()
-            try:
-                from datetime import datetime
-
-                utc_ts = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").timestamp()
-            except Exception:
-                utc_ts = 0.0
-            if utc_ts and (now_ts - utc_ts) > JS8_MAX_AGE_SECONDS:
-                continue
-            msg_type = "MSG"
-            decoded = text
-            if text.startswith("F!"):
-                parts = text.split()
-                form_part = parts[0][2:] if parts else ""
-                resp = parts[1] if len(parts) > 1 else ""
-                comment = " ".join(parts[2:]) if len(parts) > 2 else ""
-                msg_type = f"F!{form_part}" if form_part else "MSG"
-                decoded = self._decode_form(form_part, resp, comment, raw=text)
-            # Apply stored state if present
-            saved_state = state_map.get(rid)
-            if saved_state:
-                eff_state = saved_state[0]
-                read_ts = saved_state[1]
-            else:
-                eff_state = (state or "").upper() or "UNREAD"
-                read_ts = 0.0
-            msg = JS8Message(
-                msg_id=rid,
-                from_call=from_call,
-                to_call=to_call,
-                msg_type=msg_type,
-                utc_str=utc_str,
-                utc_ts=utc_ts,
-                raw_text=text,
-                decoded_text=decoded,
-                state=eff_state,
-                read_ts=read_ts,
+            msg = self._normalize_js8_inbox_row(
+                row,
+                source=source_table or "js8_inbox",
+                state_map=state_map,
+                now_ts=now_ts,
             )
+            if msg is None:
+                continue
             self._insert_js8_local(msg)
             try:
                 self._enqueue_next_msg_id(from_call, text)
