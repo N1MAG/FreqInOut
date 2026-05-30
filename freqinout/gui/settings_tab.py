@@ -2501,11 +2501,6 @@ class SettingsTab(QWidget):
         software_used_header.setContentsMargins(0, 0, 0, 0)
         software_used_header.addWidget(QLabel("Software Used"))
         software_used_header.addStretch()
-        self.software_used_help_btn = self._make_context_help_button(
-            "settings.software_used",
-            tooltip="Open help for selecting which software this station actually uses.",
-        )
-        software_used_header.addWidget(self.software_used_help_btn)
         software_used_layout.addLayout(software_used_header)
         software_used_grid = QGridLayout()
         software_used_grid.setContentsMargins(0, 0, 0, 0)
@@ -2606,32 +2601,29 @@ class SettingsTab(QWidget):
         )
         self.logging_group = QWidget()
         self.logging_group.setToolTip(log_warn_tip)
-        logging_group_layout = QVBoxLayout()
-        logging_group_layout.setContentsMargins(8, 8, 8, 8)
-        logging_group_layout.setSpacing(6)
+        logging_group_layout = QGridLayout()
+        logging_group_layout.setContentsMargins(0, 0, 0, 0)
+        logging_group_layout.setHorizontalSpacing(8)
+        logging_group_layout.setVerticalSpacing(8)
 
         self.logging_warning_label = QLabel(
-            "Verbose logging can increase disk I/O and reduce performance."
+            "Use INFO or DEBUG only while troubleshooting; verbose logs can slow the station and grow quickly."
         )
         self.logging_warning_label.setWordWrap(True)
         self.logging_warning_label.setToolTip(log_warn_tip)
-        logging_group_layout.addWidget(self.logging_warning_label)
+        logging_group_layout.addWidget(self.logging_warning_label, 0, 0, 1, 6)
 
-        level_row = QHBoxLayout()
-        level_row.addWidget(QLabel("Logging Level:"))
+        logging_group_layout.addWidget(QLabel("Logging Level:"), 1, 0)
         self.log_level_combo = QComboBox()
         self.log_level_combo.addItems(["DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"])
         self.log_level_combo.setToolTip(log_warn_tip)
         self.log_level_combo.currentTextChanged.connect(self._on_log_level_changed)
-        level_row.addWidget(self.log_level_combo)
-        level_row.addStretch()
-        logging_group_layout.addLayout(level_row)
+        logging_group_layout.addWidget(self.log_level_combo, 1, 1)
 
-        timed_row = QHBoxLayout()
         self.enable_timed_debug_btn = QPushButton("Enable DEBUG For")
         self.enable_timed_debug_btn.setToolTip(log_warn_tip)
         self.enable_timed_debug_btn.clicked.connect(self._enable_timed_debug)
-        timed_row.addWidget(self.enable_timed_debug_btn)
+        logging_group_layout.addWidget(self.enable_timed_debug_btn, 1, 2)
 
         self.debug_duration_combo = QComboBox()
         self.debug_duration_combo.addItem("15 min", 15)
@@ -2639,9 +2631,7 @@ class SettingsTab(QWidget):
         self.debug_duration_combo.addItem("60 min", 60)
         self.debug_duration_combo.setCurrentIndex(1)
         self.debug_duration_combo.setToolTip("Automatically reverts to previous logging level when timer expires.")
-        timed_row.addWidget(self.debug_duration_combo)
-        timed_row.addStretch()
-        logging_group_layout.addLayout(timed_row)
+        logging_group_layout.addWidget(self.debug_duration_combo, 1, 3)
 
         self.logging_actions_grid = QGridLayout()
         self.logging_actions_grid.setHorizontalSpacing(8)
@@ -2662,7 +2652,8 @@ class SettingsTab(QWidget):
         self.export_diag_btn.clicked.connect(self._export_diagnostics)
         self.logging_actions_grid.addWidget(self.export_diag_btn, 0, 2)
         self.logging_actions_grid.setColumnStretch(3, 1)
-        logging_group_layout.addLayout(self.logging_actions_grid)
+        logging_group_layout.addLayout(self.logging_actions_grid, 2, 0, 1, 6)
+        logging_group_layout.setColumnStretch(4, 1)
 
         self.logging_group.setLayout(logging_group_layout)
 
@@ -2742,6 +2733,7 @@ class SettingsTab(QWidget):
             op_container,
             checked=True,
             fit_content=True,
+            help_context_key="settings.freqinout",
         )
         self._register_collapsible_group(op_group, self._summary_freqinout_settings)
         self._set_section_health_key(op_group, "freqinout")
@@ -4463,17 +4455,18 @@ class SettingsTab(QWidget):
         # Launch Control
         launch_group = QGroupBox("Launch Control")
         launch_v = QVBoxLayout()
-        launch_v.setSpacing(6)
+        launch_v.setSpacing(8)
         launch_group.setLayout(launch_v)
 
-        launch_hint = QLabel("Only configured apps are shown. Launch order controls startup sequence.")
+        launch_hint = QLabel("Only configured apps are shown. Put dependent tools later in the order.")
         launch_hint.setWordWrap(True)
-        launch_v.addWidget(launch_hint)
 
         launch_global_row = QHBoxLayout()
+        launch_global_row.setContentsMargins(0, 0, 0, 0)
+        launch_global_row.setSpacing(8)
+        launch_global_row.addWidget(launch_hint, 1)
         self.launch_all_with_startup_chk = QCheckBox("Launch All with FreqInOut")
         launch_global_row.addWidget(self.launch_all_with_startup_chk)
-        launch_global_row.addStretch()
         launch_v.addLayout(launch_global_row)
 
         self.launch_control_table = QTableWidget(0, 3)
@@ -4485,24 +4478,33 @@ class SettingsTab(QWidget):
         launch_header.setSectionResizeMode(0, QHeaderView.Stretch)
         launch_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         launch_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.launch_control_table.setMinimumHeight(150)
+        self.launch_control_table.setMaximumHeight(260)
+        self.launch_control_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         launch_v.addWidget(self.launch_control_table)
 
-        launch_btn_row = QHBoxLayout()
+        launch_actions_grid = QGridLayout()
+        launch_actions_grid.setContentsMargins(0, 0, 0, 0)
+        launch_actions_grid.setHorizontalSpacing(8)
+        launch_actions_grid.setVerticalSpacing(6)
         self.launch_order_up_btn = QPushButton("Up")
         self.launch_order_down_btn = QPushButton("Down")
         self.launch_reset_order_btn = QPushButton("Reset Default Order")
         self.launch_configured_now_btn = QPushButton("Launch Configured Now")
         self.launch_stop_btn = QPushButton("Stop Launch Sequence")
         self.launch_stop_btn.setEnabled(False)
-        launch_btn_row.addWidget(self.launch_order_up_btn)
-        launch_btn_row.addWidget(self.launch_order_down_btn)
-        launch_btn_row.addWidget(self.launch_reset_order_btn)
-        launch_btn_row.addStretch()
-        launch_btn_row.addWidget(self.launch_configured_now_btn)
-        launch_btn_row.addWidget(self.launch_stop_btn)
-        launch_v.addLayout(launch_btn_row)
+        launch_actions_grid.addWidget(QLabel("Order:"), 0, 0)
+        launch_actions_grid.addWidget(self.launch_order_up_btn, 0, 1)
+        launch_actions_grid.addWidget(self.launch_order_down_btn, 0, 2)
+        launch_actions_grid.addWidget(self.launch_reset_order_btn, 0, 3)
+        launch_actions_grid.addWidget(QLabel("Run:"), 1, 0)
+        launch_actions_grid.addWidget(self.launch_configured_now_btn, 1, 1, 1, 2)
+        launch_actions_grid.addWidget(self.launch_stop_btn, 1, 3)
+        launch_actions_grid.setColumnStretch(4, 1)
+        launch_v.addLayout(launch_actions_grid)
 
         self.launch_summary_label = QLabel("Launch status: Idle")
+        self.launch_summary_label.setWordWrap(True)
         launch_v.addWidget(self.launch_summary_label)
 
         self.launch_order_up_btn.clicked.connect(lambda: self._move_launch_row(-1))
