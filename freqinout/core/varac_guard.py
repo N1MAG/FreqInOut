@@ -4,10 +4,13 @@ import datetime as dt
 import json
 import os
 import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Optional, Tuple
 
+from freqinout.core.config_paths import get_config_dir
+from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp_to_epoch
 from freqinout.core.varac_bbs_config import parse_callsign_list
@@ -16,9 +19,16 @@ from freqinout.core.varac_file_action import delete_file, quarantine_file, Varac
 
 EVENT_TS_RE = re.compile(r"^(?P<stamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\s+-\s+(?P<body>.*)$")
 CALLSIGN_RE = re.compile(r"\b([A-Z0-9/]{3,15})\b")
+CONNECTED_RE = re.compile(r"\bCONNECTED\s+(?:TO|FROM)\s+([A-Z0-9/]{3,15})\b", re.IGNORECASE)
+DISCONNECT_RE = re.compile(r"\bDISCONNECTED(?:\s+(?:FROM|BY|TO)\s+[A-Z0-9/+\-]+)?\b", re.IGNORECASE)
 FILENAME_RE = re.compile(r"(?:FILE|FILENAME|NAME|AS)\s*[:=]\s*([^\r\n]+)", re.IGNORECASE)
 QUOTED_FILE_RE = re.compile(r'"([^"]+\.(?:b2s|k2s|txt|rtf|html?|sig|asc|gpg)(?:\.[A-Za-z0-9]+)?)"', re.IGNORECASE)
 TRAILING_FILE_RE = re.compile(r"([A-Za-z0-9_.\- ]+\.(?:b2s|k2s|txt|rtf|html?|sig|asc|gpg))(?:\s|$)", re.IGNORECASE)
+FIO_HELPER_FILE_PREFIXES = (
+    "BBS MSG - ",
+    "BBS_QUEUE_LIST",
+    "BBS_BLOCK_LIST",
+)
 
 
 @dataclass(frozen=True)
@@ -28,6 +38,8 @@ class VaracTransferEvent:
     filename: str
     raw_line: str
     log_path: str
+    sender_source: str = ""
+    sender_candidates: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -55,7 +67,25 @@ class VaracGuardRunResult:
 
 
 def _normalize_call(value: object) -> str:
-    return str(value or "").strip().upper()
+    clean = str(value or "").strip().upper()
+    clean = re.sub(r"^[^A-Z0-9/]+|[^A-Z0-9/]+$", "", clean)
+    return clean
+
+
+def _base_call(value: object) -> str:
+    return _normalize_call(value).split("/", 1)[0]
+
+
+def _callsign_matches(candidate: object, expected: object) -> bool:
+    left = _normalize_call(candidate)
+    right = _normalize_call(expected)
+    if not left or not right:
+        return False
+    return left == right or _base_call(left) == _base_call(right)
+
+
+def _callsign_set_matches(candidate: object, allowed: Iterable[object]) -> bool:
+    return any(_callsign_matches(candidate, item) for item in allowed)
 
 
 def _resolve_varac_base_paths(settings) -> List[Path]:
@@ -137,7 +167,7 @@ def _split_events(text: str) -> List[str]:
     return events
 
 
-def _extract_sender(body: str) -> str:
+def _extract_sender_from_fields(body: str) -> str:
     patterns = [
         r"\bFROM\b\s*[:=]?\s*([A-Z0-9/]{3,15})",
         r"\bDE\b\s*([A-Z0-9/]{3,15})",
@@ -149,11 +179,32 @@ def _extract_sender(body: str) -> str:
         match = re.search(pattern, upper)
         if match:
             return _normalize_call(match.group(1))
+    return ""
+
+
+def _extract_sender_guess(body: str) -> str:
+    upper = str(body or "").upper()
     if "FILE SUCCESSFULLY RECEIVED" in upper:
         tokens = [tok for tok in CALLSIGN_RE.findall(upper) if tok not in {"FILE", "SUCCESSFULLY", "RECEIVED", "FROM", "SENDER", "CALLSIGN"}]
         if tokens:
             return _normalize_call(tokens[0])
     return ""
+
+
+def _validated_sender_for_file_event(body: str, active_remote: str) -> tuple[str, str, Tuple[str, ...]]:
+    session_sender = _normalize_call(active_remote)
+    line_sender = _extract_sender_from_fields(body)
+    guessed_sender = _extract_sender_guess(body)
+    candidates = tuple(dict.fromkeys(item for item in (session_sender, line_sender, guessed_sender) if item))
+    if session_sender and line_sender and not _callsign_matches(session_sender, line_sender):
+        return "", "sender_conflict", candidates
+    if session_sender:
+        return session_sender, "session", candidates
+    if line_sender:
+        return line_sender, "line", candidates
+    if guessed_sender:
+        return guessed_sender, "guess", candidates
+    return "", "sender_unresolved", candidates
 
 
 def _extract_filename(body: str) -> str:
@@ -168,6 +219,7 @@ def _extract_filename(body: str) -> str:
 
 def parse_varac_transfer_events(text: str, *, log_path: str = "") -> List[VaracTransferEvent]:
     events: List[VaracTransferEvent] = []
+    active_remote = ""
     for block in _split_events(text):
         lines = [line for line in block.splitlines() if line.strip()]
         if not lines:
@@ -177,9 +229,16 @@ def parse_varac_transfer_events(text: str, *, log_path: str = "") -> List[VaracT
             continue
         body = "\n".join([match.group("body")] + lines[1:]).strip()
         upper = body.upper()
+        connected = CONNECTED_RE.search(upper)
+        if connected:
+            active_remote = _normalize_call(connected.group(1))
+            continue
+        if DISCONNECT_RE.search(upper):
+            active_remote = ""
+            continue
         if "FILE SUCCESSFULLY RECEIVED" not in upper:
             continue
-        sender = _extract_sender(body)
+        sender, sender_source, sender_candidates = _validated_sender_for_file_event(body, active_remote)
         filename = _extract_filename(body)
         events.append(
             VaracTransferEvent(
@@ -188,6 +247,8 @@ def parse_varac_transfer_events(text: str, *, log_path: str = "") -> List[VaracT
                 filename=filename,
                 raw_line=block,
                 log_path=log_path,
+                sender_source=sender_source,
+                sender_candidates=sender_candidates,
             )
         )
     return events
@@ -291,6 +352,75 @@ def _resolve_quarantine_dir(settings, incoming_dir: Path) -> Path:
     return incoming_dir / "VGuard_Quarantine"
 
 
+def _local_operator_db_path() -> Path:
+    return get_config_dir() / "config" / "freqinout_nets.db"
+
+
+def _operator_history_trust_enabled(settings) -> bool:
+    if settings is None:
+        return True
+    try:
+        return bool(settings.get("varac_guard_allow_operator_trusted", True))
+    except Exception:
+        return True
+
+
+def _bbs_allowed_trust_enabled(settings) -> bool:
+    if settings is None:
+        return True
+    try:
+        return bool(settings.get("varac_guard_allow_bbs_allowed_callsigns", True))
+    except Exception:
+        return True
+
+
+def _trusted_operator_callsigns() -> List[str]:
+    db_path = _local_operator_db_path()
+    if not db_path.exists():
+        return []
+    conn = None
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=1.0)
+        ensure_operator_checkins_schema(conn)
+        cur = conn.execute("SELECT callsign FROM operator_checkins WHERE COALESCE(trusted, 0) != 0")
+        return [str(row[0] or "").strip() for row in cur.fetchall() if str(row[0] or "").strip()]
+    except Exception as exc:
+        log.debug("varac_guard: failed to load trusted operator callsigns: %s", exc)
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _sender_allow_reason(sender: str, settings) -> str:
+    if not sender:
+        return ""
+    if _bbs_allowed_trust_enabled(settings):
+        allowed = parse_callsign_list(settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else "")
+        if _callsign_set_matches(sender, allowed):
+            return "authorized_bbs_allowed_callsign"
+    if _operator_history_trust_enabled(settings):
+        if _callsign_set_matches(sender, _trusted_operator_callsigns()):
+            return "authorized_operator_history_trusted"
+    return ""
+
+
+def _deny_reason_for_event(event: VaracTransferEvent) -> str:
+    source = str(event.sender_source or "").strip()
+    if source in {"sender_conflict", "sender_unresolved"}:
+        return source
+    return "unauthorized_sender"
+
+
+def _is_fio_generated_helper_file(filename: object) -> bool:
+    clean = Path(str(filename or "").strip()).name
+    upper = clean.upper()
+    return any(upper.startswith(prefix.upper()) for prefix in FIO_HELPER_FILE_PREFIXES)
+
+
 def evaluate_varac_guard_event(
     event: VaracTransferEvent,
     *,
@@ -307,11 +437,11 @@ def evaluate_varac_guard_event(
             False,
         )
 
-    allowed = set(parse_callsign_list(settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else ""))
     sender = _normalize_call(event.sender)
-    if sender and sender in allowed:
+    allow_reason = _sender_allow_reason(sender, settings)
+    if allow_reason:
         return (
-            VaracGuardDecision(action="allow", reason="authorized_sender", sender=sender, filename=event.filename, log_path=event.log_path),
+            VaracGuardDecision(action="allow", reason=allow_reason, sender=sender, filename=event.filename, log_path=event.log_path),
             None,
             True,
         )
@@ -319,6 +449,13 @@ def evaluate_varac_guard_event(
     mode = str(settings.get("varac_guard_mode", "Log only") or "Log only").strip().lower() if settings is not None else "log only"
     state = state or {}
     filename = str(event.filename or "").strip()
+    deny_reason = _deny_reason_for_event(event)
+    if _is_fio_generated_helper_file(filename):
+        return (
+            VaracGuardDecision(action="skip", reason="fio_helper_file", sender=sender, filename=filename, log_path=event.log_path),
+            None,
+            True,
+        )
 
     candidates = _candidate_files(incoming_dir, filename)
     if not candidates and event.timestamp_utc > 0:
@@ -343,6 +480,12 @@ def evaluate_varac_guard_event(
         )
 
     src = candidates[0]
+    if _is_fio_generated_helper_file(src.name):
+        return (
+            VaracGuardDecision(action="skip", reason="fio_helper_file", sender=sender, filename=src.name, source_path=str(src), log_path=event.log_path),
+            None,
+            True,
+        )
     try:
         st = src.stat()
     except Exception:
@@ -361,7 +504,7 @@ def evaluate_varac_guard_event(
 
     if mode == "log only":
         return (
-            VaracGuardDecision(action="log_only", reason="unauthorized_sender", sender=sender, filename=filename, source_path=str(src), log_path=event.log_path),
+            VaracGuardDecision(action="log_only", reason=deny_reason, sender=sender, filename=filename, source_path=str(src), log_path=event.log_path),
             None,
             True,
         )
@@ -369,7 +512,7 @@ def evaluate_varac_guard_event(
     if mode == "delete unauthorized files":
         result = delete_file(src)
         return (
-            VaracGuardDecision(action="delete", reason="unauthorized_sender", sender=sender, filename=filename, source_path=str(src), log_path=event.log_path),
+            VaracGuardDecision(action="delete", reason=deny_reason, sender=sender, filename=filename, source_path=str(src), log_path=event.log_path),
             result,
             True,
         )
@@ -378,7 +521,7 @@ def evaluate_varac_guard_event(
         quarantine_dir = _resolve_quarantine_dir(settings, incoming_dir)
         result = quarantine_file(src, quarantine_dir)
         return (
-            VaracGuardDecision(action="quarantine", reason="unauthorized_sender", sender=sender, filename=filename, source_path=str(src), destination_path=result.destination, log_path=event.log_path),
+            VaracGuardDecision(action="quarantine", reason=deny_reason, sender=sender, filename=filename, source_path=str(src), destination_path=result.destination, log_path=event.log_path),
             result,
             True,
         )
@@ -417,6 +560,7 @@ def run_varac_guard(settings, *, retry_seconds: Optional[int] = None) -> VaracGu
     quarantined = 0
     pending = 0
     skipped = 0
+    recent_decisions: List[dict] = []
 
     for log_path in log_paths:
         events = parse_varac_transfer_events(_read_tail(log_path), log_path=str(log_path))
@@ -451,6 +595,18 @@ def run_varac_guard(settings, *, retry_seconds: Optional[int] = None) -> VaracGu
                 processed_keys.append(key)
                 if len(processed_keys) > 256:
                     processed_keys = processed_keys[-256:]
+            if decision.action in {"allow", "log_only", "delete", "quarantine"}:
+                recent_decisions.append(
+                    {
+                        "action": decision.action,
+                        "reason": decision.reason,
+                        "sender": decision.sender,
+                        "filename": decision.filename,
+                        "log_path": decision.log_path,
+                    }
+                )
+                if len(recent_decisions) > 20:
+                    recent_decisions = recent_decisions[-20:]
             if action_result is not None:
                 log.debug("varac_guard: %s", action_result)
 
@@ -466,6 +622,7 @@ def run_varac_guard(settings, *, retry_seconds: Optional[int] = None) -> VaracGu
         "pending_events": pending,
         "skipped_events": skipped,
     }
+    state["last_decisions"] = recent_decisions
     _save_guard_state(settings, state)
 
     summary = (

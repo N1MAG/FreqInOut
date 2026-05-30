@@ -29,6 +29,12 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
+## What's New in v1.2.5.6
+
+- VarAC VGuard now validates inbound file senders from VarAC traffic-log/session evidence before applying trust policy, including portable/mobile base-callsign matching.
+- VGuard can now allow either VarAC BBS Allowed Callsigns, Operator History `TRUSTED` callsigns, or both, so operators can choose a narrow or wider file-intake policy.
+- VGuard decision state now records clearer reasons for allowed, unauthorized, unresolved, or conflicting sender evidence.
+
 ## What's New in v1.2.5.5
 
 - JS8 intake is more defensive around malformed, partial, or unusually large JS8Call API/DB records. FIO now normalizes incoming JS8 fields before they reach message display, link parsing, or net-control listeners, and quarantines unreadable DB rows instead of reprocessing them repeatedly.

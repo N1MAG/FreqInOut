@@ -4201,6 +4201,20 @@ class SettingsTab(QWidget):
         guard_row.addStretch()
         vault_guard_v.addLayout(guard_row)
 
+        guard_trust_row = QHBoxLayout()
+        guard_trust_row.setContentsMargins(0, 0, 0, 0)
+        guard_trust_row.setSpacing(16)
+        self.varac_guard_allow_bbs_chk = QCheckBox("Allow BBS allowed callsigns")
+        self.varac_guard_allow_bbs_chk.setChecked(True)
+        self.varac_guard_allow_bbs_chk.setToolTip("Allow files from callsigns in BBS Management -> Allowed Callsigns.")
+        self.varac_guard_allow_trusted_chk = QCheckBox("Allow Operator History TRUSTED")
+        self.varac_guard_allow_trusted_chk.setChecked(True)
+        self.varac_guard_allow_trusted_chk.setToolTip("Allow files from callsigns marked TRUSTED in Operator History.")
+        guard_trust_row.addWidget(self.varac_guard_allow_bbs_chk)
+        guard_trust_row.addWidget(self.varac_guard_allow_trusted_chk)
+        guard_trust_row.addStretch()
+        vault_guard_v.addLayout(guard_trust_row)
+
         guard_dir_row = QHBoxLayout()
         guard_dir_row.setContentsMargins(0, 0, 0, 0)
         guard_dir_row.setSpacing(8)
@@ -4240,6 +4254,8 @@ class SettingsTab(QWidget):
         vault_guard_v.addLayout(guard_status_row)
 
         self.varac_guard_enabled_chk.stateChanged.connect(self._mark_settings_dirty)
+        self.varac_guard_allow_bbs_chk.stateChanged.connect(self._mark_settings_dirty)
+        self.varac_guard_allow_trusted_chk.stateChanged.connect(self._mark_settings_dirty)
         self.varac_guard_mode_combo.currentIndexChanged.connect(self._mark_settings_dirty)
         self.varac_guard_quarantine_dir_edit.textChanged.connect(self._mark_settings_dirty)
         self.varac_guard_retry_combo.currentIndexChanged.connect(self._mark_settings_dirty)
@@ -5885,6 +5901,10 @@ class SettingsTab(QWidget):
             if guard_mode not in {"Log only", "Delete unauthorized files", "Quarantine unauthorized files"}:
                 guard_mode = "Log only"
             self.varac_guard_mode_combo.setCurrentText(guard_mode)
+        if hasattr(self, "varac_guard_allow_bbs_chk"):
+            self.varac_guard_allow_bbs_chk.setChecked(bool(data.get("varac_guard_allow_bbs_allowed_callsigns", True)))
+        if hasattr(self, "varac_guard_allow_trusted_chk"):
+            self.varac_guard_allow_trusted_chk.setChecked(bool(data.get("varac_guard_allow_operator_trusted", True)))
         if hasattr(self, "varac_guard_quarantine_dir_edit"):
             self.varac_guard_quarantine_dir_edit.setText(str(data.get("varac_guard_quarantine_dir", "") or "").strip())
         if hasattr(self, "varac_guard_retry_combo"):
@@ -6263,6 +6283,12 @@ class SettingsTab(QWidget):
         )
         data["varac_guard_mode"] = (
             self.varac_guard_mode_combo.currentText().strip() if hasattr(self, "varac_guard_mode_combo") else "Log only"
+        )
+        data["varac_guard_allow_bbs_allowed_callsigns"] = bool(
+            self.varac_guard_allow_bbs_chk.isChecked() if hasattr(self, "varac_guard_allow_bbs_chk") else True
+        )
+        data["varac_guard_allow_operator_trusted"] = bool(
+            self.varac_guard_allow_trusted_chk.isChecked() if hasattr(self, "varac_guard_allow_trusted_chk") else True
         )
         retry_txt = self.varac_guard_retry_combo.currentText().strip() if hasattr(self, "varac_guard_retry_combo") else "120"
         if retry_txt not in {"30", "60", "120", "300", "600"}:
@@ -7625,6 +7651,12 @@ class SettingsTab(QWidget):
             "varac_bbs_announce_enabled": bool(int(profile.get("varac_bbs_announce_enabled", 0) or 0) == 1),
             "varac_bbs_auto_archive_enabled": bool(int(profile.get("varac_bbs_auto_archive_enabled", 0) or 0) == 1),
             "varac_bbs_auto_archive_days": str(profile.get("varac_bbs_auto_archive_days", 14) or 14),
+            "varac_guard_allow_bbs_allowed_callsigns": bool(
+                int(profile.get("varac_guard_allow_bbs_allowed_callsigns", 1) or 1) == 1
+            ),
+            "varac_guard_allow_operator_trusted": bool(
+                int(profile.get("varac_guard_allow_operator_trusted", 1) or 1) == 1
+            ),
             "varac_bbs_vault_enabled": bool(int(profile.get("varac_bbs_vault_enabled", 0) or 0) == 1),
             "varac_bbs_vault_managed_root": str(profile.get("varac_bbs_vault_managed_root", "") or "").strip(),
             "varac_bbs_vault_default_location_id": str(
@@ -7702,6 +7734,12 @@ class SettingsTab(QWidget):
             "varac_bbs_announce_enabled": bool(self.varac_bbs_announce_chk.isChecked()),
             "varac_bbs_auto_archive_enabled": bool(self.varac_bbs_auto_archive_chk.isChecked()),
             "varac_bbs_auto_archive_days": self.varac_bbs_archive_days_combo.currentText().strip() or "14",
+            "varac_guard_allow_bbs_allowed_callsigns": bool(
+                self.varac_guard_allow_bbs_chk.isChecked() if hasattr(self, "varac_guard_allow_bbs_chk") else True
+            ),
+            "varac_guard_allow_operator_trusted": bool(
+                self.varac_guard_allow_trusted_chk.isChecked() if hasattr(self, "varac_guard_allow_trusted_chk") else True
+            ),
             "varac_bbs_vault_enabled": bool(self.varac_bbs_vault_enabled_chk_main.isChecked()),
             "varac_bbs_vault_managed_root": self._computed_varac_bbs_vault_default_root(),
             "varac_bbs_vault_default_location_id": (
@@ -7786,6 +7824,10 @@ class SettingsTab(QWidget):
             self.varac_bbs_announce_chk.setChecked(bool(state.get("varac_bbs_announce_enabled", False)))
             self.varac_bbs_auto_archive_chk.setChecked(bool(state.get("varac_bbs_auto_archive_enabled", False)))
             self.varac_bbs_archive_days_combo.setCurrentText(str(state.get("varac_bbs_auto_archive_days", "14") or "14"))
+            if hasattr(self, "varac_guard_allow_bbs_chk"):
+                self.varac_guard_allow_bbs_chk.setChecked(bool(state.get("varac_guard_allow_bbs_allowed_callsigns", True)))
+            if hasattr(self, "varac_guard_allow_trusted_chk"):
+                self.varac_guard_allow_trusted_chk.setChecked(bool(state.get("varac_guard_allow_operator_trusted", True)))
             self.varac_bbs_vault_enabled_chk_main.setChecked(bool(state.get("varac_bbs_vault_enabled", False)))
             root_txt = compute_default_managed_root(self.varac_bbs_dir_edit.text().strip())
             self._set_varac_bbs_vault_root_text(root_txt)
@@ -8105,6 +8147,8 @@ class SettingsTab(QWidget):
                 "varac_bbs_announce_enabled": bool(state.get("varac_bbs_announce_enabled", False)),
                 "varac_bbs_auto_archive_enabled": bool(state.get("varac_bbs_auto_archive_enabled", False)),
                 "varac_bbs_auto_archive_days": _num("varac_bbs_auto_archive_days", 14),
+                "varac_guard_allow_bbs_allowed_callsigns": bool(state.get("varac_guard_allow_bbs_allowed_callsigns", True)),
+                "varac_guard_allow_operator_trusted": bool(state.get("varac_guard_allow_operator_trusted", True)),
                 "varac_bbs_vault_enabled": bool(state.get("varac_bbs_vault_enabled", False)),
                 "varac_bbs_vault_managed_root": _txt("varac_bbs_vault_managed_root"),
                 "varac_bbs_vault_default_location_id": _txt("varac_bbs_vault_default_location_id", DEFAULT_LOCATION_ID)
