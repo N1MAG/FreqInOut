@@ -11096,21 +11096,35 @@ class MessageViewerTab(QWidget):
         form = self._load_form_definition(form_id)
         if not form:
             return raw or responses
+        prompt_values = {
+            key.upper(): value.strip()
+            for key, value in re.findall(r"([A-Z0-9]{2})\[(.*?)\]\s*", str(comment or ""), flags=re.IGNORECASE)
+        }
+        remaining_comment = re.sub(r"([A-Z0-9]{2})\[(.*?)\]\s*", "", str(comment or ""), flags=re.IGNORECASE)
+        remaining_comment = re.sub(r"\s*#[A-Z0-9]{3,}\s*", " ", remaining_comment, flags=re.IGNORECASE).strip()
         out_lines: List[str] = []
-        for idx, q in enumerate(form):
+        resp_idx = 0
+        for q in form:
             question = q.get("q", "").strip()
+            prompt_key = str(q.get("prompt_key", "") or "").strip().upper()
+            if prompt_key:
+                out_lines.append(question)
+                out_lines.append(prompt_values.get(prompt_key, "(no response)"))
+                out_lines.append("")
+                continue
             answers = q.get("ans", {})
             out_lines.append(question)
-            if idx < len(responses):
-                code = responses[idx]
+            if resp_idx < len(responses):
+                code = responses[resp_idx]
                 ans = answers.get(code, f"(unknown: {code})")
                 out_lines.append(ans)
             else:
                 out_lines.append("(no response)")
+            resp_idx += 1
             out_lines.append("")  # spacer
-        if comment:
+        if remaining_comment:
             out_lines.append("Comment:")
-            out_lines.append(comment.strip())
+            out_lines.append(remaining_comment)
         return "\n".join(out_lines).strip() or (raw or responses)
 
     @staticmethod
@@ -11147,6 +11161,20 @@ class MessageViewerTab(QWidget):
                     if current_q:
                         questions.append(current_q)
                     current_q = {"q": line[1:].strip(), "ans": {}}
+                elif line.startswith("[") and "]" in line:
+                    if current_q:
+                        questions.append(current_q)
+                        current_q = None
+                    prompt_key = line[1 : line.find("]")].strip().upper()
+                    prompt_text = line[line.find("]") + 1 :].strip()
+                    if prompt_key:
+                        questions.append(
+                            {
+                                "q": prompt_text or prompt_key,
+                                "prompt_key": prompt_key,
+                                "ans": {},
+                            }
+                        )
                 elif line.startswith("@") and current_q:
                     try:
                         key, text = line[1], line[2:].strip()

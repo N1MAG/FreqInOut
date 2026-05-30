@@ -114,7 +114,14 @@ def factory_mapping_for_form(form_code: object, title: object = "") -> Dict[str,
         purpose = PURPOSE_NET_CHECKIN
         net = True
         status = code == "F!104"
-    elif code in {"F!104", "F!300", "F!301", "F!304"} or "SITREP" in title_upper or "SITUATION REPORT" in title_upper:
+    elif (
+        code in {"F!104", "F!300", "F!301", "F!304", "F!701", "F!701A", "F!701B"}
+        or "SITREP" in title_upper
+        or "STATREP" in title_upper
+        or "STAT-REP" in title_upper
+        or "STATUS REPORT" in title_upper
+        or "SITUATION REPORT" in title_upper
+    ):
         purpose = PURPOSE_SITREP
         map_use = True
         status = code in {"F!104", "F!301", "F!304"}

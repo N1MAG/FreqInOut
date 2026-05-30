@@ -24,6 +24,8 @@ JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
 SPOTTER_STATUS_FORM_ID = "304"  # Kept for compatibility with older tests/callers.
 SPOTTER_STATUS_FORMS = {"104", "301", "304"}
 MCF304_EXPECTED_RESPONSES = 8
+SPOTTER_PROMPT_RE = re.compile(r"([A-Z0-9]{2})\[(.*?)\]\s*", re.IGNORECASE)
+SPOTTER_TOKEN_RE = re.compile(r"\s*#[A-Z0-9]{3,}\s*", re.IGNORECASE)
 
 
 class JS8FormDecoder:
@@ -46,21 +48,35 @@ class JS8FormDecoder:
         form = self._load_form_definition(form_id)
         if not form:
             return raw or responses
+        prompt_values = {
+            key.upper(): value.strip()
+            for key, value in SPOTTER_PROMPT_RE.findall(str(comment or ""))
+        }
+        remaining_comment = SPOTTER_PROMPT_RE.sub("", str(comment or ""))
+        remaining_comment = SPOTTER_TOKEN_RE.sub(" ", remaining_comment).strip()
         out_lines: List[str] = []
-        for idx, q in enumerate(form):
+        resp_idx = 0
+        for q in form:
             question = (q.get("q", "") or "").strip()
+            prompt_key = str(q.get("prompt_key", "") or "").strip().upper()
+            if prompt_key:
+                out_lines.append(question)
+                out_lines.append(prompt_values.get(prompt_key, "(no response)"))
+                out_lines.append("")
+                continue
             answers = q.get("ans", {}) or {}
             out_lines.append(question)
-            if idx < len(responses):
-                code = responses[idx]
+            if resp_idx < len(responses):
+                code = responses[resp_idx]
                 ans = answers.get(code, f"(unknown: {code})")
                 out_lines.append(ans)
             else:
                 out_lines.append("(no response)")
+            resp_idx += 1
             out_lines.append("")
-        if comment:
+        if remaining_comment:
             out_lines.append("Comment:")
-            out_lines.append(comment.strip())
+            out_lines.append(remaining_comment)
         return "\n".join(out_lines).strip() or (raw or responses)
 
     def _load_form_definition(self, form_id: str) -> List[Dict]:
@@ -83,6 +99,20 @@ class JS8FormDecoder:
                     if current_q:
                         questions.append(current_q)
                     current_q = {"q": line[1:].strip(), "ans": {}}
+                elif line.startswith("[") and "]" in line:
+                    if current_q:
+                        questions.append(current_q)
+                        current_q = None
+                    prompt_key = line[1 : line.find("]")].strip().upper()
+                    prompt_text = line[line.find("]") + 1 :].strip()
+                    if prompt_key:
+                        questions.append(
+                            {
+                                "q": prompt_text or prompt_key,
+                                "prompt_key": prompt_key,
+                                "ans": {},
+                            }
+                        )
                 elif line.startswith("@") and current_q:
                     try:
                         key, text = line[1], line[2:].strip()

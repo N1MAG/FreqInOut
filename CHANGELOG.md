@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.5.8]
+- Fixed: JS8Spotter form display now understands prompt fields such as `TO[...]`, `ST[...]`, `GR[...]`, and `RM[...]`, so MAGNET forms like `F!701A`, `F!701B`, and `F!701C` display those answers in the proper form positions instead of leaving them as raw comment text.
+- Changed: JS8Spotter mapper defaults now recognize MAGNET `F!701A` and `F!701B` as SitRep / StatRep forms, including titles that use `STAT-REP`.
+
 ## [1.2.5.7]
 - Added: Settings now includes a JS8Spotter Form Mapper so discovered `MCF*.txt` forms can be assigned operator-friendly purposes such as Net Check-in, SitRep / StatRep, Net Notification, Weather / Storm, Hazard / Early Warning, Intel / RFI, Medical / Hospital, and Station Capability.
 - Added: JS8Spotter mapper routing now drives Messages visibility, unread alert highlighting, and Map evidence for forms whose sender already has known station location data, using cached form-code sets instead of per-row Settings reads.
