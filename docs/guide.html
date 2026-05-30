@@ -1091,7 +1091,7 @@
       </tr>
       <tr>
         <td>JS8Call Settings</td>
-        <td>TCP host/IP (default <code>127.0.0.1</code>), TCP port, offset, mark-read option, path fields, and <code>Load JS8 Traffic</code> (manual rebuild with in-process indicator)</td>
+        <td>TCP host/IP (default <code>127.0.0.1</code>), TCP port, offset, mark-read option, path fields, JS8Spotter form mapping, and <code>Load JS8 Traffic</code> (manual rebuild with in-process indicator)</td>
       </tr>
       <tr>
         <td>Fast Light Settings</td>
@@ -1150,10 +1150,17 @@
   <ul class="section-list">
     <li><strong>Host and Port</strong>: point FreqInOut to the JS8Call TCP API.</li>
     <li><strong>DIRECTED.TXT and inbox paths</strong>: give FreqInOut the local files it needs for message and link-data workflows.</li>
-    <li><strong>JS8Spotter forms</strong>: folder containing form definitions named like <code>MCF103.txt</code> or <code>MCF702A.txt</code>. FreqInOut scans this folder to populate expected-form choices and the Spotter Form Mapper.</li>
-    <li><strong>Spotter Form Mapper</strong>: tells FreqInOut what each discovered form means. A form can be treated as Net Check-in, SitRep / StatRep, Net Notification, Weather / Storm, Hazard / Early Warning, Intel / RFI, Medical / Hospital, Station Capability, or another purpose. The checkboxes decide where FIO should use that form: Messages, Map, Alerts, Net Control, or status workflows. Messages controls whether the form appears in the Messages tab, Alert marks unread matching rows as alerts, and Map treats the form as map evidence when the sender already has known station location data. Status parsing stays conservative: FIO already knows how to turn <code>F!104</code>, <code>F!301</code>, and <code>F!304</code> into normalized status; other forms can be routed now and can receive deeper field mapping later.</li>
-    <li><strong>Auto-Classify</strong>: applies FreqInOut's built-in guesses for common form IDs. Use this as a starting point, then adjust the purpose or routing checkboxes to match how your group uses the forms.</li>
-    <li><strong>Load JS8 Traffic</strong>: manually rebuilds JS8 traffic evidence used by Map and related views.</li>
+    <li><strong>JS8Spotter forms</strong>: select the folder that contains your JS8Spotter form definition files. These files usually have names such as <code>MCF103.txt</code> or <code>MCF702A.txt</code>. FreqInOut reads the file names and titles so the mapper can show the forms your station actually has available.</li>
+    <li><strong>Refresh Forms</strong>: scans the selected forms folder again. Use this after adding, removing, or replacing JS8Spotter form files while FreqInOut is open.</li>
+    <li><strong>Auto-Classify</strong>: asks FreqInOut to make a first guess about each form. For example, common check-in forms are marked for Net Control, SitRep forms are marked for status/map use, and alert-type forms are marked for alert handling. Treat this as a starting point. Your group may use a form differently, and you can change the purpose or checkboxes before saving.</li>
+    <li><strong>Purpose</strong>: describes what the form means to your operation. This is the plain-language label FreqInOut uses to decide whether a form is a net check-in, a situation report, a weather report, a net notice, an information request, or something else. If a form should be ignored by FreqInOut, choose <code>Ignore</code>.</li>
+    <li><strong>Messages</strong>: shows matching received forms in the Messages tab. Turn this off for forms you want FreqInOut to keep out of the operator message list.</li>
+    <li><strong>Map</strong>: lets a received form count as map evidence when FreqInOut already knows where the sending station is. This does not guess a location from random form text. It only helps the map show that a known station has recent form activity.</li>
+    <li><strong>Alert</strong>: makes unread matching forms stand out as alerts in Messages. After the message is marked read, it behaves like a normal read message.</li>
+    <li><strong>Net</strong>: lets Net Control workflows use that form. This is how a group-specific check-in form can feed JS8 NCS without FreqInOut hard-coding every possible form number.</li>
+    <li><strong>Status</strong>: lets a form feed the shared status view when FreqInOut knows how to read that form's status fields. Today this is intentionally conservative: <code>F!104</code>, <code>F!301</code>, and <code>F!304</code> can become normalized status. Other forms can still be routed to Messages, Map, Alerts, or Net Control, but deeper status field reading requires explicit support.</li>
+    <li><strong>Default behavior</strong>: if you have not saved a custom mapper, FreqInOut keeps the legacy behavior for the standard known forms. Once you save mapper rows, the checkboxes become the source of truth for how those forms flow through FIO.</li>
+    <li><strong>Load JS8 Traffic</strong>: manually rebuilds JS8 traffic evidence used by Messages, Map, and related views. Use it when you changed paths, imported data, or want FreqInOut to reread current JS8 traffic without waiting for the next normal refresh.</li>
   </ul>
 
   <h3 id="settings-fast-light-details">Fast Light Settings Details</h3>
