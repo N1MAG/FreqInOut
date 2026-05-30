@@ -29,8 +29,11 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
-## What's New in v1.2.5.6
+## What's New in v1.2.5.7
 
+- Settings now includes a JS8Spotter Form Mapper so discovered form files can be assigned operational purposes and routed to Messages, Map, Alerts, Net Control, or status workflows.
+- Spotter form routing now controls Messages visibility, unread alert surfacing, and Map evidence without rereading settings for every row.
+- JS8 Net Control now uses forms mapped as Net Check-in for its default check-in filter, with legacy F!103/F!104 behavior preserved when no mapper has been configured.
 - VarAC VGuard now validates inbound file senders from VarAC traffic-log/session evidence before applying trust policy, including portable/mobile base-callsign matching.
 - VGuard can now allow either VarAC BBS Allowed Callsigns, Operator History `TRUSTED` callsigns, or both, so operators can choose a narrow or wider file-intake policy.
 - VGuard decision state now records clearer reasons for allowed, unauthorized, unresolved, or conflicting sender evidence.

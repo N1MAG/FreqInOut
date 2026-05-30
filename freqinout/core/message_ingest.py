@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.js8_spotter_forms import (
+    MAPPER_SETTINGS_KEY,
+    form_id_enabled,
+    form_codes_enabled_for,
+    forms_enabled_for,
+    normalize_form_code,
+)
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 
@@ -129,6 +136,7 @@ class MessageIngestor:
             rows = []
 
         state_map = self._load_js8_state_map()
+        message_form_codes = self._form_codes_for_flag("messages")
         now_ts = time.time()
         for row in rows:
             rid = row[0] if len(row) > 0 else 0
@@ -165,6 +173,8 @@ class MessageIngestor:
             if text.startswith("F!"):
                 form_part, resp, comment = self._parse_form_parts(text)
                 msg_type = f"F!{form_part}" if form_part else "MSG"
+                if form_part and not form_id_enabled(form_part, message_form_codes):
+                    continue
                 decoded = self._decoder.decode_form(form_part, resp, comment, raw=text)
             saved_state = state_map.get(rid)
             if saved_state:
@@ -408,7 +418,7 @@ class MessageIngestor:
             return None
         if re.search(r"\bMSG\b", msg_upper):
             return None
-        form_match = re.search(r"F!(\d{3})", msg_upper)
+        form_match = re.search(r"F!([0-9]{3}[A-Z]?)", msg_upper)
         if not form_match:
             return None
         try:
@@ -452,7 +462,8 @@ class MessageIngestor:
         parts = (text or "").split()
         if not parts or not parts[0].startswith("F!"):
             return "", "", ""
-        form_part = parts[0][2:] if len(parts[0]) > 2 else ""
+        form_code = normalize_form_code(parts[0])
+        form_part = form_code[2:] if form_code.startswith("F!") else ""
         resp = parts[1] if len(parts) > 1 else ""
         comment = " ".join(parts[2:]) if len(parts) > 2 else ""
         return form_part, resp, comment
@@ -526,6 +537,23 @@ class MessageIngestor:
 
         return "unknown", cls._status_label("unknown"), ""
 
+    def _mapped_status_form_ids(self) -> set[str]:
+        try:
+            raw = self.settings.get(MAPPER_SETTINGS_KEY, [])
+        except Exception:
+            raw = []
+        mapped = {
+            code[2:]
+            for code in forms_enabled_for(self.settings, flag="status")
+            if code.startswith("F!") and code[2:] in SPOTTER_STATUS_FORMS
+        }
+        if isinstance(raw, list) and raw:
+            return mapped
+        return mapped or set(SPOTTER_STATUS_FORMS)
+
+    def _form_codes_for_flag(self, flag: str) -> set[str] | None:
+        return form_codes_enabled_for(self.settings, flag=flag)
+
     def _upsert_spotter_station_status(
         self,
         cur: sqlite3.Cursor,
@@ -540,7 +568,7 @@ class MessageIngestor:
         status_source: str = "",
     ) -> None:
         fid = (form_id or "").strip()
-        if fid not in SPOTTER_STATUS_FORMS:
+        if fid not in self._mapped_status_form_ids():
             return
         call = (from_call or "").strip().upper()
         if not call:
@@ -599,7 +627,9 @@ class MessageIngestor:
                 upgraded = cur.fetchone()
                 if upgraded and int(upgraded[0] or 0) > 0:
                     return
-            forms = sorted(SPOTTER_STATUS_FORMS)
+            forms = sorted(self._mapped_status_form_ids())
+            if not forms:
+                return
             placeholders = ",".join(["?"] * len(forms))
             cur.execute(
                 f"""

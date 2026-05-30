@@ -667,7 +667,7 @@
     </thead>
     <tbody>
       <tr><td>Session setup</td><td><code>Role</code> (NCS/ANCS), Net Name, refresh interval, Group target, expected query form, QSY dropdown, <code>Hold</code> selector, <code>QSY + Hold</code>, <code>Ad Hoc Net</code>.</td></tr>
-      <tr><td>Check-ins</td><td>Filter selector (<code>F!103 / F!104</code>, <code>Any Spotter</code>, <code>All Callsigns</code>), table actions by row selection.</td></tr>
+      <tr><td>Check-ins</td><td>Filter selector (<code>Mapped Check-ins</code>, <code>Any Spotter</code>, <code>All Callsigns</code>), table actions by row selection.</td></tr>
       <tr><td>Net lifecycle/actions</td><td><code>Start Net</code>, <code>ACK GROUP</code>, <code>ACK CALLSIGN</code>, <code>E? GROUP</code>, <code>E? Callsign</code>, <code>Save Checkins</code>, <code>End Net</code>.</td></tr>
     </tbody>
   </table>
@@ -684,7 +684,7 @@
 
   <h3 id="ncs-js8-checkins">Check-ins and Status Tracking</h3>
   <ul class="section-list">
-    <li><strong>Check-in Filter</strong>: <code>F!103 / F!104</code> focuses on the standard expected forms, <code>Any Spotter</code> broadens to other spotter-style form activity, and <code>All Callsigns</code> shows the widest received-participation view.</li>
+    <li><strong>Check-in Filter</strong>: <code>Mapped Check-ins</code> focuses on forms assigned to Net Check-in in Settings. <code>Any Spotter</code> broadens to other spotter-style form activity, and <code>All Callsigns</code> shows the widest received-participation view.</li>
     <li><strong>Status column</strong>: use it to understand where each station stands in the workflow, such as newly seen, form-tagged, or acknowledged. This is the quickest way to see who still needs attention.</li>
     <li><strong>Selection matters</strong>: some actions, especially callsign-specific acknowledgement or query operations, depend on a selected table row.</li>
   </ul>
@@ -1150,6 +1150,9 @@
   <ul class="section-list">
     <li><strong>Host and Port</strong>: point FreqInOut to the JS8Call TCP API.</li>
     <li><strong>DIRECTED.TXT and inbox paths</strong>: give FreqInOut the local files it needs for message and link-data workflows.</li>
+    <li><strong>JS8Spotter forms</strong>: folder containing form definitions named like <code>MCF103.txt</code> or <code>MCF702A.txt</code>. FreqInOut scans this folder to populate expected-form choices and the Spotter Form Mapper.</li>
+    <li><strong>Spotter Form Mapper</strong>: tells FreqInOut what each discovered form means. A form can be treated as Net Check-in, SitRep / StatRep, Net Notification, Weather / Storm, Hazard / Early Warning, Intel / RFI, Medical / Hospital, Station Capability, or another purpose. The checkboxes decide where FIO should use that form: Messages, Map, Alerts, Net Control, or status workflows. Messages controls whether the form appears in the Messages tab, Alert marks unread matching rows as alerts, and Map treats the form as map evidence when the sender already has known station location data. Status parsing stays conservative: FIO already knows how to turn <code>F!104</code>, <code>F!301</code>, and <code>F!304</code> into normalized status; other forms can be routed now and can receive deeper field mapping later.</li>
+    <li><strong>Auto-Classify</strong>: applies FreqInOut's built-in guesses for common form IDs. Use this as a starting point, then adjust the purpose or routing checkboxes to match how your group uses the forms.</li>
     <li><strong>Load JS8 Traffic</strong>: manually rebuilds JS8 traffic evidence used by Map and related views.</li>
   </ul>
 

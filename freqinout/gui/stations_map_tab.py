@@ -53,6 +53,7 @@ try:
 except Exception:
     js8net = None
 from freqinout.core.logger import log
+from freqinout.core.js8_spotter_forms import form_codes_enabled_for
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.operator_activity import (
@@ -3736,6 +3737,69 @@ class StationsMapTab(QWidget):
         self._query_cache_set(cache_key, dict(statuses))
         return statuses
 
+    def _spotter_form_codes_for_flag(self, flag: str) -> Optional[set[str]]:
+        try:
+            return form_codes_enabled_for(self.settings, flag=flag)
+        except Exception:
+            return None
+
+    def _load_spotter_map_activity(self) -> Dict[str, Dict]:
+        map_codes = self._spotter_form_codes_for_flag("map")
+        if map_codes is not None and not map_codes:
+            return {}
+        cache_key = ("spotter_map_activity", tuple(sorted(map_codes)) if map_codes is not None else "__legacy__")
+        cached = self._query_cache_get(cache_key)
+        if isinstance(cached, dict):
+            return {str(k): dict(v) if isinstance(v, dict) else v for k, v in cached.items()}
+        out: Dict[str, Dict] = {}
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return out
+        if not db_path.exists():
+            return out
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            base_sql = """
+                SELECT from_call, form_id, utc_ts, utc_str, decoded_text
+                FROM spotter_traffic
+            """
+            params: tuple = ()
+            if map_codes is not None:
+                form_ids = sorted(code[2:] for code in map_codes if code.startswith("F!"))
+                placeholders = ",".join(["?"] * len(form_ids))
+                base_sql += f" WHERE form_id IN ({placeholders})"
+                params = tuple(form_ids)
+            else:
+                # Legacy mode keeps existing map behavior; explicit map routing starts
+                # when the operator saves a mapper configuration.
+                base_sql += " WHERE 1=0"
+            cur.execute(base_sql + " ORDER BY COALESCE(utc_ts, 0) DESC, id DESC LIMIT 1000", params)
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("StationsMap: failed to load mapped Spotter form activity: %s", e)
+            return out
+        for from_call, form_id, utc_ts, utc_str, decoded_text in rows:
+            call = (from_call or "").strip().upper()
+            if not call or call in out:
+                continue
+            form = str(form_id or "").strip().upper()
+            if form and not form.startswith("F!"):
+                form = f"F!{form}"
+            first_line = ""
+            if decoded_text:
+                first_line = str(decoded_text or "").strip().splitlines()[0][:80]
+            out[call] = {
+                "form_id": form,
+                "utc_ts": self._safe_float(utc_ts, 0.0),
+                "utc_str": str(utc_str or "").strip(),
+                "summary": first_line,
+            }
+        self._query_cache_set(cache_key, dict(out))
+        return out
+
     def _load_sitrep_state_rollup(self, report_group: str = "") -> List[Dict[str, object]]:
         report_group_key = str(report_group or "").strip().upper() or "__ALL__"
         cache_key = ("sitrep_state_rollup", report_group_key)
@@ -5249,6 +5313,12 @@ class StationsMapTab(QWidget):
             lambda: _timed_map_call("map.load_spotter_station_status", self._load_spotter_station_status),
             ttl_sec=6.0,
         )
+        spotter_map_activity = self._cached_map_value(
+            "spotter_map_activity",
+            {},
+            lambda: _timed_map_call("map.load_spotter_map_activity", self._load_spotter_map_activity),
+            ttl_sec=6.0,
+        )
         sitrep_state_summary: List[Dict[str, object]] = []
         sitrep_summary_group = ""
         sitrep_summary_enabled = bool(sitrep_mode)
@@ -5277,6 +5347,9 @@ class StationsMapTab(QWidget):
         for cs in varac_stats.keys():
             if cs:
                 traffic_calls.add(cs)
+        for cs in spotter_map_activity.keys():
+            if cs:
+                traffic_calls.add(str(cs).upper())
         if self._now_reachable_enabled:
             traffic_calls.update({c for c in self._now_reachable_callsigns if c})
         show_all_stations = (not self._links_active()) or sitrep_mode
@@ -5380,8 +5453,16 @@ class StationsMapTab(QWidget):
                 spotter_status_state_conf = str(spotter_data.get("state_confidence") or "").strip()
                 spotter_status_geo_conf = str(spotter_data.get("geo_confidence") or "").strip()
                 spotter_status_brevity = str(spotter_data.get("brevity_summary") or "").strip()
+                spotter_map_data = spotter_map_activity.get(cs_upper, {})
+                spotter_map_form = str(spotter_map_data.get("form_id") or "").strip()
+                spotter_map_ts = _fmt_ts(spotter_map_data.get("utc_ts", 0))
+                spotter_map_summary = str(spotter_map_data.get("summary") or "").strip()
                 if qsy_text:
                     detail_lines.append(f"Schedule: {qsy_text}")
+                if spotter_map_form:
+                    detail_lines.append(f"Spotter Form: {spotter_map_form}" + (f" at {spotter_map_ts}" if spotter_map_ts else ""))
+                    if spotter_map_summary:
+                        detail_lines.append(f"Spotter Summary: {spotter_map_summary}")
                 # Filter empty lines
                 detail_lines = [d for d in detail_lines if d]
                 title = "\n".join(detail_lines)

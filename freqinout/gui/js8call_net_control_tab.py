@@ -33,6 +33,15 @@ from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
+from freqinout.core.js8_spotter_forms import (
+    MAPPER_SETTINGS_KEY,
+    PURPOSE_NET_CHECKIN,
+    PURPOSE_NET_NOTIFICATION,
+    discover_spotter_forms,
+    extract_form_codes,
+    forms_enabled_for,
+    legacy_default_forms_for,
+)
 from freqinout.utils.timezones import get_timezone
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 from freqinout.gui.qsy_helper import (
@@ -292,7 +301,7 @@ class JS8CallNetControlTab(QWidget):
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Check-in Filter:"))
         self.checkin_filter_combo = QComboBox()
-        self.checkin_filter_combo.addItems(["F!103 / F!104", "Any Spotter", "All Callsigns"])
+        self.checkin_filter_combo.addItems(["Mapped Check-ins", "Any Spotter", "All Callsigns"])
         filter_row.addWidget(self.checkin_filter_combo)
         filter_row.addStretch()
         table_layout.addLayout(filter_row)
@@ -455,29 +464,11 @@ class JS8CallNetControlTab(QWidget):
         self.spotter_combo.clear()
         forms = []
         if forms_dir.exists() and forms_dir.is_dir():
-            for fn in sorted(forms_dir.glob("MCF*.txt")):
-                try:
-                    num = fn.stem.replace("MCF", "").strip()
-                    if num.isdigit():
-                        code = f"F!{num}"
-                        desc = ""
-                        try:
-                            with fn.open("r", encoding="utf-8", errors="ignore") as fh:
-                                for line in fh:
-                                    header = line.strip()
-                                    if header:
-                                        desc = header
-                                        break
-                        except Exception:
-                            desc = ""
-                        label = code
-                        if desc and "|" in desc:
-                            parts = [p.strip() for p in desc.split("|", 1)]
-                            if len(parts) == 2 and parts[0]:
-                                label = f"{code} - {parts[0]}"
-                        forms.append((code, label))
-                except Exception:
-                    continue
+            for definition in discover_spotter_forms(forms_dir):
+                label = definition.form_code
+                if definition.title:
+                    label = f"{definition.form_code} - {definition.title}"
+                forms.append((definition.form_code, label))
         if forms:
             for code, label in forms:
                 self.spotter_combo.addItem(label, code)
@@ -1217,7 +1208,29 @@ class JS8CallNetControlTab(QWidget):
     def _checkin_filter_mode(self) -> str:
         if hasattr(self, "checkin_filter_combo"):
             return self.checkin_filter_combo.currentText().strip()
-        return "F!103 / F!104"
+        return "Mapped Check-ins"
+
+    def _mapped_checkin_forms(self) -> set[str]:
+        forms = forms_enabled_for(self.settings, purpose=PURPOSE_NET_CHECKIN, flag="net")
+        if self._has_custom_spotter_mapper():
+            return forms
+        return forms or set(CHECKIN_FORMS) or legacy_default_forms_for(purpose=PURPOSE_NET_CHECKIN, flag="net")
+
+    def _mapped_announcement_forms(self) -> set[str]:
+        forms = forms_enabled_for(self.settings, purpose=PURPOSE_NET_NOTIFICATION, flag="alert")
+        if self._has_custom_spotter_mapper():
+            return forms
+        return forms or {ANNOUNCE_FORM} or legacy_default_forms_for(purpose=PURPOSE_NET_NOTIFICATION, flag="alert")
+
+    def _has_custom_spotter_mapper(self) -> bool:
+        try:
+            raw = self.settings.get(MAPPER_SETTINGS_KEY, [])
+        except Exception:
+            raw = []
+        return isinstance(raw, list) and bool(raw)
+
+    def _is_checkin_form_code(self, form_code: object) -> bool:
+        return str(form_code or "").strip().upper() in self._mapped_checkin_forms()
 
     def _delete_action_text(self) -> str:
         if not self._net_in_progress:
@@ -2609,9 +2622,9 @@ class JS8CallNetControlTab(QWidget):
                                 break
                     # Spotter form response handling
                     if self._net_in_progress and self._expected_form:
-                        forms_found = re.findall(r"F![0-9]{3}", combined)
+                        forms_found = extract_form_codes(combined)
                         for form in forms_found:
-                            if form.upper() not in CHECKIN_FORMS:
+                            if not self._is_checkin_form_code(form):
                                 continue
                             if base_frm:
                                 mismatch = form != self._expected_form
@@ -2646,18 +2659,18 @@ class JS8CallNetControlTab(QWidget):
 
     def _line_has_checkin_form(self, line: str) -> bool:
         """
-        Returns True if the line contains a JS8Spotter check-in form (F!103 or F!104).
+        Returns True if the line contains a JS8Spotter form mapped as a net check-in.
         """
-        up = line.upper()
-        return any(form in up for form in CHECKIN_FORMS)
+        codes = set(extract_form_codes(line))
+        return bool(codes.intersection(self._mapped_checkin_forms()))
 
     def _line_has_any_spotter_form(self, line: str) -> bool:
         msg_text = self._message_text_from_line(line).upper()
-        return re.search(r"F![0-9]{3}", msg_text) is not None
+        return bool(extract_form_codes(msg_text))
 
     def _should_accept_checkin_line(self, line: str) -> bool:
         mode = self._checkin_filter_mode()
-        if mode == "F!103 / F!104":
+        if mode in {"Mapped Check-ins", "F!103 / F!104"}:
             return self._line_has_checkin_form(line)
         if mode == "Any Spotter":
             return self._line_has_any_spotter_form(line)
@@ -2707,7 +2720,8 @@ class JS8CallNetControlTab(QWidget):
                 self._last_traffic_group_ts = now_ts
 
     def _line_has_announce_form(self, line: str) -> bool:
-        return ANNOUNCE_FORM in line.upper()
+        codes = set(extract_form_codes(line))
+        return bool(codes.intersection(self._mapped_announcement_forms()))
 
     def _maybe_notify_announcement(self, callsign: str, line: str) -> None:
         """

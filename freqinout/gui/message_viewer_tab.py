@@ -69,6 +69,11 @@ from freqinout.core.sqlite_utils import fetch_all
 from freqinout.core.support_reporting import build_support_summary, bullet_lines
 from freqinout.core.commstat_artifacts import artifact_filter_label, artifact_kind_label
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.js8_spotter_forms import (
+    form_codes_enabled_for,
+    form_id_enabled,
+    normalize_form_code,
+)
 from freqinout.core.sitrep_metadata import (
     parse_filter_subtype_label,
     source_family_display_label,
@@ -777,6 +782,8 @@ class _RowsBuildWorker(QObject):
         signature_state_map: Dict[tuple, Dict[str, object]],
         sender_cache_seed: Dict[tuple, str],
         form_titles: Dict[str, str],
+        message_form_codes: Optional[set[str]],
+        alert_form_codes: Optional[set[str]],
         show_local_time: bool,
         tz_name: str,
         sitrep_dedupe_enabled: bool,
@@ -801,6 +808,8 @@ class _RowsBuildWorker(QObject):
         self._sender_cache_seed = dict(sender_cache_seed)
         self._sender_cache_updates: Dict[tuple, str] = {}
         self._form_titles = {str(k): str(v or "") for k, v in (form_titles or {}).items()}
+        self._message_form_codes = set(message_form_codes) if message_form_codes is not None else None
+        self._alert_form_codes = set(alert_form_codes) if alert_form_codes is not None else None
         self._show_local_time = bool(show_local_time)
         self._tz_name = str(tz_name or "UTC")
         self._sitrep_dedupe_enabled = bool(sitrep_dedupe_enabled)
@@ -827,6 +836,18 @@ class _RowsBuildWorker(QObject):
                 str(title or ""),
             ]
         ).lower()
+
+    def _form_visible_in_messages(self, msg_type: object) -> bool:
+        text = str(msg_type or "").strip()
+        if not text.upper().startswith("F!"):
+            return True
+        return form_id_enabled(text, self._message_form_codes)
+
+    def _form_is_alert(self, msg_type: object) -> bool:
+        text = str(msg_type or "").strip()
+        if not text.upper().startswith("F!"):
+            return False
+        return form_id_enabled(text, self._alert_form_codes)
 
     def _format_rcv_display(self, rcv_ts: float, utc_str: Optional[str]) -> str:
         if self._show_local_time:
@@ -1168,7 +1189,11 @@ class _RowsBuildWorker(QObject):
 
         for msg in self._js8_messages:
             msg_type = msg.msg_type if msg.msg_type.startswith("F!") else "JS8 MSG"
+            if not self._form_visible_in_messages(msg_type):
+                continue
             status = "READ" if msg.state.upper() == "READ" else "NEW"
+            if status != "READ" and self._form_is_alert(msg_type):
+                status = "ALERT"
             rcv_ts = float(msg.utc_ts or 0.0)
             rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
             title = ""
@@ -1202,7 +1227,11 @@ class _RowsBuildWorker(QObject):
                 if spotter_key and spotter_key in sitrep_report_keys:
                     continue
             msg_type = msg.msg_type or "F!"
+            if not self._form_visible_in_messages(msg_type):
+                continue
             status = "READ" if msg.state.upper() == "READ" else "NEW"
+            if status != "READ" and self._form_is_alert(msg_type):
+                status = "ALERT"
             rcv_ts = float(msg.utc_ts or 0.0)
             rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
             title = ""
@@ -7230,6 +7259,8 @@ class MessageViewerTab(QWidget):
         form_titles: Dict[str, str] = {}
         for form_id in sorted({f for f in form_ids if f}):
             form_titles[form_id] = self._load_form_title(form_id)
+        message_form_codes = self._form_codes_for_flag("messages")
+        alert_form_codes = self._form_codes_for_flag("alert")
         signature_map: Dict[tuple, Dict[str, object]] = {}
         if self._is_any_auth_verification_enabled():
             current_sig_keys: set[tuple] = set()
@@ -7261,6 +7292,8 @@ class MessageViewerTab(QWidget):
             "signature_state_map": signature_map,
             "sender_cache_seed": dict(self._sender_cache),
             "form_titles": form_titles,
+            "message_form_codes": message_form_codes,
+            "alert_form_codes": alert_form_codes,
             "show_local_time": self._current_time_mode() != "UTC",
             "tz_name": str(self.settings.get("timezone", "UTC") or "UTC"),
             "sitrep_dedupe_enabled": self._is_truthy(
@@ -7300,6 +7333,8 @@ class MessageViewerTab(QWidget):
             signature_state_map=snapshot.get("signature_state_map", {}),  # type: ignore[arg-type]
             sender_cache_seed=snapshot.get("sender_cache_seed", {}),  # type: ignore[arg-type]
             form_titles=snapshot.get("form_titles", {}),  # type: ignore[arg-type]
+            message_form_codes=snapshot.get("message_form_codes"),  # type: ignore[arg-type]
+            alert_form_codes=snapshot.get("alert_form_codes"),  # type: ignore[arg-type]
             show_local_time=bool(snapshot.get("show_local_time", False)),
             tz_name=str(snapshot.get("tz_name", "UTC") or "UTC"),
             sitrep_dedupe_enabled=bool(snapshot.get("sitrep_dedupe_enabled", True)),
@@ -7371,7 +7406,7 @@ class MessageViewerTab(QWidget):
         status_vals = sorted({r.status for r in rows if r.status})
         from_vals = sorted({r.from_call for r in rows if r.from_call})
         to_vals = sorted({r.to_call for r in rows if r.to_call})
-        spotter_forms = sorted({t for t in type_vals if re.match(r"^F!\d+$", t)})
+        spotter_forms = sorted({t for t in type_vals if re.match(r"^F![0-9]{3}[A-Z]?$", t)})
         commstat_kinds = sorted(
             {
                 str(getattr(r.payload, "artifact_kind", "") or "").strip().upper()
@@ -8620,7 +8655,7 @@ class MessageViewerTab(QWidget):
         if not rows:
             return False, "No messages in current filtered view."
         if type_sel == "Spotter":
-            if any(not re.match(r"^F!\d+$", (r.msg_type or "")) for r in rows):
+            if any(not re.match(r"^F![0-9]{3}[A-Z]?$", (r.msg_type or "")) for r in rows):
                 return False, "Filtered rows are not scoped to one message type."
         else:
             if any((r.msg_type or "") != type_sel for r in rows):
@@ -8748,7 +8783,11 @@ class MessageViewerTab(QWidget):
 
         for msg in self.js8_messages:
             msg_type = msg.msg_type if msg.msg_type.startswith("F!") else "JS8 MSG"
+            if not self._form_visible_in_messages(msg_type):
+                continue
             status = "READ" if msg.state.upper() == "READ" else "NEW"
+            if status != "READ" and self._form_is_alert(msg_type):
+                status = "ALERT"
             rcv_ts = msg.utc_ts or 0.0
             rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
             title = ""
@@ -8779,7 +8818,11 @@ class MessageViewerTab(QWidget):
                 if spotter_key and spotter_key in sitrep_report_keys:
                     continue
             msg_type = msg.msg_type or "F!"
+            if not self._form_visible_in_messages(msg_type):
+                continue
             status = "READ" if msg.state.upper() == "READ" else "NEW"
+            if status != "READ" and self._form_is_alert(msg_type):
+                status = "ALERT"
             rcv_ts = msg.utc_ts or 0.0
             rcv_display = self._format_rcv_display(rcv_ts, msg.utc_str)
             title = ""
@@ -11078,7 +11121,8 @@ class MessageViewerTab(QWidget):
         parts = (text or "").split()
         if not parts or not parts[0].startswith("F!"):
             return "", "", ""
-        form_part = parts[0][2:] if len(parts[0]) > 2 else ""
+        form_code = normalize_form_code(parts[0])
+        form_part = form_code[2:] if form_code.startswith("F!") else ""
         resp = parts[1] if len(parts) > 1 else ""
         comment = " ".join(parts[2:]) if len(parts) > 2 else ""
         return form_part, resp, comment
@@ -11144,6 +11188,24 @@ class MessageViewerTab(QWidget):
         self._form_title_cache[form_id] = title
         self._prune_cache(self._form_title_cache, self._cache_max_form_title_entries)
         return title
+
+    def _form_codes_for_flag(self, flag: str) -> Optional[set[str]]:
+        try:
+            return form_codes_enabled_for(self.settings, flag=flag)
+        except Exception:
+            return None
+
+    def _form_visible_in_messages(self, msg_type: object) -> bool:
+        text = str(msg_type or "").strip()
+        if not text.upper().startswith("F!"):
+            return True
+        return form_id_enabled(text, self._form_codes_for_flag("messages"))
+
+    def _form_is_alert(self, msg_type: object) -> bool:
+        text = str(msg_type or "").strip()
+        if not text.upper().startswith("F!"):
+            return False
+        return form_id_enabled(text, self._form_codes_for_flag("alert"))
 
     # ---------- JS8 state persistence (local DB) ---------- #
 
@@ -11522,14 +11584,25 @@ class MessageViewerTab(QWidget):
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
-            cur.execute(
-                """
+            message_codes = self._form_codes_for_flag("messages")
+            base_sql = """
                 SELECT id, utc_str, utc_ts, from_call, to_call, form_id, spotter_token,
                        raw_text, decoded_text, state, read_ts, flag_state, relay_via
                 FROM spotter_traffic
-                ORDER BY utc_ts DESC, id DESC
-                """
-            )
+            """
+            if message_codes is None:
+                cur.execute(base_sql + " ORDER BY utc_ts DESC, id DESC")
+            elif message_codes:
+                form_ids = sorted(code[2:] for code in message_codes if code.startswith("F!"))
+                placeholders = ",".join(["?"] * len(form_ids))
+                cur.execute(base_sql + f" WHERE form_id IN ({placeholders}) ORDER BY utc_ts DESC, id DESC", tuple(form_ids))
+            else:
+                rows = []
+                conn.close()
+                self.spotter_messages = msgs
+                if rebuild:
+                    self._populate_messages_table(force=force)
+                return
             rows = cur.fetchall()
             conn.close()
         except Exception as e:
@@ -11668,7 +11741,7 @@ class MessageViewerTab(QWidget):
             return None
         if re.search(r"\bMSG\b", msg_upper):
             return None
-        form_match = re.search(r"F!(\d{3})", msg_upper)
+        form_match = re.search(r"F!([0-9]{3}[A-Z]?)", msg_upper)
         if not form_match:
             return None
         try:
