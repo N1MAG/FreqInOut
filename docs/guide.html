@@ -1058,9 +1058,10 @@
   <p><strong>Warning highlights</strong>: the left section list uses warning highlighting to call out incomplete setup for the current single-radio station. This is meant as inline guidance, not as a generic error state for every optional integration.</p>
   <p><strong>Why you use it</strong>: Settings is where you teach FreqInOut what kind of station you are running. Almost every other tab depends on this information. When something elsewhere in the app feels incomplete, missing, or inconsistent, Settings is often the real starting point.</p>
   <ul class="section-list">
-    <li><strong>Good setup order</strong>: start with Operator Information, then software paths and operating groups, then schedules, then optional advanced features like Managed BBS Services, Launch Control, and message-auth trust.</li>
-    <li><strong>Cross-tab interaction</strong>: scheduler behavior, message actions, map evidence, launch readiness, BBS management, and even help-button setup review all draw from what is configured here.</li>
-    <li><strong>How to read warnings</strong>: a warning highlight usually means “you started configuring this workflow but left out a required companion field,” not “every operator must use this feature.”</li>
+    <li><strong>Good setup order</strong>: start with Operator Information, then choose the software your station actually uses, then fill in the matching software paths and operating groups. After that, set schedules and optional features such as Managed BBS Services, Launch Control, and message-auth trust.</li>
+    <li><strong>Cross-tab interaction</strong>: most other tabs take their cues from Settings. Scheduler behavior, message actions, map evidence, launch readiness, BBS management, and setup warnings all depend on what is configured here.</li>
+    <li><strong>How to read warnings</strong>: a warning highlight usually means “you started configuring this workflow but left out a companion field,” not “every operator must use this feature.” If you do not use a program, leave that program unchecked in Software Used.</li>
+    <li><strong>Plain-language rule</strong>: Settings should answer, “Who am I operating as?”, “Which tools do I actually use?”, “Where are those tools and their files?”, and “How much should FIO help me stay on plan?”</li>
   </ul>
 
   <h3 id="settings-sections">Settings Sections</h3>
@@ -1075,7 +1076,7 @@
       </tr>
       <tr>
         <td>FreqInOut Settings</td>
-        <td>Theme, Text Size (Normal/Medium/Large), Frequency Control mode, scheduler enable, enforcement and prompt intervals, logging level and diagnostics controls</td>
+        <td>Theme, Text Size (Normal/Medium/Large), Frequency Control mode, scheduler enable, Software Used checkboxes, operating status, setup readiness, and enforcement/prompt timers</td>
       </tr>
       <tr id="settings-hf-groups">
         <td>HF Operating Groups</td>
@@ -1086,24 +1087,20 @@
         <td><code>Add Profile</code>, <code>Edit Selected</code>, <code>Delete Selected</code>; table columns: <code>Selected</code>, <code>Group</code>, <code>Resource</code>, <code>Mode</code>, <code>Target</code>, <code>Notes</code></td>
       </tr>
       <tr>
-        <td>SOP Export</td>
-        <td><code>Preamble</code> and <code>Postamble</code> text blocks used to enrich SOP PDF exports; supports simple placeholders such as <code>{{operator_callsign}}</code>, <code>{{as_of_local}}</code>, <code>{{as_of_utc}}</code>, <code>{{scope}}</code>, and <code>{{timezone}}</code></td>
-      </tr>
-      <tr>
         <td>JS8Call Settings</td>
-        <td>TCP host/IP (default <code>127.0.0.1</code>), TCP port, offset, mark-read option, path fields, JS8Spotter form mapping, and <code>Load JS8 Traffic</code> (manual rebuild with in-process indicator)</td>
+        <td>JS8Call connection fields, JS8 offset, mark-read option, JS8Call traffic files, CommStat launcher, JS8Spotter launcher, JS8Spotter forms folder, JS8Spotter form mapping, and <code>Load JS8 Traffic</code></td>
       </tr>
       <tr>
         <td>Fast Light Settings</td>
-        <td>FLRig/FLDigi/FLMsg/FLAmp paths, FLRig/FLDigi XMLRPC settings, FLDigi check-in/log paths, and Fast Light auto-fill helpers</td>
-      </tr>
-      <tr>
-        <td>Message Auth (Key/Hash)</td>
-        <td>Enable signature/hash verification, trusted hash registry, GPG executable controls, key import/signing, trusted key table</td>
+        <td>FLRig/FLDigi/FLMsg/FLAmp paths, FLRig/FLDigi connection fields, FLDigi check-in/log paths, message folders, and Fast Light auto-fill helpers</td>
       </tr>
       <tr>
         <td>VarAC Settings</td>
-        <td>Install path, optional Linux launch command (Wine), incoming files path, BBS directory/archive, auto-archive policy</td>
+        <td>VarAC install/launch paths, incoming/outbox folders, BBS folders, allowed callsigns, Managed BBS Services, FLAMP relay, and VGuard protection</td>
+      </tr>
+      <tr>
+        <td>Message Auth (Key/Hash)</td>
+        <td>Signature/checksum verification, trusted hash registry, GPG executable controls, key import/signing, trusted key table, and FLAmp signing identity</td>
       </tr>
       <tr>
         <td>Custom Tools</td>
@@ -1112,6 +1109,10 @@
       <tr>
         <td>Launch Control</td>
         <td>Per-app enable/startup toggles, order management (<code>Up</code>, <code>Down</code>, <code>Reset Default Order</code>), launch/stop controls, and dependency-aware readiness pacing (JS8 API + targeted settle delays)</td>
+      </tr>
+      <tr>
+        <td>SOP Export</td>
+        <td><code>Preamble</code> and <code>Postamble</code> text blocks used to enrich SOP PDF exports; supports simple placeholders such as <code>{{operator_callsign}}</code>, <code>{{as_of_local}}</code>, <code>{{as_of_utc}}</code>, <code>{{scope}}</code>, and <code>{{timezone}}</code></td>
       </tr>
       <tr>
         <td>Logging &amp; Diagnostics</td>
@@ -1133,73 +1134,95 @@
 
   <h3 id="settings-operator-info">Operator Information</h3>
   <ul class="section-list">
-    <li><strong>Callsign</strong>: used throughout the app for message naming, schedule logic, and operator identity.</li>
-    <li><strong>Name and State</strong>: carried into operator history, form defaults, and some message workflows.</li>
-    <li><strong>Grid 6</strong>: used by mapping, propagation, and geographic decision-support features.</li>
+    <li><strong>Callsign</strong>: the callsign FIO should use for this station. It appears in message names, reports, operator matching, and local station identity.</li>
+    <li><strong>Name and State</strong>: helpful human context for rosters, reports, form defaults, and operator history. Keep the state short, such as <code>MO</code> or <code>TX</code>.</li>
+    <li><strong>Grid 6</strong>: your six-character Maidenhead grid. FIO uses it for map position, propagation estimates, and station-location context. If you only know a four-character grid, enter the best grid you have and improve it later.</li>
   </ul>
 
   <h3 id="settings-freqinout-details">FreqInOut Settings Details</h3>
   <ul class="section-list">
-    <li><strong>Theme and Text Size</strong>: control overall readability and platform consistency.</li>
-    <li><strong>Frequency Control</strong>: selects how FreqInOut drives or advises radio control in the current station model.</li>
-    <li><strong>Use FreqInOut Scheduler</strong>: enables automatic schedule-driven behavior.</li>
-    <li><strong>Enforcement and prompt intervals</strong>: choose whether corrections happen automatically on schedule changes or wait for user confirmation.</li>
+    <li><strong>Theme and Text Size</strong>: make the screen easier to read for your operating environment. These choices do not change radio behavior.</li>
+    <li><strong>Frequency Control</strong>: tells FIO which tool should be treated as the main way to read or guide the radio frequency. Choose <code>FLRig</code> when FLRig is your radio-control bridge, <code>JS8Call</code> when JS8Call is the practical source of radio state, or <code>Manual</code> when FIO should advise without assuming it can control the radio.</li>
+    <li><strong>Use FreqInOut Scheduler</strong>: turns schedule help on or off. When enabled, FIO watches the active schedule and helps the station move to the expected frequency, mode, or offset according to your enforcement choices.</li>
+    <li><strong>Software Used</strong>: check only the programs this station actually uses. This keeps readiness warnings focused. For example, do not check CommStat or JS8Spotter unless you want FIO to expect their launcher or forms settings.</li>
+    <li><strong>Frequency Timer</strong>: decides how FIO responds when the radio frequency does not match the active schedule. <code>On Schedule Change</code> is more automatic. <code>Prompt</code> asks the operator first.</li>
+    <li><strong>FLDigi Mode Timer</strong>: does the same kind of checking for the FLDigi mode. This is separate because the frequency may be correct while the FLDigi mode still needs attention.</li>
+    <li><strong>JS8 Offset Timer</strong>: checks whether the JS8 offset matches the expected operating plan. Use <code>Prompt</code> if you often move the offset by hand during live JS8 work.</li>
+    <li><strong>Prompt Interval</strong>: controls how often FIO reminds you after you choose prompt-based help. Short intervals are useful during active operations; longer intervals are quieter when you intentionally stay off plan.</li>
+    <li><strong>Operating Status</strong>: quick status lights for the station tools FIO is watching. These are a setup and awareness aid, not a guarantee that the external program itself is healthy in every way.</li>
+    <li><strong>Setup Readiness</strong>: a plain-language checklist. It points out missing companion fields after you start configuring a workflow.</li>
   </ul>
 
   <h3 id="settings-js8call-details">JS8Call Settings Details</h3>
   <ul class="section-list">
-    <li><strong>Host and Port</strong>: point FreqInOut to the JS8Call TCP API.</li>
-    <li><strong>DIRECTED.TXT and inbox paths</strong>: give FreqInOut the local files it needs for message and link-data workflows.</li>
-    <li><strong>JS8Spotter forms</strong>: select the folder that contains your JS8Spotter form definition files. These files usually have names such as <code>MCF103.txt</code> or <code>MCF702A.txt</code>. FreqInOut reads the file names and titles so the mapper can show the forms your station actually has available.</li>
-    <li><strong>Refresh Forms</strong>: scans the selected forms folder again. Use this after adding, removing, or replacing JS8Spotter form files while FreqInOut is open.</li>
-    <li><strong>Auto-Classify</strong>: asks FreqInOut to make a first guess about each form. For example, common check-in forms are marked for Net Control, SitRep forms are marked for status/map use, and alert-type forms are marked for alert handling. Treat this as a starting point. Your group may use a form differently, and you can change the purpose or checkboxes before saving.</li>
-    <li><strong>Purpose</strong>: describes what the form means to your operation. This is the plain-language label FreqInOut uses to decide whether a form is a net check-in, a situation report, a weather report, a net notice, an information request, or something else. If a form should be ignored by FreqInOut, choose <code>Ignore</code>.</li>
-    <li><strong>Messages</strong>: shows matching received forms in the Messages tab. Turn this off for forms you want FreqInOut to keep out of the operator message list.</li>
-    <li><strong>Map</strong>: lets a received form count as map evidence when FreqInOut already knows where the sending station is. This does not guess a location from random form text. It only helps the map show that a known station has recent form activity.</li>
-    <li><strong>Alert</strong>: makes unread matching forms stand out as alerts in Messages. After the message is marked read, it behaves like a normal read message.</li>
-    <li><strong>Net</strong>: lets Net Control workflows use that form. This is how a group-specific check-in form can feed JS8 NCS without FreqInOut hard-coding every possible form number.</li>
-    <li><strong>Status</strong>: lets a form feed the shared status view when FreqInOut knows how to read that form's status fields. Today this is intentionally conservative: <code>F!104</code>, <code>F!301</code>, and <code>F!304</code> can become normalized status. Other forms can still be routed to Messages, Map, Alerts, or Net Control, but deeper status field reading requires explicit support.</li>
-    <li><strong>Default behavior</strong>: if you have not saved a custom mapper, FreqInOut keeps the legacy behavior for the standard known forms. Once you save mapper rows, the checkboxes become the source of truth for how those forms flow through FIO.</li>
+    <li><strong>Host and Port</strong>: tell FreqInOut how to talk to JS8Call on this computer. Most local stations use host <code>127.0.0.1</code> and port <code>2442</code>.</li>
+    <li><strong>Offset (Hz)</strong>: the JS8 audio offset FIO should expect when checking schedule alignment. If you are unsure, start with your normal JS8 operating offset and adjust only when your group uses a specific offset plan.</li>
+    <li><strong>Mark JS8Call MSG Read?</strong>: controls whether FIO should also mark JS8Call inbox messages read when you mark them retrieved in FIO. Leave it off if you want JS8Call to keep its own unread state untouched.</li>
     <li><strong>Load JS8 Traffic</strong>: manually rebuilds JS8 traffic evidence used by Messages, Map, and related views. Use it when you changed paths, imported data, or want FreqInOut to reread current JS8 traffic without waiting for the next normal refresh.</li>
+    <li><strong>JS8Call Install Folder</strong>: the folder that contains JS8Call. FIO uses this to help find related JS8Call files and to support launch/readiness workflows.</li>
+    <li><strong>JS8Call DIRECTED.TXT</strong>: the JS8Call file that records directed traffic. FIO reads it so operator activity and link evidence can appear in FIO views.</li>
+    <li><strong>CommStat Script/Launcher</strong>: optional launcher for CommStat when your station uses it alongside JS8Call. CommStat is a separate application that can provide structured STATREP-style station awareness. Learn more at <a href="https://commstat.app/">commstat.app</a>.</li>
+    <li><strong>JS8Spotter Script/Launcher</strong>: optional launcher for JS8Spotter when your station uses it for MCForms and JS8 spotting workflows. Learn more from KF7MIX at <a href="https://kf7mix.com/">kf7mix.com</a>.</li>
+    <li><strong>JS8Spotter forms folder</strong>: select the folder that contains your JS8Spotter form definition files. These files usually have names such as <code>MCF103.txt</code> or <code>MCF702A.txt</code>. FreqInOut reads the file names and titles so the mapper can show the JS8Spotter forms your station actually has available.</li>
+    <li><strong>Refresh JS8Spotter Forms</strong>: scans the selected JS8Spotter forms folder again. Use this after adding, removing, or replacing JS8Spotter form files while FreqInOut is open.</li>
+    <li><strong>Auto-Classify</strong>: asks FreqInOut to make a first guess about each form. For example, common check-in forms are marked for Net Control, SitRep forms are marked for status/map use, and alert-type forms are marked for alert handling. Treat this as a starting point. Your group may use a form differently, and you can change the purpose or checkboxes before saving.</li>
+    <li><strong>Purpose</strong>: describes what a JS8Spotter form means to your operation. This is the plain-language label FreqInOut uses to decide whether a form is a net check-in, a situation report, a weather report, a net notice, an information request, or something else. If a form should be ignored by FreqInOut, choose <code>Ignore</code>.</li>
+    <li><strong>Messages</strong>: shows matching received JS8Spotter forms in the Messages tab. Turn this off for JS8Spotter forms you want FreqInOut to keep out of the operator message list.</li>
+    <li><strong>Map</strong>: lets a received JS8Spotter form count as map evidence when FreqInOut already knows where the sending station is. This does not guess a location from random form text. It only helps the map show that a known station has recent JS8Spotter form activity.</li>
+    <li><strong>Alert</strong>: makes unread matching JS8Spotter forms stand out as alerts in Messages. After the message is marked read, it behaves like a normal read message.</li>
+    <li><strong>Net</strong>: lets Net Control workflows use that JS8Spotter form. This is how a group-specific check-in form can feed JS8 NCS without FreqInOut hard-coding every possible form number.</li>
+    <li><strong>Status</strong>: lets a JS8Spotter form feed the shared status view when FreqInOut knows how to read that form's status fields. Today this is intentionally conservative: <code>F!104</code>, <code>F!301</code>, and <code>F!304</code> can become normalized status. Other JS8Spotter forms can still be routed to Messages, Map, Alerts, or Net Control, but deeper status field reading requires explicit support.</li>
+    <li><strong>Default behavior</strong>: if you have not saved a custom mapper, FreqInOut keeps the legacy behavior for the standard known forms. Once you save mapper rows, the checkboxes become the source of truth for how those forms flow through FIO.</li>
+    <li><strong>Auto-Fill status</strong>: after an auto-fill attempt, FIO reports what it found or what still needs attention. Treat this as setup guidance, not an error unless a feature you need remains missing.</li>
   </ul>
 
   <h3 id="settings-fast-light-details">Fast Light Settings Details</h3>
   <ul class="section-list">
-    <li><strong>Software paths</strong>: configure FLRig, FLDigi, FLMsg, and FLAmp launch paths or executables.</li>
-    <li><strong>Endpoint pairing</strong>: when FLRig or FLDigi paths are configured, confirm their companion fields: <code>FLRig XMLRPC Port</code>, <code>FLDigi XMLRPC Host</code>, and <code>FLDigi XMLRPC Port</code>. These are the names shown in the UI.</li>
+    <li><strong>Software paths</strong>: configure FLRig, FLDigi, FLMsg, and FLAmp launch paths or executables. Only fill in the tools your station actually uses.</li>
+    <li><strong>Connection fields</strong>: when FLRig or FLDigi paths are configured, confirm their companion fields: <code>FLRig XMLRPC Port</code>, <code>FLDigi XMLRPC Host</code>, and <code>FLDigi XMLRPC Port</code>. In plain terms, these tell FIO where the running program is listening on your computer.</li>
     <li><strong>Check-in File Path</strong>: folder where the FLDigi NCS tab writes its generated macro check-in files and end-net archive folder.</li>
-    <li><strong>FLDigi Log Path</strong>: folder or log location retained for future FLDigi log review features. Automatic roster intake from this path is hidden in 1.2.4 because noisy log parsing should not alter a live net roster.</li>
-    <li><strong>Message folders</strong>: FLMsg and FLAmp workflows rely on their companion message-path settings for imports, exports, and compose staging.</li>
-    <li><strong>Auto-Fill / Attempt Auto-Fill</strong>: asks FreqInOut to inspect likely local software folders and populate the Fast Light paths it can identify.</li>
+    <li><strong>FLDigi Log Path</strong>: folder or log location kept for FLDigi review and future support. It does not automatically change a live net roster.</li>
+    <li><strong>ICS/Messages</strong>: the FLMsg message folder FIO should use for compose/import/export workflows.</li>
+    <li><strong>FLAMP/rx</strong>: the FLAmp receive folder FIO should watch for received files and relay-related workflows.</li>
+    <li><strong>Auto-Fill / Find</strong>: asks FreqInOut to inspect likely local software folders and fill in paths it can identify. Review the results before saving.</li>
   </ul>
 
   <h3 id="settings-hf-groups-details">HF Operating Groups Details</h3>
   <ul class="section-list">
-    <li><strong>Mode choices</strong>: <code>Digi</code> and <code>SSB</code>.</li>
+    <li><strong>Purpose</strong>: HF Operating Groups are the reusable building blocks behind schedule rows. They describe the normal frequency, mode, VFO, FLDigi mode, and offset a group expects to use.</li>
+    <li><strong>Mode choices</strong>: choose <code>Digi</code> for digital-mode work such as JS8 or FLDigi workflows, and <code>SSB</code> for voice net work.</li>
     <li><strong>Voice sideband behavior</strong>: when <code>Mode=SSB</code>, <code>FLDigi Starting Mode</code> defaults to band-appropriate sideband (<code>LSB</code> on lower HF bands, <code>USB</code> on upper HF bands), and can be manually overridden.</li>
     <li><strong>Key table columns</strong>: <code>Group</code>, <code>Mode</code>, <code>Band</code>, <code>Freq (MHz)</code>, <code>VFO</code>, <code>FLDigi Starting Mode</code>, <code>FLDigi Offset</code>, <code>Auto-Tune</code>, <code>Use Condition Levels</code>.</li>
-    <li><strong>FLDigi Offset meaning</strong>: this is the expected/scheduled FLDigi carrier offset for the group row (for example <code>900</code>). If a schedule row omits FLDigi offset, the matching Operating Group value is used as the expected offset.</li>
-    <li><strong>Drift behavior</strong>: FLDigi offset may drift during operation and appear as off-schedule. Whether it is auto-corrected immediately or waits for a prompt depends on the FLDigi enforcement mode; active net operation can also suppress scheduler corrections.</li>
-    <li><strong>Condition levels</strong>: group-scoped; toggling one row applies to all rows for the same Group.</li>
+    <li><strong>Freq (MHz)</strong>: enter the operating frequency in MHz, such as <code>7.078</code>. This is the value FIO compares against the active schedule.</li>
+    <li><strong>VFO</strong>: choose the radio VFO the plan expects, usually <code>A</code> unless your station has a reason to use another VFO.</li>
+    <li><strong>FLDigi Offset meaning</strong>: this is the expected FLDigi audio offset for the group row, such as <code>900</code>. If a schedule row omits FLDigi offset, the matching Operating Group value is used as the expected offset.</li>
+    <li><strong>Auto-Tune</strong>: tells FIO this group is allowed to tune automatically when schedule enforcement calls for it. Leave it off when you want the operator to confirm changes manually.</li>
+    <li><strong>Drift behavior</strong>: FLDigi offset may move during operation and appear off plan. Whether FIO corrects it immediately or asks first depends on the FLDigi enforcement mode; active net operation can also suppress scheduler corrections.</li>
+    <li><strong>Condition levels</strong>: group-scoped; changing one row applies to all rows for the same Group.</li>
     <li><strong>Condition-level concept</strong>: condition levels let you pre-stage several operational postures without rewriting the whole schedule every time conditions change. Instead of editing frequency plans during an event, you can move the station's active level and let FreqInOut reveal only the rows meant for that level.</li>
   </ul>
 
   <h3 id="settings-local-comms-details">Local Comms Groups Details</h3>
   <ul class="section-list">
-    <li><strong>Purpose</strong>: local comms groups let you maintain non-HF resource profiles such as VHF/UHF or local coordination channels.</li>
-    <li><strong>Core fields</strong>: group, resource, mode, target, and notes define how the local profile should appear in the operator workflow.</li>
-    <li><strong>Practical use</strong>: keep the entries concise and operator-readable so they serve as quick references during local operations.</li>
+    <li><strong>Purpose</strong>: local comms groups let you maintain non-HF resource profiles such as VHF/UHF, repeaters, simplex channels, local nets, or nearby coordination channels.</li>
+    <li><strong>Group</strong>: the team or local operating group name.</li>
+    <li><strong>Resource</strong>: the practical resource name, such as a repeater, simplex channel, tactical channel, or local net.</li>
+    <li><strong>Mode</strong>: how operators use the resource, such as voice, packet, FLDigi, or another local mode name your group understands.</li>
+    <li><strong>Target</strong>: the frequency, repeater, talkgroup, node, or other destination operators need in order to use that resource.</li>
+    <li><strong>Notes</strong>: short local reminders, access details, tone information, role notes, or operating cautions.</li>
+    <li><strong>Practical use</strong>: keep entries concise and operator-readable. Local Comms Groups are references for SOP and local operations; they do not drive HF scheduler automation.</li>
   </ul>
 
   <h3 id="settings-varac-details">VarAC Settings Details</h3>
   <p><strong>Concept of use</strong>: treat the VarAC paths as three different jobs. <code>Incoming Files</code> is where files addressed to you arrive. <code>VarAC Outbox Directory</code> is where FreqInOut stages files that VarAC should transmit directly. <code>BBS Directory</code> is the live published file shelf remote stations can browse and pull from.</p>
   <ul class="section-list">
+    <li><strong>Recommended first setup</strong>: start with <code>VarAC Install Folder</code>, <code>Incoming Files</code>, and the normal BBS folders. Confirm basic send/receive and BBS behavior before enabling Managed BBS Services or VGuard.</li>
     <li><strong>VarAC Paths and Launch</strong>: section for the VarAC application path, launch command, INI path, incoming-file folder, and outbox folder.</li>
     <li><strong>BBS Management</strong>: section for the live BBS folder, BBS archive folder, BBS access settings, and allowed callsigns.</li>
     <li><strong>BBS Vault Settings</strong>: section for Managed BBS Services, vault session settings, FLAMP relay, and FIO managed locations.</li>
     <li><strong>BBS VGuard Settings</strong>: separate section for inbound file protection. VGuard is not the same service as the vault.</li>
     <li><strong>VarAC Install Folder</strong>: the VarAC program location. FreqInOut uses this for launch/orchestration and to help infer other VarAC resources.</li>
-    <li><strong>VarAC Launch Command (Advanced):</strong> advanced override. Leave this blank unless you need a special launch method, most often on Linux/Wine.</li>
+    <li><strong>VarAC Launch Command (Advanced):</strong> advanced override. Leave this blank unless VarAC needs a special start command on your station, most often on Linux/Wine.</li>
     <li><strong>VarAC Incoming Files</strong>: VarAC's receive folder for files delivered to you. This is not your BBS folder.</li>
     <li><strong>VarAC Outbox Directory</strong>: where FreqInOut stages files that VarAC should send directly. Use this for operator-to-operator delivery, not public BBS publication.</li>
     <li><strong>VarAC INI File</strong>: optional direct path to <code>VarAC.ini</code>. Use this when auto-detection is not enough or when you want to sync BBS policy from the authoritative INI.</li>
@@ -1266,7 +1289,7 @@
     <li><strong>List in root menu</strong>: the clearest normal administration model is to list locations in the root menu and let access policy decide who sees them. Hide a location only when you deliberately want direct-access behavior with no menu advertisement.</li>
     <li><strong>FLAMP relay workflow</strong>: remote stations can ask for queue listings, available blocks, and individual block payloads without you manually swapping files in and out of the live BBS folder. The root menu can show <code>BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - then refresh BBS.txt</code>. After the caller types <code>FLAMP</code>, FIO publishes separate helper files such as <code>LIST Q</code>, <code>LIST F277</code>, <code>BLKS 0,8,9 F277</code>, and <code>ROOT</code>. FIO is forgiving about the request word: <code>BLK</code>, <code>BLKS</code>, <code>BLOCK</code>, and <code>BLOCKS</code> all mean "make a block file" when block numbers are included. To look before requesting, use <code>LIST F277</code>; <code>BLKS F277</code> is treated as an incomplete block request and FIO will publish a helper notice instead of guessing.</li>
     <li><strong>Vault runtime status</strong>: <code>Settings</code>, <code>ControlFreq</code>, and the <code>Messages</code> BBS summary surface the last vault action so operators can tell whether the vault is enabled, active, reset, or degraded without opening logs.</li>
-    <li><strong>Recommended first setup</strong>: start with normal BBS folders and verify BBS copy/archive behavior first. Then initialize the Managed Vault, confirm the imported default location looks right, and only after that add protected alternate locations.</li>
+    <li><strong>Recommended Managed Vault setup</strong>: start with normal BBS folders and verify BBS copy/archive behavior first. Then initialize the Managed Vault, confirm the imported default location looks right, and only after that add protected alternate locations.</li>
     <li><strong>Credit</strong>: advanced VarAC BBS management in FreqInOut is being shaped with explicit credit to KG5RKW for the operational ideas behind Vault and VGuard.</li>
     <li><strong>VGuard concept</strong>: VGuard is not the same feature as Managed Vault. Vault decides what you publish into the live BBS. VGuard watches inbound VarAC file transfers and can log, delete, or quarantine files from unauthorized senders before they quietly blend into operator workflows.</li>
     <li><strong>Enable VGuard File Protection</strong>: turns on inbound file protection for received VarAC files.</li>
@@ -1291,12 +1314,14 @@
     <li><strong>Signature verification</strong>: <code>Verify signed .k2s/.b2s message files and signature sidecars</code> tells FreqInOut to look for supported signature patterns around FLAmp, VarAC, and BBS payloads and verify them against the available trusted keys.</li>
     <li><strong>Checksum verification</strong>: <code>Verify .k2s/.b2s checksum sidecars</code> tells FreqInOut to compare a payload against a separate digest sidecar when one exists. This is about file integrity, not signer identity.</li>
     <li><strong>Trusted hash actions</strong>: <code>Add</code>, <code>Import Hash File</code>, and <code>Remove Selected</code> manage hashes you want FreqInOut to treat as known-good reference values.</li>
-    <li><strong>GPG executable path</strong>: this tells FreqInOut which local GPG implementation to use for key and signature operations. On some systems this may be <code>gpg</code>; on others it may be a full path.</li>
+    <li><strong>GPG executable path</strong>: this tells FreqInOut which local GPG program to use for key and signature checks. On some systems this may be <code>gpg</code>; on others it may be a full path selected with Browse.</li>
     <li><strong>GPG actions</strong>: <code>Browse</code>, <code>Test</code>, <code>Refresh Keys</code>, <code>Import Key File</code>, <code>Import Armored Key</code>, and <code>Local-Sign Selected</code> manage the local trust environment used for signature verification.</li>
     <li><strong>What an armored key is</strong>: an armored key is a text-form public key block, usually starting with <code>-----BEGIN PGP PUBLIC KEY BLOCK-----</code>. It is easier to share in email or plain text than a binary key file.</li>
     <li><strong>What local-sign means</strong>: locally signing a key does not change the original sender's file. It records that your local trust store considers that public key verified enough for your own operational use.</li>
     <li><strong>Key table columns</strong>: <code>Trusted</code> shows whether the key is currently trusted for your station, <code>Fingerprint</code> is the unique long-form identifier you should compare carefully, and <code>User IDs</code> are the human-readable identities attached to that key.</li>
     <li><strong>Trusted hash table columns</strong>: <code>Use</code> enables or disables that reference hash, <code>Algorithm</code> identifies the digest type, <code>Hash</code> is the expected digest value, and <code>Label</code> is your human-readable reminder of what that hash represents.</li>
+    <li><strong>Default FLAmp signing key</strong>: chooses which local private key FIO should use when signing outbound FLAmp traffic. Leave auto-select on if you only have one private key and do not need to choose manually.</li>
+    <li><strong>Signing key passphrase</strong>: lets FIO check or save the passphrase in the operating system credential store. It is not saved directly in the normal FIO settings file.</li>
     <li><strong>Operational caution</strong>: do not treat a matching name or callsign in a key's user ID as sufficient proof by itself. The fingerprint is the safer identity anchor.</li>
   </ul>
 
@@ -1313,7 +1338,7 @@
   <p><strong>Concept of use</strong>: Custom Tools let you teach FreqInOut about helper programs that are specific to your station workflow but are not one of the built-in supported radio applications. Most often these are Python scripts, shell scripts, wrappers, emulators, or small utility launchers you want available from the same operational surface as the rest of the station tools.</p>
   <ul class="section-list">
     <li><strong>Name</strong>: the operator-facing label FreqInOut shows in Settings and Launch Control. Use a short, recognizable name that tells you what the tool is for.</li>
-    <li><strong>Launch Command</strong>: the exact command FreqInOut should run. This can be a script path, an executable, or a full command line with arguments if your workflow requires it.</li>
+    <li><strong>Launch Command</strong>: the exact command FreqInOut should run. This can be a script path, an executable, or a full command line with arguments if your workflow requires it. If you can start it from Terminal with that command, FIO should be able to use the same command.</li>
     <li><strong>What this is for</strong>: use Custom Tools for station-specific helpers that you want to launch intentionally from FIO, such as emulators, monitoring helpers, conversion scripts, or other repeat-use operational utilities.</li>
     <li><strong>What this is not for</strong>: do not use Custom Tools to replace the built-in FLRig, FLDigi, JS8Call, VarAC, or other first-class integrations unless you deliberately need a custom wrapper. Built-in integrations carry their own readiness checks and cross-tab behavior that generic tools do not.</li>
     <li><strong>Ordering</strong>: <code>Up</code> and <code>Down</code> control the order Custom Tools appear when surfaced in Launch Control.</li>
@@ -1325,17 +1350,22 @@
 
   <h3 id="settings-launch-control">Launch Control Details</h3>
   <ul class="section-list">
-    <li><strong>Per-app enablement</strong>: decides which supported tools FreqInOut will launch and manage.</li>
-    <li><strong>Startup toggles</strong>: controls which enabled tools should auto-start with the application.</li>
-    <li><strong>Order management</strong>: use <code>Up</code>, <code>Down</code>, and <code>Reset Default Order</code> to control startup sequencing.</li>
+    <li><strong>Launch All with FreqInOut</strong>: starts selected station tools when FIO starts. Use this when FIO is the normal front door for your operating session.</li>
+    <li><strong>Enabled</strong>: decides which supported tools FreqInOut may launch from this table.</li>
+    <li><strong>Launch on Startup</strong>: controls which enabled tools should auto-start with the application.</li>
+    <li><strong>Order management</strong>: use <code>Up</code>, <code>Down</code>, and <code>Reset Default Order</code> to control startup sequencing. This matters when one tool depends on another, such as JS8Spotter or CommStat needing JS8Call to be ready first.</li>
+    <li><strong>Launch Configured Now</strong>: starts the enabled tools in the displayed order without restarting FIO.</li>
+    <li><strong>Stop Launch Sequence</strong>: stops an in-progress launch sequence. It does not necessarily close programs that already started successfully.</li>
     <li><strong>Custom Tool crossover</strong>: Custom Tools configured in <code>Settings &gt; Custom Tools</code> also appear here, which lets you keep station-specific helpers near the same launch workflow as your built-in software stack.</li>
   </ul>
 
   <h3 id="settings-logging-diagnostics">Logging and Diagnostics Details</h3>
   <ul class="section-list">
-    <li><strong>Enable DEBUG For</strong>: temporarily raises logging detail for troubleshooting.</li>
-    <li><strong>Open Logs</strong> and <code>Open Log Folder</code>: quick access to active log output.</li>
-    <li><strong>Export Diagnostics</strong>: packages logs and troubleshooting context for support review.</li>
+    <li><strong>Logging Level</strong>: controls how much detail FIO writes to the log. Keep this disabled or low during normal use. INFO and DEBUG are best used only while troubleshooting because they can write more data and slightly reduce performance.</li>
+    <li><strong>Enable DEBUG For</strong>: temporarily raises logging detail for troubleshooting and then automatically returns to the previous logging level. This is safer than leaving DEBUG on indefinitely.</li>
+    <li><strong>Open Logs</strong>: opens the current log view so you can inspect recent activity.</li>
+    <li><strong>Open Log Folder</strong>: opens the folder where FIO stores log files.</li>
+    <li><strong>Export Diagnostics</strong>: packages logs and troubleshooting context for support review. Use this when a support helper needs more than a screenshot.</li>
   </ul>
 
   <h2 id="help">Help</h2>
