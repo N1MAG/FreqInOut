@@ -323,7 +323,7 @@
     <tbody>
       <tr><td>Activity</td><td><code>Group</code>, <code>Band/Freq</code>, <code>Callsigns Seen</code>, <code>Traffic</code></td></tr>
       <tr><td>Schedule Intersections</td><td><code>When</code>, <code>Overlaps</code>, <code>Group/Band/Freq</code></td></tr>
-      <tr><td>Message Summary</td><td><code>Type</code>, <code>Count</code>, <code>Details / BBS Aging Out</code></td></tr>
+      <tr><td>Unread Messages &amp; BBS Files</td><td><code>Source</code>, <code>Unread / Files</code>, <code>What needs attention</code>. <code>VarAC Direct</code> means unread normal VarAC messages. <code>VarAC BBS Files</code> means files currently in the live VarAC BBS folder, including files that may age out or be managed by the vault.</td></tr>
       <tr><td>Schedule Outlook</td><td><code>When/Day</code>, <code>Type</code>, <code>Group/Net</code>, <code>Band/Freq</code>, <code>Actions</code></td></tr>
       <tr><td>Propagation Forecast</td><td><code>Zone</code>, <code>Morning</code>, <code>Day</code>, <code>Night</code></td></tr>
     </tbody>
@@ -362,20 +362,26 @@
   <p><strong>CommStat dedupe</strong>: FIO now merges near-time mirrored CommStat status artifacts so the same real report is not shown twice when it is seen through CommStat tables and JS8Spotter-adjacent paths. The fused SitRep model stays responsible for map pinning and latest status by callsign.</p>
 
   <h3 id="messages-header-actions">Header Actions</h3>
+  <p><strong>Explain this to me</strong>: the top of Messages is meant to stay quiet while still giving you control. The normal row is for the inbox view, refresh timing, and the few actions most operators need during a session. Less common actions live under <code>More...</code>. BBS details are shown as a single status button so the tab does not turn into a long technical status line.</p>
   <table>
     <thead>
       <tr><th>Control</th><th>What It Does</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>Scan every</code></td><td>Sets folder scan cadence for file-backed message ingestion.</td></tr>
-      <tr><td><code>Refresh Now</code></td><td>Forces full refresh of file, JS8, and VarAC message sources.</td></tr>
-      <tr><td><code>Export to PDF</code></td><td>Exports current message view/report.</td></tr>
-      <tr><td><code>Delete Selected</code></td><td>Deletes checked rows from supported sources.</td></tr>
+      <tr><td><code>Inbox</code> / <code>Compose</code></td><td>Switches between received traffic review and outbound form staging.</td></tr>
+      <tr><td><code>Received</code></td><td>Limits the visible inbox to a time window such as recent traffic or any time.</td></tr>
+      <tr><td><code>Check</code></td><td>Controls how often FIO checks for new message activity while the Messages tab is open. Turning it off stops this visible-tab check without changing the rest of FIO.</td></tr>
+      <tr><td><code>Next check</code></td><td>Appears under the time display and counts down in calm five-second steps. It is a reassurance indicator, not a second-by-second task timer.</td></tr>
+      <tr><td><code>Refresh Now</code></td><td>Forces a full refresh of file, JS8, JS8Spotter, CommStat, and VarAC message sources.</td></tr>
       <tr><td><code>Mark All as Read</code></td><td>Marks currently filtered messages as read.</td></tr>
+      <tr><td><code>More...</code></td><td>Opens less common inbox actions such as export, delete selected, copy summary, and inbox help.</td></tr>
+      <tr><td><code>BBS Status</code></td><td>Shows a simple BBS health indicator such as <code>BBS OK</code>, <code>BBS Issue</code>, or <code>BBS Off</code>. Click it to see the detailed VarAC BBS and Managed Vault status.</td></tr>
+      <tr><td><code>BBS Manage</code></td><td>Opens BBS-focused actions, including VarAC BBS/Vault settings and BBS help.</td></tr>
       <tr><td><code>Hide Types</code></td><td>Opens a multi-select menu for message types that should stay hidden in the default view until you explicitly choose that type in <code>MSG Type...</code>.</td></tr>
       <tr><td><code>Showing: Local/UTC</code></td><td>Toggles displayed receive-time labels.</td></tr>
     </tbody>
   </table>
+  <p><strong>BBS status in plain language</strong>: <code>BBS OK</code> means the configured live BBS path is usable from FIO's point of view. <code>BBS Issue</code> usually means the BBS is enabled but the folder is missing or not configured. <code>BBS Off</code> means the BBS workflow is not currently enabled. For full BBS setup details, see <a href="#settings-varac-details">VarAC Settings Details</a>.</p>
 
   <h3 id="messages-pending">Pending JS8 MSGs</h3>
   <p><strong>Columns</strong>: <code>Callsign</code>, <code>Msg ID</code>, <code>Last Seen</code>, <code>Status</code>, <code>Actions</code>.</p>
@@ -443,6 +449,7 @@
   </ul>
 
   <h3 id="map-top-controls">Top Map Controls</h3>
+  <p><strong>Explain this to me</strong>: the top controls decide what kind of operating picture the map should show right now. Stations and links answer “who is active and who may hear whom?” Report layers answer “what has been reported from known station locations?” The report layers depend on <a href="#settings-js8call-details">JS8Spotter form mapping</a>, because FIO needs to know whether a form is weather, infrastructure, medical, or an alert before placing it on the map.</p>
   <table>
     <thead>
       <tr><th>Control</th><th>What It Does</th></tr>
@@ -457,8 +464,30 @@
       <tr><td><code>Refresh Links</code></td><td>Refreshes links and map overlays.</td></tr>
       <tr><td><code>Peer Sched Now</code></td><td>Toggle now-reachable overlay from peer schedules.</td></tr>
       <tr><td><code>SitRep Status</code></td><td>Toggle sitrep-status emphasis on map context.</td></tr>
+      <tr><td><code>Stations</code>, <code>Links</code>, <code>Weather</code>, <code>Alerts</code>, <code>Infrastructure</code></td><td>Layer controls above the map. Turn a layer on when it helps the current decision; turn it off when the map is too busy.</td></tr>
     </tbody>
   </table>
+
+  <h3 id="map-report-icons">Report Icons and Map Layers</h3>
+  <p><strong>What the icons mean</strong>: report icons are not generic decoration. They are a quick visual summary of received JS8Spotter form traffic from stations whose location is already known to FIO. The icon shape tells you the report family. The border and cluster behavior help keep the map readable when many reports arrive near the same area.</p>
+  <table>
+    <thead>
+      <tr><th>Layer</th><th>How to Read It</th><th>Where It Comes From</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Weather</code></td><td>Shows weather and storm reports. Icons summarize the likely condition such as temperature, rain, wind, lightning, snow, smoke, or fire-related weather. Severe reports receive stronger visual emphasis.</td><td>JS8Spotter forms mapped to Weather / Storm, plus supported weather-like hazard forms.</td></tr>
+      <tr><td><code>Alerts</code></td><td>Shows warning-style reports such as early warning, hazard, or important information that should be noticed quickly. These are useful for awareness but should still be read in Messages before action.</td><td>JS8Spotter forms mapped to Alert, Hazard / Early Warning, Intel / RFI, or similar alert purposes.</td></tr>
+      <tr><td><code>Infrastructure</code></td><td>Shows reports about local services and utilities. The square border distinguishes infrastructure from weather even when the symbol is visually similar, such as a water droplet.</td><td>JS8Spotter forms mapped to Infrastructure / Utilities, Area Assessment, Power, Water, Communications, or supported local condition reports.</td></tr>
+      <tr><td><code>Medical</code></td><td>Medical and hospital reports can be routed into the same map evidence model when enabled by the mapper. Use them as geographic awareness, not as a substitute for reading the full message.</td><td>JS8Spotter forms mapped to Medical / Hospital.</td></tr>
+    </tbody>
+  </table>
+  <ul class="section-list">
+    <li><strong>Clusters</strong>: when several reports are near each other, FIO groups them so the map stays readable. Zoom in or click the cluster/marker to inspect the report summary.</li>
+    <li><strong>Tooltips</strong>: hover or click to see the newest report time, severity, source callsigns, and a short summary. If the summary matters, open the matching row in <a href="#messages">Messages</a> to read the full report.</li>
+    <li><strong>Location rule</strong>: FIO does not guess a map point from free text alone. A report appears on the map when the sending station has a known operator/grid location.</li>
+    <li><strong>Layer control rule</strong>: use the controls above the map to enable or disable Stations, Links, Weather, Alerts, and Infrastructure. This keeps the working map from becoming cluttered during a busy event.</li>
+    <li><strong>Mapper cross-reference</strong>: if a form is not appearing where you expect, check <a href="#settings-js8call-details">Settings &gt; JS8Call Settings &gt; JS8Spotter Form Mapper</a>. The mapper decides whether a received JS8Spotter form flows to Messages, Map, Alerts, Net Control, or Status.</li>
+  </ul>
 
   <h3 id="map-drawer">Map Control Drawer</h3>
   <p>Use <code>Show Map Controls</code>/<code>Hide Map Controls</code> or the splitter handle toggle.</p>
@@ -1168,10 +1197,11 @@
     <li><strong>Auto-Classify</strong>: asks FreqInOut to make a first guess about each form. For example, common check-in forms are marked for Net Control, SitRep forms are marked for status/map use, and alert-type forms are marked for alert handling. Treat this as a starting point. Your group may use a form differently, and you can change the purpose or checkboxes before saving.</li>
     <li><strong>Purpose</strong>: describes what a JS8Spotter form means to your operation. This is the plain-language label FreqInOut uses to decide whether a form is a net check-in, a situation report, a weather report, a net notice, an information request, or something else. If a form should be ignored by FreqInOut, choose <code>Ignore</code>.</li>
     <li><strong>Messages</strong>: shows matching received JS8Spotter forms in the Messages tab. Turn this off for JS8Spotter forms you want FreqInOut to keep out of the operator message list.</li>
-    <li><strong>Map</strong>: lets a received JS8Spotter form count as map evidence when FreqInOut already knows where the sending station is. This does not guess a location from random form text. It only helps the map show that a known station has recent JS8Spotter form activity.</li>
-    <li><strong>Alert</strong>: makes unread matching JS8Spotter forms stand out as alerts in Messages. After the message is marked read, it behaves like a normal read message.</li>
+    <li><strong>Map</strong>: lets a received JS8Spotter form count as map evidence when FreqInOut already knows where the sending station is. This does not guess a location from random form text. It allows known-station reports to appear in map layers such as <a href="#map-report-icons">Weather, Alerts, Infrastructure, and Medical</a>.</li>
+    <li><strong>Alert</strong>: makes unread matching JS8Spotter forms stand out as alerts in Messages and lets alert-style forms feed the alert layer when map routing is also enabled. After the message is marked read, it behaves like a normal read message.</li>
     <li><strong>Net</strong>: lets Net Control workflows use that JS8Spotter form. This is how a group-specific check-in form can feed JS8 NCS without FreqInOut hard-coding every possible form number.</li>
     <li><strong>Status</strong>: lets a JS8Spotter form feed the shared status view when FreqInOut knows how to read that form's status fields. Today this is intentionally conservative: <code>F!104</code>, <code>F!301</code>, and <code>F!304</code> can become normalized status. Other JS8Spotter forms can still be routed to Messages, Map, Alerts, or Net Control, but deeper status field reading requires explicit support.</li>
+    <li><strong>Map category behavior</strong>: new JS8Spotter forms can often be routed by changing the mapper purpose and checkboxes, without a code change. A code change is only needed when FIO must understand new form-specific fields deeply enough to create a specialized summary, severity, or status value.</li>
     <li><strong>Default behavior</strong>: if you have not saved a custom mapper, FreqInOut keeps the legacy behavior for the standard known forms. Once you save mapper rows, the checkboxes become the source of truth for how those forms flow through FIO.</li>
     <li><strong>Auto-Fill status</strong>: after an auto-fill attempt, FIO reports what it found or what still needs attention. Treat this as setup guidance, not an error unless a feature you need remains missing.</li>
   </ul>

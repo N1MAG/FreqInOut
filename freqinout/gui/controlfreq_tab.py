@@ -360,10 +360,10 @@ class ControlFreqTab(QWidget):
         inter_header.setSectionResizeMode(2, QHeaderView.Stretch)
         intersection_layout.addWidget(self.intersection_table)
 
-        self.inbox_box = QGroupBox("Message Summary")
+        self.inbox_box = QGroupBox("Unread Messages & BBS Files")
         inbox_layout = QVBoxLayout(self.inbox_box)
         self.inbox_table = QTableWidget(0, 3)
-        self.inbox_table.setHorizontalHeaderLabels(["Type", "Count", "Details / BBS Aging Out"])
+        self.inbox_table.setHorizontalHeaderLabels(["Source", "Unread / Files", "What needs attention"])
         self._setup_table_defaults(self.inbox_table)
         inbox_header = self.inbox_table.horizontalHeader()
         inbox_header.setStretchLastSection(True)
@@ -4096,7 +4096,14 @@ class ControlFreqTab(QWidget):
         rows_out.extend(message_rows)
         rows_out.extend(bbs_rows)
         if rows_out and rows_out[0][0] not in {"No matches", "No data"}:
-            rows_out.sort(key=lambda row: str(row[0]).strip().upper())
+            order = {
+                "JS8": 0,
+                "SPOTTER": 1,
+                "SITREP": 2,
+                "VARAC DIRECT": 3,
+                "VARAC BBS FILES": 4,
+            }
+            rows_out.sort(key=lambda row: (order.get(str(row[0]).strip().upper(), 99), str(row[0]).strip().upper()))
         self._set_table_rows(self.inbox_table, rows_out)
         self._style_message_summary_rows()
         self._apply_elide_tooltips(self.inbox_table, 2)
@@ -4114,6 +4121,22 @@ class ControlFreqTab(QWidget):
                 count_val = int((count_item.text() or "0").strip())
             except Exception:
                 count_val = 0
+            detail_txt = (detail_item.text() if detail_item else "").strip()
+            if label == "VARAC BBS FILES":
+                detail_up = detail_txt.upper()
+                if "MISSING" in detail_up or "AGING" in detail_up:
+                    tone = palette["warn"]
+                elif count_val > 0:
+                    tone = palette["positive"]
+                else:
+                    tone = None
+                if tone is not None:
+                    for c in range(self.inbox_table.columnCount()):
+                        it = self.inbox_table.item(row, c)
+                        if it:
+                            it.setBackground(tone)
+                            it.setForeground(palette["text"])
+                continue
             if label == "VARAC BBS" and detail_item and detail_item.text().strip() not in {"", "-"}:
                 for c in range(self.inbox_table.columnCount()):
                     it = self.inbox_table.item(row, c)
@@ -4302,12 +4325,19 @@ class ControlFreqTab(QWidget):
         except Exception as e:
             log.debug("ControlFreq: inbox summary load failed: %s", e)
         rows_out: List[List[str]] = []
+        display_labels = {"JS8": "JS8", "Spotter": "Spotter", "VarAC": "VarAC Direct"}
         for key in ("JS8", "Spotter", "VarAC"):
             if search and search not in key.upper() and counts[key] == 0:
                 continue
             senders = sorted(top_senders[key].items(), key=lambda kv: kv[1], reverse=True)[:3]
-            sender_txt = ", ".join([f"{c}({n})" for c, n in senders]) or "-"
-            rows_out.append([key, str(counts[key]), sender_txt])
+            sender_txt = ", ".join([f"{c}({n})" for c, n in senders])
+            if sender_txt:
+                sender_txt = f"Unread from {sender_txt}"
+            elif key == "VarAC":
+                sender_txt = "No unread direct VarAC messages"
+            else:
+                sender_txt = "No unread messages"
+            rows_out.append([display_labels[key], str(counts[key]), sender_txt])
         sitrep_total = sitrep_counts["red"] + sitrep_counts["yellow"] + sitrep_counts["green"]
         sitrep_details = f"R:{sitrep_counts['red']}  Y:{sitrep_counts['yellow']}  G:{sitrep_counts['green']}"
         if not search or search in "SITREP" or sitrep_total > 0:
@@ -4351,15 +4381,20 @@ class ControlFreqTab(QWidget):
                 pass
             aging_out.sort(key=lambda item: item[0])
             aging_names = [name for _mtime, name in aging_out]
-            if len(aging_names) > 6:
-                aging_txt = ", ".join(aging_names[:6]) + f" +{len(aging_names) - 6} more"
+            detail_parts: List[str] = []
+            if all_names:
+                detail_parts.append(f"{len(all_names)} files in BBS folder")
             else:
-                aging_txt = ", ".join(aging_names)
-            if vault_note:
-                aging_txt = f"{aging_txt} | {vault_note}" if aging_txt else vault_note
-            row = ["VarAC BBS", str(len(all_names)), aging_txt or "-"]
+                detail_parts.append("No BBS files needing attention")
+            if aging_names:
+                detail_parts.append(f"{len(aging_names)} aging soon")
+            if vault_enabled:
+                detail_parts.append("Vault active")
+            aging_txt = " | ".join(detail_parts)
+            row = ["VarAC BBS Files", str(len(all_names)), aging_txt]
             search_hits = search and (
                 search in row[0].upper()
+                or search in "VARAC BBS"
                 or any(search in name.upper() for name in aging_names)
                 or any(search in name.upper() for name in all_names)
                 or search in vault_note.upper()
@@ -4367,11 +4402,11 @@ class ControlFreqTab(QWidget):
             if not search or search_hits:
                 return [row]
             return [["No matches", "0", "-"]]
-        note = "Not configured" if not bbs_dir_txt else "Missing directory"
-        if vault_note:
-            note = f"{note} | {vault_note}"
-        row = ["VarAC BBS", "0", note]
-        if not search or search in row[0].upper() or search in note.upper():
+        note = "BBS folder not configured" if not bbs_dir_txt else "BBS folder missing"
+        if vault_enabled:
+            note = f"{note} | Vault active"
+        row = ["VarAC BBS Files", "0", note]
+        if not search or search in row[0].upper() or search in "VARAC BBS" or search in note.upper():
             return [row]
         return [["No matches", "0", "-"]]
 

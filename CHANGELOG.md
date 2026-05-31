@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.6]
+- Added: Map report layers now render mapped JS8Spotter weather, alert, infrastructure, and medical-style reports as clear icons when the sender has known station location data.
+- Changed: Map layer controls for Stations, Links, Weather, Alerts, and Infrastructure now live above the map so operators can reduce clutter without opening an overlay box.
+- Changed: Messages now uses a cleaner inbox control row with visible-tab refresh choices, a five-second countdown under the time display, a single clickable BBS status indicator, and a More menu for less common actions.
+- Changed: Dropdown controls across the app now auto-fit their displayed text and popup width more consistently, improving Messages and JS8 NCS readability.
+- Changed: ControlFreq now labels direct VarAC messages and VarAC BBS folder files separately so the message summary is understandable at a glance.
+- Changed: Help and README content now explain map icon interpretation, JS8Spotter form mapping, Messages refresh/BBS behavior, Managed BBS, and first-run setup in plainer operator language.
+
 ## [1.2.5.8]
 - Fixed: JS8Spotter form display now understands prompt fields such as `TO[...]`, `ST[...]`, `GR[...]`, and `RM[...]`, so MAGNET forms like `F!701A`, `F!701B`, and `F!701C` display those answers in the proper form positions instead of leaving them as raw comment text.
 - Changed: JS8Spotter mapper defaults now recognize MAGNET `F!701A` and `F!701B` as SitRep / StatRep forms, including titles that use `STAT-REP`.

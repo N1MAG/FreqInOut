@@ -155,6 +155,7 @@ from freqinout.gui.theme import (
     normalize_ui_text_size,
     led_style,
     button_style,
+    fit_combo_box_to_contents,
 )
 from freqinout.version import __version__
 
@@ -3069,6 +3070,7 @@ class SettingsTab(QWidget):
         mapper_header_view.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         for col in range(3, 8):
             mapper_header_view.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.spotter_mapper_table.itemChanged.connect(self._on_spotter_mapper_item_changed)
         js8_v.addWidget(self.spotter_mapper_table)
         mapper_hint = QLabel(
             "Map each JS8Spotter form to its operational purpose so FIO can route it to Messages, Map, Alerts, Net Control, or status workflows."
@@ -7153,10 +7155,7 @@ class SettingsTab(QWidget):
     def _refresh_spotter_form_mapper(self) -> None:
         if not hasattr(self, "spotter_mapper_table"):
             return
-        try:
-            self.spotter_mapper_table.itemChanged.disconnect(self._on_spotter_mapper_item_changed)
-        except Exception:
-            pass
+        previous_signal_state = self.spotter_mapper_table.blockSignals(True)
         self._spotter_mapper_loading = True
         try:
             self.spotter_mapper_table.setRowCount(0)
@@ -7180,6 +7179,7 @@ class SettingsTab(QWidget):
 
                 purpose_combo = QComboBox()
                 purpose_combo.addItems(list(PURPOSE_OPTIONS))
+                fit_combo_box_to_contents(purpose_combo)
                 purpose = str(row.get("purpose") or "Generic Message")
                 if purpose_combo.findText(purpose) < 0:
                     purpose = "Generic Message"
@@ -7191,7 +7191,7 @@ class SettingsTab(QWidget):
                     self.spotter_mapper_table.setItem(row_idx, col, self._make_spotter_mapper_check_item(bool(row.get(key, False))))
         finally:
             self._spotter_mapper_loading = False
-            self.spotter_mapper_table.itemChanged.connect(self._on_spotter_mapper_item_changed)
+            self.spotter_mapper_table.blockSignals(previous_signal_state)
 
     def _on_spotter_mapper_changed(self, *_args) -> None:
         if self._spotter_mapper_loading:

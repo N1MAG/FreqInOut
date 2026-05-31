@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import html
 import json
 import shutil
 import sqlite3
@@ -53,7 +54,13 @@ try:
 except Exception:
     js8net = None
 from freqinout.core.logger import log
-from freqinout.core.js8_spotter_forms import form_codes_enabled_for
+from freqinout.core.js8_spotter_forms import (
+    PURPOSE_HAZARD,
+    PURPOSE_INFRASTRUCTURE,
+    PURPOSE_WEATHER,
+    form_codes_enabled_for,
+    forms_enabled_for,
+)
 from freqinout.core.perf_metrics import emit_span, span as perf_span
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.operator_activity import (
@@ -381,6 +388,19 @@ class StationPoint:
     lon: float = 0.0
 
 
+WEATHER_REPORT_MAX_AGE_SEC = 12 * 60 * 60
+ALERT_REPORT_MAX_AGE_SEC = 24 * 60 * 60
+INFRASTRUCTURE_REPORT_MAX_AGE_SEC = 24 * 60 * 60
+WEATHER_CLUSTER_DEGREES = 0.75
+
+WEATHER_SEVERITY_RANK = {
+    "unknown": 0,
+    "routine": 1,
+    "caution": 2,
+    "severe": 3,
+}
+
+
 def maidenhead_to_latlon(grid: str) -> Optional[tuple[float, float]]:
     """
     Convert Maidenhead grid locator to lat/lon (center of square/locator).
@@ -438,8 +458,13 @@ class StationsMapTab(QWidget):
         self.show_callsigns = False
         self.show_cities = False
         self.show_states = False
+        self.show_station_markers = True
+        self.show_link_paths = True
         self.show_grids = False
         self.show_grid_labels = False  # driven by the "Show grids" toggle
+        self.show_weather_reports = True
+        self.show_alert_reports = True
+        self.show_infrastructure_reports = True
         self.show_regions = False
         self.show_city_labels = False
         self.city_pop_min = 100000
@@ -604,6 +629,11 @@ class StationsMapTab(QWidget):
         apply_chk(self.show_states_chk, "show_states", "map_show_states", False)
         apply_chk(self.show_cities_chk, "show_cities", "map_show_cities", False)
         apply_chk(self.show_grid_labels_chk, "show_grids", "map_show_grids", False)
+        apply_chk(self.map_stations_chk, "show_station_markers", "map_show_station_markers", True)
+        apply_chk(self.map_links_chk, "show_link_paths", "map_show_link_paths", True)
+        apply_chk(self.map_weather_chk, "show_weather_reports", "map_show_weather_reports", True)
+        apply_chk(self.map_alerts_chk, "show_alert_reports", "map_show_alert_reports", True)
+        apply_chk(self.map_infrastructure_chk, "show_infrastructure_reports", "map_show_infrastructure_reports", True)
         # Map propagation overlay defaults OFF on every app launch.
         self.prop_overlay_enabled = False
         if self.prop_overlay_chk is not None:
@@ -667,6 +697,11 @@ class StationsMapTab(QWidget):
             self.settings.set("map_show_states", int(self.show_states_chk.isChecked()))
             self.settings.set("map_show_cities", int(self.show_cities_chk.isChecked()))
             self.settings.set("map_show_grids", int(self.show_grid_labels_chk.isChecked()))
+            self.settings.set("map_show_station_markers", int(self.map_stations_chk.isChecked()))
+            self.settings.set("map_show_link_paths", int(self.map_links_chk.isChecked()))
+            self.settings.set("map_show_weather_reports", int(self.map_weather_chk.isChecked()))
+            self.settings.set("map_show_alert_reports", int(self.map_alerts_chk.isChecked()))
+            self.settings.set("map_show_infrastructure_reports", int(self.map_infrastructure_chk.isChecked()))
             self.settings.set("map_city_pop_idx", self.city_pop_combo.currentIndex())
             if self.prop_overlay_chk is not None:
                 self.settings.set("map_prop_overlay", int(self.prop_overlay_chk.isChecked()))
@@ -1630,6 +1665,16 @@ class StationsMapTab(QWidget):
         self._sitrep_status_button = QPushButton("SitRep Status")
         self._sitrep_status_button.setCheckable(True)
         self._update_sitrep_status_button_visual(False)
+        self.map_stations_chk = QCheckBox("Stations")
+        self.map_links_chk = QCheckBox("Links")
+        self.map_weather_chk = QCheckBox("Weather Reports")
+        self.map_alerts_chk = QCheckBox("Alerts")
+        self.map_infrastructure_chk = QCheckBox("Infrastructure")
+        self.map_stations_chk.setToolTip("Show or hide station markers on the map.")
+        self.map_links_chk.setToolTip("Show or hide path lines on the map.")
+        self.map_weather_chk.setToolTip("Show or hide mapped Weather / Storm reports.")
+        self.map_alerts_chk.setToolTip("Show or hide mapped awareness and warning reports.")
+        self.map_infrastructure_chk.setToolTip("Show or hide mapped infrastructure and utility status reports.")
         for button in (
             self._refresh_links_button,
             self._now_reachable_button,
@@ -1672,7 +1717,19 @@ class StationsMapTab(QWidget):
         filter_grid.addWidget(self.recency_combo, 1, 3)
         filter_grid.addWidget(QLabel("Paths to"), 2, 0, alignment=Qt.AlignTop)
         filter_grid.addWidget(path_actions_row, 2, 1, 1, 5)
-        filter_grid.addWidget(self._now_reachable_label, 3, 0, 1, 6, alignment=Qt.AlignLeft)
+        layer_toggle_row = QWidget(filter_bar)
+        layer_toggle_layout = QHBoxLayout(layer_toggle_row)
+        layer_toggle_layout.setContentsMargins(0, 0, 0, 0)
+        layer_toggle_layout.setSpacing(14)
+        layer_toggle_layout.addWidget(self.map_stations_chk, 0)
+        layer_toggle_layout.addWidget(self.map_links_chk, 0)
+        layer_toggle_layout.addWidget(self.map_weather_chk, 0)
+        layer_toggle_layout.addWidget(self.map_alerts_chk, 0)
+        layer_toggle_layout.addWidget(self.map_infrastructure_chk, 0)
+        layer_toggle_layout.addStretch(1)
+        filter_grid.addWidget(QLabel("Map Layers"), 3, 0)
+        filter_grid.addWidget(layer_toggle_row, 3, 1, 1, 5)
+        filter_grid.addWidget(self._now_reachable_label, 4, 0, 1, 6, alignment=Qt.AlignLeft)
         filter_grid.setColumnStretch(6, 1)
         map_layout.addWidget(filter_bar)
 
@@ -1703,6 +1760,11 @@ class StationsMapTab(QWidget):
         self.show_states_chk.stateChanged.connect(self._on_show_states_changed)
         self.show_cities_chk.stateChanged.connect(self._on_show_cities_changed)
         self.show_grid_labels_chk.stateChanged.connect(self._on_show_grid_labels_changed)
+        self.map_stations_chk.stateChanged.connect(self._on_map_stations_changed)
+        self.map_links_chk.stateChanged.connect(self._on_map_links_changed)
+        self.map_weather_chk.stateChanged.connect(self._on_map_weather_changed)
+        self.map_alerts_chk.stateChanged.connect(self._on_map_alerts_changed)
+        self.map_infrastructure_chk.stateChanged.connect(self._on_map_infrastructure_changed)
         self.city_pop_combo.currentIndexChanged.connect(self._on_city_pop_changed)
         self.link_mode_combo.currentIndexChanged.connect(self._on_link_mode_changed)
         self.group_filter_combo.currentIndexChanged.connect(self._on_group_filter_changed)
@@ -3745,6 +3807,9 @@ class StationsMapTab(QWidget):
 
     def _load_spotter_map_activity(self) -> Dict[str, Dict]:
         map_codes = self._spotter_form_codes_for_flag("map")
+        if map_codes is not None:
+            weather_codes = self._spotter_weather_form_codes_for_map() or set()
+            map_codes = set(map_codes) - set(weather_codes)
         if map_codes is not None and not map_codes:
             return {}
         cache_key = ("spotter_map_activity", tuple(sorted(map_codes)) if map_codes is not None else "__legacy__")
@@ -3799,6 +3864,533 @@ class StationsMapTab(QWidget):
             }
         self._query_cache_set(cache_key, dict(out))
         return out
+
+    def _spotter_weather_form_codes_for_map(self) -> Optional[set[str]]:
+        try:
+            return forms_enabled_for(self.settings, purpose=PURPOSE_WEATHER, flag="map")
+        except Exception:
+            return set()
+
+    def _spotter_alert_form_codes_for_map(self) -> set[str]:
+        try:
+            return forms_enabled_for(self.settings, purpose=PURPOSE_HAZARD, flag="map") or set()
+        except Exception:
+            return set()
+
+    def _spotter_infrastructure_form_codes_for_map(self) -> set[str]:
+        try:
+            codes = forms_enabled_for(self.settings, purpose=PURPOSE_INFRASTRUCTURE, flag="map") or set()
+            status_codes = forms_enabled_for(self.settings, flag="status") or set()
+            codes |= {code for code in status_codes if code in {"F!301", "F!304", "F!306"}}
+            return codes
+        except Exception:
+            return set()
+
+    @staticmethod
+    def _classify_weather_text(text: object) -> tuple[str, str]:
+        lower = str(text or "").lower()
+        severe_terms = (
+            "tornado",
+            "warning",
+            "flash flood",
+            "flooding",
+            "wildfire",
+            "evacuation",
+            "damaging wind",
+            "hail",
+            "severe",
+        )
+        caution_terms = (
+            "watch",
+            "thunderstorm",
+            "lightning",
+            "heavy rain",
+            "high wind",
+            "ice",
+            "freezing",
+            "snow",
+            "smoke",
+            "heat",
+        )
+        severity = "routine"
+        if any(term in lower for term in severe_terms):
+            severity = "severe"
+        elif any(term in lower for term in caution_terms):
+            severity = "caution"
+
+        strong_wind = any(term in lower for term in ("high wind", "damaging wind", "gust", "wind gust"))
+        if any(term in lower for term in ("wildfire", "fire", "smoke")):
+            icon = "fire"
+        elif any(term in lower for term in ("flood", "high water", "washed out")):
+            icon = "flood"
+        elif any(term in lower for term in ("tornado", "thunderstorm", "lightning", "hail")):
+            icon = "storm"
+        elif any(term in lower for term in ("snow", "ice", "freezing", "sleet")):
+            icon = "snow"
+        elif any(term in lower for term in ("heat", "hot", "temperature")):
+            icon = "heat"
+        elif strong_wind:
+            icon = "wind"
+        elif any(term in lower for term in ("rain", "precip", "drizzle")):
+            icon = "rain"
+        elif any(term in lower for term in ("wind", "breeze")):
+            icon = "wind"
+        else:
+            icon = "general"
+        return icon, severity
+
+    @staticmethod
+    def _summarize_weather_text(text: object, *, max_len: int = 150) -> str:
+        lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+        if not lines:
+            return "Weather report received"
+        preferred_terms = (
+            "weather",
+            "storm",
+            "rain",
+            "wind",
+            "snow",
+            "ice",
+            "flood",
+            "fire",
+            "smoke",
+            "temperature",
+            "visibility",
+            "remarks",
+            "narrative",
+            "status",
+        )
+        picked: List[str] = []
+        for line in lines:
+            lower = line.lower()
+            if "(no response)" in lower or "unknown" == lower:
+                continue
+            if any(term in lower for term in preferred_terms):
+                picked.append(line)
+            if len(picked) >= 3:
+                break
+        if not picked:
+            picked = [line for line in lines[:3] if "(no response)" not in line.lower()]
+        summary = "; ".join(picked).strip() or "Weather report received"
+        return summary[: max_len - 1].rstrip() + "..." if len(summary) > max_len else summary
+
+    def _load_spotter_weather_reports(self) -> List[Dict[str, object]]:
+        weather_codes = self._spotter_weather_form_codes_for_map()
+        if weather_codes is not None and not weather_codes:
+            return []
+        cache_key = ("spotter_weather_reports", tuple(sorted(weather_codes)) if weather_codes is not None else "__none__")
+        cached = self._query_cache_get(cache_key)
+        if isinstance(cached, list):
+            return [dict(row) for row in cached if isinstance(row, dict)]
+        out: List[Dict[str, object]] = []
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return out
+        if not db_path.exists():
+            return out
+        cutoff = time.time() - WEATHER_REPORT_MAX_AGE_SEC
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            form_ids = sorted(code[2:] for code in (weather_codes or set()) if str(code).startswith("F!"))
+            if not form_ids:
+                conn.close()
+                return out
+            placeholders = ",".join(["?"] * len(form_ids))
+            cur.execute(
+                f"""
+                SELECT from_call, form_id, utc_ts, utc_str, decoded_text, raw_text
+                FROM spotter_traffic
+                WHERE form_id IN ({placeholders})
+                  AND COALESCE(utc_ts, 0) >= ?
+                ORDER BY COALESCE(utc_ts, 0) DESC, id DESC
+                LIMIT 1500
+                """,
+                tuple(form_ids) + (cutoff,),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("StationsMap: failed to load Spotter weather reports: %s", e)
+            return out
+        for from_call, form_id, utc_ts, utc_str, decoded_text, raw_text in rows:
+            call = str(from_call or "").strip().upper()
+            if not call:
+                continue
+            text = str(decoded_text or raw_text or "")
+            icon, severity = self._classify_weather_text(text)
+            form = str(form_id or "").strip().upper()
+            if form and not form.startswith("F!"):
+                form = f"F!{form}"
+            out.append(
+                {
+                    "callsign": call,
+                    "form_id": form,
+                    "utc_ts": self._safe_float(utc_ts, 0.0),
+                    "utc_str": str(utc_str or "").strip(),
+                    "summary": self._summarize_weather_text(text),
+                    "icon": icon,
+                    "severity": severity,
+                }
+            )
+        self._query_cache_set(cache_key, list(out))
+        return out
+
+    @staticmethod
+    def _classify_alert_text(text: object) -> tuple[str, str]:
+        lower = str(text or "").lower()
+        if any(term in lower for term in ("warning", "evacuation", "immediate", "urgent", "emergency", "severe")):
+            severity = "severe"
+        elif any(term in lower for term in ("watch", "alert", "awareness", "prepare", "activation", "expected")):
+            severity = "caution"
+        else:
+            severity = "routine"
+        if any(term in lower for term in ("evacuation", "shelter")):
+            icon = "evacuation"
+        elif any(term in lower for term in ("rfi", "request for information", "information needed")):
+            icon = "rfi"
+        elif any(term in lower for term in ("warning", "alert", "awareness", "emergency")):
+            icon = "warning"
+        else:
+            icon = "notice"
+        return icon, severity
+
+    @staticmethod
+    def _classify_infrastructure_text(text: object) -> tuple[str, str]:
+        lower = str(text or "").lower()
+        if any(term in lower for term in ("not functioning", "down", "outage", "failed", "unavailable", "not available")):
+            severity = "severe"
+        elif any(term in lower for term in ("partially", "degraded", "unstable", "intermittent", "limited", "reduced")):
+            severity = "caution"
+        elif any(term in lower for term in ("functioning", "stable", "normal", "available")):
+            severity = "routine"
+        else:
+            severity = "unknown"
+        if any(term in lower for term in ("road", "bridge", "transport", "closure", "highway", "route")):
+            icon = "transport"
+        elif any(term in lower for term in ("general utility", "local services", "utility status")):
+            icon = "utility"
+        elif any(term in lower for term in ("water", "public water", "sewage", "waste")):
+            icon = "water"
+        elif any(term in lower for term in ("internet", "phone", "cell", "communications", "radio", "comms")):
+            icon = "comms"
+        elif any(term in lower for term in ("power", "grid", "generator", "electric")):
+            icon = "power"
+        else:
+            icon = "utility"
+        return icon, severity
+
+    @staticmethod
+    def _summarize_operational_text(text: object, *, max_len: int = 160) -> str:
+        lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+        useful = [
+            line
+            for line in lines
+            if "(no response)" not in line.lower()
+            and line.lower() not in {"unknown", "n/a"}
+        ]
+        summary = "; ".join(useful[:3]).strip() or "Report received"
+        return summary[: max_len - 1].rstrip() + "..." if len(summary) > max_len else summary
+
+    def _load_spotter_layer_reports(
+        self,
+        *,
+        layer_name: str,
+        form_codes: set[str],
+        max_age_sec: int,
+        classifier,
+        summarizer,
+    ) -> List[Dict[str, object]]:
+        if not form_codes:
+            return []
+        cache_key = (f"spotter_{layer_name}_reports", tuple(sorted(form_codes)))
+        cached = self._query_cache_get(cache_key)
+        if isinstance(cached, list):
+            return [dict(row) for row in cached if isinstance(row, dict)]
+        out: List[Dict[str, object]] = []
+        try:
+            db_path = get_config_dir() / "config" / "freqinout_nets.db"
+        except Exception:
+            return out
+        if not db_path.exists():
+            return out
+        cutoff = time.time() - max_age_sec
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            form_ids = sorted(code[2:] for code in form_codes if str(code).startswith("F!"))
+            if not form_ids:
+                conn.close()
+                return out
+            placeholders = ",".join(["?"] * len(form_ids))
+            cur.execute(
+                f"""
+                SELECT from_call, form_id, utc_ts, utc_str, decoded_text, raw_text
+                FROM spotter_traffic
+                WHERE form_id IN ({placeholders})
+                  AND COALESCE(utc_ts, 0) >= ?
+                ORDER BY COALESCE(utc_ts, 0) DESC, id DESC
+                LIMIT 1500
+                """,
+                tuple(form_ids) + (cutoff,),
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            log.debug("StationsMap: failed to load Spotter %s reports: %s", layer_name, e)
+            return out
+        for from_call, form_id, utc_ts, utc_str, decoded_text, raw_text in rows:
+            call = str(from_call or "").strip().upper()
+            if not call:
+                continue
+            text = str(decoded_text or raw_text or "")
+            icon, severity = classifier(text)
+            form = str(form_id or "").strip().upper()
+            if form and not form.startswith("F!"):
+                form = f"F!{form}"
+            out.append(
+                {
+                    "callsign": call,
+                    "form_id": form,
+                    "utc_ts": self._safe_float(utc_ts, 0.0),
+                    "utc_str": str(utc_str or "").strip(),
+                    "summary": summarizer(text),
+                    "icon": icon,
+                    "severity": severity,
+                }
+            )
+        self._query_cache_set(cache_key, list(out))
+        return out
+
+    def _load_spotter_alert_reports(self) -> List[Dict[str, object]]:
+        return self._load_spotter_layer_reports(
+            layer_name="alert",
+            form_codes=self._spotter_alert_form_codes_for_map(),
+            max_age_sec=ALERT_REPORT_MAX_AGE_SEC,
+            classifier=self._classify_alert_text,
+            summarizer=self._summarize_operational_text,
+        )
+
+    def _load_spotter_infrastructure_reports(self) -> List[Dict[str, object]]:
+        return self._load_spotter_layer_reports(
+            layer_name="infrastructure",
+            form_codes=self._spotter_infrastructure_form_codes_for_map(),
+            max_age_sec=INFRASTRUCTURE_REPORT_MAX_AGE_SEC,
+            classifier=self._classify_infrastructure_text,
+            summarizer=self._summarize_operational_text,
+        )
+
+    def _build_weather_map_events(self, station_lookup: Dict[str, StationPoint]) -> List[Dict[str, object]]:
+        reports = self._cached_map_value(
+            "spotter_weather_reports",
+            {},
+            self._load_spotter_weather_reports,
+            ttl_sec=6.0,
+        )
+        if not reports:
+            return []
+        buckets: Dict[tuple[int, int], Dict[str, object]] = {}
+        now = time.time()
+        for report in reports:
+            if not isinstance(report, dict):
+                continue
+            call = str(report.get("callsign") or "").strip().upper()
+            pt = station_lookup.get(call)
+            if pt is None:
+                base = JS8LogLinkIndexer._base_callsign(call)
+                pt = station_lookup.get(base) if base else None
+            if pt is None:
+                continue
+            lat = float(pt.lat or 0.0)
+            lon = float(pt.lon or 0.0)
+            key = (
+                int(round(lat / WEATHER_CLUSTER_DEGREES)),
+                int(round(lon / WEATHER_CLUSTER_DEGREES)),
+            )
+            severity = str(report.get("severity") or "unknown").strip().lower()
+            icon = str(report.get("icon") or "general").strip().lower()
+            rank = WEATHER_SEVERITY_RANK.get(severity, 0)
+            ts = self._safe_float(report.get("utc_ts"), 0.0)
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "lat_sum": 0.0,
+                    "lon_sum": 0.0,
+                    "count": 0,
+                    "latest_ts": 0.0,
+                    "max_rank": 0,
+                    "severity": "unknown",
+                    "icon": "general",
+                    "reports": [],
+                    "callsigns": set(),
+                },
+            )
+            bucket["lat_sum"] = float(bucket.get("lat_sum", 0.0)) + lat
+            bucket["lon_sum"] = float(bucket.get("lon_sum", 0.0)) + lon
+            bucket["count"] = int(bucket.get("count", 0) or 0) + 1
+            bucket["callsigns"].add(call)
+            if rank > int(bucket.get("max_rank", 0) or 0) or ts >= self._safe_float(bucket.get("latest_ts"), 0.0):
+                if rank >= int(bucket.get("max_rank", 0) or 0):
+                    bucket["icon"] = icon
+                    bucket["severity"] = severity
+                    bucket["max_rank"] = rank
+            if ts > self._safe_float(bucket.get("latest_ts"), 0.0):
+                bucket["latest_ts"] = ts
+            bucket["reports"].append(report)
+
+        events: List[Dict[str, object]] = []
+        for bucket in buckets.values():
+            count = max(1, int(bucket.get("count", 0) or 0))
+            reports_sorted = sorted(
+                [r for r in bucket.get("reports", []) if isinstance(r, dict)],
+                key=lambda r: self._safe_float(r.get("utc_ts"), 0.0),
+                reverse=True,
+            )
+            latest_ts = self._safe_float(bucket.get("latest_ts"), 0.0)
+            age_minutes = int(max(0.0, now - latest_ts) // 60) if latest_ts else 0
+            age_label = f"{age_minutes}m ago" if age_minutes < 120 else f"{age_minutes // 60}h ago"
+            calls = sorted(str(c) for c in bucket.get("callsigns", set()) if str(c))
+            detail_lines = [
+                f"Weather Reports: {count}",
+                f"Newest: {age_label}",
+                f"Severity: {str(bucket.get('severity') or 'unknown').title()}",
+                f"Sources: {', '.join(calls[:6])}" + ("..." if len(calls) > 6 else ""),
+            ]
+            for report in reports_sorted[:4]:
+                summary = str(report.get("summary") or "Weather report received").strip()
+                source = str(report.get("callsign") or "").strip().upper()
+                form = str(report.get("form_id") or "").strip()
+                detail_lines.append(f"{source} {form}: {summary}".strip())
+            events.append(
+                {
+                    "lat": float(bucket.get("lat_sum", 0.0)) / count,
+                    "lon": float(bucket.get("lon_sum", 0.0)) / count,
+                    "count": count,
+                    "icon": str(bucket.get("icon") or "general"),
+                    "severity": str(bucket.get("severity") or "unknown"),
+                    "latest_ts": latest_ts,
+                    "age": age_label,
+                    "tooltip": "<br/>".join(html.escape(line) for line in detail_lines if line),
+                }
+            )
+        return sorted(
+            events,
+            key=lambda row: (
+                WEATHER_SEVERITY_RANK.get(str(row.get("severity") or "unknown"), 0),
+                self._safe_float(row.get("latest_ts"), 0.0),
+            ),
+            reverse=True,
+        )
+
+    def _build_spotter_operational_events(
+        self,
+        station_lookup: Dict[str, StationPoint],
+        *,
+        layer_name: str,
+        display_label: str,
+        reports_loader,
+    ) -> List[Dict[str, object]]:
+        reports = self._cached_map_value(
+            f"spotter_{layer_name}_reports",
+            {},
+            reports_loader,
+            ttl_sec=6.0,
+        )
+        if not reports:
+            return []
+        buckets: Dict[tuple[int, int], Dict[str, object]] = {}
+        now = time.time()
+        for report in reports:
+            if not isinstance(report, dict):
+                continue
+            call = str(report.get("callsign") or "").strip().upper()
+            pt = station_lookup.get(call)
+            if pt is None:
+                base = JS8LogLinkIndexer._base_callsign(call)
+                pt = station_lookup.get(base) if base else None
+            if pt is None:
+                continue
+            lat = float(pt.lat or 0.0)
+            lon = float(pt.lon or 0.0)
+            key = (
+                int(round(lat / WEATHER_CLUSTER_DEGREES)),
+                int(round(lon / WEATHER_CLUSTER_DEGREES)),
+            )
+            severity = str(report.get("severity") or "unknown").strip().lower()
+            icon = str(report.get("icon") or "general").strip().lower()
+            rank = WEATHER_SEVERITY_RANK.get(severity, 0)
+            ts = self._safe_float(report.get("utc_ts"), 0.0)
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "lat_sum": 0.0,
+                    "lon_sum": 0.0,
+                    "count": 0,
+                    "latest_ts": 0.0,
+                    "max_rank": 0,
+                    "severity": "unknown",
+                    "icon": icon,
+                    "reports": [],
+                    "callsigns": set(),
+                },
+            )
+            bucket["lat_sum"] = float(bucket.get("lat_sum", 0.0)) + lat
+            bucket["lon_sum"] = float(bucket.get("lon_sum", 0.0)) + lon
+            bucket["count"] = int(bucket.get("count", 0) or 0) + 1
+            bucket["callsigns"].add(call)
+            if rank > int(bucket.get("max_rank", 0) or 0) or ts >= self._safe_float(bucket.get("latest_ts"), 0.0):
+                if rank >= int(bucket.get("max_rank", 0) or 0):
+                    bucket["icon"] = icon
+                    bucket["severity"] = severity
+                    bucket["max_rank"] = rank
+            if ts > self._safe_float(bucket.get("latest_ts"), 0.0):
+                bucket["latest_ts"] = ts
+            bucket["reports"].append(report)
+
+        events: List[Dict[str, object]] = []
+        for bucket in buckets.values():
+            count = max(1, int(bucket.get("count", 0) or 0))
+            reports_sorted = sorted(
+                [r for r in bucket.get("reports", []) if isinstance(r, dict)],
+                key=lambda r: self._safe_float(r.get("utc_ts"), 0.0),
+                reverse=True,
+            )
+            latest_ts = self._safe_float(bucket.get("latest_ts"), 0.0)
+            age_minutes = int(max(0.0, now - latest_ts) // 60) if latest_ts else 0
+            age_label = f"{age_minutes}m ago" if age_minutes < 120 else f"{age_minutes // 60}h ago"
+            calls = sorted(str(c) for c in bucket.get("callsigns", set()) if str(c))
+            detail_lines = [
+                f"{display_label}: {count}",
+                f"Newest: {age_label}",
+                f"Severity: {str(bucket.get('severity') or 'unknown').title()}",
+                f"Sources: {', '.join(calls[:6])}" + ("..." if len(calls) > 6 else ""),
+            ]
+            for report in reports_sorted[:4]:
+                summary = str(report.get("summary") or "Report received").strip()
+                source = str(report.get("callsign") or "").strip().upper()
+                form = str(report.get("form_id") or "").strip()
+                detail_lines.append(f"{source} {form}: {summary}".strip())
+            events.append(
+                {
+                    "lat": float(bucket.get("lat_sum", 0.0)) / count,
+                    "lon": float(bucket.get("lon_sum", 0.0)) / count,
+                    "count": count,
+                    "icon": str(bucket.get("icon") or "general"),
+                    "severity": str(bucket.get("severity") or "unknown"),
+                    "latest_ts": latest_ts,
+                    "age": age_label,
+                    "tooltip": "<br/>".join(html.escape(line) for line in detail_lines if line),
+                }
+            )
+        return sorted(
+            events,
+            key=lambda row: (
+                WEATHER_SEVERITY_RANK.get(str(row.get("severity") or "unknown"), 0),
+                self._safe_float(row.get("latest_ts"), 0.0),
+            ),
+            reverse=True,
+        )
 
     def _load_sitrep_state_rollup(self, report_group: str = "") -> List[Dict[str, object]]:
         report_group_key = str(report_group or "").strip().upper() or "__ALL__"
@@ -5077,8 +5669,13 @@ class StationsMapTab(QWidget):
             bool(self.show_callsigns),
             bool(self.show_states),
             bool(self.show_cities),
+            bool(self.show_station_markers),
+            bool(self.show_link_paths),
             bool(self.show_grids),
             bool(self.show_grid_labels),
+            bool(self.show_weather_reports),
+            bool(self.show_alert_reports),
+            bool(self.show_infrastructure_reports),
             bool(self.show_regions),
             int(self.city_pop_min),
             bool(self.prop_overlay_enabled),
@@ -5328,6 +5925,7 @@ class StationsMapTab(QWidget):
 
         # Spread overlapping stations with the same base lat/lon
         markers = []
+        weather_station_lookup: Dict[str, StationPoint] = {}
         base_map: Dict[tuple[float, float], List[StationPoint]] = {}
         my_call = (self.settings.get("operator_callsign", "") or "").strip().upper()
         traffic_calls = {cs.upper() for cs in stats_lookup.keys()}
@@ -5367,6 +5965,17 @@ class StationsMapTab(QWidget):
             )
         for pt in self.stations:
             cs_upper = pt.callsign.upper()
+            if self._marker_station_matches_filters(
+                cs_upper,
+                group_filter="" if sitrep_mode else group_filter,
+                region_filter=region_filter,
+                my_call=my_call,
+                allow_self=True,
+            ):
+                weather_station_lookup[cs_upper] = pt
+                base_cs = JS8LogLinkIndexer._base_callsign(cs_upper)
+                if base_cs:
+                    weather_station_lookup.setdefault(base_cs, pt)
             if not self._marker_station_matches_filters(
                 cs_upper,
                 group_filter="" if sitrep_mode else group_filter,
@@ -5396,6 +6005,28 @@ class StationsMapTab(QWidget):
                     continue
             key = (round(pt.lat, 4), round(pt.lon, 4))
             base_map.setdefault(key, []).append(pt)
+
+        weather_events = self._build_weather_map_events(weather_station_lookup) if self.show_weather_reports else []
+        alert_events = (
+            self._build_spotter_operational_events(
+                weather_station_lookup,
+                layer_name="alert",
+                display_label="Alerts",
+                reports_loader=self._load_spotter_alert_reports,
+            )
+            if self.show_alert_reports
+            else []
+        )
+        infrastructure_events = (
+            self._build_spotter_operational_events(
+                weather_station_lookup,
+                layer_name="infrastructure",
+                display_label="Infrastructure Reports",
+                reports_loader=self._load_spotter_infrastructure_reports,
+            )
+            if self.show_infrastructure_reports
+            else []
+        )
 
         def offset_positions(base_lat: float, base_lon: float, items: List[StationPoint]):
             if len(items) == 1:
@@ -5522,14 +6153,19 @@ class StationsMapTab(QWidget):
                     ttl_sec=6.0,
                 )
 
-        self._map_marker_count = len(markers)
-        self._map_link_count = len(links)
+        display_markers = markers if self.show_station_markers else []
+        display_links = links if self.show_link_paths else []
+        self._map_marker_count = len(display_markers)
+        self._map_link_count = len(display_links)
         self._last_map_render_input_sig = map_input_sig
 
         if self.web is not None and self._map_initialized and self._map_file and not force_reload:
             self._push_map_payload(
-                markers,
-                links,
+                display_markers,
+                display_links,
+                weather_events=weather_events,
+                alert_events=alert_events,
+                infrastructure_events=infrastructure_events,
                 sitrep_state_summary=sitrep_state_summary,
                 sitrep_summary_group=sitrep_summary_group,
                 sitrep_summary_enabled=sitrep_summary_enabled,
@@ -5555,11 +6191,17 @@ class StationsMapTab(QWidget):
         geojson_urls = [u for u in (geojson_us, geojson_ca, geojson_mx, fema_geojson) if u]
         # For webview reloads, keep bootstrap HTML lightweight and push live data
         # after loadFinished to avoid serializing the same payload twice.
-        bootstrap_markers = markers if self.web is None else []
-        bootstrap_links = links if self.web is None else []
+        bootstrap_markers = display_markers if self.web is None else []
+        bootstrap_links = display_links if self.web is None else []
+        bootstrap_weather_events = weather_events if self.web is None else []
+        bootstrap_alert_events = alert_events if self.web is None else []
+        bootstrap_infrastructure_events = infrastructure_events if self.web is None else []
         html = self._build_leaflet_html(
             bootstrap_markers,
             links=bootstrap_links,
+            weather_events=bootstrap_weather_events,
+            alert_events=bootstrap_alert_events,
+            infrastructure_events=bootstrap_infrastructure_events,
             max_zoom=12,
             leaflet_js=leaflet_js,
             leaflet_css=leaflet_css,
@@ -5594,8 +6236,11 @@ class StationsMapTab(QWidget):
             self._last_map_payload_sig = None
             self._last_map_render_input_sig = None
             self._pending_map_payload = {
-                "markers": markers,
-                "links": links,
+                "markers": display_markers,
+                "links": display_links,
+                "weather_events": weather_events,
+                "alert_events": alert_events,
+                "infrastructure_events": infrastructure_events,
                 "now_reachable_enabled": bool(self._now_reachable_enabled),
                 "sitrep_state_summary": sitrep_state_summary,
                 "sitrep_summary_group": sitrep_summary_group,
@@ -5645,10 +6290,13 @@ class StationsMapTab(QWidget):
             self._push_map_payload(
                 payload.get("markers", []),
                 payload.get("links", []),
-                payload.get("now_reachable_enabled"),
-                payload.get("sitrep_state_summary", []),
-                payload.get("sitrep_summary_group", ""),
-                payload.get("sitrep_summary_enabled"),
+                weather_events=payload.get("weather_events", []),
+                alert_events=payload.get("alert_events", []),
+                infrastructure_events=payload.get("infrastructure_events", []),
+                now_reachable_enabled=payload.get("now_reachable_enabled"),
+                sitrep_state_summary=payload.get("sitrep_state_summary", []),
+                sitrep_summary_group=payload.get("sitrep_summary_group", ""),
+                sitrep_summary_enabled=payload.get("sitrep_summary_enabled"),
             )
         if self._map_visible and (self._map_dirty or self._render_requested_during_load):
             self._render_requested_during_load = False
@@ -5679,6 +6327,9 @@ class StationsMapTab(QWidget):
         self,
         markers: List[Dict],
         links: List[Dict],
+        weather_events: Optional[List[Dict[str, object]]] = None,
+        alert_events: Optional[List[Dict[str, object]]] = None,
+        infrastructure_events: Optional[List[Dict[str, object]]] = None,
         now_reachable_enabled: Optional[bool] = None,
         sitrep_state_summary: Optional[List[Dict[str, object]]] = None,
         sitrep_summary_group: str = "",
@@ -5690,6 +6341,9 @@ class StationsMapTab(QWidget):
             self._pending_map_payload = {
                 "markers": list(markers),
                 "links": list(links),
+                "weather_events": list(weather_events or []),
+                "alert_events": list(alert_events or []),
+                "infrastructure_events": list(infrastructure_events or []),
                 "now_reachable_enabled": (
                     bool(self._now_reachable_enabled)
                     if now_reachable_enabled is None
@@ -5717,6 +6371,9 @@ class StationsMapTab(QWidget):
                 {
                     "markers": markers,
                     "links": links,
+                    "weather_events": list(weather_events or []),
+                    "alert_events": list(alert_events or []),
+                    "infrastructure_events": list(infrastructure_events or []),
                     "now_reachable_enabled": now_reachable_flag,
                     "sitrep_state_summary": list(sitrep_state_summary or []),
                     "sitrep_summary_group": str(sitrep_summary_group or ""),
@@ -5725,7 +6382,7 @@ class StationsMapTab(QWidget):
             )
         except Exception:
             payload = (
-                '{"markers": [], "links": [], "sitrep_state_summary": [], "sitrep_summary_group": "", '
+                '{"markers": [], "links": [], "weather_events": [], "alert_events": [], "infrastructure_events": [], "sitrep_state_summary": [], "sitrep_summary_group": "", '
                 f'"now_reachable_enabled": {str(now_reachable_flag).lower()}, '
                 f'"sitrep_summary_enabled": {str(sitrep_summary_flag).lower()}}}'
             )
@@ -5771,6 +6428,9 @@ class StationsMapTab(QWidget):
         cities_geojson: Optional[str],
         city_min_pop: int,
         show_city_labels: bool,
+        weather_events: Optional[List[Dict[str, object]]] = None,
+        alert_events: Optional[List[Dict[str, object]]] = None,
+        infrastructure_events: Optional[List[Dict[str, object]]] = None,
         initial_view: Optional[Dict[str, float]] = None,
         prop_overlay_enabled: bool = False,
         prop_region_scores: Optional[Dict[str, Dict]] = None,
@@ -5790,6 +6450,9 @@ class StationsMapTab(QWidget):
         now_reachable_enabled = str(bool(self._now_reachable_enabled)).lower()
         markers_json = json.dumps(markers)
         links_json = json.dumps(links)
+        weather_events_json = json.dumps(weather_events or [])
+        alert_events_json = json.dumps(alert_events or [])
+        infrastructure_events_json = json.dumps(infrastructure_events or [])
         sitrep_state_summary_json = json.dumps(sitrep_state_summary or [])
         sitrep_summary_group_json = json.dumps(str(sitrep_summary_group or "").strip().upper())
         sitrep_summary_enabled_json = json.dumps(bool(sitrep_summary_enabled))
@@ -6224,7 +6887,7 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .cs-tooltip {{ background: {tooltip_bg}; color: {tooltip_text}; border: 1px solid {tooltip_border}; padding: 5px 7px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.4); z-index: 10000; }}
     .leaflet-tooltip.cs-tooltip {{ z-index: 10000; pointer-events: none; }}
     .leaflet-popup.cs-tooltip {{ z-index: 10001; }}
-    .detail-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; min-width: 150px; max-width: 220px; font-size: {panel_font_px:.1f}px; }}
+    .detail-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; width: 260px; max-width: calc(100vw - 34px); box-sizing: border-box; font-size: {panel_font_px:.1f}px; line-height: 1.35; white-space: normal; overflow-wrap: anywhere; word-break: normal; }}
     .zoom-display {{ padding: 4px 8px; font-size: {panel_font_px:.1f}px; background: {legend_bg}; color: {legend_text}; border: 1px solid {tooltip_border}; }}
     .legend-box {{ background: {legend_bg}; color: {legend_text}; padding: 8px 12px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {legend_font_px:.1f}px; line-height: 1.35; max-width: min(100%, 860px); box-sizing: border-box; }}
     .summary-panel {{ background: {legend_bg}; color: {legend_text}; padding: 6px 8px; border: 1px solid {tooltip_border}; border-radius: 4px; font-size: {panel_font_px:.1f}px; line-height: 1.35; min-width: 180px; max-width: 240px; }}
@@ -6241,6 +6904,36 @@ function addGridLabels(res, level, bounds, maxLabels) {
     .legend-sep {{ display: inline-block; width: 0; height: 12px; border-left: 1px solid {tooltip_border}; opacity: 0.55; }}
     .legend-item {{ display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; }}
     .legend-swatch {{ display: inline-block; min-width: 12px; text-align: center; }}
+    .wx-marker {{ width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid #455A64; background: #ECEFF1; box-shadow: 0 2px 6px rgba(0,0,0,0.35); position: relative; box-sizing: border-box; }}
+    .wx-marker svg {{ width: 21px; height: 21px; display: block; }}
+    .wx-severe {{ border-color: #B71C1C; }}
+    .wx-caution {{ border-color: #E65100; }}
+    .wx-routine {{ border-color: #1565C0; }}
+    .wx-unknown {{ border-color: #546E7A; }}
+    .wx-kind-general {{ background: #ECEFF1; color: #455A64; }}
+    .wx-kind-rain {{ background: #E3F2FD; color: #1565C0; }}
+    .wx-kind-storm {{ background: #F3E5F5; color: #6A1B9A; }}
+    .wx-kind-wind {{ background: #E0F7FA; color: #00838F; }}
+    .wx-kind-snow {{ background: #E1F5FE; color: #0277BD; }}
+    .wx-kind-flood {{ background: #E0F2F1; color: #00695C; }}
+    .wx-kind-fire {{ background: #FFF3E0; color: #E65100; }}
+    .wx-kind-heat {{ background: #FFEBEE; color: #C62828; }}
+    .wx-count {{ position: absolute; right: -7px; top: -7px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: #263238; color: white; font-size: 10px; line-height: 16px; text-align: center; font-weight: 700; border: 1px solid rgba(255,255,255,0.85); box-sizing: border-box; }}
+    .op-marker {{ width: 34px; height: 34px; border-radius: 7px; display: flex; align-items: center; justify-content: center; border: 2px solid #455A64; background: #ECEFF1; box-shadow: 0 2px 6px rgba(0,0,0,0.35); position: relative; box-sizing: border-box; }}
+    .op-marker svg {{ width: 21px; height: 21px; display: block; }}
+    .op-severe {{ border-color: #B71C1C; }}
+    .op-caution {{ border-color: #E65100; }}
+    .op-routine {{ border-color: #1565C0; }}
+    .op-unknown {{ border-color: #546E7A; }}
+    .op-layer-alert {{ background: #FFF8E1; color: #F57F17; }}
+    .op-layer-infrastructure {{ background: #E8F5E9; color: #2E7D32; }}
+    .op-kind-power {{ background: #FFFDE7; color: #F9A825; }}
+    .op-kind-water {{ background: #E3F2FD; color: #1565C0; }}
+    .op-kind-comms {{ background: #E0F7FA; color: #00838F; }}
+    .op-kind-transport {{ background: #EFEBE9; color: #5D4037; }}
+    .op-kind-warning {{ background: #FFF8E1; color: #F57F17; }}
+    .op-kind-evacuation {{ background: #FFEBEE; color: #C62828; }}
+    .op-kind-rfi {{ background: #EDE7F6; color: #5E35B1; }}
   </style>
 </head>
 <body>
@@ -6262,6 +6955,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
     window.propBandColors = {json.dumps(prop_colors)};
     const markers = {markers_json};
     const links = {links_json};
+    const weatherEvents = {weather_events_json};
+    const alertEvents = {alert_events_json};
+    const infrastructureEvents = {infrastructure_events_json};
     let sitrepStateSummary = {sitrep_state_summary_json};
     let sitrepSummaryGroup = {sitrep_summary_group_json};
     let sitrepSummaryEnabled = {sitrep_summary_enabled_json};
@@ -6471,6 +7167,83 @@ function addGridLabels(res, level, bounds, maxLabels) {
 
     const stationsLayer = L.layerGroup().addTo(map);
     const linksLayer = L.layerGroup().addTo(map);
+    const weatherLayer = L.layerGroup().addTo(map);
+    const alertLayer = L.layerGroup().addTo(map);
+    const infrastructureLayer = L.layerGroup().addTo(map);
+
+    function weatherSvg(kind) {{
+      const common = "fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'";
+      if (kind === 'storm') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M7 18a4 4 0 1 1 .9-7.9A6 6 0 0 1 19 12.5 3.5 3.5 0 0 1 18 19h-2"/><path ${{common}} d="M13 13l-3 5h4l-2 4"/></svg>`;
+      if (kind === 'rain') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M7 17a4 4 0 1 1 .9-7.9A6 6 0 0 1 19 11.5 3.5 3.5 0 0 1 18 18H8"/><path ${{common}} d="M8 21l1-2M13 21l1-2M18 21l1-2"/></svg>`;
+      if (kind === 'wind') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M3 8h12a3 3 0 1 0-3-3"/><path ${{common}} d="M3 13h16a3 3 0 1 1-3 3"/><path ${{common}} d="M3 18h8"/></svg>`;
+      if (kind === 'snow') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 2v20M4.9 4.9l14.2 14.2M2 12h20M4.9 19.1L19.1 4.9"/></svg>`;
+      if (kind === 'fire') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 22c4 0 7-3 7-7 0-3-2-5-4-7 .2 2-.8 3.2-2 4-1-4-4-6-4-9-3 2-5 6-5 10 0 5 3.5 9 8 9z"/></svg>`;
+      if (kind === 'flood') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M3 16c2 0 2-1 4-1s2 1 4 1 2-1 4-1 2 1 4 1 2-1 2-1"/><path ${{common}} d="M3 20c2 0 2-1 4-1s2 1 4 1 2-1 4-1 2 1 4 1 2-1 2-1"/><path ${{common}} d="M12 3l5 8H7l5-8z"/></svg>`;
+      if (kind === 'heat') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0z"/><path ${{common}} d="M12 9v8"/></svg>`;
+      return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M7 18a4 4 0 1 1 .9-7.9A6 6 0 0 1 19 12.5 3.5 3.5 0 0 1 18 19H8"/></svg>`;
+    }}
+
+    function weatherIcon(event) {{
+      const severity = (event.severity || 'unknown').toLowerCase();
+      const kind = (event.icon || 'general').toLowerCase();
+      const count = Number(event.count || 0);
+      const badge = count > 1 ? `<span class="wx-count">${{count > 99 ? '99+' : count}}</span>` : '';
+      return L.divIcon({{
+        className: '',
+        html: `<div class="wx-marker wx-${{severity}} wx-kind-${{kind}}">${{weatherSvg(kind)}}${{badge}}</div>`,
+        iconSize: [34, 34],
+        iconAnchor: [17, 17]
+      }});
+    }}
+
+    function renderWeatherEvents(list) {{
+      weatherLayer.clearLayers();
+      (list || []).forEach(event => {{
+        if (event.lat === undefined || event.lon === undefined) return;
+        const marker = L.marker([event.lat, event.lon], {{icon: weatherIcon(event), pane: 'stationsPane'}});
+        const tipText = event.tooltip || 'Weather report received';
+        marker.on('mouseover', function() {{ showDetail(tipText); }});
+        marker.on('click', function() {{ showDetail(tipText); }});
+        weatherLayer.addLayer(marker);
+      }});
+    }}
+
+    function operationalSvg(kind, layerType) {{
+      const common = "fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'";
+      if (kind === 'power') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M13 2L5 14h6l-1 8 8-12h-6l1-8z"/></svg>`;
+      if (kind === 'water') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 3s6 6.4 6 11a6 6 0 0 1-12 0c0-4.6 6-11 6-11z"/></svg>`;
+      if (kind === 'comms') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M5 12.5a10 10 0 0 1 14 0"/><path ${{common}} d="M8.5 16a5 5 0 0 1 7 0"/><path ${{common}} d="M12 20h.01"/></svg>`;
+      if (kind === 'transport') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M6 19L10 3h4l4 16"/><path ${{common}} d="M8 11h8M7 15h10"/></svg>`;
+      if (kind === 'evacuation') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 3l9 18H3L12 3z"/><path ${{common}} d="M12 9v5M12 17h.01"/></svg>`;
+      if (kind === 'rfi') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M9 9a3 3 0 1 1 4.5 2.6c-1 .6-1.5 1.2-1.5 2.4"/><path ${{common}} d="M12 18h.01"/><circle ${{common}} cx="12" cy="12" r="10"/></svg>`;
+      if (kind === 'warning' || layerType === 'alert') return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M12 3l9 18H3L12 3z"/><path ${{common}} d="M12 9v5M12 17h.01"/></svg>`;
+      return `<svg viewBox="0 0 24 24" aria-hidden="true"><path ${{common}} d="M4 8h16M4 16h16M8 4v16M16 4v16"/></svg>`;
+    }}
+
+    function operationalIcon(event, layerType) {{
+      const severity = (event.severity || 'unknown').toLowerCase();
+      const kind = (event.icon || 'general').toLowerCase();
+      const count = Number(event.count || 0);
+      const badge = count > 1 ? `<span class="wx-count">${{count > 99 ? '99+' : count}}</span>` : '';
+      return L.divIcon({{
+        className: '',
+        html: `<div class="op-marker op-${{severity}} op-layer-${{layerType}} op-kind-${{kind}}">${{operationalSvg(kind, layerType)}}${{badge}}</div>`,
+        iconSize: [34, 34],
+        iconAnchor: [17, 17]
+      }});
+    }}
+
+    function renderOperationalEvents(layer, list, layerType) {{
+      layer.clearLayers();
+      (list || []).forEach(event => {{
+        if (event.lat === undefined || event.lon === undefined) return;
+        const marker = L.marker([event.lat, event.lon], {{icon: operationalIcon(event, layerType), pane: 'stationsPane'}});
+        const tipText = event.tooltip || 'Report received';
+        marker.on('mouseover', function() {{ showDetail(tipText); }});
+        marker.on('click', function() {{ showDetail(tipText); }});
+        layer.addLayer(marker);
+      }});
+    }}
 
     function renderMarkers(list) {{
       stationsLayer.clearLayers();
@@ -6577,6 +7350,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
       if (!payload) return;
       if (payload.markers) renderMarkers(payload.markers);
       if (payload.links) renderLinks(payload.links);
+      if (payload.weather_events) renderWeatherEvents(payload.weather_events);
+      if (payload.alert_events) renderOperationalEvents(alertLayer, payload.alert_events, 'alert');
+      if (payload.infrastructure_events) renderOperationalEvents(infrastructureLayer, payload.infrastructure_events, 'infrastructure');
       if (Object.prototype.hasOwnProperty.call(payload, 'now_reachable_enabled')) {{
         nowReachableEnabled = !!payload.now_reachable_enabled;
         updateLegend();
@@ -6595,6 +7371,9 @@ function addGridLabels(res, level, bounds, maxLabels) {
     window.updateMapData({{
       markers: markers,
       links: links,
+      weather_events: weatherEvents,
+      alert_events: alertEvents,
+      infrastructure_events: infrastructureEvents,
       sitrep_state_summary: sitrepStateSummary,
       sitrep_summary_group: sitrepSummaryGroup,
       sitrep_summary_enabled: sitrepSummaryEnabled
@@ -6632,6 +7411,31 @@ function addGridLabels(res, level, bounds, maxLabels) {
         self.show_grid_labels = enabled
         self._save_display_preferences()
         self._request_map_refresh(level="light", reason="toggle_grids")
+
+    def _on_map_stations_changed(self, state):
+        self.show_station_markers = bool(state)
+        self._save_display_preferences()
+        self._request_map_refresh(level="medium", reason="toggle_station_markers")
+
+    def _on_map_links_changed(self, state):
+        self.show_link_paths = bool(state)
+        self._save_display_preferences()
+        self._request_map_refresh(level="medium", reason="toggle_link_paths")
+
+    def _on_map_weather_changed(self, state):
+        self.show_weather_reports = bool(state)
+        self._save_display_preferences()
+        self._request_map_refresh(level="medium", reason="toggle_weather")
+
+    def _on_map_alerts_changed(self, state):
+        self.show_alert_reports = bool(state)
+        self._save_display_preferences()
+        self._request_map_refresh(level="medium", reason="toggle_alerts")
+
+    def _on_map_infrastructure_changed(self, state):
+        self.show_infrastructure_reports = bool(state)
+        self._save_display_preferences()
+        self._request_map_refresh(level="medium", reason="toggle_infrastructure")
 
     def _on_show_regions_changed(self, state):
         self.show_regions = bool(state)

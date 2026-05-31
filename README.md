@@ -1,6 +1,6 @@
 # FreqInOut
 
-FreqInOut is a cross-workflow HF operations console for amateur radio. It unifies net control (FLDigi/JS8Call), schedule enforcement, SOP action reminders, operator database tooling, message management (JS8/FLMSG/FLAMP/VarAC), and map-based link intelligence in one desktop UI, with UTC-native data handling and practical safeguards for live operating conditions.
+FreqInOut is a desktop operations console for amateur radio. It helps an operator answer three practical questions: where do I need to be, when do I need to be there, and what do I do when traffic or reports arrive? It brings scheduling, net control, message review, map awareness, operator history, SOP reminders, and VarAC BBS file handling into one place without trying to replace the radio programs you already use.
 
 <p align="center">
   <a href="https://github.com/N1MAG/FreqInOut/releases/download/release-assets/ControlFreq_tab.png">
@@ -13,10 +13,10 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 
 ## Highlights
 
-- ControlFreq operations dashboard with Frequency Control, Schedule Outlook, Message Summary, propagation forecast, and View presets/chips for card layout control
+- ControlFreq operations dashboard with Frequency Control, Schedule Outlook, unread message and BBS file awareness, propagation forecast, and View presets/chips for card layout control
 - Offline propagation modeling (Modeled/Actual/Blended) with lower-48 targeting (Region/State/Operator) and historical-outcome blending
-- SitRep status pipeline from CommStatOne and JS8Spotter forms (`F!104`, `F!301`, `F!304`) with latest-signal-wins logic across ControlFreq, Operators, and Map
-- Map intelligence with link filters, propagation overlay, SitRep-only mode, and schedule-risk/QSY awareness
+- SitRep, weather, alert, infrastructure, and medical awareness from CommStat and JS8Spotter forms, routed by operator-friendly form mapping
+- Map intelligence with station/link layers, weather and infrastructure report icons, alert overlays, propagation, SitRep-only mode, and schedule-risk/QSY awareness
 - UTC-native HF + Net scheduling with controlled enforcement, busy deferral, and NET override behavior
 - SOP Builder v2 with `HF SOP` and `Local Comms SOP` categories, conflict-aware save-time resolution, and Daily interval support
 - Net control operations for both FLDigi and JS8Call (start/track/save/end workflows)
@@ -24,10 +24,29 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Local operations expansion: `Local Operators` roster tab and `NCS-Local` net control tab
 - Net resources catalog workflow via SitRepNet.com or custom JSON: import JSON into managed Net Resources and promote selected entries into active Net Schedule
 - Launch orchestration with configurable start order, per-app startup toggles, global startup mode, and continue-on-failure handling
-- Messages center for JS8/FLMSG/FLAMP/VarAC plus VarAC BBS workflows (view/archive/delete, aging visibility, auto-archive support), including GPG/PGP and Hash signature verification
+- Messages center for JS8, JS8Spotter, CommStat, FLMSG, FLAMP, and VarAC traffic, with visible-tab refresh controls, BBS status, archive/delete actions, and GPG/PGP or hash verification
+- Managed VarAC BBS support for publishing a clean live BBS folder, organizing BBS file sets behind simple menu names, auto-archiving old BBS files, and protecting inbound VarAC files with VGuard-style sender checks
 - Operator History with CSV import/export, group/role standardization, trust tools, sorting/filtering, SitRep chip updates, and VarAC callsign-tag sync
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
+
+## What FIO Helps You Do
+
+- Keep the station on the expected frequency, mode, and schedule while still letting the operator pause, hold, or override when live traffic requires it.
+- Run FLDigi/SSB and JS8Call nets with rosters, check-ins, traffic tracking, acknowledgements, and saved records.
+- Review incoming traffic from JS8Call, JS8Spotter, CommStat, FLMsg, FLAmp, and VarAC in one Messages tab instead of checking several folders and programs by hand.
+- Stage outbound forms for FLMsg, FLAmp, VarAC Outbox, or VarAC BBS from the Messages Compose workflow.
+- Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
+- Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
+
+## What's New in v1.2.6
+
+- Map report layers now show weather, alert, infrastructure, and medical-style JS8Spotter reports as clear icons when the sender has a known station location.
+- Map layer controls for Stations, Links, Weather, Alerts, and Infrastructure sit above the map so operators can reduce clutter quickly during busy events.
+- JS8Spotter Form Mapper help now explains how form purposes route traffic to Messages, Map layers, Alerts, JS8 Net Control, and shared status views.
+- Messages has a cleaner one-row inbox control layout, a simple clickable BBS status indicator, a less distracting five-second refresh countdown, and a More menu for less common actions.
+- Dropdowns across FIO auto-fit their text more reliably, including Messages and JS8 NCS controls.
+- The help guide and README were refreshed to explain map icons, Messages refresh/BBS behavior, JS8Spotter form mapping, Managed BBS, and first-run expectations in plainer language.
 
 ## What's New in v1.2.5.7
 

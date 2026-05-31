@@ -26,7 +26,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="tab.controlfreq",
         anchor="controlfreq",
         title="ControlFreq Help",
-        summary="Frequency control, schedule awareness, activity panels, and operator decision support.",
+        summary="Frequency control, schedule awareness, activity panels, unread message and BBS file awareness, and operator decision support.",
     ),
     "controlfreq.actions": HelpContext(
         key="controlfreq.actions",
@@ -38,7 +38,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="tab.messages",
         anchor="messages",
         title="Messages Help",
-        summary="Inbox review, message filters, and traffic actions across JS8, FL Suite, and VarAC.",
+        summary="Inbox review, visible-tab refresh, BBS status, message filters, and traffic actions.",
     ),
     "messages.compose": HelpContext(
         key="messages.compose",
@@ -62,7 +62,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="tab.map",
         anchor="map",
         title="Map Help",
-        summary="Map layers, filters, traffic overlays, and station-visibility controls.",
+        summary="Map layers, report icons, filters, traffic overlays, and station-visibility controls.",
     ),
     "tab.station-health": HelpContext(
         key="tab.station-health",
@@ -80,7 +80,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="map.controls",
         anchor="map-top-controls",
         title="Map Controls Help",
-        summary="Top-level map filters and control drawer behavior.",
+        summary="Top-level map filters, station/link/report layers, and control drawer behavior.",
     ),
     "map.paths": HelpContext(
         key="map.paths",
