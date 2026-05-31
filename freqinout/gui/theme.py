@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Tuple
 
 from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtWidgets import QComboBox
 
 
 THEMES: Dict[str, Dict[str, str]] = {
@@ -348,6 +349,71 @@ def led_style(state: str, theme: Dict[str, str]) -> str:
     return f"background-color: {color}; border-radius: 7px;"
 
 
+def _combo_box_text_width(combo: QComboBox) -> Tuple[int, int]:
+    metrics = combo.fontMetrics()
+    longest_text = combo.currentText() or ""
+    longest_width = metrics.horizontalAdvance(longest_text)
+    count = combo.count()
+    sample_limit = min(count, 250)
+    for idx in range(sample_limit):
+        text = combo.itemText(idx)
+        width = metrics.horizontalAdvance(text)
+        if width > longest_width:
+            longest_width = width
+            longest_text = text
+    if count > sample_limit:
+        for idx in range(max(sample_limit, count - 25), count):
+            text = combo.itemText(idx)
+            width = metrics.horizontalAdvance(text)
+            if width > longest_width:
+                longest_width = width
+                longest_text = text
+    return longest_width, len(longest_text)
+
+
+def fit_combo_box_to_contents(combo: QComboBox) -> None:
+    try:
+        if combo is None or combo.property("fio_no_auto_fit"):
+            return
+        if combo.count() <= 0 and not combo.currentText():
+            return
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        text_width, text_len = _combo_box_text_width(combo)
+        closed_width = min(max(text_width + 48, 76), 360)
+        popup_width = min(max(text_width + 64, closed_width), 520)
+        if combo.maximumWidth() > combo.minimumWidth() and combo.minimumWidth() < closed_width:
+            combo.setMinimumWidth(closed_width)
+        combo.setMinimumContentsLength(min(max(combo.minimumContentsLength(), text_len), 34))
+        view = combo.view()
+        if view is not None and view.minimumWidth() < popup_width:
+            view.setMinimumWidth(popup_width)
+    except Exception:
+        return
+
+
+def fit_existing_combo_boxes(app) -> None:
+    if app is None:
+        return
+    try:
+        for widget in app.allWidgets():
+            if isinstance(widget, QComboBox):
+                fit_combo_box_to_contents(widget)
+    except Exception:
+        return
+
+
+def fit_child_combo_boxes(container) -> None:
+    if container is None:
+        return
+    try:
+        if isinstance(container, QComboBox):
+            fit_combo_box_to_contents(container)
+        for widget in container.findChildren(QComboBox):
+            fit_combo_box_to_contents(widget)
+    except Exception:
+        return
+
+
 def app_stylesheet(theme: Dict[str, str]) -> str:
     return (
         "QWidget {"
@@ -487,3 +553,4 @@ def apply_app_theme(app, theme: Dict[str, str], *, ui_text_scale: float = 1.00) 
     pal.setColor(QPalette.HighlightedText, qcolor(theme["text"]))
     app.setPalette(pal)
     app.setStyleSheet(app_stylesheet(theme))
+    fit_existing_combo_boxes(app)

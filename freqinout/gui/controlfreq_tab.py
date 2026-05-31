@@ -360,10 +360,10 @@ class ControlFreqTab(QWidget):
         inter_header.setSectionResizeMode(2, QHeaderView.Stretch)
         intersection_layout.addWidget(self.intersection_table)
 
-        self.inbox_box = QGroupBox("Message Summary")
+        self.inbox_box = QGroupBox("Unread Messages & BBS Files")
         inbox_layout = QVBoxLayout(self.inbox_box)
         self.inbox_table = QTableWidget(0, 3)
-        self.inbox_table.setHorizontalHeaderLabels(["Type", "Count", "Details / BBS Aging Out"])
+        self.inbox_table.setHorizontalHeaderLabels(["Source", "Unread / Files", "What needs attention"])
         self._setup_table_defaults(self.inbox_table)
         inbox_header = self.inbox_table.horizontalHeader()
         inbox_header.setStretchLastSection(True)
@@ -4175,7 +4175,14 @@ class ControlFreqTab(QWidget):
         rows_out.extend(message_rows)
         rows_out.extend(bbs_rows)
         if rows_out and rows_out[0][0] not in {"No matches", "No data"}:
-            rows_out.sort(key=lambda row: str(row[0]).strip().upper())
+            order = {
+                "JS8": 0,
+                "SPOTTER": 1,
+                "SITREP": 2,
+                "VARAC DIRECT": 3,
+                "VARAC BBS FILES": 4,
+            }
+            rows_out.sort(key=lambda row: (order.get(str(row[0]).strip().upper(), 99), str(row[0]).strip().upper()))
         self._set_table_rows(self.inbox_table, rows_out)
         self._style_message_summary_rows()
         self._apply_elide_tooltips(self.inbox_table, 2)
@@ -4193,6 +4200,22 @@ class ControlFreqTab(QWidget):
                 count_val = int((count_item.text() or "0").strip())
             except Exception:
                 count_val = 0
+            detail_txt = (detail_item.text() if detail_item else "").strip()
+            if label == "VARAC BBS FILES":
+                detail_up = detail_txt.upper()
+                if "MISSING" in detail_up or "AGING" in detail_up or "DUE NOW" in detail_up or "DUE SOON" in detail_up:
+                    tone = palette["warn"]
+                elif count_val > 0:
+                    tone = palette["positive"]
+                else:
+                    tone = None
+                if tone is not None:
+                    for c in range(self.inbox_table.columnCount()):
+                        it = self.inbox_table.item(row, c)
+                        if it:
+                            it.setBackground(tone)
+                            it.setForeground(palette["text"])
+                continue
             if label == "VARAC BBS" and detail_item and detail_item.text().strip() not in {"", "-"}:
                 for c in range(self.inbox_table.columnCount()):
                     it = self.inbox_table.item(row, c)
@@ -4381,12 +4404,19 @@ class ControlFreqTab(QWidget):
         except Exception as e:
             log.debug("ControlFreq: inbox summary load failed: %s", e)
         rows_out: List[List[str]] = []
+        display_labels = {"JS8": "JS8", "Spotter": "Spotter", "VarAC": "VarAC Direct"}
         for key in ("JS8", "Spotter", "VarAC"):
             if search and search not in key.upper() and counts[key] == 0:
                 continue
             senders = sorted(top_senders[key].items(), key=lambda kv: kv[1], reverse=True)[:3]
-            sender_txt = ", ".join([f"{c}({n})" for c, n in senders]) or "-"
-            rows_out.append([key, str(counts[key]), sender_txt])
+            sender_txt = ", ".join([f"{c}({n})" for c, n in senders])
+            if sender_txt:
+                sender_txt = f"Unread from {sender_txt}"
+            elif key == "VarAC":
+                sender_txt = "No unread direct VarAC messages"
+            else:
+                sender_txt = "No unread messages"
+            rows_out.append([display_labels[key], str(counts[key]), sender_txt])
         sitrep_total = sitrep_counts["red"] + sitrep_counts["yellow"] + sitrep_counts["green"]
         sitrep_details = f"R:{sitrep_counts['red']}  Y:{sitrep_counts['yellow']}  G:{sitrep_counts['green']}"
         if not search or search in "SITREP" or sitrep_total > 0:
@@ -4395,10 +4425,32 @@ class ControlFreqTab(QWidget):
 
     def _collect_bbs_rows(self, search: str) -> List[List[str]]:
         inventory = build_bbs_inventory(self.settings)
-        detail = format_bbs_inventory_detail(inventory)
         count = str(inventory.live_file_count if inventory.bbs_enabled and inventory.live_exists else 0)
-        row = ["VarAC BBS", count, detail or "-"]
-        haystack_parts = [row[0], row[1], row[2], inventory.live_dir]
+        detail = ""
+        if not inventory.bbs_enabled:
+            detail = "BBS disabled"
+        elif not inventory.live_dir:
+            detail = "BBS folder not configured"
+        elif not inventory.live_exists:
+            detail = "BBS folder missing"
+        else:
+            detail_parts: List[str] = []
+            if inventory.live_file_count:
+                detail_parts.append(f"{inventory.live_file_count} files in BBS folder")
+            else:
+                detail_parts.append("No BBS files needing attention")
+            aging_total = int(inventory.live_due_now_count or 0) + int(inventory.live_due_soon_count or 0)
+            if aging_total:
+                detail_parts.append(f"{aging_total} aging soon")
+            if inventory.vault_enabled:
+                detail_parts.append("Vault active")
+            detail = " | ".join(detail_parts)
+        row = ["VarAC BBS Files", count, detail or "-"]
+        haystack_parts = [row[0], "VarAC BBS", row[1], row[2], inventory.live_dir]
+        try:
+            haystack_parts.append(format_bbs_inventory_detail(inventory))
+        except Exception:
+            pass
         haystack_parts.extend(loc.name for loc in inventory.locations)
         haystack_parts.extend(loc.alias for loc in inventory.locations)
         haystack_parts.extend(loc.source_dir for loc in inventory.locations)

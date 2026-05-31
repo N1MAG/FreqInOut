@@ -4,6 +4,11 @@
 - Added: Settings now includes a JS8Spotter Form Mapper so discovered `MCF*.txt` forms can be assigned operator-friendly purposes such as Net Check-in, SitRep / StatRep, Net Notification, Weather / Storm, Hazard / Early Warning, Intel / RFI, Medical / Hospital, and Station Capability.
 - Added: JS8Spotter mapper routing now drives Messages visibility, unread alert highlighting, and Map evidence for forms whose sender already has known station location data, using cached form-code sets instead of per-row Settings reads.
 - Added: Map now has operator-controlled layers for Stations, Links, Weather Reports, Alerts, and Infrastructure, with JS8Spotter weather/alert/infrastructure forms rendered as clustered operational icons when the sender has known station location data.
+- Changed: Map layer controls for Stations, Links, Weather, Alerts, and Infrastructure now live above the map so operators can reduce clutter without opening an overlay box.
+- Changed: Messages now uses a cleaner inbox control row with visible-tab refresh choices, a five-second countdown under the time display, a single clickable BBS status indicator, and a More menu for less common actions.
+- Changed: Dropdown controls across the app now auto-fit their displayed text and popup width more consistently, improving Messages and JS8 NCS readability.
+- Changed: ControlFreq now labels direct VarAC messages and VarAC BBS folder files separately so the message summary is understandable at a glance.
+- Changed: Help and README content now explain map icon interpretation, JS8Spotter form mapping, Messages refresh/BBS behavior, Managed BBS, and first-run setup in plainer operator language.
 - Changed: JS8 NCS check-in and net-notification handling now uses mapper-selected forms, so custom or group-specific check-in forms can flow to NCS without hard-coding new form IDs.
 - Changed: JS8Spotter SitRep ingest now uses mapper-selected status forms while preserving the existing conservative parsed-status behavior for `F!104`, `F!301`, and `F!304`.
 - Fixed: JS8Spotter form discovery now supports alpha-suffix form IDs such as `F!702A` when the form file is named like `MCF702A.txt`.

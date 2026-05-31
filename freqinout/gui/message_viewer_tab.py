@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -133,7 +134,7 @@ from freqinout.core.nbems_compose import (
     unique_destination,
 )
 from freqinout.gui.help_registry import resolve_help_host
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents
 from freqinout.gui.qsy_helper import suspend_active, scheduler_enabled
 
 
@@ -190,6 +191,12 @@ DEFAULT_WATCH_DIRS = [
 SCAN_CHOICES = [1, 15, 30, 60]  # minutes
 JS8_POLL_SECONDS = 90  # 90 seconds
 PENDING_POLL_SECONDS = 30
+MESSAGE_CHECK_CHOICES = [
+    ("Auto 15s", 15),
+    ("Auto 30s", 30),
+    ("Auto 60s", 60),
+    ("Off", 0),
+]
 JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
 JS8_SAFE_TEXT_LIMIT = 8192
 JS8_SAFE_FIELD_LIMIT = 256
@@ -205,6 +212,15 @@ BBS_HELPER_FILE_PREFIXES = (
     "BBS_QUEUE_LIST",
     "BBS_BLOCK_LIST",
 )
+
+RECEIVED_FILTER_CHOICES = [
+    ("Any time", 0),
+    ("Last 15 min", 15 * 60),
+    ("Last 1 hour", 60 * 60),
+    ("Last 6 hours", 6 * 60 * 60),
+    ("Last 24 hours", 24 * 60 * 60),
+    ("Last 7 days", 7 * 24 * 60 * 60),
+]
 
 
 def _safe_js8_text(value: object, *, limit: int = JS8_SAFE_TEXT_LIMIT, upper: bool = False) -> str:
@@ -2312,6 +2328,14 @@ class MessageViewerTab(QWidget):
         self.scan_minutes: int = cfg.get("scan_minutes") or 15
         if self.scan_minutes not in SCAN_CHOICES:
             self.scan_minutes = 15
+        try:
+            visible_check_raw = cfg.get("visible_check_seconds", 30)
+            self._visible_check_interval_sec: int = 30 if visible_check_raw is None else int(visible_check_raw)
+        except Exception:
+            self._visible_check_interval_sec = 30
+        valid_check_seconds = {int(seconds) for _label, seconds in MESSAGE_CHECK_CHOICES}
+        if self._visible_check_interval_sec not in valid_check_seconds:
+            self._visible_check_interval_sec = 30
 
         self.js8_messages: List[JS8Message] = []
         self.spotter_messages: List[SpotterMessage] = []
@@ -2324,6 +2348,7 @@ class MessageViewerTab(QWidget):
         self._js8_timer: QTimer | None = None
         self._pending_timer: QTimer | None = None
         self._clock_timer: QTimer | None = None
+        self._message_check_timer: QTimer | None = None
         self._pending_rows: List[Dict[str, str | float]] = []
         self._pending_rows_signature: str = ""
         self._form_cache: Dict[str, List[Dict]] = {}
@@ -2386,6 +2411,10 @@ class MessageViewerTab(QWidget):
         self._activation_refresh_pending: bool = False
         self._activation_refresh_interval_sec: float = 60.0
         self._last_activation_refresh_ts: float = 0.0
+        self._last_visible_message_check_ts: float = 0.0
+        self._next_visible_message_check_ts: float = 0.0
+        self._visible_message_check_inflight: bool = False
+        self._message_check_status_text: str = ""
         self._bbs_auto_archive_timer: QTimer | None = None
         self._bbs_auto_archive_thread: QThread | None = None
         self._bbs_auto_archive_worker: _BbsAutoArchiveWorker | None = None
@@ -2451,6 +2480,7 @@ class MessageViewerTab(QWidget):
         self._setup_timer()
         self._setup_js8_timer()
         self._setup_pending_timer()
+        self._setup_message_check_timer()
 
     # ---------- DB helpers ----------
 
@@ -3695,6 +3725,14 @@ class MessageViewerTab(QWidget):
         header.addWidget(self.time_toggle_btn)
         layout.addLayout(header)
 
+        time_status_row = QHBoxLayout()
+        time_status_row.setContentsMargins(0, 0, 0, 0)
+        time_status_row.addStretch()
+        self.message_check_status_label = QLabel("Next check: --")
+        self.message_check_status_label.setToolTip("Shows when FIO will next check for new messages while this tab is open.")
+        time_status_row.addWidget(self.message_check_status_label)
+        layout.addLayout(time_status_row)
+
         loading_row = QHBoxLayout()
         self.loading_label = QLabel("Getting messages...")
         self.loading_label.setStyleSheet("color: #888;")
@@ -3713,14 +3751,17 @@ class MessageViewerTab(QWidget):
         self.messages_bbs_help_btn = QPushButton("BBS Help")
         self.messages_bbs_help_btn.setToolTip("Open focused help for VarAC BBS copy and archive behavior.")
         self.messages_bbs_help_btn.clicked.connect(lambda: self._open_context_help("messages.bbs"))
+        self.messages_bbs_help_btn.setVisible(False)
         self.messages_manage_bbs_btn = QPushButton("Manage VarAC BBS & Vault")
         self.messages_manage_bbs_btn.setToolTip(
             "Open VarAC Settings to review BBS access, Managed BBS Vault, and folder configuration."
         )
         self.messages_manage_bbs_btn.clicked.connect(self._open_varac_bbs_manager)
+        self.messages_manage_bbs_btn.setVisible(False)
         self.messages_copy_summary_btn = QPushButton("Copy Summary")
         self.messages_copy_summary_btn.setToolTip("Copy a concise Messages support summary for the current mode.")
         self.messages_copy_summary_btn.clicked.connect(self._copy_messages_support_summary)
+        self.messages_copy_summary_btn.setVisible(False)
         self.messages_inbox_mode_btn = QPushButton("Inbox")
         self.messages_inbox_mode_btn.clicked.connect(lambda: self._set_messages_mode("Inbox", save=False))
         self.messages_compose_mode_btn = QPushButton("Compose")
@@ -3741,17 +3782,71 @@ class MessageViewerTab(QWidget):
             self.scan_combo.addItem(f"{m} min", m)
         self.scan_combo.setCurrentText(f"{self.scan_minutes} min")
         self.scan_combo.currentIndexChanged.connect(self._on_scan_changed)
+        self.scan_combo.setVisible(False)
+        fit_combo_box_to_contents(self.scan_combo)
+
+        self.message_check_combo = QComboBox()
+        for label, seconds in MESSAGE_CHECK_CHOICES:
+            self.message_check_combo.addItem(label, seconds)
+        idx_check = self.message_check_combo.findData(self._visible_check_interval_sec)
+        self.message_check_combo.setCurrentIndex(idx_check if idx_check >= 0 else 1)
+        self.message_check_combo.setToolTip("How often FIO checks for new messages while this tab is open.")
+        self.message_check_combo.currentIndexChanged.connect(self._on_message_check_interval_changed)
+        fit_combo_box_to_contents(self.message_check_combo)
+
+        self.received_filter = QComboBox()
+        for label, seconds in RECEIVED_FILTER_CHOICES:
+            self.received_filter.addItem(label, seconds)
+        self.received_filter.setToolTip("Limit visible messages to a recent receive window.")
+        self.received_filter.currentIndexChanged.connect(self._on_filter_changed)
+        fit_combo_box_to_contents(self.received_filter)
 
         self.refresh_btn = QPushButton("Refresh Now")
         self.refresh_btn.clicked.connect(self._on_refresh_now)
 
         self.export_btn = QPushButton("Export to PDF")
         self.export_btn.clicked.connect(self._export_pdf)
+        self.export_btn.setVisible(False)
+
+        self.more_actions_btn = QPushButton("More...")
+        self.more_actions_menu = QMenu(self.more_actions_btn)
+        self.more_export_pdf_action = self.more_actions_menu.addAction("Export to PDF")
+        self.more_export_pdf_action.triggered.connect(self._export_pdf)
+        self._export_selected_available = callable(getattr(self, "_export_selected_csv", None))
+        self.more_export_selected_action = self.more_actions_menu.addAction("Export Selected...")
+        if self._export_selected_available:
+            self.more_export_selected_action.triggered.connect(self._export_selected_csv)
+        else:
+            self.more_export_selected_action.setEnabled(False)
+        self.more_delete_selected_action = self.more_actions_menu.addAction("Delete Selected")
+        self.more_delete_selected_action.triggered.connect(self._delete_selected_messages)
+        self.more_actions_menu.addSeparator()
+        self.more_copy_summary_action = self.more_actions_menu.addAction("Copy Summary")
+        self.more_copy_summary_action.triggered.connect(self._copy_messages_support_summary)
+        self.more_inbox_help_action = self.more_actions_menu.addAction("Inbox Help")
+        self.more_inbox_help_action.triggered.connect(self._open_messages_help)
+        self.more_actions_menu.aboutToShow.connect(self._refresh_more_actions_menu)
+        self.more_actions_btn.setMenu(self.more_actions_menu)
+
+        self.bbs_manage_btn = QPushButton("Manage")
+        self.bbs_manage_menu = QMenu(self.bbs_manage_btn)
+        self.bbs_manage_vault_action = self.bbs_manage_menu.addAction("Manage VarAC BBS & Vault")
+        self.bbs_manage_vault_action.triggered.connect(self._open_varac_bbs_manager)
+        self.bbs_help_action = self.bbs_manage_menu.addAction("BBS Help")
+        self.bbs_help_action.triggered.connect(lambda: self._open_context_help("messages.bbs"))
+        self.bbs_copy_summary_action = self.bbs_manage_menu.addAction("Copy Summary")
+        self.bbs_copy_summary_action.triggered.connect(self._copy_messages_support_summary)
+        self.bbs_manage_btn.setMenu(self.bbs_manage_menu)
+
+        self.bbs_status_btn = QPushButton("BBS Status")
+        self.bbs_status_btn.setToolTip("Show VarAC BBS status details.")
+        self.bbs_status_btn.clicked.connect(self._show_varac_bbs_status_details)
 
         self.delete_selected_btn = QPushButton("Delete Selected")
         self.delete_selected_btn.clicked.connect(self._delete_selected_messages)
         self.delete_selected_btn.setEnabled(False)
         self.delete_selected_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
+        self.delete_selected_btn.setVisible(False)
 
         self.mark_all_read_btn = QPushButton("Mark All as Read")
         self.mark_all_read_btn.setMinimumWidth(160)
@@ -3766,31 +3861,33 @@ class MessageViewerTab(QWidget):
         mode_row.addWidget(self.messages_compose_mode_btn)
         mode_row.addStretch()
 
-        help_row = QHBoxLayout()
-        help_row.setSpacing(8)
-        help_row.addWidget(QLabel("Help & BBS:"))
-        help_row.addWidget(self.messages_help_btn)
-        help_row.addWidget(self.messages_bbs_help_btn)
-        help_row.addWidget(self.messages_manage_bbs_btn)
-        help_row.addWidget(self.messages_copy_summary_btn)
-        help_row.addStretch()
-
         compose_row = QHBoxLayout()
         compose_row.setSpacing(8)
         compose_row.addWidget(self.compose_refresh_forms_btn)
         compose_row.addWidget(self.compose_reset_btn)
         compose_row.addWidget(self.compose_open_source_btn)
+        compose_row.addWidget(self.messages_help_btn)
         compose_row.addStretch()
 
         inbox_row = QHBoxLayout()
         inbox_row.setSpacing(8)
-        inbox_row.addWidget(QLabel("Inbox Actions:"))
-        inbox_row.addWidget(QLabel("Scan every:"))
-        inbox_row.addWidget(self.scan_combo)
+        inbox_row.addWidget(QLabel("Received:"))
+        inbox_row.addWidget(self.received_filter)
+        inbox_row.addWidget(QLabel("Check:"))
+        inbox_row.addWidget(self.message_check_combo)
         inbox_row.addWidget(self.refresh_btn)
-        inbox_row.addWidget(self.export_btn)
-        inbox_row.addWidget(self.delete_selected_btn)
+        self.export_selected_btn = QPushButton("Export Selected...")
+        if self._export_selected_available:
+            self.export_selected_btn.clicked.connect(self._export_selected_csv)
+        self.export_selected_btn.setEnabled(False)
+        self.export_selected_btn.setStyleSheet(button_style("muted", resolve_theme(self.settings)))
+        self.export_selected_btn.setVisible(False)
         inbox_row.addWidget(self.mark_all_read_btn)
+        inbox_row.addWidget(self.more_actions_btn)
+        inbox_row.addSpacing(14)
+        inbox_row.addWidget(QLabel("BBS:"))
+        inbox_row.addWidget(self.bbs_status_btn)
+        inbox_row.addWidget(self.bbs_manage_btn)
         inbox_row.addStretch()
 
         compose_wrap = QWidget()
@@ -3803,15 +3900,9 @@ class MessageViewerTab(QWidget):
         header_stack = QVBoxLayout()
         header_stack.setSpacing(6)
         header_stack.addLayout(mode_row)
-        header_stack.addLayout(help_row)
         header_stack.addWidget(compose_wrap)
         header_stack.addWidget(inbox_wrap)
         layout.addLayout(header_stack)
-
-        self.messages_bbs_status_label = QLabel("")
-        self.messages_bbs_status_label.setWordWrap(True)
-        self.messages_bbs_status_label.setVisible(True)
-        layout.addWidget(self.messages_bbs_status_label)
 
         self.messages_mode_stack = QStackedWidget()
         layout.addWidget(self.messages_mode_stack, 1)
@@ -3947,6 +4038,7 @@ class MessageViewerTab(QWidget):
         self.rcv_search.textChanged.connect(lambda _: self._filter_timer.start(200))
         self._build_messages_header()
         self._apply_accessibility_width_guards()
+        fit_child_combo_boxes(self)
         QTimer.singleShot(0, self._set_initial_splitter_sizes)
         self._messages_model.dataChanged.connect(self._update_bulk_delete_buttons)
         self.compose_page = self._build_compose_page()
@@ -3964,6 +4056,7 @@ class MessageViewerTab(QWidget):
 
     def _on_clock_tick(self) -> None:
         self._update_clock_labels()
+        self._update_message_check_status()
 
     def _update_clock_labels(self) -> None:
         if not hasattr(self, "utc_label") or not hasattr(self, "local_label"):
@@ -5012,31 +5105,36 @@ class MessageViewerTab(QWidget):
         if hasattr(self, "messages_help_btn"):
             self.messages_help_btn.setText("Compose Help" if compose_active else "Inbox Help")
             self.messages_help_btn.setStyleSheet(button_style("secondary", theme))
-        if hasattr(self, "messages_bbs_help_btn"):
-            self.messages_bbs_help_btn.setVisible(not compose_active)
-            self.messages_bbs_help_btn.setStyleSheet(button_style("secondary", theme))
-        if hasattr(self, "messages_manage_bbs_btn"):
-            self.messages_manage_bbs_btn.setVisible(not compose_active)
-            self.messages_manage_bbs_btn.setStyleSheet(button_style("secondary", theme))
         self.messages_inbox_mode_btn.setStyleSheet(button_style("primary" if not compose_active else "muted", theme))
         self.messages_compose_mode_btn.setStyleSheet(button_style("primary" if compose_active else "muted", theme))
-        for widget in (self.messages_bbs_help_btn, self.messages_manage_bbs_btn):
-            widget.setVisible(not compose_active)
-            widget.setStyleSheet(button_style("secondary", theme))
+        for widget in (self.messages_bbs_help_btn, self.messages_manage_bbs_btn, self.messages_copy_summary_btn):
+            widget.setVisible(False)
         for widget in (self.compose_refresh_forms_btn, self.compose_reset_btn, self.compose_open_source_btn):
             widget.setVisible(compose_active)
             widget.setStyleSheet(button_style("muted", theme))
         if hasattr(self, "_compose_tools_row"):
             self._compose_tools_row.setVisible(compose_active)
-        for widget in (self.scan_combo, self.refresh_btn, self.export_btn, self.delete_selected_btn, self.mark_all_read_btn):
+        for widget in (
+            self.received_filter,
+            self.message_check_combo,
+            self.message_check_status_label,
+            self.refresh_btn,
+            self.mark_all_read_btn,
+            self.more_actions_btn,
+        ):
             widget.setVisible(not compose_active)
+        for widget in (self.scan_combo, self.export_btn, self.export_selected_btn, self.delete_selected_btn):
+            widget.setVisible(False)
         if hasattr(self, "_inbox_actions_row"):
             self._inbox_actions_row.setVisible(not compose_active)
         if hasattr(self, "messages_help_btn"):
             self.messages_help_btn.setVisible(True)
-        if hasattr(self, "messages_bbs_status_label"):
-            self.messages_bbs_status_label.setVisible(not compose_active)
+        if hasattr(self, "bbs_status_btn"):
+            self.bbs_status_btn.setVisible(not compose_active)
             self._refresh_varac_bbs_status_label()
+        if hasattr(self, "bbs_manage_btn"):
+            self.bbs_manage_btn.setVisible(not compose_active)
+        self._sync_message_check_timer()
         self._update_compose_preview()
 
     def _open_messages_help(self) -> None:
@@ -5051,7 +5149,9 @@ class MessageViewerTab(QWidget):
             f"Pending backlog: {self.pending_count.text() if hasattr(self, 'pending_count') else '0 pending'}",
         ]
         if mode == "Inbox":
-            top_lines.append(f"Scan cadence: every {int(self.scan_minutes)} minute(s)")
+            check_label = "off" if not self._visible_check_interval_sec else f"every {int(self._visible_check_interval_sec)} seconds while open"
+            top_lines.append(f"Message check: {check_label}")
+            top_lines.append(f"Folder scan: every {int(self.scan_minutes)} minute(s)")
             sections = (
                 (
                     "Inbox Detail",
@@ -5089,6 +5189,37 @@ class MessageViewerTab(QWidget):
             self.messages_copy_summary_btn.setText("Copied")
             QTimer.singleShot(1500, lambda: self.messages_copy_summary_btn.setText("Copy Summary"))
 
+    def _refresh_more_actions_menu(self) -> None:
+        selected = len(self._messages_model.selected_rows()) if hasattr(self, "_messages_model") else 0
+        if hasattr(self, "more_export_selected_action"):
+            self.more_export_selected_action.setEnabled(bool(self._export_selected_available) and selected > 0)
+        if hasattr(self, "more_delete_selected_action"):
+            self.more_delete_selected_action.setEnabled(selected > 0)
+
+    def _status_chip_html(self, text: str, role: str = "neutral") -> str:
+        palette = {
+            "ok": ("#E8F5E9", "#1B5E20", "#A5D6A7"),
+            "info": ("#E3F2FD", "#0D47A1", "#90CAF9"),
+            "warn": ("#FFF8E1", "#8D6E00", "#FFE082"),
+            "bad": ("#FFEBEE", "#8E0000", "#EF9A9A"),
+            "neutral": ("#ECEFF1", "#263238", "#CFD8DC"),
+        }
+        bg, fg, border = palette.get(str(role or "neutral"), palette["neutral"])
+        label = html.escape(str(text or "").strip())
+        return (
+            f"<span style='background-color:{bg}; color:{fg}; border:1px solid {border}; "
+            "padding:2px 7px; font-weight:600; white-space:nowrap;'>"
+            f"{label}</span>"
+        )
+
+    @staticmethod
+    def _allowed_callsign_count(text: object) -> int:
+        raw = str(text or "").strip()
+        if not raw:
+            return 0
+        parts = [p.strip().upper() for p in re.split(r"[,;\\s]+", raw) if p.strip()]
+        return len([p for p in parts if p not in {"*", "ALL"}])
+
     def _open_varac_bbs_manager(self) -> None:
         host = resolve_help_host(self)
         if host is not None and hasattr(host, "open_settings_section"):
@@ -5103,12 +5234,15 @@ class MessageViewerTab(QWidget):
         except Exception:
             pass
         inventory = build_bbs_inventory(self.settings, allowed_exts=ORIGIN_EXTS.get("bbs", set(SUPPORTED_EXT)))
+        limit_access = bool(self.settings.get("varac_bbs_limit_access_enabled", False))
+        announce_enabled = bool(self.settings.get("varac_bbs_announce_enabled", False))
+        allowed_text = str(self.settings.get("varac_bbs_allowed_callsigns", "") or "")
         summary = bbs_summary_text(
             {
                 "enable_bbs": inventory.bbs_enabled,
-                "limit_access": bool(self.settings.get("varac_bbs_limit_access_enabled", False)),
-                "announce": bool(self.settings.get("varac_bbs_announce_enabled", False)),
-                "allowed_callsigns": str(self.settings.get("varac_bbs_allowed_callsigns", "") or ""),
+                "limit_access": limit_access,
+                "announce": announce_enabled,
+                "allowed_callsigns": allowed_text,
             }
         )
         if inventory.live_dir:
@@ -5125,9 +5259,26 @@ class MessageViewerTab(QWidget):
                 f" Managed locations: {inventory.enabled_location_count} enabled / "
                 f"{inventory.total_location_count} total, {inventory.managed_file_count} files."
             )
-        text = f"VarAC BBS (runtime-projected default context): {summary}.{suffix}{vault_suffix}"
-        self.messages_bbs_status_label.setText(text)
-        self.messages_bbs_status_label.setToolTip(text)
+        full_text = f"VarAC BBS (runtime-projected default context): {summary}.{suffix}{vault_suffix}"
+        if not inventory.bbs_enabled:
+            label, role = "BBS Off", "neutral"
+        elif not inventory.live_dir or not inventory.live_exists:
+            label, role = "BBS Issue", "danger"
+        else:
+            label, role = "BBS OK", "success"
+        self._bbs_status_detail_text = full_text
+        if hasattr(self, "bbs_status_btn"):
+            self.bbs_status_btn.setText(label)
+            self.bbs_status_btn.setToolTip(full_text)
+            self.bbs_status_btn.setStyleSheet(button_style(role, resolve_theme(self.settings)))
+
+    def _show_varac_bbs_status_details(self) -> None:
+        self._refresh_varac_bbs_status_label()
+        QMessageBox.information(
+            self,
+            "VarAC BBS Status",
+            getattr(self, "_bbs_status_detail_text", "VarAC BBS status is not available."),
+        )
 
     def _open_context_help(self, context_key: str) -> None:
         host = resolve_help_host(self)
@@ -5704,16 +5855,126 @@ class MessageViewerTab(QWidget):
     def _on_bbs_auto_archive_timer(self) -> None:
         self._queue_bbs_auto_archive_check("timer", delay_ms=0)
 
+    def _setup_message_check_timer(self) -> None:
+        if self._message_check_timer:
+            self._message_check_timer.stop()
+        self._message_check_timer = QTimer(self)
+        self._message_check_timer.timeout.connect(self._on_visible_message_check_timer)
+        self._sync_message_check_timer()
+
+    def _sync_message_check_timer(self) -> None:
+        if self._message_check_timer is None:
+            self._message_check_timer = QTimer(self)
+            self._message_check_timer.timeout.connect(self._on_visible_message_check_timer)
+        active = (
+            bool(self._has_active_view)
+            and self._messages_mode == "Inbox"
+            and int(self._visible_check_interval_sec or 0) > 0
+            and not self._is_shutting_down
+        )
+        if not active:
+            self._message_check_timer.stop()
+            self._next_visible_message_check_ts = 0.0
+            self._update_message_check_status()
+            return
+        interval_ms = max(15, int(self._visible_check_interval_sec or 30)) * 1000
+        self._message_check_timer.start(interval_ms)
+        self._next_visible_message_check_ts = time.time() + max(15, int(self._visible_check_interval_sec or 30))
+        self._update_message_check_status()
+
+    def _message_source_count(self) -> int:
+        return (
+            len(self.js8_messages)
+            + len(self.spotter_messages)
+            + len(self.varac_messages)
+            + len(self.sitrep_messages)
+            + len(self.commstat_messages)
+            + sum(len(v) for v in self.files.values())
+        )
+
+    def _on_visible_message_check_timer(self) -> None:
+        if self._visible_message_check_inflight:
+            self._message_check_status_text = "Still checking..."
+            self._update_message_check_status()
+            return
+        self._visible_message_check_inflight = True
+        before_count = self._message_source_count()
+        self._message_check_status_text = "Checking..."
+        self._update_message_check_status()
+        try:
+            self._refresh_js8_messages(force=False, rebuild=False)
+            self._refresh_varac_messages(force=False, rebuild=False)
+            self._load_message_sources_from_local(force=False)
+            self._populate_messages_table(force=False)
+            self._refresh_pending_backlog()
+            after_count = self._message_source_count()
+            delta = max(0, int(after_count - before_count))
+            self._message_check_status_text = f"{delta} new message{'s' if delta != 1 else ''}" if delta else "No new messages"
+            now = time.time()
+            self._last_visible_message_check_ts = now
+            self._last_activation_refresh_ts = now
+        except Exception as e:
+            log.debug("MessageViewer: visible message check failed: %s", e)
+            self._message_check_status_text = "Check failed"
+        finally:
+            self._visible_message_check_inflight = False
+            if self._has_active_view and self._messages_mode == "Inbox" and self._visible_check_interval_sec:
+                self._next_visible_message_check_ts = time.time() + max(15, int(self._visible_check_interval_sec or 30))
+            self._update_message_check_status()
+
+    def _update_message_check_status(self) -> None:
+        label = getattr(self, "message_check_status_label", None)
+        if label is None:
+            return
+        if self._messages_mode != "Inbox":
+            label.setText("")
+            return
+        if int(self._visible_check_interval_sec or 0) <= 0:
+            label.setText("Auto-check off")
+            label.setToolTip("Automatic checks are off. Use Refresh Now when you want FIO to check immediately.")
+            return
+        if self._visible_message_check_inflight or self._message_check_status_text == "Checking...":
+            label.setText("Checking...")
+            label.setToolTip("FIO is checking for new messages now.")
+            return
+        now = time.time()
+        remaining = int(max(0.0, float(self._next_visible_message_check_ts or 0.0) - now))
+        display_remaining = int(math.ceil(max(0, remaining) / 5.0) * 5) if remaining else 0
+        if not self._has_active_view:
+            label.setText("Checks pause when closed")
+            label.setToolTip("FIO checks faster only while the Messages tab is open.")
+            return
+        if self._message_check_status_text and self._last_visible_message_check_ts and remaining > 3:
+            label.setText(f"{self._message_check_status_text} | Next: {display_remaining}s")
+        else:
+            label.setText(f"Next check: {display_remaining}s")
+        if self._last_visible_message_check_ts:
+            checked = datetime.datetime.fromtimestamp(self._last_visible_message_check_ts).strftime("%H:%M:%S")
+            label.setToolTip(f"Last checked {checked}. FIO checks faster only while this tab is open.")
+        else:
+            label.setToolTip("FIO checks faster only while this tab is open.")
+
     def _on_refresh_now(self) -> None:
         self._unfreeze_table()
+        self._message_check_status_text = "Checking..."
+        self._update_message_check_status()
         self._set_loading(True)
+        before_count = self._message_source_count()
         try:
             self._refresh_files(force=True)
             self._refresh_js8_messages(force=True, rebuild=False)
             self._refresh_varac_messages(force=True, rebuild=False)
             self._populate_messages_table(force=True)
-            self._last_activation_refresh_ts = time.time()
+            after_count = self._message_source_count()
+            delta = max(0, int(after_count - before_count))
+            self._message_check_status_text = f"{delta} new message{'s' if delta != 1 else ''}" if delta else "No new messages"
+            now = time.time()
+            self._last_visible_message_check_ts = now
+            self._last_activation_refresh_ts = now
         finally:
+            if self._has_active_view and self._messages_mode == "Inbox" and self._visible_check_interval_sec:
+                self._next_visible_message_check_ts = time.time() + max(15, int(self._visible_check_interval_sec or 30))
+            self._update_message_check_status()
             self._set_loading(False)
 
     def _on_scan_changed(self):
@@ -5722,6 +5983,16 @@ class MessageViewerTab(QWidget):
             return
         self.scan_minutes = int(val)
         self._setup_timer()
+        self._save_settings()
+
+    def _on_message_check_interval_changed(self):
+        val = self.message_check_combo.currentData()
+        try:
+            self._visible_check_interval_sec = int(val or 0)
+        except Exception:
+            self._visible_check_interval_sec = 30
+        self._message_check_status_text = ""
+        self._sync_message_check_timer()
         self._save_settings()
 
     def _initial_refresh(self) -> None:
@@ -5826,6 +6097,28 @@ class MessageViewerTab(QWidget):
                 self._activation_refresh_pending = False
                 self._set_loading(False)
 
+    def _load_message_sources_from_local(self, *, force: bool = False) -> None:
+        try:
+            self._load_js8_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: JS8 local activation load failed: %s", e)
+        try:
+            self._load_spotter_from_db(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: spotter activation load failed: %s", e)
+        try:
+            self._load_sitrep_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: sitrep activation load failed: %s", e)
+        try:
+            self._load_commstat_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: CommStat activation load failed: %s", e)
+        try:
+            self._load_varac_from_local(force=force, rebuild=False)
+        except Exception as e:
+            log.debug("MessageViewer: VarAC activation load failed: %s", e)
+
     def set_tab_active(self, active: bool) -> None:
         self._has_active_view = bool(active)
         if active:
@@ -5836,14 +6129,17 @@ class MessageViewerTab(QWidget):
             self._setup_timer()
             self._setup_js8_timer()
             self._setup_pending_timer()
+            self._sync_message_check_timer()
             self._setup_bbs_auto_archive_timer()
             if self._signature_verify_deferred_until_active:
                 self._signature_verify_deferred_until_active = False
                 QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
             return
-        for timer in (self._clock_timer, self._timer, self._js8_timer, self._pending_timer, self._bbs_auto_archive_timer):
+        for timer in (self._clock_timer, self._timer, self._js8_timer, self._pending_timer, self._message_check_timer, self._bbs_auto_archive_timer):
             if timer:
                 timer.stop()
+        self._next_visible_message_check_ts = 0.0
+        self._update_message_check_status()
 
     # ---------- BBS Auto-Archive ----------
 
@@ -7666,6 +7962,10 @@ class MessageViewerTab(QWidget):
         self._fit_filter_combo_popup(self.status_filter)
         self._fit_filter_combo_popup(self.from_filter)
         self._fit_filter_combo_popup(self.to_filter)
+        fit_combo_box_to_contents(self.type_filter)
+        fit_combo_box_to_contents(self.status_filter)
+        fit_combo_box_to_contents(self.from_filter)
+        fit_combo_box_to_contents(self.to_filter)
         self._update_excluded_types_button_state()
 
     def _apply_message_filters(self) -> None:
@@ -7881,6 +8181,11 @@ class MessageViewerTab(QWidget):
             self.delete_selected_btn.setEnabled(has_selection)
             role = "eligible_danger" if has_selection else "muted"
             self.delete_selected_btn.setStyleSheet(button_style(role, theme))
+        if hasattr(self, "export_selected_btn"):
+            self.export_selected_btn.setEnabled(has_selection)
+            role = "eligible_warning" if has_selection else "muted"
+            self.export_selected_btn.setStyleSheet(button_style(role, theme))
+        self._refresh_more_actions_menu()
         self._sync_select_all_checkbox()
         self._update_mark_all_read_style()
 
@@ -8447,6 +8752,8 @@ class MessageViewerTab(QWidget):
             getattr(self, "compose_reset_btn", None),
             getattr(self, "compose_open_source_btn", None),
             getattr(self, "refresh_btn", None),
+            getattr(self, "more_actions_btn", None),
+            getattr(self, "bbs_manage_btn", None),
             getattr(self, "export_btn", None),
             getattr(self, "delete_selected_btn", None),
             getattr(self, "mark_all_read_btn", None),
@@ -11939,6 +12246,7 @@ class MessageViewerTab(QWidget):
             data = self.settings.get("message_viewer", {}) or {}
             # Persist only legacy scan interval; paths now come from Settings tab
             data["scan_minutes"] = self.scan_minutes
+            data["visible_check_seconds"] = int(self._visible_check_interval_sec or 0)
             data["excluded_msg_types"] = sorted(self._excluded_msg_types)
             data["mode"] = self._messages_mode
             if hasattr(self.settings, "set"):

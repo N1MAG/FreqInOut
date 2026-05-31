@@ -68,7 +68,7 @@ from freqinout.gui.qsy_helper import (
     active_hold_status_text,
 )
 from freqinout.core.config_paths import get_config_dir
-from freqinout.gui.theme import resolve_theme, button_style
+from freqinout.gui.theme import resolve_theme, button_style, fit_child_combo_boxes, fit_combo_box_to_contents
 
 
 def _nets_db_path() -> Path:
@@ -302,6 +302,7 @@ class JS8CallNetControlTab(QWidget):
         filter_row.addWidget(QLabel("Check-in Filter:"))
         self.checkin_filter_combo = QComboBox()
         self.checkin_filter_combo.addItems(["Mapped Check-ins", "Any Spotter", "All Callsigns"])
+        fit_combo_box_to_contents(self.checkin_filter_combo)
         filter_row.addWidget(self.checkin_filter_combo)
         filter_row.addStretch()
         table_layout.addLayout(filter_row)
@@ -328,6 +329,7 @@ class JS8CallNetControlTab(QWidget):
         self.ack_callsign_btn.setEnabled(False)
         self.end_btn.setEnabled(False)
         self._set_net_button_styles(active=False)
+        fit_child_combo_boxes(self)
 
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.ack_btn)
@@ -483,6 +485,7 @@ class JS8CallNetControlTab(QWidget):
             self.set_spotter_btn.setEnabled(False)
             self.group_spotter_btn.setEnabled(False)
             self.single_spotter_btn.setEnabled(False)
+        fit_combo_box_to_contents(self.spotter_combo)
 
     def _save_refresh_setting(self):
         try:
@@ -728,6 +731,8 @@ class JS8CallNetControlTab(QWidget):
         self._qsy_options = build_qsy_options(ops)
         refresh_qsy_combo(self.qsy_combo, self._qsy_options)
         refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
+        fit_combo_box_to_contents(self.qsy_combo)
+        fit_combo_box_to_contents(self.hold_duration_combo)
         self._update_qsy_button_enabled()
 
     def _selected_qsy_meta(self) -> Optional[Dict]:

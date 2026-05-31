@@ -89,7 +89,7 @@ from freqinout.gui.qsy_helper import (
     active_hold_button_text,
     active_hold_status_text,
 )
-from freqinout.gui.theme import resolve_theme, resolve_ui_text_scale, apply_app_theme, button_style
+from freqinout.gui.theme import resolve_theme, resolve_ui_text_scale, apply_app_theme, button_style, fit_child_combo_boxes
 
 
 class MainWindow(QMainWindow):
@@ -2347,6 +2347,7 @@ class MainWindow(QMainWindow):
         theme = resolve_theme(self.settings)
         ui_text_scale = resolve_ui_text_scale(self.settings)
         apply_app_theme(app, theme, ui_text_scale=ui_text_scale)
+        fit_child_combo_boxes(self)
         self._set_logo_pixmap()
         self._update_log_indicator()
         if self._context_help_dialog is not None:
@@ -3856,6 +3857,10 @@ class MainWindow(QMainWindow):
                 self._ensure_lazy_tab_loaded(label, index)
                 self.stack.setCurrentIndex(index)
                 self._active_tab_index = index
+                try:
+                    fit_child_combo_boxes(self.stack.widget(index))
+                except Exception:
+                    pass
                 try:
                     widget_active = self.stack.widget(index)
                     if label == "Messages" and hasattr(widget_active, "show_inbox_from_navigation"):
