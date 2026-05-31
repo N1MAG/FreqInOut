@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.6.1]
+- Fixed: `Resume Schedule` now forces the active operating plan back into FLDigi mode/offset enforcement instead of skipping FLDigi when the current schedule row looks already applied.
+- Added: Scheduler decisions are now persisted in a bounded `scheduler_events` journal so Station Health can show why FIO applied, skipped, held, retried, or failed a schedule action.
+- Changed: Station Health now includes recent scheduler decisions, making schedule-miss reports easier to diagnose without relying only on transient logs.
+- Fixed: FLDigi RX-busy holds now record the 3-minute watchdog recheck and the authoritative break-away decision before proceeding with the schedule change.
+
 ## [1.2.6]
 - Added: Map report layers now render mapped JS8Spotter weather, alert, infrastructure, and medical-style reports as clear icons when the sender has known station location data.
 - Changed: Map layer controls for Stations, Links, Weather, Alerts, and Infrastructure now live above the map so operators can reduce clutter without opening an overlay box.

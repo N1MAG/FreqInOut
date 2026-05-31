@@ -31,7 +31,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.2.5.5</p>
+  <p><strong>Current version</strong>: 1.2.6.1</p>
   <p>This guide is a complete reference for the current FreqInOut interface. It documents each main-menu area, tab, button, table, and nested action so both new and advanced operators can move quickly and confidently.</p>
   <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
   <p><strong>How to use this guide</strong>: if you are new, read the sections in operational order instead of treating this as a pure control catalog. Start with <a href="#settings">Settings</a>, then the schedule tabs, then the live operating tabs such as <a href="#controlfreq">ControlFreq</a>, <a href="#messages">Messages</a>, and <a href="#map">Map</a>. If you are already operating, use the guide as a workflow map: when one tab seems confusing, the answer is often explained in a related tab or settings section.</p>
@@ -268,7 +268,7 @@
       </tr>
     </tbody>
   </table>
-  <p><strong>Resume Schedule note</strong>: <code>Resume Schedule</code> clears a temporary schedule suspension and returns control to the scheduler. It does not act as a blanket "force reset" for every off-schedule item; FLDigi and JS8 corrections still follow the configured enforcement mode.</p>
+  <p><strong>Resume Schedule note</strong>: <code>Resume Schedule</code> clears a temporary schedule suspension and returns control to the scheduler. It is an authoritative return-to-plan action for the active schedule row, including FLDigi mode and offset. Active transmit protection still matters; FIO should not fight a keyed transmitter.</p>
   <ol class="section-list">
     <li><strong>Temporary hold workflow</strong>: choose a <code>Hold</code> duration (`30`, `60`, `90`, or `120` minutes) before using <code>Suspend</code> or any <code>QSY + Hold</code> action.</li>
     <li><strong>While paused</strong>: the button changes to a live countdown-style <code>Resume</code> control and the card shows when schedule control will return automatically.</li>
@@ -518,8 +518,9 @@
     <li><strong>What belongs here</strong>: JS8Call API, FLRig, FLDigi, rigctld, observer endpoints, background ingest, scheduler status snapshots, scheduler control tasks, and other checks FIO uses while building the operating picture.</li>
     <li><strong>What the states mean in normal language</strong>: <code>OK</code> means the last known check is current enough and FIO has no concern. <code>Stale</code> means the last OK check is old enough that FIO should not pretend it is fresh. <code>Warning</code> means FIO saw a problem or a scheduler hold that deserves attention. <code>Backoff</code> means FIO is deliberately waiting before trying again so the rest of the app stays responsive.</li>
     <li><strong>Busy is not automatically broken</strong>: a program can be legitimately busy receiving, transmitting, or holding traffic and still be healthy. FIO separates normal traffic protection from responsiveness problems where possible.</li>
-    <li><strong>Scheduler holds are now visible</strong>: if FIO delays a schedule change because FLRig PTT is active, JS8Call/VarAC is busy, or FLDigi appears to be receiving, Station Health can show that hold as something FIO observed.</li>
-    <li><strong>FLDigi busy break-away</strong>: for HF/SOP schedule changes, FIO will hold briefly when FLDigi appears RX-busy. If that condition lasts 3 minutes, FIO forces a fresh recheck. If FLDigi still reports busy, FIO breaks away and allows the schedule change, then records the event as a possible stale/hung external app busy state. This is not proof that FLDigi hung; it is FIO preserving scheduler reliability while showing the clue that made the break-away necessary.</li>
+    <li><strong>Scheduler decisions are visible</strong>: if FIO applies, holds, skips, retries, or fails a schedule action, Station Health shows recent scheduler decisions in plain language. This helps answer, “Why did FIO not change on schedule?” without asking the operator to read the raw log first.</li>
+    <li><strong>Scheduler holds are visible</strong>: if FIO delays a schedule change because FLRig PTT is active, JS8Call/VarAC is busy, FLDigi appears to be receiving, the scheduler is suspended, control is set to Manual, or schedule data is missing, Station Health can show that as something FIO observed.</li>
+    <li><strong>FLDigi busy break-away</strong>: for HF/SOP schedule changes, FIO will hold briefly when FLDigi appears RX-busy. If that condition lasts 3 minutes, FIO forces a fresh recheck. If FLDigi still reports busy, FIO records an authoritative break-away decision and allows the schedule change. This is not proof that FLDigi hung; it is FIO preserving scheduler reliability while showing the clue that made the break-away necessary.</li>
     <li><strong>Left menu alert</strong>: when FIO already knows about a responsiveness issue, the Station Health button shows an alert count. That alert is based on known health state; it does not create extra checks just to light the button.</li>
   </ul>
   <table>
@@ -538,7 +539,7 @@
       <tr><td><code>Last Duration</code></td><td>How long the last known check took. A blank value usually means the row is a grouped summary rather than one exact check.</td></tr>
     </tbody>
   </table>
-  <p><strong>Operator note</strong>: Station Health is a current-condition view, not a long event history. It keeps the most useful recent state visible and preserves the start time for the current issue so you can tell whether a problem is new or has been present for a while. For deeper support, pair this screen with the normal FIO logs.</p>
+  <p><strong>Operator note</strong>: Station Health shows both current conditions and recent scheduler decisions. The current-condition rows explain what FIO is waiting on right now. The recent scheduler decisions explain what FIO recently did or why it did not act, including schedule holds, manual control, disabled automation, control backoff, bad schedule data, and successful schedule changes.</p>
 
   <h2 id="ncs-fldigi-ssb">NCS: FLDigi / SSB</h2>
   <p><strong>Purpose</strong>: this is the live net-control desk for an FLDigi-supported or voice-supported directed net. It helps NCS and ANCS build one clean roster, keep track of who is handling each station, copy the right lines at the right time, and feed FLDigi macros from files that FIO keeps current.</p>

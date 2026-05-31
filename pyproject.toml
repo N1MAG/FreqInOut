@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "freqinout"
-version = "1.2.6"
+version = "1.2.6.1"
 description = "HF Radio Frequency and Net Control Utility"
 readme = "README.md"
 authors = [{ name = "Bill Daniel" }]

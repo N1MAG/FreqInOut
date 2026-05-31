@@ -4,6 +4,7 @@ import time
 from typing import Callable, Dict, Iterable, List, Mapping, Optional
 
 from freqinout.core.dependency_health import get_dependency_health_registry
+from freqinout.core.scheduler_events import load_recent_scheduler_events
 
 
 ScopeResolver = Callable[[str, Mapping[str, object]], str]
@@ -277,6 +278,7 @@ def summarize_station_health(
     registry_snapshot: Optional[Mapping[str, object]] = None,
     *,
     include_ok: bool = True,
+    include_scheduler_events: bool = False,
     scope_resolver: Optional[ScopeResolver] = None,
 ) -> Dict[str, object]:
     """
@@ -317,9 +319,11 @@ def summarize_station_health(
         severity = "danger"
     elif issue_items:
         severity = "warning"
+    recent_scheduler_events = load_recent_scheduler_events(limit=25) if include_scheduler_events else []
     return {
         "severity": severity,
         "issue_count": len(issue_items),
         "items": items,
         "issue_items": issue_items,
+        "recent_scheduler_events": recent_scheduler_events,
     }

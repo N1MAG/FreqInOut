@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from typing import Mapping, Optional
 
 from PySide6.QtCore import Qt, QTimer
@@ -95,6 +96,29 @@ class StationHealthTab(QWidget):
         header_view.setSectionResizeMode(7, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(8, QHeaderView.ResizeToContents)
         layout.addWidget(self.table, 1)
+
+        recent_label = QLabel("Recent Scheduler Decisions")
+        recent_label.setStyleSheet("font-size: 14px; font-weight: 700;")
+        layout.addWidget(recent_label)
+
+        self.scheduler_table = QTableWidget(0, 6, self)
+        self.scheduler_table.setHorizontalHeaderLabels(
+            ["UTC Time", "Decision", "Source", "What FIO Did", "Detail", "Target"]
+        )
+        self.scheduler_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.scheduler_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.scheduler_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.scheduler_table.setAlternatingRowColors(True)
+        self.scheduler_table.setWordWrap(True)
+        self.scheduler_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        sched_header = self.scheduler_table.horizontalHeader()
+        sched_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        sched_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        sched_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        sched_header.setSectionResizeMode(3, QHeaderView.Stretch)
+        sched_header.setSectionResizeMode(4, QHeaderView.Stretch)
+        sched_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        layout.addWidget(self.scheduler_table, 1)
         self.apply_theme()
 
     def set_scope_resolver(self, resolver: Optional[ScopeResolver]) -> None:
@@ -120,9 +144,13 @@ class StationHealthTab(QWidget):
         return str(self._last_summary.get("severity", "ok") or "ok")
 
     def refresh_from_registry(self) -> None:
-        self._last_summary = summarize_station_health(scope_resolver=self._scope_resolver)
+        self._last_summary = summarize_station_health(
+            include_scheduler_events=True,
+            scope_resolver=self._scope_resolver,
+        )
         self._render_summary()
         self._render_table()
+        self._render_scheduler_events()
 
     def apply_theme(self) -> None:
         theme = resolve_theme(self.settings)
@@ -192,3 +220,61 @@ class StationHealthTab(QWidget):
             for col, value in enumerate(values):
                 self.table.setItem(row, col, self._item(value, severity=severity if col == 2 else ""))
         self.table.resizeRowsToContents()
+
+    @staticmethod
+    def _format_scheduler_ts(value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            return dt.astimezone(datetime.timezone.utc).strftime("%H:%M:%SZ")
+        except Exception:
+            return text
+
+    @staticmethod
+    def _format_scheduler_target(item: Mapping[str, object]) -> str:
+        freq = item.get("frequency_hz")
+        parts = []
+        try:
+            if freq not in (None, ""):
+                parts.append(f"{int(freq) / 1_000_000.0:.3f} MHz")
+        except Exception:
+            pass
+        for key in ("band", "mode", "vfo"):
+            text = str(item.get(key, "") or "").strip()
+            if text:
+                parts.append(text)
+        return " / ".join(parts)
+
+    def _scheduler_event_severity(self, item: Mapping[str, object]) -> str:
+        code = str(item.get("code", "") or "")
+        event_type = str(item.get("event_type", "") or "")
+        if event_type in {"failed"} or "failed" in code:
+            return "danger"
+        if event_type in {"hold", "skip", "watchdog", "breakaway"}:
+            return "warning"
+        if event_type in {"applied", "resume"}:
+            return "ok"
+        return ""
+
+    def _render_scheduler_events(self) -> None:
+        events = list(self._last_summary.get("recent_scheduler_events", []) or [])
+        self.scheduler_table.setRowCount(len(events))
+        for row, item in enumerate(events):
+            if not isinstance(item, Mapping):
+                continue
+            severity = self._scheduler_event_severity(item)
+            values = [
+                self._format_scheduler_ts(item.get("ts_utc", "")),
+                item.get("code", ""),
+                item.get("source", ""),
+                item.get("action", ""),
+                item.get("detail", ""),
+                self._format_scheduler_target(item),
+            ]
+            for col, value in enumerate(values):
+                self.scheduler_table.setItem(row, col, self._item(value, severity=severity if col == 1 else ""))
+        self.scheduler_table.resizeRowsToContents()
