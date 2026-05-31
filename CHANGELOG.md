@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.6.1]
+- Fixed: `Resume Schedule` now forces the active operating plan back into FLDigi mode/offset enforcement instead of skipping FLDigi when the current schedule row looks already applied.
+- Added: Scheduler decisions are now persisted in a bounded `scheduler_events` journal so Station Health can show why FIO applied, skipped, held, retried, or failed a schedule action.
+- Changed: Station Health now includes recent scheduler decisions, making schedule-miss reports easier to diagnose without relying only on transient logs.
+- Fixed: FLDigi RX-busy holds now record the 3-minute watchdog recheck and the authoritative break-away decision before proceeding with the schedule change.
+
 ## [1.2.6]
 - Added: Settings now includes a JS8Spotter Form Mapper so discovered `MCF*.txt` forms can be assigned operator-friendly purposes such as Net Check-in, SitRep / StatRep, Net Notification, Weather / Storm, Hazard / Early Warning, Intel / RFI, Medical / Hospital, and Station Capability.
 - Added: JS8Spotter mapper routing now drives Messages visibility, unread alert highlighting, and Map evidence for forms whose sender already has known station location data, using cached form-code sets instead of per-row Settings reads.

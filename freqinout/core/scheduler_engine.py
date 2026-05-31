@@ -15,6 +15,7 @@ from freqinout.core.logger import log
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.mode_utils import normalize_operating_group_mode, resolve_rig_mode
 from freqinout.core.multi_radio_store import MultiRadioStore, settings_db_path
+from freqinout.core.scheduler_events import record_scheduler_event
 from freqinout.core.schedule_targeting import (
     normalize_schedule_target_fields,
     schedule_row_matches_target_context,
@@ -329,6 +330,7 @@ class SchedulerEngine(QObject):
         self._fldigi_busy_last_reason: Optional[str] = None
         self._fldigi_busy_watchdog_s: float = 180.0
         self._health = get_dependency_health_registry()
+        self._scheduler_event_last: Dict[Tuple[object, ...], float] = {}
 
         self.current_source: str = "NONE"
         self.current_schedule_entry: Dict = {}
@@ -751,6 +753,76 @@ class SchedulerEngine(QObject):
         except Exception:
             pass
 
+    def _schedule_event_key(self, source: str, entry_key: object = None) -> str:
+        if entry_key is not None:
+            return "|".join(str(part) for part in (entry_key if isinstance(entry_key, tuple) else (entry_key,)))
+        entry = self.current_schedule_entry or {}
+        try:
+            return "|".join(
+                [
+                    str(source or self.current_source or ""),
+                    str(entry.get("band") or ""),
+                    str(entry.get("frequency") or ""),
+                    str(entry.get("vfo") or ""),
+                    str(entry.get("primary_js8call_group") or ""),
+                    str(entry.get("mode") or ""),
+                    str(entry.get("fldigi_mode") or ""),
+                    str(entry.get("fldigi_offset") or ""),
+                ]
+            )
+        except Exception:
+            return str(source or self.current_source or "")
+
+    def _record_scheduler_event(
+        self,
+        event_type: str,
+        code: str,
+        *,
+        source: str = "",
+        entry: Optional[Dict] = None,
+        entry_key: object = None,
+        action: str = "",
+        detail: str = "",
+        frequency_hz: Optional[int] = None,
+        band: str = "",
+        mode: Optional[str] = None,
+        vfo: Optional[str] = None,
+        throttle_sec: float = 0.0,
+        **metadata,
+    ) -> None:
+        source_text = str(source or self.current_source or "").strip()
+        entry_obj = entry if isinstance(entry, dict) else (self.current_schedule_entry or {})
+        band_text = str(band or entry_obj.get("band") or "").strip().upper()
+        mode_text = str(mode if mode is not None else (self._resolve_rig_mode(entry_obj) if entry_obj else "") or "").strip()
+        vfo_text = str(vfo if vfo is not None else entry_obj.get("vfo") or "").strip().upper()
+        freq_hz = frequency_hz
+        if freq_hz is None and entry_obj:
+            try:
+                freq_hz = self._parse_freq_hz((entry_obj.get("frequency") or "").strip())
+            except Exception:
+                freq_hz = None
+        schedule_key = self._schedule_event_key(source_text, entry_key=entry_key)
+        sig = (str(event_type or ""), str(code or ""), source_text, schedule_key, str(detail or ""))
+        now_ts = time.time()
+        if throttle_sec > 0:
+            last_ts = self._scheduler_event_last.get(sig, 0.0)
+            if now_ts - last_ts < float(throttle_sec):
+                return
+        self._scheduler_event_last[sig] = now_ts
+        record_scheduler_event(
+            event_type=event_type,
+            code=code,
+            source=source_text,
+            action=action,
+            detail=detail,
+            frequency_hz=freq_hz,
+            band=band_text,
+            mode=mode_text,
+            vfo=vfo_text,
+            schedule_key=schedule_key,
+            metadata={k: v for k, v in metadata.items() if v is not None},
+        )
+
     def _clear_scheduler_health_issue(self, name: str, **metadata) -> None:
         try:
             self._health.record_success(
@@ -1027,20 +1099,84 @@ class SchedulerEngine(QObject):
     ) -> bool:
         if self._shutdown_requested:
             log.debug("SchedulerEngine: control action skipped (shutdown requested).")
+            self._record_scheduler_event(
+                "skip",
+                "shutdown_requested",
+                source=source,
+                action="Control action skipped because FIO is shutting down",
+                frequency_hz=freq_hz,
+                band=band,
+                mode=mode,
+                vfo=vfo,
+                entry_key=entry_key,
+                throttle_sec=15.0,
+            )
             return False
         if not self._control_can_attempt():
             log.debug("SchedulerEngine: control action skipped (backoff active).")
+            self._record_scheduler_event(
+                "skip",
+                "control_backoff",
+                source=source,
+                action="Control action delayed by scheduler backoff",
+                detail="A previous control action failed or timed out; FIO is waiting briefly before retrying.",
+                frequency_hz=freq_hz,
+                band=band,
+                mode=mode,
+                vfo=vfo,
+                entry_key=entry_key,
+                throttle_sec=15.0,
+                backoff_until=self._control_backoff_until,
+            )
             return False
         if self._control_future is not None and not self._control_future.done():
             if self._control_future_stuck():
                 self._reset_control_executor("timeout waiting for control task")
             else:
                 log.debug("SchedulerEngine: control action skipped (control task running).")
+                self._record_scheduler_event(
+                    "skip",
+                    "control_task_running",
+                    source=source,
+                    action="Control action waiting for prior control task",
+                    frequency_hz=freq_hz,
+                    band=band,
+                    mode=mode,
+                    vfo=vfo,
+                    entry_key=entry_key,
+                    throttle_sec=15.0,
+                )
                 return False
         if self._pending_entry_key == entry_key:
             log.debug("SchedulerEngine: control action skipped (pending entry key).")
+            self._record_scheduler_event(
+                "skip",
+                "pending_entry_key",
+                source=source,
+                action="Control action already pending for this schedule entry",
+                frequency_hz=freq_hz,
+                band=band,
+                mode=mode,
+                vfo=vfo,
+                entry_key=entry_key,
+                throttle_sec=15.0,
+            )
             return False
         self._pending_entry_key = entry_key
+        self._record_scheduler_event(
+            "apply_attempt",
+            "control_action_queued",
+            source=source,
+            action="Queued schedule control action",
+            frequency_hz=freq_hz,
+            band=band,
+            mode=mode,
+            vfo=vfo,
+            entry_key=entry_key,
+            throttle_sec=0.0,
+            control_mode=control_mode,
+            js8_offset=js8_offset,
+        )
 
         def _task() -> bool:
             ok = False
@@ -1111,6 +1247,18 @@ class SchedulerEngine(QObject):
                     self._last_freq_hz = freq_hz
                     self._last_band = band
                     self._clear_scheduler_health_issue("control-task", source=source, frequency_hz=freq_hz)
+                    self._record_scheduler_event(
+                        "applied",
+                        "control_action_succeeded",
+                        source=source,
+                        action="Schedule control action succeeded",
+                        frequency_hz=freq_hz,
+                        band=band,
+                        mode=mode,
+                        vfo=vfo,
+                        entry_key=entry_key,
+                        throttle_sec=0.0,
+                    )
                 else:
                     self._control_fail_count += 1
                     backoff = self._control_backoff()
@@ -1127,6 +1275,21 @@ class SchedulerEngine(QObject):
                         source=source,
                         frequency_hz=freq_hz,
                         failures=self._control_fail_count,
+                    )
+                    self._record_scheduler_event(
+                        "failed",
+                        "control_action_failed",
+                        source=source,
+                        action=f"Control action failed; backing off {backoff:.1f}s",
+                        detail="FIO will retry the latest scheduler intent after the control path recovers.",
+                        frequency_hz=freq_hz,
+                        band=band,
+                        mode=mode,
+                        vfo=vfo,
+                        entry_key=entry_key,
+                        throttle_sec=0.0,
+                        failures=self._control_fail_count,
+                        backoff_s=round(backoff, 1),
                     )
                 if self._latest_intent:
                     self._force_retry_after_control = False
@@ -1436,6 +1599,14 @@ class SchedulerEngine(QObject):
         if ignore_fldigi_busy or not want_freq_change:
             return False, None
         if self._manual_net_fldigi_active or self._manual_net_js8_active:
+            self._record_scheduler_event(
+                "skip",
+                "manual_net_active",
+                source=source,
+                action="FLDigi busy hold bypassed during active manual net control",
+                detail="Manual net control owns FLDigi/JS8 behavior for this net window.",
+                throttle_sec=60.0,
+            )
             return False, None
         if (source or "").upper() == "NET":
             return False, None
@@ -1469,6 +1640,16 @@ class SchedulerEngine(QObject):
                 hold_age_s=round(hold_age, 1),
                 source=source,
             )
+            self._record_scheduler_event(
+                "watchdog",
+                "fldigi_busy_recheck",
+                source=source,
+                action="FLDigi busy held schedule for 3 minutes; forcing a fresh recheck",
+                detail=f"FIO is verifying whether FLDigi busy is stale before applying the schedule. Reason: {reason}",
+                throttle_sec=0.0,
+                reason=reason,
+                hold_age_s=round(hold_age, 1),
+            )
             fresh = self._force_fldigi_status_recheck()
             fresh_busy = bool(fresh.get("busy"))
             fresh_reason = str(fresh.get("reason") or "") or "RX activity"
@@ -1492,12 +1673,35 @@ class SchedulerEngine(QObject):
                     hold_age_s=round(hold_age, 1),
                     source=source,
                 )
+                self._record_scheduler_event(
+                    "breakaway",
+                    "fldigi_busy_breakaway",
+                    source=source,
+                    action="FLDigi still reports busy after 3 minutes; applying schedule anyway",
+                    detail=(
+                        "Authoritative schedule break-away. FIO will proceed because a stale/hung FLDigi busy "
+                        f"state should not hold the operating plan indefinitely. Reason: {fresh_reason}"
+                    ),
+                    throttle_sec=0.0,
+                    reason=fresh_reason,
+                    hold_age_s=round(hold_age, 1),
+                )
             else:
                 log.warning(
                     "SchedulerEngine: FLDigi busy cleared by watchdog recheck after %.1fs hold; proceeding with schedule change.",
                     hold_age,
                 )
                 self._clear_scheduler_health_issue("fldigi-busy", source=source)
+                self._record_scheduler_event(
+                    "breakaway",
+                    "fldigi_busy_cleared",
+                    source=source,
+                    action="FLDigi busy cleared on 3-minute recheck; applying schedule",
+                    detail="The fresh FLDigi busy check cleared, so FIO will proceed with the schedule change.",
+                    throttle_sec=0.0,
+                    reason=fresh_reason,
+                    hold_age_s=round(hold_age, 1),
+                )
             return False, None
         self._record_scheduler_health_issue(
             "fldigi-busy",
@@ -1506,6 +1710,16 @@ class SchedulerEngine(QObject):
             reason=reason,
             hold_age_s=round(hold_age, 1),
             source=source,
+        )
+        self._record_scheduler_event(
+            "hold",
+            "fldigi_busy",
+            source=source,
+            action="Holding schedule change for FLDigi RX activity",
+            detail=f"FIO will recheck and break away after 3 minutes if this busy state does not clear. Reason: {reason}",
+            throttle_sec=30.0,
+            reason=reason,
+            hold_age_s=round(hold_age, 1),
         )
         return True, self._fldigi_busy_last_reason or "RX activity"
 
@@ -1601,39 +1815,14 @@ class SchedulerEngine(QObject):
         self._prompt_entry_key = None
         self._clear_coordination_prompt()
         self._reset_prompt_timers()
-        resume_skip_fldigi_apply = False
-        entry = self.current_schedule_entry or {}
-        if entry:
-            try:
-                effective_entry, _og = self._entry_with_operating_group_overrides(entry)
-                band = (effective_entry.get("band") or "").strip().upper()
-                freq_hz = self._parse_freq_hz((effective_entry.get("frequency") or "").strip())
-                js8_group = (effective_entry.get("primary_js8call_group") or "").strip()
-                vfo_raw = (effective_entry.get("vfo") or "A").strip().upper()
-                vfo = vfo_raw if vfo_raw in ("A", "B") else None
-                rig_mode = self._resolve_rig_mode(effective_entry)
-                resume_entry_key = (
-                    band,
-                    freq_hz,
-                    self._expected_fldigi_offset(effective_entry),
-                    self._js8_offset_setting(),
-                    vfo,
-                    js8_group,
-                    rig_mode,
-                )
-                # Resume should restore scheduler activity, but avoid re-forcing FLDigi
-                # for the already-current entry so offset drift stays notify-only.
-                same_source = (self._last_source or "") == (self.current_source or "NONE")
-                resume_skip_fldigi_apply = bool(
-                    same_source
-                    and (
-                        self._last_entry_key == resume_entry_key
-                        or self._last_entry_matches_schedule_identity(effective_entry)
-                    )
-                )
-            except Exception:
-                resume_skip_fldigi_apply = False
-        self._fldigi_force_apply_once = not resume_skip_fldigi_apply
+        self._record_scheduler_event(
+            "resume",
+            "resume_schedule",
+            action="Resume Schedule requested; forcing active operating plan",
+            detail="Resume clears holds/backoff and reapplies the active schedule, including FLDigi mode/offset.",
+            throttle_sec=0.0,
+        )
+        self._fldigi_force_apply_once = True
         self._latest_intent = None
         self._latest_intent_ts = 0.0
         self._retry_scheduled = False
@@ -1654,12 +1843,9 @@ class SchedulerEngine(QObject):
             ignore_js8_busy=True,
             ignore_varac_busy=True,
             ignore_fldigi_busy=True,
-            apply_fldigi=not resume_skip_fldigi_apply,
+            apply_fldigi=True,
         )
-        if resume_skip_fldigi_apply:
-            self._fldigi_apply_pending = False
-        if not resume_skip_fldigi_apply:
-            self._maybe_apply_fldigi()
+        self._maybe_apply_fldigi()
         self._net_resume_apply_once = False
         self._schedule_forced_retry()
 
@@ -1670,6 +1856,14 @@ class SchedulerEngine(QObject):
         This is intended for user-invoked temporary holds from global UI controls.
         """
         mins = self._normalize_hold_minutes(minutes if minutes is not None else self._default_hold_minutes())
+        self._record_scheduler_event(
+            "hold",
+            "schedule_suspended",
+            action=f"Scheduler manually suspended for {mins} minutes",
+            detail="FIO will keep showing schedule state, but automatic frequency changes are paused until resumed or the hold expires.",
+            throttle_sec=0.0,
+            minutes=mins,
+        )
         self._prompt_active = False
         self._prompt_items = []
         self._prompt_entry_key = None
@@ -3289,6 +3483,14 @@ class SchedulerEngine(QObject):
             # we keep the rig where it was (no auto "clear") but still
             # notify UI that source is NONE.
             self._clear_coordination_prompt()
+            self._record_scheduler_event(
+                "skip",
+                "no_active_schedule",
+                source=source,
+                action="No active schedule entry",
+                detail="FIO found no HF, NET, or SOP schedule row active for this time.",
+                throttle_sec=300.0,
+            )
             if source != self.current_source or force:
                 self.current_source = "NONE"
                 self.current_schedule_entry = {}
@@ -3904,6 +4106,15 @@ class SchedulerEngine(QObject):
         if source != "QSY" and self._manual_qsy_active:
             self._clear_coordination_prompt()
             log.debug("SchedulerEngine: manual QSY active; skipping scheduled frequency change.")
+            self._record_scheduler_event(
+                "skip",
+                "manual_qsy_active",
+                source=source,
+                entry=effective_entry,
+                action="Scheduled change skipped because manual QSY is active",
+                detail="Resume Schedule clears manual QSY and returns to the active schedule.",
+                throttle_sec=30.0,
+            )
             self.active_entry_changed.emit(effective_entry, source)
             return
 
@@ -3911,12 +4122,30 @@ class SchedulerEngine(QObject):
         # If we're not in JS8CALL mode and have no rig backend, just update UI state.
         if control_mode != "JS8CALL" and self.rig is None:
             self._clear_coordination_prompt()
+            self._record_scheduler_event(
+                "skip",
+                "rig_backend_missing",
+                source=source,
+                entry=effective_entry,
+                action="Schedule state updated, but no rig control backend is available",
+                detail="FIO cannot send frequency commands until the selected control app is available.",
+                throttle_sec=60.0,
+            )
             self.active_entry_changed.emit(effective_entry, source)
             return
 
         if control_mode == "MANUAL":
             self._clear_coordination_prompt()
             log.debug("SchedulerEngine: manual control selected; no frequency commands sent.")
+            self._record_scheduler_event(
+                "skip",
+                "manual_control",
+                source=source,
+                entry=effective_entry,
+                action="Schedule state updated; Manual control is selected",
+                detail="FIO will not send frequency commands while control mode is Manual.",
+                throttle_sec=60.0,
+            )
             self.active_entry_changed.emit(effective_entry, source)
             return
         if control_mode == "NONE":
@@ -3924,6 +4153,15 @@ class SchedulerEngine(QObject):
             log.debug(
                 "SchedulerEngine: control backend unavailable for mode=%s; not sending commands.",
                 self.settings.get("control_via", "FLRig"),
+            )
+            self._record_scheduler_event(
+                "skip",
+                "control_backend_unavailable",
+                source=source,
+                entry=effective_entry,
+                action="Schedule state updated; selected control backend is unavailable",
+                detail=f"Selected control path: {self.settings.get('control_via', 'FLRig')}",
+                throttle_sec=60.0,
             )
             self.active_entry_changed.emit(effective_entry, source)
             return
@@ -3933,6 +4171,15 @@ class SchedulerEngine(QObject):
             dt = self._suspend_until_dt()
             until_txt = dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ") if dt else ""
             log.debug("SchedulerEngine: scheduling suspended until %s; skipping frequency change.", until_txt)
+            self._record_scheduler_event(
+                "hold",
+                "schedule_suspended",
+                source=source,
+                entry=effective_entry,
+                action="Holding schedule change because scheduler is suspended",
+                detail=f"Suspended until {until_txt}" if until_txt else "Scheduler suspend is active.",
+                throttle_sec=30.0,
+            )
             self.active_entry_changed.emit(effective_entry, source)
             return
 
@@ -3940,15 +4187,42 @@ class SchedulerEngine(QObject):
         if not self._scheduler_enabled():
             self._clear_coordination_prompt()
             log.debug("SchedulerEngine: scheduler disabled in settings; no frequency changes sent.")
+            self._record_scheduler_event(
+                "skip",
+                "scheduler_disabled",
+                source=source,
+                entry=effective_entry,
+                action="Schedule state updated; scheduler automation is disabled",
+                detail="Turn scheduler automation back on in Settings to allow FIO to send schedule frequency changes.",
+                throttle_sec=60.0,
+            )
             self.active_entry_changed.emit(effective_entry, source)
             return
         # Parse frequency text early to support VarAC wait prompts.
         if not freq_text:
             log.warning("SchedulerEngine: schedule entry missing 'frequency'; skipping.")
+            self._record_scheduler_event(
+                "skip",
+                "missing_frequency",
+                source=source,
+                entry=effective_entry,
+                action="Schedule entry missing frequency",
+                detail="FIO cannot apply a schedule entry without a frequency.",
+                throttle_sec=60.0,
+            )
             return
         freq_hz = self._parse_freq_hz(freq_text)
         if freq_hz is None:
             log.error("SchedulerEngine: invalid frequency text '%s'; skipping.", freq_text)
+            self._record_scheduler_event(
+                "skip",
+                "invalid_frequency",
+                source=source,
+                entry=effective_entry,
+                action="Schedule entry has an invalid frequency",
+                detail=f"Frequency text was {freq_text!r}.",
+                throttle_sec=60.0,
+            )
             return
         current_freq_hz = self._status_flrig_freq_hz if control_mode in {"FLRIG", "RIGCTLD"} else None
         if current_freq_hz is None:
@@ -3972,6 +4246,17 @@ class SchedulerEngine(QObject):
                 self._varac_wait_prompt_active = True
                 self._varac_wait_prompt_entry_key = prompt_key
                 self.varac_wait_detected.emit({"entry": effective_entry, "source": source})
+            self._record_scheduler_event(
+                "hold",
+                "varac_waiting_for_frequency",
+                source=source,
+                entry=effective_entry,
+                entry_key=prompt_key,
+                action="Holding schedule change because VarAC is waiting for frequency",
+                detail="FIO is waiting for operator confirmation before changing while VarAC appears to need the current frequency.",
+                frequency_hz=freq_hz,
+                throttle_sec=30.0,
+            )
             self.active_entry_changed.emit(effective_entry, source)
             return
         fldigi_delay, fldigi_reason = self._should_delay_for_fldigi(
@@ -3993,6 +4278,17 @@ class SchedulerEngine(QObject):
                 frequency_hz=freq_hz,
                 control_mode=control_mode,
             )
+            self._record_scheduler_event(
+                "hold",
+                "flrig_ptt",
+                source=source,
+                entry=effective_entry,
+                entry_key=prompt_key,
+                action=f"Holding schedule change because {control_mode} PTT is active",
+                frequency_hz=freq_hz,
+                throttle_sec=15.0,
+                control_mode=control_mode,
+            )
         shared_ptt = self._shared_ptt_lock_status(force=bool(force))
         if bool(shared_ptt.get("blocked")):
             shared_reason = str(shared_ptt.get("reason", "") or "").strip() or "Shared PTT interlock is active"
@@ -4005,12 +4301,35 @@ class SchedulerEngine(QObject):
                 frequency_hz=freq_hz,
                 control_mode=control_mode,
             )
+            self._record_scheduler_event(
+                "hold",
+                "shared_ptt_interlock",
+                source=source,
+                entry=effective_entry,
+                entry_key=prompt_key,
+                action="Holding schedule change because shared PTT interlock is active",
+                detail=shared_reason,
+                frequency_hz=freq_hz,
+                throttle_sec=15.0,
+                control_mode=control_mode,
+            )
         if not ptt_hold_active:
             self._clear_scheduler_health_issue("flrig-ptt")
 
         if source != "NET" and bool(self._last_js8_busy) and not ignore_js8_busy:
             busy_reasons.append("JS8Call is busy (RX/TX)")
             self._record_scheduler_health_issue("js8-busy", "holding schedule change because JS8Call is busy (RX/TX)", source=source, frequency_hz=freq_hz)
+            self._record_scheduler_event(
+                "hold",
+                "js8_busy",
+                source=source,
+                entry=effective_entry,
+                entry_key=prompt_key,
+                action="Holding schedule change because JS8Call is busy",
+                detail="Resume Schedule can override JS8 busy if the operator wants to force the active plan.",
+                frequency_hz=freq_hz,
+                throttle_sec=30.0,
+            )
         else:
             self._clear_scheduler_health_issue("js8-busy")
 
@@ -4025,6 +4344,18 @@ class SchedulerEngine(QObject):
                 f"holding schedule change because VarAC is busy{f' ({varac_reason})' if varac_reason else ''}",
                 source=source,
                 frequency_hz=freq_hz,
+                reason=varac_reason,
+            )
+            self._record_scheduler_event(
+                "hold",
+                "varac_busy",
+                source=source,
+                entry=effective_entry,
+                entry_key=prompt_key,
+                action="Holding schedule change because VarAC is busy",
+                detail=varac_reason,
+                frequency_hz=freq_hz,
+                throttle_sec=30.0,
                 reason=varac_reason,
             )
         else:
@@ -4069,6 +4400,17 @@ class SchedulerEngine(QObject):
                 self._coordination_prompt_signature = coordination_signature
                 self._coordination_prompt_payload = dict(coordination_conflict)
                 self.coordination_conflict_detected.emit(dict(coordination_conflict))
+            self._record_scheduler_event(
+                "hold",
+                "coordination_conflict",
+                source=source,
+                entry=effective_entry,
+                action="Holding schedule change for multi-rig coordination review",
+                detail=str(coordination_conflict.get("summary") or coordination_conflict.get("detail") or ""),
+                frequency_hz=freq_hz,
+                throttle_sec=30.0,
+                signature=coordination_signature,
+            )
             self.active_entry_changed.emit(effective_entry, source)
             return
 
@@ -4104,11 +4446,32 @@ class SchedulerEngine(QObject):
             if self._manual_net_fldigi_active or self._manual_net_js8_active:
                 self._clear_coordination_prompt()
                 log.debug("SchedulerEngine: net active; skipping schedule enforcement.")
+                self._record_scheduler_event(
+                    "skip",
+                    "manual_net_active",
+                    source=source,
+                    entry=effective_entry,
+                    entry_key=entry_key,
+                    action="Net schedule enforcement skipped during manual net control",
+                    frequency_hz=freq_hz,
+                    throttle_sec=30.0,
+                )
                 self.active_entry_changed.emit(effective_entry, source)
                 return
             if self._last_entry_key == entry_key:
                 self._clear_coordination_prompt()
                 log.debug("SchedulerEngine: net schedule active; skipping corrections for current entry.")
+                self._record_scheduler_event(
+                    "skip",
+                    "net_corrections_suppressed",
+                    source=source,
+                    entry=effective_entry,
+                    entry_key=entry_key,
+                    action="Net schedule corrections suppressed for current entry",
+                    detail="FIO is avoiding repeated corrections while the net schedule is active.",
+                    frequency_hz=freq_hz,
+                    throttle_sec=60.0,
+                )
                 self.active_entry_changed.emit(effective_entry, source)
                 return
         if source in ("HF", "NET", "SOP") and scheduler_transition and apply_fldigi:
@@ -4119,6 +4482,16 @@ class SchedulerEngine(QObject):
         if self._pending_entry_key == entry_key and not force:
             self._clear_coordination_prompt()
             log.debug("SchedulerEngine: control action skipped (pending entry key).")
+            self._record_scheduler_event(
+                "skip",
+                "pending_entry_key",
+                source=source,
+                entry=effective_entry,
+                entry_key=entry_key,
+                action="Schedule control action already pending for this entry",
+                frequency_hz=freq_hz,
+                throttle_sec=15.0,
+            )
             self.active_entry_changed.emit(effective_entry, source)
             return
         already_applied = (
@@ -4127,6 +4500,17 @@ class SchedulerEngine(QObject):
         if not force and already_applied:
             self._clear_coordination_prompt()
             log.debug("SchedulerEngine: schedule entry already applied; skipping re-apply.")
+            self._record_scheduler_event(
+                "skip",
+                "already_applied",
+                source=source,
+                entry=effective_entry,
+                entry_key=entry_key,
+                action="Schedule entry already applied",
+                detail="FIO did not resend the same command because the active schedule key already matches the last successful apply.",
+                frequency_hz=freq_hz,
+                throttle_sec=120.0,
+            )
             self.active_entry_changed.emit(effective_entry, source)
             return
         if apply_fldigi:
