@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from freqinout.core.config_paths import get_config_dir
+from freqinout.core.js8_spotter_forms import (
+    MAPPER_SETTINGS_KEY,
+    form_id_enabled,
+    form_codes_enabled_for,
+    forms_enabled_for,
+    normalize_form_code,
+)
 from freqinout.core.logger import log
 from freqinout.core.settings_manager import SettingsManager
 
@@ -17,6 +24,8 @@ JS8_MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30 days
 SPOTTER_STATUS_FORM_ID = "304"  # Kept for compatibility with older tests/callers.
 SPOTTER_STATUS_FORMS = {"104", "301", "304"}
 MCF304_EXPECTED_RESPONSES = 8
+SPOTTER_PROMPT_RE = re.compile(r"([A-Z0-9]{2})\[(.*?)\]\s*", re.IGNORECASE)
+SPOTTER_TOKEN_RE = re.compile(r"\s*#[A-Z0-9]{3,}\s*", re.IGNORECASE)
 
 
 class JS8FormDecoder:
@@ -39,21 +48,35 @@ class JS8FormDecoder:
         form = self._load_form_definition(form_id)
         if not form:
             return raw or responses
+        prompt_values = {
+            key.upper(): value.strip()
+            for key, value in SPOTTER_PROMPT_RE.findall(str(comment or ""))
+        }
+        remaining_comment = SPOTTER_PROMPT_RE.sub("", str(comment or ""))
+        remaining_comment = SPOTTER_TOKEN_RE.sub(" ", remaining_comment).strip()
         out_lines: List[str] = []
-        for idx, q in enumerate(form):
+        resp_idx = 0
+        for q in form:
             question = (q.get("q", "") or "").strip()
+            prompt_key = str(q.get("prompt_key", "") or "").strip().upper()
+            if prompt_key:
+                out_lines.append(question)
+                out_lines.append(prompt_values.get(prompt_key, "(no response)"))
+                out_lines.append("")
+                continue
             answers = q.get("ans", {}) or {}
             out_lines.append(question)
-            if idx < len(responses):
-                code = responses[idx]
+            if resp_idx < len(responses):
+                code = responses[resp_idx]
                 ans = answers.get(code, f"(unknown: {code})")
                 out_lines.append(ans)
             else:
                 out_lines.append("(no response)")
+            resp_idx += 1
             out_lines.append("")
-        if comment:
+        if remaining_comment:
             out_lines.append("Comment:")
-            out_lines.append(comment.strip())
+            out_lines.append(remaining_comment)
         return "\n".join(out_lines).strip() or (raw or responses)
 
     def _load_form_definition(self, form_id: str) -> List[Dict]:
@@ -76,6 +99,20 @@ class JS8FormDecoder:
                     if current_q:
                         questions.append(current_q)
                     current_q = {"q": line[1:].strip(), "ans": {}}
+                elif line.startswith("[") and "]" in line:
+                    if current_q:
+                        questions.append(current_q)
+                        current_q = None
+                    prompt_key = line[1 : line.find("]")].strip().upper()
+                    prompt_text = line[line.find("]") + 1 :].strip()
+                    if prompt_key:
+                        questions.append(
+                            {
+                                "q": prompt_text or prompt_key,
+                                "prompt_key": prompt_key,
+                                "ans": {},
+                            }
+                        )
                 elif line.startswith("@") and current_q:
                     try:
                         key, text = line[1], line[2:].strip()
@@ -129,6 +166,7 @@ class MessageIngestor:
             rows = []
 
         state_map = self._load_js8_state_map()
+        message_form_codes = self._form_codes_for_flag("messages")
         now_ts = time.time()
         for row in rows:
             rid = row[0] if len(row) > 0 else 0
@@ -165,6 +203,8 @@ class MessageIngestor:
             if text.startswith("F!"):
                 form_part, resp, comment = self._parse_form_parts(text)
                 msg_type = f"F!{form_part}" if form_part else "MSG"
+                if form_part and not form_id_enabled(form_part, message_form_codes):
+                    continue
                 decoded = self._decoder.decode_form(form_part, resp, comment, raw=text)
             saved_state = state_map.get(rid)
             if saved_state:
@@ -408,7 +448,7 @@ class MessageIngestor:
             return None
         if re.search(r"\bMSG\b", msg_upper):
             return None
-        form_match = re.search(r"F!(\d{3})", msg_upper)
+        form_match = re.search(r"F!([0-9]{3}[A-Z]?)", msg_upper)
         if not form_match:
             return None
         try:
@@ -452,7 +492,8 @@ class MessageIngestor:
         parts = (text or "").split()
         if not parts or not parts[0].startswith("F!"):
             return "", "", ""
-        form_part = parts[0][2:] if len(parts[0]) > 2 else ""
+        form_code = normalize_form_code(parts[0])
+        form_part = form_code[2:] if form_code.startswith("F!") else ""
         resp = parts[1] if len(parts) > 1 else ""
         comment = " ".join(parts[2:]) if len(parts) > 2 else ""
         return form_part, resp, comment
@@ -526,6 +567,23 @@ class MessageIngestor:
 
         return "unknown", cls._status_label("unknown"), ""
 
+    def _mapped_status_form_ids(self) -> set[str]:
+        try:
+            raw = self.settings.get(MAPPER_SETTINGS_KEY, [])
+        except Exception:
+            raw = []
+        mapped = {
+            code[2:]
+            for code in forms_enabled_for(self.settings, flag="status")
+            if code.startswith("F!") and code[2:] in SPOTTER_STATUS_FORMS
+        }
+        if isinstance(raw, list) and raw:
+            return mapped
+        return mapped or set(SPOTTER_STATUS_FORMS)
+
+    def _form_codes_for_flag(self, flag: str) -> set[str] | None:
+        return form_codes_enabled_for(self.settings, flag=flag)
+
     def _upsert_spotter_station_status(
         self,
         cur: sqlite3.Cursor,
@@ -540,7 +598,7 @@ class MessageIngestor:
         status_source: str = "",
     ) -> None:
         fid = (form_id or "").strip()
-        if fid not in SPOTTER_STATUS_FORMS:
+        if fid not in self._mapped_status_form_ids():
             return
         call = (from_call or "").strip().upper()
         if not call:
@@ -599,7 +657,9 @@ class MessageIngestor:
                 upgraded = cur.fetchone()
                 if upgraded and int(upgraded[0] or 0) > 0:
                     return
-            forms = sorted(SPOTTER_STATUS_FORMS)
+            forms = sorted(self._mapped_status_form_ids())
+            if not forms:
+                return
             placeholders = ",".join(["?"] * len(forms))
             cur.execute(
                 f"""

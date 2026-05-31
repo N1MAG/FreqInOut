@@ -88,6 +88,14 @@ from freqinout.core.hash_tools import (
     normalize_hash_hex,
     normalize_trusted_hash_entries,
 )
+from freqinout.core.js8_spotter_forms import (
+    MAPPER_SETTINGS_KEY,
+    PURPOSE_OPTIONS,
+    discover_spotter_forms,
+    effective_mapping_rows,
+    factory_mapping_for_form,
+    normalize_mapping_rows,
+)
 from freqinout.core.multi_radio_store import (
     DEFAULT_OPERATING_NAME,
     MultiRadioStore,
@@ -487,6 +495,8 @@ class SettingsTab(QWidget):
     log_level_changed = Signal(str)
     SECTION_HEALTH_STATE_ROLE = int(Qt.UserRole) + 1
     SECTION_HEALTH_KEY_ROLE = int(Qt.UserRole) + 2
+    SECTION_STACK_INDEX_ROLE = int(Qt.UserRole) + 3
+    SECTION_SCOPE_ROLE = int(Qt.UserRole) + 4
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -531,6 +541,8 @@ class SettingsTab(QWidget):
         self._accordion_groups: List[QGroupBox] = []
         self._section_meta: Dict[QGroupBox, Dict[str, object]] = {}
         self._section_nav_items: Dict[QGroupBox, QListWidgetItem] = {}
+        self._section_nav_buttons: Dict[QGroupBox, QPushButton] = {}
+        self._global_settings_nav_collapsed = True
         self._context_help_buttons: List[QPushButton] = []
         self._custom_tool_items_cache: List[Dict[str, str]] = []
         self._custom_tools_table_loading = False
@@ -561,6 +573,9 @@ class SettingsTab(QWidget):
         self._gpg_trusted_fingerprints: set[str] = set()
         self._trusted_hashes_table_loading = False
         self._trusted_hash_entries: List[Dict[str, object]] = []
+        self._spotter_mapper_loading = False
+        self._settings_radio_focus_id: Optional[int] = None
+        self._settings_radio_selector_buttons: Dict[int, QPushButton] = {}
         self._software_radio_combo_loading = False
         self._software_radio_current_id: Optional[int] = None
         self._software_radio_drafts: Dict[int, Dict[str, Any]] = {}
@@ -2010,7 +2025,7 @@ class SettingsTab(QWidget):
         callsign_group_layout.addWidget(callsign_container)
         callsign_group.setLayout(callsign_group_layout)
         callsign_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        main_layout.addWidget(callsign_group)
+        self.operator_information_section_group = callsign_group
 
         # FreqInOut settings
         op_layout = QVBoxLayout()
@@ -2128,32 +2143,29 @@ class SettingsTab(QWidget):
         )
         self.logging_group = QWidget()
         self.logging_group.setToolTip(log_warn_tip)
-        logging_group_layout = QVBoxLayout()
-        logging_group_layout.setContentsMargins(8, 8, 8, 8)
-        logging_group_layout.setSpacing(6)
+        logging_group_layout = QGridLayout()
+        logging_group_layout.setContentsMargins(0, 0, 0, 0)
+        logging_group_layout.setHorizontalSpacing(8)
+        logging_group_layout.setVerticalSpacing(8)
 
         self.logging_warning_label = QLabel(
-            "Verbose logging can increase disk I/O and reduce performance."
+            "Use INFO or DEBUG only while troubleshooting; verbose logs can slow the station and grow quickly."
         )
         self.logging_warning_label.setWordWrap(True)
         self.logging_warning_label.setToolTip(log_warn_tip)
-        logging_group_layout.addWidget(self.logging_warning_label)
+        logging_group_layout.addWidget(self.logging_warning_label, 0, 0, 1, 6)
 
-        level_row = QHBoxLayout()
-        level_row.addWidget(QLabel("Logging Level:"))
+        logging_group_layout.addWidget(QLabel("Logging Level:"), 1, 0)
         self.log_level_combo = QComboBox()
         self.log_level_combo.addItems(["DISABLED", "ERROR", "WARNING", "INFO", "DEBUG"])
         self.log_level_combo.setToolTip(log_warn_tip)
         self.log_level_combo.currentTextChanged.connect(self._on_log_level_changed)
-        level_row.addWidget(self.log_level_combo)
-        level_row.addStretch()
-        logging_group_layout.addLayout(level_row)
+        logging_group_layout.addWidget(self.log_level_combo, 1, 1)
 
-        timed_row = QHBoxLayout()
         self.enable_timed_debug_btn = QPushButton("Enable DEBUG For")
         self.enable_timed_debug_btn.setToolTip(log_warn_tip)
         self.enable_timed_debug_btn.clicked.connect(self._enable_timed_debug)
-        timed_row.addWidget(self.enable_timed_debug_btn)
+        logging_group_layout.addWidget(self.enable_timed_debug_btn, 1, 2)
 
         self.debug_duration_combo = QComboBox()
         self.debug_duration_combo.addItem("15 min", 15)
@@ -2161,9 +2173,7 @@ class SettingsTab(QWidget):
         self.debug_duration_combo.addItem("60 min", 60)
         self.debug_duration_combo.setCurrentIndex(1)
         self.debug_duration_combo.setToolTip("Automatically reverts to previous logging level when timer expires.")
-        timed_row.addWidget(self.debug_duration_combo)
-        timed_row.addStretch()
-        logging_group_layout.addLayout(timed_row)
+        logging_group_layout.addWidget(self.debug_duration_combo, 1, 3)
 
         self.logging_actions_grid = QGridLayout()
         self.logging_actions_grid.setHorizontalSpacing(8)
@@ -2184,7 +2194,8 @@ class SettingsTab(QWidget):
         self.export_diag_btn.clicked.connect(self._export_diagnostics)
         self.logging_actions_grid.addWidget(self.export_diag_btn, 0, 2)
         self.logging_actions_grid.setColumnStretch(3, 1)
-        logging_group_layout.addLayout(self.logging_actions_grid)
+        logging_group_layout.addLayout(self.logging_actions_grid, 2, 0, 1, 6)
+        logging_group_layout.setColumnStretch(4, 1)
 
         self.logging_group.setLayout(logging_group_layout)
 
@@ -2200,16 +2211,43 @@ class SettingsTab(QWidget):
         self.status_layout = QHBoxLayout()
         status_container = QWidget()
         status_container.setLayout(self.status_layout)
-        status_group = QGroupBox("Operating Status")
+        status_group = QGroupBox("Radio Status")
         status_group_layout = QVBoxLayout()
         status_group_layout.setContentsMargins(10, 10, 10, 12)
         status_group_layout.setSpacing(6)
         status_group_layout.addWidget(status_container)
         status_group.setLayout(status_group_layout)
         status_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        main_layout.addWidget(status_group)
         self.status_group = status_group
         self._rebuild_status_indicators()
+
+        configured_radios_group = QGroupBox("Configured Radios")
+        configured_radios_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        configured_radios_layout = QVBoxLayout(configured_radios_group)
+        configured_radios_layout.setContentsMargins(10, 10, 10, 12)
+        configured_radios_layout.setSpacing(6)
+        self.device_profile_selector_title_label = QLabel("Select Radio To Edit")
+        selector_title_font = self.device_profile_selector_title_label.font()
+        selector_title_font.setBold(True)
+        self.device_profile_selector_title_label.setFont(selector_title_font)
+        configured_radios_layout.addWidget(self.device_profile_selector_title_label)
+        self.device_profile_selector_widget = QWidget()
+        self.device_profile_selector_layout = QHBoxLayout(self.device_profile_selector_widget)
+        self.device_profile_selector_layout.setContentsMargins(0, 0, 0, 0)
+        self.device_profile_selector_layout.setSpacing(8)
+        self.device_profile_selector_layout.addStretch()
+        self.device_profile_selector_scroll = QScrollArea()
+        self.device_profile_selector_scroll.setWidgetResizable(True)
+        self.device_profile_selector_scroll.setFrameShape(QFrame.NoFrame)
+        self.device_profile_selector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.device_profile_selector_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.device_profile_selector_scroll.setMinimumHeight(72)
+        self.device_profile_selector_scroll.setMaximumHeight(92)
+        self.device_profile_selector_scroll.setWidget(self.device_profile_selector_widget)
+        configured_radios_layout.addWidget(self.device_profile_selector_scroll)
+        configured_radios_layout.addWidget(self.status_group)
+        main_layout.addWidget(configured_radios_group)
+        self.configured_radios_group = configured_radios_group
 
         sections_row = QHBoxLayout()
         sections_row.setSpacing(10)
@@ -2224,7 +2262,37 @@ class SettingsTab(QWidget):
         self.sections_nav_list.setMouseTracking(True)
         self.sections_nav_list.setItemDelegate(_SettingsSectionNavDelegate(self))
         self.sections_nav_list.currentRowChanged.connect(self._on_section_nav_changed)
-        sections_row.addWidget(self.sections_nav_list, 0, Qt.AlignTop)
+        nav_panel = QWidget()
+        nav_panel_layout = QVBoxLayout(nav_panel)
+        nav_panel_layout.setContentsMargins(0, 0, 0, 0)
+        nav_panel_layout.setSpacing(6)
+        self.global_settings_toggle_btn = QToolButton()
+        self.global_settings_toggle_btn.setCheckable(True)
+        self.global_settings_toggle_btn.setChecked(False)
+        self.global_settings_toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.global_settings_toggle_btn.setArrowType(Qt.RightArrow)
+        self.global_settings_toggle_btn.setText("Global Settings")
+        self.global_settings_toggle_btn.setMinimumHeight(28)
+        self.global_settings_toggle_btn.clicked.connect(self._on_global_settings_toggle)
+        nav_panel_layout.addWidget(self.global_settings_toggle_btn)
+        self.global_section_buttons_widget = QWidget()
+        self.global_section_buttons_layout = QVBoxLayout(self.global_section_buttons_widget)
+        self.global_section_buttons_layout.setContentsMargins(10, 0, 0, 0)
+        self.global_section_buttons_layout.setSpacing(4)
+        self.global_section_buttons_widget.setVisible(False)
+        nav_panel_layout.addWidget(self.global_section_buttons_widget)
+        self.radio_specific_nav_label = QLabel("Radio Specific")
+        radio_label_font = self.radio_specific_nav_label.font()
+        radio_label_font.setBold(True)
+        self.radio_specific_nav_label.setFont(radio_label_font)
+        nav_panel_layout.addWidget(self.radio_specific_nav_label)
+        self.radio_section_buttons_widget = QWidget()
+        self.radio_section_buttons_layout = QVBoxLayout(self.radio_section_buttons_widget)
+        self.radio_section_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self.radio_section_buttons_layout.setSpacing(4)
+        nav_panel_layout.addWidget(self.radio_section_buttons_widget)
+        self.sections_nav_list.hide()
+        sections_row.addWidget(nav_panel, 0, Qt.AlignTop)
 
         self.sections_stack = QStackedWidget()
         self.sections_scroll = QScrollArea()
@@ -2239,15 +2307,17 @@ class SettingsTab(QWidget):
         op_container = QWidget()
         op_container.setLayout(op_layout)
         op_group = self._make_collapsible_group(
-            "FreqInOut Settings",
+            "Preferences",
             op_container,
             checked=True,
             fit_content=True,
+            help_context_key="settings.freqinout",
         )
         self._register_collapsible_group(op_group, self._summary_freqinout_settings)
         self._set_section_health_key(op_group, "freqinout")
         op_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(op_group)
+        self._add_settings_section(self.operator_information_section_group, scope="global")
+        self._add_settings_section(op_group, scope="global")
 
         def _make_support_card(title: str, status_object_name: str) -> tuple[QFrame, QLabel, QLabel]:
             card = QFrame()
@@ -2276,6 +2346,33 @@ class SettingsTab(QWidget):
         self.device_profiles_hint_label.setWordWrap(True)
         device_layout.addWidget(self.device_profiles_hint_label)
 
+        self.device_profile_detail_card = QFrame()
+        self.device_profile_detail_card.setFrameShape(QFrame.StyledPanel)
+        detail_layout = QVBoxLayout(self.device_profile_detail_card)
+        detail_layout.setContentsMargins(12, 10, 12, 10)
+        detail_layout.setSpacing(6)
+        self.device_profile_detail_title_label = QLabel("Selected Radio")
+        detail_title_font = self.device_profile_detail_title_label.font()
+        detail_title_font.setBold(True)
+        self.device_profile_detail_title_label.setFont(detail_title_font)
+        detail_layout.addWidget(self.device_profile_detail_title_label)
+        self.device_profile_detail_label = QLabel("Select a radio to edit that radio's settings.")
+        self.device_profile_detail_label.setWordWrap(True)
+        detail_layout.addWidget(self.device_profile_detail_label)
+        device_layout.addWidget(self.device_profile_detail_card)
+
+        software_chips_title = QLabel("Software Enabled For This Radio")
+        software_chips_font = software_chips_title.font()
+        software_chips_font.setBold(True)
+        software_chips_title.setFont(software_chips_font)
+        device_layout.addWidget(software_chips_title)
+        self.radio_profile_software_chips_widget = QWidget()
+        self.radio_profile_software_chips_layout = QHBoxLayout(self.radio_profile_software_chips_widget)
+        self.radio_profile_software_chips_layout.setContentsMargins(0, 0, 0, 0)
+        self.radio_profile_software_chips_layout.setSpacing(8)
+        self.radio_profile_software_chips_layout.addStretch()
+        device_layout.addWidget(self.radio_profile_software_chips_widget)
+
         self.device_profile_readiness_card = QFrame()
         self.device_profile_readiness_card.setFrameShape(QFrame.StyledPanel)
         readiness_layout = QVBoxLayout(self.device_profile_readiness_card)
@@ -2287,7 +2384,7 @@ class SettingsTab(QWidget):
         self.device_profile_readiness_title_label.setFont(readiness_title_font)
         readiness_layout.addWidget(self.device_profile_readiness_title_label)
         self.device_profile_readiness_status_label = QLabel(
-            "Select a radio row to review the readiness checklist for that radio."
+            "Select a radio to review the readiness checklist for that radio."
         )
         self.device_profile_readiness_status_label.setWordWrap(True)
         readiness_layout.addWidget(self.device_profile_readiness_status_label)
@@ -2298,10 +2395,13 @@ class SettingsTab(QWidget):
         readiness_actions.addStretch()
         readiness_actions.addWidget(self.copy_readiness_summary_btn)
         readiness_layout.addLayout(readiness_actions)
-        device_actions = QHBoxLayout()
+
+        device_actions = QGridLayout()
+        device_actions.setHorizontalSpacing(8)
+        device_actions.setVerticalSpacing(6)
         self.add_device_profile_btn = QPushButton("Add Radio")
         self.add_device_profile_btn.clicked.connect(self._add_device_profile)
-        self.edit_device_profile_btn = QPushButton("Edit Selected")
+        self.edit_device_profile_btn = QPushButton("Edit Radio")
         self.edit_device_profile_btn.clicked.connect(self._edit_device_profile)
         self.activate_device_profile_btn = QPushButton("Activate")
         self.activate_device_profile_btn.clicked.connect(self._activate_selected_device_profiles)
@@ -2315,15 +2415,18 @@ class SettingsTab(QWidget):
         self.set_active_device_profile_btn.clicked.connect(self._set_active_selected_device_profile)
         self.delete_device_profile_btn = QPushButton("Delete Selected")
         self.delete_device_profile_btn.clicked.connect(self._delete_device_profiles)
-        device_actions.addStretch()
-        device_actions.addWidget(self.add_device_profile_btn)
-        device_actions.addWidget(self.edit_device_profile_btn)
-        device_actions.addWidget(self.activate_device_profile_btn)
-        device_actions.addWidget(self.deactivate_device_profile_btn)
-        device_actions.addWidget(self.assign_radio_schedule_btn)
-        device_actions.addWidget(self.restore_radio_schedule_btn)
-        device_actions.addWidget(self.set_active_device_profile_btn)
-        device_actions.addWidget(self.delete_device_profile_btn)
+        device_actions.addWidget(QLabel("Profile:"), 0, 0)
+        device_actions.addWidget(self.add_device_profile_btn, 0, 1)
+        device_actions.addWidget(self.edit_device_profile_btn, 0, 2)
+        device_actions.addWidget(QLabel("Runtime:"), 1, 0)
+        device_actions.addWidget(self.activate_device_profile_btn, 1, 1)
+        device_actions.addWidget(self.deactivate_device_profile_btn, 1, 2)
+        device_actions.addWidget(self.set_active_device_profile_btn, 1, 3)
+        device_actions.addWidget(QLabel("Schedule:"), 2, 0)
+        device_actions.addWidget(self.assign_radio_schedule_btn, 2, 1)
+        device_actions.addWidget(self.restore_radio_schedule_btn, 2, 2)
+        device_actions.addWidget(self.delete_device_profile_btn, 2, 3)
+        device_actions.setColumnStretch(4, 1)
         device_layout.addWidget(self.device_profile_readiness_card)
         device_layout.addLayout(device_actions)
 
@@ -2356,6 +2459,7 @@ class SettingsTab(QWidget):
         self.device_profiles_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.device_profiles_table.currentCellChanged.connect(
             lambda _r, _c, _pr, _pc: (
+                self._on_device_profile_table_focus_changed(),
                 self._update_device_profile_readiness_detail(),
                 self._sync_software_radio_to_device_focus(),
                 self._sync_schedule_views_to_device_focus(),
@@ -2363,6 +2467,7 @@ class SettingsTab(QWidget):
         )
         self.device_profiles_table.cellClicked.connect(
             lambda _r, _c: (
+                self._on_device_profile_table_focus_changed(),
                 self._update_device_profile_readiness_detail(),
                 self._sync_software_radio_to_device_focus(),
                 self._sync_schedule_views_to_device_focus(),
@@ -2384,19 +2489,36 @@ class SettingsTab(QWidget):
         device_header.setSectionResizeMode(12, QHeaderView.ResizeToContents)
         device_header.setSectionResizeMode(13, QHeaderView.ResizeToContents)
         device_header.setSectionResizeMode(14, QHeaderView.Stretch)
-        device_layout.addWidget(self.device_profiles_table)
-
-        self.device_profile_detail_label = QLabel()
-        self.device_profile_detail_label.setWordWrap(True)
-        self.device_profile_detail_label.hide()
+        self.device_profiles_advanced_group = QGroupBox("Advanced Radio Inventory")
+        self.device_profiles_advanced_group.setCheckable(True)
+        self.device_profiles_advanced_group.setChecked(False)
+        self.device_profiles_advanced_group.setToolTip(
+            "Open this when you need the full radio inventory table or batch-oriented details."
+        )
+        advanced_layout = QVBoxLayout(self.device_profiles_advanced_group)
+        advanced_layout.setContentsMargins(10, 10, 10, 12)
+        advanced_layout.setSpacing(6)
+        self.device_profiles_advanced_hint = QLabel(
+            "The selector above is the normal one-radio-at-a-time workflow. "
+            "This inventory view keeps the full details available for review."
+        )
+        self.device_profiles_advanced_hint.setWordWrap(True)
+        self.device_profiles_advanced_hint.setVisible(False)
+        advanced_layout.addWidget(self.device_profiles_advanced_hint)
+        advanced_layout.addWidget(self.device_profiles_table)
+        self.device_profiles_table.setVisible(False)
+        self.device_profiles_advanced_group.toggled.connect(self.device_profiles_table.setVisible)
+        self.device_profiles_advanced_group.toggled.connect(self.device_profiles_advanced_hint.setVisible)
+        device_layout.addWidget(self.device_profiles_advanced_group)
 
         device_container = QWidget()
         device_container.setLayout(device_layout)
-        device_group = self._make_collapsible_group("Radio Profiles", device_container, checked=True, fit_content=False)
+        device_group = self._make_collapsible_group("Radio Profile", device_container, checked=True, fit_content=False)
         self._register_collapsible_group(device_group, self._summary_device_profiles)
         self._set_section_health_key(device_group, "radio_profiles")
         device_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(device_group)
+        self.radio_profile_section_group = device_group
+        self._add_settings_section(device_group, scope="radio")
 
         operating_group = QGroupBox("Schedule Profiles")
         operating_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -2463,7 +2585,7 @@ class SettingsTab(QWidget):
         operating_group = self._make_collapsible_group("Schedule Profiles", operating_container, checked=True, fit_content=False)
         self._register_collapsible_group(operating_group, self._summary_operating_profiles)
         operating_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(operating_group)
+        self._add_settings_section(operating_group, scope="radio")
 
         assignments_group = QGroupBox("Radio Schedule Assignments")
         assignments_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -2537,7 +2659,7 @@ class SettingsTab(QWidget):
         assignments_group = self._make_collapsible_group("Radio Schedule Assignments", assignments_container, checked=True, fit_content=False)
         self._register_collapsible_group(assignments_group, self._summary_device_assignments)
         assignments_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(assignments_group)
+        self._add_settings_section(assignments_group, scope="radio")
 
         varac_clusters_group = QGroupBox("VarAC Clusters")
         varac_clusters_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -2755,7 +2877,7 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(ops_group, self._summary_operating_groups)
         self._set_section_health_key(ops_group, "operating_groups")
         ops_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(ops_group)
+        self._add_settings_section(ops_group, scope="global")
 
         # Local Comms Groups panel (non-scheduler local net metadata for SOP workflows)
         local_group = QGroupBox("Local Comms Groups")
@@ -2816,7 +2938,7 @@ class SettingsTab(QWidget):
         )
         self._register_collapsible_group(local_group, self._summary_local_net_profiles)
         local_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(local_group)
+        self._add_settings_section(local_group, scope="global")
 
         software_scope_group = QGroupBox("Radio Software View")
         software_scope_layout = QVBoxLayout()
@@ -2868,7 +2990,7 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(software_scope_group, self._summary_radio_software_view)
         self._set_section_health_key(software_scope_group, "radio_software")
         software_scope_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(software_scope_group)
+        self.radio_software_scope_section_group = software_scope_group
 
         # JS8Call status/settings
         js8_group = QGroupBox("JS8Call Settings")
@@ -2931,6 +3053,28 @@ class SettingsTab(QWidget):
         js8_mark_row.addStretch()
         js8_v.addLayout(js8_mark_row)
 
+        load_links_row = QHBoxLayout()
+        load_links_row.setSpacing(8)
+        load_links_row.setContentsMargins(0, 0, 0, 0)
+        load_links_label = QLabel("Tools")
+        load_links_label.setFixedWidth(js8_label_width)
+        load_links_row.addWidget(load_links_label)
+        self.load_js8_btn = QPushButton("Load JS8 Traffic")
+        self.load_js8_btn.clicked.connect(self._load_js8_logs)
+        load_links_row.addWidget(self.load_js8_btn)
+        self.load_js8_progress = QProgressBar()
+        self.load_js8_progress.setRange(0, 0)
+        self.load_js8_progress.setTextVisible(False)
+        self.load_js8_progress.setFixedWidth(120)
+        self.load_js8_progress.setFixedHeight(12)
+        self.load_js8_progress.setVisible(False)
+        load_links_row.addWidget(self.load_js8_progress)
+        self.load_js8_status_label = QLabel("Loading JS8 traffic...")
+        self.load_js8_status_label.setVisible(False)
+        load_links_row.addWidget(self.load_js8_status_label)
+        load_links_row.addStretch()
+        js8_v.addLayout(load_links_row)
+
         def build_js8_path_row(label: str, edit: QLineEdit, browse_cb, autofill_btn: QPushButton | None = None) -> QWidget:
             row = QHBoxLayout()
             row.setSpacing(8)
@@ -2974,13 +3118,15 @@ class SettingsTab(QWidget):
             build_js8_path_row("JS8Call DIRECTED.TXT:", self.js8_directed_edit, self._choose_js8_directed_path)
         )
 
-        self.js8_forms_edit = QLineEdit()
-        self.js8_forms_edit.setPlaceholderText("Select your JS8Spotter forms folder")
-        self.js8_forms_edit.setToolTip(
-            "JS8Spotter is commonly installed in custom locations. Use Browse to select the forms folder "
-            "used for the selected radio."
+        self.commstat_path_edit = QLineEdit()
+        self.commstat_path_edit.setPlaceholderText("Select your CommStat launcher/script/shortcut")
+        self.commstat_path_edit.setToolTip(
+            "CommStat launchers are often stored in custom locations. Use Browse to select the launcher, "
+            "script, or shortcut used for the selected radio."
         )
-        js8_v.addWidget(build_js8_path_row("JS8Spotter forms:", self.js8_forms_edit, self._choose_js8_forms_path))
+        js8_v.addWidget(
+            build_js8_path_row("CommStat Launch Path:", self.commstat_path_edit, self._choose_commstat_launch_path)
+        )
 
         self.js8spotter_path_edit = QLineEdit()
         self.js8spotter_path_edit.setPlaceholderText("Select your JS8Spotter launcher/script/shortcut")
@@ -2996,18 +3142,52 @@ class SettingsTab(QWidget):
             )
         )
 
-        self.commstat_path_edit = QLineEdit()
-        self.commstat_path_edit.setPlaceholderText("Select your CommStat launcher/script/shortcut")
-        self.commstat_path_edit.setToolTip(
-            "CommStat launchers are often stored in custom locations. Use Browse to select the launcher, "
-            "script, or shortcut used for the selected radio."
+        self.js8_forms_edit = QLineEdit()
+        self.js8_forms_edit.setPlaceholderText("Select your JS8Spotter forms folder")
+        self.js8_forms_edit.setToolTip(
+            "JS8Spotter is commonly installed in custom locations. Use Browse to select the forms folder "
+            "used for the selected radio."
         )
-        js8_v.addWidget(
-            build_js8_path_row("CommStat Launch Path:", self.commstat_path_edit, self._choose_commstat_launch_path)
+        js8_v.addWidget(build_js8_path_row("JS8Spotter forms:", self.js8_forms_edit, self._choose_js8_forms_path))
+
+        mapper_header = QHBoxLayout()
+        mapper_header.setContentsMargins(0, 0, 0, 0)
+        mapper_header.setSpacing(8)
+        mapper_header.addWidget(QLabel("Spotter Form Mapper"))
+        mapper_header.addStretch()
+        self.spotter_mapper_refresh_btn = QPushButton("Refresh Forms")
+        self.spotter_mapper_auto_btn = QPushButton("Auto-Classify")
+        mapper_header.addWidget(self.spotter_mapper_refresh_btn)
+        mapper_header.addWidget(self.spotter_mapper_auto_btn)
+        js8_v.addLayout(mapper_header)
+        self.spotter_mapper_table = QTableWidget(0, 8)
+        self.spotter_mapper_table.setHorizontalHeaderLabels(
+            ["Form", "Title", "Purpose", "Messages", "Map", "Alert", "Net", "Status"]
         )
+        self.spotter_mapper_table.verticalHeader().setVisible(False)
+        self.spotter_mapper_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.spotter_mapper_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.spotter_mapper_table.setAlternatingRowColors(True)
+        self.spotter_mapper_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.spotter_mapper_table.setMinimumHeight(180)
+        mapper_header_view = self.spotter_mapper_table.horizontalHeader()
+        mapper_header_view.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        mapper_header_view.setSectionResizeMode(1, QHeaderView.Stretch)
+        mapper_header_view.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for col in range(3, 8):
+            mapper_header_view.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        js8_v.addWidget(self.spotter_mapper_table)
+        mapper_hint = QLabel(
+            "Map each JS8Spotter form to its operational purpose so FIO can route it to Messages, Map, Alerts, Net Control, or status workflows."
+        )
+        mapper_hint.setWordWrap(True)
+        js8_v.addWidget(mapper_hint)
 
         self.js8_directed_edit.textChanged.connect(self._refresh_section_titles)
         self.js8_forms_edit.textChanged.connect(self._refresh_section_titles)
+        self.js8_forms_edit.textChanged.connect(lambda _text: self._refresh_spotter_form_mapper())
+        self.spotter_mapper_refresh_btn.clicked.connect(self._refresh_spotter_form_mapper)
+        self.spotter_mapper_auto_btn.clicked.connect(self._auto_classify_spotter_forms)
         self.js8call_path_edit.textChanged.connect(self._refresh_section_titles)
         self.js8spotter_path_edit.textChanged.connect(self._refresh_section_titles)
         self.commstat_path_edit.textChanged.connect(self._refresh_section_titles)
@@ -3025,28 +3205,6 @@ class SettingsTab(QWidget):
         js8_autofill_status_row.addWidget(self.js8_autofill_status_label, 1)
         js8_v.addLayout(js8_autofill_status_row)
 
-        load_links_row = QHBoxLayout()
-        load_links_row.setSpacing(8)
-        load_links_row.setContentsMargins(0, 0, 0, 0)
-        load_links_label = QLabel("Tools")
-        load_links_label.setFixedWidth(js8_label_width)
-        load_links_row.addWidget(load_links_label)
-        self.load_js8_btn = QPushButton("Load JS8 Traffic")
-        self.load_js8_btn.clicked.connect(self._load_js8_logs)
-        load_links_row.addWidget(self.load_js8_btn)
-        self.load_js8_progress = QProgressBar()
-        self.load_js8_progress.setRange(0, 0)
-        self.load_js8_progress.setTextVisible(False)
-        self.load_js8_progress.setFixedWidth(120)
-        self.load_js8_progress.setFixedHeight(12)
-        self.load_js8_progress.setVisible(False)
-        load_links_row.addWidget(self.load_js8_progress)
-        self.load_js8_status_label = QLabel("Loading JS8 traffic...")
-        self.load_js8_status_label.setVisible(False)
-        load_links_row.addWidget(self.load_js8_status_label)
-        load_links_row.addStretch()
-        js8_v.addLayout(load_links_row)
-
         js8_container = QWidget()
         js8_container.setLayout(js8_v)
         js8_group = self._make_collapsible_group(
@@ -3059,7 +3217,8 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(js8_group, self._summary_js8_settings)
         self._set_section_health_key(js8_group, "js8call")
         js8_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(js8_group)
+        self.js8_section_group = js8_group
+        self._add_settings_section(js8_group, scope="radio")
 
         msg_label_width = 170
 
@@ -3270,7 +3429,8 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(fast_light_group, self._summary_fast_light_settings)
         self._set_section_health_key(fast_light_group, "fast_light")
         fast_light_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(fast_light_group)
+        self.fast_light_section_group = fast_light_group
+        self._add_settings_section(fast_light_group, scope="radio")
 
         # Message Authenticity (Key/Hash)
         gpg_group = QGroupBox("Message Auth (Key/Hash)")
@@ -4305,10 +4465,11 @@ class SettingsTab(QWidget):
         self._register_collapsible_group(varac_group, self._summary_varac_settings)
         self._set_section_health_key(varac_group, "varac")
         varac_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(varac_group)
-        self._add_settings_section(self.varac_clusters_section_group)
-        self._add_settings_section(self.varac_memberships_section_group)
-        self._add_settings_section(gpg_group)
+        self.varac_section_group = varac_group
+        self._add_settings_section(varac_group, scope="radio")
+        self._add_settings_section(self.varac_clusters_section_group, scope="radio")
+        self._add_settings_section(self.varac_memberships_section_group, scope="radio")
+        self.message_auth_section_group = gpg_group
 
         custom_tools_group = QGroupBox("Custom Tools")
         custom_tools_v = QVBoxLayout()
@@ -4321,6 +4482,9 @@ class SettingsTab(QWidget):
         )
         custom_tools_hint.setWordWrap(True)
         custom_tools_v.addWidget(custom_tools_hint)
+        self.custom_tools_scope_label = QLabel("Editing radio: --")
+        self.custom_tools_scope_label.setWordWrap(True)
+        custom_tools_v.addWidget(self.custom_tools_scope_label)
 
         self.custom_tools_table = QTableWidget(0, 2)
         self.custom_tools_table.setHorizontalHeaderLabels(["Name", "Launch Command"])
@@ -4369,13 +4533,18 @@ class SettingsTab(QWidget):
         )
         self._register_collapsible_group(custom_tools_group, self._summary_custom_tools)
         custom_tools_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(custom_tools_group)
+        self.custom_tools_section_group = custom_tools_group
+        self._add_settings_section(custom_tools_group, scope="radio")
 
         # Launch Control
         launch_group = QGroupBox("Launch Control")
         launch_v = QVBoxLayout()
-        launch_v.setSpacing(6)
+        launch_v.setSpacing(8)
         launch_group.setLayout(launch_v)
+
+        self.launch_control_scope_label = QLabel("Editing radio: --")
+        self.launch_control_scope_label.setWordWrap(True)
+        launch_v.addWidget(self.launch_control_scope_label)
 
         (
             self.launch_guidance_card,
@@ -4386,12 +4555,13 @@ class SettingsTab(QWidget):
 
         self.launch_hint_label = QLabel()
         self.launch_hint_label.setWordWrap(True)
-        launch_v.addWidget(self.launch_hint_label)
 
         launch_global_row = QHBoxLayout()
+        launch_global_row.setContentsMargins(0, 0, 0, 0)
+        launch_global_row.setSpacing(8)
+        launch_global_row.addWidget(self.launch_hint_label, 1)
         self.launch_all_with_startup_chk = QCheckBox("Launch All with FreqInOut")
         launch_global_row.addWidget(self.launch_all_with_startup_chk)
-        launch_global_row.addStretch()
         launch_v.addLayout(launch_global_row)
 
         self.launch_control_table = QTableWidget(0, 3)
@@ -4403,24 +4573,33 @@ class SettingsTab(QWidget):
         launch_header.setSectionResizeMode(0, QHeaderView.Stretch)
         launch_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         launch_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.launch_control_table.setMinimumHeight(150)
+        self.launch_control_table.setMaximumHeight(260)
+        self.launch_control_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         launch_v.addWidget(self.launch_control_table)
 
-        launch_btn_row = QHBoxLayout()
+        launch_actions_grid = QGridLayout()
+        launch_actions_grid.setContentsMargins(0, 0, 0, 0)
+        launch_actions_grid.setHorizontalSpacing(8)
+        launch_actions_grid.setVerticalSpacing(6)
         self.launch_order_up_btn = QPushButton("Up")
         self.launch_order_down_btn = QPushButton("Down")
         self.launch_reset_order_btn = QPushButton("Reset Default Order")
         self.launch_configured_now_btn = QPushButton("Launch Configured Now")
         self.launch_stop_btn = QPushButton("Stop Launch Sequence")
         self.launch_stop_btn.setEnabled(False)
-        launch_btn_row.addWidget(self.launch_order_up_btn)
-        launch_btn_row.addWidget(self.launch_order_down_btn)
-        launch_btn_row.addWidget(self.launch_reset_order_btn)
-        launch_btn_row.addStretch()
-        launch_btn_row.addWidget(self.launch_configured_now_btn)
-        launch_btn_row.addWidget(self.launch_stop_btn)
-        launch_v.addLayout(launch_btn_row)
+        launch_actions_grid.addWidget(QLabel("Order:"), 0, 0)
+        launch_actions_grid.addWidget(self.launch_order_up_btn, 0, 1)
+        launch_actions_grid.addWidget(self.launch_order_down_btn, 0, 2)
+        launch_actions_grid.addWidget(self.launch_reset_order_btn, 0, 3)
+        launch_actions_grid.addWidget(QLabel("Run:"), 1, 0)
+        launch_actions_grid.addWidget(self.launch_configured_now_btn, 1, 1, 1, 2)
+        launch_actions_grid.addWidget(self.launch_stop_btn, 1, 3)
+        launch_actions_grid.setColumnStretch(4, 1)
+        launch_v.addLayout(launch_actions_grid)
 
         self.launch_summary_label = QLabel("Launch status: Idle")
+        self.launch_summary_label.setWordWrap(True)
         launch_v.addWidget(self.launch_summary_label)
 
         self.launch_order_up_btn.clicked.connect(lambda: self._move_launch_row(-1))
@@ -4447,7 +4626,8 @@ class SettingsTab(QWidget):
         )
         self._register_collapsible_group(launch_group, self._summary_launch_control)
         launch_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(launch_group)
+        self.launch_control_section_group = launch_group
+        self._add_settings_section(launch_group, scope="radio")
 
         # SOP Export
         sop_export_v = QVBoxLayout()
@@ -4495,8 +4675,9 @@ class SettingsTab(QWidget):
         )
         self._register_collapsible_group(sop_export_group, self._summary_sop_export)
         sop_export_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._add_settings_section(sop_export_group)
-        self._add_settings_section(logging_section)
+        self._add_settings_section(sop_export_group, scope="global")
+        self._add_settings_section(self.message_auth_section_group, scope="global")
+        self._add_settings_section(logging_section, scope="global")
 
         # bottom save
         bottom_row = QHBoxLayout()
@@ -4509,8 +4690,9 @@ class SettingsTab(QWidget):
         self._refresh_launch_control_table()
         self._set_save_button_state("success")
         self._refresh_section_titles()
-        if self.sections_nav_list.count() > 0:
-            self.sections_nav_list.setCurrentRow(0)
+        self._apply_settings_nav_scope_visibility()
+        self._refresh_radio_specific_section_visibility()
+        self._select_first_visible_settings_section()
         self._update_sections_nav_size()
         self._apply_accessibility_width_guards()
 
@@ -4574,30 +4756,138 @@ class SettingsTab(QWidget):
         meta.update({"summary_fn": summary_fn})
         self._section_meta[group] = meta
 
-    def _add_settings_section(self, group: QGroupBox) -> None:
+    def _add_settings_section(self, group: QGroupBox, *, scope: str = "radio") -> None:
         meta = self._section_meta.get(group, {})
         title = str(meta.get("title", group.title() if hasattr(group, "title") else "Section"))
         item = QListWidgetItem(title)
+        stack_index = self.sections_stack.count()
+        normalized_scope = str(scope or "radio").strip().lower()
+        item.setData(self.SECTION_STACK_INDEX_ROLE, stack_index)
+        item.setData(self.SECTION_SCOPE_ROLE, normalized_scope)
         self.sections_nav_list.addItem(item)
         self._section_nav_items[group] = item
+        meta["scope"] = normalized_scope
+        meta.setdefault("section_visible", True)
+        self._section_meta[group] = meta
         self.sections_stack.addWidget(group)
+        btn = QPushButton(title)
+        btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        btn.setMinimumHeight(30)
+        btn.clicked.connect(lambda _checked=False, g=group: self._select_settings_section_group(g))
+        target_layout = (
+            self.global_section_buttons_layout
+            if normalized_scope == "global" and hasattr(self, "global_section_buttons_layout")
+            else self.radio_section_buttons_layout
+            if hasattr(self, "radio_section_buttons_layout")
+            else None
+        )
+        if target_layout is not None:
+            target_layout.addWidget(btn)
+        self._section_nav_buttons[group] = btn
         content = meta.get("content")
         header_btn = meta.get("header_btn")
         if isinstance(content, QWidget):
             expanded = bool(header_btn.isChecked()) if header_btn else True
             self._apply_collapsed_state(group, content, expanded)
+        self._apply_settings_nav_scope_visibility()
+        self._refresh_settings_nav_button_styles()
         self._update_sections_nav_size()
+
+    def _select_settings_section_group(self, group: QGroupBox | None) -> None:
+        if group is None or group not in self._section_meta:
+            return
+        try:
+            stack_index = self.sections_stack.indexOf(group)
+        except Exception:
+            stack_index = -1
+        if stack_index < 0:
+            return
+        self.sections_stack.setCurrentIndex(stack_index)
+        nav_item = self._section_nav_items.get(group)
+        if nav_item is not None and not nav_item.isHidden():
+            row = self.sections_nav_list.row(nav_item)
+            if row >= 0:
+                was_blocked = self.sections_nav_list.blockSignals(True)
+                try:
+                    self.sections_nav_list.setCurrentRow(row)
+                finally:
+                    self.sections_nav_list.blockSignals(was_blocked)
+        self._sync_current_section_scroll_size()
+        self._reset_sections_scroll_to_top()
+        self._refresh_settings_nav_button_styles()
+
+    def _on_global_settings_toggle(self, checked: bool) -> None:
+        self._global_settings_nav_collapsed = not bool(checked)
+        if hasattr(self, "global_settings_toggle_btn"):
+            self.global_settings_toggle_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        if hasattr(self, "global_section_buttons_widget"):
+            self.global_section_buttons_widget.setVisible(bool(checked))
+        self._apply_settings_nav_scope_visibility()
+        self._refresh_settings_nav_button_styles()
+
+    def _apply_settings_nav_scope_visibility(self) -> None:
+        if not hasattr(self, "sections_nav_list"):
+            return
+        hide_global = bool(self._global_settings_nav_collapsed)
+        for group, item in self._section_nav_items.items():
+            if item is None:
+                continue
+            scope = str(self._section_meta.get(group, {}).get("scope", item.data(self.SECTION_SCOPE_ROLE) or "radio")).strip().lower()
+            section_visible = bool(self._section_meta.get(group, {}).get("section_visible", True))
+            if scope == "global":
+                item.setHidden(hide_global or not section_visible)
+                btn = self._section_nav_buttons.get(group)
+                if btn is not None:
+                    btn.setVisible(not hide_global and section_visible)
+            else:
+                item.setHidden(not section_visible)
+                btn = self._section_nav_buttons.get(group)
+                if btn is not None:
+                    btn.setVisible(section_visible)
+        current_widget = self.sections_stack.currentWidget() if hasattr(self, "sections_stack") else None
+        if (
+            hide_global
+            and isinstance(current_widget, QGroupBox)
+            and str(self._section_meta.get(current_widget, {}).get("scope", "")).strip().lower() == "global"
+        ):
+            self._select_first_visible_settings_section()
+        self._update_sections_nav_size()
+
+    def _refresh_settings_nav_button_styles(self) -> None:
+        theme = resolve_theme(self.settings)
+        current_widget = self.sections_stack.currentWidget() if hasattr(self, "sections_stack") else None
+        for group, btn in self._section_nav_buttons.items():
+            if btn is None:
+                continue
+            role = "primary" if group is current_widget else "secondary"
+            meta = self._section_meta.get(group, {})
+            section_visible = bool(meta.get("section_visible", True))
+            scope = str(meta.get("scope", "")).strip().lower()
+            nav_visible = section_visible and (scope != "global" or not bool(self._global_settings_nav_collapsed))
+            btn.setVisible(nav_visible)
+            btn.setStyleSheet(button_style(role, theme))
+        if hasattr(self, "global_settings_toggle_btn"):
+            self.global_settings_toggle_btn.setStyleSheet(button_style("secondary", theme))
 
     def _set_settings_section_visible(self, group: QGroupBox | None, visible: bool) -> None:
         if group is None:
             return
+        meta = self._section_meta.get(group, {})
+        meta["section_visible"] = bool(visible)
+        self._section_meta[group] = meta
         group.setVisible(bool(visible))
         nav_item = self._section_nav_items.get(group)
         if nav_item is not None:
             nav_item.setHidden(not bool(visible))
+        nav_btn = self._section_nav_buttons.get(group)
+        if nav_btn is not None:
+            scope = str(self._section_meta.get(group, {}).get("scope", "")).strip().lower()
+            global_visible = scope != "global" or not bool(self._global_settings_nav_collapsed)
+            nav_btn.setVisible(bool(visible) and global_visible)
         current_widget = self.sections_stack.currentWidget() if hasattr(self, "sections_stack") else None
         if not visible and current_widget is group:
             self._select_first_visible_settings_section()
+        self._refresh_settings_nav_button_styles()
         self._update_sections_nav_size()
 
     def _select_first_visible_settings_section(self) -> None:
@@ -4636,8 +4926,10 @@ class SettingsTab(QWidget):
                     "Cluster mode is off. Most operators should leave this off unless they are intentionally coordinating multiple radios or VarAC instances together."
                     + preserved_note
                 )
-        self._set_settings_section_visible(getattr(self, "varac_clusters_section_group", None), enabled)
-        self._set_settings_section_visible(getattr(self, "varac_memberships_section_group", None), enabled)
+        selected_profile = self._selected_settings_radio_profile()
+        varac_visible = bool(isinstance(selected_profile, dict) and self._radio_software_enabled(selected_profile, "varac"))
+        self._set_settings_section_visible(getattr(self, "varac_clusters_section_group", None), enabled and varac_visible)
+        self._set_settings_section_visible(getattr(self, "varac_memberships_section_group", None), enabled and varac_visible)
         if refresh_tables:
             self._refresh_varac_clusters_table(refresh_memberships=True, refresh_section_titles=False)
         else:
@@ -4763,13 +5055,21 @@ class SettingsTab(QWidget):
     def _on_section_nav_changed(self, row: int) -> None:
         if row < 0:
             return
-        if row >= self.sections_stack.count():
+        item = self.sections_nav_list.item(row) if hasattr(self, "sections_nav_list") else None
+        if item is None or item.isHidden():
+            return
+        try:
+            stack_index = int(item.data(self.SECTION_STACK_INDEX_ROLE) or -1)
+        except Exception:
+            stack_index = -1
+        if stack_index < 0 or stack_index >= self.sections_stack.count():
             return
         with perf_span("settings.section_switch", settings=self.settings, min_ms=10.0):
-            self.sections_stack.setCurrentIndex(row)
+            self.sections_stack.setCurrentIndex(stack_index)
             self._sync_current_section_scroll_size()
             self._reset_sections_scroll_to_top()
             self._apply_sections_nav_style()
+            self._refresh_settings_nav_button_styles()
             try:
                 page = self.sections_stack.currentWidget()
                 if isinstance(page, QGroupBox):
@@ -5409,7 +5709,8 @@ class SettingsTab(QWidget):
                 widget.deleteLater()
 
     def _current_visible_status_items(self) -> List[tuple[str, str]]:
-        profiles = self.device_profiles
+        selected_profile = self._selected_settings_radio_profile()
+        profiles = [selected_profile] if isinstance(selected_profile, dict) else self.device_profiles
         if not profiles:
             try:
                 profiles = list(self.multi_radio_store.list_device_profiles())
@@ -5425,6 +5726,10 @@ class SettingsTab(QWidget):
         self._status_text_labels = {}
         theme = resolve_theme(self.settings)
         visible_items = self._current_visible_status_items()
+        selected_profile = self._selected_settings_radio_profile()
+        if hasattr(self, "status_group"):
+            radio_name = self._profile_display_name(selected_profile) if isinstance(selected_profile, dict) else "Selected Radio"
+            self.status_group.setTitle(f"Radio Status: {radio_name}")
         self.status_group.setVisible(bool(visible_items))
         for key, label in visible_items:
             led = QLabel()
@@ -5449,6 +5754,12 @@ class SettingsTab(QWidget):
             item_key = str(item.data(self.SECTION_HEALTH_KEY_ROLE) or "").strip().lower()
             if item_key != target:
                 continue
+            scope = str(item.data(self.SECTION_SCOPE_ROLE) or "").strip().lower()
+            if item.isHidden() and scope == "global" and hasattr(self, "global_settings_toggle_btn"):
+                self.global_settings_toggle_btn.setChecked(True)
+                self._on_global_settings_toggle(True)
+            if item.isHidden():
+                continue
             self.sections_nav_list.setCurrentRow(row)
             self.sections_nav_list.scrollToItem(item)
             if target == "radio_profiles" and radio_id:
@@ -5471,7 +5782,7 @@ class SettingsTab(QWidget):
             if item_radio_id != int(radio_id):
                 continue
             table.scrollToItem(item, QAbstractItemView.PositionAtCenter)
-            table.setCurrentCell(row, 3)
+            self._set_settings_radio_focus(int(radio_id))
             table.setFocus(Qt.OtherFocusReason)
             return True
         return False
@@ -5797,6 +6108,12 @@ class SettingsTab(QWidget):
                     self.settings._data = data  # type: ignore[attr-defined]
         self.js8_offset_edit.setText(str(offset_int))
         self.js8_forms_edit.setText(data.get("js8_forms_path", "") or "")
+        if MAPPER_SETTINGS_KEY not in data:
+            try:
+                self.settings.set(MAPPER_SETTINGS_KEY, normalize_mapping_rows([]))
+            except Exception:
+                pass
+        self._refresh_spotter_form_mapper()
         self.js8call_path_edit.setText((data.get("path_js8call", "") or "").strip())
         self.js8spotter_path_edit.setText((data.get("path_js8spotter", "") or "").strip())
         self.commstat_path_edit.setText((data.get("path_commstat", "") or "").strip())
@@ -6205,6 +6522,7 @@ class SettingsTab(QWidget):
         data["js8_offset_hz"] = offset_val
 
         data["js8_forms_path"] = self.js8_forms_edit.text().strip()
+        data[MAPPER_SETTINGS_KEY] = self._collect_spotter_form_mappings()
         data["path_js8call"] = self.js8call_path_edit.text().strip() if hasattr(self, "js8call_path_edit") else ""
         data["path_js8spotter"] = (
             self.js8spotter_path_edit.text().strip() if hasattr(self, "js8spotter_path_edit") else ""
@@ -6532,6 +6850,7 @@ class SettingsTab(QWidget):
                 "js8_prompt_interval": data.get("js8_prompt_interval", "Hourly"),
                 "ui_theme": data.get("ui_theme", "light"),
                 "primary_js8_groups": data["primary_js8_groups"],
+                MAPPER_SETTINGS_KEY: data.get(MAPPER_SETTINGS_KEY, []),
                 "js8_inbox_mark_retrieved_sync": data.get("js8_inbox_mark_retrieved_sync", False),
                 "gpg_verify_flamp_k2s_enabled": data.get("gpg_verify_flamp_k2s_enabled", False),
                 "hash_verify_flamp_k2s_enabled": data.get("hash_verify_flamp_k2s_enabled", True),
@@ -6572,6 +6891,7 @@ class SettingsTab(QWidget):
             self.settings.set("js8_enforcement_mode", data.get("js8_enforcement_mode", "On Schedule Change"))
             self.settings.set("js8_prompt_interval", data.get("js8_prompt_interval", "Hourly"))
             self.settings.set("primary_js8_groups", data["primary_js8_groups"])
+            self.settings.set(MAPPER_SETTINGS_KEY, data.get(MAPPER_SETTINGS_KEY, []))
             self.settings.set(
                 "js8_inbox_mark_retrieved_sync",
                 data.get("js8_inbox_mark_retrieved_sync", False),
@@ -7033,6 +7353,108 @@ class SettingsTab(QWidget):
             except Exception:
                 pass
 
+    def _make_spotter_mapper_check_item(self, checked: bool) -> QTableWidgetItem:
+        item = QTableWidgetItem("")
+        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        item.setTextAlignment(Qt.AlignCenter)
+        return item
+
+    def _refresh_spotter_form_mapper(self) -> None:
+        if not hasattr(self, "spotter_mapper_table"):
+            return
+        try:
+            self.spotter_mapper_table.itemChanged.disconnect(self._on_spotter_mapper_item_changed)
+        except Exception:
+            pass
+        self._spotter_mapper_loading = True
+        try:
+            self.spotter_mapper_table.setRowCount(0)
+            rows = effective_mapping_rows(self.settings, self.js8_forms_edit.text().strip())
+            if not rows:
+                rows = [
+                    factory_mapping_for_form("F!103", "Net Checkin"),
+                    factory_mapping_for_form("F!104", "@SITREP Basic Check-in"),
+                    factory_mapping_for_form("F!106", "Impromptu Net Notice"),
+                    factory_mapping_for_form("F!301", "Field Situation Report"),
+                    factory_mapping_for_form("F!304", "Individual Situation Report"),
+                ]
+            for row_idx, row in enumerate(rows):
+                self.spotter_mapper_table.insertRow(row_idx)
+                code_item = QTableWidgetItem(str(row.get("form_code") or "").strip())
+                code_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                title_item = QTableWidgetItem(str(row.get("title") or "").strip())
+                title_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.spotter_mapper_table.setItem(row_idx, 0, code_item)
+                self.spotter_mapper_table.setItem(row_idx, 1, title_item)
+
+                purpose_combo = QComboBox()
+                purpose_combo.addItems(list(PURPOSE_OPTIONS))
+                purpose = str(row.get("purpose") or "Generic Message")
+                if purpose_combo.findText(purpose) < 0:
+                    purpose = "Generic Message"
+                purpose_combo.setCurrentText(purpose)
+                purpose_combo.currentIndexChanged.connect(self._on_spotter_mapper_changed)
+                self.spotter_mapper_table.setCellWidget(row_idx, 2, purpose_combo)
+
+                for col, key in enumerate(("messages", "map", "alert", "net", "status"), start=3):
+                    self.spotter_mapper_table.setItem(
+                        row_idx,
+                        col,
+                        self._make_spotter_mapper_check_item(bool(row.get(key, False))),
+                    )
+        finally:
+            self._spotter_mapper_loading = False
+            self.spotter_mapper_table.itemChanged.connect(self._on_spotter_mapper_item_changed)
+
+    def _on_spotter_mapper_changed(self, *_args) -> None:
+        if self._spotter_mapper_loading:
+            return
+        self._mark_settings_dirty()
+
+    def _on_spotter_mapper_item_changed(self, _item: QTableWidgetItem) -> None:
+        self._on_spotter_mapper_changed()
+
+    def _collect_spotter_form_mappings(self) -> List[Dict[str, object]]:
+        if not hasattr(self, "spotter_mapper_table"):
+            return []
+        rows: List[Dict[str, object]] = []
+        for row_idx in range(self.spotter_mapper_table.rowCount()):
+            code_item = self.spotter_mapper_table.item(row_idx, 0)
+            title_item = self.spotter_mapper_table.item(row_idx, 1)
+            purpose_widget = self.spotter_mapper_table.cellWidget(row_idx, 2)
+            purpose = purpose_widget.currentText().strip() if isinstance(purpose_widget, QComboBox) else "Generic Message"
+            row = {
+                "form_code": code_item.text().strip() if code_item else "",
+                "title": title_item.text().strip() if title_item else "",
+                "purpose": purpose,
+            }
+            for col, key in enumerate(("messages", "map", "alert", "net", "status"), start=3):
+                item = self.spotter_mapper_table.item(row_idx, col)
+                row[key] = bool(item and item.checkState() == Qt.Checked)
+            rows.append(row)
+        return normalize_mapping_rows(rows)
+
+    def _auto_classify_spotter_forms(self) -> None:
+        rows = [
+            factory_mapping_for_form(definition.form_code, definition.title)
+            for definition in discover_spotter_forms(self.js8_forms_edit.text().strip())
+        ]
+        if not rows:
+            rows = [
+                factory_mapping_for_form("F!103", "Net Checkin"),
+                factory_mapping_for_form("F!104", "@SITREP Basic Check-in"),
+                factory_mapping_for_form("F!106", "Impromptu Net Notice"),
+                factory_mapping_for_form("F!301", "Field Situation Report"),
+                factory_mapping_for_form("F!304", "Individual Situation Report"),
+            ]
+        try:
+            self.settings.set(MAPPER_SETTINGS_KEY, normalize_mapping_rows(rows))
+        except Exception:
+            pass
+        self._refresh_spotter_form_mapper()
+        self._mark_settings_dirty()
+
     def _wire_dirty_tracking(self) -> None:
         edits = [
             self.callsign_edit,
@@ -7158,7 +7580,8 @@ class SettingsTab(QWidget):
 
     def _selected_device_profile_ids(self) -> List[int]:
         if not hasattr(self, "device_profiles_table"):
-            return []
+            focused = int(self._settings_radio_focus_id or 0)
+            return [focused] if focused > 0 else []
         selected: List[int] = []
         for row in range(self.device_profiles_table.rowCount()):
             wrapper = self.device_profiles_table.cellWidget(row, 0)
@@ -7169,6 +7592,10 @@ class SettingsTab(QWidget):
                 selected.append(int(chk.property("device_profile_id") or 0))
             except Exception:
                 continue
+        if not selected:
+            focused = int(self._settings_radio_focus_id or 0)
+            if focused > 0:
+                selected.append(focused)
         return selected
 
     def _selected_device_profiles(self) -> List[Dict[str, Any]]:
@@ -7209,6 +7636,285 @@ class SettingsTab(QWidget):
             if isinstance(row, dict) and int(row.get("id", 0) or 0) == target:
                 return dict(row)
         return None
+
+    def _ensure_settings_radio_focus_id(self) -> Optional[int]:
+        current_id = int(self._settings_radio_focus_id or 0)
+        if current_id > 0 and self._device_profile_by_id(current_id):
+            return current_id
+        primary_id = next(
+            (
+                int(row.get("id", 0) or 0)
+                for row in self.device_profiles
+                if isinstance(row, dict) and int(row.get("runtime_primary", 0) or 0) == 1
+            ),
+            0,
+        )
+        if primary_id > 0:
+            self._settings_radio_focus_id = primary_id
+            return primary_id
+        first_id = next(
+            (
+                int(row.get("id", 0) or 0)
+                for row in self.device_profiles
+                if isinstance(row, dict) and int(row.get("id", 0) or 0) > 0
+            ),
+            0,
+        )
+        self._settings_radio_focus_id = first_id or None
+        return self._settings_radio_focus_id
+
+    def _selected_settings_radio_profile(self) -> Optional[Dict[str, Any]]:
+        focused_id = self._ensure_settings_radio_focus_id()
+        if not focused_id:
+            return None
+        return self._device_profile_by_id(int(focused_id))
+
+    def _on_device_profile_table_focus_changed(self) -> None:
+        if self._device_profiles_table_loading:
+            return
+        table = getattr(self, "device_profiles_table", None)
+        if table is None:
+            return
+        current_row = table.currentRow()
+        if current_row < 0:
+            return
+        item = table.item(current_row, 3)
+        if item is None:
+            return
+        try:
+            radio_id = int(item.data(Qt.UserRole) or 0)
+        except Exception:
+            radio_id = 0
+        if radio_id <= 0:
+            return
+        self._set_settings_radio_focus(radio_id, sync_table=False)
+
+    def _set_settings_radio_focus(self, radio_id: int, *, sync_table: bool = True) -> None:
+        radio_id = int(radio_id or 0)
+        if radio_id <= 0 or not self._device_profile_by_id(radio_id):
+            return
+        self._settings_radio_focus_id = radio_id
+        if sync_table:
+            self._sync_device_profiles_table_to_settings_focus()
+        self._rebuild_device_profile_selector()
+        self._update_device_profile_action_buttons()
+        self._update_device_profile_readiness_detail()
+        self._sync_software_radio_to_device_focus()
+        self._sync_schedule_views_to_device_focus()
+        self._rebuild_status_indicators()
+        self._refresh_radio_specific_section_visibility()
+
+    def _sync_device_profiles_table_to_settings_focus(self) -> None:
+        if not hasattr(self, "device_profiles_table"):
+            return
+        focused_id = int(self._settings_radio_focus_id or 0)
+        if focused_id <= 0:
+            return
+        table = self.device_profiles_table
+        table_was_blocked = table.blockSignals(True)
+        try:
+            for row in range(table.rowCount()):
+                item = table.item(row, 3)
+                try:
+                    row_id = int(item.data(Qt.UserRole) or 0) if item is not None else 0
+                except Exception:
+                    row_id = 0
+                wrapper = table.cellWidget(row, 0)
+                chk = wrapper.findChild(QCheckBox) if wrapper is not None else None
+                if chk is not None:
+                    was_blocked = chk.blockSignals(True)
+                    chk.setChecked(row_id == focused_id)
+                    chk.blockSignals(was_blocked)
+                if row_id == focused_id:
+                    table.setCurrentCell(row, 3)
+        finally:
+            table.blockSignals(table_was_blocked)
+
+    def _radio_selector_button_role(
+        self,
+        profile: Dict[str, Any],
+        *,
+        selected: bool,
+        readiness_report: Any | None = None,
+    ) -> str:
+        if selected:
+            return "primary"
+        if not int(profile.get("enabled", 1) or 0):
+            return "muted"
+        status = self._device_readiness_summary(profile, readiness_report).strip().lower()
+        if any(token in status for token in ("offline", "unreachable", "not responding", "failed")):
+            return "danger"
+        if any(token in status for token in ("needs", "warning", "degraded", "issue", "missing")):
+            return "warning"
+        if "ready" in status or "ok" in status:
+            return "success_muted"
+        return "info"
+
+    def _radio_selector_button_text(self, profile: Dict[str, Any], readiness_report: Any | None = None) -> str:
+        name = self._profile_display_name(profile)
+        status_bits: List[str] = []
+        readiness = self._device_readiness_summary(profile, readiness_report).strip()
+        if readiness:
+            status_bits.append(readiness)
+        if int(profile.get("runtime_active", 0) or 0) == 1:
+            status_bits.append("Active")
+        if int(profile.get("runtime_primary", 0) or 0) == 1:
+            status_bits.append("Default")
+        device_class = self._device_class_label(str(profile.get("device_class", "") or ""))
+        if device_class and device_class.lower() != "transceiver":
+            status_bits.append(device_class)
+        return f"{name}\n{' | '.join(dict.fromkeys(status_bits))}"
+
+    def _rebuild_device_profile_selector(self) -> None:
+        if not hasattr(self, "device_profile_selector_layout"):
+            return
+        layout = self.device_profile_selector_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._settings_radio_selector_buttons = {}
+        focused_id = int(self._ensure_settings_radio_focus_id() or 0)
+        readiness_report = self._current_station_readiness_report()
+        theme = resolve_theme(self.settings)
+        if not self.device_profiles:
+            empty = QLabel("No radios are configured yet. Add a radio to start the selected-radio workflow.")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+            layout.addStretch()
+            return
+        for profile in self.device_profiles:
+            if not isinstance(profile, dict):
+                continue
+            radio_id = int(profile.get("id", 0) or 0)
+            if radio_id <= 0:
+                continue
+            selected = radio_id == focused_id
+            btn = QPushButton(self._radio_selector_button_text(profile, readiness_report))
+            btn.setCheckable(True)
+            btn.setChecked(selected)
+            btn.setMinimumWidth(170)
+            btn.setMinimumHeight(52)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            btn.setToolTip(
+                f"Edit {self._profile_display_name(profile)}. "
+                f"Software: {self._device_software_summary(profile)}. "
+                f"Endpoint: {self._device_endpoint_summary(profile)}."
+            )
+            btn.clicked.connect(lambda _checked=False, ident=radio_id: self._set_settings_radio_focus(ident))
+            btn.setStyleSheet(button_style(self._radio_selector_button_role(profile, selected=selected, readiness_report=readiness_report), theme))
+            self._settings_radio_selector_buttons[radio_id] = btn
+            layout.addWidget(btn)
+        layout.addStretch()
+
+    def _selected_radio_detail_text(
+        self,
+        profile: Optional[Dict[str, Any]],
+        readiness_report: Any | None = None,
+    ) -> str:
+        if not isinstance(profile, dict):
+            return "Select a radio to edit that radio's settings."
+        radio_id = int(profile.get("id", 0) or 0)
+        assignment = self._effective_assignment_map().get(radio_id, {})
+        assignment_name = str(assignment.get("operating_profile_name", "") or "").strip() or "Unassigned"
+        assignment_state = str(assignment.get("assignment_state", "") or "").strip().lower()
+        flags = []
+        if int(profile.get("runtime_primary", 0) or 0) == 1:
+            flags.append("Station Default")
+        if int(profile.get("runtime_active", 0) or 0) == 1:
+            flags.append("Active")
+        enabled = "Enabled" if int(profile.get("enabled", 1) or 0) == 1 else "Disabled"
+        flags.append(enabled)
+        return (
+            f"{' / '.join(flags)}\n"
+            f"Model: {self._device_radio_model_summary(profile)} | "
+            f"Class: {self._device_class_label(str(profile.get('device_class', '') or ''))} | "
+            f"Backend: {self._device_backend_label(str(profile.get('control_backend', '') or ''))}\n"
+            f"Software: {self._device_software_summary(profile)}\n"
+            f"Endpoint: {self._device_endpoint_summary(profile)}\n"
+            f"Assigned schedule: {assignment_name}"
+            f"{f' ({self._assignment_state_label(assignment_state)})' if assignment_name != 'Unassigned' else ''}\n"
+            f"PTT group: {self._device_ptt_group_label(profile.get('ptt_group', ''))} | "
+            f"Notes: {str(profile.get('notes', '') or '').strip() or '--'}"
+        )
+
+    def _refresh_radio_profile_software_chips(self) -> None:
+        if not hasattr(self, "radio_profile_software_chips_layout"):
+            return
+        layout = self.radio_profile_software_chips_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        profile = self._selected_settings_radio_profile()
+        theme = resolve_theme(self.settings)
+        chip_defs = [
+            ("JS8Call", getattr(self, "js8_section_group", None), bool(isinstance(profile, dict) and (
+                self._radio_software_enabled(profile, "js8call")
+                or self._radio_software_enabled(profile, "js8spotter")
+                or self._radio_software_enabled(profile, "commstat")
+            ))),
+            ("Fast Light", getattr(self, "fast_light_section_group", None), bool(isinstance(profile, dict) and (
+                self._radio_software_enabled(profile, "flrig")
+                or self._radio_software_enabled(profile, "fldigi")
+                or self._radio_software_enabled(profile, "flmsg")
+                or self._radio_software_enabled(profile, "flamp")
+            ))),
+            ("VarAC", getattr(self, "varac_section_group", None), bool(isinstance(profile, dict) and self._radio_software_enabled(profile, "varac"))),
+            ("Launch Control", getattr(self, "launch_control_section_group", None), bool(isinstance(profile, dict) and int(profile.get("launch_enabled", 1) or 0) == 1)),
+        ]
+        added = 0
+        for label, target_group, enabled in chip_defs:
+            if not enabled:
+                continue
+            btn = QPushButton(label)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            btn.setStyleSheet(button_style("info", theme))
+            if isinstance(target_group, QGroupBox):
+                btn.clicked.connect(lambda _checked=False, g=target_group: self._select_settings_section_group(g))
+            layout.addWidget(btn)
+            added += 1
+        if added <= 0:
+            empty = QLabel("No radio software is enabled yet. Use Edit Radio to choose the software this radio uses.")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+        layout.addStretch()
+
+    def _refresh_radio_specific_section_visibility(self) -> None:
+        profile = self._selected_settings_radio_profile()
+        has_profile = isinstance(profile, dict)
+
+        def enabled(key: str) -> bool:
+            return bool(has_profile and self._radio_software_enabled(profile, key))
+
+        js8_visible = enabled("js8call") or enabled("js8spotter") or enabled("commstat")
+        fast_light_visible = enabled("flrig") or enabled("fldigi") or enabled("flmsg") or enabled("flamp")
+        varac_visible = enabled("varac")
+        launch_visible = bool(
+            has_profile
+            and (
+                int(profile.get("launch_enabled", 1) or 0) == 1
+                or int(profile.get("use_launch_control", 1) or 0) == 1
+            )
+        )
+
+        self._set_settings_section_visible(getattr(self, "radio_software_scope_section_group", None), False)
+        self._set_settings_section_visible(getattr(self, "js8_section_group", None), js8_visible)
+        self._set_settings_section_visible(getattr(self, "fast_light_section_group", None), fast_light_visible)
+        self._set_settings_section_visible(getattr(self, "varac_section_group", None), varac_visible)
+        self._set_settings_section_visible(
+            getattr(self, "varac_clusters_section_group", None),
+            varac_visible and self._varac_cluster_mode_enabled(),
+        )
+        self._set_settings_section_visible(
+            getattr(self, "varac_memberships_section_group", None),
+            varac_visible and self._varac_cluster_mode_enabled(),
+        )
+        self._set_settings_section_visible(getattr(self, "launch_control_section_group", None), launch_visible)
+        self._set_settings_section_visible(getattr(self, "custom_tools_section_group", None), launch_visible)
+        self._refresh_radio_profile_software_chips()
 
     def _emit_device_profiles_changed(self) -> None:
         try:
@@ -7458,12 +8164,13 @@ class SettingsTab(QWidget):
                 and assignment_map[int(row.get("id", 0) or 0)].get("operating_profile_id") not in (None, "", 0)
             ]
         )
-        hint = (
-            "One or more radio profiles can be runtime-active. "
-            "The default radio drives the legacy compatibility controls in this tab."
-        )
+        focused = self._selected_settings_radio_profile()
+        focused_name = self._profile_display_name(focused) if isinstance(focused, dict) else ""
+        hint = "Select one radio, then edit that radio's schedule and software settings below."
+        if focused_name:
+            hint = f"Editing radio: {focused_name}. " + hint
         if primary:
-            hint = f"Default radio: {primary}. " + hint
+            hint += f" Station default: {primary}."
         if active_profiles:
             hint += f" Active radios: {', '.join(active_profiles)}."
         if observer_count:
@@ -7490,6 +8197,9 @@ class SettingsTab(QWidget):
         self.device_profiles_hint_label.setText(hint)
 
     def _current_device_profile_focus_id(self) -> int | None:
+        focused_id = self._ensure_settings_radio_focus_id()
+        if focused_id:
+            return int(focused_id)
         if not hasattr(self, "device_profiles_table"):
             return None
         table = self.device_profiles_table
@@ -7611,6 +8321,14 @@ class SettingsTab(QWidget):
             self.fast_light_scope_label.setText(scope_text)
         if hasattr(self, "varac_scope_label"):
             self.varac_scope_label.setText(scope_text)
+        if hasattr(self, "custom_tools_scope_label"):
+            self.custom_tools_scope_label.setText(
+                f"{scope_text} Custom tools are still shared until the radio-scoped custom-tools binding audit is complete."
+            )
+        if hasattr(self, "launch_control_scope_label"):
+            self.launch_control_scope_label.setText(
+                f"{scope_text} Launch Control currently follows the Station Default projection while selected-radio launch binding is reviewed."
+            )
 
     def _radio_software_state_from_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         message_paths = {
@@ -7793,6 +8511,7 @@ class SettingsTab(QWidget):
             self.js8_offset_edit.setText(str(state.get("js8_offset_hz", "") or "0"))
             self.js8_directed_edit.setText(str(state.get("js8_directed_path", "") or ""))
             self.js8_forms_edit.setText(str(state.get("js8_forms_path", "") or ""))
+            self._refresh_spotter_form_mapper()
             self.js8call_path_edit.setText(str(state.get("path_js8call", "") or "").strip())
             self.js8spotter_path_edit.setText(str(state.get("path_js8spotter", "") or "").strip())
             self.commstat_path_edit.setText(str(state.get("path_commstat", "") or "").strip())
@@ -8280,22 +8999,26 @@ class SettingsTab(QWidget):
         if not focused_radio_id:
             if hasattr(self, "device_profile_readiness_card"):
                 self.device_profile_readiness_card.setVisible(True)
-            message = "Select a radio row to review the readiness checklist for that radio."
+            message = "Select a radio to review the readiness checklist for that radio."
+            if hasattr(self, "device_profile_detail_title_label"):
+                self.device_profile_detail_title_label.setText("Selected Radio")
             if hasattr(self, "device_profile_readiness_title_label"):
                 self.device_profile_readiness_title_label.setText("Focused Radio Readiness")
             if hasattr(self, "device_profile_readiness_status_label"):
                 self.device_profile_readiness_status_label.setText(message)
-            self.device_profile_detail_label.setText(message)
+            self.device_profile_detail_label.setText("Select a radio to edit that radio's settings.")
             _set_readiness_card_style("info")
             return
         profile = self._device_profile_by_id(int(focused_radio_id))
         if not profile:
-            message = "Select a radio row to review the readiness checklist for that radio."
+            message = "Select a radio to review the readiness checklist for that radio."
+            if hasattr(self, "device_profile_detail_title_label"):
+                self.device_profile_detail_title_label.setText("Selected Radio")
             if hasattr(self, "device_profile_readiness_title_label"):
                 self.device_profile_readiness_title_label.setText("Focused Radio Readiness")
             if hasattr(self, "device_profile_readiness_status_label"):
                 self.device_profile_readiness_status_label.setText(message)
-            self.device_profile_detail_label.setText(message)
+            self.device_profile_detail_label.setText("Select a radio to edit that radio's settings.")
             _set_readiness_card_style("info")
             return
         summary = readiness_report.summary_for_radio(int(focused_radio_id))
@@ -8305,6 +9028,9 @@ class SettingsTab(QWidget):
         assignment_state = str(assignment.get("assignment_state", "") or "").strip().lower()
         if hasattr(self, "device_profile_readiness_title_label"):
             self.device_profile_readiness_title_label.setText(f"{name} Readiness")
+        if hasattr(self, "device_profile_detail_title_label"):
+            self.device_profile_detail_title_label.setText(f"Editing Radio: {name}")
+        self.device_profile_detail_label.setText(self._selected_radio_detail_text(profile, readiness_report))
         if summary is None or (
             summary.required_count <= 0 and summary.recommended_count <= 0 and summary.informational_count <= 0
         ):
@@ -8318,7 +9044,6 @@ class SettingsTab(QWidget):
             message = f"{name} is ready.{schedule_text}"
             if hasattr(self, "device_profile_readiness_status_label"):
                 self.device_profile_readiness_status_label.setText(message)
-            self.device_profile_detail_label.setText(readiness_state_description("ready"))
             _set_readiness_card_style("success")
             return
         if hasattr(self, "device_profile_readiness_card"):
@@ -8342,7 +9067,9 @@ class SettingsTab(QWidget):
             detail_message = f"{detail_message} Guidance: {detail_text}"
         if hasattr(self, "device_profile_readiness_status_label"):
             self.device_profile_readiness_status_label.setText(message)
-        self.device_profile_detail_label.setText(detail_message)
+        self.device_profile_detail_label.setText(
+            f"{self._selected_radio_detail_text(profile, readiness_report)}\n\nReadiness guidance: {detail_message}"
+        )
         _set_readiness_card_style(readiness_state_card_level(summary.overall_state))
 
     def _set_guidance_card_state(
@@ -8865,12 +9592,15 @@ class SettingsTab(QWidget):
                 table.setItem(row, 14, QTableWidgetItem(str(profile.get("notes", "") or "")))
         finally:
             self._device_profiles_table_loading = False
-        if table.rowCount() > 0 and table.currentRow() < 0:
-            table.selectRow(0)
+        self._ensure_settings_radio_focus_id()
+        if table.rowCount() > 0:
+            self._sync_device_profiles_table_to_settings_focus()
         self._rebuild_status_indicators()
+        self._rebuild_device_profile_selector()
         self._update_device_profiles_hint()
         self._update_device_profile_action_buttons()
         self._update_device_profile_readiness_detail(readiness_report)
+        self._refresh_radio_specific_section_visibility()
         self._refresh_launch_control_guidance()
         self._refresh_section_nav_health()
         if refresh_section_titles:
@@ -14424,6 +15154,7 @@ class SettingsTab(QWidget):
             return
         self.js8_forms_edit.setText(fn)
         log.info("JS8Spotter forms path staged for selected radio: %s", fn)
+        self._refresh_spotter_form_mapper()
         self._mark_settings_dirty()
         self._refresh_section_titles()
 

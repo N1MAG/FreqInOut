@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.6]
+- Added: Settings now includes a JS8Spotter Form Mapper so discovered `MCF*.txt` forms can be assigned operator-friendly purposes such as Net Check-in, SitRep / StatRep, Net Notification, Weather / Storm, Hazard / Early Warning, Intel / RFI, Medical / Hospital, and Station Capability.
+- Added: JS8Spotter mapper routing now drives Messages visibility, unread alert highlighting, and Map evidence for forms whose sender already has known station location data, using cached form-code sets instead of per-row Settings reads.
+- Added: Map now has operator-controlled layers for Stations, Links, Weather Reports, Alerts, and Infrastructure, with JS8Spotter weather/alert/infrastructure forms rendered as clustered operational icons when the sender has known station location data.
+- Changed: JS8 NCS check-in and net-notification handling now uses mapper-selected forms, so custom or group-specific check-in forms can flow to NCS without hard-coding new form IDs.
+- Changed: JS8Spotter SitRep ingest now uses mapper-selected status forms while preserving the existing conservative parsed-status behavior for `F!104`, `F!301`, and `F!304`.
+- Fixed: JS8Spotter form discovery now supports alpha-suffix form IDs such as `F!702A` when the form file is named like `MCF702A.txt`.
+
 ## [1.2.5.6]
 - Fixed: VarAC VGuard now validates inbound file senders with session-aware traffic-log evidence before applying trust policy, including portable/mobile base-callsign matching such as `W1ABC/P` to `W1ABC`.
 - Added: VGuard trust policy can now allow VarAC BBS Allowed Callsigns, Operator History `TRUSTED` callsigns, or both, giving operators a narrow allow-list mode or a broader FIO-trusted-operator mode.

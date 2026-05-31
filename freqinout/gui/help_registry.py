@@ -110,7 +110,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="tab.settings",
         anchor="settings",
         title="Settings Help",
-        summary="Station identity, software integration, scheduler behavior, and launch readiness.",
+        summary="Station identity, software choices, paths, scheduler help, launch readiness, and troubleshooting.",
     ),
     "settings.operator": HelpContext(
         key="settings.operator",
@@ -122,19 +122,25 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="settings.freqinout",
         anchor="settings-freqinout-details",
         title="FreqInOut Settings Help",
-        summary="Theme, text size, scheduler behavior, enforcement, and core application controls.",
+        summary="Theme, text size, software used, scheduler help, timers, operating status, and setup readiness.",
+    ),
+    "settings.software_used": HelpContext(
+        key="settings.software_used",
+        anchor="settings-freqinout-details",
+        title="Software Used Help",
+        summary="Choose only the station programs you actually use so FIO shows useful readiness guidance.",
     ),
     "settings.js8call": HelpContext(
         key="settings.js8call",
         anchor="settings-js8call-details",
         title="JS8Call Settings Help",
-        summary="JS8 API, traffic files, and link-data inputs used by FreqInOut.",
+        summary="JS8Call connection, JS8 traffic files, CommStat, JS8Spotter, and JS8Spotter form mapping.",
     ),
     "settings.fast-light": HelpContext(
         key="settings.fast-light",
         anchor="settings-fast-light-details",
         title="Fast Light Settings Help",
-        summary="FLRig, FLDigi, FLMsg, and FLAmp paths and companion integration fields.",
+        summary="FLRig, FLDigi, FLMsg, and FLAmp paths, connection fields, message folders, and auto-fill help.",
     ),
     "settings.hf-groups": HelpContext(
         key="settings.hf-groups",
@@ -152,19 +158,19 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="settings.varac",
         anchor="settings-varac-details",
         title="VarAC Settings Help",
-        summary="VarAC install, message folders, BBS paths, and archive behavior.",
+        summary="VarAC paths, incoming/outbox folders, BBS management, Managed BBS Services, relay, and VGuard.",
     ),
     "settings.message-auth": HelpContext(
         key="settings.message-auth",
         anchor="settings-message-auth",
         title="Message Auth Help",
-        summary="Signature and checksum verification, trusted hashes, and GPG key actions.",
+        summary="Plain-language signature and checksum verification, trusted hashes, GPG keys, and signing identity.",
     ),
     "settings.launch-control": HelpContext(
         key="settings.launch-control",
         anchor="settings-launch-control",
         title="Launch Control Help",
-        summary="Launch order, startup behavior, and software enablement for supported tools.",
+        summary="Which station tools FIO may start, startup behavior, launch order, and dependency pacing.",
     ),
     "settings.custom-tools": HelpContext(
         key="settings.custom-tools",
@@ -182,7 +188,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="settings.logging",
         anchor="settings-logging-diagnostics",
         title="Logging and Diagnostics Help",
-        summary="Troubleshooting controls, log access, and diagnostics export.",
+        summary="When to turn on extra logging, how to open logs, and how to export diagnostics for support.",
     ),
 }
 

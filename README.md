@@ -16,6 +16,8 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - ControlFreq operations dashboard with Frequency Control, Schedule Outlook, Message Summary, propagation forecast, and View presets/chips for card layout control
 - Offline propagation modeling (Modeled/Actual/Blended) with lower-48 targeting (Region/State/Operator) and historical-outcome blending
 - SitRep status pipeline from CommStatOne and JS8Spotter forms (`F!104`, `F!301`, `F!304`) with latest-signal-wins logic across ControlFreq, Operators, and Map
+- Settings now includes a JS8Spotter Form Mapper so discovered form files can be assigned operational purposes and routed to Messages, Map, Alerts, Net Control, or status workflows.
+- Spotter form routing now controls Messages visibility, unread alert surfacing, and Map evidence without rereading settings for every row.
 - Map intelligence with link filters, propagation overlay, SitRep-only mode, and schedule-risk/QSY awareness
 - UTC-native HF + Net scheduling with controlled enforcement, busy deferral, and NET override behavior
 - SOP Builder v2 with `HF SOP` and `Local Comms SOP` categories, conflict-aware save-time resolution, and Daily interval support
@@ -29,8 +31,12 @@ FreqInOut is a cross-workflow HF operations console for amateur radio. It unifie
 - Linux guided installer with repair mode, rollback protections, desktop launcher support, and detailed logs
 - Cross-platform database admin wrappers and maintenance tooling for advanced users
 
-## What's New in v1.2.5.6
+## What's New in v1.2.6
 
+- Settings now includes a JS8Spotter Form Mapper so discovered form files can be assigned operational purposes and routed to Messages, Map, Alerts, Net Control, or status workflows.
+- Spotter form routing now controls Messages visibility, unread alert surfacing, and Map evidence without rereading settings for every row.
+- Map now includes operator-controlled layers for Stations, Links, Weather Reports, Alerts, and Infrastructure, with weather/alert/infrastructure Spotter forms shown as compact operational icons when the sender has known location data.
+- JS8 NCS check-in and net-notification handling now uses mapper-selected forms, so custom or group-specific check-in forms can flow to NCS without hard-coding new form IDs.
 - VarAC VGuard now validates inbound file senders from VarAC traffic-log/session evidence before applying trust policy, including portable/mobile base-callsign matching.
 - VGuard can now allow either VarAC BBS Allowed Callsigns, Operator History `TRUSTED` callsigns, or both, so operators can choose a narrow or wider file-intake policy.
 - VGuard decision state now records clearer reasons for allowed, unauthorized, unresolved, or conflicting sender evidence.

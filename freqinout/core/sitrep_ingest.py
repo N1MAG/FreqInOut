@@ -30,13 +30,19 @@ from freqinout.core.commstat_artifacts import (
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.group_utils import normalize_group_name
+from freqinout.core.js8_spotter_forms import (
+    MAPPER_SETTINGS_KEY,
+    extract_form_codes,
+    forms_enabled_for,
+    normalize_form_code,
+)
 from freqinout.core.logger import log
 
 
 SPOTTER_SITREP_FORMS = {
-    "104": "SPOTTER_104",
-    "301": "SPOTTER_301",
-    "304": "SPOTTER_304",
+    "F!104": "SPOTTER_104",
+    "F!301": "SPOTTER_301",
+    "F!304": "SPOTTER_304",
 }
 
 _INGEST_LOCK = threading.Lock()
@@ -111,7 +117,7 @@ def ingest_sitreps(settings, *, max_rows_per_source: int = 500) -> Dict[str, int
                 stats["sources_attempted"] += 1
                 path = _resolve_js8spotter_db_path(settings)
                 if path:
-                    _merge_stats(stats, _ingest_js8spotter(conn, path, max_rows=max_rows_per_source))
+                    _merge_stats(stats, _ingest_js8spotter(conn, path, settings=settings, max_rows=max_rows_per_source))
                     stats["sources_ok"] += 1
 
             if _is_enabled(settings, "sitrep_ingest_commstat3_enabled", True):
@@ -543,23 +549,46 @@ def _parse_ts(value, fallback: str = "") -> Tuple[float, str]:
 
 
 def _extract_form_id(typeid: str) -> str:
-    tid = (typeid or "").strip().upper()
-    if tid.startswith("F!"):
-        tid = tid[2:]
-    return "".join(ch for ch in tid if ch.isdigit())
+    return normalize_form_code(typeid)
 
 
-def _is_sitrep_like_message(text: str) -> bool:
+def _custom_mapper_configured(settings) -> bool:
+    try:
+        return bool(settings is not None and settings.get(MAPPER_SETTINGS_KEY, []))
+    except Exception:
+        return False
+
+
+def _mapped_sitrep_forms(settings) -> set[str]:
+    # Status fusion only knows the legacy JS8Spotter status-bearing response layouts.
+    # The mapper can still route other forms to Messages/Map/Alerts without inventing
+    # status fields FIO cannot parse safely yet.
+    mapped = forms_enabled_for(settings, flag="status") & set(SPOTTER_SITREP_FORMS.keys())
+    if mapped:
+        return mapped
+    if _custom_mapper_configured(settings):
+        return set()
+    return set(SPOTTER_SITREP_FORMS.keys())
+
+
+def _spotter_sitrep_subtype(form_code: str) -> str:
+    code = normalize_form_code(form_code)
+    if not code:
+        return ""
+    return SPOTTER_SITREP_FORMS.get(code, f"SPOTTER_{code[2:]}")
+
+
+def _is_sitrep_like_message(text: str, settings=None, mapped_forms: Optional[set[str]] = None) -> bool:
     upper = (text or "").upper()
     if not upper:
         return False
+    mapped = mapped_forms if mapped_forms is not None else _mapped_sitrep_forms(settings)
     return (
         ("{&%}" in upper)
         or ("{&%3}" in upper)
         or ("{F%}" in upper)
         or ("{F%3}" in upper)
-        or ("F!301" in upper)
-        or ("F!304" in upper)
+        or any(code in mapped for code in extract_form_codes(upper))
     )
 
 
@@ -867,12 +896,13 @@ def _ingest_local_spotter_backfill(
         return out
 
     max_seen = last_id
+    mapped_sitrep_forms = _mapped_sitrep_forms(settings)
     for row in rows:
         rid = int(row[0] or 0)
         max_seen = max(max_seen, rid)
         out["rows_scanned"] += 1
         form_id = _extract_form_id(str(row[5] or ""))
-        subtype = SPOTTER_SITREP_FORMS.get(form_id, "")
+        subtype = _spotter_sitrep_subtype(form_id) if form_id in mapped_sitrep_forms else ""
         if not subtype:
             continue
         event_ts, event_ts_utc = _parse_ts(row[1], fallback=str(row[2] or ""))
@@ -914,10 +944,11 @@ def _ingest_local_spotter_backfill(
     return out
 
 
-def _ingest_js8spotter(local_conn: sqlite3.Connection, source_db: Path, *, max_rows: int) -> Dict[str, int]:
+def _ingest_js8spotter(local_conn: sqlite3.Connection, source_db: Path, *, settings=None, max_rows: int) -> Dict[str, int]:
     out = {"rows_scanned": 0, "events_inserted": 0, "errors": 0}
     source = "JS8SPOTTER"
     source_db_path = str(source_db)
+    mapped_sitrep_forms = _mapped_sitrep_forms(settings)
     try:
         src = _open_source_db(source_db)
     except Exception as e:
@@ -925,7 +956,7 @@ def _ingest_js8spotter(local_conn: sqlite3.Connection, source_db: Path, *, max_r
         out["errors"] += 1
         return out
     try:
-        # forms table: F!104/F!301/F!304.
+        # forms table: mapper-selected SitRep/StatRep status forms.
         table = "forms"
         try:
             if _table_exists(src, table):
@@ -948,7 +979,7 @@ def _ingest_js8spotter(local_conn: sqlite3.Connection, source_db: Path, *, max_r
                     max_seen = max(max_seen, rid)
                     out["rows_scanned"] += 1
                     form_id = _extract_form_id(str(row[3] or ""))
-                    subtype = SPOTTER_SITREP_FORMS.get(form_id, "")
+                    subtype = _spotter_sitrep_subtype(form_id) if form_id in mapped_sitrep_forms else ""
                     if not subtype:
                         continue
                     event_ts, event_ts_utc = _parse_ts(row[7], fallback=str(row[6] or ""))
