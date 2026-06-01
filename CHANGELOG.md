@@ -2,6 +2,7 @@
 
 ## [1.2.7.1]
 - Fixed: macOS Python 3.9 installs that use LibreSSL no longer pull `urllib3` v2 through `requests`, avoiding the startup `NotOpenSSLWarning` after dependencies are reinstalled.
+- Fixed: ControlFreq message summary now colors the `FLMsg / FLAmp` row consistently with the other summary rows.
 
 ## [1.2.7]
 - Changed: Scheduler authority now treats FIO-controlled schedule changes and `Resume Schedule` as authoritative operating-plan actions, with bounded busy deferral and stronger off-schedule recovery while still protecting active transmit and VarAC file-transfer cases.
