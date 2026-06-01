@@ -1,5 +1,8 @@
 # Changelog
 
+## [1.2.7.2]
+- Fixed: Scheduler JS8 offset status now uses fresh readback before declaring `Off Schedule`, so a correct JS8Call offset does not remain falsely flagged after `Resume Schedule` while FIO still manages JS8 offset under FLRig control.
+
 ## [1.2.7.1]
 - Fixed: macOS Python 3.9 installs that use LibreSSL no longer pull `urllib3` v2 through `requests`, avoiding the startup `NotOpenSSLWarning` after dependencies are reinstalled.
 - Fixed: ControlFreq message summary now colors the `FLMsg / FLAmp` row consistently with the other summary rows.

@@ -37,6 +37,8 @@ class StationActualState:
     flrig_vfo: Optional[str] = None
     js8_freq_hz: Optional[int] = None
     js8_offset_hz: Optional[int] = None
+    js8_offset_age_s: Optional[float] = None
+    js8_offset_stale: bool = False
     fldigi_mode: Optional[str] = None
     fldigi_offset_hz: Optional[int] = None
     actual_frequency_hz: Optional[int] = None
@@ -310,6 +312,7 @@ class SchedulerEngine(QObject):
         self._status_js8_freq_hz: Optional[int] = None
         self._status_js8_offset_hz: Optional[int] = None
         self._status_js8_freq_ts: float = 0.0
+        self._status_js8_offset_ts: float = 0.0
         self._status_summary_cache: Optional[Dict[str, object]] = None
         self._status_summary_cache_ts: float = 0.0
         self._status_summary_cache_ttl_s: float = 2.5
@@ -553,6 +556,21 @@ class SchedulerEngine(QObject):
             return val
         except Exception:
             return 0
+
+    def _js8_offset_authority_active(self, entry: Optional[Dict], control_mode: Optional[str] = None) -> bool:
+        mode = (control_mode or self._cached_control_mode()).strip().upper()
+        if mode not in {"FLRIG", "JS8CALL"}:
+            return False
+        if self._js8_offset_setting() <= 0:
+            return False
+        if mode == "JS8CALL":
+            return True
+        row = entry or self.current_schedule_entry or {}
+        if str(row.get("primary_js8call_group") or "").strip():
+            return True
+        if str(row.get("js8_offset") or row.get("js8call_offset") or "").strip():
+            return True
+        return bool(self.js8 and self._js8_running())
 
     def _parse_freq_hz(self, freq_text: str) -> Optional[int]:
         if not freq_text:
@@ -961,6 +979,8 @@ class SchedulerEngine(QObject):
             )
         except Exception:
             pass
+        current_entry = dict(self.current_schedule_entry or {})
+        js8_offset_check_active = self._js8_offset_authority_active(current_entry, self._cached_control_mode())
 
         def _task() -> Dict[str, object]:
             settings = SettingsManager()
@@ -1005,11 +1025,12 @@ class SchedulerEngine(QObject):
                         out["flrig_vfo"] = rig.get_active_vfo()
                 except Exception as e:
                     log.debug("SchedulerEngine: background FLRig status failed: %s", e)
-                if control_mode == "JS8CALL":
+                if control_mode == "JS8CALL" or js8_offset_check_active:
                     try:
                         js8 = JS8ControlClient()
-                        out["js8_busy"] = bool(js8.is_busy())
-                        out["js8_freq_hz"] = js8.get_frequency()
+                        if control_mode == "JS8CALL":
+                            out["js8_busy"] = bool(js8.is_busy())
+                            out["js8_freq_hz"] = js8.get_frequency()
                         out["js8_offset_hz"] = js8.get_offset()
                     except Exception as e:
                         log.debug("SchedulerEngine: background JS8Call status failed: %s", e)
@@ -1059,6 +1080,7 @@ class SchedulerEngine(QObject):
                 js8_offset = data.get("js8_offset_hz")
                 if isinstance(js8_offset, (int, float)):
                     self._status_js8_offset_hz = int(js8_offset)
+                    self._status_js8_offset_ts = time.time()
                 self._last_js8_busy = bool(data.get("js8_busy", self._last_js8_busy))
                 self._status_summary_external_ts = float(data.get("checked_ts") or time.time())
                 self._status_summary_cache = None
@@ -1102,6 +1124,7 @@ class SchedulerEngine(QObject):
         mode: Optional[str],
         vfo: Optional[str],
         entry_key: Tuple,
+        verify_js8_offset: bool = False,
     ) -> None:
         verify_entry = {
             "band": band,
@@ -1135,7 +1158,7 @@ class SchedulerEngine(QObject):
                     out["flrig_vfo"] = rig.get_active_vfo()
             except Exception as e:
                 errors["rig"] = str(e)
-            if mode_key == "JS8CALL" or not out.get("flrig_freq_hz"):
+            if mode_key == "JS8CALL" or verify_js8_offset or not out.get("flrig_freq_hz"):
                 try:
                     if js8 is not None:
                         if hasattr(js8, "get_frequency"):
@@ -1172,6 +1195,7 @@ class SchedulerEngine(QObject):
                     self._status_js8_freq_ts = now_ts
                 if isinstance(js8_offset, (int, float)):
                     self._status_js8_offset_hz = int(js8_offset)
+                    self._status_js8_offset_ts = now_ts
                 ptt_known = bool(data.get("flrig_ptt_known", False))
                 if ptt_known:
                     self._last_ptt_active = bool(data.get("flrig_ptt_active", self._last_ptt_active))
@@ -1431,6 +1455,7 @@ class SchedulerEngine(QObject):
                         mode=mode,
                         vfo=vfo,
                         entry_key=entry_key,
+                        verify_js8_offset=js8_offset is not None,
                     )
                 else:
                     self._control_fail_count += 1
@@ -2455,9 +2480,12 @@ class SchedulerEngine(QObject):
             flrig_vfo=self._status_flrig_vfo,
             js8_freq_hz=self._status_js8_freq_hz,
             js8_offset_hz=self._status_js8_offset_hz,
+            js8_offset_age_s=(now_ts - self._status_js8_offset_ts) if self._status_js8_offset_ts else None,
             fldigi_mode=self._fldigi_mode_cache,
             fldigi_offset_hz=self._fldigi_offset_cache,
         )
+        if state.js8_offset_age_s is None or state.js8_offset_age_s > 30.0:
+            state.js8_offset_stale = True
         if state.flrig_ptt_age_s is None or state.flrig_ptt_age_s > self._status_flrig_ptt_max_age_s:
             state.flrig_ptt_known = False
             state.flrig_ptt_stale = True
@@ -2496,7 +2524,7 @@ class SchedulerEngine(QObject):
                         self._status_flrig_vfo_ts = now_ts
             except Exception as e:
                 state.errors["flrig_vfo"] = str(e)
-            if mode == "JS8CALL" or state.flrig_freq_hz is None:
+            if mode == "JS8CALL" or self._js8_offset_authority_active(self.current_schedule_entry, mode) or state.flrig_freq_hz is None:
                 try:
                     if self.js8 and self._js8_running():
                         js8_freq = self.js8.get_frequency()
@@ -2508,6 +2536,9 @@ class SchedulerEngine(QObject):
                         if isinstance(js8_offset, (int, float)):
                             state.js8_offset_hz = int(js8_offset)
                             self._status_js8_offset_hz = int(js8_offset)
+                            self._status_js8_offset_ts = now_ts
+                            state.js8_offset_age_s = 0.0
+                            state.js8_offset_stale = False
                 except Exception as e:
                     state.errors["js8_frequency"] = str(e)
             try:
@@ -2651,13 +2682,15 @@ class SchedulerEngine(QObject):
                     throttle_sec=120.0,
                 )
 
-        if check_offset and self._js8_running():
+        if check_offset and self._js8_offset_authority_active(entry, active_control_mode):
             desired_js8 = self._js8_offset_setting()
             current_js8 = actual.js8_offset_hz
             if current_js8 is None:
-                flags["offset"] = True
                 state.status_unknown = True
                 state.reasons.append("JS8 offset unavailable")
+            elif actual.js8_offset_stale:
+                state.status_unknown = True
+                state.reasons.append("JS8 offset pending fresh verification")
             elif desired_js8 != current_js8:
                 flags["offset"] = True
                 state.reasons.append(f"JS8 offset {current_js8} Hz, target {desired_js8} Hz")

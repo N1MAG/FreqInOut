@@ -39,6 +39,10 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
 - Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
 
+## What's New in v1.2.7.2
+
+- JS8 offset schedule status now waits for fresh JS8Call readback before declaring `Off Schedule`. FIO still manages the JS8 offset when FLRig controls the radio dial, but a stale cached offset should no longer make `Resume Schedule` look like it did nothing.
+
 ## What's New in v1.2.7.1
 
 - Startup dependency compatibility was tightened for macOS Python 3.9 environments that use LibreSSL. FIO now pins `urllib3` below v2 so the app does not show the `NotOpenSSLWarning` during launch after dependencies are reinstalled.
