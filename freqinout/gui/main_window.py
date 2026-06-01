@@ -4,6 +4,7 @@ import datetime
 import sqlite3
 import sys
 import time
+from typing import Callable
 
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -104,8 +105,9 @@ class MainWindow(QMainWindow):
       - Help
     """
 
-    def __init__(self):
+    def __init__(self, startup_status: Callable[[str], None] | None = None):
         super().__init__()
+        self._startup_status_callback = startup_status
         self._shutting_down = False
         self._app_active = True
         self._ui_resume_pending = False
@@ -118,6 +120,7 @@ class MainWindow(QMainWindow):
         self._ui_resume_settle_timer.timeout.connect(self._on_ui_resume_settled)
 
         self.settings = SettingsManager()
+        self._notify_startup_status("Loading application settings...")
         self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
         self._set_window_icon()
 
@@ -184,6 +187,7 @@ class MainWindow(QMainWindow):
             ("Settings", self.settings_tab),
             ("Help", self.help_tab),
         ]
+        self._notify_startup_status("Building station dashboard...")
         self._screen_index_by_label = {label: idx for idx, (label, _w) in enumerate(self._screens)}
         self._condition_levels_signature: tuple[tuple[str, int], ...] = tuple()
         self._condition_levels_refresh_pending = False
@@ -474,6 +478,7 @@ class MainWindow(QMainWindow):
             varac=self.varac_status,
             fldigi_log=self.fldigi_log_status,
         )
+        self._notify_startup_status("Starting scheduler services...")
         self.scheduler.start()
         self.background_ingest = BackgroundIngestController(self.settings)
         self.background_ingest.start()
@@ -610,6 +615,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         QTimer.singleShot(1200, self._start_launch_control_startup)
+        self._notify_startup_status("Opening FIO...")
+
+    def _notify_startup_status(self, message: str) -> None:
+        callback = getattr(self, "_startup_status_callback", None)
+        if callback is None:
+            return
+        try:
+            callback(message)
+        except Exception as e:
+            log.debug("MainWindow startup status update failed: %s", e)
 
     def _ui_refresh_allowed(self) -> bool:
         return bool(
