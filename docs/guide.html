@@ -31,7 +31,7 @@
   </div>
 
   <h1 id="guide-home">FreqInOut User Guide</h1>
-  <p><strong>Current version</strong>: 1.2.6.1</p>
+  <p><strong>Current version</strong>: 1.2.7</p>
   <p>This guide is a complete reference for the current FreqInOut interface. It documents each main-menu area, tab, button, table, and nested action so both new and advanced operators can move quickly and confidently.</p>
   <p><strong>Time model</strong>: schedule and SOP data are stored in UTC. Local/UTC toggles change display only.</p>
   <p><strong>How to use this guide</strong>: if you are new, read the sections in operational order instead of treating this as a pure control catalog. Start with <a href="#settings">Settings</a>, then the schedule tabs, then the live operating tabs such as <a href="#controlfreq">ControlFreq</a>, <a href="#messages">Messages</a>, and <a href="#map">Map</a>. If you are already operating, use the guide as a workflow map: when one tab seems confusing, the answer is often explained in a related tab or settings section.</p>
@@ -237,6 +237,7 @@
       <tr><td><a href="#settings-sections">Settings Sections</a></td><td>This is the index of station setup areas. Start here when a feature is missing or disabled.</td></tr>
       <tr><td><a href="#settings-operator-info">Operator Information</a></td><td>This is your station identity. It affects filenames, messages, map position, and operator matching.</td></tr>
       <tr><td><a href="#settings-freqinout-details">FreqInOut Settings Details</a></td><td>These choices control the app's look, scheduler behavior, and how strongly FIO should correct off-schedule conditions.</td></tr>
+      <tr><td><a href="#settings-scheduler-behavior">Scheduler Behavior Examples</a></td><td>This explains how FIO decides whether to control frequency, mode, and offsets, with examples for common settings.</td></tr>
       <tr><td><a href="#settings-js8call-details">JS8Call Settings Details</a></td><td>These tell FIO where JS8Call is and where its traffic files live.</td></tr>
       <tr><td><a href="#settings-fast-light-details">Fast Light Settings Details</a></td><td>These connect FIO to FLRig, FLDigi, FLMsg, and FLAmp paths, ports, logs, and message folders.</td></tr>
       <tr><td><a href="#settings-hf-groups-details">HF Operating Groups Details</a></td><td>These define the named HF groups, expected modes, bands, frequencies, offsets, and optional condition-level behavior.</td></tr>
@@ -268,7 +269,7 @@
       </tr>
     </tbody>
   </table>
-  <p><strong>Resume Schedule note</strong>: <code>Resume Schedule</code> clears a temporary schedule suspension and returns control to the scheduler. It is an authoritative return-to-plan action for the active schedule row, including FLDigi mode and offset. Active transmit protection still matters; FIO should not fight a keyed transmitter.</p>
+  <p><strong>Resume Schedule note</strong>: <code>Resume Schedule</code> clears a temporary schedule suspension and returns control to the scheduler. It is an authoritative return-to-plan action for the active schedule row, including FLDigi mode and offset. Active transmit protection still matters; FIO should not fight a keyed transmitter. For the full plain-language explanation, see <a href="#settings-scheduler-behavior">Scheduler Behavior Examples</a>.</p>
   <ol class="section-list">
     <li><strong>Temporary hold workflow</strong>: choose a <code>Hold</code> duration (`30`, `60`, `90`, or `120` minutes) before using <code>Suspend</code> or any <code>QSY + Hold</code> action.</li>
     <li><strong>While paused</strong>: the button changes to a live countdown-style <code>Resume</code> control and the card shows when schedule control will return automatically.</li>
@@ -308,11 +309,12 @@
     </tbody>
   </table>
   <p>The right side of Frequency Control includes a live time/date readout aligned with the selected <code>Showing</code> mode (Local or UTC).</p>
-  <p><strong>Scheduler enforcement note</strong>: The scheduler can notify off-schedule conditions without immediately correcting them, depending on the enforcement settings. This is most visible for FLDigi mode and FLDigi offset.</p>
+  <p><strong>Scheduler enforcement note</strong>: The scheduler can notify off-schedule conditions without immediately correcting them, depending on the enforcement settings. This is most visible for FLDigi mode and FLDigi offset. If the badge says <code>Off Schedule</code>, FIO is saying, “what I can see does not match the active plan.” If <code>Resume Schedule</code> is available, clicking it tells FIO to return to the plan now, while still respecting active transmit protection. See <a href="#settings-scheduler-behavior">Scheduler Behavior Examples</a> for common combinations and <a href="#station-health">Station Health</a> for recent scheduler holds or failures.</p>
   <ul class="section-list">
     <li><strong>Next Change</strong>: the scheduler strip shows the upcoming target frequency for the next scheduled change, not the currently active frequency.</li>
     <li><strong>Active hold changes</strong>: if a temporary hold is already running, changing the <code>Hold</code> dropdown updates that active hold window immediately.</li>
     <li><strong>Activity window</strong>: the <code>Activity</code> panel reflects actual recent traffic in the selected time window and excludes <code>@GROUP</code> address tokens from <code>Callsigns Seen</code>.</li>
+    <li><strong>Off Schedule</strong>: this does not always mean something failed. It can mean you moved the radio, another program changed the radio, prompt-mode help is waiting for permission, PTT is active, or a temporary hold is still running. Use this badge with <a href="#left-rail-status">Schedule Status</a> and <a href="#station-health">Station Health</a>.</li>
   </ul>
 
   <h3 id="controlfreq-tables">Tables</h3>
@@ -401,9 +403,11 @@
     <li><code>Delete</code>: deletes selected message/file record.</li>
     <li><code>Archive</code>: shown for BBS file rows. Moves that file out of <code>BBS Directory</code> into <code>BBS Archive</code>.</li>
     <li><code>+BBS</code>: shown for FLMsg/FLAmp/VarAC file rows when VarAC BBS path is configured; copies file to VarAC BBS folder with overwrite prompt if needed.</li>
+    <li><code>+Relay</code>: shown only when the row is a FLAMP relay/block file and FIO can identify a four-character relay queue ID. The queue ID may already be at the start of the filename, or it may be inside the FLAMP file. If FIO cannot identify the queue ID confidently, it leaves the file viewable but does not offer <code>+Relay</code>.</li>
   </ul>
   <p><code>Open Image</code> appears when selected content is an image-capable file and opens it externally.</p>
   <p><strong>Transport forms</strong>: received <code>.b2s</code> and <code>.k2s</code> transport files use the same form-friendly decode path when the payload can be interpreted as a supported transport form.</p>
+  <p><strong>Explain <code>+Relay</code> to me</strong>: viewing a file and adding it to FLAMP Relay are different decisions. <code>View</code> asks, “can FIO show this traffic?” <code>+Relay</code> asks, “can FIO safely place this file where the FLAMP relay service can advertise it by queue ID?” A complete FLAMP file received through VarAC may not have the queue ID in the filename. When the internal FLAMP file ID is exactly four hex characters, FIO uses that as the queue prefix. If the ID is missing, too long, not hex, or already belongs to a different relay file, FIO does not guess. For the relay folder and remote commands, see <a href="#settings-varac-details">VarAC Settings Details</a>.</p>
   <ol class="section-list">
     <li><strong>1) Use <code>Hide Types</code> to hide noisy traffic from the default view</strong>: check one or more message types you do not want to see every time you open Messages.</li>
     <li><strong>2) Leave <code>MSG Type...</code> unselected for the normal default view</strong>: hidden message types stay out of the list while all other filters continue to work normally.</li>
@@ -1183,6 +1187,42 @@
     <li><strong>Setup Readiness</strong>: a plain-language checklist. It points out missing companion fields after you start configuring a workflow.</li>
   </ul>
 
+  <h3 id="settings-scheduler-behavior">Scheduler Behavior Examples</h3>
+  <p><strong>Explain this to me</strong>: the scheduler is FIO's way of keeping the station matched to the current operating plan. The plan may say which frequency to use, which mode belongs with that row, and which digital offset should be used. FIO's job is to notice when the station drifts away from that plan and either fix it or ask you, depending on your settings.</p>
+  <p><strong>The big idea</strong>: FIO is the plan owner when the scheduler is enabled. That does not mean FIO should blindly fight the operator. It means FIO keeps asking, “does the station match the plan right now?” If not, FIO follows the choices you made in Settings. It also respects active transmit protection, because changing a station while the transmitter is keyed is not safe.</p>
+  <p><strong>Where the plan comes from</strong>: routine HF schedule rows are the baseline. Net schedule rows can take priority during a named net. Active SOP layers can take priority when an SOP is active. ControlFreq shows the current plan and the next likely change; HF Daily, HF Nets, and SOP Builder are where you correct the plan itself.</p>
+  <table>
+    <thead>
+      <tr><th>Setting</th><th>Explain This To Me</th><th>What You Should Expect</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Use FreqInOut Scheduler</code></td><td>This is the main on/off switch for schedule ownership.</td><td>When it is on, FIO watches the active plan and can help return the station to it. When it is off, FIO may still show schedule information, but it should not act like it owns schedule changes.</td></tr>
+      <tr><td><code>Frequency Control</code></td><td>This tells FIO which outside program is the best path for reading or guiding the radio frequency.</td><td><code>FLRig</code> is the usual radio-control bridge. <code>JS8Call</code> is useful when JS8Call is the practical source of radio state. <code>Manual</code> means FIO should advise instead of assuming it can control the radio.</td></tr>
+      <tr><td><code>On Schedule Change</code></td><td>FIO applies that item when the active schedule row changes.</td><td>This feels automatic. It is best when you want the station to follow the plan without stopping to ask every time.</td></tr>
+      <tr><td><code>Prompt</code></td><td>FIO notices the mismatch and asks before changing that item.</td><td>This feels advisory. It is best when you often make deliberate manual changes and want FIO to warn you rather than immediately correct you.</td></tr>
+      <tr><td><code>Prompt Interval</code></td><td>This is the reminder pace for prompt-mode mismatches.</td><td>A shorter interval is more insistent during an operation. A longer interval is quieter when you may stay off plan on purpose.</td></tr>
+      <tr><td><code>Hold</code> / <code>Suspend</code></td><td>This is a temporary operator pause.</td><td>FIO stops correcting schedule state until the hold expires or you click <code>Resume Schedule</code>.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>What can be off schedule?</strong> Frequency, FLDigi mode, FLDigi offset, and JS8 offset are separate checks. The radio may be on the correct RF frequency while FLDigi is still on the wrong offset. That is why <code>Off Schedule</code> can appear even when the frequency display looks right.</p>
+  <p><strong>What does Resume Schedule do?</strong> <code>Resume Schedule</code> means “return to the active plan now.” It clears temporary holds and asks FIO to re-apply the active schedule row. It is stronger than waiting for the next timer tick. It still does not mean “change the station while PTT is active.”</p>
+  <table>
+    <thead>
+      <tr><th>Scenario</th><th>Settings</th><th>What FIO Does</th><th>What The Operator Should Expect</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Normal automatic schedule</td><td>Scheduler on, Frequency set to <code>On Schedule Change</code>.</td><td>When the schedule moves to a new row, FIO applies the planned frequency.</td><td>ControlFreq should return to <code>On Schedule</code> after the radio reports the expected frequency.</td></tr>
+      <tr><td>You intentionally try another frequency</td><td>Scheduler on, Frequency set to <code>Prompt</code>.</td><td>FIO marks the station off schedule and asks before changing it back.</td><td>Choose apply/resume when you want the plan restored, or hold/suspend if you intend to stay off plan for a while.</td></tr>
+      <tr><td>JS8Call or VarAC changes FLRig</td><td>Scheduler on.</td><td>FIO notices the radio no longer matches the active plan.</td><td>If <code>Resume Schedule</code> is available, click it to tell FIO to take the station back to the plan. If the other program is busy, FIO may wait briefly before acting.</td></tr>
+      <tr><td>Frequency is right but FLDigi offset is wrong</td><td>FLDigi offset set to <code>On Schedule Change</code> or <code>Prompt</code>.</td><td>FIO treats the offset mismatch separately from the radio frequency.</td><td>You may see <code>Off Schedule</code> even though the RF frequency is correct. Check the FLDigi mode and offset expectations.</td></tr>
+      <tr><td>A named net begins</td><td>Net schedule row active.</td><td>The net can become the current plan for that time window.</td><td>ControlFreq should show the net in the schedule outlook or current-plan context when available.</td></tr>
+      <tr><td>An SOP is active</td><td>HF SOP active and scheduler on.</td><td>The SOP can become the current plan when its window is active.</td><td>Use HF Daily's effective schedule and ControlFreq's source hints to confirm which plan is in charge.</td></tr>
+      <tr><td>FLDigi appears busy for too long</td><td>Scheduler on and a schedule change is due.</td><td>FIO waits briefly, rechecks, records what happened, and then protects the schedule from being stuck forever by a stale busy signal.</td><td>Open <a href="#station-health">Station Health</a> to see whether FIO held, rechecked, resumed, or failed a control action.</td></tr>
+      <tr><td>You click <code>QSY + Hold</code></td><td>Any enforcement mode.</td><td>FIO changes to the selected frequency and starts a temporary hold.</td><td>The scheduler will not fight that move until the hold ends or you click <code>Resume Schedule</code>.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Where to look when something seems wrong</strong>: use <a href="#controlfreq">ControlFreq</a> for the live badge and next action, <a href="#left-rail-status">Schedule Status</a> for the always-visible summary, <a href="#station-health">Station Health</a> for recent holds and failures, and <a href="#hf-daily">HF Daily</a>, <a href="#hf-nets">HF Nets</a>, or <a href="#sop-builder">SOP Builder</a> when the plan itself needs to be corrected.</p>
+
   <h3 id="settings-js8call-details">JS8Call Settings Details</h3>
   <ul class="section-list">
     <li><strong>Host and Port</strong>: tell FreqInOut how to talk to JS8Call on this computer. Most local stations use host <code>127.0.0.1</code> and port <code>2442</code>.</li>
@@ -1319,6 +1359,7 @@
     <li><strong>Callsign-aware menus</strong>: root menu helper files should only be shown for aliases the caller is allowed to see. If a location is callsign-limited, stations outside that policy should not get a menu entry that invites them into a location they cannot use.</li>
     <li><strong>List in root menu</strong>: the clearest normal administration model is to list locations in the root menu and let access policy decide who sees them. Hide a location only when you deliberately want direct-access behavior with no menu advertisement.</li>
     <li><strong>FLAMP relay workflow</strong>: remote stations can ask for queue listings, available blocks, and individual block payloads without you manually swapping files in and out of the live BBS folder. The root menu can show <code>BBS MSG - type FLAMP to see FLAMP BLOCK FILL CMDS - then refresh BBS.txt</code>. After the caller types <code>FLAMP</code>, FIO publishes separate helper files such as <code>LIST Q</code>, <code>LIST F277</code>, <code>BLKS 0,8,9 F277</code>, and <code>ROOT</code>. FIO is forgiving about the request word: <code>BLK</code>, <code>BLKS</code>, <code>BLOCK</code>, and <code>BLOCKS</code> all mean "make a block file" when block numbers are included. To look before requesting, use <code>LIST F277</code>; <code>BLKS F277</code> is treated as an incomplete block request and FIO will publish a helper notice instead of guessing.</li>
+    <li><strong>Adding received FLAMP files to relay</strong>: if a complete FLAMP file arrives through VarAC, open <a href="#messages-main-table">Messages</a>. FIO shows <code>+Relay</code> only when it can confidently identify the four-character queue ID from the filename or the FLAMP file content. That protects the relay list from guessed names. If <code>+Relay</code> is not shown, the file may still be readable, but FIO is telling you it cannot safely add it to the relay queue automatically.</li>
     <li><strong>Vault runtime status</strong>: <code>Settings</code>, <code>ControlFreq</code>, and the <code>Messages</code> BBS summary surface the last vault action so operators can tell whether the vault is enabled, active, reset, or degraded without opening logs.</li>
     <li><strong>Recommended Managed Vault setup</strong>: start with normal BBS folders and verify BBS copy/archive behavior first. Then initialize the Managed Vault, confirm the imported default location looks right, and only after that add protected alternate locations.</li>
     <li><strong>Credit</strong>: advanced VarAC BBS management in FreqInOut is being shaped with explicit credit to KG5RKW for the operational ideas behind Vault and VGuard.</li>

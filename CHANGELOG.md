@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.7]
+- Changed: Scheduler authority now treats FIO-controlled schedule changes and `Resume Schedule` as authoritative operating-plan actions, with bounded busy deferral and stronger off-schedule recovery while still protecting active transmit and VarAC file-transfer cases.
+- Added: Scheduler and control decisions are persisted more clearly for Station Health and ControlFreq review, including off-schedule detection, resume requests, busy holds, break-throughs, failed control attempts, and schedule-state reasons.
+- Fixed: Hidden-tab and idle/wake UI refresh paths now defer heavy Messages table rebuilds until the tab is active and show stable visible loading text such as `Checking Messages...`, reducing macOS Qt/WebEngine lifecycle crash exposure.
+- Fixed: Managed VarAC BBS and VGuard validation now normalize sender evidence more consistently, report alias collisions, recover health state after slow vault jobs, and avoid silently trusting ambiguous inbound file senders.
+- Added: Messages now supports a guarded `+Relay` action for verified FLAMP `.b2s` / `.k2s` relay files received through VarAC when the FLAMP queue ID can be identified confidently from the filename or file content.
+- Changed: Help content now explains scheduler behavior, off-schedule/resume actions, and `+Relay` in plain operator language with cross-links between Settings, ControlFreq, Messages, and Station Health.
+
 ## [1.2.6.1]
 - Fixed: `Resume Schedule` now forces the active operating plan back into FLDigi mode/offset enforcement instead of skipping FLDigi when the current schedule row looks already applied.
 - Added: Scheduler decisions are now persisted in a bounded `scheduler_events` journal so Station Health can show why FIO applied, skipped, held, retried, or failed a schedule action.

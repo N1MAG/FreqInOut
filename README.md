@@ -39,6 +39,14 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
 - Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
 
+## What's New in v1.2.7
+
+- Scheduler authority is more direct: when FIO is the schedule controller, normal schedule changes and Resume Schedule now push the station back to the active operating plan unless a real transmit/file-transfer safety condition is present.
+- Station Health and ControlFreq now preserve clearer scheduler decisions, off-schedule state, resume actions, busy holds, break-throughs, and control failures so schedule-miss reports can be reviewed after the fact.
+- Messages and map-adjacent UI refreshes are safer on macOS idle/wake and hidden-tab transitions. Visible tabs show stable loading text such as `Checking Messages...` instead of appearing frozen while background data is prepared.
+- Managed VarAC BBS and VGuard sender validation are stricter and easier to diagnose, including alias-collision reporting, sender normalization, and clearer health/status behavior when vault jobs slow down or fail.
+- Messages can offer `+Relay` for verified FLAMP `.b2s` / `.k2s` relay files received through VarAC when FIO can confidently identify the FLAMP queue ID. FLMsg-style files remain viewable but are not copied to the FLAMP Relay folder as relay traffic.
+
 ## What's New in v1.2.6.1
 
 - Resume Schedule now forces the active operating plan back into FLDigi mode/offset enforcement, so a wrong FLDigi offset is corrected instead of treated as notify-only drift.

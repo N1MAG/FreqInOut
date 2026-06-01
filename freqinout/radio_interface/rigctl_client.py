@@ -272,6 +272,18 @@ class FLRigClient:
             log.warning("Failed to get VFO frequency from FLRig: %s", e)
             return None
 
+    def get_active_vfo(self) -> Optional[str]:
+        """
+        Returns the active FLRig VFO ("A" or "B"), or None on failure.
+        """
+        try:
+            raw = self._with_proxy(lambda p: p.rig.get_AB(), label="get_AB")
+            vfo = str(raw or "").strip().upper()[:1]
+            return vfo if vfo in {"A", "B"} else None
+        except Exception as e:
+            log.debug("Failed to get active VFO from FLRig: %s", e)
+            return None
+
     # ------------- CONTROL METHODS -------------
 
     @staticmethod

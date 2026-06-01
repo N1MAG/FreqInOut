@@ -122,7 +122,7 @@ HELP_CONTEXTS: Dict[str, HelpContext] = {
         key="settings.freqinout",
         anchor="settings-freqinout-details",
         title="FreqInOut Settings Help",
-        summary="Theme, text size, software used, scheduler help, timers, operating status, and setup readiness.",
+        summary="Theme, text size, software used, scheduler behavior examples, timers, operating status, and setup readiness.",
     ),
     "settings.software_used": HelpContext(
         key="settings.software_used",

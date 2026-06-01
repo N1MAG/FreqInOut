@@ -16,10 +16,11 @@ from pathlib import Path
 from pathlib import PureWindowsPath
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
 from freqinout.core.nbems_compose import safe_varac_bbs_filename
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp_to_epoch
-from freqinout.core.varac_bbs_config import parse_callsign_list
+from freqinout.core.varac_bbs_config import normalize_callsign, parse_callsign_list
 from freqinout.core.varac_guard import resolve_varac_traffic_log_paths
 
 DEFAULT_ACCESS_CODE_ITERATIONS = 310_000
@@ -41,6 +42,8 @@ DEFAULT_FLAMP_BLOCK_PREFIX = "BBS_BLOCK_LIST"
 DEFAULT_FLAMP_FILE_PREFIX = "BBS"
 DEFAULT_FLAMP_LISTING_MAX_AGE_DAYS = 14
 DEFAULT_BBS_REFRESH_PAUSE_SECONDS = 10
+VAULT_ALIAS_HEALTH_KEY = "varac-bbs-vault-aliases"
+VAULT_ALIAS_HEALTH_OWNER = "VarAC Managed BBS Vault"
 
 EVENT_TS_RE = re.compile(r"^(?P<stamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\s+-\s+(?P<body>.*)$")
 EVENT_TS_SCAN_RE = re.compile(r"(?P<stamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})\s+-\s+")
@@ -203,7 +206,7 @@ class _VirtualFile:
 
 
 def _normalize_callsign(value: object) -> str:
-    return str(value or "").strip().upper()
+    return normalize_callsign(value)
 
 
 def _clean_location_name(value: object) -> str:
@@ -1297,6 +1300,49 @@ def _location_by_id(locations: Sequence[VaultLocation], location_id: str) -> Opt
 def _location_by_alias(locations: Sequence[VaultLocation], alias: str) -> Optional[VaultLocation]:
     target = normalize_location_alias(alias)
     return next((loc for loc in locations if normalize_location_alias(loc.alias, loc.name) == target), None)
+
+
+def _build_alias_map(locations: Sequence[VaultLocation], *, default_location_id: str) -> Tuple[Dict[str, str], List[str]]:
+    alias_map: Dict[str, str] = {}
+    collisions: List[str] = []
+    for location in locations:
+        if location.id == default_location_id or not location.enabled:
+            continue
+        alias = normalize_location_alias(location.alias, location.name)
+        if not alias:
+            continue
+        if alias in alias_map:
+            collisions.append(alias)
+            continue
+        alias_map[alias] = location.id
+    return alias_map, collisions
+
+
+def _record_alias_health(alias_collisions: Sequence[str]) -> None:
+    try:
+        health = get_dependency_health_registry()
+        unique_collisions = sorted(set(str(alias or "").strip() for alias in alias_collisions if str(alias or "").strip()))
+        if unique_collisions:
+            health.record_failure(
+                VAULT_ALIAS_HEALTH_KEY,
+                owner=VAULT_ALIAS_HEALTH_OWNER,
+                error=f"alias collision: {', '.join(unique_collisions)}",
+                duration_ms=0.0,
+                cooldown_sec=0.0,
+                metadata={
+                    "action": "Two managed vault locations use the same open command alias",
+                    "aliases": unique_collisions,
+                },
+            )
+        else:
+            health.record_success(
+                VAULT_ALIAS_HEALTH_KEY,
+                owner=VAULT_ALIAS_HEALTH_OWNER,
+                duration_ms=0.0,
+                metadata={"action": "Managed vault aliases are unique"},
+            )
+    except Exception as exc:
+        log.debug("varac_bbs_vault: alias health update failed: %s", exc)
 
 
 def _extract_alias_request(text: str, alias_map: Mapping[str, str]) -> Tuple[str, str]:
@@ -2729,6 +2775,7 @@ def _apply_open_request(
         return VaultActionResult("cooldown_active", False, summary, _update_state(state, last_action=summary, last_error="cooldown_active"))
 
     matched_location = requested_location
+    matched_by_verified_code = False
     if matched_location is None:
         for location in locations:
             if not location.enabled or location.id == default_location_id:
@@ -2742,6 +2789,7 @@ def _apply_open_request(
                 access_code_iterations=location.access_code_iterations,
             ):
                 matched_location = location
+                matched_by_verified_code = True
                 break
 
     failed_attempts = {str(key): list(value) for key, value in state.failed_attempts.items()}
@@ -2805,7 +2853,10 @@ def _apply_open_request(
             failed_attempts=failed_attempts,
         )
 
-    if _location_requires_code(matched_location, default_location_id=default_location_id, global_code_policy=global_code_policy):
+    if (
+        _location_requires_code(matched_location, default_location_id=default_location_id, global_code_policy=global_code_policy)
+        and not matched_by_verified_code
+    ):
         if not verify_access_code(
             code_text,
             access_code_hash=matched_location.access_code_hash,
@@ -3157,11 +3208,13 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         _persist_runtime_state(settings, error_state, summary)
         return VaracBbsVaultRunResult(True, 0, 0, False, error_state.current_location_id, error_state.current_session_callsign, summary)
 
-    alias_map = {
-        normalize_location_alias(location.alias, location.name): location.id
-        for location in locations
-        if location.id != default_location_id
-    }
+    alias_map, alias_collisions = _build_alias_map(locations, default_location_id=default_location_id)
+    _record_alias_health(alias_collisions)
+    if alias_collisions:
+        collision_text = ", ".join(sorted(set(alias_collisions)))
+        summary = f"Managed Vault alias collision ignored for: {collision_text}"
+        log.warning("varac_bbs_vault: %s", summary)
+        runtime_state = _update_state(runtime_state, last_action=summary, last_error="alias_collision")
     varac_db_path = _resolve_varac_db_path(settings)
     scanned = 0
     processed = 0

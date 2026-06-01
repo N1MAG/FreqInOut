@@ -86,7 +86,7 @@ from freqinout.core.sitrep_metadata import (
 from freqinout.utils.timezones import get_timezone
 from freqinout.core.varac_ingest import ingest_varac
 from freqinout.core.varac_bbs_config import bbs_summary_text
-from freqinout.core.varac_bbs_vault import DEFAULT_LOCATION_ID, load_vault_locations
+from freqinout.core.varac_bbs_vault import DEFAULT_LOCATION_ID, FlampRelayStore, load_vault_locations
 from freqinout.core.gpg_tools import (
     DEFAULT_INLINE_SIGNED_SUFFIXES,
     clearsign_file,
@@ -674,6 +674,7 @@ class _BbsAutoArchiveWorker(QObject):
         days: int,
         allowed_exts: List[str],
         reason: str,
+        archive_context: str = "",
     ):
         super().__init__()
         self._bbs_dir = Path(str(bbs_dir or ""))
@@ -688,16 +689,22 @@ class _BbsAutoArchiveWorker(QObject):
             if str(ext or "").strip()
         }
         self._reason = str(reason or "").strip() or "timer"
+        self._archive_context = str(archive_context or "").strip().strip("/\\")
 
     def _archive_destination(self, src: Path) -> Path:
-        dst = self._archive_dir / src.name
+        try:
+            rel = src.relative_to(self._bbs_dir)
+        except Exception:
+            rel = Path(src.name)
+        base_dir = self._archive_dir / self._archive_context if self._archive_context else self._archive_dir
+        dst = base_dir / rel
         if not dst.exists():
             return dst
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-        dst = self._archive_dir / f"{src.stem}_{stamp}{src.suffix}"
+        dst = dst.parent / f"{src.stem}_{stamp}{src.suffix}"
         attempt = 2
         while dst.exists():
-            dst = self._archive_dir / f"{src.stem}_{stamp}_{attempt}{src.suffix}"
+            dst = dst.parent / f"{src.stem}_{stamp}_{attempt}{src.suffix}"
             attempt += 1
         return dst
 
@@ -712,20 +719,19 @@ class _BbsAutoArchiveWorker(QObject):
         errors: List[str] = []
         cutoff_ts = started_ts - (float(self._days) * 86400.0)
         try:
-            with os.scandir(self._bbs_dir) as it:
-                for dent in it:
+            for root, _dirs, files in os.walk(self._bbs_dir):
+                for name in files:
                     try:
-                        if not dent.is_file(follow_symlinks=False):
-                            continue
+                        src = Path(root) / name
                         scanned_count += 1
-                        suffix = Path(dent.name).suffix.lower()
+                        suffix = src.suffix.lower()
                         if self._allowed_exts and suffix not in self._allowed_exts:
                             continue
-                        st = dent.stat()
+                        st = src.stat()
                         if float(st.st_mtime) > cutoff_ts:
                             continue
-                        src = Path(dent.path)
                         dst = self._archive_destination(src)
+                        dst.parent.mkdir(parents=True, exist_ok=True)
                         eligible_count += 1
                         shutil.move(str(src), str(dst))
                         moved_count += 1
@@ -1610,6 +1616,7 @@ class VarACMessage:
     folder: str
     vmail_guid: str
     flag_state: int = 0
+    has_attachment: int = 0
 
 
 @dataclass
@@ -1979,7 +1986,8 @@ class MessageActionDelegate(QStyledItemDelegate):
         live_bbs_row: bool,
         archived_bbs_row: bool,
         bbs_copy_row: bool,
-    ) -> tuple[QRect, QRect, QRect, QRect]:
+        relay_copy_row: bool,
+    ) -> tuple[QRect, QRect, QRect, QRect, QRect]:
         view_text = "View"
         view_width = fm.horizontalAdvance(view_text)
         view_left = rect.left() + 6
@@ -1997,12 +2005,13 @@ class MessageActionDelegate(QStyledItemDelegate):
             arch_right = del_left - 12
             arch_left = arch_right - arch_width + 1
             aux_rect = QRect(arch_left, rect.y(), arch_width, rect.height())
-            return view_rect, aux_rect, QRect(), del_rect
+            return view_rect, aux_rect, QRect(), QRect(), del_rect
 
         if archived_bbs_row:
-            return view_rect, QRect(), QRect(), del_rect
+            return view_rect, QRect(), QRect(), QRect(), del_rect
 
         bbs_rect = QRect()
+        relay_rect = QRect()
         gap_right = del_left - 10
         if bbs_copy_row:
             bbs_text = "+BBS"
@@ -2011,6 +2020,13 @@ class MessageActionDelegate(QStyledItemDelegate):
             bbs_left = bbs_right - bbs_width + 1
             bbs_rect = QRect(bbs_left, rect.y(), bbs_width, rect.height())
             gap_right = bbs_left - 10
+        if relay_copy_row:
+            relay_text = "+Relay"
+            relay_width = fm.horizontalAdvance(relay_text)
+            relay_right = gap_right
+            relay_left = relay_right - relay_width + 1
+            relay_rect = QRect(relay_left, rect.y(), relay_width, rect.height())
+            gap_right = relay_left - 10
 
         flag_text = "\u2691"
         flag_width = fm.horizontalAdvance(flag_text)
@@ -2018,7 +2034,7 @@ class MessageActionDelegate(QStyledItemDelegate):
         flag_center = (gap_left + gap_right) // 2
         flag_left = max(gap_left, flag_center - (flag_width // 2))
         aux_rect = QRect(flag_left, rect.y(), flag_width, rect.height())
-        return view_rect, aux_rect, bbs_rect, del_rect
+        return view_rect, aux_rect, relay_rect, bbs_rect, del_rect
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         if index.column() != 7:
@@ -2043,6 +2059,12 @@ class MessageActionDelegate(QStyledItemDelegate):
             hasattr(parent_widget, "_can_copy_row_to_varac_bbs")
             and parent_widget._can_copy_row_to_varac_bbs(row)
         )
+        relay_copy_row = bool(
+            (not archived_bbs_row)
+            and (not live_bbs_row)
+            and hasattr(parent_widget, "_can_copy_row_to_flamp_relay")
+            and parent_widget._can_copy_row_to_flamp_relay(row)
+        )
         bbs_copy_enabled = bool(
             bbs_copy_row
             and (
@@ -2055,12 +2077,25 @@ class MessageActionDelegate(QStyledItemDelegate):
             and hasattr(parent_widget, "_is_row_already_in_varac_bbs")
             and parent_widget._is_row_already_in_varac_bbs(row)
         )
-        view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(
+        relay_copy_enabled = bool(
+            relay_copy_row
+            and (
+                not hasattr(parent_widget, "_is_row_relay_copy_action_enabled")
+                or parent_widget._is_row_relay_copy_action_enabled(row)
+            )
+        )
+        relay_copy_present = bool(
+            relay_copy_row
+            and hasattr(parent_widget, "_is_row_already_in_flamp_relay")
+            and parent_widget._is_row_already_in_flamp_relay(row)
+        )
+        view_rect, aux_rect, relay_rect, bbs_rect, del_rect = self._action_rects(
             rect,
             fm,
             live_bbs_row,
             archived_bbs_row,
             bbs_copy_row,
+            relay_copy_row,
         )
         painter.drawText(view_rect, Qt.AlignVCenter | Qt.AlignLeft, "View")
         if live_bbs_row:
@@ -2095,6 +2130,16 @@ class MessageActionDelegate(QStyledItemDelegate):
             font.setBold(True)
             painter.setFont(font)
             painter.drawText(aux_rect, Qt.AlignVCenter | Qt.AlignLeft, "\u2691")
+
+            if relay_copy_row:
+                if relay_copy_present:
+                    painter.setPen(self._flag_color_green)
+                elif relay_copy_enabled:
+                    painter.setPen(link_color)
+                else:
+                    painter.setPen(option.palette.color(QPalette.Disabled, QPalette.Text))
+                painter.setFont(option.font)
+                painter.drawText(relay_rect, Qt.AlignVCenter | Qt.AlignLeft, "+Relay")
 
             if bbs_copy_row:
                 if bbs_copy_present:
@@ -2134,6 +2179,12 @@ class MessageActionDelegate(QStyledItemDelegate):
             hasattr(parent_widget, "_can_copy_row_to_varac_bbs")
             and parent_widget._can_copy_row_to_varac_bbs(row)
         )
+        relay_copy_row = bool(
+            (not archived_bbs_row)
+            and (not live_bbs_row)
+            and hasattr(parent_widget, "_can_copy_row_to_flamp_relay")
+            and parent_widget._can_copy_row_to_flamp_relay(row)
+        )
         bbs_copy_enabled = bool(
             bbs_copy_row
             and (
@@ -2141,16 +2192,28 @@ class MessageActionDelegate(QStyledItemDelegate):
                 or parent_widget._is_row_bbs_copy_action_enabled(row)
             )
         )
-        _view_rect, aux_rect, bbs_rect, del_rect = self._action_rects(
+        relay_copy_enabled = bool(
+            relay_copy_row
+            and (
+                not hasattr(parent_widget, "_is_row_relay_copy_action_enabled")
+                or parent_widget._is_row_relay_copy_action_enabled(row)
+            )
+        )
+        _view_rect, aux_rect, relay_rect, bbs_rect, del_rect = self._action_rects(
             rect,
             fm,
             live_bbs_row,
             archived_bbs_row,
             bbs_copy_row,
+            relay_copy_row,
         )
         if isinstance(row.payload, FileRecord):
             if live_bbs_row and aux_rect.contains(pos):
                 self.parent()._archive_file_record(row.payload)
+            elif relay_copy_row and relay_rect.contains(pos):
+                if relay_copy_enabled:
+                    self.parent()._copy_row_to_flamp_relay(row)
+                return True
             elif bbs_copy_row and bbs_rect.contains(pos):
                 if bbs_copy_enabled:
                     self.parent()._copy_row_to_varac_bbs(row)
@@ -2176,6 +2239,10 @@ class MessageActionDelegate(QStyledItemDelegate):
             else:
                 self.parent()._on_view_message(row)
         elif isinstance(row.payload, VarACMessage):
+            if relay_copy_row and relay_rect.contains(pos):
+                if relay_copy_enabled:
+                    self.parent()._copy_row_to_flamp_relay(row)
+                return True
             if aux_rect.contains(pos):
                 self.parent()._cycle_flag_state(row.payload)
             elif del_rect.contains(pos):
@@ -2395,11 +2462,13 @@ class MessageViewerTab(QWidget):
         self._sort_order = self._default_sort_order
         self._freeze_messages_table = False
         self._deferred_refresh = False
+        self._initial_populate_deferred = False
         self._messages_model = MessageTableModel([])
         self._actions_delegate = None
         self._header_cells: List[QWidget] = []
         self._messages_header_sync_connected: bool = False
         self._is_shutting_down = False
+        self._app_active = True
         self._refresh_files_inflight = False
         self.loading_label: QLabel | None = None
         self._file_scan_thread: QThread | None = None
@@ -2412,7 +2481,7 @@ class MessageViewerTab(QWidget):
         self._rows_build_pending_force: bool = False
         self._open_external_path: Path | None = None
         self._loading_timer: QTimer | None = None
-        self._loading_text: str = "Getting messages..."
+        self._loading_text: str = "Checking Messages..."
         self._loading_progress: QProgressBar | None = None
         self.utc_label: QLabel | None = None
         self.local_label: QLabel | None = None
@@ -2436,6 +2505,7 @@ class MessageViewerTab(QWidget):
         self._bbs_auto_archive_interval_sec: float = float(BBS_AUTO_ARCHIVE_INTERVAL_SECONDS)
         self._varac_ingest_interval_sec: float = 20.0
         self._last_varac_ingest_ts: float = 0.0
+        self._varac_attachment_scan_requested: set[int] = set()
         self._js8_ingest_interval_sec: float = 20.0
         self._last_js8_ingest_ts: float = 0.0
         self._js8_display_snapshot_fp: Optional[Tuple[Tuple[str, int, int], ...]] = None
@@ -2459,6 +2529,9 @@ class MessageViewerTab(QWidget):
         self._signature_verify_pending_records: List[FileRecord] = []
         self._signature_verify_deferred_until_active: bool = False
         self._bbs_copied_session_keys: set[tuple[str, float, int]] = set()
+        self._relay_copied_session_keys: set[tuple[str, float, int]] = set()
+        self._flamp_relay_validation_cache: Dict[tuple[str, float, int], bool] = {}
+        self._flamp_relay_parse_cache: Dict[tuple[str, float, int], Optional[Dict[str, object]]] = {}
 
         # merge DB paths if present
         self._load_watch_dirs_from_db()
@@ -3745,7 +3818,7 @@ class MessageViewerTab(QWidget):
         layout.addLayout(time_status_row)
 
         loading_row = QHBoxLayout()
-        self.loading_label = QLabel("Getting messages...")
+        self.loading_label = QLabel("Checking Messages...")
         self.loading_label.setStyleSheet("color: #888;")
         self.loading_label.setVisible(False)
         loading_row.addWidget(self.loading_label)
@@ -5601,28 +5674,32 @@ class MessageViewerTab(QWidget):
             self._timer.stop()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_files)
-        self._timer.start(self.scan_minutes * 60 * 1000)
+        if self._has_active_view and self._app_active and not self._is_shutting_down:
+            self._timer.start(self.scan_minutes * 60 * 1000)
 
     def _setup_js8_timer(self):
         if self._js8_timer:
             self._js8_timer.stop()
         self._js8_timer = QTimer(self)
         self._js8_timer.timeout.connect(self._refresh_js8_messages)
-        self._js8_timer.start(JS8_POLL_SECONDS * 1000)
+        if self._has_active_view and self._app_active and not self._is_shutting_down:
+            self._js8_timer.start(JS8_POLL_SECONDS * 1000)
 
     def _setup_pending_timer(self):
         if self._pending_timer:
             self._pending_timer.stop()
         self._pending_timer = QTimer(self)
         self._pending_timer.timeout.connect(self._refresh_pending_backlog)
-        self._pending_timer.start(PENDING_POLL_SECONDS * 1000)
+        if self._has_active_view and self._app_active and not self._is_shutting_down:
+            self._pending_timer.start(PENDING_POLL_SECONDS * 1000)
 
     def _setup_bbs_auto_archive_timer(self):
         if self._bbs_auto_archive_timer:
             self._bbs_auto_archive_timer.stop()
         self._bbs_auto_archive_timer = QTimer(self)
         self._bbs_auto_archive_timer.timeout.connect(self._on_bbs_auto_archive_timer)
-        self._bbs_auto_archive_timer.start(int(self._bbs_auto_archive_interval_sec * 1000))
+        if self._has_active_view and self._app_active and not self._is_shutting_down:
+            self._bbs_auto_archive_timer.start(int(self._bbs_auto_archive_interval_sec * 1000))
 
     def _on_bbs_auto_archive_timer(self) -> None:
         self._queue_bbs_auto_archive_check("timer", delay_ms=0)
@@ -5640,6 +5717,7 @@ class MessageViewerTab(QWidget):
             self._message_check_timer.timeout.connect(self._on_visible_message_check_timer)
         active = (
             bool(self._has_active_view)
+            and bool(self._app_active)
             and self._messages_mode == "Inbox"
             and int(self._visible_check_interval_sec or 0) > 0
             and not self._is_shutting_down
@@ -5778,17 +5856,20 @@ class MessageViewerTab(QWidget):
             QTimer.singleShot(1500, lambda: self._refresh_files(force=False))
         self._refresh_js8_messages(rebuild=False)
         self._refresh_varac_messages(force=True, rebuild=False)
-        self._populate_messages_table(force=True)
         if self._has_active_view:
+            self._populate_messages_table(force=True)
             QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
         else:
+            self._initial_populate_deferred = True
+            self._deferred_refresh = True
+            log.info("MESSAGES|initial_table_populate_deferred reason=hidden_prewarm")
             # Hidden startup lazy-prewarm should not launch GPG verification; defer
             # until the Messages tab is first shown.
             self._signature_verify_deferred_until_active = True
         self._refresh_pending_backlog()
         self._last_activation_refresh_ts = time.time()
 
-    def _set_loading(self, active: bool, text: str = "Getting messages...") -> None:
+    def _set_loading(self, active: bool, text: str = "Checking Messages...") -> None:
         if not self.loading_label:
             return
         if self._loading_timer and self._loading_timer.isActive():
@@ -5798,7 +5879,7 @@ class MessageViewerTab(QWidget):
         if self._loading_progress is not None:
             self._loading_progress.setVisible(bool(active))
 
-    def _schedule_loading(self, text: str = "Getting messages...", delay_ms: int = 350) -> None:
+    def _schedule_loading(self, text: str = "Checking Messages...", delay_ms: int = 350) -> None:
         if not self.loading_label:
             return
         if self._loading_timer is None:
@@ -5842,7 +5923,7 @@ class MessageViewerTab(QWidget):
             if self._activation_refresh_pending:
                 return
             self._activation_refresh_pending = True
-            self._schedule_loading("Getting messages...")
+            self._schedule_loading("Checking Messages...")
             QTimer.singleShot(0, lambda: self._run_activation_refresh(force=not self._message_rows))
 
     def _run_activation_refresh(self, force: bool = False) -> None:
@@ -5935,7 +6016,7 @@ class MessageViewerTab(QWidget):
 
     def set_tab_active(self, active: bool) -> None:
         self._has_active_view = bool(active)
-        if active:
+        if active and self._app_active:
             if self._clock_timer is None:
                 self._setup_clock_timer()
             elif not self._clock_timer.isActive():
@@ -5948,12 +6029,39 @@ class MessageViewerTab(QWidget):
             if self._signature_verify_deferred_until_active:
                 self._signature_verify_deferred_until_active = False
                 QTimer.singleShot(0, lambda: self._start_signature_verification(force=False))
+            if self._initial_populate_deferred:
+                self._initial_populate_deferred = False
+                self._deferred_refresh = False
+                QTimer.singleShot(0, lambda: self._populate_messages_table(force=True))
+                return
+            if self._deferred_refresh:
+                QTimer.singleShot(0, lambda: self._populate_messages_table(force=False))
+                return
             return
         for timer in (self._clock_timer, self._timer, self._js8_timer, self._pending_timer, self._message_check_timer, self._bbs_auto_archive_timer):
             if timer:
                 timer.stop()
         self._next_visible_message_check_ts = 0.0
         self._update_message_check_status()
+
+    def set_app_active(self, active: bool) -> None:
+        self._app_active = bool(active)
+        if not self._app_active:
+            self._deferred_refresh = True
+            for timer in (
+                self._clock_timer,
+                self._timer,
+                self._js8_timer,
+                self._pending_timer,
+                self._message_check_timer,
+                self._bbs_auto_archive_timer,
+            ):
+                if timer:
+                    timer.stop()
+            log.info("MESSAGES|ui_paused reason=app_inactive")
+            return
+        if self._has_active_view:
+            self.set_tab_active(True)
 
     # ---------- BBS Auto-Archive ----------
 
@@ -6635,7 +6743,7 @@ class MessageViewerTab(QWidget):
             cur.execute(
                 """
                 SELECT id, guid, source, msg_type, from_call, to_call, subject, body,
-                       ts, band, freq_hz, snr, read_status, folder, vmail_guid, is_deleted, flag_state
+                       ts, band, freq_hz, snr, read_status, folder, vmail_guid, is_deleted, flag_state, has_attachment
                 FROM varac_messages
                 WHERE COALESCE(is_deleted, 0) = 0
                 ORDER BY ts DESC
@@ -6667,6 +6775,7 @@ class MessageViewerTab(QWidget):
                 folder=str(r[13] or ""),
                 vmail_guid=(r[14] or ""),
                 flag_state=int(r[16] or 0),
+                has_attachment=int(r[17] or 0),
             )
             msgs.append(msg)
         self.varac_messages = msgs
@@ -7487,6 +7596,14 @@ class MessageViewerTab(QWidget):
             meta={"force": bool(force)},
             min_ms=5.0,
         ):
+            if not self._has_active_view or not self._app_active:
+                self._deferred_refresh = True
+                log.info(
+                    "MESSAGES|table_refresh_deferred active_view=%s app_active=%s",
+                    self._has_active_view,
+                    self._app_active,
+                )
+                return
             if self._freeze_messages_table and not force:
                 self._deferred_refresh = True
                 log.debug("MessageViewer: table refresh deferred (freeze active)")
@@ -8803,7 +8920,7 @@ class MessageViewerTab(QWidget):
                 pass
 
         try:
-            progress_w = int(self.loading_label.fontMetrics().horizontalAdvance("Getting messages...") + 64)
+            progress_w = int(self.loading_label.fontMetrics().horizontalAdvance("Checking Messages...") + 64)
             self._loading_progress.setFixedWidth(max(140, min(260, progress_w)))
         except Exception:
             pass
@@ -10086,6 +10203,263 @@ class MessageViewerTab(QWidget):
         self._unfreeze_table()
         self._populate_messages_table(force=True)
 
+    @staticmethod
+    def _is_flamp_relay_payload_name(name: object) -> bool:
+        return Path(str(name or "")).suffix.lower() in {".b2s", ".k2s"}
+
+    @staticmethod
+    def _flamp_relay_validation_key(rec: FileRecord) -> tuple[str, float, int]:
+        try:
+            path_txt = str(rec.path.resolve())
+        except Exception:
+            path_txt = str(rec.path)
+        try:
+            mtime_key = round(float(rec.mtime or 0.0), 6)
+        except Exception:
+            mtime_key = 0.0
+        try:
+            size_key = int(rec.size or 0)
+        except Exception:
+            size_key = 0
+        return (os.path.normcase(os.path.normpath(path_txt)), mtime_key, size_key)
+
+    def _parsed_flamp_relay_file(self, rec: FileRecord | None) -> Optional[Dict[str, object]]:
+        if not isinstance(rec, FileRecord):
+            return None
+        if not self._is_flamp_relay_payload_name(rec.path.name):
+            return None
+        if not rec.path.exists() or not rec.path.is_file():
+            return None
+        key = self._flamp_relay_validation_key(rec)
+        if key in self._flamp_relay_parse_cache:
+            return self._flamp_relay_parse_cache.get(key)
+        parsed: Optional[Dict[str, object]]
+        try:
+            parsed = FlampRelayStore(rec.path.parent).parse_file(rec.path)
+        except Exception:
+            parsed = None
+        if not parsed or not parsed.get("blocks"):
+            parsed = None
+        self._flamp_relay_parse_cache[key] = parsed
+        self._flamp_relay_validation_cache[key] = bool(parsed)
+        return parsed
+
+    def _is_valid_flamp_relay_file(self, rec: FileRecord | None) -> bool:
+        if not isinstance(rec, FileRecord):
+            return False
+        key = self._flamp_relay_validation_key(rec)
+        cached = self._flamp_relay_validation_cache.get(key)
+        if cached is not None:
+            return bool(cached)
+        return bool(self._parsed_flamp_relay_file(rec))
+
+    def _flamp_relay_internal_queue_id(self, rec: FileRecord) -> str:
+        parsed = self._parsed_flamp_relay_file(rec)
+        file_id = str((parsed or {}).get("file_id") or "").strip().upper()
+        if FlampRelayStore.VALID_Q_RE.match(file_id):
+            return file_id
+        return ""
+
+    @staticmethod
+    def _flamp_relay_has_queue_id(name: object) -> bool:
+        return bool(re.match(r"^[A-Fa-f0-9]{4}", Path(str(name or "")).name))
+
+    @staticmethod
+    def _safe_flamp_relay_filename(name: object) -> str:
+        text = unicodedata.normalize("NFKC", Path(str(name or "")).name)
+        cleaned_chars: List[str] = []
+        for ch in text:
+            if ch.isspace():
+                cleaned_chars.append(" ")
+            elif ord(ch) < 32 or ord(ch) == 127 or ch in '/\\:*?"<>|':
+                cleaned_chars.append("_")
+            else:
+                cleaned_chars.append(ch)
+        cleaned = re.sub(r"\s+", " ", "".join(cleaned_chars)).strip().rstrip(".")
+        return cleaned or "relay-file.k2s"
+
+    def _flamp_relay_source_file_for_row(self, row: UnifiedMessage | None) -> FileRecord | None:
+        payload = getattr(row, "payload", None) if row is not None else None
+        if isinstance(payload, FileRecord) and self._is_flamp_relay_payload_name(payload.path.name):
+            return payload
+        if isinstance(payload, VarACMessage):
+            matched, _terms, reason = self._find_varac_received_file_for_message(payload)
+            if matched is not None and self._is_flamp_relay_payload_name(matched.path.name):
+                return matched
+            if reason in {"not_found", "low_confidence"} and payload.msg_id not in self._varac_attachment_scan_requested:
+                self._varac_attachment_scan_requested.add(payload.msg_id)
+                self._refresh_files(force=True)
+        return None
+
+    def _flamp_relay_dir(self) -> Path | None:
+        raw = str(self.settings.get("varac_bbs_vault_flamp_relay_dir", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            return Path(raw).expanduser()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _existing_flamp_relay_queue_ids(relay_dir: Path) -> set[str]:
+        ids: set[str] = set()
+        try:
+            children = list(relay_dir.iterdir())
+        except Exception:
+            return ids
+        for path in children:
+            if not path.is_file():
+                continue
+            match = re.match(r"^([A-Fa-f0-9]{4})", path.name)
+            if match:
+                ids.add(match.group(1).upper())
+        return ids
+
+    @classmethod
+    def _strip_flamp_relay_queue_prefix(cls, name: object) -> str:
+        safe = cls._safe_flamp_relay_filename(name)
+        match = re.match(r"^[A-Fa-f0-9]{4}[_ -]+(.+)$", safe)
+        if match and len(match.group(1).strip()) >= 4:
+            return match.group(1).strip()
+        return safe
+
+    def _flamp_relay_destination_for_record(self, rec: FileRecord) -> tuple[Path | None, str, str]:
+        relay_dir = self._flamp_relay_dir()
+        if relay_dir is None or not relay_dir.exists() or not relay_dir.is_dir():
+            return None, "missing_dir", ""
+        if not self._is_valid_flamp_relay_file(rec):
+            return None, "not_flamp_payload", ""
+        safe_name = self._safe_flamp_relay_filename(rec.path.name)
+        if self._flamp_relay_has_queue_id(safe_name):
+            queue_id = safe_name[:4].upper()
+            existing_ids = self._existing_flamp_relay_queue_ids(relay_dir)
+            dst = relay_dir / safe_name
+            if queue_id not in existing_ids or dst.exists():
+                return dst, "preserved", queue_id
+        payload_name = self._strip_flamp_relay_queue_prefix(safe_name)
+        internal_queue_id = self._flamp_relay_internal_queue_id(rec)
+        if internal_queue_id:
+            existing_ids = self._existing_flamp_relay_queue_ids(relay_dir)
+            dst = relay_dir / f"{internal_queue_id}_{payload_name}"
+            if internal_queue_id not in existing_ids or dst.exists():
+                return dst, "extracted", internal_queue_id
+            return None, "queue_id_collision", internal_queue_id
+        return None, "queue_id_missing", ""
+
+    def _can_copy_row_to_flamp_relay(self, row: UnifiedMessage | None) -> bool:
+        if row is None:
+            return False
+        rec = self._flamp_relay_source_file_for_row(row)
+        if rec is None:
+            return False
+        dst, _mode, _queue_id = self._flamp_relay_destination_for_record(rec)
+        return dst is not None
+
+    def _relay_copy_session_key_for_row(self, row: UnifiedMessage | None) -> tuple[str, float, int] | None:
+        rec = self._flamp_relay_source_file_for_row(row)
+        return MessageViewerTab._bbs_copy_session_key_for_record(rec)
+
+    def _is_row_already_in_flamp_relay(self, row: UnifiedMessage | None) -> bool:
+        rec = self._flamp_relay_source_file_for_row(row)
+        if rec is None:
+            return False
+        key = self._relay_copy_session_key_for_row(row)
+        if key is not None and key in self._relay_copied_session_keys:
+            return True
+        dst, _mode, _queue_id = self._flamp_relay_destination_for_record(rec)
+        if dst is None:
+            return False
+        try:
+            if rec.path.resolve() == dst.resolve():
+                return True
+        except Exception:
+            pass
+        if dst.exists() and MessageViewerTab._file_record_matches_path(rec, dst):
+            return True
+        return False
+
+    def _is_row_relay_copy_action_enabled(self, row: UnifiedMessage | None) -> bool:
+        if not self._can_copy_row_to_flamp_relay(row):
+            return False
+        if self._is_row_already_in_flamp_relay(row):
+            return False
+        key = self._relay_copy_session_key_for_row(row)
+        if key is None:
+            return True
+        return key not in self._relay_copied_session_keys
+
+    def _mark_row_copied_to_flamp_relay_session(self, row: UnifiedMessage | None) -> None:
+        key = self._relay_copy_session_key_for_row(row)
+        if key is not None:
+            self._relay_copied_session_keys.add(key)
+
+    def _copy_row_to_flamp_relay(self, row: UnifiedMessage | None) -> None:
+        if row is None or not self._can_copy_row_to_flamp_relay(row):
+            return
+        if not self._is_row_relay_copy_action_enabled(row):
+            return
+        rec = self._flamp_relay_source_file_for_row(row)
+        if rec is None:
+            QMessageBox.warning(self, "Copy to FLAMP Relay", "FIO could not find the source FLAMP file.")
+            return
+        if not self._is_valid_flamp_relay_file(rec):
+            QMessageBox.warning(
+                self,
+                "Copy to FLAMP Relay",
+                "This .b2s/.k2s file is not a FLAMP relay/block file. It can be viewed, but it cannot be added to FLAMP Relay.",
+            )
+            return
+        src = rec.path
+        if not src.exists() or not src.is_file():
+            QMessageBox.warning(self, "Copy to FLAMP Relay", "The selected source file no longer exists.")
+            return
+        dst, mode, queue_id = self._flamp_relay_destination_for_record(rec)
+        if dst is None:
+            if mode == "missing_dir":
+                QMessageBox.warning(
+                    self,
+                    "Copy to FLAMP Relay",
+                    "Set a valid FLAMP Relay folder in Settings before using +Relay.",
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Copy to FLAMP Relay",
+                    "FIO could not create a queue-safe FLAMP Relay filename.",
+                )
+            return
+        try:
+            if src.resolve() == dst.resolve():
+                return
+        except Exception:
+            pass
+        if dst.exists() and MessageViewerTab._file_record_matches_path(rec, dst):
+            self._mark_row_copied_to_flamp_relay_session(row)
+            self._populate_messages_table(force=True)
+            return
+        if dst.exists():
+            QMessageBox.warning(self, "Copy to FLAMP Relay", f"Destination already exists:\n{dst}")
+            return
+        try:
+            shutil.copy2(str(src), str(dst))
+        except Exception as e:
+            QMessageBox.warning(self, "Copy to FLAMP Relay", f"Copy failed:\n{e}")
+            return
+        self._mark_row_copied_to_flamp_relay_session(row)
+        if mode == "preserved":
+            note = f"Preserved relay queue ID {queue_id}."
+        elif mode == "extracted":
+            note = f"Used FLAMP file ID {queue_id} as the relay queue ID."
+        else:
+            note = f"Added relay queue ID {queue_id} so FLAMP Relay can list the file."
+        QMessageBox.information(
+            self,
+            "Copy to FLAMP Relay",
+            f"Copied file to FLAMP Relay:\n{dst}\n\n{note}",
+        )
+        self._unfreeze_table()
+        self._populate_messages_table(force=True)
+
     def _remove_file_record(self, rec: FileRecord) -> None:
         origin = rec.origin
         if origin in self.files:
@@ -10715,6 +11089,180 @@ class MessageViewerTab(QWidget):
                 return
             cache.pop(first_key, None)
 
+    def _configured_varac_incoming_path(self) -> Path | None:
+        try:
+            message_paths = self.settings.get("message_paths", {}) or {}
+        except Exception:
+            message_paths = {}
+        raw = ""
+        if isinstance(message_paths, dict):
+            raw = str(message_paths.get("varac", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            return Path(raw).expanduser()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _clean_file_reference(value: object) -> str:
+        text = str(value or "").strip().strip("\"'` ")
+        if not text:
+            return ""
+        text = text.replace("\\", "/")
+        text = text.split("/")[-1].strip()
+        text = re.sub(r"\s+", " ", text)
+        return text
+
+    @classmethod
+    def _norm_file_reference(cls, value: object) -> str:
+        text = cls._clean_file_reference(value).lower()
+        text = re.sub(r"[^a-z0-9._ -]+", "", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _file_reference_aliases(cls, value: object) -> set[str]:
+        text = cls._norm_file_reference(value)
+        aliases = {text} if text else set()
+        match = re.match(r"^([a-z0-9]{3,8})[_ -]+(.+)$", text)
+        if match and any(ch.isdigit() for ch in match.group(1)):
+            payload_name = match.group(2).strip(" _-")
+            if len(payload_name) >= 4:
+                aliases.add(payload_name)
+        return {alias for alias in aliases if alias}
+
+    def _varac_file_reference_terms(self, msg: VarACMessage) -> List[str]:
+        text = "\n".join(part for part in [msg.subject or "", msg.body or ""] if part)
+        terms: set[str] = set()
+        ext_group = "|".join(sorted(re.escape(ext.lstrip(".")) for ext in SUPPORTED_EXT if ext))
+        if ext_group:
+            for found in re.findall(rf"([A-Za-z0-9][A-Za-z0-9 _.,()\\[\\]{{}}+\\-]{{0,160}}\\.({ext_group}))\b", text, flags=re.IGNORECASE):
+                terms.update(self._file_reference_aliases(found[0]))
+        for line in text.splitlines():
+            line_clean = self._clean_file_reference(line)
+            if not line_clean or len(line_clean) > 140:
+                continue
+            if re.search(r"\b(file|filename|title|attachment|received)\b", line_clean, flags=re.IGNORECASE):
+                candidate = re.sub(
+                    r"(?i)\b(received|file|filename|title|attachment)\b\s*[:=-]?\s*",
+                    "",
+                    line_clean,
+                ).strip()
+                if candidate and len(candidate) <= 120:
+                    terms.update(self._file_reference_aliases(candidate))
+        subject_clean = self._clean_file_reference(msg.subject)
+        if subject_clean and len(subject_clean) <= 120:
+            terms.update(self._file_reference_aliases(subject_clean))
+        return sorted(term for term in terms if term)
+
+    def _varac_message_looks_like_file_reference(self, msg: VarACMessage, terms: Optional[List[str]] = None) -> bool:
+        if int(getattr(msg, "has_attachment", 0) or 0):
+            return True
+        text = f"{msg.subject or ''}\n{msg.body or ''}"
+        if re.search(r"\b(file|filename|attachment|received file|flamp)\b", text, flags=re.IGNORECASE):
+            return True
+        terms = terms if terms is not None else self._varac_file_reference_terms(msg)
+        return any("." in term for term in terms)
+
+    def _varac_attachment_match_score(self, msg: VarACMessage, rec: FileRecord, terms: List[str]) -> int:
+        name_aliases = self._file_reference_aliases(rec.path.name)
+        stem_aliases = self._file_reference_aliases(rec.path.stem)
+        text = self._norm_file_reference(f"{msg.subject or ''} {msg.body or ''}")
+        score = 0
+        term_set = set(terms)
+        if name_aliases and name_aliases.intersection(term_set):
+            score += 120
+        elif stem_aliases and stem_aliases.intersection(term_set):
+            score += 90
+        elif any(alias and alias in text for alias in name_aliases):
+            score += 80
+        elif any(alias and len(alias) >= 4 and alias in text for alias in stem_aliases):
+            score += 55
+        else:
+            return 0
+        delta = abs(float(rec.mtime or 0.0) - float(msg.ts or 0.0)) if msg.ts and rec.mtime else 999999.0
+        if delta <= 3600:
+            score += 20
+        elif delta <= 24 * 3600:
+            score += 10
+        if int(getattr(msg, "has_attachment", 0) or 0):
+            score += 10
+        return score
+
+    def _find_varac_received_file_for_message(self, msg: VarACMessage) -> tuple[Optional[FileRecord], List[str], str]:
+        configured = self._configured_varac_incoming_path()
+        terms = self._varac_file_reference_terms(msg)
+        if configured is None:
+            return None, terms, "not_configured"
+        try:
+            configured_norm = self._norm_scan_path(configured)
+        except Exception:
+            configured_norm = ""
+        if not configured_norm or not configured.exists() or not configured.is_dir():
+            return None, terms, "path_missing"
+        candidates: List[tuple[int, float, FileRecord]] = []
+        for rec in self.files.get("varac", []):
+            try:
+                rec_norm = self._norm_scan_path(rec.path)
+            except Exception:
+                continue
+            if rec_norm != configured_norm and not rec_norm.startswith(configured_norm + os.sep):
+                continue
+            score = self._varac_attachment_match_score(msg, rec, terms)
+            if score <= 0:
+                continue
+            delta = abs(float(rec.mtime or 0.0) - float(msg.ts or 0.0)) if msg.ts and rec.mtime else 999999.0
+            candidates.append((score, -delta, rec))
+        if not candidates:
+            return None, terms, "not_found"
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        best_score, _delta, best = candidates[0]
+        if best_score < 80:
+            return None, terms, "low_confidence"
+        return best, terms, "matched"
+
+    def _render_missing_varac_file_reference(
+        self,
+        msg: VarACMessage,
+        terms: List[str],
+        reason: str,
+        *,
+        scan_requested: bool,
+    ) -> None:
+        configured = self._configured_varac_incoming_path()
+        if configured is None:
+            path_text = "Not configured"
+        else:
+            path_text = str(configured)
+        looked_for = ", ".join(terms[:5]) if terms else (msg.subject or "No filename found in the title/body")
+        lines = [
+            "FIO sees a VarAC file reference, but the received file was not found in the configured VarAC Incoming Files folder.",
+            "",
+            f"VarAC Incoming Files: {path_text}",
+            f"Looked for: {looked_for}",
+        ]
+        if reason == "path_missing":
+            lines.append("Status: The configured folder does not exist or is not available.")
+        elif reason == "not_configured":
+            lines.append("Status: Set VarAC Incoming Files in Settings so FIO knows where VarAC stores received files.")
+        elif scan_requested:
+            lines.append("Status: FIO is checking the configured message folders now. Refresh or select this row again after the scan completes.")
+        else:
+            lines.append("Status: The file was not present in FIO's current scan of that folder.")
+        lines.extend(
+            [
+                "",
+                "Note: FLAMP Relay is a separate watched folder. Copying a file there can make it display because FIO is reading that different folder.",
+                "",
+                "VarAC message text:",
+                msg.body or msg.subject or "",
+            ]
+        )
+        self._set_open_external_path(None)
+        self.info_label.setText(f"VarAC file reference {msg.from_call} -> {msg.to_call}")
+        self.viewer.setAcceptRichText(False)
+        self.viewer.setPlainText("\n".join(lines))
+
     def _load_varac_content(self, msg: VarACMessage, row_ref: Optional[UnifiedMessage] = None) -> None:
         with perf_span(
             "messages.load_varac_content",
@@ -10722,6 +11270,26 @@ class MessageViewerTab(QWidget):
             meta={"msg_type": msg.msg_type},
             min_ms=2.0,
         ):
+            terms = self._varac_file_reference_terms(msg)
+            if self._varac_message_looks_like_file_reference(msg, terms):
+                matched_file, terms, reason = self._find_varac_received_file_for_message(msg)
+                if matched_file is not None:
+                    self._load_content(matched_file)
+                    self._mark_varac_read(msg, row_ref=row_ref)
+                    return
+                scan_requested = False
+                if reason in {"not_found", "low_confidence"} and msg.msg_id not in self._varac_attachment_scan_requested:
+                    self._varac_attachment_scan_requested.add(msg.msg_id)
+                    scan_requested = True
+                    self._refresh_files(force=True)
+                self._render_missing_varac_file_reference(
+                    msg,
+                    terms,
+                    reason,
+                    scan_requested=scan_requested,
+                )
+                self._mark_varac_read(msg, row_ref=row_ref)
+                return
             header = [
                 f"TYPE: {msg.msg_type}",
                 f"FROM: {msg.from_call}",

@@ -1670,9 +1670,15 @@ class FldigiNetControlTab(QWidget):
             return
         self._roster_syncing = True
         try:
-            main_text = self._roster_table_text("TFC")
-            qru_text = self._roster_table_text("QRU")
-            late_text = self._roster_table_text("LATE")
+            has_roster_rows = bool(self._roster_table_rows())
+            if has_roster_rows:
+                main_text = self._roster_table_text("TFC")
+                qru_text = self._roster_table_text("QRU")
+                late_text = self._roster_table_text("LATE")
+            else:
+                main_text = self.main_text.toPlainText()
+                qru_text = self.qru_text.toPlainText()
+                late_text = self.late_text.toPlainText()
             self.main_text.setPlainText(main_text)
             self.qru_text.setPlainText(qru_text)
             self.late_text.setPlainText(late_text)
@@ -1683,7 +1689,10 @@ class FldigiNetControlTab(QWidget):
                 self._write_file(main_path, main_text)
                 self._write_file(qru_path, qru_text)
                 self._write_file(late_path, late_text)
-                self._write_file(self._all_checkins_file_path(), self._roster_table_text())
+                all_text = self._roster_table_text() if has_roster_rows else "\n".join(
+                    text for text in (main_text, qru_text, late_text) if text.strip()
+                )
+                self._write_file(self._all_checkins_file_path(), all_text)
                 self._sync_role_roster_files()
                 self._sync_role_ack_pending_files()
                 self._sync_next_tfc_action_files()
@@ -2529,8 +2538,6 @@ class FldigiNetControlTab(QWidget):
         return f"CUSTOM_{index + 1}"
 
     def _log_assisted_enabled(self) -> bool:
-        if not self.LOG_ASSISTED_INTAKE_VISIBLE:
-            return False
         return bool(self.log_assisted_enable_chk.isChecked())
 
     def _log_assisted_show_review(self) -> bool:
@@ -2580,6 +2587,7 @@ class FldigiNetControlTab(QWidget):
         for callsign, candidate in list(self._log_assisted_candidates_by_callsign.items()):
             bucket_id = self._log_assisted_target_bucket(candidate)
             if bucket_id in {"tfc", "qru"}:
+                self._remove_bucket_line_by_callsign(bucket_id, callsign)
                 self._roster_remove_callsign(callsign)
             elif bucket_id == "review":
                 self._remove_bucket_line_by_callsign(bucket_id, callsign)
@@ -2734,7 +2742,7 @@ class FldigiNetControlTab(QWidget):
         return re.sub(r"\s*\[ctx:\s*.*\]\s*$", "", str(line or "").strip(), flags=re.IGNORECASE)
 
     def _poll_log_assisted_intake(self) -> None:
-        if not self._net_in_progress or not self._log_assisted_enabled():
+        if not self._log_assisted_enabled():
             return
         path = resolve_fldigi_log_path(self.settings.get("fldigi_log_path", ""))
         if path is None:
@@ -2750,6 +2758,8 @@ class FldigiNetControlTab(QWidget):
             self._log_assisted_candidates_by_callsign.clear()
             self.review_card.set_text("")
             self._update_log_assisted_status()
+            return
+        if not self._net_in_progress:
             return
         candidates, new_offset, last_tx_context = scan_fldigi_log_file(
             path,
@@ -5250,14 +5260,22 @@ class FldigiNetControlTab(QWidget):
 
     def _save_checkins(self):
         main_path, qru_path, late_path = self._ensure_checkin_files()
+        has_roster_rows = bool(self._roster_table_rows())
         self._roster_sync_legacy_buffers(write_files=False)
-        main_text = self._roster_table_text("TFC")
-        qru_text = self._roster_table_text("QRU")
-        late_text = self._roster_table_text("LATE")
+        if has_roster_rows:
+            main_text = self._roster_table_text("TFC")
+            qru_text = self._roster_table_text("QRU")
+            late_text = self._roster_table_text("LATE")
+            all_text = self._roster_table_text()
+        else:
+            main_text = self.main_text.toPlainText()
+            qru_text = self.qru_text.toPlainText()
+            late_text = self.late_text.toPlainText()
+            all_text = "\n".join(text for text in (main_text, qru_text, late_text) if text.strip())
         self._write_file(main_path, main_text)
         self._write_file(qru_path, qru_text)
         self._write_file(late_path, late_text)
-        self._write_file(self._all_checkins_file_path(), self._roster_table_text())
+        self._write_file(self._all_checkins_file_path(), all_text)
         self._sync_role_roster_files()
         self._sync_role_ack_pending_files()
         self._sync_next_tfc_action_files()
@@ -5390,8 +5408,9 @@ class FldigiNetControlTab(QWidget):
         qru_text = self._roster_table_text("QRU") or self._read_file(qru_path)
         late_path = self._checkin_file_paths()[2]
         late_text = self._roster_table_text("LATE") or self._read_file(late_path)
-        combined_text = "\n".join(text for text in (main_text, qru_text, late_text) if text.strip())
-        if not combined_text.strip():
+        import_text = "\n".join(text for text in (main_text, qru_text) if text.strip())
+        saved_text = "\n".join(text for text in (main_text, qru_text, late_text) if text.strip())
+        if not saved_text.strip():
             resp = QMessageBox.question(
                 self,
                 "End Net?",
@@ -5417,7 +5436,7 @@ class FldigiNetControlTab(QWidget):
 
         entries: List[Dict] = []
         seen_callsigns = set()
-        for line in combined_text.splitlines():
+        for line in import_text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
