@@ -72,6 +72,10 @@ from freqinout.gui.qsy_helper import (
 )
 
 BBS_HELPER_FILE_PREFIXES = ("BBS MSG - ", "BBS_QUEUE_LIST", "BBS_BLOCK_LIST")
+FLMSG_FLAMP_RECENT_SECONDS = 24 * 60 * 60
+FLMSG_FLAMP_SUMMARY_EXTS = {".b2s", ".k2s", ".txt", ".rtf", ".html", ".htm", ".xml", ".ff"}
+FLMSG_FLAMP_SUMMARY_MAX_FILES = 750
+FLMSG_FLAMP_SUMMARY_MAX_DIRS = 80
 
 
 def _is_fio_bbs_helper_file_name(name: object) -> bool:
@@ -375,6 +379,8 @@ class ControlFreqTab(QWidget):
 
         self.inbox_box = QGroupBox("Unread Messages & BBS Files")
         inbox_layout = QVBoxLayout(self.inbox_box)
+        inbox_layout.setContentsMargins(8, 6, 8, 6)
+        inbox_layout.setSpacing(2)
         self.inbox_table = QTableWidget(0, 3)
         self.inbox_table.setHorizontalHeaderLabels(["Source", "Unread / Files", "What needs attention"])
         self._setup_table_defaults(self.inbox_table)
@@ -384,7 +390,7 @@ class ControlFreqTab(QWidget):
         inbox_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         inbox_header.setSectionResizeMode(2, QHeaderView.Stretch)
         inbox_layout.addWidget(self.inbox_table)
-        self._set_message_summary_visible_rows(7)
+        self._set_message_summary_visible_rows(6)
 
         self.left_splitter = QSplitter(Qt.Vertical)
         self.left_splitter.setChildrenCollapsible(False)
@@ -400,22 +406,16 @@ class ControlFreqTab(QWidget):
 
         self.freq_ctrl_box = QGroupBox("Frequency Control")
         freq_layout = QVBoxLayout(self.freq_ctrl_box)
-        freq_layout.setContentsMargins(8, 8, 8, 8)
-        freq_layout.setSpacing(4)
-        hero_row = QHBoxLayout()
-        hero_row.setContentsMargins(0, 0, 0, 0)
-        hero_row.setSpacing(6)
-        hero_row.addStretch(1)
+        freq_layout.setContentsMargins(8, 6, 8, 6)
+        freq_layout.setSpacing(2)
         self.freq_state_badge = QLabel("Unknown")
         self.freq_state_badge.setAlignment(Qt.AlignCenter)
-        self.freq_state_badge.setMinimumWidth(108)
+        self.freq_state_badge.setMinimumWidth(132)
         self.freq_state_badge.setMinimumHeight(26)
         self.freq_state_badge.setMaximumHeight(26)
         self.freq_state_badge.setStyleSheet(
             "font-size: 12px; font-weight: 600; border-radius: 6px; padding: 0 8px;"
         )
-        hero_row.addWidget(self.freq_state_badge)
-        freq_layout.addLayout(hero_row)
         self.freq_combo = QComboBox()
         self.freq_combo.setMinimumHeight(40)
         self.freq_combo.setMaximumHeight(40)
@@ -442,10 +442,6 @@ class ControlFreqTab(QWidget):
         self.next_change_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.next_change_label.setStyleSheet("color: #888;")
         freq_layout.addWidget(self.next_change_label)
-        try:
-            freq_layout.addSpacing(max(6, int(self.fontMetrics().height() * 0.50)))
-        except Exception:
-            freq_layout.addSpacing(8)
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(8)
@@ -1117,7 +1113,7 @@ class ControlFreqTab(QWidget):
         except Exception:
             pass
         self._apply_frequency_display_style()
-        self._set_message_summary_visible_rows(7)
+        self._set_message_summary_visible_rows(6)
         self._lock_frequency_control_height()
         self._update_time_toggle_text()
         self._refresh_clock_display()
@@ -1332,7 +1328,7 @@ class ControlFreqTab(QWidget):
                 continue
             try:
                 fm = QFontMetrics(label.font())
-                row_h = max(18, int(fm.height()) + 4)
+                row_h = max(16, int(fm.height()) + 2)
                 label.setMinimumHeight(row_h)
                 label.setMaximumHeight(row_h)
             except Exception:
@@ -1340,12 +1336,13 @@ class ControlFreqTab(QWidget):
 
     def _set_frequency_state_badge(self, state: str) -> None:
         key = (state or "").strip().lower()
-        if key not in {"on", "off", "blocked", "unknown"}:
+        if key not in {"on", "off", "blocked", "net_mode", "unknown"}:
             key = "unknown"
         labels = {
             "on": "On Schedule",
             "off": "Off Schedule",
             "blocked": "Blocked",
+            "net_mode": "Net Mode Changed",
             "unknown": "Unknown",
         }
         dark = self._is_dark_theme()
@@ -1353,6 +1350,7 @@ class ControlFreqTab(QWidget):
             "on": ("#1B5E20", "#D7FFD9") if dark else ("#DFF6E4", "#1B5E20"),
             "off": ("#8A5A00", "#FFF1CC") if dark else ("#FFF3D6", "#8A5A00"),
             "blocked": ("#8B1E1E", "#FFD6D6") if dark else ("#FFE2E2", "#8B1E1E"),
+            "net_mode": ("#0D47A1", "#D6E8FF") if dark else ("#E3F2FD", "#0D47A1"),
             "unknown": ("#455A64", "#E6EEF2") if dark else ("#EAF2FF", "#1E3A5F"),
         }
         bg, fg = colors.get(key, colors["unknown"])
@@ -1780,8 +1778,27 @@ class ControlFreqTab(QWidget):
                 self.effective_source_label.setToolTip("")
             self.effective_source_label.setText(source_text)
             off_schedule = bool(status.get("off_schedule"))
-            badge_state = "off" if off_schedule else "on"
+            off_flags = status.get("off_schedule_flags")
+            if not isinstance(off_flags, dict):
+                off_flags = {}
+            fldigi_net_active = source == "NET" and "FLDIGI" in (net_kind or "").upper()
+            mode_only_net_change = (
+                off_schedule
+                and fldigi_net_active
+                and bool(status.get("fldigi_mode_off") or off_flags.get("mode"))
+                and not any(
+                    bool(off_flags.get(flag))
+                    for flag in ("frequency", "offset", "fldigi_offset", "vfo")
+                )
+            )
+            badge_state = "net_mode" if mode_only_net_change else ("off" if off_schedule else "on")
             self._set_frequency_state_badge(badge_state)
+            if mode_only_net_change:
+                self.freq_state_badge.setToolTip(
+                    "The FLDigi net is still on the scheduled frequency. The operator changed mode during the net."
+                )
+            else:
+                self.freq_state_badge.setToolTip("")
             self._apply_frequency_action_busy_override(self._frequency_action_busy_reason(status))
 
             next_change = getattr(sched, "next_change_utc", None)
@@ -4233,6 +4250,14 @@ class ControlFreqTab(QWidget):
             auto_days_raw = self.settings.get("varac_bbs_auto_archive_days", 14)
         except Exception:
             auto_days_raw = 14
+        try:
+            message_paths = self.settings.get("message_paths", {}) or {}
+        except Exception:
+            message_paths = {}
+        if not isinstance(message_paths, dict):
+            message_paths = {}
+        flmsg_dir_txt = str(message_paths.get("flmsg", "") or "").strip()
+        flamp_dir_txt = str(message_paths.get("flamp", "") or "").strip()
         db_path = self._db_path()
         self._message_summary_request_id += 1
         request_id = self._message_summary_request_id
@@ -4254,7 +4279,12 @@ class ControlFreqTab(QWidget):
                 vault_summary=vault_summary,
                 auto_days_raw=auto_days_raw,
             )
-            return self._message_summary_rows(message_rows, bbs_rows)
+            file_rows = self._collect_flmsg_flamp_rows(
+                search,
+                flmsg_dir_txt=flmsg_dir_txt,
+                flamp_dir_txt=flamp_dir_txt,
+            )
+            return self._message_summary_rows(message_rows, bbs_rows, file_rows)
 
         future = self._ensure_message_summary_executor().submit(_work)
         future.add_done_callback(lambda done, rid=request_id: self._handle_message_summary_future(rid, done))
@@ -4289,19 +4319,17 @@ class ControlFreqTab(QWidget):
             QTimer.singleShot(0, self._schedule_message_summary_refresh)
 
     @staticmethod
-    def _message_summary_rows(message_rows: List[List[str]], bbs_rows: List[List[str]]) -> List[List[str]]:
+    def _message_summary_rows(
+        message_rows: List[List[str]],
+        bbs_rows: List[List[str]],
+        file_rows: Optional[List[List[str]]] = None,
+    ) -> List[List[str]]:
         rows_out: List[List[str]] = []
         rows_out.extend(message_rows)
         rows_out.extend(bbs_rows)
+        rows_out.extend(file_rows or [])
         if rows_out and rows_out[0][0] not in {"No matches", "No data"}:
-            order = {
-                "JS8": 0,
-                "SPOTTER": 1,
-                "SITREP": 2,
-                "VARAC DIRECT": 3,
-                "VARAC BBS FILES": 4,
-            }
-            rows_out.sort(key=lambda row: (order.get(str(row[0]).strip().upper(), 99), str(row[0]).strip().upper()))
+            rows_out.sort(key=lambda row: str(row[0]).strip().upper())
         return rows_out
 
     def _style_message_summary_rows(self) -> None:
@@ -4543,6 +4571,78 @@ class ControlFreqTab(QWidget):
         if not search or search in "SITREP" or sitrep_total > 0:
             rows_out.append(["SitRep", str(sitrep_total), sitrep_details])
         return rows_out or [["No matches", "0", "-"]]
+
+    def _collect_flmsg_flamp_rows(
+        self,
+        search: str,
+        *,
+        flmsg_dir_txt: str,
+        flamp_dir_txt: str,
+    ) -> List[List[str]]:
+        label = "FLMsg / FLAmp"
+        if search and search not in "FLMSG" and search not in "FLAMP" and search not in label.upper():
+            return []
+
+        now_ts = time.time()
+        cutoff_ts = now_ts - FLMSG_FLAMP_RECENT_SECONDS
+        stats: Dict[str, int] = {"FLMsg": 0, "FLAmp": 0}
+        scanned_cap_hit = False
+
+        def _scan_recent(root_txt: str, bucket: str) -> None:
+            nonlocal scanned_cap_hit
+            root = Path(root_txt).expanduser() if root_txt else None
+            if not root or not root.exists() or not root.is_dir():
+                return
+            dirs_seen = 0
+            files_seen = 0
+            stack: List[Path] = [root]
+            while stack and dirs_seen < FLMSG_FLAMP_SUMMARY_MAX_DIRS and files_seen < FLMSG_FLAMP_SUMMARY_MAX_FILES:
+                current = stack.pop()
+                dirs_seen += 1
+                try:
+                    children = current.iterdir()
+                except OSError:
+                    continue
+                for child in children:
+                    if files_seen >= FLMSG_FLAMP_SUMMARY_MAX_FILES:
+                        scanned_cap_hit = True
+                        break
+                    name = child.name
+                    if name.startswith("."):
+                        continue
+                    try:
+                        if child.is_dir():
+                            if dirs_seen + len(stack) < FLMSG_FLAMP_SUMMARY_MAX_DIRS:
+                                stack.append(child)
+                            else:
+                                scanned_cap_hit = True
+                            continue
+                        if not child.is_file():
+                            continue
+                        files_seen += 1
+                        if child.suffix.lower() not in FLMSG_FLAMP_SUMMARY_EXTS:
+                            continue
+                        st = child.stat()
+                    except OSError:
+                        continue
+                    if float(st.st_mtime) >= cutoff_ts:
+                        stats[bucket] += 1
+            if stack:
+                scanned_cap_hit = True
+
+        _scan_recent(flmsg_dir_txt, "FLMsg")
+        _scan_recent(flamp_dir_txt, "FLAmp")
+
+        total = int(stats["FLMsg"] + stats["FLAmp"])
+        if not flmsg_dir_txt and not flamp_dir_txt:
+            detail = "FLMsg and FLAmp folders not configured"
+        elif total:
+            detail = f"Last 24h: FLMsg {stats['FLMsg']}, FLAmp {stats['FLAmp']}"
+        else:
+            detail = "No new FLMsg or FLAmp files in 24h"
+        if scanned_cap_hit:
+            detail += " (large folder, showing bounded count)"
+        return [[label, str(total), detail]]
 
     def _collect_bbs_rows(
         self,
