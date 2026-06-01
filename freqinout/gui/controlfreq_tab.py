@@ -6,10 +6,11 @@ import math
 import re
 import sqlite3
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QShortcut, QKeySequence, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -90,10 +91,18 @@ from freqinout.gui.theme import resolve_theme, button_style, led_style
 from freqinout.version import __version__
 
 
+FLMSG_FLAMP_RECENT_SECONDS = 24 * 60 * 60
+FLMSG_FLAMP_SUMMARY_EXTS = {".b2s", ".k2s", ".txt", ".rtf", ".html", ".htm", ".xml", ".ff"}
+FLMSG_FLAMP_SUMMARY_MAX_FILES = 750
+FLMSG_FLAMP_SUMMARY_MAX_DIRS = 80
+
+
 class ControlFreqTab(QWidget):
     """
     ControlFreq: summary/console view for activity and operational status.
     """
+
+    _message_summary_ready = Signal(int, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -102,6 +111,8 @@ class ControlFreqTab(QWidget):
         self._timer: Optional[QTimer] = None
         self._active = False
         self._last_refresh_ts = 0.0
+        self._theme_cache: Optional[Dict[str, Any]] = None
+        self._settings_reload_mtime_ns = 0
         self._freq_timer: Optional[QTimer] = None
         self._status_timer: Optional[QTimer] = None
         self._clock_timer: Optional[QTimer] = None
@@ -199,6 +210,14 @@ class ControlFreqTab(QWidget):
         self._heavy_refresh_pending = False
         self._heavy_refresh_interval_sec = 120.0
         self._last_heavy_refresh_ts = 0.0
+        self._message_summary_executor: Optional[ThreadPoolExecutor] = None
+        self._message_summary_pending = False
+        self._message_summary_followup = False
+        self._message_summary_request_id = 0
+        self._message_summary_applied_id = 0
+        self._message_summary_cache_rows: List[List[str]] = []
+        self._message_summary_ready.connect(self._on_message_summary_ready)
+        self.destroyed.connect(lambda *_args: self._shutdown_message_summary_executor())
         self._build_ui()
         refresh_hold_duration_combo(self.hold_duration_combo, self.settings)
         self._restore_ui_state()
@@ -362,6 +381,8 @@ class ControlFreqTab(QWidget):
 
         self.inbox_box = QGroupBox("Unread Messages & BBS Files")
         inbox_layout = QVBoxLayout(self.inbox_box)
+        inbox_layout.setContentsMargins(8, 6, 8, 6)
+        inbox_layout.setSpacing(2)
         self.inbox_table = QTableWidget(0, 3)
         self.inbox_table.setHorizontalHeaderLabels(["Source", "Unread / Files", "What needs attention"])
         self._setup_table_defaults(self.inbox_table)
@@ -371,7 +392,7 @@ class ControlFreqTab(QWidget):
         inbox_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         inbox_header.setSectionResizeMode(2, QHeaderView.Stretch)
         inbox_layout.addWidget(self.inbox_table)
-        self._set_message_summary_visible_rows(7)
+        self._set_message_summary_visible_rows(6)
 
         self.left_splitter = QSplitter(Qt.Vertical)
         self.left_splitter.setChildrenCollapsible(False)
@@ -387,22 +408,16 @@ class ControlFreqTab(QWidget):
 
         self.freq_ctrl_box = QGroupBox("Frequency Control")
         freq_layout = QVBoxLayout(self.freq_ctrl_box)
-        freq_layout.setContentsMargins(8, 8, 8, 8)
-        freq_layout.setSpacing(4)
-        hero_row = QHBoxLayout()
-        hero_row.setContentsMargins(0, 0, 0, 0)
-        hero_row.setSpacing(6)
-        hero_row.addStretch(1)
+        freq_layout.setContentsMargins(8, 6, 8, 6)
+        freq_layout.setSpacing(2)
         self.freq_state_badge = QLabel("Unknown")
         self.freq_state_badge.setAlignment(Qt.AlignCenter)
-        self.freq_state_badge.setMinimumWidth(108)
+        self.freq_state_badge.setMinimumWidth(132)
         self.freq_state_badge.setMinimumHeight(26)
         self.freq_state_badge.setMaximumHeight(26)
         self.freq_state_badge.setStyleSheet(
             "font-size: 12px; font-weight: 600; border-radius: 6px; padding: 0 8px;"
         )
-        hero_row.addWidget(self.freq_state_badge)
-        freq_layout.addLayout(hero_row)
         self.freq_combo = QComboBox()
         self.freq_combo.setMinimumHeight(40)
         self.freq_combo.setMaximumHeight(40)
@@ -429,10 +444,6 @@ class ControlFreqTab(QWidget):
         self.next_change_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.next_change_label.setStyleSheet("color: #888;")
         freq_layout.addWidget(self.next_change_label)
-        try:
-            freq_layout.addSpacing(max(6, int(self.fontMetrics().height() * 0.50)))
-        except Exception:
-            freq_layout.addSpacing(8)
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(8)
@@ -737,7 +748,7 @@ class ControlFreqTab(QWidget):
         self._focus_mode = False
         self.focus_mode_btn.setText("Focus Mode: Off")
         try:
-            theme = resolve_theme(self.settings)
+            theme = self._theme()
             self.focus_mode_btn.setStyleSheet(button_style("secondary", theme))
         except Exception:
             pass
@@ -1019,7 +1030,7 @@ class ControlFreqTab(QWidget):
             return
         if theme is None:
             try:
-                theme = resolve_theme(self.settings)
+                theme = self._theme()
             except Exception:
                 theme = {}
         for key, btn in self.view_chip_buttons.items():
@@ -1041,7 +1052,7 @@ class ControlFreqTab(QWidget):
 
     def _is_dark_theme(self) -> bool:
         try:
-            theme = resolve_theme(self.settings)
+            theme = self._theme()
             r, g, b = self._hex_to_rgb(str(theme.get("bg", "#FFFFFF")))
             lum = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
             return lum < 128
@@ -1069,9 +1080,18 @@ class ControlFreqTab(QWidget):
             "muted_text": QColor("#555555"),
         }
 
+    def _theme(self) -> Dict[str, Any]:
+        if self._theme_cache is None:
+            self._theme_cache = resolve_theme(self.settings)
+        return self._theme_cache
+
+    def _invalidate_theme_cache(self) -> None:
+        self._theme_cache = None
+
     def _apply_theme(self) -> None:
+        self._invalidate_theme_cache()
         try:
-            theme = resolve_theme(self.settings)
+            theme = self._theme()
             self.help_btn.setStyleSheet(button_style("secondary", theme))
             self.refresh_btn.setStyleSheet(button_style("muted", theme))
             self.clear_filters_btn.setStyleSheet(button_style("muted", theme))
@@ -1089,7 +1109,7 @@ class ControlFreqTab(QWidget):
         except Exception:
             pass
         self._apply_frequency_display_style()
-        self._set_message_summary_visible_rows(7)
+        self._set_message_summary_visible_rows(6)
         self._lock_frequency_control_height()
         self._update_time_toggle_text()
         self._refresh_clock_display()
@@ -1107,7 +1127,7 @@ class ControlFreqTab(QWidget):
 
     def _apply_frequency_display_style(self) -> None:
         try:
-            theme = resolve_theme(self.settings)
+            theme = self._theme()
         except Exception:
             theme = {}
         text_color = str(theme.get("text", "#F2F2F2" if self._is_dark_theme() else "#111111"))
@@ -1167,7 +1187,7 @@ class ControlFreqTab(QWidget):
                 continue
             try:
                 fm = QFontMetrics(label.font())
-                row_h = max(18, int(fm.height()) + 4)
+                row_h = max(16, int(fm.height()) + 2)
                 label.setMinimumHeight(row_h)
                 label.setMaximumHeight(row_h)
             except Exception:
@@ -1175,12 +1195,13 @@ class ControlFreqTab(QWidget):
 
     def _set_frequency_state_badge(self, state: str) -> None:
         key = (state or "").strip().lower()
-        if key not in {"on", "off", "blocked", "unknown"}:
+        if key not in {"on", "off", "blocked", "net_mode", "unknown"}:
             key = "unknown"
         labels = {
             "on": "On Schedule",
             "off": "Off Schedule",
             "blocked": "Blocked",
+            "net_mode": "Net Mode Changed",
             "unknown": "Unknown",
         }
         dark = self._is_dark_theme()
@@ -1188,6 +1209,7 @@ class ControlFreqTab(QWidget):
             "on": ("#1B5E20", "#D7FFD9") if dark else ("#DFF6E4", "#1B5E20"),
             "off": ("#8A5A00", "#FFF1CC") if dark else ("#FFF3D6", "#8A5A00"),
             "blocked": ("#8B1E1E", "#FFD6D6") if dark else ("#FFE2E2", "#8B1E1E"),
+            "net_mode": ("#0D47A1", "#D6E8FF") if dark else ("#E3F2FD", "#0D47A1"),
             "unknown": ("#455A64", "#E6EEF2") if dark else ("#EAF2FF", "#1E3A5F"),
         }
         bg, fg = colors.get(key, colors["unknown"])
@@ -1198,6 +1220,7 @@ class ControlFreqTab(QWidget):
         )
 
     def apply_theme(self) -> None:
+        self._invalidate_theme_cache()
         self._apply_theme()
 
     def set_tab_active(self, active: bool) -> None:
@@ -1312,6 +1335,8 @@ class ControlFreqTab(QWidget):
             self._heavy_refresh_pending = False
 
     def on_settings_saved(self) -> None:
+        self._invalidate_theme_cache()
+        self._settings_reload_mtime_ns = 0
         try:
             self.settings.reload()
         except Exception:
@@ -1371,7 +1396,7 @@ class ControlFreqTab(QWidget):
         self._clear_status_layout()
         self.status_labels = {}
         self._status_text_labels = {}
-        theme = resolve_theme(self.settings)
+        theme = self._theme()
         visible_items = self._current_visible_status_items()
         self.status_group.setVisible(bool(visible_items))
         for key, label in visible_items:
@@ -1460,7 +1485,7 @@ class ControlFreqTab(QWidget):
             return
         first_issue = report.first_actionable_issue()
         detail = f" First item: {format_readiness_issue(first_issue)}." if first_issue else ""
-        theme = resolve_theme(self.settings)
+        theme = self._theme()
         self.readiness_review_label.setText(
             f"Setup review: {readiness_report_overall_text(report)}{detail}"
         )
@@ -1552,7 +1577,7 @@ class ControlFreqTab(QWidget):
     def _update_time_toggle_style(self, theme: Optional[Dict[str, str]] = None) -> None:
         if theme is None:
             try:
-                theme = resolve_theme(self.settings)
+                theme = self._theme()
             except Exception:
                 theme = {}
         # Local is default context; only highlight when user switches to UTC.
@@ -1640,7 +1665,7 @@ class ControlFreqTab(QWidget):
 
     def _update_clear_filters_style(self) -> None:
         try:
-            theme = resolve_theme(self.settings)
+            theme = self._theme()
             role = "eligible_warning" if self._filters_active() else "muted"
             self.clear_filters_btn.setStyleSheet(button_style(role, theme))
         except Exception:
@@ -1654,10 +1679,7 @@ class ControlFreqTab(QWidget):
     ) -> None:
         with perf_span("controlfreq.refresh_all", settings=self.settings, min_ms=10.0):
             if include_secondary or include_heavy:
-                try:
-                    self.settings.reload()
-                except Exception:
-                    pass
+                self._reload_settings_if_changed()
             self._refresh_frequency_control(include_intersections=False)
             if include_status:
                 self._refresh_status_widgets()
@@ -1686,7 +1708,7 @@ class ControlFreqTab(QWidget):
         self._refresh_scheduler_strip()
 
     def _refresh_running_status(self) -> None:
-        theme = resolve_theme(self.settings)
+        theme = self._theme()
         visible_keys = [key for key, _label in self._current_visible_status_items()]
         if visible_keys != list(self.status_labels.keys()):
             self._rebuild_status_indicators()
@@ -1710,7 +1732,7 @@ class ControlFreqTab(QWidget):
 
     def _refresh_scheduler_strip(self, status: Optional[Dict[str, Any]] = None) -> None:
         try:
-            theme = resolve_theme(self.settings)
+            theme = self._theme()
             muted = str(theme.get("text_muted", "#888"))
             sched = getattr(self.window(), "scheduler", None)
             if not sched or not hasattr(sched, "get_status_summary"):
@@ -1771,8 +1793,27 @@ class ControlFreqTab(QWidget):
                 self.effective_source_label.setToolTip("")
             self.effective_source_label.setText(source_text)
             off_schedule = bool(status.get("off_schedule"))
-            badge_state = "off" if off_schedule else "on"
+            off_flags = status.get("off_schedule_flags")
+            if not isinstance(off_flags, dict):
+                off_flags = {}
+            fldigi_net_active = source == "NET" and "FLDIGI" in (net_kind or "").upper()
+            mode_only_net_change = (
+                off_schedule
+                and fldigi_net_active
+                and bool(status.get("fldigi_mode_off") or off_flags.get("mode"))
+                and not any(
+                    bool(off_flags.get(flag))
+                    for flag in ("frequency", "offset", "fldigi_offset", "vfo")
+                )
+            )
+            badge_state = "net_mode" if mode_only_net_change else ("off" if off_schedule else "on")
             self._set_frequency_state_badge(badge_state)
+            if mode_only_net_change:
+                self.freq_state_badge.setToolTip(
+                    "The FLDigi net is still on the scheduled frequency. The operator changed mode during the net."
+                )
+            else:
+                self.freq_state_badge.setToolTip("")
             self._apply_frequency_action_busy_override(self._frequency_action_busy_reason(status))
 
             next_change = getattr(sched, "next_change_utc", None)
@@ -1783,6 +1824,10 @@ class ControlFreqTab(QWidget):
                 if not isinstance(fallback_freq, (int, float)):
                     fallback_freq = None
             next_text = "Next Change: --"
+            next_entry_start = status.get("next_entry_start_utc")
+            next_entry_freq = status.get("next_entry_frequency_mhz")
+            next_entry_source = str(status.get("next_entry_source") or "").strip().upper()
+            schedule_gap_seconds = status.get("schedule_gap_seconds")
             if not isinstance(next_change, dt.datetime) and isinstance(fallback_preview, dict):
                 preview_when = fallback_preview.get("when_utc")
                 if isinstance(preview_when, dt.datetime):
@@ -1829,9 +1874,48 @@ class ControlFreqTab(QWidget):
                     self.next_change_label.setStyleSheet("font-weight: 500; color: #8A5A00;")
                 else:
                     self.next_change_label.setStyleSheet(f"color: {muted};")
+                if (
+                    isinstance(schedule_gap_seconds, (int, float))
+                    and schedule_gap_seconds > 60
+                    and isinstance(next_entry_start, dt.datetime)
+                    and isinstance(next_entry_freq, (int, float))
+                ):
+                    start_dt = next_entry_start
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=dt.timezone.utc)
+                    else:
+                        start_dt = start_dt.astimezone(dt.timezone.utc)
+                    start_display = start_dt.astimezone(self._get_display_tz()) if self._show_local else start_dt
+                    next_text = f"Current Ends: {display_dt:%H:%M} | Next: {float(next_entry_freq):.3f} {start_display:%H:%M}"
+                    if next_entry_source and next_entry_source != "NONE":
+                        next_text += f" {next_entry_source}"
+                    self.next_change_label.setToolTip(
+                        f"Schedule gap: the active entry ends at {display_dt:%H:%M}; "
+                        f"the next planned entry starts at {start_display:%H:%M}."
+                    )
             else:
-                self.next_change_label.setStyleSheet(f"color: {muted};")
-                self.next_change_label.setToolTip("")
+                if isinstance(next_entry_start, dt.datetime) and isinstance(next_entry_freq, (int, float)):
+                    start_dt = next_entry_start
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=dt.timezone.utc)
+                    else:
+                        start_dt = start_dt.astimezone(dt.timezone.utc)
+                    now_utc = dt.datetime.now(dt.timezone.utc)
+                    mins = int(max(0.0, (start_dt - now_utc).total_seconds()) // 60)
+                    start_display = start_dt.astimezone(self._get_display_tz()) if self._show_local else start_dt
+                    next_text = f"Next Schedule: {float(next_entry_freq):.3f} {start_display:%H:%M}"
+                    if next_entry_source and next_entry_source != "NONE":
+                        next_text += f" {next_entry_source}"
+                    self.next_change_label.setToolTip("No schedule entry is active now; this is the next planned entry.")
+                    if mins <= 15:
+                        self.next_change_label.setStyleSheet("font-weight: 600; color: #B71C1C;")
+                    elif mins <= 60:
+                        self.next_change_label.setStyleSheet("font-weight: 500; color: #8A5A00;")
+                    else:
+                        self.next_change_label.setStyleSheet(f"color: {muted};")
+                else:
+                    self.next_change_label.setStyleSheet(f"color: {muted};")
+                    self.next_change_label.setToolTip("")
             self.next_change_label.setText(next_text)
             self._sync_frequency_info_row_heights()
         except Exception as e:
@@ -1881,7 +1965,7 @@ class ControlFreqTab(QWidget):
         )
         self.freq_action_btn.setEnabled(False)
         try:
-            theme = resolve_theme(self.settings)
+            theme = self._theme()
         except Exception:
             theme = None
         if theme:
@@ -2042,6 +2126,18 @@ class ControlFreqTab(QWidget):
 
     def _settings_db_path(self) -> Path:
         return get_config_dir() / "config" / "freqinout.db"
+
+    def _reload_settings_if_changed(self) -> None:
+        try:
+            db_path = Path(getattr(self.settings, "db_path", self._settings_db_path()))
+            mtime_ns = int(db_path.stat().st_mtime_ns) if db_path.exists() else 0
+            if mtime_ns and mtime_ns == int(self._settings_reload_mtime_ns or 0):
+                return
+            self.settings.reload()
+            self._settings_reload_mtime_ns = mtime_ns
+            self._invalidate_theme_cache()
+        except Exception:
+            pass
 
     @staticmethod
     def _safe_db_mtime(db_path: Path) -> float:
@@ -3116,7 +3212,7 @@ class ControlFreqTab(QWidget):
         active: Optional[float] = None,
     ) -> None:
         try:
-            theme = resolve_theme(self.settings)
+            theme = self._theme()
         except Exception:
             theme = None
         if not theme:
@@ -3143,6 +3239,14 @@ class ControlFreqTab(QWidget):
             and active is not None
             and abs(scheduled - active) > 0.0005
         )
+        try:
+            sched = getattr(self.window(), "scheduler", None)
+            if sched is not None and hasattr(sched, "get_status_summary"):
+                status = sched.get_status_summary(live=False)
+                if isinstance(status, dict):
+                    mismatch = bool(status.get("off_schedule"))
+        except Exception:
+            pass
         qsy_pending = False
         meta = selected_qsy_meta(self.freq_combo)
         if meta:
@@ -3211,7 +3315,7 @@ class ControlFreqTab(QWidget):
         self, scheduled: Optional[float], active: Optional[float]
     ) -> None:
         try:
-            theme = resolve_theme(self.settings)
+            theme = self._theme()
         except Exception:
             theme = None
         mismatch = False
@@ -3237,26 +3341,32 @@ class ControlFreqTab(QWidget):
         mins = perform_qsy_with_hold(self.window(), self.settings, meta, self._selected_hold_minutes())
         ok = mins > 0
         try:
-            theme = resolve_theme(self.settings)
+            theme = self._theme()
         except Exception:
             theme = None
         if theme:
             self.freq_action_btn.setStyleSheet(
                 button_style("success" if ok else "warning", theme)
             )
-        self._refresh_frequency_control()
         if ok:
             QMessageBox.information(
                 self,
                 "QSY Applied",
                 f"Frequency changed and scheduling paused for {mins} minutes.",
             )
+            QTimer.singleShot(0, self._refresh_frequency_control)
             QTimer.singleShot(800, self._refresh_frequency_control)
+        else:
+            QTimer.singleShot(0, self._refresh_frequency_control)
 
     def _on_freq_selection_changed(self, *_args) -> None:
         self._update_frequency_action_styles()
 
     def _on_resume_schedule_clicked(self) -> None:
+        try:
+            self.freq_action_btn.setStyleSheet(button_style("info", self._theme()))
+        except Exception:
+            pass
         resumed = False
         try:
             sched = getattr(self.window(), "scheduler", None)
@@ -3459,7 +3569,7 @@ class ControlFreqTab(QWidget):
             btn.setToolTip(self._schedule_action_tooltip(action_kind))
             btn.clicked.connect(lambda _=False, payload=entry: self._on_schedule_action_clicked(payload))
             try:
-                theme = resolve_theme(self.settings)
+                theme = self._theme()
                 btn.setStyleSheet(button_style(self._schedule_action_button_role(action_kind), theme))
             except Exception:
                 pass
@@ -4168,24 +4278,118 @@ class ControlFreqTab(QWidget):
         return self._format_display_time(dt_utc, include_day, tz)
 
     def _refresh_message_summary(self) -> None:
+        self._schedule_message_summary_refresh()
+
+    def _ensure_message_summary_executor(self) -> ThreadPoolExecutor:
+        if self._message_summary_executor is None:
+            self._message_summary_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="fio-controlfreq-summary",
+            )
+        return self._message_summary_executor
+
+    def _shutdown_message_summary_executor(self) -> None:
+        executor = self._message_summary_executor
+        self._message_summary_executor = None
+        if executor is None:
+            return
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            executor.shutdown(wait=False)
+        except Exception as exc:
+            log.debug("ControlFreq: message summary executor shutdown failed: %s", exc)
+
+    def _schedule_message_summary_refresh(self) -> None:
+        if self._message_summary_pending:
+            self._message_summary_followup = True
+            if not self._message_summary_cache_rows:
+                self._set_table_rows(self.inbox_table, [["Checking messages...", "", ""]])
+            return
         search = (self.search_edit.text() or "").strip().upper()
-        message_rows = self._collect_inbox_rows(search)
-        bbs_rows = self._collect_bbs_rows(search)
-        rows_out: List[List[str]] = []
-        rows_out.extend(message_rows)
-        rows_out.extend(bbs_rows)
-        if rows_out and rows_out[0][0] not in {"No matches", "No data"}:
-            order = {
-                "JS8": 0,
-                "SPOTTER": 1,
-                "SITREP": 2,
-                "VARAC DIRECT": 3,
-                "VARAC BBS FILES": 4,
-            }
-            rows_out.sort(key=lambda row: (order.get(str(row[0]).strip().upper(), 99), str(row[0]).strip().upper()))
+        try:
+            group_filter = normalize_group_name(self.group_combo.currentData())
+        except Exception:
+            group_filter = ""
+        try:
+            local_operator_call = str(self.settings.get("operator_callsign", "") or "").strip().upper()
+        except Exception:
+            local_operator_call = ""
+        try:
+            message_paths = self.settings.get("message_paths", {}) or {}
+        except Exception:
+            message_paths = {}
+        if not isinstance(message_paths, dict):
+            message_paths = {}
+        flmsg_dir_txt = str(message_paths.get("flmsg", "") or "").strip()
+        flamp_dir_txt = str(message_paths.get("flamp", "") or "").strip()
+        db_path = self._db_path()
+        self._message_summary_request_id += 1
+        request_id = self._message_summary_request_id
+        self._message_summary_pending = True
+        if not self._message_summary_cache_rows:
+            self._set_table_rows(self.inbox_table, [["Checking messages...", "", ""]])
+
+        def _work() -> List[List[str]]:
+            message_rows = self._collect_inbox_rows(
+                search,
+                db_path=db_path,
+                group_filter=group_filter,
+                local_operator_call=local_operator_call,
+            )
+            bbs_rows = self._collect_bbs_rows(search)
+            file_rows = self._collect_flmsg_flamp_rows(
+                search,
+                flmsg_dir_txt=flmsg_dir_txt,
+                flamp_dir_txt=flamp_dir_txt,
+            )
+            return self._message_summary_rows(message_rows, bbs_rows, file_rows)
+
+        future = self._ensure_message_summary_executor().submit(_work)
+        future.add_done_callback(lambda done, rid=request_id: self._handle_message_summary_future(rid, done))
+
+    def _handle_message_summary_future(self, request_id: int, future: Future) -> None:
+        rows: List[List[str]]
+        error = ""
+        try:
+            rows = future.result()
+        except Exception as exc:
+            error = str(exc)
+            rows = [["Messages", "0", "Message summary unavailable"]]
+        try:
+            self._message_summary_ready.emit(int(request_id), rows, error)
+        except RuntimeError:
+            pass
+
+    def _on_message_summary_ready(self, request_id: int, rows: object, error: object) -> None:
+        self._message_summary_pending = False
+        if request_id < self._message_summary_applied_id:
+            return
+        if error:
+            log.debug("ControlFreq: message summary worker failed: %s", error)
+        rows_out = rows if isinstance(rows, list) else [["Messages", "0", "Message summary unavailable"]]
+        self._message_summary_applied_id = int(request_id)
+        self._message_summary_cache_rows = rows_out
         self._set_table_rows(self.inbox_table, rows_out)
         self._style_message_summary_rows()
         self._apply_elide_tooltips(self.inbox_table, 2)
+        if self._message_summary_followup:
+            self._message_summary_followup = False
+            QTimer.singleShot(0, self._schedule_message_summary_refresh)
+
+    @staticmethod
+    def _message_summary_rows(
+        message_rows: List[List[str]],
+        bbs_rows: List[List[str]],
+        file_rows: Optional[List[List[str]]] = None,
+    ) -> List[List[str]]:
+        rows_out: List[List[str]] = []
+        rows_out.extend(message_rows)
+        rows_out.extend(bbs_rows)
+        rows_out.extend(file_rows or [])
+        if rows_out and rows_out[0][0] not in {"No matches", "No data"}:
+            rows_out.sort(key=lambda row: str(row[0]).strip().upper())
+        return rows_out
 
     def _style_message_summary_rows(self) -> None:
         palette = self._urgency_palette()
@@ -4245,15 +4449,19 @@ class ControlFreqTab(QWidget):
                         it.setBackground(palette["positive"])
                         it.setForeground(palette["text"])
 
-    def _collect_inbox_rows(self, search: str) -> List[List[str]]:
-        db_path = self._db_path()
+    def _collect_inbox_rows(
+        self,
+        search: str,
+        *,
+        db_path: Path,
+        group_filter: str,
+        local_operator_call: str,
+    ) -> List[List[str]]:
         if not db_path.exists():
             return [["No data", "0", "Messages DB unavailable"]]
         counts = {"JS8": 0, "Spotter": 0, "VarAC": 0}
         top_senders: Dict[str, Dict[str, int]] = {"JS8": {}, "Spotter": {}, "VarAC": {}}
         sitrep_counts = {"red": 0, "yellow": 0, "green": 0}
-        group_filter = normalize_group_name(self.group_combo.currentData())
-        local_operator_call = str(self.settings.get("operator_callsign", "") or "").strip().upper()
 
         def _load_operator_groups(cur: sqlite3.Cursor) -> Dict[str, Set[str]]:
             out: Dict[str, Set[str]] = {}
@@ -4317,7 +4525,7 @@ class ControlFreqTab(QWidget):
             return any(search in term for term in terms if term)
 
         try:
-            conn = sqlite3.connect(db_path)
+            conn = connect_sqlite(db_path, timeout=1.5, busy_timeout_ms=1500)
             cur = conn.cursor()
             cur.execute("SELECT from_call, state FROM js8_messages")
             for cs, state in cur.fetchall():
@@ -4423,8 +4631,87 @@ class ControlFreqTab(QWidget):
             rows_out.append(["SitRep", str(sitrep_total), sitrep_details])
         return rows_out or [["No matches", "0", "-"]]
 
+    def _collect_flmsg_flamp_rows(
+        self,
+        search: str,
+        *,
+        flmsg_dir_txt: str,
+        flamp_dir_txt: str,
+    ) -> List[List[str]]:
+        label = "FLMsg / FLAmp"
+        if search and search not in "FLMSG" and search not in "FLAMP" and search not in label.upper():
+            return []
+
+        now_ts = time.time()
+        cutoff_ts = now_ts - FLMSG_FLAMP_RECENT_SECONDS
+        stats: Dict[str, int] = {"FLMsg": 0, "FLAmp": 0}
+        scanned_cap_hit = False
+
+        def _scan_recent(root_txt: str, bucket: str) -> None:
+            nonlocal scanned_cap_hit
+            root = Path(root_txt).expanduser() if root_txt else None
+            if not root or not root.exists() or not root.is_dir():
+                return
+            dirs_seen = 0
+            files_seen = 0
+            stack: List[Path] = [root]
+            while stack and dirs_seen < FLMSG_FLAMP_SUMMARY_MAX_DIRS and files_seen < FLMSG_FLAMP_SUMMARY_MAX_FILES:
+                current = stack.pop()
+                dirs_seen += 1
+                try:
+                    children = current.iterdir()
+                except OSError:
+                    continue
+                for child in children:
+                    if files_seen >= FLMSG_FLAMP_SUMMARY_MAX_FILES:
+                        scanned_cap_hit = True
+                        break
+                    name = child.name
+                    if name.startswith("."):
+                        continue
+                    try:
+                        if child.is_dir():
+                            if dirs_seen + len(stack) < FLMSG_FLAMP_SUMMARY_MAX_DIRS:
+                                stack.append(child)
+                            else:
+                                scanned_cap_hit = True
+                            continue
+                        if not child.is_file():
+                            continue
+                        files_seen += 1
+                        if child.suffix.lower() not in FLMSG_FLAMP_SUMMARY_EXTS:
+                            continue
+                        st = child.stat()
+                    except OSError:
+                        continue
+                    if float(st.st_mtime) >= cutoff_ts:
+                        stats[bucket] += 1
+            if stack:
+                scanned_cap_hit = True
+
+        _scan_recent(flmsg_dir_txt, "FLMsg")
+        _scan_recent(flamp_dir_txt, "FLAmp")
+
+        total = int(stats["FLMsg"] + stats["FLAmp"])
+        if not flmsg_dir_txt and not flamp_dir_txt:
+            detail = "FLMsg and FLAmp folders not configured"
+        elif total:
+            detail = f"Last 24h: FLMsg {stats['FLMsg']}, FLAmp {stats['FLAmp']}"
+        else:
+            detail = "No new FLMsg or FLAmp files in 24h"
+        if scanned_cap_hit:
+            detail += " (large folder, showing bounded count)"
+        return [[label, str(total), detail]]
+
     def _collect_bbs_rows(self, search: str) -> List[List[str]]:
-        inventory = build_bbs_inventory(self.settings)
+        worker_settings = SettingsManager()
+        try:
+            inventory = build_bbs_inventory(worker_settings)
+        finally:
+            try:
+                worker_settings.close()
+            except Exception:
+                pass
         count = str(inventory.live_file_count if inventory.bbs_enabled and inventory.live_exists else 0)
         detail = ""
         if not inventory.bbs_enabled:
