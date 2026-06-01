@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import sqlite3
 import sys
+from typing import Callable
 
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -107,11 +108,13 @@ class MainWindow(QMainWindow):
       - Help
     """
 
-    def __init__(self):
+    def __init__(self, startup_status: Callable[[str], None] | None = None):
         super().__init__()
         self._shutting_down = False
+        self._startup_status_callback = startup_status
 
         self.settings = SettingsManager()
+        self._notify_startup_status("Loading application settings...")
         self.multi_radio_store = MultiRadioStore()
         self.station_runtime_manager = StationRuntimeManager(store=self.multi_radio_store, settings=self.settings)
         self.station_runtime_manager.sync_with_store()
@@ -192,6 +195,7 @@ class MainWindow(QMainWindow):
             ("Settings", self.settings_tab),
             ("Help", self.help_tab),
         ]
+        self._notify_startup_status("Building station dashboard...")
         self._screen_index_by_label = {label: idx for idx, (label, _w) in enumerate(self._screens)}
         self._condition_levels_signature: tuple[tuple[str, int], ...] = tuple()
         self._condition_levels_refresh_pending = False
@@ -506,6 +510,7 @@ class MainWindow(QMainWindow):
             set_scheduler_enabled_override(bool(startup_policy.get("scheduler_enabled", True)))
         except Exception:
             pass
+        self._notify_startup_status("Starting scheduler services...")
         self.scheduler.start()
         self.background_ingest = BackgroundIngestController(self.settings)
         if self._runtime_background_ingest_enabled(self._active_runtime_profile, startup_policy):
@@ -667,6 +672,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         QTimer.singleShot(1200, self._start_launch_control_startup)
+        self._notify_startup_status("Opening FIO...")
+
+    def _notify_startup_status(self, message: str) -> None:
+        callback = getattr(self, "_startup_status_callback", None)
+        if callback is None:
+            return
+        try:
+            callback(message)
+        except Exception as e:
+            log.debug("MainWindow startup status update failed: %s", e)
 
     def refresh_operator_history_views(self):
         """
