@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "freqinout"
-version = "1.2.7"
+version = "1.2.7.1"
 description = "HF Radio Frequency and Net Control Utility"
 readme = "README.md"
 authors = [{ name = "Bill Daniel" }]
@@ -13,6 +13,7 @@ license = { text = "GPL-3.0-only" }
 requires-python = ">=3.9,<3.14"
 dependencies = [
   "requests>=2.31.0",
+  "urllib3<2",
   "pytz>=2023.3",
   "psutil>=5.9.0",
   "PySide6>=6.7.0",

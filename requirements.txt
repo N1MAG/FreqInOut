@@ -4,6 +4,7 @@ PySide6-Essentials==6.8.1.1
 PySide6-Addons==6.8.1.1
 psutil>=5.9.0
 requests>=2.31.0
+urllib3<2
 pytz>=2023.3
 tzdata>=2024.1
 keyring>=25.0

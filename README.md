@@ -39,6 +39,10 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
 - Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
 
+## What's New in v1.2.7.1
+
+- Startup dependency compatibility was tightened for macOS Python 3.9 environments that use LibreSSL. FIO now pins `urllib3` below v2 so the app does not show the `NotOpenSSLWarning` during launch after dependencies are reinstalled.
+
 ## What's New in v1.2.7
 
 - Scheduler authority is more direct: when FIO is the schedule controller, normal schedule changes and Resume Schedule now push the station back to the active operating plan unless a real transmit/file-transfer safety condition is present.
