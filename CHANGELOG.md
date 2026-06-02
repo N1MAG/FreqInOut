@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.7.3]
+- Fixed: CommStat items deleted from Messages are now hidden with a durable local FIO tombstone instead of only deleting the temporary artifact row, so they do not reappear after refresh, restart, or CommStat ingest while the original CommStat source database remains untouched.
+- Changed: CommStat delete confirmations now explain that FIO is hiding the item from Messages, success feedback auto-closes, and bulk delete summaries distinguish hidden/deleted, skipped, and failed rows.
+
 ## [1.2.7.2]
 - Fixed: Scheduler JS8 offset status now uses fresh readback before declaring `Off Schedule`, so a correct JS8Call offset does not remain falsely flagged after `Resume Schedule` while FIO still manages JS8 offset under FLRig control.
 

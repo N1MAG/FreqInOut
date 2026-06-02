@@ -39,6 +39,11 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
 - Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
 
+## What's New in v1.2.7.3
+
+- CommStat items deleted from Messages are now hidden from FIO with a durable local record, so they stay hidden after refresh or restart without deleting anything from CommStat itself.
+- CommStat delete dialogs now explain that FIO is hiding the item from Messages, and delete summaries auto-close instead of lingering on screen.
+
 ## What's New in v1.2.7.2
 
 - JS8 offset schedule status now waits for fresh JS8Call readback before declaring `Off Schedule`. FIO still manages the JS8 offset when FLRig controls the radio dial, but a stale cached offset should no longer make `Resume Schedule` look like it did nothing.

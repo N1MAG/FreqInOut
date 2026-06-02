@@ -145,6 +145,88 @@ def ensure_commstat_artifact_tables(conn: sqlite3.Connection) -> None:
             ON commstat_artifacts(report_group, event_ts DESC, id DESC)
         """
     )
+    ensure_commstat_artifact_deletion_tables(conn)
+
+
+def normalize_commstat_artifact_key(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def ensure_commstat_artifact_deletion_tables(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS commstat_artifact_deletions (
+            artifact_key TEXT PRIMARY KEY,
+            artifact_kind TEXT,
+            from_call TEXT,
+            target TEXT,
+            title TEXT,
+            event_ts REAL,
+            deleted_ts REAL NOT NULL,
+            reason TEXT
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "commstat_artifact_deletions",
+        {
+            "artifact_key": "TEXT",
+            "artifact_kind": "TEXT",
+            "from_call": "TEXT",
+            "target": "TEXT",
+            "title": "TEXT",
+            "event_ts": "REAL",
+            "deleted_ts": "REAL",
+            "reason": "TEXT",
+        },
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_commstat_artifact_deletions_ts
+            ON commstat_artifact_deletions(deleted_ts)
+        """
+    )
+
+
+def tombstone_commstat_artifact(
+    conn: sqlite3.Connection,
+    *,
+    artifact_key: object,
+    artifact_kind: object = "",
+    from_call: object = "",
+    target: object = "",
+    title: object = "",
+    event_ts: object = 0.0,
+    reason: object = "message_viewer_delete",
+) -> bool:
+    key = normalize_commstat_artifact_key(artifact_key)
+    if not key:
+        return False
+    ensure_commstat_artifact_deletion_tables(conn)
+    try:
+        event_ts_value = float(event_ts or 0.0)
+    except Exception:
+        event_ts_value = 0.0
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO commstat_artifact_deletions (
+            artifact_key, artifact_kind, from_call, target, title, event_ts, deleted_ts, reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key,
+            str(artifact_kind or "").strip().upper(),
+            str(from_call or "").strip().upper(),
+            str(target or "").strip().upper(),
+            str(title or "").strip(),
+            event_ts_value,
+            float(time.time()),
+            str(reason or "").strip(),
+        ),
+    )
+    return True
 
 
 def artifact_kind_label(kind: object) -> str:

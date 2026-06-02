@@ -66,9 +66,15 @@ from reportlab.pdfgen import canvas
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.logger import log
 from freqinout.core.perf_metrics import emit_span, span as perf_span
-from freqinout.core.sqlite_utils import fetch_all
+from freqinout.core.sqlite_utils import connect_sqlite, fetch_all, table_exists
 from freqinout.core.support_reporting import build_support_summary, bullet_lines
-from freqinout.core.commstat_artifacts import artifact_filter_label, artifact_kind_label
+from freqinout.core.commstat_artifacts import (
+    artifact_filter_label,
+    artifact_kind_label,
+    ensure_commstat_artifact_deletion_tables,
+    normalize_commstat_artifact_key,
+    tombstone_commstat_artifact,
+)
 from freqinout.core.group_utils import normalize_group_name
 from freqinout.core.js8_spotter_forms import (
     form_codes_enabled_for,
@@ -6900,15 +6906,27 @@ class MessageViewerTab(QWidget):
                 if {"brevity_code", "brevity_summary"}.issubset(columns)
                 else "'' AS brevity_code, '' AS brevity_summary"
             )
+            has_deletions = table_exists(conn, "commstat_artifact_deletions")
+            deletion_join = (
+                """
+                LEFT JOIN commstat_artifact_deletions cad
+                  ON cad.artifact_key = ca.artifact_key
+                """
+                if has_deletions
+                else ""
+            )
+            deletion_where = "WHERE cad.artifact_key IS NULL" if has_deletions else ""
             cur.execute(
                 f"""
-                SELECT id, artifact_key, artifact_kind, subtype, event_ts, event_ts_utc,
-                       from_call, target, report_group, grid, state_code, scope,
-                       transport_mode, status_label, alert_color, title, body_text, remarks_text,
-                       source_first, source_last, source_count, sources_json, source_refs_json,
-                       external_ids_json, payload_json, updated_ts, {brevity_select}
-                FROM commstat_artifacts
-                ORDER BY event_ts DESC, id DESC
+                SELECT ca.id, ca.artifact_key, ca.artifact_kind, ca.subtype, ca.event_ts, ca.event_ts_utc,
+                       ca.from_call, ca.target, ca.report_group, ca.grid, ca.state_code, ca.scope,
+                       ca.transport_mode, ca.status_label, ca.alert_color, ca.title, ca.body_text, ca.remarks_text,
+                       ca.source_first, ca.source_last, ca.source_count, ca.sources_json, ca.source_refs_json,
+                       ca.external_ids_json, ca.payload_json, ca.updated_ts, {brevity_select}
+                FROM commstat_artifacts ca
+                {deletion_join}
+                {deletion_where}
+                ORDER BY ca.event_ts DESC, ca.id DESC
                 LIMIT 5000
                 """
             )
@@ -8410,7 +8428,11 @@ class MessageViewerTab(QWidget):
                     self.viewer.clear()
                 deleted += 1
             elif isinstance(payload, CommStatArtifact):
-                if not self._delete_commstat_row(payload):
+                result = self._delete_commstat_row(payload)
+                if result == "skipped":
+                    skipped += 1
+                    continue
+                if result != "deleted":
                     failed += 1
                     continue
                 self.commstat_messages = [
@@ -8438,7 +8460,8 @@ class MessageViewerTab(QWidget):
         self._unfreeze_table()
         self._populate_messages_table(force=True)
         summary = self._summarize_types(rows)
-        details = f"Deleted {deleted} messages.\n{summary}"
+        action_word = "Hidden/deleted" if any(isinstance(row.payload, CommStatArtifact) for row in rows) else "Deleted"
+        details = f"{action_word} {deleted} messages.\n{summary}"
         if skipped:
             details = f"{details}\nSkipped: {skipped}"
         if failed:
@@ -10502,11 +10525,17 @@ class MessageViewerTab(QWidget):
     def _commstat_message_key(msg: CommStatArtifact | None) -> tuple[str, int | str] | None:
         if not isinstance(msg, CommStatArtifact):
             return None
+        artifact_key = normalize_commstat_artifact_key(getattr(msg, "artifact_key", ""))
+        if artifact_key:
+            return ("commstat", artifact_key)
         artifact_id = int(getattr(msg, "artifact_id", 0) or 0)
-        if artifact_id > 0:
-            return ("commstat", artifact_id)
-        artifact_key = str(getattr(msg, "artifact_key", "") or "").strip().lower()
-        return ("commstat", artifact_key) if artifact_key else None
+        return ("commstat", artifact_id) if artifact_id > 0 else None
+
+    @staticmethod
+    def _commstat_tombstone_key(msg: CommStatArtifact | None) -> str:
+        if not isinstance(msg, CommStatArtifact):
+            return ""
+        return normalize_commstat_artifact_key(getattr(msg, "artifact_key", ""))
 
     def _delete_sitrep_row(self, msg: SitrepMessage) -> bool:
         db_path = self._db_path()
@@ -10556,27 +10585,39 @@ class MessageViewerTab(QWidget):
         self._populate_messages_table(force=True)
         QMessageBox.information(self, "Delete Message", f"SitRep {label} deleted")
 
-    def _delete_commstat_row(self, msg: CommStatArtifact) -> bool:
+    def _delete_commstat_row(self, msg: CommStatArtifact) -> str:
         db_path = self._db_path()
         if not db_path or not db_path.exists():
-            return False
-        key = self._commstat_message_key(msg)
-        if key is None:
-            return False
+            return "failed"
+        artifact_key = self._commstat_tombstone_key(msg)
+        if not artifact_key:
+            log.warning(
+                "MessageViewer: cannot hide CommStat artifact without artifact_key id=%s title=%s",
+                getattr(msg, "artifact_id", 0),
+                getattr(msg, "title", ""),
+            )
+            return "skipped"
         try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            if isinstance(key[1], int):
-                cur.execute("DELETE FROM commstat_artifacts WHERE id=?", (int(key[1]),))
-            else:
-                cur.execute("DELETE FROM commstat_artifacts WHERE artifact_key=?", (str(key[1]),))
-            deleted = int(cur.rowcount or 0) > 0
-            conn.commit()
-            conn.close()
-            return deleted
+            with connect_sqlite(db_path, timeout=2.0) as conn:
+                ensure_commstat_artifact_deletion_tables(conn)
+                tombstoned = tombstone_commstat_artifact(
+                    conn,
+                    artifact_key=artifact_key,
+                    artifact_kind=getattr(msg, "artifact_kind", ""),
+                    from_call=getattr(msg, "from_call", ""),
+                    target=getattr(msg, "target", ""),
+                    title=getattr(msg, "title", ""),
+                    event_ts=getattr(msg, "event_ts", 0.0),
+                    reason="message_viewer_delete",
+                )
+                if not tombstoned:
+                    return "skipped"
+                conn.execute("DELETE FROM commstat_artifacts WHERE artifact_key=?", (artifact_key,))
+                conn.commit()
+            return "deleted"
         except Exception as e:
-            log.debug("MessageViewer: failed to delete CommStat artifact %s: %s", key, e)
-            return False
+            log.warning("MessageViewer: failed to hide CommStat artifact %s: %s", artifact_key, e)
+            return "failed"
 
     def _delete_commstat_message(self, msg: CommStatArtifact) -> None:
         if not msg:
@@ -10592,8 +10633,20 @@ class MessageViewerTab(QWidget):
         )
         if resp != QMessageBox.Yes:
             return
-        if not self._delete_commstat_row(msg):
-            QMessageBox.warning(self, "Delete Message", f"Failed to delete CommStat message {label}.")
+        result = self._delete_commstat_row(msg)
+        if result == "skipped":
+            QMessageBox.warning(
+                self,
+                "Delete Message",
+                "FIO could not hide this CommStat item because it does not have a stable message identity.",
+            )
+            return
+        if result != "deleted":
+            QMessageBox.warning(
+                self,
+                "Delete Message",
+                "FIO could not hide this CommStat item. The message database was busy or unavailable. Try Refresh Now and delete it again.",
+            )
             return
         msg_key = self._commstat_message_key(msg)
         self.commstat_messages = [m for m in self.commstat_messages if self._commstat_message_key(m) != msg_key]
@@ -10604,7 +10657,7 @@ class MessageViewerTab(QWidget):
             self.viewer.clear()
         self._unfreeze_table()
         self._populate_messages_table(force=True)
-        QMessageBox.information(self, "Delete Message", f"CommStat message {label} deleted")
+        QMessageBox.information(self, "Delete Message", "CommStat item hidden from FIO Messages.")
 
     def _delete_js8_message(self, msg: JS8Message) -> None:
         if not msg:

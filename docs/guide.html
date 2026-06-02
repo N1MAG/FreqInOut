@@ -400,7 +400,7 @@
   <ul class="section-list">
     <li><code>View</code>: opens selected message in viewer pane.</li>
     <li>Flag icon: cycles action-needed flag state.</li>
-    <li><code>Delete</code>: deletes selected message/file record.</li>
+    <li><code>Delete</code>: deletes or hides the selected message/file record. For CommStat rows, this hides the item from FIO Messages and does not delete the original record from CommStat.</li>
     <li><code>Archive</code>: shown for BBS file rows. Moves that file out of <code>BBS Directory</code> into <code>BBS Archive</code>.</li>
     <li><code>+BBS</code>: shown for FLMsg/FLAmp/VarAC file rows when VarAC BBS path is configured; copies file to VarAC BBS folder with overwrite prompt if needed.</li>
     <li><code>+Relay</code>: shown only when the row is a FLAMP relay/block file and FIO can identify a four-character relay queue ID. The queue ID may already be at the start of the filename, or it may be inside the FLAMP file. If FIO cannot identify the queue ID confidently, it leaves the file viewable but does not offer <code>+Relay</code>.</li>
