@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.7.5]
+- Added: Routine app/status polling now uses a shared dependency status service, so Settings and ControlFreq read cached worker-built snapshots instead of each tab repeatedly probing JS8Call, FLRig, and FLDigi from the UI path.
+- Changed: Launch readiness monitoring is more relaxed and operator-friendly, checking every 2 seconds for the first 30 seconds and every 5 seconds after that with a 90-second default timeout for slower JS8Call starts.
+- Fixed: Status indicator rows are no longer rebuilt on every visible timer tick when the visible program set has not changed.
+
 ## [1.2.7.4]
 - Fixed: Python 3.9 installs no longer crash at startup in the splash-screen path because the main entry point now uses Python 3.9-compatible annotation handling.
 

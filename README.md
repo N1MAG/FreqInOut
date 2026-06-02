@@ -39,6 +39,12 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
 - Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
 
+## What's New in v1.2.7.5
+
+- Settings and ControlFreq now use a shared background status snapshot instead of repeatedly checking radio apps from the UI.
+- Startup launch monitoring is calmer for slower apps like JS8Call: FIO checks readiness every 2 seconds at first, then every 5 seconds, with a 90-second default timeout.
+- Status indicator rows avoid unnecessary rebuilds when the visible program list has not changed.
+
 ## What's New in v1.2.7.4
 
 - Fixes a Python 3.9 startup crash in the new startup splash path.
