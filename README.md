@@ -39,6 +39,10 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
 - Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
 
+## What's New in v1.2.7.4
+
+- Fixes a Python 3.9 startup crash in the new startup splash path.
+
 ## What's New in v1.2.7.3
 
 - CommStat items deleted from Messages are now hidden from FIO with a durable local record, so they stay hidden after refresh or restart without deleting anything from CommStat itself.

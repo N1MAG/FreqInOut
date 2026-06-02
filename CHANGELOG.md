@@ -1,5 +1,8 @@
 # Changelog
 
+## [1.2.7.4]
+- Fixed: Python 3.9 installs no longer crash at startup in the splash-screen path because the main entry point now uses Python 3.9-compatible annotation handling.
+
 ## [1.2.7.3]
 - Fixed: CommStat items deleted from Messages are now hidden with a durable local FIO tombstone instead of only deleting the temporary artifact row, so they do not reappear after refresh, restart, or CommStat ingest while the original CommStat source database remains untouched.
 - Changed: CommStat delete confirmations now explain that FIO is hiding the item from Messages, success feedback auto-closes, and bulk delete summaries distinguish hidden/deleted, skipped, and failed rows.
