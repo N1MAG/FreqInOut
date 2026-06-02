@@ -71,6 +71,7 @@ from freqinout.core.station_readiness import (
     readiness_state_label,
     visible_status_programs,
 )
+from freqinout.core.dependency_status_service import get_dependency_status_service
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.varac_bbs_config import (
     bbs_summary_text,
@@ -465,7 +466,13 @@ class SettingsTab(QWidget):
         self._op_group_condition_sync = False
         self._op_group_rows_by_group: Dict[str, List[int]] = {}
         self.loading_label: QLabel | None = None
-        self._status_service = SoftwareStatusService(self.settings)
+        self._status_service = get_dependency_status_service(self.settings)
+        self._software_status_probe = SoftwareStatusService(self.settings)
+        self._status_indicator_signature: Tuple[Tuple[str, str], ...] = ()
+        try:
+            self._status_service.snapshot_changed.connect(self._on_dependency_status_snapshot_changed)
+        except Exception:
+            pass
         self.launch_orchestrator = LaunchOrchestrator(self.settings, self)
 
         self.PROGRAMS: Dict[str, Dict[str, str]] = {
@@ -2281,14 +2288,20 @@ class SettingsTab(QWidget):
             if widget is not None:
                 widget.deleteLater()
 
-    def _rebuild_status_indicators(self) -> None:
+    def _rebuild_status_indicators(self, *, force: bool = False) -> None:
         if not hasattr(self, "status_layout"):
+            return
+        visible_items = visible_status_programs(self._settings_snapshot_for_readiness())
+        signature = tuple((str(key), str(label)) for key, label in visible_items)
+        if not force and signature == self._status_indicator_signature and self.status_labels:
+            if hasattr(self, "status_group"):
+                self.status_group.setVisible(bool(visible_items))
             return
         self._clear_status_layout(self.status_layout)
         self.status_labels = {}
         self._status_text_labels = {}
         theme = resolve_theme(self.settings)
-        visible_items = visible_status_programs(self._settings_snapshot_for_readiness())
+        self._status_indicator_signature = signature
         if hasattr(self, "status_group"):
             self.status_group.setVisible(bool(visible_items))
         for key, label in visible_items:
@@ -7917,56 +7930,26 @@ class SettingsTab(QWidget):
 
     def _program_is_running(self, program_name: str) -> bool:
         try:
-            return bool(self._status_service.program_is_running(program_name))
+            return bool(self._software_status_probe.program_is_running(program_name))
         except Exception:
             return False
 
     def _find_process_exe(self, program_name: str) -> Optional[str]:
         try:
-            return self._status_service.find_process_exe(program_name)
+            return self._software_status_probe.find_process_exe(program_name)
         except Exception:
             return None
+
+    def _on_dependency_status_snapshot_changed(self, _snapshot: object) -> None:
+        if not self._active:
+            return
+        self._refresh_running_status()
 
     def _refresh_running_status(self):
         _perf_t0 = time.perf_counter()
         theme = resolve_theme(self.settings)
         self._rebuild_status_indicators()
-        port_override: Optional[int] = None
-        flrig_port_override: Optional[int] = None
-        fldigi_host_override: Optional[str] = None
-        fldigi_port_override: Optional[int] = None
-        try:
-            host_txt = self.js8_host_edit.text().strip() if hasattr(self, "js8_host_edit") else ""
-            host_override = host_txt or "127.0.0.1"
-        except Exception:
-            host_override = "127.0.0.1"
-        try:
-            txt = self.js8_port_edit.text().strip() if hasattr(self, "js8_port_edit") else ""
-            port_override = int(txt) if txt else None
-        except Exception:
-            port_override = None
-        try:
-            txt = self.flrig_port_edit.text().strip() if hasattr(self, "flrig_port_edit") else ""
-            flrig_port_override = int(txt) if txt else None
-        except Exception:
-            flrig_port_override = None
-        try:
-            host_txt = self.fldigi_host_edit.text().strip() if hasattr(self, "fldigi_host_edit") else ""
-            fldigi_host_override = host_txt or self._resolved_fldigi_host_value()
-        except Exception:
-            fldigi_host_override = self._resolved_fldigi_host_value()
-        try:
-            txt = self.fldigi_port_edit.text().strip() if hasattr(self, "fldigi_port_edit") else ""
-            fldigi_port_override = int(txt) if txt else None
-        except Exception:
-            fldigi_port_override = None
-        snapshot = self._status_service.status_snapshot(
-            port_override=port_override,
-            host_override=host_override,
-            flrig_port_override=flrig_port_override,
-            fldigi_host_override=fldigi_host_override,
-            fldigi_port_override=fldigi_port_override,
-        )
+        snapshot = self._status_service.software_status_snapshot()
         for program_name, lbl in self.status_labels.items():
             info = snapshot.get(program_name, {})
             state = str(info.get("state", "idle"))
@@ -8046,7 +8029,7 @@ class SettingsTab(QWidget):
         except Exception:
             port_override = None
         try:
-            return bool(self._status_service.js8_api_reachable(port_override=port_override, host_override=host_override))
+            return bool(self._software_status_probe.js8_api_reachable(port_override=port_override, host_override=host_override))
         except Exception:
             return False
 

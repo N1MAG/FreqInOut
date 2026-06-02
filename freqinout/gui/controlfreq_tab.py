@@ -40,7 +40,8 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.propagation_service import PropagationService
 from freqinout.core.sqlite_utils import connect_sqlite, fetch_all, rows_to_dicts, table_exists
-from freqinout.core.software_status_service import SoftwareStatusService, PROGRAM_PATH_KEYS
+from freqinout.core.dependency_status_service import get_dependency_status_service
+from freqinout.core.software_status_service import PROGRAM_PATH_KEYS
 from freqinout.core.station_readiness import (
     build_station_readiness_report,
     format_readiness_issue,
@@ -177,7 +178,12 @@ class ControlFreqTab(QWidget):
         self.status_labels: Dict[str, QLabel] = {}
         self._status_text_labels: Dict[str, QLabel] = {}
         self._status_checked_at: Dict[str, str] = {}
-        self._status_service = SoftwareStatusService(self.settings)
+        self._status_service = get_dependency_status_service(self.settings)
+        self._status_indicator_signature: Tuple[Tuple[str, str], ...] = ()
+        try:
+            self._status_service.snapshot_changed.connect(self._on_dependency_status_snapshot_changed)
+        except Exception:
+            pass
         self._readiness_banner_dismissed = False
         self._readiness_banner_digest = ""
         self._readiness_dismissed_digest = str(self.settings.get("readiness_review_dismissed_digest", "") or "").strip()
@@ -1163,14 +1169,19 @@ class ControlFreqTab(QWidget):
             if widget is not None:
                 widget.deleteLater()
 
-    def _rebuild_status_indicators(self) -> None:
+    def _rebuild_status_indicators(self, *, force: bool = False) -> None:
         if not hasattr(self, "status_layout"):
+            return
+        visible_items = visible_status_programs(self._settings_snapshot_for_readiness())
+        signature = tuple((str(key), str(label)) for key, label in visible_items)
+        if not force and signature == self._status_indicator_signature and self.status_labels:
+            self.status_group.setVisible(bool(visible_items))
             return
         self._clear_status_layout(self.status_layout)
         self.status_labels = {}
         self._status_text_labels = {}
         theme = self._theme()
-        visible_items = visible_status_programs(self._settings_snapshot_for_readiness())
+        self._status_indicator_signature = signature
         self.status_group.setVisible(bool(visible_items))
         for key, label in visible_items:
             led = QLabel()
@@ -1694,15 +1705,24 @@ class ControlFreqTab(QWidget):
         self._refresh_running_status()
         self._refresh_scheduler_strip()
 
+    def _on_dependency_status_snapshot_changed(self, _snapshot: object) -> None:
+        if not self._active:
+            return
+        self._refresh_running_status()
+
     def _refresh_running_status(self) -> None:
         theme = self._theme()
         self._rebuild_status_indicators()
-        snapshot = self._status_service.status_snapshot()
-        checked_at = dt.datetime.now().strftime("%H:%M:%S")
+        snapshot = self._status_service.software_status_snapshot()
         for program_name, lbl in self.status_labels.items():
             info = snapshot.get(program_name, {})
             state = str(info.get("state", "idle"))
             base_tooltip = str(info.get("tooltip", "Not running"))
+            checked_at_ts = float(info.get("checked_at") or 0.0)
+            if checked_at_ts:
+                checked_at = dt.datetime.fromtimestamp(checked_at_ts).strftime("%H:%M:%S")
+            else:
+                checked_at = "pending"
             configured = ""
             key = PROGRAM_PATH_KEYS.get(program_name)
             if key:

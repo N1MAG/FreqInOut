@@ -42,6 +42,7 @@ from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
+from freqinout.core.dependency_status_service import get_dependency_status_service
 from freqinout.core.station_health_summary import summarize_station_health
 from freqinout.core.ui_watchdog import UiEventLoopWatchdog
 from freqinout.radio_interface.rigctl_client import flrig_client_from_settings
@@ -121,6 +122,7 @@ class MainWindow(QMainWindow):
 
         self.settings = SettingsManager()
         self._notify_startup_status("Loading application settings...")
+        self.dependency_status_service = get_dependency_status_service(self.settings)
         self.setWindowTitle(f"FreqInOut de N1MAG (v{__version__})")
         self._set_window_icon()
 
