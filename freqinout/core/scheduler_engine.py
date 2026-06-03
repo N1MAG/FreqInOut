@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-import psutil
 from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 
 from freqinout.core.logger import log
@@ -21,6 +20,7 @@ from freqinout.core.schedule_targeting import (
     schedule_row_matches_target_context,
 )
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.radio_interface.rigctl_client import FrequencyCommand, RigControlClient
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
@@ -270,6 +270,7 @@ class SchedulerEngine(QObject):
         super().__init__(parent)
         self._assert_scheduler_thread_contract()
         self.settings = SettingsManager()
+        self._software_status = SoftwareStatusService(self.settings)
         self._scheduler_thread_call.connect(self._run_scheduler_thread_call)
         self.rig: Optional[RigControlClient] = rig
         self.js8: Optional[JS8ControlClient] = js8
@@ -309,8 +310,6 @@ class SchedulerEngine(QObject):
         self._coordination_prompt_signature: Optional[str] = None
         self._coordination_prompt_payload: Optional[Dict[str, object]] = None
         self._coordination_prompt_suppressed_signature: Optional[str] = None
-        self._proc_snapshot: List[str] = []
-        self._proc_snapshot_ts: float = 0.0
         self._status_poll_ttl_s: float = 0.8
         self._status_poll_retry_s: float = 4.0
         self._status_flrig_freq_hz: Optional[int] = None
@@ -1743,35 +1742,16 @@ class SchedulerEngine(QObject):
             return next_change, "schedule"
         return None, "none"
 
-    def _refresh_proc_snapshot(self) -> None:
-        now_ts = time.time()
-        if now_ts - self._proc_snapshot_ts < 2.0:
-            return
-        snap: List[str] = []
-        for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
-            try:
-                name = (proc.info.get("name") or "").lower()
-                exe_path = (proc.info.get("exe") or "")
-                exe = exe_path.lower()
-                exe_base = Path(exe_path).name.lower() if exe_path else ""
-                cmdline_list = proc.info.get("cmdline") or []
-                first_arg = (cmdline_list[0] if cmdline_list else "")
-                cmd_base = Path(first_arg).name.lower() if first_arg else ""
-                for token in (name, exe, exe_base, cmd_base):
-                    if token:
-                        snap.append(token)
-            except Exception:
-                continue
-        self._proc_snapshot = snap
-        self._proc_snapshot_ts = now_ts
-
     def _process_running(self, name: str) -> bool:
         target = (name or "").strip().lower()
         if not target:
             return False
-        self._refresh_proc_snapshot()
-        targets = {target, f"{target}.exe"}
-        return any(entry in targets for entry in self._proc_snapshot)
+        program_names = {
+            "js8call": "JS8Call",
+            "flrig": "FLRig",
+            "varac": "VarAC",
+        }
+        return bool(self._software_status.program_is_running(program_names.get(target, name)))
 
     def _js8_running(self) -> bool:
         return self._process_running("js8call")
