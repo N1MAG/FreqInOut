@@ -4456,14 +4456,6 @@ class ControlFreqTab(QWidget):
                         it.setBackground(tone)
                         it.setForeground(palette["text"])
                 continue
-            if label == "FLMSG / FLAMP":
-                tone = palette["positive"]
-                for c in range(self.inbox_table.columnCount()):
-                    it = self.inbox_table.item(row, c)
-                    if it:
-                        it.setBackground(tone)
-                        it.setForeground(palette["text"])
-                continue
             if count_val > 0:
                 for c in range(self.inbox_table.columnCount()):
                     it = self.inbox_table.item(row, c)

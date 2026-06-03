@@ -97,7 +97,7 @@ class StationHealthTab(QWidget):
         header_view.setSectionResizeMode(8, QHeaderView.ResizeToContents)
         layout.addWidget(self.table, 1)
 
-        recent_label = QLabel("Recent Scheduler Decisions")
+        recent_label = QLabel("Latest Scheduler Success and Issue Log")
         recent_label.setStyleSheet("font-size: 14px; font-weight: 700;")
         layout.addWidget(recent_label)
 
@@ -250,6 +250,9 @@ class StationHealthTab(QWidget):
         return " / ".join(parts)
 
     def _scheduler_event_severity(self, item: Mapping[str, object]) -> str:
+        kind = str(item.get("_station_health_kind", "") or "")
+        if kind == "latest_success":
+            return "ok"
         code = str(item.get("code", "") or "")
         event_type = str(item.get("event_type", "") or "")
         if event_type in {"failed"} or "failed" in code:
@@ -267,9 +270,13 @@ class StationHealthTab(QWidget):
             if not isinstance(item, Mapping):
                 continue
             severity = self._scheduler_event_severity(item)
+            kind = str(item.get("_station_health_kind", "") or "")
+            decision = str(item.get("code", "") or "")
+            if kind == "latest_success":
+                decision = f"latest success: {decision}"
             values = [
                 self._format_scheduler_ts(item.get("ts_utc", "")),
-                item.get("code", ""),
+                decision,
                 item.get("source", ""),
                 item.get("action", ""),
                 item.get("detail", ""),

@@ -1963,6 +1963,7 @@ class SchedulerEngine(QObject):
         source_upper = (source or "").upper()
         if ignore_fldigi_busy or not want_freq_change or source_upper not in {"HF", "SOP"}:
             self._clear_fldigi_busy_check_state()
+            self._clear_scheduler_health_issue("fldigi-busy")
             return False, None
         if self._manual_net_fldigi_active or self._manual_net_js8_active:
             self._record_scheduler_event(
@@ -2042,6 +2043,7 @@ class SchedulerEngine(QObject):
                 reason=reason,
                 hold_age_s=round(hold_age, 1),
                 source=source,
+                active_hold=True,
             )
             self._record_scheduler_event(
                 "breakaway",
@@ -2150,6 +2152,7 @@ class SchedulerEngine(QObject):
                 reason=detail_reason,
                 hold_age_s=round(hold_age, 1),
                 source=source,
+                active_hold=True,
             )
             self._record_scheduler_event(
                 "hold",
@@ -2176,6 +2179,7 @@ class SchedulerEngine(QObject):
                 reason=detail_reason,
                 hold_age_s=round(hold_age, 1),
                 source=source,
+                active_hold=True,
             )
             self._record_scheduler_event(
                 "breakaway",
@@ -2200,6 +2204,7 @@ class SchedulerEngine(QObject):
             reason=detail_reason,
             hold_age_s=round(hold_age, 1),
             source=source,
+            active_hold=True,
         )
         self._record_scheduler_event(
             "hold",
@@ -5200,7 +5205,7 @@ class SchedulerEngine(QObject):
         busy_reasons = []
         ptt_hold_active = False
         ptt_state_known = bool(actual_state.flrig_ptt_known and not actual_state.flrig_ptt_stale)
-        if ptt_state_known and actual_state.flrig_ptt_active:
+        if want_freq_change and ptt_state_known and actual_state.flrig_ptt_active:
             busy_reasons.append("Rig PTT is active")
             ptt_hold_active = True
             self._record_scheduler_health_issue(
@@ -5209,6 +5214,7 @@ class SchedulerEngine(QObject):
                 source=source,
                 frequency_hz=freq_hz,
                 control_mode=control_mode,
+                active_hold=True,
             )
             self._record_scheduler_event(
                 "hold",
@@ -5223,7 +5229,7 @@ class SchedulerEngine(QObject):
                 control_mode=control_mode,
             )
         shared_ptt = self._shared_ptt_lock_status(force=bool(force))
-        if bool(shared_ptt.get("blocked")):
+        if want_freq_change and bool(shared_ptt.get("blocked")):
             shared_reason = str(shared_ptt.get("reason", "") or "").strip() or "Shared PTT interlock is active"
             busy_reasons.append(shared_reason)
             ptt_hold_active = True
@@ -5233,6 +5239,7 @@ class SchedulerEngine(QObject):
                 source=source,
                 frequency_hz=freq_hz,
                 control_mode=control_mode,
+                active_hold=True,
             )
             self._record_scheduler_event(
                 "hold",
