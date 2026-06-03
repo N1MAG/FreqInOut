@@ -7,10 +7,8 @@ from typing import Callable, Dict, List, Optional
 
 from PySide6.QtCore import QObject, QTimer, QCoreApplication
 
-try:
-    import psutil
-except Exception:  # pragma: no cover - optional dependency
-    psutil = None
+from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.software_status_service import SoftwareStatusService
 
 JS8NET_PATH = Path(__file__).resolve().parents[2] / "third_party" / "js8net" / "js8net-main"
 if JS8NET_PATH.exists():
@@ -97,6 +95,7 @@ class JS8RxHub(QObject):
         self._last_rx_activity_ts: float = 0.0
         self._last_ptt_ts: float = 0.0
         self._ptt_active: bool = False
+        self._software_status = SoftwareStatusService(SettingsManager())
 
     @classmethod
     def instance(cls) -> "JS8RxHub":
@@ -149,20 +148,10 @@ class JS8RxHub(QObject):
         type(self)._instance = None
 
     def _js8call_running(self) -> bool:
-        if psutil is None:
-            return True
         try:
-            for proc in psutil.process_iter(attrs=["name", "exe"]):
-                try:
-                    name = (proc.info.get("name") or "").lower()
-                    exe = (proc.info.get("exe") or "").lower()
-                    if "js8call" in name or "js8call" in exe:
-                        return True
-                except Exception:
-                    continue
+            return bool(self._software_status.program_is_running("JS8Call"))
         except Exception:
             return True
-        return False
 
     def _poll_queue(self) -> None:
         if js8net is None or not hasattr(js8net, "rx_queue"):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shlex
 import socket
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -10,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import psutil
 
 from freqinout.core.dependency_health import get_dependency_health_registry
+from freqinout.core.logger import log
 
 
 PROGRAM_TOKENS: Dict[str, Sequence[str]] = {
@@ -62,14 +64,16 @@ class SoftwareStatusService:
 
     # Shared caches across all service instances to avoid duplicated polling work.
     _shared_proc_snapshot: List[str] = []
+    _shared_proc_records: List[Dict[str, object]] = []
     _shared_proc_snapshot_ts: float = 0.0
+    _shared_proc_lock = threading.Lock()
     _shared_js8_api_cache: Dict[tuple[str, int, bool], tuple[float, bool]] = {}
     _shared_service_probe_cache: Dict[tuple[str, ...], tuple[float, bool]] = {}
-    _shared_process_exe_cache: Dict[str, tuple[float, Optional[str]]] = {}
 
     def __init__(self, settings: Any) -> None:
         self.settings = settings
         self._proc_snapshot: List[str] = []
+        self._proc_records: List[Dict[str, object]] = []
         self._proc_snapshot_ts: float = 0.0
         self._snapshot_ttl_sec: float = 5.0
         self._js8_api_cache_key: tuple[str, int, bool] | None = None
@@ -168,36 +172,70 @@ class SoftwareStatusService:
     def _health_snapshot_for(self, cache_key: tuple[object, ...]) -> Dict[str, object]:
         return self._health.snapshot(self._health_key(cache_key))
 
+    @staticmethod
+    def _basename_token(value: object) -> str:
+        try:
+            text = str(value or "").strip().replace("\\", "/")
+            return text.rsplit("/", 1)[-1].strip().lower()
+        except Exception:
+            return ""
+
     def _refresh_process_snapshot(self, *, force: bool = False) -> None:
         cls = type(self)
-        now = time.monotonic()
-        if not force and (now - float(cls._shared_proc_snapshot_ts or 0.0)) < self._snapshot_ttl_sec:
-            self._proc_snapshot = list(cls._shared_proc_snapshot)
-            self._proc_snapshot_ts = float(cls._shared_proc_snapshot_ts or now)
-            return
-        snap: List[str] = []
-        for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
-            try:
-                name = (proc.info.get("name") or "").strip().lower()
-                exe = os.path.basename(proc.info.get("exe") or "").strip().lower()
-                cmdline = proc.info.get("cmdline") or []
-                cmd_tokens: List[str] = []
-                for arg in cmdline[:6]:
-                    try:
-                        token = os.path.basename(str(arg or "")).strip().lower()
-                    except Exception:
-                        token = ""
-                    if token:
-                        cmd_tokens.append(token)
-                for token in (name, exe, *cmd_tokens):
-                    if token:
-                        snap.append(token)
-            except Exception:
-                continue
-        cls._shared_proc_snapshot = list(snap)
-        cls._shared_proc_snapshot_ts = now
-        self._proc_snapshot = snap
-        self._proc_snapshot_ts = now
+        with cls._shared_proc_lock:
+            now = time.monotonic()
+            if not force and (now - float(cls._shared_proc_snapshot_ts or 0.0)) < self._snapshot_ttl_sec:
+                self._proc_snapshot = cls._shared_proc_snapshot
+                self._proc_records = cls._shared_proc_records
+                self._proc_snapshot_ts = float(cls._shared_proc_snapshot_ts or now)
+                return
+            started = time.perf_counter()
+            snap: List[str] = []
+            records: List[Dict[str, object]] = []
+            for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
+                try:
+                    name = (proc.info.get("name") or "").strip().lower()
+                    exe_path = (proc.info.get("exe") or "").strip()
+                    exe = self._basename_token(exe_path)
+                    cmdline = proc.info.get("cmdline") or []
+                    cmd_paths: List[str] = []
+                    cmd_tokens: List[str] = []
+                    for arg in cmdline[:6]:
+                        try:
+                            path = str(arg or "").strip()
+                            token = self._basename_token(path)
+                        except Exception:
+                            path = ""
+                            token = ""
+                        if token:
+                            cmd_paths.append(path)
+                            cmd_tokens.append(token)
+                    for token in (name, exe, *cmd_tokens):
+                        if token:
+                            snap.append(token)
+                    records.append(
+                        {
+                            "name": name,
+                            "exe": exe,
+                            "exe_path": exe_path,
+                            "cmd_tokens": tuple(cmd_tokens),
+                            "cmd_paths": tuple(cmd_paths),
+                        }
+                    )
+                except Exception:
+                    continue
+            cls._shared_proc_snapshot = snap
+            cls._shared_proc_records = records
+            cls._shared_proc_snapshot_ts = now
+            self._proc_snapshot = cls._shared_proc_snapshot
+            self._proc_records = cls._shared_proc_records
+            self._proc_snapshot_ts = now
+        log.debug(
+            "PROCESS_INVENTORY|refreshed|processes=%s|tokens=%s|duration_ms=%.1f",
+            len(records),
+            len(snap),
+            (time.perf_counter() - started) * 1000.0,
+        )
 
     def _configured_tokens(self, program_name: str) -> List[str]:
         key = PROGRAM_PATH_KEYS.get(program_name)
@@ -212,7 +250,7 @@ class SoftwareStatusService:
         out: List[str] = []
         try:
             p = Path(path_txt)
-            name = p.name.strip().lower()
+            name = self._basename_token(p.name)
             if name:
                 out.append(name)
         except Exception:
@@ -222,10 +260,7 @@ class SoftwareStatusService:
         except Exception:
             parts = []
         for part in parts[:6]:
-            try:
-                token = os.path.basename(str(part or "")).strip().lower()
-            except Exception:
-                token = ""
+            token = self._basename_token(part)
             if token:
                 out.append(token)
         return list(dict.fromkeys(out))
@@ -242,35 +277,26 @@ class SoftwareStatusService:
         return any(token in targets for token in self._proc_snapshot)
 
     def find_process_exe(self, program_name: str) -> Optional[str]:
-        cls = type(self)
-        now = time.monotonic()
-        cache_key = str(program_name or "").strip()
-        cached = cls._shared_process_exe_cache.get(cache_key)
-        if cached and (now - float(cached[0] or 0.0)) < self._snapshot_ttl_sec:
-            return cached[1]
+        self._refresh_process_snapshot()
         targets = set(self._target_tokens(program_name))
         if not targets:
             targets = {program_name.strip().lower(), f"{program_name.strip().lower()}.exe"}
-        for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
+        for record in self._proc_records:
             try:
-                name = (proc.info.get("name") or "").strip().lower()
-                exe = (proc.info.get("exe") or "").strip()
-                exe_base = os.path.basename(exe).strip().lower()
-                cmdline = proc.info.get("cmdline") or []
-                first_arg = os.path.basename(cmdline[0]).strip().lower() if cmdline else ""
-                second_arg = os.path.basename(cmdline[1]).strip().lower() if len(cmdline) > 1 else ""
-                if any(token in targets for token in (name, exe_base, first_arg, second_arg)):
-                    if exe:
-                        cls._shared_process_exe_cache[cache_key] = (now, exe)
-                        return exe
-                    if cmdline:
-                        cls._shared_process_exe_cache[cache_key] = (now, cmdline[0])
-                        return cmdline[0]
-                    cls._shared_process_exe_cache[cache_key] = (now, None)
-                    return None
+                cmd_tokens = tuple(str(token or "") for token in record.get("cmd_tokens", ()))
+                cmd_paths = tuple(str(path or "") for path in record.get("cmd_paths", ()))
+                for token, path in zip(cmd_tokens, cmd_paths):
+                    if token in targets and path:
+                        return path
+                process_tokens = {str(record.get("name") or ""), str(record.get("exe") or "")}
+                if not process_tokens.intersection(targets):
+                    continue
+                exe_path = str(record.get("exe_path") or "").strip()
+                if exe_path:
+                    return exe_path
+                return None
             except Exception:
                 continue
-        cls._shared_process_exe_cache[cache_key] = (now, None)
         return None
 
     def js8_api_reachable(

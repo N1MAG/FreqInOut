@@ -11,9 +11,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import psutil
-
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
@@ -41,6 +40,7 @@ class JS8StatusClient:
 
     def __init__(self, host: Optional[str] = None):
         self.settings = SettingsManager()
+        self._software_status = SoftwareStatusService(self.settings)
         self.host = self._resolve_host(host)
 
     def _resolve_host(self, host: Optional[str]) -> str:
@@ -113,24 +113,15 @@ class JS8ControlClient(JS8StatusClient):
                 continue
         return 2442
 
-    @staticmethod
-    def _js8call_running() -> bool:
+    def _js8call_running(self) -> bool:
         """
         Lightweight process check to avoid spawning JS8Call
         if it is not already running.
         """
         try:
-            for proc in psutil.process_iter(attrs=["name", "exe"]):
-                try:
-                    name = (proc.info.get("name") or "").lower()
-                    exe = (proc.info.get("exe") or "").lower()
-                    if "js8call" in name or "js8call" in exe:
-                        return True
-                except Exception:
-                    continue
+            return bool(self._software_status.program_is_running("JS8Call"))
         except Exception:
             return False
-        return False
 
     def _ensure_net(self) -> bool:
         if js8net is None:
@@ -234,6 +225,7 @@ class VarACStatusClient:
 
     def __init__(self, settings: Optional[object] = None) -> None:
         self.settings = settings if settings is not None else SettingsManager()
+        self._software_status = SoftwareStatusService(self.settings)
         self._last_status: Dict[str, object] = {}
         self._last_db_transfer_status: Dict[str, object] = {
             "busy": False,
@@ -467,21 +459,9 @@ class VarACStatusClient:
         # Fallback: detect VarAC install folder from running process.
         if not bases:
             try:
-                for proc in psutil.process_iter(attrs=["name", "exe", "cmdline"]):
-                    try:
-                        name = (proc.info.get("name") or "").lower()
-                        exe = (proc.info.get("exe") or "").strip()
-                        if "varac" not in name and "varac" not in exe.lower():
-                            continue
-                        if exe:
-                            bases.append(Path(exe).parent)
-                            continue
-                        cmdline = proc.info.get("cmdline") or []
-                        first = str(cmdline[0]).strip() if cmdline else ""
-                        if first:
-                            bases.append(Path(first).parent)
-                    except Exception:
-                        continue
+                exe = self._software_status.find_process_exe("VarAC")
+                if exe:
+                    bases.append(Path(exe).parent)
             except Exception:
                 pass
         # De-duplicate while preserving order.

@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.7.8]
+- Fixed: Routine companion-app detection now uses one thread-safe shared process inventory instead of independent scheduler, JS8Call, VarAC, and executable-path scans, reducing repeated Linux `/proc` reads and idle CPU activity.
+- Fixed: Process discovery now recognizes Windows-style command paths on Linux, improving VarAC and other Wine-launched companion detection without requiring repeated process scans.
+- Changed: Scheduler process guards now reuse the same five-second cached status inventory as other FIO status consumers while actual schedule control remains authoritative through API calls and readback.
+
 ## [1.2.7.7]
 - Fixed: Scheduler status and control worker timeouts no longer abandon blocked executor threads and create replacements, preventing an external dependency stall from growing FIO to thousands of threads and sustained high CPU use.
 - Changed: A truly stuck scheduler worker now remains bounded, is reported through Station Health, and asks the operator to restart the unresponsive companion app or FIO instead of attempting unsafe in-process thread replacement.
