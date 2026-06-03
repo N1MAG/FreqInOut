@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import queue
+import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -23,6 +24,27 @@ except Exception:  # pragma: no cover
 
 _JS8_HUB_TEXT_LIMIT = 8192
 _JS8_HUB_FIELD_LIMIT = 256
+_JS8NET_START_LOCK = threading.Lock()
+_JS8NET_STARTED_ENDPOINT: Optional[Tuple[str, int]] = None
+
+
+def ensure_js8net_started(host: str, port: int) -> bool:
+    """Start the process-global js8net connection at most once."""
+    global _JS8NET_STARTED_ENDPOINT
+    if js8net is None:
+        return False
+    endpoint = (str(host or "127.0.0.1").strip() or "127.0.0.1", int(port))
+    with _JS8NET_START_LOCK:
+        if _JS8NET_STARTED_ENDPOINT == endpoint:
+            return True
+        if _JS8NET_STARTED_ENDPOINT is not None:
+            return False
+        try:
+            js8net.start_net(*endpoint)
+        except Exception:
+            return False
+        _JS8NET_STARTED_ENDPOINT = endpoint
+        return True
 
 
 def _safe_js8_hub_text(value: object, *, limit: int = _JS8_HUB_TEXT_LIMIT) -> str:
@@ -132,11 +154,8 @@ class JS8RxHub(QObject):
         if not self._net_started:
             if not self._js8call_running():
                 return False
-            try:
-                js8net.start_net(self._host, self._port)
-                self._net_started = True
-            except Exception:
-                self._net_started = False
+            self._net_started = ensure_js8net_started(self._host, self._port)
+            if not self._net_started:
                 return False
         if not self._timer.isActive():
             self._timer.start()

@@ -3,6 +3,9 @@
 ## [Unreleased]
 - Fixed: Routine companion-app detection now uses one thread-safe shared process inventory instead of independent scheduler, JS8Call, VarAC, and executable-path scans, reducing repeated Linux `/proc` reads and idle CPU activity.
 - Fixed: Process discovery now recognizes Windows-style command paths on Linux, improving VarAC and other Wine-launched companion detection without requiring repeated process scans.
+- Fixed: JS8Call scheduler and status checks now share one process-global JS8Net connection instead of starting new RX, TX, and heartbeat threads from each short-lived client, preventing thread count and CPU use from climbing over time.
+- Changed: VarAC Managed BBS Vault full reconciliation now adapts from active five-second checks to 30-second and two-minute idle checks while a lightweight five-second activity signature still wakes it promptly when files, logs, or settings change.
+- Fixed: Unchanged Managed BBS publish manifests and runtime state are no longer rewritten on every idle vault run, reducing repeated directory scans and SQLite WAL writes on Linux stations.
 
 ## [1.2.6.1]
 - Fixed: CommStat artifact rows deleted from Messages are now hidden with a durable local FIO tombstone instead of only deleting the temporary artifact row, so they do not reappear after refresh, restart, or CommStat ingest while the original CommStat source database remains untouched.
