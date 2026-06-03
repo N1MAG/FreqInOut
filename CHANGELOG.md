@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.8]
+- Changed: Station Health now shows one latest scheduler success plus an issue log instead of repeating routine already-applied scheduler checks.
+- Changed: Informational scheduler holds and old transient FLDigi busy-check diagnostics no longer count as active station responsiveness issues.
+- Fixed: ControlFreq now colors the `FLMsg / FLAmp` message-summary row consistently with other rows, highlighting only when new files are present.
+
 ## [1.2.7.9]
 - Fixed: JS8Call scheduler and status checks now share one process-global JS8Net connection instead of starting new RX, TX, and heartbeat threads from each short-lived client, preventing thread count and CPU use from climbing over time.
 - Changed: VarAC Managed BBS Vault full reconciliation now adapts from active five-second checks to 30-second and two-minute idle checks while a lightweight five-second activity signature still wakes it promptly when files, logs, or settings change.

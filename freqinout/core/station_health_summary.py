@@ -68,6 +68,43 @@ def _shorten_error(value: object) -> str:
     return text[:137].rstrip() + "..."
 
 
+def _operator_error_text(key: str, value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    key_norm = str(key or "").strip().lower().replace("_", "-")
+    lower = text.lower()
+    if "settingsmanager used from a different thread" in lower:
+        if key_norm == "scheduler:fldigi-busy-check":
+            return "An old FLDigi receive-activity check could not finish cleanly. FIO is not currently blocked by this check."
+        return "A background check could not finish cleanly because an internal settings handle was used from the wrong worker thread."
+    if key_norm == "scheduler:fldigi-busy-check" and "could not verify fldigi receive activity" in lower:
+        return "FIO could not confirm FLDigi receive activity during an earlier schedule check. The schedule was allowed to continue."
+    return text
+
+
+def _is_fldigi_busy_check_key(key: str) -> bool:
+    return str(key or "").strip().lower().replace("_", "-") == "scheduler:fldigi-busy-check"
+
+
+def _is_scheduler_hold_key(key: str) -> bool:
+    return str(key or "").strip().lower().replace("_", "-") in {
+        "scheduler:fldigi-busy",
+        "scheduler:js8-busy",
+        "scheduler:varac-busy",
+        "scheduler:flrig-ptt",
+    }
+
+
+def _is_expired_transient_scheduler_key(key: str, last_checked_ts: float, *, now: Optional[float] = None) -> bool:
+    key_norm = str(key or "").strip().lower().replace("_", "-")
+    if key_norm not in {"scheduler:fldigi-busy-check"}:
+        return False
+    if last_checked_ts <= 0:
+        return False
+    return ((time.monotonic() if now is None else now) - last_checked_ts) > 300.0
+
+
 def _dependency_label(key: str, owner: str = "") -> str:
     parts = [part for part in str(key or "").split(":") if part]
     if not parts:
@@ -184,15 +221,47 @@ def _item_from_snapshot(
         and slow <= 0
         and (now or time.monotonic()) - last_checked_ts > 600.0
     )
-    warning = stale_ok or failures > 0 or slow > 0 or bool(str(snapshot.get("last_error", "") or "").strip())
-    if backoff:
+    last_error = _operator_error_text(str(key or ""), snapshot.get("last_error", ""))
+    scheduler_hold = _is_scheduler_hold_key(str(key or ""))
+    active_scheduler_hold = scheduler_hold and bool(metadata.get("active_hold"))
+    fldigi_busy_check = _is_fldigi_busy_check_key(str(key or ""))
+    expired_transient = _is_expired_transient_scheduler_key(str(key or ""), last_checked_ts, now=now)
+    warning = (
+        (stale_ok and not expired_transient)
+        or failures > 0
+        or slow > 0
+        or bool(last_error)
+    )
+    if fldigi_busy_check:
+        severity = "ok"
+        state = "OK"
+        action = "No schedule move is waiting on this FLDigi activity check."
+        warning = False
+        backoff = False
+    elif backoff:
         severity = "danger"
         state = "Backoff"
         action = "Backing off to keep FIO responsive"
+    elif expired_transient and warning:
+        severity = "ok"
+        state = "OK"
+        action = "No active issue; the last transient scheduler check is old"
+        warning = False
+    elif active_scheduler_hold and not backoff:
+        severity = "info"
+        state = "Hold"
+        action = "A scheduled frequency change is waiting for current station activity to clear."
+        warning = False
+    elif scheduler_hold:
+        severity = "ok"
+        state = "OK"
+        action = "No scheduled frequency change is waiting on this activity check."
+        warning = False
     elif stale_ok:
-        severity = "warning"
-        state = "Stale"
-        action = "Last OK check is stale; waiting for the next fresh check"
+        severity = "info"
+        state = "Not recent"
+        action = "Last known check was OK; FIO has not needed a fresh check recently"
+        warning = False
     elif warning:
         severity = "warning"
         state = "Warning"
@@ -202,7 +271,7 @@ def _item_from_snapshot(
         state = "OK"
         action = "Normal"
     action_override = str(metadata.get("action", "") or "").strip()
-    if action_override:
+    if action_override and not fldigi_busy_check and (not scheduler_hold or active_scheduler_hold):
         action = action_override
     scope = ""
     if scope_resolver is not None:
@@ -219,7 +288,7 @@ def _item_from_snapshot(
         "state": state,
         "severity": severity,
         "action": action,
-        "last_issue": _shorten_error(snapshot.get("last_error", "")),
+        "last_issue": _shorten_error(last_error) if warning or backoff else "",
         "issue_since": _format_issue_since(snapshot.get("issue_started_ts"), now=now) if warning else "",
         "cooldown": _format_cooldown(cooldown),
         "last_check": _format_age(snapshot.get("last_checked_ts"), now=now),
@@ -227,7 +296,7 @@ def _item_from_snapshot(
         "last_duration": _format_duration_ms(snapshot.get("last_duration_ms")),
         "failures": failures,
         "slow": slow,
-        "is_issue": severity != "ok",
+        "is_issue": severity in {"danger", "warning"},
         "group": "background_ingest" if str(key or "").strip().lower().startswith("background-ingest:") else "",
     }
 
@@ -256,7 +325,7 @@ def _collapse_background_ingest_ok_items(items: List[Dict[str, object]]) -> List
 
 
 def _merge_equivalent_endpoint_items(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
-    severity_rank = {"danger": 0, "warning": 1, "ok": 2}
+    severity_rank = {"danger": 0, "warning": 1, "info": 2, "ok": 3}
     merged: Dict[str, Dict[str, object]] = {}
     for item in items:
         key = _canonical_endpoint_key(item.get("key", ""))
@@ -273,6 +342,51 @@ def _merge_equivalent_endpoint_items(items: List[Dict[str, object]]) -> List[Dic
         ):
             merged[key] = item
     return list(merged.values())
+
+
+def _scheduler_event_is_issue(item: Mapping[str, object]) -> bool:
+    event_type = str(item.get("event_type", "") or "").strip().lower()
+    code = str(item.get("code", "") or "").strip().lower()
+    if code in {"fldigi_busy_check_failed", "fldigi_busy_check_queued"}:
+        return False
+    if event_type in {"failed", "hold", "skip", "watchdog", "breakaway"}:
+        return True
+    return any(token in code for token in ("failed", "error", "timeout", "busy", "backoff", "stuck"))
+
+
+def _scheduler_event_is_success(item: Mapping[str, object]) -> bool:
+    if _scheduler_event_is_issue(item):
+        return False
+    event_type = str(item.get("event_type", "") or "").strip().lower()
+    code = str(item.get("code", "") or "").strip().lower()
+    if code in {"fldigi_busy_check_failed", "fldigi_busy_check_queued"}:
+        return False
+    return event_type in {"applied", "resume", "verified", "status"} or code in {
+        "already_applied",
+        "post_apply_on_schedule",
+        "fldigi_busy_check_result",
+    }
+
+
+def _summarize_scheduler_events(events: List[Dict[str, object]], *, issue_limit: int = 24) -> List[Dict[str, object]]:
+    latest_success: Optional[Dict[str, object]] = None
+    issues: List[Dict[str, object]] = []
+    for raw in events:
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        if _scheduler_event_is_issue(item):
+            item["_station_health_kind"] = "issue"
+            issues.append(item)
+            continue
+        if latest_success is None and _scheduler_event_is_success(item):
+            item["_station_health_kind"] = "latest_success"
+            latest_success = item
+    out: List[Dict[str, object]] = []
+    if latest_success is not None:
+        out.append(latest_success)
+    out.extend(issues[: max(0, int(issue_limit or 24))])
+    return out
 
 
 def summarize_station_health(
@@ -309,7 +423,7 @@ def summarize_station_health(
     items = _merge_equivalent_endpoint_items(items)
     items.sort(
         key=lambda item: (
-            {"danger": 0, "warning": 1, "ok": 2}.get(str(item.get("severity")), 3),
+            {"danger": 0, "warning": 1, "info": 2, "ok": 3}.get(str(item.get("severity")), 4),
             str(item.get("scope", "")),
             str(item.get("dependency", "")),
         )
@@ -320,7 +434,9 @@ def summarize_station_health(
         severity = "danger"
     elif issue_items:
         severity = "warning"
-    recent_scheduler_events = load_recent_scheduler_events(limit=25) if include_scheduler_events else []
+    recent_scheduler_events = (
+        _summarize_scheduler_events(load_recent_scheduler_events(limit=100)) if include_scheduler_events else []
+    )
     return {
         "severity": severity,
         "issue_count": len(issue_items),

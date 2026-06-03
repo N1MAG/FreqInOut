@@ -1874,6 +1874,7 @@ class SchedulerEngine(QObject):
         source_upper = (source or "").upper()
         if ignore_fldigi_busy or not want_freq_change or source_upper not in {"HF", "SOP"}:
             self._clear_fldigi_busy_check_state()
+            self._clear_scheduler_health_issue("fldigi-busy")
             return False, None
         if self._manual_net_fldigi_active or self._manual_net_js8_active:
             self._record_scheduler_event(
@@ -1982,6 +1983,7 @@ class SchedulerEngine(QObject):
             reason=reason,
             hold_age_s=round(hold_age, 1),
             source=source,
+            active_hold=True,
         )
         self._record_scheduler_event(
             "hold",
@@ -2061,6 +2063,7 @@ class SchedulerEngine(QObject):
                 reason=detail_reason,
                 hold_age_s=round(hold_age, 1),
                 source=source,
+                active_hold=True,
             )
             self._record_scheduler_event(
                 "hold",
@@ -2087,6 +2090,7 @@ class SchedulerEngine(QObject):
                 reason=detail_reason,
                 hold_age_s=round(hold_age, 1),
                 source=source,
+                active_hold=True,
             )
             self._record_scheduler_event(
                 "breakaway",
@@ -2111,6 +2115,7 @@ class SchedulerEngine(QObject):
             reason=detail_reason,
             hold_age_s=round(hold_age, 1),
             source=source,
+            active_hold=True,
         )
         self._record_scheduler_event(
             "hold",
@@ -4896,9 +4901,15 @@ class SchedulerEngine(QObject):
         # Safety: avoid changing frequency while a backend is busy transmitting.
         busy_reasons = []
         ptt_state_known = bool(actual_state.flrig_ptt_known and not actual_state.flrig_ptt_stale)
-        if ptt_state_known and actual_state.flrig_ptt_active:
+        if want_freq_change and ptt_state_known and actual_state.flrig_ptt_active:
             busy_reasons.append("FLRig PTT is active")
-            self._record_scheduler_health_issue("flrig-ptt", "holding schedule change because FLRig PTT is active", source=source, frequency_hz=freq_hz)
+            self._record_scheduler_health_issue(
+                "flrig-ptt",
+                "holding schedule change because FLRig PTT is active",
+                source=source,
+                frequency_hz=freq_hz,
+                active_hold=True,
+            )
             self._record_scheduler_event(
                 "hold",
                 "flrig_ptt",

@@ -39,6 +39,12 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
 - Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
 
+## What's New in v1.2.8
+
+- Station Health now keeps scheduler history focused: one latest success plus issue rows instead of a long list of routine already-applied checks.
+- Routine scheduler holds and stale transient FLDigi busy-check notices are shown as informational instead of active station problems.
+- ControlFreq message-summary coloring is consistent for FLMsg / FLAmp files.
+
 ## What's New in v1.2.7.9
 
 - FIO now shares one JS8Call connection across scheduler, status, and net-control use, preventing JS8Net worker threads from multiplying during routine checks.
