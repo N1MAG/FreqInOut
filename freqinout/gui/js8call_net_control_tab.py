@@ -1922,7 +1922,11 @@ class JS8CallNetControlTab(QWidget):
             port = 2442
         host = (self.settings.get("js8_host", "") or "").strip() or "127.0.0.1"
         try:
-            js8net.start_net(host, port)
+            hub = self._js8_rx_hub or JS8RxHub.instance()
+            if not hub.start(host, port):
+                log.error("JS8CallNetControl: shared js8net connection could not start.")
+                return None
+            self._js8_rx_hub = hub
             self._js8_client = js8net
             self._js8_net_started = True
             return js8net

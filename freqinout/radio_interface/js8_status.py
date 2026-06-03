@@ -15,7 +15,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp
 from freqinout.core.dependency_health import get_dependency_health_registry
-from freqinout.radio_interface.js8_rx_hub import JS8RxHub
+from freqinout.radio_interface.js8_rx_hub import JS8RxHub, ensure_js8net_started
 
 log = logging.getLogger(__name__)
 
@@ -132,8 +132,10 @@ class JS8ControlClient(JS8StatusClient):
             return False
         if not self._net_started:
             try:
-                js8net.start_net(self.host, self._get_port())
-                self._net_started = True
+                self._net_started = ensure_js8net_started(self.host, self._get_port())
+                if not self._net_started:
+                    log.warning("JS8ControlClient: shared js8net connection is using a different endpoint.")
+                    return False
                 log.info("JS8ControlClient: js8net started on %s:%s", self.host, self._get_port())
             except Exception as e:
                 log.warning("JS8ControlClient: failed to start js8net: %s", e)
@@ -203,14 +205,8 @@ class JS8ControlClient(JS8StatusClient):
             return False
 
     def stop(self):
-        if js8net is None or not self._net_started:
-            return
-        try:
-            sock = getattr(js8net, "s", None)
-            if sock:
-                sock.close()
-        except Exception:
-            pass
+        # js8net is process-global and shared by the receive hub, scheduler,
+        # and JS8 Net Control. Individual clients must not close it.
         self._net_started = False
 
 

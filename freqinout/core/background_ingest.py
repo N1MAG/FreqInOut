@@ -16,7 +16,11 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.sitrep_fusion import fuse_sitreps
 from freqinout.core.sitrep_ingest import ingest_sitreps
 from freqinout.core.varac_ingest import ingest_varac
-from freqinout.core.varac_bbs_vault import run_varac_bbs_vault
+from freqinout.core.varac_bbs_vault import (
+    VaracBbsVaultRunResult,
+    build_varac_bbs_vault_activity_signature,
+    run_varac_bbs_vault,
+)
 from freqinout.core.varac_guard import run_varac_guard
 from freqinout.gui.stations_map_tab import JS8LogLinkIndexer
 
@@ -26,7 +30,10 @@ class BackgroundIngestController(QObject):
     Background, non-UI data ingest to keep DBs warm for fast tab activation.
     """
 
-    _VARAC_VAULT_ENABLED_INTERVAL_MS = 5_000
+    _VARAC_VAULT_ACTIVITY_INTERVAL_MS = 5_000
+    _VARAC_VAULT_ACTIVE_INTERVAL_MS = 5_000
+    _VARAC_VAULT_WARM_IDLE_INTERVAL_MS = 30_000
+    _VARAC_VAULT_IDLE_INTERVAL_MS = 120_000
     _VARAC_VAULT_DEGRADED_INTERVAL_MS = 60_000
     _VARAC_VAULT_DISABLED_INTERVAL_MS = 30_000
     _controller_thread_call = Signal(object)
@@ -38,6 +45,7 @@ class BackgroundIngestController(QObject):
         self._messages_timer: Optional[QTimer] = None
         self._varac_timer: Optional[QTimer] = None
         self._varac_vault_timer: Optional[QTimer] = None
+        self._varac_vault_activity_timer: Optional[QTimer] = None
         self._varac_guard_timer: Optional[QTimer] = None
         self._sitrep_timer: Optional[QTimer] = None
         self._prop_outcome_timer: Optional[QTimer] = None
@@ -54,6 +62,10 @@ class BackgroundIngestController(QObject):
         self._job_watchdog_timer: Optional[QTimer] = None
         self._health = get_dependency_health_registry()
         self._running = False
+        self._varac_vault_activity_signature: Optional[object] = None
+        self._varac_vault_no_change_runs: int = 0
+        self._varac_vault_full_interval_ms: int = self._VARAC_VAULT_ACTIVE_INTERVAL_MS
+        self._varac_vault_refresh_pending: bool = False
         self._controller_thread_call.connect(self._run_controller_thread_call)
 
     def _run_controller_thread_call(self, callback: object) -> None:
@@ -93,6 +105,12 @@ class BackgroundIngestController(QObject):
         self._varac_vault_timer = QTimer(self)
         self._varac_vault_timer.timeout.connect(self._ingest_varac_vault)
         self._update_varac_vault_timer_state()
+
+        self._varac_vault_activity_timer = QTimer(self)
+        self._varac_vault_activity_timer.setInterval(self._VARAC_VAULT_ACTIVITY_INTERVAL_MS)
+        self._varac_vault_activity_timer.timeout.connect(self._probe_varac_vault_activity)
+        if self._varac_vault_enabled():
+            self._varac_vault_activity_timer.start()
 
         self._varac_guard_timer = QTimer(self)
         self._varac_guard_timer.setInterval(90 * 1000)  # 90 seconds
@@ -141,6 +159,7 @@ class BackgroundIngestController(QObject):
             self._messages_timer,
             self._varac_timer,
             self._varac_vault_timer,
+            self._varac_vault_activity_timer,
             self._varac_guard_timer,
             self._sitrep_timer,
             self._prop_outcome_timer,
@@ -242,7 +261,7 @@ class BackgroundIngestController(QObject):
         timer.setInterval(
             self._VARAC_VAULT_DEGRADED_INTERVAL_MS
             if enabled and degraded
-            else self._VARAC_VAULT_ENABLED_INTERVAL_MS
+            else self._varac_vault_full_interval_ms
             if enabled
             else self._VARAC_VAULT_DISABLED_INTERVAL_MS
         )
@@ -252,9 +271,15 @@ class BackgroundIngestController(QObject):
             timer.start()
         elif not enabled and timer.isActive():
             timer.stop()
+        activity_timer = self._varac_vault_activity_timer
+        if activity_timer is not None:
+            if enabled and self._running and not activity_timer.isActive():
+                activity_timer.start()
+            elif not enabled and activity_timer.isActive():
+                activity_timer.stop()
 
     def refresh_runtime_settings(self) -> None:
-        self._update_varac_vault_timer_state()
+        self.request_varac_vault_refresh("settings_saved")
 
     def _submit_job(self, job_name: str, job_func: Callable[[], None]) -> None:
         if not self._running:
@@ -282,11 +307,12 @@ class BackgroundIngestController(QObject):
             self._job_futures[job_name] = future
         future.add_done_callback(lambda done, name=job_name: self._on_job_done(name, done))
 
-    def _run_job(self, job_name: str, job_func: Callable[[], None]) -> None:
+    def _run_job(self, job_name: str, job_func: Callable[[], object]) -> object:
         started_at = time.time()
         failed = False
+        result: object = None
         try:
-            job_func()
+            result = job_func()
         except Exception as e:
             failed = True
             log.debug("BackgroundIngest: %s worker failed: %s", job_name, e)
@@ -310,6 +336,7 @@ class BackgroundIngestController(QObject):
                 )
             if elapsed >= 1.0:
                 log.debug("BackgroundIngest: %s completed in %.2fs", job_name, elapsed)
+        return result
 
     def _on_job_done(self, job_name: str, future: Future) -> None:
         with self._executor_lock:
@@ -357,12 +384,15 @@ class BackgroundIngestController(QObject):
                 self._realtime_job_futures.pop(job_name, None)
                 self._job_started_at.pop(job_name, None)
                 self._job_timeout_warned.discard(job_name)
-        if job_name == "varac_vault":
-            self._queue_controller_thread_call(self._update_varac_vault_timer_state)
         try:
-            future.result()
+            result = future.result()
         except Exception as e:
             log.debug("BackgroundIngest: realtime %s future failed: %s", job_name, e)
+            result = None
+        if job_name == "varac_vault":
+            self._queue_controller_thread_call(lambda result=result: self._on_varac_vault_result(result))
+        elif job_name == "varac_vault_probe":
+            self._queue_controller_thread_call(lambda result=result: self._on_varac_vault_activity_result(result))
 
     def _job_timeout_seconds(self, job_name: str) -> float:
         if job_name in {"varac_vault", "varac_guard"}:
@@ -438,6 +468,95 @@ class BackgroundIngestController(QObject):
             return
         self._submit_realtime_job("varac_vault", self._run_varac_vault_job)
 
+    def request_varac_vault_refresh(self, reason: str = "manual") -> None:
+        self._varac_vault_no_change_runs = 0
+        self._varac_vault_full_interval_ms = self._VARAC_VAULT_ACTIVE_INTERVAL_MS
+        self._update_varac_vault_timer_state()
+        log.debug("VARAC_VAULT_CADENCE|refresh_requested|reason=%s", str(reason or "manual"))
+        if not self._running or not self._varac_vault_enabled():
+            return
+        with self._realtime_executor_lock:
+            future = self._realtime_job_futures.get("varac_vault")
+            if future is not None and not future.done():
+                self._varac_vault_refresh_pending = True
+                return
+        self._ingest_varac_vault()
+
+    def _probe_varac_vault_activity(self) -> None:
+        if not self._running or not self._varac_vault_enabled():
+            return
+        self._submit_realtime_job("varac_vault_probe", self._run_varac_vault_activity_probe)
+
+    def _run_varac_vault_activity_probe(self) -> object:
+        worker_settings = self._new_worker_settings()
+        try:
+            return build_varac_bbs_vault_activity_signature(worker_settings)
+        except Exception as e:
+            log.debug("VARAC_VAULT_CADENCE|activity_probe_failed|error=%s", e)
+            return None
+        finally:
+            worker_settings.close()
+
+    def _on_varac_vault_activity_result(self, signature: object) -> None:
+        if signature is None:
+            return
+        previous = self._varac_vault_activity_signature
+        self._varac_vault_activity_signature = signature
+        if previous is None:
+            return
+        if signature != previous:
+            log.debug(
+                "VARAC_VAULT_CADENCE|activity_changed|reason=signature|full_interval_ms=%s",
+                self._varac_vault_full_interval_ms,
+            )
+            self.request_varac_vault_refresh("activity_changed")
+
+    def _on_varac_vault_result(self, result: object) -> None:
+        if not isinstance(result, VaracBbsVaultRunResult):
+            log.debug("VARAC_VAULT_CADENCE|full_job_result_missing|idle_backoff_skipped=true")
+            self._update_varac_vault_timer_state()
+            if self._varac_vault_refresh_pending:
+                self._varac_vault_refresh_pending = False
+                self._ingest_varac_vault()
+            return
+        changed = False
+        active_session = False
+        processed = 0
+        publish_changed = False
+        state_changed = False
+        processed = int(result.processed_events or 0)
+        publish_changed = bool(result.publish_changed or result.published)
+        state_changed = bool(result.state_changed or result.unmanaged_live_files_changed)
+        active_session = bool(result.active_session or result.current_session_callsign)
+        changed = bool(processed or publish_changed or state_changed)
+        if changed or active_session:
+            self._varac_vault_no_change_runs = 0
+            self._varac_vault_full_interval_ms = self._VARAC_VAULT_ACTIVE_INTERVAL_MS
+        else:
+            self._varac_vault_no_change_runs += 1
+            self._varac_vault_full_interval_ms = (
+                self._VARAC_VAULT_IDLE_INTERVAL_MS
+                if self._varac_vault_no_change_runs >= 3
+                else self._VARAC_VAULT_WARM_IDLE_INTERVAL_MS
+            )
+            log.debug(
+                "VARAC_VAULT_CADENCE|idle_backoff|no_change_runs=%s|next_interval_ms=%s",
+                self._varac_vault_no_change_runs,
+                self._varac_vault_full_interval_ms,
+            )
+        log.debug(
+            "VARAC_VAULT_CADENCE|full_job_result|processed=%s|publish_changed=%s|state_changed=%s|active_session=%s|next_interval_ms=%s",
+            processed,
+            publish_changed,
+            state_changed,
+            active_session,
+            self._varac_vault_full_interval_ms,
+        )
+        self._update_varac_vault_timer_state()
+        if self._varac_vault_refresh_pending:
+            self._varac_vault_refresh_pending = False
+            self._ingest_varac_vault()
+
     @staticmethod
     def _job_health_key(job_name: str) -> str:
         return f"background-ingest:{str(job_name or '').strip().lower() or 'unknown'}"
@@ -454,7 +573,7 @@ class BackgroundIngestController(QObject):
         finally:
             worker_settings.close()
 
-    def _run_varac_vault_job(self) -> None:
+    def _run_varac_vault_job(self) -> object:
         worker_settings = self._new_worker_settings()
         try:
             vault_result = run_varac_bbs_vault(worker_settings)
@@ -462,8 +581,10 @@ class BackgroundIngestController(QObject):
                 int(vault_result.processed_events or 0) > 0 or bool(vault_result.published)
             ):
                 log.debug("BackgroundIngest: VarAC vault %s", vault_result.summary)
+            return vault_result
         except Exception as e:
             log.debug("BackgroundIngest: VarAC vault failed: %s", e)
+            return None
         finally:
             worker_settings.close()
 

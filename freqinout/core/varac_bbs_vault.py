@@ -197,6 +197,10 @@ class VaracBbsVaultRunResult:
     active_location_id: str
     current_session_callsign: str
     summary: str
+    state_changed: bool = False
+    publish_changed: bool = False
+    unmanaged_live_files_changed: bool = False
+    active_session: bool = False
 
 
 @dataclass(frozen=True)
@@ -796,6 +800,55 @@ def compute_default_managed_root(live_bbs_dir: object) -> str:
     return str(live_path.parent / "FIO_BBS_Vault")
 
 
+def build_varac_bbs_vault_activity_signature(settings) -> Tuple[object, ...]:
+    """Return cheap, non-consuming evidence that a full vault run may be needed."""
+
+    def stat_signature(path_value: object) -> Tuple[str, bool, int, int]:
+        if path_value is None:
+            return ("", False, 0, 0)
+        path_text = str(path_value or "").strip()
+        if not path_text:
+            return ("", False, 0, 0)
+        try:
+            path = Path(path_text)
+            stat = path.stat()
+            return (str(path), True, int(stat.st_size or 0), int(stat.st_mtime_ns or 0))
+        except Exception:
+            return (path_text, False, 0, 0)
+
+    if settings is None:
+        return ("disabled",)
+    live_bbs_dir = str(settings.get("varac_bbs_dir", "") or "").strip()
+    managed_root = compute_default_managed_root(live_bbs_dir)
+    locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
+    flamp_enabled = bool(settings.get("varac_bbs_vault_flamp_enabled", False))
+    flamp_relay_dir = str(settings.get("varac_bbs_vault_flamp_relay_dir", "") or "").strip()
+    config_keys = (
+        "varac_bbs_vault_enabled",
+        "varac_bbs_vault_default_location_id",
+        "varac_bbs_vault_locations_v1",
+        "varac_bbs_allowed_callsigns",
+        "varac_bbs_limit_access_enabled",
+        "varac_bbs_vault_flamp_enabled",
+        "varac_bbs_vault_flamp_relay_dir",
+        "varac_bbs_vault_flamp_listing_max_age_days",
+    )
+    config_payload = {key: settings.get(key, None) for key in config_keys}
+    config_signature = json.dumps(config_payload, sort_keys=True, default=str)
+    path_signatures: List[Tuple[str, bool, int, int]] = [
+        stat_signature(live_bbs_dir),
+        stat_signature(managed_root),
+        stat_signature(_resolve_varac_db_path(settings)),
+    ]
+    for log_path in resolve_varac_traffic_log_paths(settings):
+        path_signatures.append(stat_signature(log_path))
+    for location in locations:
+        path_signatures.append(stat_signature(location.source_dir))
+    if flamp_enabled:
+        path_signatures.append(stat_signature(flamp_relay_dir))
+    return (config_signature, tuple(path_signatures))
+
+
 def _managed_root_paths(managed_root: object) -> Dict[str, Path]:
     root = _resolve_path(managed_root)
     if root is None:
@@ -899,6 +952,10 @@ def write_publish_manifest(path: object, entries: Sequence[VaultPublishManifestE
     payload = [asdict(entry) for entry in entries]
     manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return str(manifest_path)
+
+
+def _publish_manifest_text(entries: Sequence[VaultPublishManifestEntry]) -> str:
+    return json.dumps([asdict(entry) for entry in entries], indent=2, sort_keys=True)
 
 
 def scan_location_files(source_dir: object) -> Tuple[List[Path], int]:
@@ -1157,7 +1214,18 @@ def _publish_manifest_entries(
             except OSError:
                 pass
 
-    write_publish_manifest(manifest_path, entries)
+    next_manifest_text = _publish_manifest_text(entries)
+    existing_manifest_text = ""
+    if manifest_path.exists():
+        try:
+            existing_manifest_text = manifest_path.read_text(encoding="utf-8")
+        except Exception:
+            existing_manifest_text = ""
+    if not manifest_path.exists() or existing_manifest_text != next_manifest_text:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(next_manifest_text, encoding="utf-8")
+    else:
+        log.debug("VARAC_VAULT_MANIFEST|unchanged|entries=%s|write_skipped=true", len(entries))
 
     unmanaged: List[str] = []
     tracked = set(next_map.keys())
@@ -2297,8 +2365,18 @@ def _persist_runtime_state(settings, state: VaultRuntimeState, summary: str) -> 
     if settings is None:
         return
     try:
-        settings.set("varac_bbs_vault_runtime_state_v1", vault_runtime_state_to_data(state))
-        settings.set("varac_bbs_vault_last_summary", summary)
+        state_data = vault_runtime_state_to_data(state)
+        current_state = settings.get("varac_bbs_vault_runtime_state_v1", {})
+        current_summary = str(settings.get("varac_bbs_vault_last_summary", "") or "")
+        wrote = False
+        if current_state != state_data:
+            settings.set("varac_bbs_vault_runtime_state_v1", state_data)
+            wrote = True
+        if current_summary != summary:
+            settings.set("varac_bbs_vault_last_summary", summary)
+            wrote = True
+        if not wrote:
+            log.debug("VARAC_VAULT_STATE|unchanged|write_skipped=true")
     except Exception as exc:
         log.debug("varac_bbs_vault: failed to persist runtime state: %s", exc)
 
@@ -3192,6 +3270,8 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
     )
     locations = load_vault_locations(settings.get("varac_bbs_vault_locations_v1", []))
     runtime_state = load_vault_runtime_state(settings.get("varac_bbs_vault_runtime_state_v1", {}))
+    initial_state_data = vault_runtime_state_to_data(runtime_state)
+    initial_unmanaged_live_files = tuple(runtime_state.unmanaged_live_files)
     global_allowed = parse_callsign_list(settings.get("varac_bbs_allowed_callsigns", "") if settings is not None else "")
     limit_access_enabled = bool(settings.get("varac_bbs_limit_access_enabled", False) if settings is not None else False)
 
@@ -3891,4 +3971,8 @@ def run_varac_bbs_vault(settings) -> VaracBbsVaultRunResult:
         active_location_id=runtime_state.current_location_id,
         current_session_callsign=runtime_state.current_session_callsign,
         summary=summary,
+        state_changed=vault_runtime_state_to_data(runtime_state) != initial_state_data,
+        publish_changed=published,
+        unmanaged_live_files_changed=tuple(runtime_state.unmanaged_live_files) != initial_unmanaged_live_files,
+        active_session=bool(runtime_state.current_session_callsign),
     )
