@@ -7,13 +7,13 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Mapping, Optional, Tuple
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.checkins_db import ensure_operator_checkins_schema
 from freqinout.core.logger import log
 from freqinout.core.varac_log_parser import parse_varac_event_timestamp_to_epoch
-from freqinout.core.varac_bbs_config import parse_callsign_list
+from freqinout.core.varac_bbs_config import base_callsign, callsigns_match, normalize_callsign, parse_callsign_list
 from freqinout.core.varac_file_action import delete_file, quarantine_file, VaracFileActionResult
 
 
@@ -67,21 +67,15 @@ class VaracGuardRunResult:
 
 
 def _normalize_call(value: object) -> str:
-    clean = str(value or "").strip().upper()
-    clean = re.sub(r"^[^A-Z0-9/]+|[^A-Z0-9/]+$", "", clean)
-    return clean
+    return normalize_callsign(value)
 
 
 def _base_call(value: object) -> str:
-    return _normalize_call(value).split("/", 1)[0]
+    return base_callsign(value)
 
 
 def _callsign_matches(candidate: object, expected: object) -> bool:
-    left = _normalize_call(candidate)
-    right = _normalize_call(expected)
-    if not left or not right:
-        return False
-    return left == right or _base_call(left) == _base_call(right)
+    return callsigns_match(candidate, expected)
 
 
 def _callsign_set_matches(candidate: object, allowed: Iterable[object]) -> bool:
@@ -133,6 +127,81 @@ def resolve_varac_traffic_log_paths(settings) -> List[Path]:
             if path.exists():
                 out.append(path)
     return out
+
+
+def _log_cursor_key(path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve())
+    except Exception:
+        return str(path)
+
+
+def _read_log_increment(
+    path: Path,
+    cursor: Mapping[str, object],
+    *,
+    initial_max_bytes: int = 262144,
+    overlap_bytes: int = 4096,
+) -> Tuple[str, dict, bool]:
+    try:
+        stat = path.stat()
+    except Exception as exc:
+        log.debug("varac_guard: failed to stat %s: %s", path, exc)
+        return "", dict(cursor or {}), False
+
+    size = int(getattr(stat, "st_size", 0) or 0)
+    inode = int(getattr(stat, "st_ino", 0) or 0)
+    device = int(getattr(stat, "st_dev", 0) or 0)
+    previous_offset = int((cursor or {}).get("offset", 0) or 0)
+    previous_inode = int((cursor or {}).get("inode", 0) or 0)
+    previous_device = int((cursor or {}).get("device", 0) or 0)
+    previous_mtime_ns = int((cursor or {}).get("mtime_ns", 0) or 0)
+    current_mtime_ns = int(getattr(stat, "st_mtime_ns", 0) or 0)
+
+    rotated = bool(
+        previous_offset
+        and (
+            size < previous_offset
+            or (previous_inode and inode and previous_inode != inode)
+            or (previous_device and device and previous_device != device)
+        )
+    )
+    if rotated:
+        start = max(0, size - max(1, int(initial_max_bytes)))
+    elif previous_offset > 0:
+        if size <= previous_offset:
+            if size == previous_offset and previous_mtime_ns and current_mtime_ns and current_mtime_ns != previous_mtime_ns:
+                start = max(0, size - max(1, int(initial_max_bytes)))
+            else:
+                return "", {
+                    "path": str(path),
+                    "offset": size,
+                    "size": size,
+                    "mtime_ns": current_mtime_ns,
+                    "inode": inode,
+                    "device": device,
+                }, True
+        else:
+            start = max(0, previous_offset - max(0, int(overlap_bytes)))
+    else:
+        start = max(0, size - max(1, int(initial_max_bytes)))
+
+    try:
+        with path.open("rb") as handle:
+            handle.seek(start)
+            text = handle.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        log.debug("varac_guard: failed to read %s: %s", path, exc)
+        return "", dict(cursor or {}), False
+
+    return text, {
+        "path": str(path),
+        "offset": size,
+        "size": size,
+        "mtime_ns": current_mtime_ns,
+        "inode": inode,
+        "device": device,
+    }, True
 
 
 def _read_tail(path: Path, max_bytes: int = 32768) -> str:
@@ -287,6 +356,40 @@ def _state_key(event: VaracTransferEvent) -> str:
     )
 
 
+def _event_to_state(event: VaracTransferEvent) -> dict:
+    return {
+        "timestamp_utc": float(event.timestamp_utc or 0.0),
+        "sender": event.sender,
+        "filename": event.filename,
+        "raw_line": event.raw_line,
+        "log_path": event.log_path,
+        "sender_source": event.sender_source,
+        "sender_candidates": list(event.sender_candidates),
+    }
+
+
+def _event_from_state(value: object) -> Optional[VaracTransferEvent]:
+    if not isinstance(value, dict):
+        return None
+    try:
+        candidates_raw = value.get("sender_candidates", [])
+        if isinstance(candidates_raw, (list, tuple)):
+            candidates = tuple(str(item or "") for item in candidates_raw if str(item or "").strip())
+        else:
+            candidates = tuple()
+        return VaracTransferEvent(
+            timestamp_utc=float(value.get("timestamp_utc", 0.0) or 0.0),
+            sender=str(value.get("sender", "") or ""),
+            filename=str(value.get("filename", "") or ""),
+            raw_line=str(value.get("raw_line", "") or ""),
+            log_path=str(value.get("log_path", "") or ""),
+            sender_source=str(value.get("sender_source", "") or ""),
+            sender_candidates=candidates,
+        )
+    except Exception:
+        return None
+
+
 def _candidate_files(incoming_dir: Path, filename: str) -> List[Path]:
     if not filename:
         return []
@@ -358,20 +461,20 @@ def _local_operator_db_path() -> Path:
 
 def _operator_history_trust_enabled(settings) -> bool:
     if settings is None:
-        return True
+        return False
     try:
         return bool(settings.get("varac_guard_allow_operator_trusted", True))
     except Exception:
-        return True
+        return False
 
 
 def _bbs_allowed_trust_enabled(settings) -> bool:
     if settings is None:
-        return True
+        return False
     try:
         return bool(settings.get("varac_guard_allow_bbs_allowed_callsigns", True))
     except Exception:
-        return True
+        return False
 
 
 def _trusted_operator_callsigns() -> List[str]:
@@ -495,6 +598,8 @@ def evaluate_varac_guard_event(
             False,
         )
 
+    # VarAC writes and moves files outside FIO's control. This mtime check is a
+    # conservative heuristic to avoid acting on an older same-name file.
     if event.timestamp_utc > 0 and float(st.st_mtime or 0.0) < (float(event.timestamp_utc) - 30.0):
         return (
             VaracGuardDecision(action="skip", reason="preexisting_file", sender=sender, filename=filename, source_path=str(src), log_path=event.log_path),
@@ -550,6 +655,18 @@ def run_varac_guard(settings, *, retry_seconds: Optional[int] = None) -> VaracGu
     state = _load_guard_state(settings)
     seen = set(str(x) for x in state.get("processed_event_keys", []) if str(x).strip())
     processed_keys: List[str] = list(state.get("processed_event_keys", [])) if isinstance(state.get("processed_event_keys", []), list) else []
+    log_cursor_map = {
+        str(key): dict(value)
+        for key, value in (state.get("log_cursors", {}) or {}).items()
+        if isinstance(value, dict)
+    } if isinstance(state.get("log_cursors", {}), dict) else {}
+    pending_records = state.get("pending_events", [])
+    pending_events: List[VaracTransferEvent] = []
+    if isinstance(pending_records, list):
+        for record in pending_records:
+            event = _event_from_state(record)
+            if event is not None:
+                pending_events.append(event)
     now_utc = dt.datetime.now(dt.timezone.utc).timestamp()
 
     scanned = 0
@@ -561,56 +678,73 @@ def run_varac_guard(settings, *, retry_seconds: Optional[int] = None) -> VaracGu
     pending = 0
     skipped = 0
     recent_decisions: List[dict] = []
+    events_by_key: dict[str, VaracTransferEvent] = {}
+    for event in pending_events:
+        key = _state_key(event)
+        if key and key not in seen:
+            events_by_key[key] = event
 
     for log_path in log_paths:
-        events = parse_varac_transfer_events(_read_tail(log_path), log_path=str(log_path))
-        for event in events:
-            scanned += 1
+        cursor_key = _log_cursor_key(log_path)
+        text, next_cursor, readable = _read_log_increment(log_path, log_cursor_map.get(cursor_key, {}))
+        if readable:
+            log_cursor_map[cursor_key] = next_cursor
+        for event in parse_varac_transfer_events(text, log_path=str(log_path)):
             key = _state_key(event)
-            if key in seen:
-                skipped += 1
-                continue
-            decision, action_result, should_mark = evaluate_varac_guard_event(
-                event,
-                settings=settings,
-                state=state,
-                now_utc=now_utc,
-                retry_seconds=retry_seconds,
+            if key and key not in seen:
+                events_by_key[key] = event
+
+    next_pending_events: List[dict] = []
+    for key, event in events_by_key.items():
+        scanned += 1
+        if key in seen:
+            skipped += 1
+            continue
+        decision, action_result, should_mark = evaluate_varac_guard_event(
+            event,
+            settings=settings,
+            state=state,
+            now_utc=now_utc,
+            retry_seconds=retry_seconds,
+        )
+        if decision.action == "allow":
+            allowed += 1
+            processed += 1
+        elif decision.action == "pending":
+            pending += 1
+            next_pending_events.append(_event_to_state(event))
+        elif decision.action == "skip":
+            skipped += 1
+        else:
+            processed += 1
+            unauthorized += 1
+            if decision.action == "delete":
+                deleted += 1
+            elif decision.action == "quarantine":
+                quarantined += 1
+        if should_mark and decision.action != "pending":
+            seen.add(key)
+            processed_keys.append(key)
+            if len(processed_keys) > 256:
+                processed_keys = processed_keys[-256:]
+        if decision.action in {"allow", "log_only", "delete", "quarantine"}:
+            recent_decisions.append(
+                {
+                    "action": decision.action,
+                    "reason": decision.reason,
+                    "sender": decision.sender,
+                    "filename": decision.filename,
+                    "log_path": decision.log_path,
+                }
             )
-            if decision.action == "allow":
-                allowed += 1
-            elif decision.action == "pending":
-                pending += 1
-            elif decision.action == "skip":
-                skipped += 1
-            else:
-                processed += 1
-                unauthorized += 1
-                if decision.action == "delete":
-                    deleted += 1
-                elif decision.action == "quarantine":
-                    quarantined += 1
-            if should_mark and decision.action != "pending":
-                seen.add(key)
-                processed_keys.append(key)
-                if len(processed_keys) > 256:
-                    processed_keys = processed_keys[-256:]
-            if decision.action in {"allow", "log_only", "delete", "quarantine"}:
-                recent_decisions.append(
-                    {
-                        "action": decision.action,
-                        "reason": decision.reason,
-                        "sender": decision.sender,
-                        "filename": decision.filename,
-                        "log_path": decision.log_path,
-                    }
-                )
-                if len(recent_decisions) > 20:
-                    recent_decisions = recent_decisions[-20:]
-            if action_result is not None:
-                log.debug("varac_guard: %s", action_result)
+            if len(recent_decisions) > 20:
+                recent_decisions = recent_decisions[-20:]
+        if action_result is not None:
+            log.debug("varac_guard: %s", action_result)
 
     state["processed_event_keys"] = processed_keys
+    state["log_cursors"] = log_cursor_map
+    state["pending_events"] = next_pending_events[-128:]
     state["last_run_utc"] = now_utc
     state["last_summary"] = {
         "scanned_events": scanned,

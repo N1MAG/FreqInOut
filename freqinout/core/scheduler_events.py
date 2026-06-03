@@ -4,7 +4,7 @@ import datetime
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
@@ -12,6 +12,7 @@ from freqinout.core.sqlite_utils import connect_sqlite
 
 
 MAX_SCHEDULER_EVENTS = 500
+_schema_initialized_paths: Set[str] = set()
 
 
 def _db_path() -> Path:
@@ -25,6 +26,9 @@ def _utc_now_iso() -> str:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    db_key = str(_db_path())
+    if db_key in _schema_initialized_paths:
+        return
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS scheduler_events (
@@ -46,6 +50,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduler_events_ts ON scheduler_events(ts_utc)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_scheduler_events_code ON scheduler_events(code)")
+    _schema_initialized_paths.add(db_key)
 
 
 def record_scheduler_event(

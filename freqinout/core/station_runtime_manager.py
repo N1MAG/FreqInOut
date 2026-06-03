@@ -8,6 +8,12 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from freqinout.core.logger import log
 from freqinout.core.multi_radio_store import MultiRadioStore, normalize_ptt_group, normalize_resource_group
+from freqinout.core.multi_rig_runtime_status import (
+    STARTUP_FRESH_DEFAULT_READY,
+    STARTUP_MIGRATED,
+    MultiRigRuntimeStatus,
+    build_multi_rig_runtime_status,
+)
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.varac_ingest import load_latest_varac_sync_status
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
@@ -821,14 +827,44 @@ class StationRuntimeManager:
         self._varac_cluster_members_by_device: Dict[int, Dict[str, Any]] = {}
         self._varac_sync_by_source: Dict[str, Dict[str, Any]] = {}
         self._active_profile_swap: Optional[Dict[str, Any]] = None
+        self._runtime_status: Optional[MultiRigRuntimeStatus] = None
 
-    def sync_with_store(self) -> None:
+    def invalidate_runtime_status(self) -> None:
+        self._runtime_status = None
+
+    def sync_with_store(
+        self,
+        runtime_status: Optional[MultiRigRuntimeStatus] = None,
+        *,
+        refresh_runtime_status: bool = False,
+    ) -> None:
         settings_reload = getattr(self.settings, "reload", None)
         if callable(settings_reload):
             try:
                 settings_reload()
             except Exception:
                 pass
+
+        if runtime_status is None:
+            if refresh_runtime_status or self._runtime_status is None:
+                runtime_status = build_multi_rig_runtime_status(self.store)
+            else:
+                runtime_status = self._runtime_status
+        self._runtime_status = runtime_status
+        if runtime_status.startup_mode not in {STARTUP_FRESH_DEFAULT_READY, STARTUP_MIGRATED}:
+            if self._runtimes:
+                for runtime in list(self._runtimes.values()):
+                    runtime.stop()
+                self._runtimes.clear()
+            self._active_profile_ids = []
+            self._primary_device_id = None
+            self._rf_conflict_policies = []
+            self._sdr_follow_policies = []
+            self._varac_clusters = {}
+            self._varac_cluster_members_by_device = {}
+            self._varac_sync_by_source = {}
+            self._active_profile_swap = None
+            return
 
         active_profiles = list(self.store.list_runtime_active_device_profiles())
         primary_profile = self.store.get_runtime_primary_device_profile()
@@ -1341,6 +1377,9 @@ class StationRuntimeManager:
         if runtime is None:
             return None
         return dict(runtime.profile)
+
+    def runtime_status(self) -> Optional[MultiRigRuntimeStatus]:
+        return self._runtime_status
 
     def primary_runtime_signature(self) -> tuple[object, ...]:
         runtime = self.get_primary_runtime()

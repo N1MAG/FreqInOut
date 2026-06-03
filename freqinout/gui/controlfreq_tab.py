@@ -45,7 +45,8 @@ from freqinout.core.schedule_targeting import (
     schedule_row_matches_target_context,
 )
 from freqinout.core.sqlite_utils import connect_sqlite, fetch_all, rows_to_dicts, table_exists
-from freqinout.core.software_status_service import SoftwareStatusService, PROGRAM_PATH_KEYS
+from freqinout.core.dependency_status_service import get_dependency_status_service
+from freqinout.core.software_status_service import PROGRAM_PATH_KEYS
 from freqinout.core.station_readiness import (
     build_station_readiness_report,
     format_readiness_issue,
@@ -178,7 +179,11 @@ class ControlFreqTab(QWidget):
         self.status_labels: Dict[str, QLabel] = {}
         self._status_text_labels: Dict[str, QLabel] = {}
         self._status_checked_at: Dict[str, str] = {}
-        self._status_service = SoftwareStatusService(self.settings)
+        self._status_service = get_dependency_status_service(self.settings)
+        try:
+            self._status_service.snapshot_changed.connect(self._on_dependency_status_snapshot_changed)
+        except Exception:
+            pass
         self._multi_radio_store = MultiRadioStore()
         self._readiness_banner_dismissed = False
         self._readiness_banner_digest = ""
@@ -1707,17 +1712,26 @@ class ControlFreqTab(QWidget):
         self._refresh_running_status()
         self._refresh_scheduler_strip()
 
+    def _on_dependency_status_snapshot_changed(self, _snapshot: object) -> None:
+        if not self._active:
+            return
+        self._refresh_running_status()
+
     def _refresh_running_status(self) -> None:
         theme = self._theme()
         visible_keys = [key for key, _label in self._current_visible_status_items()]
         if visible_keys != list(self.status_labels.keys()):
             self._rebuild_status_indicators()
-        snapshot = self._status_service.status_snapshot()
-        checked_at = dt.datetime.now().strftime("%H:%M:%S")
+        snapshot = self._status_service.software_status_snapshot()
         for program_name, lbl in self.status_labels.items():
             info = snapshot.get(program_name, {})
             state = str(info.get("state", "idle"))
             base_tooltip = str(info.get("tooltip", "Not running"))
+            checked_at_ts = float(info.get("checked_at") or 0.0)
+            if checked_at_ts:
+                checked_at = dt.datetime.fromtimestamp(checked_at_ts).strftime("%H:%M:%S")
+            else:
+                checked_at = "pending"
             configured = ""
             key = PROGRAM_PATH_KEYS.get(program_name)
             if key:

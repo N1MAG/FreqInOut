@@ -31,6 +31,10 @@ LAUNCH_APP_ORDER: List[str] = [
 JS8_DEPENDENT_APPS = {"JS8Spotter", "CommStat"}
 DEFAULT_VARAC_SETTLE_DELAY_SEC = 12.0
 DEFAULT_JS8CALL_DEPENDENT_DELAY_SEC = 4.0
+DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC = 90
+LAUNCH_READINESS_INITIAL_POLL_MS = 2000
+LAUNCH_READINESS_RELAXED_POLL_MS = 5000
+LAUNCH_READINESS_RELAX_AFTER_SEC = 30.0
 
 
 LAUNCH_APP_META: Dict[str, Dict[str, Any]] = {
@@ -106,9 +110,9 @@ class LaunchOrchestrator(QObject):
         self._current_name: Optional[str] = None
         self._current_cmd: Optional[List[str]] = None
         self._current_started_monotonic = 0.0
-        self._wait_timeout_sec = 30
+        self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
         self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(500)
+        self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
         self._poll_timer.timeout.connect(self._poll_current_readiness)
         self._migrate_if_needed()
 
@@ -230,7 +234,10 @@ class LaunchOrchestrator(QObject):
             "launch_control_items": normalized,
             "launch_control_enabled": bool(launch_all_with_startup),
             "launch_control_migrated_v1": True,
-            "launch_readiness_timeout_sec": int(self.settings.get("launch_readiness_timeout_sec", 30) or 30),
+            "launch_readiness_timeout_sec": int(
+                self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
+                or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+            ),
         }
         for item in normalized:
             name = str(item.get("name", "")).strip()
@@ -312,7 +319,10 @@ class LaunchOrchestrator(QObject):
             "launch_control_items": defaults,
             "launch_control_enabled": bool(self.settings.get("launch_control_enabled", True)),
             "launch_control_migrated_v1": True,
-            "launch_readiness_timeout_sec": int(self.settings.get("launch_readiness_timeout_sec", 30) or 30),
+            "launch_readiness_timeout_sec": int(
+                self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
+                or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+            ),
         }
         for item in defaults:
             name = str(item.get("name", "")).strip()
@@ -400,9 +410,12 @@ class LaunchOrchestrator(QObject):
         self._current_cmd = None
         self._current_started_monotonic = 0.0
         try:
-            self._wait_timeout_sec = int(self.settings.get("launch_readiness_timeout_sec", 30) or 30)
+            self._wait_timeout_sec = int(
+                self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
+                or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+            )
         except Exception:
-            self._wait_timeout_sec = 30
+            self._wait_timeout_sec = DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
         self.sequence_started.emit({"trigger": trigger, "queue": list(queue)})
         self._schedule_advance_queue(0)
         return True
@@ -428,6 +441,7 @@ class LaunchOrchestrator(QObject):
             self._current_name = name
             self._current_cmd = None
             self._current_started_monotonic = time.monotonic()
+            self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
             self._poll_timer.start()
             return
         cmd, cmd_desc = self._resolve_launch_command(name)
@@ -457,6 +471,7 @@ class LaunchOrchestrator(QObject):
             self._current_name = name
             self._current_cmd = cmd
             self._current_started_monotonic = time.monotonic()
+            self._poll_timer.setInterval(LAUNCH_READINESS_INITIAL_POLL_MS)
             self._poll_timer.start()
         except Exception as e:
             log.error("LaunchOrchestrator: failed launching %s via %s: %s", name, cmd_desc, e)
@@ -479,6 +494,13 @@ class LaunchOrchestrator(QObject):
             self._schedule_advance_queue(0)
             return
         elapsed = max(0.0, time.monotonic() - self._current_started_monotonic)
+        desired_interval = (
+            LAUNCH_READINESS_RELAXED_POLL_MS
+            if elapsed >= LAUNCH_READINESS_RELAX_AFTER_SEC
+            else LAUNCH_READINESS_INITIAL_POLL_MS
+        )
+        if self._poll_timer.interval() != desired_interval:
+            self._poll_timer.setInterval(desired_interval)
         if self._program_ready_for_sequence(name):
             self._poll_timer.stop()
             delay_sec = self._post_ready_settle_delay_seconds(name)

@@ -535,6 +535,7 @@ class StationsMapTab(QWidget):
         self._map_last_event_ts: float = 0.0
         self._map_marker_count: int = 0
         self._map_link_count: int = 0
+        self._app_active: bool = True
         self.prop_overlay_enabled: bool = False
         self.prop_adaptive_enabled: bool = True
         self.prop_mode: str = "blended"
@@ -718,7 +719,8 @@ class StationsMapTab(QWidget):
         self._js8_timer = QTimer(self)
         self._js8_timer.setInterval(5 * 60 * 1000)  # 5 minutes
         self._js8_timer.timeout.connect(lambda: self._auto_ingest_and_refresh(initial=False))
-        self._js8_timer.start()
+        if self._map_visible and self._app_active and not self._is_shutting_down:
+            self._js8_timer.start()
         # Start display refresh timer (separate from ingest) using selected interval
         # JS8 RX live ingestion timer
         self._start_js8_rx_listener()
@@ -880,6 +882,13 @@ class StationsMapTab(QWidget):
         if self._is_shutting_down:
             return
         requested_rank = self._refresh_level_rank(level)
+        if not self._app_active:
+            self._map_dirty = True
+            self._pending_refresh_level = max(self._pending_refresh_level, requested_rank)
+            self._pending_refresh_reason = reason or self._pending_refresh_reason
+            self._pending_refresh_preserve_view = preserve_view
+            self._emit_map_event("render_deferred_inactive", level=self._refresh_level_name(requested_rank), reason=reason)
+            return
         if not self._map_visible:
             self._map_dirty = True
             self._pending_refresh_level = max(self._pending_refresh_level, requested_rank)
@@ -915,7 +924,7 @@ class StationsMapTab(QWidget):
         self._pending_refresh_reason = ""
         self._pending_refresh_preserve_view = True
         self._render_pending = False
-        if not self._map_visible:
+        if not self._map_visible or not self._app_active:
             self._map_dirty = True
             return
         if self._map_page_loading:
@@ -1077,6 +1086,11 @@ class StationsMapTab(QWidget):
             if self._js8_timer is not None:
                 self._js8_timer.stop()
             return
+        if not self._app_active:
+            self._map_dirty = True
+            self._set_map_runtime_state("warming", "Preparing the map view.")
+            self._emit_map_event("activation_deferred_inactive")
+            return
         if self._map_visible and not self._ingest_started:
             self._deferred_initial_ingest_pending = True
             self._maybe_start_map_ingest()
@@ -1086,6 +1100,21 @@ class StationsMapTab(QWidget):
             self._set_map_runtime_state("warming", "Preparing the map view and refreshing station data.")
             self._emit_map_event("activation_started")
             self._map_dirty = True
+            QTimer.singleShot(0, self._on_map_visible_deferred)
+
+    def set_app_active(self, active: bool) -> None:
+        self._app_active = bool(active)
+        if not self._app_active:
+            self._map_dirty = True
+            if self._js8_timer is not None:
+                self._js8_timer.stop()
+            self._emit_map_event("ui_paused_inactive")
+            return
+        if self._map_visible and not self._is_shutting_down:
+            if self._js8_timer is not None and self._ingest_started and not self._js8_timer.isActive():
+                self._js8_timer.start()
+            self._set_map_runtime_state("warming", "Resuming map view.")
+            self._emit_map_event("ui_resumed")
             QTimer.singleShot(0, self._on_map_visible_deferred)
 
     def _on_js8_rx_messages(self, messages: List[dict]) -> None:
@@ -1201,6 +1230,10 @@ class StationsMapTab(QWidget):
         Background ingest and refresh map. Used on timer and manual refresh.
         """
         if self._is_shutting_down:
+            return
+        if not self._app_active:
+            self._map_dirty = True
+            self._emit_map_event("ingest_deferred_inactive")
             return
         since = None
         if initial:
@@ -5511,14 +5544,19 @@ class StationsMapTab(QWidget):
 
     def prepare_webview_for_first_show(self) -> bool:
         """
-        Create the map webview while the tab is still hidden (after WebEngine
-        process prewarm) so the first visible Map switch is less disruptive.
+        Create the map webview only when the tab is visible and the app is
+        active. This avoids hidden-tab WebEngine churn during wake/sleep and
+        help-dialog teardown, while keeping the normal first visible load.
         """
+        if not self._app_active or not self._map_visible:
+            self._map_dirty = True
+            self._emit_map_event("webview_prepare_deferred", reason="inactive_or_hidden")
+            return False
         return self._ensure_web_view()
 
     # ------------- Map rendering ------------- #
     def _render_map(self, preserve_view: bool = True):
-        if not self._map_visible:
+        if not self._map_visible or not self._app_active:
             self._map_dirty = True
             return
         if self._map_page_loading:
@@ -5568,7 +5606,7 @@ class StationsMapTab(QWidget):
                 if self._map_stack is not None:
                     self._map_stack.setCurrentIndex(0)
                 if self._map_loading_label is not None:
-                    self._map_loading_label.setText("Loading map...")
+                    self._map_loading_label.setText("Preparing map...")
                 path = self._write_map_html(html)
                 if path is not None:
                     self._map_file = path
@@ -6165,6 +6203,10 @@ class StationsMapTab(QWidget):
     def _on_map_visible_deferred(self) -> None:
         if not self._map_visible or self._is_shutting_down:
             return
+        if not self._app_active:
+            self._map_dirty = True
+            self._set_map_runtime_state("warming", "Preparing the map view.")
+            return
         self._ensure_initial_data_loaded()
         if not self._ensure_web_view():
             self._enter_map_degraded("Qt WebEngine is not available for the embedded map preview.", reason="webengine_missing")
@@ -6192,6 +6234,9 @@ class StationsMapTab(QWidget):
         sitrep_summary_group: str = "",
     ) -> None:
         if self.web is None:
+            return
+        if not self._map_visible or not self._app_active:
+            self._map_dirty = True
             return
         if self._map_page_loading or not self._map_initialized:
             self._pending_map_payload = {

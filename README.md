@@ -41,6 +41,7 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 
 ## What's New in v1.2.6.1
 
+- CommStat items deleted from Messages are now hidden from FIO with a durable local record, so they stay hidden after refresh or restart without deleting anything from CommStat itself.
 - Resume Schedule now forces the active operating plan back into FLDigi mode/offset enforcement, so a wrong FLDigi offset is corrected instead of treated as notify-only drift.
 - Station Health now includes recent scheduler decisions, showing whether FIO applied the schedule, held for traffic, skipped because automation was disabled/manual, hit control backoff, found bad schedule data, or stopped for multi-rig coordination protection.
 - FLDigi RX-busy schedule holds still protect live receive activity, but after 3 minutes FIO performs a fresh recheck and records the authoritative break-away before applying the schedule.

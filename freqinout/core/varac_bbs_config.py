@@ -2,10 +2,29 @@ from __future__ import annotations
 
 import configparser
 import json
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import List, Mapping, Optional
+
+
+def normalize_callsign(value: object) -> str:
+    clean = str(value or "").strip().upper()
+    clean = re.sub(r"^[^A-Z0-9/]+|[^A-Z0-9/]+$", "", clean)
+    return clean
+
+
+def base_callsign(value: object) -> str:
+    return normalize_callsign(value).split("/", 1)[0]
+
+
+def callsigns_match(candidate: object, expected: object) -> bool:
+    left = normalize_callsign(candidate)
+    right = normalize_callsign(expected)
+    if not left or not right:
+        return False
+    return left == right or base_callsign(left) == base_callsign(right)
 
 
 def parse_varac_bool(value: object, default: bool = False) -> bool:
@@ -25,8 +44,7 @@ def parse_callsign_list(value: object) -> List[str]:
         raw = str(value or "")
         tokens = raw.replace("\n", ",").replace(";", ",").split(",")
     for token in tokens:
-        clean = str(token or "").strip().upper()
-        clean = "".join(ch for ch in clean if ch.isalnum() or ch == "/")
+        clean = normalize_callsign(token)
         if clean:
             parts.append(clean)
     seen: set[str] = set()

@@ -11,6 +11,10 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
 from freqinout.core.message_ingest import MessageIngestor
+from freqinout.core.multi_rig_runtime_status import (
+    SCOPE_ALL_ACTIVE_RUNTIME,
+    build_multi_rig_runtime_status,
+)
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.peer_schedule_infer import infer_peer_schedules
 from freqinout.core.propagation_outcome_ingest import ingest_propagation_outcomes
@@ -86,6 +90,9 @@ class BackgroundIngestController(QObject):
         self._realtime_executor_lock = threading.RLock()
         self._realtime_job_futures: Dict[str, Future] = {}
         self._job_skipped_counts: Dict[str, int] = {}
+        self._job_started_at: Dict[str, float] = {}
+        self._job_timeout_warned: set[str] = set()
+        self._job_watchdog_timer: Optional[QTimer] = None
         self._health = get_dependency_health_registry()
         self._running = False
         self._controller_thread_call.connect(self._run_controller_thread_call)
@@ -151,6 +158,11 @@ class BackgroundIngestController(QObject):
         self._peer_sched_timer.timeout.connect(self._infer_peer_schedules)
         self._peer_sched_timer.start()
 
+        self._job_watchdog_timer = QTimer(self)
+        self._job_watchdog_timer.setInterval(5000)
+        self._job_watchdog_timer.timeout.connect(self._check_long_running_jobs)
+        self._job_watchdog_timer.start()
+
         # Initial staggered ingest
         if initial_stagger:
             QTimer.singleShot(2000, self._ingest_js8_links)
@@ -174,6 +186,7 @@ class BackgroundIngestController(QObject):
             self._sitrep_timer,
             self._prop_outcome_timer,
             self._peer_sched_timer,
+            self._job_watchdog_timer,
         ):
             if t:
                 t.stop()
@@ -244,6 +257,9 @@ class BackgroundIngestController(QObject):
     def _active_varac_vault_profiles(self) -> list[Dict[str, object]]:
         try:
             store = MultiRadioStore()
+            runtime_status = build_multi_rig_runtime_status(store)
+            if runtime_status.background_ingest_scope != SCOPE_ALL_ACTIVE_RUNTIME:
+                return []
             profiles = [dict(row) for row in store.list_runtime_active_device_profiles()]
         except Exception:
             return []
@@ -330,6 +346,8 @@ class BackgroundIngestController(QObject):
                 log.debug("BackgroundIngest: job already running, skipping trigger: %s", job_name)
                 return
             executor = self._ensure_executor()
+            self._job_started_at[job_name] = time.time()
+            self._job_timeout_warned.discard(job_name)
             future = executor.submit(self._run_job, job_name, job_func)
             self._job_futures[job_name] = future
         future.add_done_callback(lambda done, name=job_name: self._on_job_done(name, done))
@@ -358,7 +376,7 @@ class BackgroundIngestController(QObject):
                     health_key,
                     owner="BackgroundIngest",
                     duration_ms=elapsed_ms,
-                    slow_ms=5000.0,
+                    slow_ms=self._job_success_slow_ms(job_name),
                 )
             if elapsed >= 1.0:
                 log.debug("BackgroundIngest: %s completed in %.2fs", job_name, elapsed)
@@ -368,6 +386,8 @@ class BackgroundIngestController(QObject):
             current = self._job_futures.get(job_name)
             if current is future:
                 self._job_futures.pop(job_name, None)
+                self._job_started_at.pop(job_name, None)
+                self._job_timeout_warned.discard(job_name)
         try:
             future.result()
         except Exception as e:
@@ -394,6 +414,8 @@ class BackgroundIngestController(QObject):
                 self._job_skipped_counts[job_name] = self._job_skipped_counts.get(job_name, 0) + 1
                 return
             executor = self._ensure_realtime_executor()
+            self._job_started_at[job_name] = time.time()
+            self._job_timeout_warned.discard(job_name)
             future = executor.submit(self._run_job, job_name, job_func)
             self._realtime_job_futures[job_name] = future
         future.add_done_callback(lambda done, name=job_name: self._on_realtime_job_done(name, done))
@@ -403,12 +425,40 @@ class BackgroundIngestController(QObject):
             current = self._realtime_job_futures.get(job_name)
             if current is future:
                 self._realtime_job_futures.pop(job_name, None)
+                self._job_started_at.pop(job_name, None)
+                self._job_timeout_warned.discard(job_name)
         if job_name == "varac_vault":
             self._queue_controller_thread_call(self._update_varac_vault_timer_state)
         try:
             future.result()
         except Exception as e:
             log.debug("BackgroundIngest: realtime %s future failed: %s", job_name, e)
+
+    def _job_timeout_seconds(self, job_name: str) -> float:
+        if job_name in {"varac_vault", "varac_guard"}:
+            return 30.0
+        return 90.0
+
+    def _job_success_slow_ms(self, job_name: str) -> float:
+        if job_name in {"varac_vault", "varac_guard"}:
+            return max(5000.0, self._job_timeout_seconds(job_name) * 2000.0)
+        return 5000.0
+
+    def _check_long_running_jobs(self) -> None:
+        now = time.time()
+        for job_name, started_at in list(self._job_started_at.items()):
+            threshold = self._job_timeout_seconds(job_name)
+            elapsed = max(0.0, now - float(started_at or 0.0))
+            if elapsed < threshold or job_name in self._job_timeout_warned:
+                continue
+            self._job_timeout_warned.add(job_name)
+            self._health.record_failure(
+                self._job_health_key(job_name),
+                owner="BackgroundIngest",
+                error=f"job running longer than {int(threshold)}s",
+                duration_ms=elapsed * 1000.0,
+            )
+            log.warning("BackgroundIngest: %s has been running for %.1fs", job_name, elapsed)
 
     def _ingest_js8_links(self) -> None:
         self._submit_job("js8_links", self._run_js8_links_job)

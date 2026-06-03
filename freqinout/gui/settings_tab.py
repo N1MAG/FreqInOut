@@ -61,7 +61,12 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.config_paths import get_fldigi_checkin_dir, get_config_dir
 from freqinout.core.local_ops_store import get_all_operators as get_local_operators
 from freqinout.core.system_timezone import detect_system_timezone_name
-from freqinout.core.launch_orchestrator import LaunchOrchestrator, LAUNCH_APP_ORDER
+from freqinout.core.launch_orchestrator import (
+    DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC,
+    LAUNCH_APP_ORDER,
+    LaunchOrchestrator,
+)
+from freqinout.core.dependency_status_service import get_dependency_status_service
 from freqinout.core.software_path_detector import SoftwarePathDetector, PathDetectionResult
 from freqinout.core.software_status_service import SoftwareStatusService
 from freqinout.core.gpg_tools import (
@@ -509,7 +514,12 @@ class SettingsTab(QWidget):
         self._op_group_condition_sync = False
         self._op_group_rows_by_group: Dict[str, List[int]] = {}
         self.loading_label: QLabel | None = None
-        self._status_service = SoftwareStatusService(self.settings)
+        self._status_service = get_dependency_status_service(self.settings)
+        self._software_status_probe = SoftwareStatusService(self.settings)
+        try:
+            self._status_service.snapshot_changed.connect(self._on_dependency_status_snapshot_changed)
+        except Exception:
+            pass
         self.launch_orchestrator = LaunchOrchestrator(self.settings, self)
         self.multi_radio_store = MultiRadioStore()
 
@@ -6774,7 +6784,10 @@ class SettingsTab(QWidget):
         )
         data["launch_control_enabled"] = bool(self.launch_all_with_startup_chk.isChecked())
         data["launch_control_migrated_v1"] = True
-        data["launch_readiness_timeout_sec"] = int(self.settings.get("launch_readiness_timeout_sec", 30) or 30)
+        data["launch_readiness_timeout_sec"] = int(
+            self.settings.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC)
+            or DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC
+        )
         startup_by_name = {
             str(item.get("name", "")).strip(): bool(item.get("startup", False))
             for item in data["launch_control_items"]
@@ -6867,7 +6880,10 @@ class SettingsTab(QWidget):
                 "launch_control_items": data.get("launch_control_items", []),
                 "launch_control_enabled": data.get("launch_control_enabled", True),
                 "launch_control_migrated_v1": data.get("launch_control_migrated_v1", True),
-                "launch_readiness_timeout_sec": data.get("launch_readiness_timeout_sec", 30),
+                "launch_readiness_timeout_sec": data.get(
+                    "launch_readiness_timeout_sec",
+                    DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC,
+                ),
                 "operating_groups": data.get("operating_groups", []),
                 "local_net_profiles": data.get("local_net_profiles", []),
             }
@@ -6914,7 +6930,10 @@ class SettingsTab(QWidget):
             self.settings.set("launch_control_items", data.get("launch_control_items", []))
             self.settings.set("launch_control_enabled", data.get("launch_control_enabled", True))
             self.settings.set("launch_control_migrated_v1", data.get("launch_control_migrated_v1", True))
-            self.settings.set("launch_readiness_timeout_sec", data.get("launch_readiness_timeout_sec", 30))
+            self.settings.set(
+                "launch_readiness_timeout_sec",
+                data.get("launch_readiness_timeout_sec", DEFAULT_LAUNCH_READINESS_TIMEOUT_SEC),
+            )
             for prog_name, meta in self.PROGRAMS.items():
                 auto_key = meta["autostart_key"]
                 if auto_key:
@@ -13249,15 +13268,20 @@ class SettingsTab(QWidget):
 
     def _program_is_running(self, program_name: str) -> bool:
         try:
-            return bool(self._status_service.program_is_running(program_name))
+            return bool(self._software_status_probe.program_is_running(program_name))
         except Exception:
             return False
 
     def _find_process_exe(self, program_name: str) -> Optional[str]:
         try:
-            return self._status_service.find_process_exe(program_name)
+            return self._software_status_probe.find_process_exe(program_name)
         except Exception:
             return None
+
+    def _on_dependency_status_snapshot_changed(self, _snapshot: object) -> None:
+        if not self._active:
+            return
+        self._refresh_running_status(force=True)
 
     def _refresh_running_status(self, force: bool = False):
         _perf_t0 = time.perf_counter()
@@ -13265,44 +13289,7 @@ class SettingsTab(QWidget):
         visible_keys = [key for key, _label in self._current_visible_status_items()]
         if visible_keys != list(self.status_labels.keys()):
             self._rebuild_status_indicators()
-        projected = self.settings.all()
-        port_override: Optional[int] = None
-        flrig_port_override: Optional[int] = None
-        fldigi_host_override: Optional[str] = None
-        fldigi_port_override: Optional[int] = None
-        try:
-            host_txt = str(projected.get("js8_host", "") or "").strip()
-            host_override = host_txt or "127.0.0.1"
-        except Exception:
-            host_override = "127.0.0.1"
-        try:
-            txt = str(projected.get("js8_port", "") or "").strip()
-            port_override = int(txt) if txt else None
-        except Exception:
-            port_override = None
-        try:
-            txt = str(projected.get("flrig_port", "") or "").strip()
-            flrig_port_override = int(txt) if txt else None
-        except Exception:
-            flrig_port_override = None
-        try:
-            host_txt = str(projected.get("fldigi_host", "") or "").strip()
-            fldigi_host_override = host_txt or self._resolved_fldigi_host_value(projected)
-        except Exception:
-            fldigi_host_override = self._resolved_fldigi_host_value(projected)
-        try:
-            txt = str(projected.get("fldigi_port", "") or "").strip()
-            fldigi_port_override = int(txt) if txt else None
-        except Exception:
-            fldigi_port_override = None
-        status_sig: Tuple[object, ...] = (
-            tuple(visible_keys),
-            host_override,
-            port_override,
-            flrig_port_override,
-            fldigi_host_override,
-            fldigi_port_override,
-        )
+        status_sig: Tuple[object, ...] = (tuple(visible_keys),)
         now_ts = time.time()
         if (
             not force
@@ -13311,13 +13298,7 @@ class SettingsTab(QWidget):
             < float(self._running_status_refresh_interval_sec)
         ):
             return
-        snapshot = self._status_service.status_snapshot(
-            port_override=port_override,
-            host_override=host_override,
-            flrig_port_override=flrig_port_override,
-            fldigi_host_override=fldigi_host_override,
-            fldigi_port_override=fldigi_port_override,
-        )
+        snapshot = self._status_service.software_status_snapshot()
         self._last_running_status_sig = status_sig
         self._last_running_status_refresh_ts = now_ts
         for program_name, lbl in self.status_labels.items():
@@ -13396,7 +13377,7 @@ class SettingsTab(QWidget):
         except Exception:
             port_override = None
         try:
-            return bool(self._status_service.js8_api_reachable(port_override=port_override, host_override=host_override))
+            return bool(self._software_status_probe.js8_api_reachable(port_override=port_override, host_override=host_override))
         except Exception:
             return False
 

@@ -12,8 +12,10 @@ from freqinout.core.config_paths import get_config_dir
 from freqinout.core.sqlite_utils import connect_sqlite
 from freqinout.core.system_timezone import detect_system_timezone_name
 from freqinout.core.multi_radio_store import (
-    ensure_default_multi_radio_records,
+    detect_existing_fio_usage,
+    ensure_multi_rig_migration,
     ensure_multi_radio_settings_schema,
+    is_multi_rig_migration_current,
     mirror_legacy_settings_into_runtime_active_device,
 )
 
@@ -40,11 +42,28 @@ class SettingsManager:
         self._last_timezone_sync_monotonic = 0.0
 
         self._init_db()
-        self._maybe_migrate_from_json()
+        legacy_config_imported = self._maybe_migrate_from_json()
         self.reload()
+        existing_fio_usage = detect_existing_fio_usage(
+            self._conn,
+            self._data,
+            legacy_config_exists=legacy_config_imported,
+        )
         self._purge_legacy_autoquery_keys()
-        ensure_default_multi_radio_records(self._conn, self._data)
-        self.reload()
+        if is_multi_rig_migration_current(self._conn):
+            log.debug("SettingsManager: multi-rig migration marker is current.")
+        elif existing_fio_usage:
+            log.info(
+                "SettingsManager: existing FIO configuration detected; multi-rig migration remains deferred."
+            )
+        else:
+            result = ensure_multi_rig_migration(self._conn, self._data)
+            log.info(
+                "SettingsManager: initialized fresh multi-rig defaults (applied=%s, warnings=%s).",
+                result.applied,
+                ", ".join(result.warnings) if result.warnings else "none",
+            )
+            self.reload()
         self._sync_system_timezone(force=True)
 
     # ---------- internal I/O ---------- #
@@ -53,23 +72,25 @@ class SettingsManager:
         self._conn = connect_sqlite(self.db_path)
         ensure_multi_radio_settings_schema(self._conn)
 
-    def _maybe_migrate_from_json(self) -> None:
+    def _maybe_migrate_from_json(self) -> bool:
         """
         If the kv table is empty and a legacy config.json exists, import it once.
         """
         cur = self._conn.execute("SELECT COUNT(*) FROM kv")
         count = cur.fetchone()[0]
         if count:
-            return
+            return False
         legacy = self.config_dir / "config.json"
         if not legacy.exists():
-            return
+            return False
         try:
             data = json.loads(legacy.read_text(encoding="utf-8") or "{}")
             self._bulk_write(data)
             log.info("SettingsManager: migrated legacy config.json into %s", self.db_path)
+            return True
         except Exception as e:
             log.error("SettingsManager: migration from config.json failed: %s", e)
+            return False
 
     def _bulk_write(self, data: Dict[str, Any]) -> None:
         payload = [(k, json.dumps(v)) for k, v in data.items()]

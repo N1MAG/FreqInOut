@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 from freqinout.core.multi_radio_store import (
+    CURRENT_MULTI_RIG_MIGRATION_VERSION,
+    MULTI_RIG_MIGRATION_VERSION_KEY,
     MultiRadioStore,
+    SETTINGS_TABLE_SPECS,
+    ensure_multi_rig_migration,
     ensure_default_multi_radio_records,
     settings_db_path,
 )
@@ -49,6 +53,7 @@ def test_settings_manager_seeds_default_multi_rig_records(monkeypatch, tmp_path)
     assignments = store.list_assignments()
 
     assert settings.db_path == settings_db_path()
+    assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
     assert len(devices) == 1
     assert devices[0]["system_key"] == "default_device"
     assert devices[0]["name"] == "Default Radio"
@@ -76,7 +81,7 @@ def test_settings_manager_seeds_default_multi_rig_records(monkeypatch, tmp_path)
     assert devices[0]["varac_node_id"] == varac_nodes[0]["id"]
 
 
-def test_default_seed_reflects_legacy_settings(monkeypatch, tmp_path):
+def test_existing_legacy_settings_wait_for_explicit_migration(monkeypatch, tmp_path):
     cfg_root = tmp_path / "profile"
     monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
 
@@ -99,6 +104,16 @@ def test_default_seed_reflects_legacy_settings(monkeypatch, tmp_path):
     settings = SettingsManager()
     store = MultiRadioStore(settings_db_path())
 
+    assert store.list_device_profiles() == []
+    assert store.list_operating_profiles() == []
+    assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) is None
+
+    result = ensure_multi_rig_migration(settings._conn, settings.all())  # type: ignore[arg-type]
+    settings.reload()
+
+    assert result.applied is True
+    assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
+
     devices = store.list_device_profiles()
     operating = store.list_operating_profiles()
     assert len(devices) == 1
@@ -114,6 +129,233 @@ def test_default_seed_reflects_legacy_settings(monkeypatch, tmp_path):
     assert len(operating) == 1
     assert operating[0]["scheduler_enabled"] == 0
     assert operating[0]["use_launch_control"] == 0
+
+
+def test_deferred_legacy_writes_do_not_create_multi_rig_records(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    db_path = cfg_root / "config" / "freqinout.db"
+    _insert_kv(db_path, {"control_via": "FLRig", "flrig_port": 12345})
+
+    settings = SettingsManager()
+    settings.set("js8_port", 2555)
+
+    store = MultiRadioStore(settings_db_path())
+    assert settings.get("js8_port") == 2555
+    assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) is None
+    assert store.list_device_profiles() == []
+    assert store.list_js8_instances() == []
+    assert store.list_fast_light_configs() == []
+    assert store.list_varac_nodes() == []
+
+
+def test_timezone_only_settings_do_not_block_fresh_install_defaults(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    db_path = cfg_root / "config" / "freqinout.db"
+    _insert_kv(db_path, {"timezone": "America/Denver"})
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
+    assert len(store.list_device_profiles()) == 1
+    assert len(store.list_operating_profiles()) == 1
+
+
+def test_corrupt_legacy_config_does_not_leave_schema_only_limbo(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    config_dir = cfg_root / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text("{not valid json", encoding="utf-8")
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+
+    assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
+    assert len(store.list_device_profiles()) == 1
+    assert len(store.list_operating_profiles()) == 1
+
+
+def test_explicit_migration_writes_key_map_columns(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    db_path = cfg_root / "config" / "freqinout.db"
+    _insert_kv(
+        db_path,
+        {
+            "control_via": "JS8Call",
+            "rig_host": "10.9.0.1",
+            "rig_port": 4532,
+            "flrig_host": "10.9.0.2",
+            "flrig_port": 12346,
+            "path_flrig": "/opt/flrig",
+            "path_fldigi": "/opt/fldigi",
+            "fldigi_host": "10.9.0.3",
+            "fldigi_port": 7366,
+            "fldigi_log_path": "/logs/fldigi",
+            "fldigi_checkin_dir": "/checkins",
+            "path_flmsg": "/opt/flmsg",
+            "path_flamp": "/opt/flamp",
+            "message_paths": {
+                "flmsg": "/messages/flmsg",
+                "flamp": "/messages/flamp",
+                "varac": "/messages/varac",
+            },
+            "js8_host": "10.9.0.4",
+            "js8_port": 2445,
+            "js8_offset_hz": 1500,
+            "js8_profile_path": "/js8/profile",
+            "js8_directed_path": "/js8/DIRECTED.TXT",
+            "js8_forms_path": "/js8/forms",
+            "path_js8call": "/opt/js8call",
+            "path_js8spotter": "/opt/js8spotter",
+            "path_commstat": "/opt/commstat",
+            "varac_path": "/opt/varac",
+            "varac_db_path": "/varac/VarAC.db",
+            "varac_ini_path": "/varac/VarAC.ini",
+            "varac_launch_cmd": "varac --portable",
+            "varac_outbox_dir": "/varac/outbox",
+            "varac_bbs_dir": "/varac/bbs",
+            "varac_bbs_archive_dir": "/varac/archive",
+            "varac_bbs_enabled": True,
+            "varac_bbs_limit_access_enabled": True,
+            "varac_bbs_allowed_callsigns": "K1ABC,N0XYZ",
+            "varac_bbs_announce_enabled": True,
+            "launch_control_enabled": False,
+            "use_scheduler": False,
+        },
+    )
+
+    settings = SettingsManager()
+    result = ensure_multi_rig_migration(
+        settings._conn,  # type: ignore[arg-type]
+        settings.all(),
+        radio_name="IC-7300 Desk",
+        radio_model="IC-7300",
+        radio_manufacturer="Icom",
+        enabled_software_roles={"js8call", "fast_light", "varac", "flamp", "flmsg", "js8spotter", "commstat"},
+    )
+    settings.reload()
+    store = MultiRadioStore(settings_db_path())
+
+    assert result.applied is True
+    device = store.list_device_profiles()[0]
+    js8 = store.list_js8_instances()[0]
+    fast = store.list_fast_light_configs()[0]
+    varac = store.list_varac_nodes()[0]
+    operating = store.list_operating_profiles()[0]
+
+    assert device["name"] == "IC-7300 Desk"
+    assert device["radio_manufacturer"] == "Icom"
+    assert device["radio_model"] == "IC-7300"
+    assert device["control_backend"] == "js8call"
+    assert device["rig_host"] == "10.9.0.1"
+    assert device["rig_port"] == 4532
+    assert device["flmsg_path"] == "/opt/flmsg"
+    assert device["flmsg_message_path"] == "/messages/flmsg"
+    assert device["flamp_path"] == "/opt/flamp"
+    assert device["flamp_message_path"] == "/messages/flamp"
+    assert device["varac_outbox_dir"] == "/varac/outbox"
+    assert device["varac_bbs_dir"] == "/varac/bbs"
+    assert device["varac_bbs_archive_dir"] == "/varac/archive"
+    assert device["varac_bbs_enabled"] == 1
+    assert device["launch_enabled"] == 0
+    assert device["use_js8call"] == 1
+    assert device["use_flrig"] == 1
+    assert device["use_fldigi"] == 1
+    assert device["use_varac"] == 1
+    assert device["use_flamp"] == 1
+    assert device["use_flmsg"] == 1
+    assert device["use_js8spotter"] == 1
+    assert device["use_commstat"] == 1
+
+    assert fast["flrig_host"] == "10.9.0.2"
+    assert fast["flrig_port"] == 12346
+    assert fast["fldigi_path"] == "/opt/fldigi"
+    assert fast["fldigi_host"] == "10.9.0.3"
+    assert fast["fldigi_port"] == 7366
+    assert fast["fldigi_log_path"] == "/logs/fldigi"
+    assert fast["fldigi_checkin_dir"] == "/checkins"
+
+    assert js8["host"] == "10.9.0.4"
+    assert js8["port"] == 2445
+    assert js8["offset_hz"] == 1500
+    assert js8["profile_path"] == "/js8/profile"
+    assert js8["directed_path"] == "/js8/DIRECTED.TXT"
+    assert js8["forms_path"] == "/js8/forms"
+    assert js8["install_path"] == "/opt/js8call"
+    assert js8["spotter_launch_path"] == "/opt/js8spotter"
+    assert js8["commstat_launch_path"] == "/opt/commstat"
+
+    assert varac["install_path"] == "/opt/varac"
+    assert varac["db_path"] == "/varac/VarAC.db"
+    assert varac["ini_path"] == "/varac/VarAC.ini"
+    assert varac["launch_cmd"] == "varac --portable"
+    assert varac["incoming_path"] == "/messages/varac"
+
+    assert operating["name"] == "Migrated Single-Rig Plan"
+    assert operating["scheduler_enabled"] == 0
+    assert operating["use_launch_control"] == 0
+
+
+def test_migration_key_map_targets_exist_in_schema():
+    expected_columns = {
+        "device_profiles": {
+            "control_backend",
+            "rig_host",
+            "rig_port",
+            "launch_path",
+            "launch_enabled",
+            "flmsg_path",
+            "flmsg_message_path",
+            "flamp_path",
+            "flamp_message_path",
+            "varac_outbox_dir",
+            "varac_bbs_dir",
+            "varac_bbs_archive_dir",
+        },
+        "fast_light_configs": {
+            "flrig_host",
+            "flrig_port",
+            "fldigi_path",
+            "fldigi_host",
+            "fldigi_port",
+            "fldigi_log_path",
+            "fldigi_checkin_dir",
+        },
+        "js8_instances": {
+            "host",
+            "port",
+            "offset_hz",
+            "profile_path",
+            "directed_path",
+            "forms_path",
+            "install_path",
+            "spotter_launch_path",
+            "commstat_launch_path",
+        },
+        "varac_nodes": {
+            "install_path",
+            "db_path",
+            "ini_path",
+            "launch_cmd",
+            "incoming_path",
+        },
+        "operating_profiles": {
+            "scheduler_enabled",
+            "use_launch_control",
+        },
+    }
+
+    for table, columns in expected_columns.items():
+        spec_columns = set(SETTINGS_TABLE_SPECS[table]["columns"])
+        assert columns <= spec_columns
 
 
 def test_default_seed_is_idempotent(monkeypatch, tmp_path):

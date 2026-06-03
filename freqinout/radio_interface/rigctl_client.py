@@ -46,6 +46,9 @@ class RigControlClient(Protocol):
     def get_vfo_frequency(self) -> Optional[int]:
         ...
 
+    def get_active_vfo(self) -> Optional[str]:
+        ...
+
     def set_frequency(self, cmd: "FrequencyCommand") -> bool:
         ...
 
@@ -287,6 +290,18 @@ class FLRigClient:
             return int(float(freq_str))
         except Exception as e:
             log.warning("Failed to get VFO frequency from FLRig: %s", e)
+            return None
+
+    def get_active_vfo(self) -> Optional[str]:
+        """
+        Returns the active FLRig VFO ("A" or "B"), or None on failure.
+        """
+        try:
+            raw = self._with_proxy(lambda p: p.rig.get_AB(), label="get_AB")
+            vfo = str(raw or "").strip().upper()[:1]
+            return vfo if vfo in {"A", "B"} else None
+        except Exception as e:
+            log.debug("Failed to get active VFO from FLRig: %s", e)
             return None
 
     # ------------- CONTROL METHODS -------------
@@ -582,6 +597,19 @@ class RigctldClient:
             except Exception as e:
                 log.debug("Failed to get VFO frequency from rigctld: %s", e)
                 return None
+
+    def get_active_vfo(self) -> Optional[str]:
+        with self._lock:
+            try:
+                raw = self._scalar_response_locked("v", label="get_vfo")
+                txt = str(raw or "").strip().upper()
+                if "VFOA" in txt or txt == "A":
+                    return "A"
+                if "VFOB" in txt or txt == "B":
+                    return "B"
+            except Exception as e:
+                log.debug("Failed to get active VFO from rigctld: %s", e)
+            return None
 
     def _set_vfo_locked(self, vfo: Optional[str]) -> bool:
         target = str(vfo or "").strip().upper()

@@ -83,8 +83,6 @@ def test_scheduler_status_summary_reports_next_transition_frequency(monkeypatch,
         )
         monkeypatch.setattr(engine, "_varac_status", lambda: {"waiting_for_frequency": False, "busy": False})
         monkeypatch.setattr(engine, "_js8_running", lambda: False)
-        monkeypatch.setattr(engine, "_fldigi_log_status", lambda: {"busy": False, "reason": None})
-
         engine.current_source = "HF"
         engine.current_schedule_entry = {"frequency": "14.115", "group_name": "ALPHA"}
         engine._next_source = "HF"
@@ -168,21 +166,31 @@ def test_fldigi_busy_watchdog_rechecks_and_overrides_after_three_minutes(monkeyp
 
     from freqinout.core.scheduler_engine import SchedulerEngine
 
-    engine = SchedulerEngine()
+    engine = SchedulerEngine(fldigi_log=object())
     try:
-        engine._last_fldigi_status = {"busy": True, "reason": "text", "last_valid_age_s": 1.0}
+        recorded_events = []
+        monkeypatch.setattr(
+            engine,
+            "_record_scheduler_event",
+            lambda category, reason_code, **kwargs: recorded_events.append((category, reason_code, kwargs)),
+        )
         engine._fldigi_busy_watchdog_s = 180.0
         engine._fldigi_busy_entry_key = ("40M", 7_100_000)
         engine._fldigi_busy_since_ts = 1000.0
-        monkeypatch.setattr(
-            engine,
-            "_force_fldigi_status_recheck",
-            lambda: {"busy": True, "reason": "text", "last_valid_age_s": 1.0},
-        )
+        engine._fldigi_busy_check_source = "HF"
+        engine._fldigi_busy_check_target_hz = 7_100_000
+        engine._fldigi_busy_check_result = {
+            "busy": True,
+            "reason": "text",
+            "last_valid_age_s": 1.0,
+            "checked_ts": 1181.0,
+            "error": None,
+        }
 
         delay, reason = engine._should_delay_for_fldigi(
             entry_key=("40M", 7_100_000),
             source="HF",
+            target_frequency_hz=7_100_000,
             want_freq_change=True,
             ignore_fldigi_busy=False,
             now_ts=1181.0,
@@ -192,9 +200,10 @@ def test_fldigi_busy_watchdog_rechecks_and_overrides_after_three_minutes(monkeyp
         assert reason is None
         assert engine._fldigi_busy_entry_key is None
         assert engine._fldigi_busy_since_ts is None
-        health = engine._health.snapshot(engine._scheduler_health_key("fldigi-busy"))
-        assert "watchdog break-away" in health["last_error"]
-        assert "possible stale/hung external app busy state" in health["last_error"]
+        assert any(
+            category == "breakaway" and reason_code == "fldigi_busy_breakaway"
+            for category, reason_code, _kwargs in recorded_events
+        )
     finally:
         engine.stop()
         engine.deleteLater()

@@ -4,6 +4,7 @@ import datetime
 import json
 import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -21,10 +22,14 @@ DEFAULT_FAST_LIGHT_SYSTEM_KEY = "default_fast_light"
 DEFAULT_FAST_LIGHT_NAME = "Primary Fast Light"
 DEFAULT_VARAC_NODE_SYSTEM_KEY = "default_varac_node"
 DEFAULT_VARAC_NODE_NAME = "Primary VarAC"
+MULTI_RIG_MIGRATION_VERSION_KEY = "multi_rig_migration_version"
+MULTI_RIG_MIGRATION_DEFERRED_KEY = "multi_rig_migration_deferred"
+CURRENT_MULTI_RIG_MIGRATION_VERSION = 1
 
 SUPPORTED_DEVICE_CONTROL_BACKENDS = frozenset({"flrig", "js8call", "manual", "rigctld"})
 # Keep the runtime compatibility projection aligned with 1.2.2.
 SUPPORTED_RUNTIME_CONTROL_BACKENDS = frozenset({"flrig", "js8call", "manual", "rigctld"})
+SUPPORTED_SOFTWARE_ROLES = frozenset({"js8call", "fast_light", "varac", "flamp", "flmsg", "js8spotter", "commstat"})
 SUPPORTED_DEVICE_CLASSES = frozenset({"tx_rx", "observer", "gateway"})
 SUPPORTED_DEPLOYMENT_MODES = frozenset({"full", "minimal"})
 SUPPORTED_ASSIGNMENT_STATES = frozenset({"active", "temporary_override", "scheduled", "inactive", "superseded"})
@@ -98,6 +103,32 @@ MIRRORED_LEGACY_KEYS = frozenset(
         "use_scheduler",
     }
 )
+
+FIO_EXISTING_USE_IGNORED_KEYS = frozenset(
+    {
+        MULTI_RIG_MIGRATION_VERSION_KEY,
+        MULTI_RIG_MIGRATION_DEFERRED_KEY,
+        "multi_rig_shared_state_schema_version",
+        "autoquery_keys_purged_v1",
+        "timezone",
+    }
+)
+
+
+@dataclass(frozen=True)
+class MigrationResult:
+    already_current: bool
+    applied: bool
+    deferred: bool
+    from_version: int
+    to_version: int
+    created_device_profile_id: Optional[int] = None
+    created_operating_profile_id: Optional[int] = None
+    created_js8_instance_id: Optional[int] = None
+    created_fast_light_config_id: Optional[int] = None
+    created_varac_node_id: Optional[int] = None
+    enabled_software_roles: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
     "device_profiles": {
@@ -275,6 +306,40 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "CREATE INDEX IF NOT EXISTS idx_device_profiles_display_order ON device_profiles(display_order)",
             "CREATE INDEX IF NOT EXISTS idx_device_profiles_runtime_active ON device_profiles(runtime_active)",
             "CREATE INDEX IF NOT EXISTS idx_device_profiles_runtime_primary ON device_profiles(runtime_primary)",
+        ),
+    },
+    "runtime_policies": {
+        "ddl": """
+        CREATE TABLE IF NOT EXISTS runtime_policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            radio_profile_id INTEGER NOT NULL UNIQUE,
+            scheduler_enabled INTEGER NOT NULL DEFAULT 1,
+            background_ingest_enabled INTEGER NOT NULL DEFAULT 1,
+            messages_enabled INTEGER NOT NULL DEFAULT 1,
+            map_enabled INTEGER NOT NULL DEFAULT 1,
+            launch_enabled INTEGER NOT NULL DEFAULT 1,
+            net_control_enabled INTEGER NOT NULL DEFAULT 1,
+            operator_suppressed INTEGER NOT NULL DEFAULT 0,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL,
+            FOREIGN KEY(radio_profile_id) REFERENCES device_profiles(id) ON DELETE CASCADE
+        )
+        """,
+        "columns": {
+            "radio_profile_id": "INTEGER NOT NULL UNIQUE",
+            "scheduler_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "background_ingest_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "messages_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "map_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "launch_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "net_control_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "operator_suppressed": "INTEGER NOT NULL DEFAULT 0",
+            "created_utc": "TEXT NOT NULL DEFAULT ''",
+            "updated_utc": "TEXT NOT NULL DEFAULT ''",
+        },
+        "indexes": (
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_policies_radio_profile_id ON runtime_policies(radio_profile_id)",
+            "CREATE INDEX IF NOT EXISTS idx_runtime_policies_operator_suppressed ON runtime_policies(operator_suppressed)",
         ),
     },
     "js8_instances": {
@@ -1472,6 +1537,72 @@ def ensure_multi_radio_settings_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def get_multi_rig_migration_version(conn: sqlite3.Connection) -> int:
+    ensure_multi_radio_settings_schema(conn)
+    cur = conn.execute("SELECT value FROM kv WHERE key=?", (MULTI_RIG_MIGRATION_VERSION_KEY,))
+    row = cur.fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(json.loads(row[0]))
+    except Exception:
+        return _coerce_int(row[0], 0)
+
+
+def is_multi_rig_migration_current(conn: sqlite3.Connection) -> bool:
+    return get_multi_rig_migration_version(conn) >= CURRENT_MULTI_RIG_MIGRATION_VERSION
+
+
+def set_multi_rig_migration_version(
+    conn: sqlite3.Connection,
+    version: int = CURRENT_MULTI_RIG_MIGRATION_VERSION,
+) -> None:
+    ensure_multi_radio_settings_schema(conn)
+    _write_kv_settings(conn, {MULTI_RIG_MIGRATION_VERSION_KEY: int(version)})
+    conn.commit()
+
+
+def set_multi_rig_migration_deferred(conn: sqlite3.Connection, deferred: bool) -> None:
+    ensure_multi_radio_settings_schema(conn)
+    _write_kv_settings(conn, {MULTI_RIG_MIGRATION_DEFERRED_KEY: bool(deferred)})
+    conn.commit()
+
+
+def get_multi_rig_migration_deferred(conn: sqlite3.Connection) -> bool:
+    ensure_multi_radio_settings_schema(conn)
+    cur = conn.execute("SELECT value FROM kv WHERE key=?", (MULTI_RIG_MIGRATION_DEFERRED_KEY,))
+    row = cur.fetchone()
+    if row is None:
+        return False
+    try:
+        value = json.loads(row[0])
+    except Exception:
+        value = row[0]
+    return bool(_coerce_bool_int(value, False))
+
+
+def detect_existing_fio_usage(
+    conn: sqlite3.Connection,
+    settings_values: Mapping[str, Any],
+    *,
+    legacy_config_exists: bool = False,
+) -> bool:
+    ensure_multi_radio_settings_schema(conn)
+    if legacy_config_exists:
+        return True
+    meaningful_keys = {str(key) for key in settings_values.keys()} - set(FIO_EXISTING_USE_IGNORED_KEYS)
+    if meaningful_keys:
+        return True
+    for table in ("device_profiles", "operating_profiles", "js8_instances", "fast_light_configs", "varac_nodes"):
+        try:
+            row = conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+        except Exception:
+            row = None
+        if row is not None:
+            return True
+    return False
+
+
 def _record_by_id(conn: sqlite3.Connection, table: str, record_id: int) -> Optional[Dict[str, Any]]:
     cur = conn.execute(f"SELECT * FROM {table} WHERE id=?", (int(record_id),))
     return _fetchone_dict(cur)
@@ -2156,7 +2287,13 @@ def _legacy_settings_projection_from_device(
     return updates
 
 
-def _normalize_runtime_primary_device(conn: sqlite3.Connection) -> Optional[int]:
+def _normalize_runtime_primary_device(
+    conn: sqlite3.Connection,
+    *,
+    allow_pre_migration: bool = False,
+) -> Optional[int]:
+    if not allow_pre_migration and not is_multi_rig_migration_current(conn):
+        return None
     rows = conn.execute(
         """
         SELECT id, enabled, runtime_active, runtime_primary, device_class
@@ -2411,6 +2548,13 @@ def _seed_device_defaults(
 
 
 def ensure_default_multi_radio_records(conn: sqlite3.Connection, settings_values: Mapping[str, Any]) -> None:
+    """Create the default multi-rig baseline.
+
+    This helper intentionally writes device, operating, software-instance, assignment,
+    and runtime-primary state. It must not be used as a startup convenience for an
+    existing FIO install before the migration marker is current. Use
+    ``ensure_multi_rig_migration`` for fresh-install/default migration flows.
+    """
     ensure_multi_radio_settings_schema(conn)
     js8 = _record_by_system_key(conn, "js8_instances", DEFAULT_JS8_INSTANCE_SYSTEM_KEY)
     if not js8:
@@ -2451,8 +2595,153 @@ def ensure_default_multi_radio_records(conn: sqlite3.Connection, settings_values
         conn.commit()
         device = _record_by_id(conn, "device_profiles", int(device["id"])) or device
     _ensure_default_assignment(conn, int(device["id"]), int(operating["id"]))
-    _normalize_runtime_primary_device(conn)
+    _normalize_runtime_primary_device(conn, allow_pre_migration=True)
     log.debug("MultiRadioStore: ensured default multi-radio records for the compatibility baseline.")
+
+
+def _normalize_software_roles(value: Optional[Iterable[str]]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if value is None:
+        return (), ()
+    valid: List[str] = []
+    unknown: List[str] = []
+    for role in value:
+        normalized = _coerce_text(role, "").lower()
+        if not normalized:
+            continue
+        if normalized in SUPPORTED_SOFTWARE_ROLES:
+            valid.append(normalized)
+        else:
+            unknown.append(normalized)
+    return tuple(sorted(set(valid))), tuple(sorted(set(unknown)))
+
+
+def ensure_multi_rig_migration(
+    conn: sqlite3.Connection,
+    settings_values: Mapping[str, Any],
+    *,
+    radio_name: str = "",
+    radio_model: str = "",
+    radio_manufacturer: str = "",
+    operating_plan_name: str = "",
+    enabled_software_roles: Optional[Iterable[str]] = None,
+    target_version: int = CURRENT_MULTI_RIG_MIGRATION_VERSION,
+    defer: bool = False,
+    dry_run: bool = False,
+) -> MigrationResult:
+    """Migrate a single-rig configuration into the multi-rig baseline.
+
+    This function intentionally delegates to helpers that may commit during default
+    record creation and marker updates. Callers should treat it as a complete
+    migration operation, not as a nested transaction participant.
+    """
+    ensure_multi_radio_settings_schema(conn)
+    from_version = get_multi_rig_migration_version(conn)
+    to_version = int(target_version or CURRENT_MULTI_RIG_MIGRATION_VERSION)
+    if from_version >= to_version:
+        return MigrationResult(
+            already_current=True,
+            applied=False,
+            deferred=False,
+            from_version=from_version,
+            to_version=to_version,
+        )
+    if defer:
+        if not dry_run:
+            set_multi_rig_migration_deferred(conn, True)
+        return MigrationResult(
+            already_current=False,
+            applied=False,
+            deferred=True,
+            from_version=from_version,
+            to_version=to_version,
+        )
+
+    roles, unknown_roles = _normalize_software_roles(enabled_software_roles)
+    warnings = tuple(f"Unknown software role ignored: {role}" for role in unknown_roles)
+    if dry_run:
+        return MigrationResult(
+            already_current=False,
+            applied=True,
+            deferred=False,
+            from_version=from_version,
+            to_version=to_version,
+            enabled_software_roles=roles,
+            warnings=warnings,
+        )
+
+    try:
+        ensure_default_multi_radio_records(conn, settings_values)
+        device = _record_by_system_key(conn, "device_profiles", DEFAULT_DEVICE_SYSTEM_KEY)
+        operating = _record_by_system_key(conn, "operating_profiles", DEFAULT_OPERATING_SYSTEM_KEY)
+        js8 = _record_by_system_key(conn, "js8_instances", DEFAULT_JS8_INSTANCE_SYSTEM_KEY)
+        fast_light = _record_by_system_key(conn, "fast_light_configs", DEFAULT_FAST_LIGHT_SYSTEM_KEY)
+        varac = _record_by_system_key(conn, "varac_nodes", DEFAULT_VARAC_NODE_SYSTEM_KEY)
+
+        if device:
+            updates: Dict[str, Any] = {"updated_utc": _utc_now_iso()}
+            display_name = _coerce_text(radio_name, "")
+            if display_name:
+                updates["name"] = display_name
+            manufacturer = _coerce_text(radio_manufacturer, "")
+            if manufacturer:
+                updates["radio_manufacturer"] = manufacturer
+            model = _coerce_text(radio_model, "")
+            if model:
+                updates["radio_model"] = model
+            if roles:
+                updates.update(
+                    {
+                        "use_js8call": 1 if "js8call" in roles else 0,
+                        "use_flrig": 1 if "fast_light" in roles else 0,
+                        "use_fldigi": 1 if "fast_light" in roles else 0,
+                        "use_varac": 1 if "varac" in roles else 0,
+                        "use_flamp": 1 if "flamp" in roles else 0,
+                        "use_flmsg": 1 if "flmsg" in roles else 0,
+                        "use_js8spotter": 1 if "js8spotter" in roles else 0,
+                        "use_commstat": 1 if "commstat" in roles else 0,
+                    }
+                )
+            assignments = ", ".join(f"{key}=?" for key in updates)
+            conn.execute(
+                f"UPDATE device_profiles SET {assignments} WHERE id=?",
+                [updates[key] for key in updates] + [int(device["id"])],
+            )
+
+        if operating:
+            plan_name = _coerce_text(operating_plan_name, "") or "Migrated Single-Rig Plan"
+            conn.execute(
+                "UPDATE operating_profiles SET name=?, updated_utc=? WHERE id=?",
+                (plan_name, _utc_now_iso(), int(operating["id"])),
+            )
+
+        set_multi_rig_migration_deferred(conn, False)
+        set_multi_rig_migration_version(conn, to_version)
+        conn.commit()
+        return MigrationResult(
+            already_current=False,
+            applied=True,
+            deferred=False,
+            from_version=from_version,
+            to_version=to_version,
+            created_device_profile_id=int(device["id"]) if device else None,
+            created_operating_profile_id=int(operating["id"]) if operating else None,
+            created_js8_instance_id=int(js8["id"]) if js8 else None,
+            created_fast_light_config_id=int(fast_light["id"]) if fast_light else None,
+            created_varac_node_id=int(varac["id"]) if varac else None,
+            enabled_software_roles=roles,
+            warnings=warnings,
+        )
+    except Exception as exc:
+        log.error("MultiRadioStore: multi-rig migration failed: %s", exc)
+        return MigrationResult(
+            already_current=False,
+            applied=False,
+            deferred=False,
+            from_version=from_version,
+            to_version=to_version,
+            enabled_software_roles=roles,
+            warnings=warnings + (f"Migration failed: {exc}",),
+        )
 
 
 def project_runtime_active_device_to_legacy_settings(
@@ -2460,6 +2749,8 @@ def project_runtime_active_device_to_legacy_settings(
     device_profile_id: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     ensure_multi_radio_settings_schema(conn)
+    if not is_multi_rig_migration_current(conn):
+        return None
     if device_profile_id is None:
         device_profile_id = _normalize_runtime_primary_device(conn)
     if device_profile_id is None:
@@ -2484,6 +2775,8 @@ def mirror_legacy_settings_into_runtime_active_device(
     if keys_changed is not None and MIRRORED_LEGACY_KEYS.isdisjoint({str(key) for key in keys_changed}):
         return None
     ensure_multi_radio_settings_schema(conn)
+    if not is_multi_rig_migration_current(conn):
+        return None
     active_id = _normalize_runtime_primary_device(conn)
     if active_id is None:
         return None
@@ -2700,8 +2993,53 @@ class MultiRadioStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
         ensure_multi_radio_settings_schema(conn)
         return conn
+
+    def connect(self) -> sqlite3.Connection:
+        return self._connect()
+
+    def get_all_kv_settings(self) -> Dict[str, Any]:
+        with self._connect() as conn:
+            return _load_kv_settings(conn)
+
+    def read_runtime_status_inputs(
+        self,
+        *,
+        settings_values: Optional[Mapping[str, Any]] = None,
+        existing_fio_usage: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Read the runtime-status inputs from one database snapshot."""
+        with self._connect() as conn:
+            values = dict(settings_values) if settings_values is not None else _load_kv_settings(conn)
+            migration_version = get_multi_rig_migration_version(conn)
+            migration_deferred = get_multi_rig_migration_deferred(conn)
+            migration_current = migration_version >= CURRENT_MULTI_RIG_MIGRATION_VERSION
+            if existing_fio_usage is not None:
+                detected_usage = bool(existing_fio_usage)
+            elif migration_current:
+                meaningful_keys = {str(key) for key in values.keys()} - set(FIO_EXISTING_USE_IGNORED_KEYS)
+                detected_usage = bool(meaningful_keys)
+            else:
+                detected_usage = detect_existing_fio_usage(conn, values)
+            primary_row: Optional[Dict[str, Any]] = None
+            active_rows: List[Dict[str, Any]] = []
+            if migration_current:
+                primary_row = _runtime_primary_device_profile(conn)
+                active_rows = _runtime_active_device_profiles(conn)
+            return {
+                "settings_values": values,
+                "migration_version": migration_version,
+                "migration_deferred": migration_deferred,
+                "migration_current": migration_current,
+                "existing_fio_usage": detected_usage,
+                "primary_row": primary_row,
+                "active_rows": active_rows,
+            }
 
     @staticmethod
     def _save_device_profile_conn(conn: sqlite3.Connection, values: Mapping[str, Any]) -> Dict[str, Any]:
@@ -3784,6 +4122,7 @@ class MultiRadioStore:
             )
             conn.execute("DELETE FROM operating_profile_assignments WHERE device_profile_id=?", (int(device_profile_id),))
             conn.execute("DELETE FROM varac_cluster_members WHERE device_profile_id=?", (int(device_profile_id),))
+            conn.execute("DELETE FROM runtime_policies WHERE radio_profile_id=?", (int(device_profile_id),))
             conn.execute(
                 "DELETE FROM station_coordination_policies WHERE source_device_id=? OR target_device_id=?",
                 (int(device_profile_id), int(device_profile_id)),

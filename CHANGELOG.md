@@ -1,7 +1,9 @@
 # Changelog
 
 ## [1.2.6.1]
+- Fixed: CommStat artifact rows deleted from Messages are now hidden with a durable local FIO tombstone instead of only deleting the temporary artifact row, so they do not reappear after refresh, restart, or CommStat ingest while the original CommStat source database remains untouched.
 - Fixed: `Resume Schedule` now forces the active operating plan back into FLDigi mode/offset enforcement instead of skipping FLDigi when the current schedule row looks already applied.
+- Fixed: Scheduler JS8 offset status now uses fresh readback before declaring `Off Schedule`, so a correct JS8Call offset does not remain falsely flagged after `Resume Schedule` while FIO still manages JS8 offset under FLRig/Rigctld control.
 - Added: Scheduler decisions are now persisted in a bounded `scheduler_events` journal so Station Health can show why FIO applied, skipped, held, retried, or failed a schedule action.
 - Changed: Station Health now includes recent scheduler decisions, making schedule-miss reports easier to diagnose without relying only on transient logs.
 - Fixed: FLDigi RX-busy holds now record the 3-minute watchdog recheck and the authoritative break-away decision before proceeding with the schedule change.

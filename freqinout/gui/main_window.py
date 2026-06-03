@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import sqlite3
 import sys
+import time
 from typing import Callable
 
 from PySide6.QtWidgets import (
@@ -43,6 +44,7 @@ from freqinout.core.settings_manager import SettingsManager
 from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
+from freqinout.core.dependency_status_service import get_dependency_status_service
 from freqinout.core.station_health_summary import summarize_station_health
 from freqinout.core.ui_watchdog import UiEventLoopWatchdog
 from freqinout.radio_interface.rigctl_client import rig_control_client_from_settings
@@ -110,11 +112,21 @@ class MainWindow(QMainWindow):
 
     def __init__(self, startup_status: Callable[[str], None] | None = None):
         super().__init__()
-        self._shutting_down = False
         self._startup_status_callback = startup_status
+        self._shutting_down = False
+        self._app_active = True
+        self._ui_resume_pending = False
+        self._ui_refresh_dirty = False
+        self._ui_timers_paused_for_inactive = False
+        self._help_dialog_settle_until = 0.0
+        self._ui_resume_settle_timer = QTimer(self)
+        self._ui_resume_settle_timer.setSingleShot(True)
+        self._ui_resume_settle_timer.setInterval(350)
+        self._ui_resume_settle_timer.timeout.connect(self._on_ui_resume_settled)
 
         self.settings = SettingsManager()
         self._notify_startup_status("Loading application settings...")
+        self.dependency_status_service = get_dependency_status_service(self.settings)
         self.multi_radio_store = MultiRadioStore()
         self.station_runtime_manager = StationRuntimeManager(store=self.multi_radio_store, settings=self.settings)
         self.station_runtime_manager.sync_with_store()
@@ -582,6 +594,11 @@ class MainWindow(QMainWindow):
 
         app = QApplication.instance()
         if app is not None:
+            try:
+                self._app_active = app.applicationState() == Qt.ApplicationActive
+                app.applicationStateChanged.connect(self._on_application_state_changed)
+            except Exception as e:
+                log.debug("MainWindow: UI lifecycle state wiring failed: %s", e)
             app.aboutToQuit.connect(self._on_app_about_to_quit)
 
         self.on_hold_state_changed(force_reload=True)
@@ -682,6 +699,95 @@ class MainWindow(QMainWindow):
             callback(message)
         except Exception as e:
             log.debug("MainWindow startup status update failed: %s", e)
+
+    def _ui_refresh_allowed(self) -> bool:
+        return bool(
+            not getattr(self, "_shutting_down", False)
+            and getattr(self, "_app_active", True)
+            and not getattr(self, "_ui_resume_pending", False)
+        )
+
+    def _mark_ui_refresh_dirty(self, reason: str = "") -> None:
+        self._ui_refresh_dirty = True
+        if reason:
+            log.debug("UI_LIFECYCLE|refresh_deferred reason=%s", reason)
+
+    def _pause_noncritical_ui_timers(self) -> None:
+        for timer_name in ("_status_timer", "_hold_state_timer", "_condition_levels_refresh_timer"):
+            timer = getattr(self, timer_name, None)
+            if isinstance(timer, QTimer) and timer.isActive():
+                timer.stop()
+                self._ui_timers_paused_for_inactive = True
+
+    def _resume_noncritical_ui_timers(self) -> None:
+        timer = getattr(self, "_status_timer", None)
+        if isinstance(timer, QTimer) and not timer.isActive():
+            timer.start()
+        try:
+            self.on_hold_state_changed(force_reload=False)
+        except Exception:
+            pass
+        if bool(getattr(self, "_condition_levels_refresh_pending", False)):
+            timer = getattr(self, "_condition_levels_refresh_timer", None)
+            if isinstance(timer, QTimer):
+                timer.start()
+        self._ui_timers_paused_for_inactive = False
+
+    def _set_child_app_active(self, active: bool) -> None:
+        for label, widget in getattr(self, "_screens", []):
+            try:
+                if hasattr(widget, "set_app_active"):
+                    widget.set_app_active(bool(active))
+            except Exception as e:
+                log.debug("UI_LIFECYCLE|child_state_failed label=%s err=%s", label, e)
+
+    def _flush_visible_ui_refresh(self, reason: str = "resume") -> None:
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty(reason)
+            return
+        self._ui_refresh_dirty = False
+        log.info("UI_LIFECYCLE|visible_refresh reason=%s", reason)
+        for callback in (
+            self._refresh_scheduler_status_panel,
+            self._refresh_condition_level_panel,
+            self._refresh_station_overview,
+            self._refresh_station_health_alert,
+            self._check_timed_debug_expiry,
+        ):
+            try:
+                callback()
+            except Exception:
+                pass
+        try:
+            widget = self.stack.currentWidget() if hasattr(self, "stack") else None
+            if widget is not None and hasattr(widget, "on_tab_activated"):
+                QTimer.singleShot(0, widget.on_tab_activated)
+        except Exception:
+            pass
+
+    def _on_ui_resume_settled(self) -> None:
+        self._ui_resume_pending = False
+        self._resume_noncritical_ui_timers()
+        self._set_child_app_active(True)
+        self._flush_visible_ui_refresh("app_resume")
+
+    def _on_application_state_changed(self, state) -> None:
+        active = state == Qt.ApplicationActive
+        if active == getattr(self, "_app_active", True):
+            return
+        self._app_active = active
+        log.info("UI_LIFECYCLE|app_active=%s state=%s", active, state)
+        if not active:
+            self._ui_resume_pending = False
+            self._ui_resume_settle_timer.stop()
+            self._pause_noncritical_ui_timers()
+            self._set_child_app_active(False)
+            self._mark_ui_refresh_dirty("app_inactive")
+            return
+        self._ui_resume_pending = True
+        self._pause_noncritical_ui_timers()
+        self._set_child_app_active(False)
+        self._ui_resume_settle_timer.start()
 
     def refresh_operator_history_views(self):
         """
@@ -1450,6 +1556,9 @@ class MainWindow(QMainWindow):
         self._dispatch_hold_snapshot(snapshot, force=bool(force_reload))
 
     def _on_hold_state_tick(self) -> None:
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty("hold_state_tick")
+            return
         snapshot = suspend_snapshot(self.settings, allow_reload=False)
         if snapshot.get("until") and not snapshot.get("active"):
             resume_schedule_hold(self, self.settings)
@@ -1488,6 +1597,9 @@ class MainWindow(QMainWindow):
             layout.addWidget(lbl)
 
     def _refresh_scheduler_status_panel(self, *_args) -> None:
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty("scheduler_status")
+            return
         if not hasattr(self, "scheduler") or not hasattr(self, "scheduler_status_container"):
             return
         if not self.scheduler_status_container.isVisible():
@@ -2333,11 +2445,19 @@ class MainWindow(QMainWindow):
         context = get_help_context(context_key)
         if self._context_help_dialog is None:
             self._context_help_dialog = ContextHelpDialog(self.settings, self)
+            try:
+                self._context_help_dialog.finished.connect(self._on_context_help_finished)
+            except Exception:
+                pass
         try:
             self._context_help_dialog.apply_theme()
         except Exception:
             pass
         self._context_help_dialog.show_help_for(context.key)
+
+    def _on_context_help_finished(self, *_args) -> None:
+        self._help_dialog_settle_until = time.time() + 0.35
+        log.info("UI_LIFECYCLE|context_help_closed settle_ms=350")
 
     def open_settings_section(self, health_key: str = "freqinout", radio_id: int | None = None) -> None:
         idx = self._screen_index_by_label.get("Settings", -1)
@@ -2452,6 +2572,18 @@ class MainWindow(QMainWindow):
         except Exception:
             raw = None
         return self._truthy_flag(raw, default_enabled)
+
+    def _show_tab_loading_notice(self, text: str) -> None:
+        try:
+            self.statusBar().showMessage(str(text or "Preparing..."), 2500)
+        except Exception:
+            pass
+
+    def _hide_tab_loading_notice(self) -> None:
+        try:
+            self.statusBar().clearMessage()
+        except Exception:
+            pass
 
     def _restore_nav_selection_to_active_tab(self) -> None:
         try:
@@ -2660,6 +2792,9 @@ class MainWindow(QMainWindow):
 
     def _apply_condition_levels_changed(self) -> None:
         if not bool(getattr(self, "_condition_levels_refresh_pending", False)):
+            return
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty("condition_levels_changed")
             return
         self._condition_levels_refresh_pending = False
         try:
@@ -3010,6 +3145,9 @@ class MainWindow(QMainWindow):
             pass
 
     def _refresh_station_overview(self, *, force: bool = False) -> None:
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty("station_overview")
+            return
         try:
             if hasattr(self, "station_overview_tab") and self.station_overview_tab is not None:
                 self.station_overview_tab.refresh_from_manager(force=force)
@@ -3660,6 +3798,9 @@ class MainWindow(QMainWindow):
                 widget.deleteLater()
 
     def _refresh_condition_level_panel(self) -> None:
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty("condition_level_panel")
+            return
         if not hasattr(self, "condition_levels_rows_layout"):
             return
         levels = self._collect_condition_levels()
@@ -3848,6 +3989,14 @@ class MainWindow(QMainWindow):
                     if fallback_index != index:
                         self._set_screen(fallback_index)
                     return
+                if label == "Map" and time.time() < float(getattr(self, "_help_dialog_settle_until", 0.0) or 0.0):
+                    remaining_ms = int(
+                        max(50.0, (float(self._help_dialog_settle_until) - time.time()) * 1000.0)
+                    )
+                    self._show_tab_loading_notice("Preparing Map...")
+                    log.info("UI_LIFECYCLE|map_switch_deferred reason=help_settle ms=%s", remaining_ms)
+                    QTimer.singleShot(remaining_ms, lambda idx=index: self._set_screen(idx))
+                    return
                 if label != "Map" and self._pending_map_switch_index is not None:
                     self._pending_map_switch_index = None
                 if label == "Map" and self._queue_map_switch_after_webengine_warmup(index):
@@ -3962,6 +4111,9 @@ class MainWindow(QMainWindow):
         return label
 
     def _refresh_station_health_alert(self) -> None:
+        if not self._ui_refresh_allowed():
+            self._mark_ui_refresh_dirty("station_health_alert")
+            return
         try:
             summary = summarize_station_health(include_ok=False)
         except Exception:

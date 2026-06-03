@@ -42,7 +42,6 @@ from freqinout.core.logger import log
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.checkins_db import upsert_checkins
 from freqinout.core.config_paths import get_fldigi_checkin_dir
-from freqinout.core.fldigi_log_checkin_parser import resolve_fldigi_log_path, scan_fldigi_log_file
 from freqinout.core.fldigi_macro_parser import scan_macro_profile, count_detected_file_references
 from freqinout.core.fldigi_macro_profile import macro_mapping_path_leaf
 from freqinout.core.fldigi_role_workspace import (
@@ -138,10 +137,6 @@ class FldigiNetControlTab(QWidget):
     net_status_changed = Signal(str, bool)
     FLDIGI_MACRO_PROFILES_KEY = "fldigi_macro_profiles_v1"
     FLDIGI_SELECTED_MACRO_PROFILE_KEY = "fldigi_selected_macro_profile"
-    FLDIGI_LOG_ASSISTED_ENABLED_KEY = "fldigi_log_assisted_enabled_v1"
-    FLDIGI_LOG_ASSISTED_SHOW_REVIEW_KEY = "fldigi_log_assisted_show_review_v1"
-    FLDIGI_LOG_ASSISTED_INCLUDE_TX_KEY = "fldigi_log_assisted_include_tx_v1"
-    LOG_ASSISTED_INTAKE_VISIBLE = False
     COL_SEQ = 0
     COL_HEARD = 1
     COL_ACKED = 2
@@ -191,17 +186,10 @@ class FldigiNetControlTab(QWidget):
         self._custom_bucket_sources: Dict[str, str] = {}
         self._roster_syncing = False
         self._roster_loading = False
-        self._log_assisted_loading = False
         self._macro_profile_combo_loading = False
         self._setup_details_expanded = False
         self._compare_workspace_expanded = False
         self._roster_dirty = False
-        self._log_assisted_session_path: str = ""
-        self._log_assisted_session_offset: int = 0
-        self._log_assisted_session_start_utc: Optional[datetime.datetime] = None
-        self._log_assisted_session_tx_context: str = ""
-        self._log_assisted_seen_normalized: set[str] = set()
-        self._log_assisted_candidates_by_callsign: Dict[str, Dict[str, object]] = {}
         self._activation_secondary_refresh_pending: bool = False
         self._activation_secondary_refresh_inflight: bool = False
         self._ncs_partner_call: str = ""
@@ -383,48 +371,6 @@ class FldigiNetControlTab(QWidget):
         self.macro_mapping_locations_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         details_layout.addWidget(self.macro_mapping_locations_label)
 
-        log_controls_layout = QVBoxLayout()
-        log_controls_layout.setSpacing(2)
-        self.log_assisted_enable_chk = QCheckBox("Auto-add from FLDigi log")
-        self.log_assisted_enable_chk.setToolTip("Automatically pull likely check-ins from the FLDigi log into the net roster.")
-        log_controls_layout.addWidget(self.log_assisted_enable_chk)
-        self.log_assisted_enable_help = QLabel("Pull likely check-ins from the FLDigi log into the net roster during the net.")
-        self.log_assisted_enable_help.setWordWrap(True)
-        self.log_assisted_enable_help.setStyleSheet("QLabel { color: #666666; margin-left: 24px; }")
-        log_controls_layout.addWidget(self.log_assisted_enable_help)
-        self.log_assisted_review_chk = QCheckBox("Hold uncertain decodes for review")
-        self.log_assisted_review_chk.setToolTip("Keep incomplete or lower-confidence decodes out of the roster until reviewed.")
-        log_controls_layout.addWidget(self.log_assisted_review_chk)
-        self.log_assisted_review_help = QLabel("Questionable decodes stay in the Review tab so they can be checked before being added.")
-        self.log_assisted_review_help.setWordWrap(True)
-        self.log_assisted_review_help.setStyleSheet("QLabel { color: #666666; margin-left: 24px; }")
-        log_controls_layout.addWidget(self.log_assisted_review_help)
-        self.log_assisted_tx_chk = QCheckBox("Use sent TX as context")
-        self.log_assisted_tx_chk.setToolTip("Use transmitted lines only to help interpret nearby received text. TX lines never become check-ins.")
-        log_controls_layout.addWidget(self.log_assisted_tx_chk)
-        self.log_assisted_tx_help = QLabel("Sent TX text is only used as nearby context. It never creates a check-in on its own.")
-        self.log_assisted_tx_help.setWordWrap(True)
-        self.log_assisted_tx_help.setStyleSheet("QLabel { color: #666666; margin-left: 24px; }")
-        log_controls_layout.addWidget(self.log_assisted_tx_help)
-        details_layout.addLayout(log_controls_layout)
-
-        self.log_assisted_status = QLabel("Log-assisted intake disabled.")
-        self.log_assisted_status.setWordWrap(True)
-        details_layout.addWidget(self.log_assisted_status)
-        # Intentionally hidden for 1.2.4. Real FLDigi logs mix scripts, acks,
-        # repeats, form payloads, and noisy decodes; the current parser is kept
-        # for future RX-only/review-only work but must not drive normal NCS UI.
-        if not self.LOG_ASSISTED_INTAKE_VISIBLE:
-            for widget in (
-                self.log_assisted_enable_chk,
-                self.log_assisted_enable_help,
-                self.log_assisted_review_chk,
-                self.log_assisted_review_help,
-                self.log_assisted_tx_chk,
-                self.log_assisted_tx_help,
-                self.log_assisted_status,
-            ):
-                widget.setVisible(False)
         setup_layout.addWidget(self.setup_details_frame)
 
         layout.addWidget(setup_frame)
@@ -836,9 +782,6 @@ class FldigiNetControlTab(QWidget):
         self.joiner_add_btn.clicked.connect(self._add_joiner_net_control_rows)
         self.joiner_ncs_edit.returnPressed.connect(self._add_joiner_net_control_rows)
         self.joiner_ancs_edit.returnPressed.connect(self._add_joiner_net_control_rows)
-        self.log_assisted_enable_chk.toggled.connect(self._on_log_assisted_controls_changed)
-        self.log_assisted_review_chk.toggled.connect(self._on_log_assisted_controls_changed)
-        self.log_assisted_tx_chk.toggled.connect(self._on_log_assisted_controls_changed)
         self.main_text.textChanged.connect(self._on_workspace_text_changed)
         self.late_text.textChanged.connect(self._on_workspace_text_changed)
         self.qru_text.textChanged.connect(self._on_workspace_text_changed)
@@ -2528,202 +2471,6 @@ class FldigiNetControlTab(QWidget):
             return macro_id
         return f"CUSTOM_{index + 1}"
 
-    def _log_assisted_enabled(self) -> bool:
-        if not self.LOG_ASSISTED_INTAKE_VISIBLE:
-            return False
-        return bool(self.log_assisted_enable_chk.isChecked())
-
-    def _log_assisted_show_review(self) -> bool:
-        return bool(self.log_assisted_review_chk.isChecked())
-
-    def _log_assisted_include_tx(self) -> bool:
-        return bool(self.log_assisted_tx_chk.isChecked())
-
-    def _on_log_assisted_controls_changed(self, *_args) -> None:
-        if self._log_assisted_loading:
-            return
-        self.settings.set(self.FLDIGI_LOG_ASSISTED_ENABLED_KEY, self._log_assisted_enabled())
-        self.settings.set(self.FLDIGI_LOG_ASSISTED_SHOW_REVIEW_KEY, self._log_assisted_show_review())
-        self.settings.set(self.FLDIGI_LOG_ASSISTED_INCLUDE_TX_KEY, self._log_assisted_include_tx())
-        if self._net_in_progress and self._log_assisted_enabled():
-            self._capture_log_assisted_session()
-        elif not self._log_assisted_enabled():
-            self._reset_log_assisted_session()
-        self._update_log_assisted_status()
-        self._apply_role_workspace(self.role_combo.currentText())
-
-    def _load_log_assisted_state(self) -> None:
-        self._log_assisted_loading = True
-        try:
-            enabled = bool(self.settings.get(self.FLDIGI_LOG_ASSISTED_ENABLED_KEY, False))
-            self.log_assisted_enable_chk.setChecked(enabled and self.LOG_ASSISTED_INTAKE_VISIBLE)
-            self.log_assisted_review_chk.setChecked(bool(self.settings.get(self.FLDIGI_LOG_ASSISTED_SHOW_REVIEW_KEY, True)))
-            self.log_assisted_tx_chk.setChecked(bool(self.settings.get(self.FLDIGI_LOG_ASSISTED_INCLUDE_TX_KEY, True)))
-        finally:
-            self._log_assisted_loading = False
-        self._update_log_assisted_status()
-        self._apply_role_workspace(self.role_combo.currentText())
-
-    def _reset_log_assisted_session(self) -> None:
-        self._clear_log_assisted_candidates_from_buckets()
-        self._log_assisted_session_path = ""
-        self._log_assisted_session_offset = 0
-        self._log_assisted_session_start_utc = None
-        self._log_assisted_session_tx_context = ""
-        self._log_assisted_seen_normalized.clear()
-        self._log_assisted_candidates_by_callsign.clear()
-        self.review_card.set_text("")
-
-    def _clear_log_assisted_candidates_from_buckets(self) -> None:
-        if not self._log_assisted_candidates_by_callsign:
-            return
-        for callsign, candidate in list(self._log_assisted_candidates_by_callsign.items()):
-            bucket_id = self._log_assisted_target_bucket(candidate)
-            if bucket_id in {"tfc", "qru"}:
-                self._roster_remove_callsign(callsign)
-            elif bucket_id == "review":
-                self._remove_bucket_line_by_callsign(bucket_id, callsign)
-
-    def _capture_log_assisted_session(self) -> None:
-        if not self._log_assisted_enabled():
-            self._reset_log_assisted_session()
-            return
-        self._clear_log_assisted_candidates_from_buckets()
-        path = resolve_fldigi_log_path(self.settings.get("fldigi_log_path", ""))
-        self._log_assisted_session_path = str(path) if path is not None else ""
-        self._log_assisted_session_offset = int(path.stat().st_size) if path is not None and path.exists() else 0
-        self._log_assisted_session_start_utc = datetime.datetime.now(datetime.timezone.utc)
-        self._log_assisted_session_tx_context = ""
-        self._log_assisted_seen_normalized.clear()
-        self._log_assisted_candidates_by_callsign.clear()
-        self.review_card.set_text("")
-        self._update_log_assisted_status()
-
-    def _update_log_assisted_status(self, *, scanned: int = 0, imported: int = 0, reviewed: int = 0) -> None:
-        if not self._log_assisted_enabled():
-            self.log_assisted_status.setText("Log-assisted intake disabled.")
-            self._refresh_setup_summary()
-            return
-        if not self._log_assisted_session_path:
-            self.log_assisted_status.setText("Log-assisted intake is enabled, but no FLDigi log file is configured or resolved yet.")
-            self._refresh_setup_summary()
-            return
-        parts = [f"Session log: {Path(self._log_assisted_session_path).name or self._log_assisted_session_path}"]
-        if self._log_assisted_session_start_utc is not None:
-            parts.append(self._log_assisted_session_start_utc.strftime("started %Y-%m-%d %H:%M:%S UTC"))
-        if scanned or imported or reviewed:
-            parts.append(f"scanned {scanned} lines, imported {imported}, review {reviewed}")
-        self.log_assisted_status.setText("; ".join(parts))
-        self._refresh_setup_summary()
-
-    def _log_assisted_target_bucket(self, candidate) -> str:
-        role = normalize_role(self.role_combo.currentText())
-        if candidate.bucket == "REVIEW":
-            return "review"
-        if role == "JOINER":
-            return "tfc"
-        if candidate.bucket == "QRU":
-            return "qru"
-        return "tfc"
-
-    def _log_assisted_candidate_line(self, candidate) -> str:
-        parts = [candidate.callsign]
-        if candidate.name:
-            parts.append(candidate.name)
-        if candidate.state:
-            parts.append(candidate.state)
-        if candidate.traffic:
-            parts.append(candidate.traffic)
-        line = " / ".join(parts)
-        tx_context = str(getattr(candidate, "tx_context", "") or "").strip()
-        if candidate.bucket == "REVIEW" and tx_context:
-            line = f"{line} [ctx: {tx_context}]"
-        return line
-
-    def _log_assisted_candidate_rank(self, candidate) -> tuple[int, int, int]:
-        confidence_rank = {"low": 1, "medium": 2, "high": 3}.get(str(candidate.confidence or "").lower(), 0)
-        return candidate.completeness_score(), confidence_rank, int(candidate.timestamp_utc.timestamp()) if candidate.timestamp_utc else 0
-
-    def _remove_bucket_line_by_callsign(self, bucket_id: str, callsign: str) -> None:
-        card = self._workspace_bucket_cards.get(bucket_id)
-        if card is None:
-            return
-        lines = []
-        removed = False
-        for raw_line in card.text().splitlines():
-            cs, _, _ = self._parse_checkin_line(raw_line)
-            if (cs or "").strip().upper() == callsign:
-                removed = True
-                continue
-            lines.append(raw_line)
-        if removed:
-            card.set_text("\n".join(lines).strip())
-
-    def _upsert_bucket_line(self, bucket_id: str, line: str, callsign: str) -> None:
-        card = self._workspace_bucket_cards.get(bucket_id)
-        if card is None or not line:
-            return
-        lines = []
-        replaced = False
-        for raw_line in card.text().splitlines():
-            cs, _, _ = self._parse_checkin_line(raw_line)
-            if (cs or "").strip().upper() == callsign:
-                if not replaced:
-                    lines.append(line)
-                    replaced = True
-                continue
-            lines.append(raw_line)
-        if not replaced:
-            lines.append(line)
-        card.set_text("\n".join([ln for ln in lines if ln]).strip())
-
-    def _log_assisted_bucket_text(self, bucket_id: str) -> str:
-        return self._workspace_bucket_text(bucket_id)
-
-    def _render_log_assisted_candidate(self, candidate) -> str:
-        return self._log_assisted_candidate_line(candidate)
-
-    def _apply_log_assisted_candidate(self, candidate) -> None:
-        callsign = (candidate.callsign or "").strip().upper()
-        if not callsign:
-            return
-        current = self._log_assisted_candidates_by_callsign.get(callsign)
-        current_rank = self._log_assisted_candidate_rank(current) if current is not None else (-1, -1, -1)
-        new_rank = self._log_assisted_candidate_rank(candidate)
-        if current is not None and new_rank <= current_rank:
-            return
-
-        old_bucket = self._log_assisted_target_bucket(current) if current is not None else ""
-        new_bucket = self._log_assisted_target_bucket(candidate)
-        if new_bucket == "review":
-            if old_bucket in {"tfc", "qru"}:
-                self._roster_remove_callsign(callsign)
-            line = self._render_log_assisted_candidate(candidate)
-            lines = [ln for ln in self.review_card.text().splitlines() if (self._parse_checkin_line(ln)[0] or "").strip().upper() != callsign]
-            lines.append(line)
-            self.review_card.set_text("\n".join(lines).strip())
-            if self._log_assisted_show_review():
-                self._set_compare_workspace_expanded(True)
-                self.compare_workspace_tabs.setCurrentWidget(self.review_card)
-        else:
-            if old_bucket == "review":
-                lines = [ln for ln in self.review_card.text().splitlines() if (self._parse_checkin_line(ln)[0] or "").strip().upper() != callsign]
-                self.review_card.set_text("\n".join(lines).strip())
-            category = "QRU" if new_bucket == "qru" else "TFC"
-            self._roster_append_row(
-                callsign,
-                candidate.name or "",
-                candidate.state or "",
-                candidate.traffic or "",
-                category,
-                "Log",
-            )
-        self._log_assisted_candidates_by_callsign[callsign] = candidate
-
-        if new_bucket == "review":
-            self.review_card.setVisible(self._log_assisted_show_review())
-        self._update_log_assisted_status(imported=sum(1 for c in self._log_assisted_candidates_by_callsign.values() if self._log_assisted_target_bucket(c) != "review"), reviewed=sum(1 for c in self._log_assisted_candidates_by_callsign.values() if self._log_assisted_target_bucket(c) == "review"))
-
     def _paste_into_review_card(self) -> None:
         from PySide6.QtWidgets import QApplication
 
@@ -2732,41 +2479,6 @@ class FldigiNetControlTab(QWidget):
     @staticmethod
     def _strip_inline_review_context(line: str) -> str:
         return re.sub(r"\s*\[ctx:\s*.*\]\s*$", "", str(line or "").strip(), flags=re.IGNORECASE)
-
-    def _poll_log_assisted_intake(self) -> None:
-        if not self._net_in_progress or not self._log_assisted_enabled():
-            return
-        path = resolve_fldigi_log_path(self.settings.get("fldigi_log_path", ""))
-        if path is None:
-            self._update_log_assisted_status()
-            return
-        path_text = str(path)
-        if path_text != self._log_assisted_session_path:
-            self._clear_log_assisted_candidates_from_buckets()
-            self._log_assisted_session_path = path_text
-            self._log_assisted_session_offset = int(path.stat().st_size) if path.exists() else 0
-            self._log_assisted_session_tx_context = ""
-            self._log_assisted_seen_normalized.clear()
-            self._log_assisted_candidates_by_callsign.clear()
-            self.review_card.set_text("")
-            self._update_log_assisted_status()
-            return
-        candidates, new_offset, last_tx_context = scan_fldigi_log_file(
-            path,
-            start_offset=self._log_assisted_session_offset,
-            session_start_utc=self._log_assisted_session_start_utc,
-            last_tx_context=self._log_assisted_session_tx_context,
-            include_tx_context=self._log_assisted_include_tx(),
-            seen_normalized=self._log_assisted_seen_normalized,
-        )
-        self._log_assisted_session_offset = new_offset
-        self._log_assisted_session_tx_context = last_tx_context
-        if not candidates:
-            self._update_log_assisted_status()
-            return
-        for candidate in candidates:
-            self._apply_log_assisted_candidate(candidate)
-        self._update_log_assisted_status(scanned=len(candidates), imported=sum(1 for c in candidates if self._log_assisted_target_bucket(c) != "review"), reviewed=sum(1 for c in candidates if self._log_assisted_target_bucket(c) == "review"))
 
     def _insert_left_bucket_widget(self, widget: WorkspaceBucketCard) -> None:
         if self._left_bucket_col.indexOf(widget) >= 0:
@@ -3461,8 +3173,7 @@ class FldigiNetControlTab(QWidget):
             self.compare_results_card.set_read_only(True)
             self.compare_results_card.set_placeholder("Run Compare to list entries that can be merged into the net roster.")
             self.compare_results_card.set_count(len(self._reference_entries_missing_from_roster()))
-            review_visible = self._log_assisted_enabled() and self._log_assisted_show_review()
-            self.review_card.setVisible(review_visible)
+            self.review_card.setVisible(False)
             self.review_card.set_read_only(False)
             self.review_card.set_placeholder("Review held candidates here.")
             self._workspace_bucket_defaults = {
@@ -3472,8 +3183,6 @@ class FldigiNetControlTab(QWidget):
             self._workspace_visible_bucket_ids = set(visible_ids)
             self._workspace_visible_bucket_ids.add("roster")
             self._workspace_visible_bucket_ids.add("compare_results")
-            if review_visible:
-                self._workspace_visible_bucket_ids.add("review")
             self._refresh_custom_bucket_cards(normalized)
             self._refresh_known_action_band(normalized)
             self._sync_compare_workspace_tabs()
@@ -3564,7 +3273,6 @@ class FldigiNetControlTab(QWidget):
         self._maybe_reload_operating_groups()
         self._apply_theme()
         self._refresh_macro_profile_choices()
-        self._update_log_assisted_status()
 
     def show_loading_toast(self) -> None:
         # NCS tabs do not use a loading banner/toast.
@@ -3593,7 +3301,6 @@ class FldigiNetControlTab(QWidget):
         try:
             self._maybe_reload_operating_groups()
             self._refresh_macro_profile_choices()
-            self._poll_log_assisted_intake()
         finally:
             self._activation_secondary_refresh_inflight = False
 
@@ -3615,7 +3322,6 @@ class FldigiNetControlTab(QWidget):
         self._update_clock_labels()
         self._update_suspend_state()
         self._update_next_change_display()
-        self._poll_log_assisted_intake()
 
     def _maybe_reload_operating_groups(self):
         try:
@@ -3754,7 +3460,6 @@ class FldigiNetControlTab(QWidget):
     def _on_timer_tick(self):
         self._update_clock_labels()
         self._update_next_change_display()
-        self._poll_log_assisted_intake()
 
     def _ui_tz_abbr(self, tz_name: str, fallback: str) -> str:
         mapping = {
@@ -4364,7 +4069,6 @@ class FldigiNetControlTab(QWidget):
     def _load_settings(self):
         self._role_workspace_prefs = load_role_workspace_prefs(self.settings)
         self._load_macro_profile_state()
-        self._load_log_assisted_state()
         self._resolve_checkin_dir()
         self._refresh_macro_profile_choices()
 
@@ -5219,7 +4923,6 @@ class FldigiNetControlTab(QWidget):
             self._add_joiner_net_control_rows()
         self._roster_sync_legacy_buffers(write_files=True)
         self._set_roster_dirty(False)
-        self._capture_log_assisted_session()
         self.net_status_changed.emit("FLDIGI", True)
         self._set_net_button_styles(active=True)
         log.info("FLDigi net started: %s (%s)", self.net_name_combo.currentText().strip(), self.role_combo.currentText())
@@ -5404,7 +5107,6 @@ class FldigiNetControlTab(QWidget):
             self._archive_checkin_files()
             # End net even though no check-ins exist
             self._net_in_progress = False
-            self._reset_log_assisted_session()
             self.net_status_changed.emit("FLDIGI", False)
             self._set_net_button_styles(active=False)
             log.info("FLDigi net ended (no check-ins file content).")
@@ -5483,7 +5185,6 @@ class FldigiNetControlTab(QWidget):
 
         self._archive_checkin_files()
         self._net_in_progress = False
-        self._reset_log_assisted_session()
         self.net_status_changed.emit("FLDIGI", False)
         self._set_net_button_styles(active=False)
         log.info("FLDigi net ended: %s (%s)", net_name, role)
