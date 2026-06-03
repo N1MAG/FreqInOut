@@ -107,6 +107,7 @@ class FldigiLogStatusClient:
         stale_mtime_seconds: int = 90,
         status_cache_ttl_seconds: float = 1.0,
         path_cache_ttl_seconds: float = 3.0,
+        max_read_bytes: int = 1_048_576,
     ) -> None:
         self.settings = SettingsManager()
         self.hold_seconds = int(hold_seconds)
@@ -119,6 +120,7 @@ class FldigiLogStatusClient:
         self.stale_mtime_seconds = int(stale_mtime_seconds)
         self.status_cache_ttl_seconds = max(0.0, float(status_cache_ttl_seconds))
         self.path_cache_ttl_seconds = max(0.0, float(path_cache_ttl_seconds))
+        self.max_read_bytes = max(4096, int(max_read_bytes))
         self._last_path: Optional[Path] = None
         self._last_offset: int = 0
         self._last_valid_ts: Optional[datetime.datetime] = None
@@ -282,12 +284,18 @@ class FldigiLogStatusClient:
                 stat = path.stat()
             except Exception:
                 return stats
+            discard_partial_line = False
             if self._last_path != path:
                 self._last_path = path
-                self._last_offset = 0
+                self._last_offset = max(0, stat.st_size - self.max_read_bytes)
+                discard_partial_line = self._last_offset > 0
             if stat.st_size < self._last_offset:
                 # log rotation/truncate
-                self._last_offset = 0
+                self._last_offset = max(0, stat.st_size - self.max_read_bytes)
+                discard_partial_line = self._last_offset > 0
+            elif stat.st_size - self._last_offset > self.max_read_bytes:
+                self._last_offset = max(0, stat.st_size - self.max_read_bytes)
+                discard_partial_line = self._last_offset > 0
             try:
                 with path.open("rb") as fh:
                     fh.seek(self._last_offset)
@@ -299,6 +307,10 @@ class FldigiLogStatusClient:
             meta["bytes"] = stats["bytes"]
             if not data:
                 return stats
+            if discard_partial_line and data:
+                # A bounded tail may begin midway through a line.
+                newline = data.find(b"\n")
+                data = data[newline + 1 :] if newline >= 0 else b""
             text = data.decode("utf-8", errors="replace")
             lines = text.splitlines()
             stats["lines"] = len(lines)

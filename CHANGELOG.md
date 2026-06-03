@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.7.6]
+- Fixed: FIO no longer scans the FLDigi log as part of routine scheduler status polling, reducing unnecessary idle CPU activity in both FIO and FLDigi.
+- Changed: FLDigi receive-busy checks are now demand-driven and run only while an HF/SOP scheduled frequency change is waiting to take control. Busy transitions continue to recheck every 5 seconds and retain the authoritative 3-minute breakaway.
+- Changed: The long-lived FLDigi log status reader now keeps an incremental file offset and bounds first or reset reads to the recent log tail.
+- Removed: The hidden, unused FLDigi NCS log-assisted intake path and parser are retired.
+
 ## [1.2.7.5]
 - Added: Routine app/status polling now uses a shared dependency status service, so Settings and ControlFreq read cached worker-built snapshots instead of each tab repeatedly probing JS8Call, FLRig, and FLDigi from the UI path.
 - Changed: Launch readiness monitoring is more relaxed and operator-friendly, checking every 2 seconds for the first 30 seconds and every 5 seconds after that with a 90-second default timeout for slower JS8Call starts.

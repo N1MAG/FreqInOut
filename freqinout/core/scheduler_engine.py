@@ -18,7 +18,6 @@ from freqinout.core.scheduler_events import record_scheduler_event
 from freqinout.core.settings_manager import SettingsManager
 from freqinout.radio_interface.rigctl_client import FLRigClient, FrequencyCommand, flrig_client_from_settings
 from freqinout.radio_interface.js8_status import JS8ControlClient, VarACStatusClient
-from freqinout.radio_interface.fldigi_status import FldigiLogStatusClient
 from freqinout.radio_interface.js8_rx_hub import JS8RxHub
 
 
@@ -324,7 +323,6 @@ class SchedulerEngine(QObject):
         self._status_snapshot_timeout_s: float = 15.0
         self._last_varac_status: Dict[str, object] = {"busy": False, "waiting_for_frequency": False, "reason": None}
         self._last_js8_busy: bool = False
-        self._last_fldigi_status: Dict[str, object] = {"busy": False, "reason": None, "last_valid_age_s": None}
         self._last_ptt_active: bool = False
         self._fldigi_mode_cache: Optional[str] = None
         self._fldigi_mode_cache_ts: float = 0.0
@@ -367,7 +365,13 @@ class SchedulerEngine(QObject):
         self._fldigi_busy_since_ts: Optional[float] = None
         self._fldigi_busy_last_reason: Optional[str] = None
         self._fldigi_busy_watchdog_s: float = 180.0
-        self._fldigi_recheck_in_flight: bool = False
+        self._fldigi_busy_check_source: str = ""
+        self._fldigi_busy_check_target_hz: Optional[int] = None
+        self._fldigi_busy_check_result: Optional[Dict[str, object]] = None
+        self._fldigi_busy_check_in_flight: bool = False
+        self._fldigi_busy_check_token: int = 0
+        self._fldigi_busy_check_next_ts: float = 0.0
+        self._fldigi_busy_check_interval_s: float = 5.0
         self._js8_busy_entry_key: Optional[Tuple] = None
         self._js8_busy_since_ts: Optional[float] = None
         self._varac_busy_entry_key: Optional[Tuple] = None
@@ -622,6 +626,7 @@ class SchedulerEngine(QObject):
         self._retry_scheduled = False
         self._force_retry_after_control = False
         self._forced_retry_attempts_left = 0
+        self._clear_fldigi_busy_check_state()
         self._shutdown_control_executor("stop")
         self._shutdown_status_executor("stop")
 
@@ -988,7 +993,6 @@ class SchedulerEngine(QObject):
                 control_mode = (settings.get("control_via", "FLRig") or "FLRig").upper()
                 out: Dict[str, object] = {
                     "varac_status": {"busy": False, "waiting_for_frequency": False, "reason": None},
-                    "fldigi_status": {"busy": False, "reason": None, "last_valid_age_s": None},
                     "flrig_ptt": False,
                     "flrig_ptt_known": False,
                     "flrig_freq_hz": None,
@@ -1003,16 +1007,6 @@ class SchedulerEngine(QObject):
                     out["varac_status"] = varac.get_status(include_db_transfer=True)
                 except Exception as e:
                     log.debug("SchedulerEngine: background VarAC status failed: %s", e)
-                try:
-                    fldigi = FldigiLogStatusClient()
-                    fldigi_status = fldigi.get_status()
-                    out["fldigi_status"] = {
-                        "busy": bool(getattr(fldigi_status, "busy", False)),
-                        "reason": getattr(fldigi_status, "reason", None),
-                        "last_valid_age_s": getattr(fldigi_status, "last_valid_age_s", None),
-                    }
-                except Exception as e:
-                    log.debug("SchedulerEngine: background FLDigi status failed: %s", e)
                 try:
                     rig = flrig_client_from_settings(settings)
                     try:
@@ -1055,9 +1049,6 @@ class SchedulerEngine(QObject):
                 varac_status = data.get("varac_status")
                 if isinstance(varac_status, dict):
                     self._last_varac_status = dict(varac_status)
-                fldigi_status = data.get("fldigi_status")
-                if isinstance(fldigi_status, dict):
-                    self._last_fldigi_status = dict(fldigi_status)
                 ptt_known = bool(data.get("flrig_ptt_known", False))
                 if ptt_known:
                     self._last_ptt_active = bool(data.get("flrig_ptt", False))
@@ -1433,6 +1424,7 @@ class SchedulerEngine(QObject):
                     self._last_source = source
                     self._last_freq_hz = freq_hz
                     self._last_band = band
+                    self._clear_fldigi_busy_check_state()
                     self._clear_scheduler_health_issue("control-task", source=source, frequency_hz=freq_hz)
                     self._record_scheduler_event(
                         "applied",
@@ -1738,137 +1730,168 @@ class SchedulerEngine(QObject):
         except Exception:
             return True
 
-    def _fldigi_log_status(self) -> Dict[str, object]:
-        if not self.fldigi_log:
-            return {"busy": False, "reason": None, "last_valid_age_s": None}
-        if hasattr(self.fldigi_log, "get_status"):
+    def _clear_fldigi_busy_check_state(self) -> None:
+        self._fldigi_busy_entry_key = None
+        self._fldigi_busy_since_ts = None
+        self._fldigi_busy_last_reason = None
+        self._fldigi_busy_check_source = ""
+        self._fldigi_busy_check_target_hz = None
+        self._fldigi_busy_check_result = None
+        self._fldigi_busy_check_in_flight = False
+        self._fldigi_busy_check_token += 1
+        self._fldigi_busy_check_next_ts = 0.0
+        self._clear_scheduler_health_issue("fldigi-busy")
+
+    def _queue_fldigi_busy_check(
+        self,
+        *,
+        entry_key: Tuple,
+        source: str,
+        target_frequency_hz: int,
+    ) -> None:
+        if self._shutdown_requested or self._fldigi_busy_check_in_flight or not self.fldigi_log:
+            return
+        self._fldigi_busy_check_token += 1
+        check_token = self._fldigi_busy_check_token
+
+        def _task() -> Dict[str, object]:
+            started = time.time()
             try:
                 status = self.fldigi_log.get_status()
                 if isinstance(status, dict):
-                    self._last_fldigi_status = dict(status)
-                    self._status_summary_external_ts = time.time()
-                    return status
-                if hasattr(status, "busy"):
-                    out = {
-                        "busy": bool(getattr(status, "busy", False)),
-                        "reason": getattr(status, "reason", None),
-                        "last_valid_age_s": getattr(status, "last_valid_age_s", None),
-                    }
-                    self._last_fldigi_status = dict(out)
-                    self._status_summary_external_ts = time.time()
-                    return out
-            except Exception:
-                self._last_fldigi_status = {"busy": False, "reason": None, "last_valid_age_s": None}
-                return dict(self._last_fldigi_status)
-        try:
-            self._last_fldigi_status = {"busy": bool(self.fldigi_log.is_busy()), "reason": None, "last_valid_age_s": None}
-            self._status_summary_external_ts = time.time()
-            return dict(self._last_fldigi_status)
-        except Exception:
-            self._last_fldigi_status = {"busy": False, "reason": None, "last_valid_age_s": None}
-            return dict(self._last_fldigi_status)
-
-    def _queue_fldigi_status_recheck(self, *, source: str, reason: str, hold_age: float) -> None:
-        if self._fldigi_recheck_in_flight:
-            self._record_scheduler_event(
-                "watchdog",
-                "fldigi_busy_recheck_already_running",
-                source=source,
-                action="FLDigi busy background recheck already running",
-                detail="FIO did not queue another recheck because the previous breakaway recheck has not finished.",
-                throttle_sec=30.0,
-                reason=reason,
-                hold_age_s=round(float(hold_age or 0.0), 1),
-            )
-            return
-
-        def _task() -> Dict[str, object]:
-            try:
-                status = FldigiLogStatusClient(
-                    status_cache_ttl_seconds=0.0,
-                    path_cache_ttl_seconds=0.0,
-                ).get_status()
+                    busy = bool(status.get("busy"))
+                    reason = status.get("reason")
+                    last_valid_age_s = status.get("last_valid_age_s")
+                else:
+                    busy = bool(getattr(status, "busy", False))
+                    reason = getattr(status, "reason", None)
+                    last_valid_age_s = getattr(status, "last_valid_age_s", None)
                 return {
-                    "busy": bool(getattr(status, "busy", False)),
-                    "reason": getattr(status, "reason", None),
-                    "last_valid_age_s": getattr(status, "last_valid_age_s", None),
+                    "busy": busy,
+                    "reason": reason,
+                    "last_valid_age_s": last_valid_age_s,
                     "checked_ts": time.time(),
+                    "duration_ms": round((time.time() - started) * 1000.0, 1),
+                    "error": None,
                 }
             except Exception as e:
-                log.warning("SchedulerEngine: background FLDigi busy recheck failed: %s", e)
                 return {
                     "busy": False,
                     "reason": None,
                     "last_valid_age_s": None,
-                    "recheck_error": str(e),
                     "checked_ts": time.time(),
+                    "duration_ms": round((time.time() - started) * 1000.0, 1),
+                    "error": str(e),
                 }
 
         def _on_done(done) -> None:
             def _apply() -> None:
+                if check_token != self._fldigi_busy_check_token:
+                    return
+                self._fldigi_busy_check_in_flight = False
                 if self._shutdown_requested:
                     return
-                try:
-                    fresh = done.result()
-                except Exception as e:
-                    self._fldigi_recheck_in_flight = False
-                    self._record_scheduler_event(
-                        "watchdog",
-                        "fldigi_busy_recheck_result",
-                        source=source,
-                        action="FLDigi busy background recheck failed",
-                        detail=str(e),
-                        throttle_sec=30.0,
-                    )
+                if (
+                    self._fldigi_busy_entry_key != entry_key
+                    or self._fldigi_busy_check_source != source
+                    or self._fldigi_busy_check_target_hz != target_frequency_hz
+                ):
                     return
-                self._fldigi_recheck_in_flight = False
-                self._last_fldigi_status = dict(fresh)
-                self._status_summary_external_ts = float(fresh.get("checked_ts") or time.time())
+                try:
+                    result = dict(done.result())
+                except Exception as e:
+                    result = {
+                        "busy": False,
+                        "reason": None,
+                        "last_valid_age_s": None,
+                        "checked_ts": time.time(),
+                        "duration_ms": 0.0,
+                        "error": str(e),
+                    }
+                self._fldigi_busy_check_result = result
+                self._fldigi_busy_check_next_ts = time.time() + self._fldigi_busy_check_interval_s
                 self._status_summary_cache = None
-                fresh_busy = bool(fresh.get("busy"))
-                fresh_reason = str(fresh.get("reason") or "") or "RX activity"
-                self._record_scheduler_event(
-                    "watchdog",
-                    "fldigi_busy_recheck_result",
-                    source=source,
-                    action="FLDigi busy background recheck completed",
-                    detail=f"FLDigi busy={fresh_busy}; reason={fresh_reason}",
-                    throttle_sec=30.0,
-                    reason=fresh_reason,
-                    hold_age_s=round(float(hold_age or 0.0), 1),
-                    busy=fresh_busy,
-                )
+                busy = bool(result.get("busy"))
+                reason = str(result.get("reason") or "") or "RX activity"
+                error = str(result.get("error") or "")
+                if error:
+                    self._record_scheduler_health_issue(
+                        "fldigi-busy-check",
+                        f"could not verify FLDigi receive activity; continuing schedule: {error}",
+                        cooldown_sec=30.0,
+                        source=source,
+                        frequency_hz=target_frequency_hz,
+                    )
+                    self._record_scheduler_event(
+                        "failed",
+                        "fldigi_busy_check_failed",
+                        source=source,
+                        action="Could not verify FLDigi receive activity; continuing schedule",
+                        detail=error,
+                        frequency_hz=target_frequency_hz,
+                        entry_key=entry_key,
+                        throttle_sec=30.0,
+                        duration_ms=result.get("duration_ms"),
+                    )
+                else:
+                    self._clear_scheduler_health_issue("fldigi-busy-check")
+                    self._record_scheduler_event(
+                        "status",
+                        "fldigi_busy_check_result",
+                        source=source,
+                        action="FLDigi receive activity check completed",
+                        detail=f"FLDigi busy={busy}; reason={reason}",
+                        frequency_hz=target_frequency_hz,
+                        entry_key=entry_key,
+                        throttle_sec=30.0,
+                        busy=busy,
+                        reason=reason,
+                        duration_ms=result.get("duration_ms"),
+                    )
+                try:
+                    self._evaluate(now_utc=datetime.datetime.now(datetime.timezone.utc))
+                except Exception as e:
+                    log.error("SchedulerEngine: FLDigi busy result reevaluation failed: %s", e)
 
             self._queue_scheduler_thread_call(_apply)
 
         try:
-            self._fldigi_recheck_in_flight = True
+            self._fldigi_busy_check_in_flight = True
             future = self._status_executor.submit(_task)
             future.add_done_callback(_on_done)
             self._record_scheduler_event(
-                "watchdog",
-                "fldigi_busy_recheck_queued",
+                "status",
+                "fldigi_busy_check_queued",
                 source=source,
-                action="Queued FLDigi busy background recheck",
-                detail=f"FIO is checking FLDigi in the background after breaking away from a long busy hold. Reason: {reason}",
+                action="Checking FLDigi receive activity before changing frequency",
+                frequency_hz=target_frequency_hz,
+                entry_key=entry_key,
                 throttle_sec=30.0,
-                reason=reason,
-                hold_age_s=round(float(hold_age or 0.0), 1),
             )
         except RuntimeError as e:
-            self._fldigi_recheck_in_flight = False
-            log.debug("SchedulerEngine: could not queue FLDigi status recheck: %s", e)
+            self._fldigi_busy_check_in_flight = False
+            self._fldigi_busy_check_result = {
+                "busy": False,
+                "reason": None,
+                "last_valid_age_s": None,
+                "checked_ts": time.time(),
+                "duration_ms": 0.0,
+                "error": str(e),
+            }
 
     def _should_delay_for_fldigi(
         self,
         *,
         entry_key: Tuple,
         source: str,
+        target_frequency_hz: int,
         want_freq_change: bool,
         ignore_fldigi_busy: bool,
         now_ts: Optional[float] = None,
     ) -> Tuple[bool, Optional[str]]:
-        if ignore_fldigi_busy or not want_freq_change:
+        source_upper = (source or "").upper()
+        if ignore_fldigi_busy or not want_freq_change or source_upper not in {"HF", "SOP"}:
+            self._clear_fldigi_busy_check_state()
             return False, None
         if self._manual_net_fldigi_active or self._manual_net_js8_active:
             self._record_scheduler_event(
@@ -1879,26 +1902,60 @@ class SchedulerEngine(QObject):
                 detail="Manual net control owns FLDigi/JS8 behavior for this net window.",
                 throttle_sec=60.0,
             )
+            self._clear_fldigi_busy_check_state()
             return False, None
-        if (source or "").upper() == "NET":
+        if not self.fldigi_log:
+            self._clear_fldigi_busy_check_state()
             return False, None
-        status = dict(self._last_fldigi_status or {})
+        now_ts = now_ts if now_ts is not None else time.time()
+        if (
+            self._fldigi_busy_entry_key != entry_key
+            or self._fldigi_busy_check_source != source
+            or self._fldigi_busy_check_target_hz != target_frequency_hz
+        ):
+            self._clear_fldigi_busy_check_state()
+            self._fldigi_busy_entry_key = entry_key
+            self._fldigi_busy_check_source = source
+            self._fldigi_busy_check_target_hz = target_frequency_hz
+            self._queue_fldigi_busy_check(
+                entry_key=entry_key,
+                source=source,
+                target_frequency_hz=target_frequency_hz,
+            )
+            return True, "checking FLDigi receive activity"
+        status = dict(self._fldigi_busy_check_result or {})
+        if not status:
+            if not self._fldigi_busy_check_in_flight and now_ts >= self._fldigi_busy_check_next_ts:
+                self._queue_fldigi_busy_check(
+                    entry_key=entry_key,
+                    source=source,
+                    target_frequency_hz=target_frequency_hz,
+                )
+            return True, "checking FLDigi receive activity"
+        checked_ts = float(status.get("checked_ts") or 0.0)
+        if checked_ts <= 0.0 or now_ts - checked_ts >= self._fldigi_busy_check_interval_s:
+            self._fldigi_busy_check_result = None
+            self._queue_fldigi_busy_check(
+                entry_key=entry_key,
+                source=source,
+                target_frequency_hz=target_frequency_hz,
+            )
+            return True, "checking FLDigi receive activity"
+        if status.get("error"):
+            return False, None
         busy = bool(status.get("busy"))
         if not busy:
-            self._fldigi_busy_entry_key = None
             self._fldigi_busy_since_ts = None
             self._fldigi_busy_last_reason = None
             self._clear_scheduler_health_issue("fldigi-busy")
             return False, None
-        now_ts = now_ts if now_ts is not None else time.time()
-        if entry_key != self._fldigi_busy_entry_key:
-            self._fldigi_busy_entry_key = entry_key
+        if self._fldigi_busy_since_ts is None:
             self._fldigi_busy_since_ts = now_ts
         self._fldigi_busy_last_reason = str(status.get("reason") or "") or None
         since = self._fldigi_busy_since_ts or now_ts
         hold_age = max(0.0, now_ts - since)
         reason = self._fldigi_busy_last_reason or "RX activity"
-        if (source or "").upper() in {"HF", "SOP"} and hold_age >= self._fldigi_busy_watchdog_s:
+        if hold_age >= self._fldigi_busy_watchdog_s:
             log.warning(
                 "SchedulerEngine: FLDigi busy watchdog breaking away after %.1fs hold (reason=%s).",
                 hold_age,
@@ -1928,11 +1985,14 @@ class SchedulerEngine(QObject):
                 reason=reason,
                 hold_age_s=round(hold_age, 1),
             )
-            self._queue_fldigi_status_recheck(source=source, reason=reason, hold_age=hold_age)
-            self._fldigi_busy_entry_key = None
-            self._fldigi_busy_since_ts = None
-            self._fldigi_busy_last_reason = None
+            self._clear_fldigi_busy_check_state()
             return False, None
+        if not self._fldigi_busy_check_in_flight and now_ts >= self._fldigi_busy_check_next_ts:
+            self._queue_fldigi_busy_check(
+                entry_key=entry_key,
+                source=source,
+                target_frequency_hz=target_frequency_hz,
+            )
         self._record_scheduler_health_issue(
             "fldigi-busy",
             f"holding schedule change for FLDigi RX activity ({reason})",
@@ -2754,9 +2814,9 @@ class SchedulerEngine(QObject):
         freq_hz = actual_state.actual_frequency_hz
         varac_status = dict(self._last_varac_status or {})
         js8_busy = bool(self._last_js8_busy)
-        fldigi_status = dict(self._last_fldigi_status or {})
-        fldigi_busy = bool(fldigi_status.get("busy"))
-        fldigi_busy_reason = fldigi_status.get("reason")
+        fldigi_result = dict(self._fldigi_busy_check_result or {})
+        fldigi_busy = bool(self._fldigi_busy_since_ts is not None and fldigi_result.get("busy"))
+        fldigi_busy_reason = self._fldigi_busy_last_reason if fldigi_busy else None
         ptt_active = bool(actual_state.flrig_ptt_known and actual_state.flrig_ptt_active)
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         suspended_until = self._suspend_until_dt()
@@ -2790,6 +2850,8 @@ class SchedulerEngine(QObject):
             "js8_busy": js8_busy,
             "fldigi_busy": fldigi_busy,
             "fldigi_busy_reason": fldigi_busy_reason,
+            "fldigi_busy_check_pending": bool(self._fldigi_busy_check_in_flight),
+            "fldigi_busy_checked_at": fldigi_result.get("checked_ts"),
             "varac_busy": bool(varac_status.get("busy")),
             "ptt_active": ptt_active,
             "ptt_state_known": bool(actual_state.flrig_ptt_known),
@@ -3277,9 +3339,6 @@ class SchedulerEngine(QObject):
             self._fldigi_apply_after_ts = now_ts + 5
             return
         if self._fldigi_apply_after_ts is not None and now_ts < self._fldigi_apply_after_ts:
-            return
-        status = self._fldigi_log_status()
-        if bool(status.get("busy")):
             return
         desired = (self._desired_fldigi_mode, self._desired_fldigi_offset)
         if self._last_fldigi_apply == desired and self._fldigi_apply_after_ts is None:
@@ -4145,6 +4204,7 @@ class SchedulerEngine(QObject):
             self._net_schedule_started_at = None
             self._net_schedule_entry_key = None
             self._last_scheduler_selection_sig = None
+            self._clear_fldigi_busy_check_state()
             return
 
         # Apply to rig (if needed) and emit active_entry_changed
@@ -4847,6 +4907,7 @@ class SchedulerEngine(QObject):
         fldigi_delay, fldigi_reason = self._should_delay_for_fldigi(
             entry_key=prompt_key,
             source=source,
+            target_frequency_hz=freq_hz,
             want_freq_change=want_freq_change,
             ignore_fldigi_busy=ignore_fldigi_busy,
         )
