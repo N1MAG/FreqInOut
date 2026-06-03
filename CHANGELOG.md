@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.7.7]
+- Fixed: Scheduler status and control worker timeouts no longer abandon blocked executor threads and create replacements, preventing an external dependency stall from growing FIO to thousands of threads and sustained high CPU use.
+- Changed: A truly stuck scheduler worker now remains bounded, is reported through Station Health, and asks the operator to restart the unresponsive companion app or FIO instead of attempting unsafe in-process thread replacement.
+
 ## [1.2.7.6]
 - Fixed: FIO no longer scans the FLDigi log as part of routine scheduler status polling, reducing unnecessary idle CPU activity in both FIO and FLDigi.
 - Changed: FLDigi receive-busy checks are now demand-driven and run only while an HF/SOP scheduled frequency change is waiting to take control. Busy transitions continue to recheck every 5 seconds and retain the authoritative 3-minute breakaway.

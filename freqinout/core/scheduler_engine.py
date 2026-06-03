@@ -321,6 +321,7 @@ class SchedulerEngine(QObject):
         self._status_snapshot_future = None
         self._status_snapshot_started_at: Optional[float] = None
         self._status_snapshot_timeout_s: float = 15.0
+        self._status_snapshot_timeout_reported: bool = False
         self._last_varac_status: Dict[str, object] = {"busy": False, "waiting_for_frequency": False, "reason": None}
         self._last_js8_busy: bool = False
         self._last_ptt_active: bool = False
@@ -335,6 +336,7 @@ class SchedulerEngine(QObject):
         self._control_future_token: int = 0
         self._control_future_started_at: Optional[float] = None
         self._control_timeout_s: float = 8.0
+        self._control_timeout_reported: bool = False
         self._control_backoff_until: float = 0.0
         self._control_fail_count: int = 0
         self._pending_entry_key: Optional[Tuple] = None
@@ -895,20 +897,13 @@ class SchedulerEngine(QObject):
         return True
 
     def _reset_control_executor(self, reason: str) -> None:
-        self._shutdown_control_executor(f"reset ({reason})")
-        self._control_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="freqinout-control",
-        )
-        self._control_future = None
-        self._control_future_started_at = None
-        self._pending_entry_key = None
-        self._control_backoff_until = 0.0
-        self._control_fail_count = 0
-        log.warning("SchedulerEngine: control executor reset (%s).", reason)
+        if self._control_timeout_reported:
+            return
+        self._control_timeout_reported = True
+        log.warning("SchedulerEngine: control worker is stuck (%s); keeping the existing worker to prevent a thread leak.", reason)
         self._record_scheduler_health_issue(
             "control-task",
-            f"control executor reset: {reason}",
+            f"control worker is stuck: {reason}; restart the unresponsive companion app or FIO",
             cooldown_sec=30.0,
             reason=reason,
         )
@@ -958,17 +953,18 @@ class SchedulerEngine(QObject):
             started = float(self._status_snapshot_started_at or 0.0)
             if started and (now_ts - started) > self._status_snapshot_timeout_s:
                 age = now_ts - started
-                log.warning("SchedulerEngine: status snapshot worker timed out after %.1fs; resetting.", age)
-                self._record_scheduler_health_issue(
-                    "status-snapshot",
-                    f"status snapshot worker timed out after {age:.1f}s; reset",
-                    cooldown_sec=30.0,
-                    age_s=round(age, 1),
-                )
-                self._shutdown_status_executor("status snapshot timeout")
-                self._status_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-status")
-                self._status_snapshot_refresh_ts = 0.0
-            else:
+                if not self._status_snapshot_timeout_reported:
+                    self._status_snapshot_timeout_reported = True
+                    log.warning(
+                        "SchedulerEngine: status snapshot worker timed out after %.1fs; keeping the existing worker to prevent a thread leak.",
+                        age,
+                    )
+                    self._record_scheduler_health_issue(
+                        "status-snapshot",
+                        f"status snapshot worker timed out after {age:.1f}s; restart the unresponsive companion app or FIO",
+                        cooldown_sec=30.0,
+                        age_s=round(age, 1),
+                    )
                 return
         future = self._status_snapshot_future
         if future is not None and not future.done():
@@ -1044,6 +1040,7 @@ class SchedulerEngine(QObject):
                 except Exception as e:
                     log.debug("SchedulerEngine: background status snapshot failed: %s", e)
                     self._status_snapshot_started_at = None
+                    self._status_snapshot_timeout_reported = False
                     self._record_scheduler_health_issue("status-snapshot", f"status snapshot failed: {e}", cooldown_sec=30.0)
                     return
                 varac_status = data.get("varac_status")
@@ -1076,6 +1073,7 @@ class SchedulerEngine(QObject):
                 self._status_summary_external_ts = float(data.get("checked_ts") or time.time())
                 self._status_summary_cache = None
                 self._status_snapshot_started_at = None
+                self._status_snapshot_timeout_reported = False
                 self._clear_scheduler_health_issue("status-snapshot")
 
             self._queue_scheduler_thread_call(_apply)
@@ -1086,7 +1084,11 @@ class SchedulerEngine(QObject):
             self._status_snapshot_future.add_done_callback(_on_done)
         except RuntimeError:
             if not self._shutdown_requested:
-                self._status_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="freqinout-status")
+                self._record_scheduler_health_issue(
+                    "status-snapshot",
+                    "status snapshot could not be queued; restart FIO if dependency status remains unavailable",
+                    cooldown_sec=30.0,
+                )
 
     def _reset_control_if_running(self, reason: str) -> None:
         """
@@ -1310,21 +1312,20 @@ class SchedulerEngine(QObject):
         if self._control_future is not None and not self._control_future.done():
             if self._control_future_stuck():
                 self._reset_control_executor("timeout waiting for control task")
-            else:
-                log.debug("SchedulerEngine: control action skipped (control task running).")
-                self._record_scheduler_event(
-                    "skip",
-                    "control_task_running",
-                    source=source,
-                    action="Control action waiting for prior control task",
-                    frequency_hz=freq_hz,
-                    band=band,
-                    mode=mode,
-                    vfo=vfo,
-                    entry_key=entry_key,
-                    throttle_sec=15.0,
-                )
-                return False
+            log.debug("SchedulerEngine: control action skipped (control task running).")
+            self._record_scheduler_event(
+                "skip",
+                "control_task_running",
+                source=source,
+                action="Control action waiting for prior control task",
+                frequency_hz=freq_hz,
+                band=band,
+                mode=mode,
+                vfo=vfo,
+                entry_key=entry_key,
+                throttle_sec=15.0,
+            )
+            return False
         if self._pending_entry_key == entry_key:
             log.debug("SchedulerEngine: control action skipped (pending entry key).")
             self._record_scheduler_event(
@@ -1411,6 +1412,7 @@ class SchedulerEngine(QObject):
                 self._control_future = None
                 self._pending_entry_key = None
                 self._control_future_started_at = None
+                self._control_timeout_reported = False
                 ok = False
                 try:
                     ok = bool(fut.result())
