@@ -650,6 +650,7 @@ class MainWindow(QMainWindow):
             log.debug("MainWindow signal wiring failed: local_data_updated fanout: %s", e)
         _connect_or_log("settings_saved -> apply theme", self.settings_tab.settings_saved, self._apply_app_theme)
         _connect_or_log("settings_saved -> runtime settings", self.settings_tab.settings_saved, self._on_runtime_settings_saved)
+        _connect_or_log("settings_saved -> sync runtime status", self.settings_tab.settings_saved, self._sync_settings_runtime_status)
         try:
             if hasattr(self.settings_tab, "device_profiles_changed"):
                 self.settings_tab.device_profiles_changed.connect(self._on_runtime_device_profiles_changed)
@@ -703,6 +704,7 @@ class MainWindow(QMainWindow):
 
     def _sync_settings_runtime_status(self) -> None:
         try:
+            self.station_runtime_manager.sync_with_store(refresh_runtime_status=True)
             status = self.station_runtime_manager.runtime_status()
         except Exception:
             status = None

@@ -601,6 +601,7 @@ class SettingsTab(QWidget):
         self._software_radio_current_id: Optional[int] = None
         self._software_radio_drafts: Dict[int, Dict[str, Any]] = {}
         self._multi_rig_runtime_status: MultiRigRuntimeStatus | None = None
+        self._multi_rig_radio_catalog_payload: Dict[str, Any] | None = None
         self._active = False
         self._last_activation_refresh_ts = 0.0
         self._activation_refresh_interval_sec = 30.0
@@ -9147,6 +9148,16 @@ class SettingsTab(QWidget):
         except Exception:
             return {}
 
+    def _multi_rig_radio_catalog(self) -> Dict[str, Any]:
+        if self._multi_rig_radio_catalog_payload is None:
+            try:
+                payload = load_radio_catalog()
+            except Exception as exc:
+                log.debug("Failed loading radio catalog for multi-rig setup: %s", exc)
+                payload = {"entries": (), "source": "unavailable"}
+            self._multi_rig_radio_catalog_payload = dict(payload or {})
+        return dict(self._multi_rig_radio_catalog_payload)
+
     def _defer_multi_rig_setup(self) -> None:
         try:
             with self.multi_radio_store.connect() as conn:
@@ -9209,7 +9220,7 @@ class SettingsTab(QWidget):
         message_paths = self.settings.get("message_paths", {}) or {}
         if self._configured_text("path_flrig") or self._configured_text("path_fldigi") or self._configured_text("fldigi_log_path"):
             roles.add("fast_light")
-        if self._configured_text("path_js8call") or self._configured_text("js8_host") or self._configured_text("js8_directed_path"):
+        if self._configured_text("path_js8call") or self._configured_text("js8_directed_path"):
             roles.add("js8call")
         if self._configured_text("path_js8spotter"):
             roles.add("js8spotter")
@@ -9244,7 +9255,7 @@ class SettingsTab(QWidget):
         form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         layout.addLayout(form)
 
-        catalog_payload = load_radio_catalog()
+        catalog_payload = self._multi_rig_radio_catalog()
         catalog_entries = list(catalog_payload.get("entries", []) or [])
         model_combo = QComboBox()
         model_combo.setEditable(True)
@@ -9257,6 +9268,9 @@ class SettingsTab(QWidget):
         form.addRow("Radio model:", model_combo)
 
         manual_chk = QCheckBox("Use manual model entry")
+        if not catalog_entries:
+            manual_chk.setChecked(True)
+            model_combo.setEnabled(False)
         form.addRow("", manual_chk)
         manufacturer_edit = QLineEdit()
         model_edit = QLineEdit()
@@ -9326,6 +9340,15 @@ class SettingsTab(QWidget):
         def _accept_setup() -> None:
             if not name_edit.text().strip():
                 QMessageBox.warning(dialog, "Multi-Rig Setup", "Radio display name is required.")
+                return
+            if manual_chk.isChecked() and (
+                not manufacturer_edit.text().strip() or not model_edit.text().strip()
+            ):
+                QMessageBox.warning(
+                    dialog,
+                    "Multi-Rig Setup",
+                    "Manufacturer and model are required for manual radio entry.",
+                )
                 return
             if not manual_chk.isChecked() and not _selected_catalog_entry():
                 QMessageBox.warning(
