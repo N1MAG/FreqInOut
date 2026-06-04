@@ -9,12 +9,17 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RADIO_TOOLS = Path("/Users/bill/RadioTools")
 DEFAULT_LAB_ROOT = Path("/Users/bill/RadioCode/WORK/MultiRig/TestLab")
+DEFAULT_PRODUCTION_APP_CONFIG = Path("/Users/bill/Radio/FreqInOut/config")
+DEFAULT_PRODUCTION_HOME_CONFIG = Path("/Users/bill/.freqinout/config")
+DEFAULT_PRODUCTION_RUNTIME_SINGLE_CONFIG = Path("/Users/bill/.freqinout/runtime/single-rig/config")
+PRODUCTION_SCENARIO = "prod-upgrade"
+RUN_SCENARIOS = ("upgrade", "fresh", PRODUCTION_SCENARIO)
 
 PROFILE_PORTS = {
     "a": {"flrig": 12345, "fldigi": 7362, "js8": 2442},
@@ -37,6 +42,18 @@ def _write_kv(db_path: Path, values: dict[str, Any]) -> None:
             "INSERT OR REPLACE INTO kv(key, value) VALUES(?, ?)",
             [(key, _json(value)) for key, value in sorted(values.items())],
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _delete_kv(db_path: Path, keys: tuple[str, ...]) -> None:
+    if not db_path.exists():
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executemany("DELETE FROM kv WHERE key=?", [(key,) for key in keys])
         conn.commit()
     finally:
         conn.close()
@@ -73,6 +90,20 @@ def _radio_tools_paths(radio_tools: Path) -> dict[str, str]:
     }
 
 
+def _message_path_values(radio_tools: Path) -> dict[str, str]:
+    paths = _radio_tools_paths(radio_tools)
+    message_paths = dict(paths["message_paths"])
+    return {
+        "js8_directed_path": paths["js8_directed_path"],
+        "js8_forms_path": paths["js8_forms_path"],
+        "flmsg_message_path": message_paths["flmsg"],
+        "flamp_message_path": message_paths["flamp"],
+        "varac_outbox_dir": paths["varac_outbox_dir"],
+        "varac_bbs_dir": paths["varac_bbs_dir"],
+        "varac_bbs_vault_managed_root": paths["varac_bbs_vault_root_dir"],
+    }
+
+
 def _base_settings(radio_tools: Path, profile: str = "a") -> dict[str, Any]:
     ports = PROFILE_PORTS[profile]
     settings = {
@@ -104,6 +135,76 @@ def _base_settings(radio_tools: Path, profile: str = "a") -> dict[str, Any]:
     return settings
 
 
+def _lab_endpoint_settings(radio_tools: Path, profile: str = "a") -> dict[str, Any]:
+    ports = PROFILE_PORTS[profile]
+    values: dict[str, Any] = {
+        "flrig_host": "127.0.0.1",
+        "flrig_port": ports["flrig"],
+        "fldigi_host": "127.0.0.1",
+        "fldigi_port": ports["fldigi"],
+        "js8_host": "127.0.0.1",
+        "js8_port": ports["js8"],
+        "autostart_flrig": False,
+        "autostart_fldigi": False,
+        "autostart_js8call": False,
+        "autostart_js8spotter": False,
+        "autostart_varac": False,
+        "autostart_flamp": False,
+        "autostart_flmsg": False,
+        "autostart_commstat": False,
+    }
+    values.update(_radio_tools_paths(radio_tools))
+    values.update(_message_path_values(radio_tools))
+    return values
+
+
+def _resolve_production_config_source(source: str) -> Path:
+    normalized = str(source or "app").strip()
+    if normalized == "app":
+        return DEFAULT_PRODUCTION_APP_CONFIG
+    if normalized == "home":
+        return DEFAULT_PRODUCTION_HOME_CONFIG
+    if normalized in {"runtime-single", "runtime_single", "single"}:
+        return DEFAULT_PRODUCTION_RUNTIME_SINGLE_CONFIG
+    return Path(normalized).expanduser()
+
+
+def _sqlite_backup(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    try:
+        dst_conn = sqlite3.connect(dst)
+        try:
+            src_conn.backup(dst_conn)
+            dst_conn.commit()
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+
+def _copy_config_tree(source_config_dir: Path, dest_config_dir: Path, *, reset: bool) -> None:
+    if not source_config_dir.exists():
+        raise FileNotFoundError(source_config_dir)
+    if reset and dest_config_dir.exists():
+        shutil.rmtree(dest_config_dir)
+    dest_config_dir.mkdir(parents=True, exist_ok=True)
+    for src in source_config_dir.rglob("*"):
+        rel = src.relative_to(source_config_dir)
+        dst = dest_config_dir / rel
+        if src.is_dir():
+            dst.mkdir(parents=True, exist_ok=True)
+            continue
+        name = src.name
+        if name.endswith(("-wal", "-shm")):
+            continue
+        if name.endswith(".db"):
+            _sqlite_backup(src, dst)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+
 def prepare_profile(
     *,
     scenario: str,
@@ -127,6 +228,112 @@ def prepare_profile(
         raise ValueError(f"Unsupported scenario: {scenario}")
 
     return config_root
+
+
+def copy_production_profile(
+    *,
+    lab_root: Path,
+    radio_tools: Path,
+    source: str,
+    reset: bool,
+    force_unmigrated: bool,
+) -> Path:
+    source_config_dir = _resolve_production_config_source(source)
+    config_root = _profile_config_dir(lab_root, PRODUCTION_SCENARIO)
+    config_dir = config_root / "config"
+    _copy_config_tree(source_config_dir, config_dir, reset=reset)
+    db_path = config_dir / "freqinout.db"
+    _write_kv(db_path, _lab_endpoint_settings(radio_tools, "a"))
+    if force_unmigrated:
+        _delete_kv(db_path, ("multi_rig_migration_version", "multi_rig_migration_deferred"))
+    return config_root
+
+
+def _existing_device_id_by_system_key(store: Any, system_key: str) -> Optional[int]:
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM device_profiles WHERE system_key=? LIMIT 1",
+            (system_key,),
+        ).fetchone()
+        return int(row[0]) if row is not None else None
+
+
+def _extra_radio_values(radio_tools: Path, profile: str, display_order: int, existing_id: Optional[int]) -> dict[str, Any]:
+    paths = _radio_tools_paths(radio_tools)
+    message_values = _message_path_values(radio_tools)
+    ports = PROFILE_PORTS[profile]
+    label = profile.upper()
+    values: dict[str, Any] = {
+        "system_key": f"lab_radio_{profile}",
+        "name": f"Lab Radio {label}",
+        "radio_manufacturer": "RadioTools",
+        "radio_model": f"Emulated Profile {label}",
+        "enabled": 1,
+        "runtime_active": 0,
+        "runtime_primary": 0,
+        "display_order": display_order,
+        "device_class": "tx_rx",
+        "deployment_mode": "full",
+        "control_backend": "flrig",
+        "use_flrig": 1,
+        "use_fldigi": 1,
+        "use_flmsg": 1,
+        "use_flamp": 1,
+        "use_js8call": 1,
+        "use_js8spotter": 1,
+        "use_commstat": 1,
+        "use_varac": 1,
+        "flrig_host": "127.0.0.1",
+        "flrig_port": ports["flrig"],
+        "fldigi_host": "127.0.0.1",
+        "fldigi_port": ports["fldigi"],
+        "js8_host": "127.0.0.1",
+        "js8_port": ports["js8"],
+        "flmsg_path": paths["path_flmsg"],
+        "flamp_path": paths["path_flamp"],
+        "js8_directed_path": paths["js8_directed_path"],
+        "js8_forms_path": paths["js8_forms_path"],
+        "varac_install_path": paths["varac_path"],
+        "varac_outbox_dir": paths["varac_outbox_dir"],
+        "varac_bbs_dir": paths["varac_bbs_dir"],
+        "varac_bbs_vault_managed_root": paths["varac_bbs_vault_root_dir"],
+        "launch_enabled": 0,
+        "ptt_group": f"LAB-{label}",
+    }
+    values.update(message_values)
+    if existing_id is not None:
+        values["id"] = existing_id
+    return values
+
+
+def seed_extra_radios(config_root: Path, radio_tools: Path) -> int:
+    os.environ["FREQINOUT_CONFIG_DIR"] = str(config_root)
+    from freqinout.core.multi_radio_store import MultiRadioStore
+    from freqinout.core.multi_rig_runtime_status import build_multi_rig_runtime_status
+
+    store = MultiRadioStore()
+    status = build_multi_rig_runtime_status(store)
+    if not status.migration_current:
+        print("This profile is not multi-rig yet. Run FIO and complete Multi-Rig Setup first.")
+        print(f"startup_mode={status.startup_mode}")
+        return 1
+
+    saved_ids: list[int] = []
+    for display_order, profile in ((20, "b"), (30, "c")):
+        key = f"lab_radio_{profile}"
+        existing_id = _existing_device_id_by_system_key(store, key)
+        saved = store.save_device_profile(_extra_radio_values(radio_tools, profile, display_order, existing_id))
+        device_id = int(saved["id"])
+        store.restore_default_operating_profile(
+            device_id,
+            reason="Assigned by the multi-rig emulator lab.",
+            created_by="multirig_test_lab",
+        )
+        store.set_device_profile_runtime_active(device_id, True)
+        saved_ids.append(device_id)
+
+    print(f"seeded extra runtime radios: {saved_ids}", flush=True)
+    return check_profile(config_root)
 
 
 def _python_bin() -> str:
@@ -183,7 +390,7 @@ settings.close()
 
 
 def print_paths(lab_root: Path) -> None:
-    for scenario in ("upgrade", "fresh"):
+    for scenario in RUN_SCENARIOS:
         root = _profile_config_dir(lab_root, scenario)
         print(f"{scenario}:")
         print(f"  config root: {root}")
@@ -200,8 +407,21 @@ def main(argv: list[str] | None = None) -> int:
     prep.add_argument("scenario", choices=("upgrade", "fresh", "all"))
     prep.add_argument("--reset", action="store_true", help="Delete the profile before preparing it.")
 
+    copy_prod = sub.add_parser("copy-production", help="Copy this computer's FIO config into the production-upgrade lab profile.")
+    copy_prod.add_argument("--reset", action="store_true", help="Delete the copied lab profile before copying.")
+    copy_prod.add_argument(
+        "--source",
+        default="app",
+        help="Config source: app, home, runtime-single, or a config directory path.",
+    )
+    copy_prod.add_argument(
+        "--keep-migration-marker",
+        action="store_true",
+        help="Preserve any existing multi-rig migration marker in the copied lab DB.",
+    )
+
     run = sub.add_parser("run", help="Run FIO against an isolated profile.")
-    run.add_argument("scenario", choices=("upgrade", "fresh"))
+    run.add_argument("scenario", choices=RUN_SCENARIOS)
     run.add_argument("--prepare", action="store_true", help="Prepare the profile before launching FIO.")
     run.add_argument("--reset", action="store_true", help="Reset the profile when preparing.")
 
@@ -210,9 +430,12 @@ def main(argv: list[str] | None = None) -> int:
     lab.add_argument("--mode", choices=("single", "multi", "quad"), default="single")
 
     check = sub.add_parser("check", help="Print FIO startup status for an isolated profile.")
-    check.add_argument("scenario", choices=("upgrade", "fresh"))
+    check.add_argument("scenario", choices=RUN_SCENARIOS)
     check.add_argument("--prepare", action="store_true", help="Prepare the profile before checking.")
     check.add_argument("--reset", action="store_true", help="Reset the profile when preparing.")
+
+    seed = sub.add_parser("seed-extra-radios", help="Add RadioTools emulator profiles b and c to a migrated lab profile.")
+    seed.add_argument("scenario", choices=RUN_SCENARIOS)
 
     sub.add_parser("paths", help="Print profile paths.")
 
@@ -231,26 +454,56 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"prepared {scenario}: {root}")
         return 0
+    if args.command == "copy-production":
+        root = copy_production_profile(
+            lab_root=lab_root,
+            radio_tools=radio_tools,
+            source=str(args.source),
+            reset=bool(args.reset),
+            force_unmigrated=not bool(args.keep_migration_marker),
+        )
+        print(f"copied production config into {PRODUCTION_SCENARIO}: {root}")
+        return 0
     if args.command == "run":
         if args.prepare:
-            prepare_profile(
-                scenario=args.scenario,
-                lab_root=lab_root,
-                radio_tools=radio_tools,
-                reset=bool(args.reset),
-            )
+            if args.scenario == PRODUCTION_SCENARIO:
+                copy_production_profile(
+                    lab_root=lab_root,
+                    radio_tools=radio_tools,
+                    source="app",
+                    reset=bool(args.reset),
+                    force_unmigrated=True,
+                )
+            else:
+                prepare_profile(
+                    scenario=args.scenario,
+                    lab_root=lab_root,
+                    radio_tools=radio_tools,
+                    reset=bool(args.reset),
+                )
         return run_fio(_profile_config_dir(lab_root, args.scenario))
     if args.command == "lab":
         return lab_command(radio_tools, args.action, args.mode)
     if args.command == "check":
         if args.prepare:
-            prepare_profile(
-                scenario=args.scenario,
-                lab_root=lab_root,
-                radio_tools=radio_tools,
-                reset=bool(args.reset),
-            )
+            if args.scenario == PRODUCTION_SCENARIO:
+                copy_production_profile(
+                    lab_root=lab_root,
+                    radio_tools=radio_tools,
+                    source="app",
+                    reset=bool(args.reset),
+                    force_unmigrated=True,
+                )
+            else:
+                prepare_profile(
+                    scenario=args.scenario,
+                    lab_root=lab_root,
+                    radio_tools=radio_tools,
+                    reset=bool(args.reset),
+                )
         return check_profile(_profile_config_dir(lab_root, args.scenario))
+    if args.command == "seed-extra-radios":
+        return seed_extra_radios(_profile_config_dir(lab_root, args.scenario), radio_tools)
     if args.command == "paths":
         print_paths(lab_root)
         return 0
