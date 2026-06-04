@@ -1167,6 +1167,18 @@
     <li><strong>VarAC completeness</strong>: warning highlights can appear when <code>VarAC Install Folder</code> is set without <code>Incoming Files</code>.</li>
   </ul>
 
+  <h3 id="settings-multirig-setup">Multi-Rig Setup and Runtime Radios</h3>
+  <p><strong>Explain this to me</strong>: Multi-Rig setup tells FIO which real radio is doing live station work. If FIO says it is using your current station setup, nothing is wrong. It means FIO has not moved that setup into a named runtime radio yet.</p>
+  <ul class="section-list">
+    <li><strong>Primary radio</strong>: the radio FIO uses for the main window and <a href="#controlfreq">ControlFreq</a> unless a future radio-specific view says otherwise.</li>
+    <li><strong>Active radio</strong>: a radio FIO is allowed to include in live station work. Shared views such as <a href="#messages">Messages</a> and <a href="#map">Map</a> use all active radios by default.</li>
+    <li><strong>Paused radio</strong>: a configured radio that FIO will not use for Scheduler, Messages, Map, or other live work until you turn it back on.</li>
+    <li><strong>Set up Multi-Rig</strong>: starts a guided setup that turns your current station setup into the first runtime radio. Choose the supported radio model from the Hamlib-backed catalog when possible, then give it a display name such as <code>IC-7300 HF Desk</code>.</li>
+    <li><strong>Not Now</strong>: pauses Multi-Rig setup and keeps FIO using the current station setup. This is a normal operator choice, not an error.</li>
+    <li><strong>Copy Summary</strong>: copies a support-safe summary with FIO version, platform, startup mode, migration state, and runtime radio names. It does not include access codes, private keys, or message contents.</li>
+  </ul>
+  <p><strong>Where this interacts</strong>: Multi-Rig status explains which radio context downstream tabs should trust. Use <a href="#station-health">Station Health</a> for live external-software or scheduler problems, not for normal setup-paused states.</p>
+
   <h3 id="settings-operator-info">Operator Information</h3>
   <ul class="section-list">
     <li><strong>Callsign</strong>: the callsign FIO should use for this station. It appears in message names, reports, operator matching, and local station identity.</li>

@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
 
         # Instantiate screens (lazy-load heavy tabs to improve perceived performance)
         self.settings_tab = SettingsTab(self)
+        self._sync_settings_runtime_status()
         self.launch_orchestrator = self.settings_tab.launch_orchestrator
         self._launch_progress_dialog: QProgressDialog | None = None
         self._launch_progress_total = 0
@@ -699,6 +700,17 @@ class MainWindow(QMainWindow):
             callback(message)
         except Exception as e:
             log.debug("MainWindow startup status update failed: %s", e)
+
+    def _sync_settings_runtime_status(self) -> None:
+        try:
+            status = self.station_runtime_manager.runtime_status()
+        except Exception:
+            status = None
+        try:
+            if hasattr(self, "settings_tab") and hasattr(self.settings_tab, "set_multi_rig_runtime_status"):
+                self.settings_tab.set_multi_rig_runtime_status(status)
+        except Exception as exc:
+            log.debug("MainWindow: failed syncing runtime status to Settings: %s", exc)
 
     def _ui_refresh_allowed(self) -> bool:
         return bool(
@@ -3143,6 +3155,7 @@ class MainWindow(QMainWindow):
             self._update_nav_layout_metrics()
         except Exception:
             pass
+        self._sync_settings_runtime_status()
 
     def _refresh_station_overview(self, *, force: bool = False) -> None:
         if not self._ui_refresh_allowed():

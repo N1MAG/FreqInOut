@@ -105,6 +105,16 @@ from freqinout.core.multi_radio_store import (
     DEFAULT_OPERATING_NAME,
     MultiRadioStore,
     SUPPORTED_RUNTIME_CONTROL_BACKENDS,
+    ensure_multi_rig_migration,
+)
+from freqinout.core.multi_rig_runtime_status import (
+    STARTUP_DEFERRED,
+    STARTUP_EXISTING_UNMIGRATED,
+    STARTUP_FRESH_DEFAULT_READY,
+    STARTUP_MIGRATED,
+    STARTUP_MIGRATION_ERROR,
+    MultiRigRuntimeStatus,
+    build_multi_rig_runtime_status,
 )
 from freqinout.core.mode_utils import normalize_operating_group_mode, voice_sideband_for_band
 from freqinout.core.radio_catalog import catalog_entry_control_methods, find_radio_catalog_entry, load_radio_catalog
@@ -590,6 +600,7 @@ class SettingsTab(QWidget):
         self._software_radio_combo_loading = False
         self._software_radio_current_id: Optional[int] = None
         self._software_radio_drafts: Dict[int, Dict[str, Any]] = {}
+        self._multi_rig_runtime_status: MultiRigRuntimeStatus | None = None
         self._active = False
         self._last_activation_refresh_ts = 0.0
         self._activation_refresh_interval_sec = 30.0
@@ -2356,6 +2367,39 @@ class SettingsTab(QWidget):
         self.device_profiles_hint_label = QLabel()
         self.device_profiles_hint_label.setWordWrap(True)
         device_layout.addWidget(self.device_profiles_hint_label)
+
+        self.multi_rig_status_card = QFrame()
+        self.multi_rig_status_card.setFrameShape(QFrame.StyledPanel)
+        multi_rig_status_layout = QVBoxLayout(self.multi_rig_status_card)
+        multi_rig_status_layout.setContentsMargins(12, 10, 12, 10)
+        multi_rig_status_layout.setSpacing(6)
+        self.multi_rig_status_title_label = QLabel("Multi-Rig Setup")
+        multi_rig_title_font = self.multi_rig_status_title_label.font()
+        multi_rig_title_font.setBold(True)
+        self.multi_rig_status_title_label.setFont(multi_rig_title_font)
+        multi_rig_status_layout.addWidget(self.multi_rig_status_title_label)
+        self.multi_rig_status_summary_label = QLabel()
+        self.multi_rig_status_summary_label.setWordWrap(True)
+        multi_rig_status_layout.addWidget(self.multi_rig_status_summary_label)
+        self.multi_rig_status_detail_label = QLabel()
+        self.multi_rig_status_detail_label.setWordWrap(True)
+        multi_rig_status_layout.addWidget(self.multi_rig_status_detail_label)
+        self.multi_rig_status_actions_widget = QWidget()
+        multi_rig_status_actions = QHBoxLayout(self.multi_rig_status_actions_widget)
+        multi_rig_status_actions.setContentsMargins(0, 0, 0, 0)
+        multi_rig_status_actions.setSpacing(8)
+        self.multi_rig_setup_btn = QPushButton("Set up Multi-Rig")
+        self.multi_rig_setup_btn.clicked.connect(self._start_multi_rig_setup)
+        self.multi_rig_not_now_btn = QPushButton("Not Now")
+        self.multi_rig_not_now_btn.clicked.connect(self._defer_multi_rig_setup)
+        self.multi_rig_copy_summary_btn = QPushButton("Copy Summary")
+        self.multi_rig_copy_summary_btn.clicked.connect(self._copy_multi_rig_status_summary)
+        multi_rig_status_actions.addWidget(self.multi_rig_setup_btn)
+        multi_rig_status_actions.addWidget(self.multi_rig_not_now_btn)
+        multi_rig_status_actions.addWidget(self.multi_rig_copy_summary_btn)
+        multi_rig_status_actions.addStretch(1)
+        multi_rig_status_layout.addWidget(self.multi_rig_status_actions_widget)
+        device_layout.addWidget(self.multi_rig_status_card)
 
         self.device_profile_detail_card = QFrame()
         self.device_profile_detail_card.setFrameShape(QFrame.StyledPanel)
@@ -8973,6 +9017,375 @@ class SettingsTab(QWidget):
         self._software_radio_drafts.clear()
         return True
 
+    def set_multi_rig_runtime_status(self, status: MultiRigRuntimeStatus | None) -> None:
+        self._multi_rig_runtime_status = status
+        self._refresh_multi_rig_status_card()
+
+    def _current_multi_rig_runtime_status(self) -> MultiRigRuntimeStatus:
+        if self._multi_rig_runtime_status is not None:
+            return self._multi_rig_runtime_status
+        status = build_multi_rig_runtime_status(
+            self.multi_radio_store,
+            settings_values=dict(self.settings.all()),
+        )
+        self._multi_rig_runtime_status = status
+        return status
+
+    def _refresh_cached_multi_rig_runtime_status(self) -> MultiRigRuntimeStatus:
+        status = build_multi_rig_runtime_status(
+            self.multi_radio_store,
+            settings_values=dict(self.settings.all()),
+        )
+        self._multi_rig_runtime_status = status
+        self._refresh_multi_rig_status_card()
+        return status
+
+    def _radio_name_by_id(self, profile_id: int | None) -> str:
+        if not profile_id:
+            return ""
+        for row in self.device_profiles:
+            try:
+                if int(row.get("id", 0) or 0) == int(profile_id):
+                    return str(row.get("name", "") or "").strip()
+            except Exception:
+                continue
+        try:
+            profile = self.multi_radio_store.get_device_profile(int(profile_id))
+        except Exception:
+            profile = None
+        return str((profile or {}).get("name", "") or "").strip()
+
+    def _multi_rig_status_text(self, status: MultiRigRuntimeStatus) -> tuple[str, str, str, str]:
+        mode = status.startup_mode
+        primary_name = self._radio_name_by_id(status.primary_device_profile_id) or "Primary radio"
+        active_count = len(status.active_device_profile_ids)
+        if mode == STARTUP_FRESH_DEFAULT_READY:
+            return (
+                "Multi-Rig Setup",
+                "FIO is ready with one default radio.",
+                "You can rename the radio and add more radios when needed.",
+                "success",
+            )
+        if mode == STARTUP_MIGRATED:
+            detail = f"Primary radio: {primary_name}. Active radios: {active_count}."
+            if active_count > 1:
+                detail += " Messages and Map use all active radios by default."
+            return ("Runtime Radios", "Multi-Rig is ready.", detail, "success")
+        if mode == STARTUP_DEFERRED:
+            return (
+                "Multi-Rig Setup",
+                "Multi-Rig setup is paused.",
+                "FIO is still using your current station setup. You can return to Multi-Rig setup from here any time.",
+                "info",
+            )
+        if mode == STARTUP_MIGRATION_ERROR:
+            warning = " ".join(status.warnings[:2]) if status.warnings else ""
+            detail = "Your current settings were left unchanged. You can keep using FIO while this is reviewed."
+            if warning:
+                detail = f"{detail} Latest note: {warning}"
+            return ("Multi-Rig Setup", "FIO could not prepare Multi-Rig setup.", detail, "warning")
+        return (
+            "Multi-Rig Setup",
+            "FIO is using your current station setup.",
+            "Multi-Rig setup is available when you are ready. Your current settings will be left unchanged until you confirm setup.",
+            "info",
+        )
+
+    def _style_multi_rig_status_card(self, level: str) -> None:
+        if not hasattr(self, "multi_rig_status_card"):
+            return
+        theme = resolve_theme(self.settings)
+        level_key = (level or "info").strip().lower()
+        color_map = {
+            "success": theme.get("success", "#2E7D32"),
+            "warning": theme.get("warning", "#C99700"),
+            "danger": theme.get("danger", "#C62828"),
+            "info": theme.get("info", theme.get("accent", "#1565C0")),
+        }
+        accent = QColor(color_map.get(level_key, color_map["info"]))
+        bg = QColor(accent)
+        bg.setAlpha(18 if level_key in {"info", "success"} else 28)
+        border = QColor(accent)
+        border.setAlpha(105 if level_key in {"info", "success"} else 150)
+        text_color = theme.get("text", "#1C1F21")
+        muted_color = theme.get("text_muted", text_color)
+        self.multi_rig_status_card.setStyleSheet(
+            "QFrame {"
+            f" background-color: {bg.name(QColor.HexArgb)};"
+            f" border: 1px solid {border.name(QColor.HexArgb)};"
+            " border-radius: 8px;"
+            "}"
+            f" QLabel {{ color: {text_color}; border: none; background: transparent; }}"
+            f" QLabel#multiRigStatusDetail {{ color: {muted_color}; }}"
+        )
+        self.multi_rig_setup_btn.setStyleSheet(button_style("primary", theme))
+        self.multi_rig_not_now_btn.setStyleSheet(button_style("muted", theme))
+        self.multi_rig_copy_summary_btn.setStyleSheet(button_style("secondary", theme))
+
+    def _refresh_multi_rig_status_card(self) -> None:
+        if not hasattr(self, "multi_rig_status_card"):
+            return
+        status = self._current_multi_rig_runtime_status()
+        title, summary, detail, level = self._multi_rig_status_text(status)
+        self.multi_rig_status_title_label.setText(title)
+        self.multi_rig_status_summary_label.setText(summary)
+        self.multi_rig_status_detail_label.setObjectName("multiRigStatusDetail")
+        self.multi_rig_status_detail_label.setText(detail)
+        setup_available = status.startup_mode in {
+            STARTUP_EXISTING_UNMIGRATED,
+            STARTUP_DEFERRED,
+            STARTUP_MIGRATION_ERROR,
+        }
+        self.multi_rig_setup_btn.setVisible(setup_available)
+        self.multi_rig_setup_btn.setText("Continue Multi-Rig Setup" if status.startup_mode == STARTUP_DEFERRED else "Set up Multi-Rig")
+        self.multi_rig_not_now_btn.setVisible(status.startup_mode == STARTUP_EXISTING_UNMIGRATED)
+        self._style_multi_rig_status_card(level)
+
+    def _settings_values_for_migration(self) -> Dict[str, Any]:
+        try:
+            return dict(self.settings.all())
+        except Exception:
+            return {}
+
+    def _defer_multi_rig_setup(self) -> None:
+        try:
+            with self.multi_radio_store.connect() as conn:
+                ensure_multi_rig_migration(
+                    conn,
+                    self._settings_values_for_migration(),
+                    defer=True,
+                )
+        except Exception as exc:
+            log.exception("Failed deferring multi-rig setup.")
+            QMessageBox.warning(self, "Multi-Rig Setup", f"Unable to pause Multi-Rig setup:\n{exc}")
+            return
+        self._refresh_cached_multi_rig_runtime_status()
+        QMessageBox.information(
+            self,
+            "Multi-Rig Setup",
+            "Multi-Rig setup is paused. FIO will keep using your current station setup.",
+        )
+        try:
+            self.settings_saved.emit()
+        except Exception:
+            pass
+
+    def _copy_multi_rig_status_summary(self) -> None:
+        status = self._current_multi_rig_runtime_status()
+        active_names = []
+        for profile_id in status.active_device_profile_ids:
+            name = self._radio_name_by_id(profile_id) or f"Radio {profile_id}"
+            active_names.append(f"{name} ({profile_id})")
+        lines = [
+            "FreqInOut Multi-Rig Summary",
+            f"FIO version: {__version__}",
+            f"Platform: {platform.platform()}",
+            f"Python: {sys.version.replace(chr(10), ' ')}",
+            f"Architecture: {platform.machine()}",
+            f"Startup mode: {status.startup_mode}",
+            f"Migration version: {status.migration_version}",
+            f"Migration current: {status.migration_current}",
+            f"Migration paused: {status.migration_deferred}",
+            f"Primary radio: {self._radio_name_by_id(status.primary_device_profile_id) or 'None'} ({status.primary_device_profile_id or 'none'})",
+            f"Active radios: {len(status.active_device_profile_ids)}",
+        ]
+        if active_names:
+            lines.append("Active radio list: " + ", ".join(active_names))
+        if status.warnings:
+            lines.append("Warnings: " + " | ".join(status.warnings))
+        QApplication.clipboard().setText("\n".join(lines))
+        self.multi_rig_copy_summary_btn.setText("Copied")
+        QTimer.singleShot(1500, lambda: self.multi_rig_copy_summary_btn.setText("Copy Summary"))
+
+    def _configured_text(self, key: str) -> str:
+        try:
+            value = self.settings.get(key, "")
+        except Exception:
+            value = ""
+        return str(value or "").strip()
+
+    def _detect_migration_roles(self) -> set[str]:
+        roles: set[str] = set()
+        message_paths = self.settings.get("message_paths", {}) or {}
+        if self._configured_text("path_flrig") or self._configured_text("path_fldigi") or self._configured_text("fldigi_log_path"):
+            roles.add("fast_light")
+        if self._configured_text("path_js8call") or self._configured_text("js8_host") or self._configured_text("js8_directed_path"):
+            roles.add("js8call")
+        if self._configured_text("path_js8spotter"):
+            roles.add("js8spotter")
+        if self._configured_text("varac_path") or self._configured_text("varac_launch_cmd") or str(message_paths.get("varac", "") or "").strip():
+            roles.add("varac")
+        if self._configured_text("path_flamp") or str(message_paths.get("flamp", "") or "").strip():
+            roles.add("flamp")
+        if self._configured_text("path_flmsg") or str(message_paths.get("flmsg", "") or "").strip():
+            roles.add("flmsg")
+        if self._configured_text("path_commstat"):
+            roles.add("commstat")
+        return roles
+
+    def _start_multi_rig_setup(self) -> None:
+        status = self._current_multi_rig_runtime_status()
+        if status.startup_mode in {STARTUP_FRESH_DEFAULT_READY, STARTUP_MIGRATED}:
+            self._select_settings_section_group(getattr(self, "radio_profile_section_group", None))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set up Multi-Rig")
+        dialog.resize(620, 520)
+        layout = QVBoxLayout(dialog)
+        intro = QLabel(
+            "FIO found your current station setup. Multi-Rig setup will make that station the first runtime radio. "
+            "Your current settings stay unchanged until you confirm setup."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        layout.addLayout(form)
+
+        catalog_payload = load_radio_catalog()
+        catalog_entries = list(catalog_payload.get("entries", []) or [])
+        model_combo = QComboBox()
+        model_combo.setEditable(True)
+        model_combo.setInsertPolicy(QComboBox.NoInsert)
+        for entry in catalog_entries:
+            model_combo.addItem(str(entry.get("display_name", "") or ""), dict(entry))
+        if model_combo.count() == 0:
+            model_combo.addItem("Manual entry", {})
+        model_combo.setMinimumWidth(320)
+        form.addRow("Radio model:", model_combo)
+
+        manual_chk = QCheckBox("Use manual model entry")
+        form.addRow("", manual_chk)
+        manufacturer_edit = QLineEdit()
+        model_edit = QLineEdit()
+        form.addRow("Manufacturer:", manufacturer_edit)
+        form.addRow("Model:", model_edit)
+        name_edit = QLineEdit()
+        name_edit.setPlaceholderText("Example: IC-7300 HF Desk")
+        form.addRow("Display name:", name_edit)
+        plan_edit = QLineEdit("Migrated Single-Rig Plan")
+        form.addRow("Plan name:", plan_edit)
+
+        role_group = QGroupBox("Software FIO found in Settings")
+        role_layout = QVBoxLayout(role_group)
+        role_layout.setSpacing(4)
+        role_checks: Dict[str, QCheckBox] = {}
+        role_labels = [
+            ("fast_light", "FLRig / FLDigi (Fast Light)"),
+            ("js8call", "JS8Call"),
+            ("js8spotter", "JS8Spotter"),
+            ("varac", "VarAC"),
+            ("flamp", "FLAMP"),
+            ("flmsg", "FLMsg"),
+            ("commstat", "CommStat"),
+        ]
+        detected_roles = self._detect_migration_roles()
+        for role, label in role_labels:
+            chk = QCheckBox(label)
+            chk.setChecked(role in detected_roles)
+            role_layout.addWidget(chk)
+            role_checks[role] = chk
+        role_note = QLabel("These choices come from configured paths and endpoints, not from live process checks.")
+        role_note.setWordWrap(True)
+        role_layout.addWidget(role_note)
+        layout.addWidget(role_group)
+
+        def _selected_catalog_entry() -> Dict[str, Any]:
+            current_text = model_combo.currentText().strip()
+            current_index = model_combo.currentIndex()
+            if current_index < 0 or current_text != model_combo.itemText(current_index).strip():
+                return {}
+            data = model_combo.currentData()
+            return dict(data) if isinstance(data, dict) else {}
+
+        def _sync_model_fields() -> None:
+            manual = bool(manual_chk.isChecked())
+            entry = _selected_catalog_entry()
+            manufacturer_edit.setEnabled(manual)
+            model_edit.setEnabled(manual)
+            if not manual:
+                manufacturer_edit.setText(str(entry.get("manufacturer", "") or ""))
+                model_edit.setText(str(entry.get("model_name", "") or ""))
+                if not name_edit.text().strip():
+                    name_edit.setText(str(entry.get("display_name", "") or "").strip())
+
+        model_combo.currentIndexChanged.connect(lambda _idx: _sync_model_fields())
+        manual_chk.stateChanged.connect(lambda _state: _sync_model_fields())
+        _sync_model_fields()
+
+        buttons = QDialogButtonBox()
+        setup_btn = buttons.addButton("Set up Multi-Rig", QDialogButtonBox.AcceptRole)
+        not_now_btn = buttons.addButton("Not Now", QDialogButtonBox.DestructiveRole)
+        buttons.addButton(QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        action: Dict[str, str] = {"value": ""}
+
+        def _accept_setup() -> None:
+            if not name_edit.text().strip():
+                QMessageBox.warning(dialog, "Multi-Rig Setup", "Radio display name is required.")
+                return
+            if not manual_chk.isChecked() and not _selected_catalog_entry():
+                QMessageBox.warning(
+                    dialog,
+                    "Multi-Rig Setup",
+                    "Choose a supported radio model from the list, or select manual model entry.",
+                )
+                return
+            action["value"] = "setup"
+            dialog.accept()
+
+        def _accept_defer() -> None:
+            action["value"] = "defer"
+            dialog.accept()
+
+        setup_btn.clicked.connect(_accept_setup)
+        not_now_btn.clicked.connect(_accept_defer)
+        buttons.rejected.connect(dialog.reject)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        if action["value"] == "defer":
+            self._defer_multi_rig_setup()
+            return
+
+        roles = tuple(sorted(role for role, chk in role_checks.items() if chk.isChecked()))
+        try:
+            with self.multi_radio_store.connect() as conn:
+                result = ensure_multi_rig_migration(
+                    conn,
+                    self._settings_values_for_migration(),
+                    radio_name=name_edit.text().strip(),
+                    radio_manufacturer=manufacturer_edit.text().strip(),
+                    radio_model=model_edit.text().strip(),
+                    operating_plan_name=plan_edit.text().strip(),
+                    enabled_software_roles=roles,
+                )
+        except Exception as exc:
+            log.exception("Failed running multi-rig migration.")
+            QMessageBox.warning(self, "Multi-Rig Setup", f"Unable to complete Multi-Rig setup:\n{exc}")
+            return
+        if not result.applied and not result.already_current:
+            QMessageBox.warning(
+                self,
+                "Multi-Rig Setup",
+                "FIO could not complete Multi-Rig setup. Your current settings were left unchanged.",
+            )
+            return
+        self._refresh_multi_radio_tables(refresh_section_titles=False)
+        self._refresh_cached_multi_rig_runtime_status()
+        self._emit_device_profiles_changed()
+        try:
+            self.settings_saved.emit()
+        except Exception:
+            pass
+        QMessageBox.information(
+            self,
+            "Multi-Rig Setup",
+            "Multi-Rig setup is ready. FIO created your first runtime radio.",
+        )
+
     def _update_device_profile_readiness_detail(
         self,
         readiness_report: Any | None = None,
@@ -9617,6 +10030,7 @@ class SettingsTab(QWidget):
         self._rebuild_status_indicators()
         self._rebuild_device_profile_selector()
         self._update_device_profiles_hint()
+        self._refresh_multi_rig_status_card()
         self._update_device_profile_action_buttons()
         self._update_device_profile_readiness_detail(readiness_report)
         self._refresh_radio_specific_section_visibility()
