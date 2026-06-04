@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+
+def test_station_health_shows_latest_success_and_issue_log(monkeypatch):
+    import freqinout.core.station_health_summary as summary_module
+
+    events = [
+        {
+            "id": 5,
+            "event_type": "status",
+            "code": "already_applied",
+            "action": "Schedule entry already applied",
+            "detail": "newest routine success",
+        },
+        {
+            "id": 4,
+            "event_type": "status",
+            "code": "already_applied",
+            "action": "Schedule entry already applied",
+            "detail": "older routine success",
+        },
+        {
+            "id": 3,
+            "event_type": "failed",
+            "code": "control_failed",
+            "action": "Control failed",
+            "detail": "issue retained",
+        },
+        {
+            "id": 2,
+            "event_type": "verified",
+            "code": "post_apply_on_schedule",
+            "action": "Verified",
+            "detail": "older success hidden",
+        },
+    ]
+    monkeypatch.setattr(summary_module, "load_recent_scheduler_events", lambda limit=25: list(events))
+
+    result = summary_module.summarize_station_health(
+        registry_snapshot={},
+        include_scheduler_events=True,
+    )
+
+    filtered = result["recent_scheduler_events"]
+    assert [item["code"] for item in filtered] == ["already_applied", "control_failed"]
+    assert filtered[0]["_station_health_kind"] == "latest_success"
+    assert filtered[1]["_station_health_kind"] == "issue"
+
+
+def test_fldigi_busy_check_history_is_not_a_station_issue():
+    import freqinout.core.station_health_summary as summary_module
+
+    result = summary_module.summarize_station_health(
+        registry_snapshot={
+            "scheduler:fldigi-busy-check": {
+                "owner": "scheduler",
+                "consecutive_failures": 1,
+                "cooldown_remaining_sec": 25,
+                "last_checked_ts": 1000.0,
+                "issue_started_ts": 1000.0,
+                "last_error": (
+                    "could not verify FLDigi receive activity; continuing schedule: "
+                    "SettingsManager used from a different thread than it was created on"
+                ),
+                "metadata": {
+                    "action": (
+                        "could not verify FLDigi receive activity; continuing schedule: "
+                        "SettingsManager used from a different thread than it was created on"
+                    )
+                },
+            }
+        },
+        include_scheduler_events=False,
+    )
+
+    assert result["severity"] == "ok"
+    assert result["issue_count"] == 0
+    item = result["items"][0]
+    assert item["state"] == "OK"
+    assert item["is_issue"] is False
+    assert item["last_issue"] == ""
+    assert "SettingsManager" not in item["action"]
+
+
+def test_fldigi_busy_check_internal_events_do_not_fill_issue_log(monkeypatch):
+    import freqinout.core.station_health_summary as summary_module
+
+    events = [
+        {
+            "id": 4,
+            "event_type": "status",
+            "code": "already_applied",
+            "action": "Schedule entry already applied",
+        },
+        {
+            "id": 3,
+            "event_type": "failed",
+            "code": "fldigi_busy_check_failed",
+            "action": "Could not verify FLDigi receive activity; continuing schedule",
+            "detail": "SettingsManager used from a different thread than it was created on",
+        },
+        {
+            "id": 2,
+            "event_type": "status",
+            "code": "fldigi_busy_check_queued",
+            "action": "Checking FLDigi receive activity before changing frequency",
+        },
+    ]
+    monkeypatch.setattr(summary_module, "load_recent_scheduler_events", lambda limit=25: list(events))
+
+    result = summary_module.summarize_station_health(
+        registry_snapshot={},
+        include_scheduler_events=True,
+    )
+
+    filtered = result["recent_scheduler_events"]
+    assert [item["code"] for item in filtered] == ["already_applied"]
+
+
+def test_scheduler_hold_history_is_ok_when_no_schedule_move_is_pending():
+    import freqinout.core.station_health_summary as summary_module
+
+    result = summary_module.summarize_station_health(
+        registry_snapshot={
+            "scheduler:js8-busy": {
+                "owner": "scheduler",
+                "consecutive_failures": 1,
+                "last_checked_ts": 1000.0,
+                "last_error": "holding schedule change because JS8Call is busy",
+                "metadata": {
+                    "action": "holding schedule change because JS8Call is busy",
+                },
+            }
+        },
+        include_scheduler_events=False,
+    )
+
+    assert result["severity"] == "ok"
+    assert result["issue_count"] == 0
+    item = result["items"][0]
+    assert item["state"] == "OK"
+    assert item["is_issue"] is False
+    assert item["action"] == "No scheduled frequency change is waiting on this activity check."
+
+
+def test_active_scheduler_hold_still_shows_hold():
+    import freqinout.core.station_health_summary as summary_module
+
+    result = summary_module.summarize_station_health(
+        registry_snapshot={
+            "scheduler:js8-busy": {
+                "owner": "scheduler",
+                "consecutive_failures": 1,
+                "last_checked_ts": 1000.0,
+                "last_error": "holding schedule change because JS8Call is busy",
+                "metadata": {
+                    "action": "holding schedule change because JS8Call is busy",
+                    "active_hold": True,
+                },
+            }
+        },
+        include_scheduler_events=False,
+    )
+
+    assert result["severity"] == "ok"
+    assert result["issue_count"] == 0
+    item = result["items"][0]
+    assert item["state"] == "Hold"
+    assert item["is_issue"] is False
+    assert item["action"] == "holding schedule change because JS8Call is busy"

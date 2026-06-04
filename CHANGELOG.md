@@ -1,6 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [1.2.8]
+- Changed: Station Health now shows one latest scheduler success plus an issue log instead of repeating routine already-applied scheduler checks.
+- Changed: Informational scheduler holds and old transient FLDigi busy-check diagnostics no longer count as active station responsiveness issues.
+- Fixed: ControlFreq now colors the `FLMsg / FLAmp` message-summary row consistently with other rows, highlighting only when new files are present.
 - Fixed: Routine companion-app detection now uses one thread-safe shared process inventory instead of independent scheduler, JS8Call, VarAC, and executable-path scans, reducing repeated Linux `/proc` reads and idle CPU activity.
 - Fixed: Process discovery now recognizes Windows-style command paths on Linux, improving VarAC and other Wine-launched companion detection without requiring repeated process scans.
 - Fixed: JS8Call scheduler and status checks now share one process-global JS8Net connection instead of starting new RX, TX, and heartbeat threads from each short-lived client, preventing thread count and CPU use from climbing over time.

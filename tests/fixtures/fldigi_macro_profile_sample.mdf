@@ -1,0 +1,31 @@
+//fldigi macro definition file extended
+// Representative macro sample for parser tests
+
+// Macro # 1
+/$ 0 15 Min
+<MODEM:Cont-4/250> <TXRSID:on> \n
+QST QST de <MYCALL> <MYCALL>\n
+<RX>
+
+// Macro # 2
+/$ 1 Start2 ChkIns
+Thank you <CALL>\n
+Turn OFF your TxID in the upper right corner of Fldigi.\n
+<RX>
+
+// Macro # 3
+/$ 2 Send FLAMP
+<FILE:/home/tta/.fldigi/macros/MacroTxt/CheckIns_deANCS_TRAFFIC.txt>\n
+<RX>
+
+// Macro # 4
+/$ 3 Ack TFC ONLY
+<FILE:/home/tta/.fldigi/macros/MacroTxt/CheckIns_TRAFFIC.txt>\n
+<FILE:/home/tta/.fldigi/macros/MacroTxt/CheckIns_QRU.txt>\n
+<RX>
+
+// Macro # 5
+/$ 4 Unknown Construct
+<UNKNOWN:macro:widget>\n
+This macro has no file-backed references yet.\n
+<RX>

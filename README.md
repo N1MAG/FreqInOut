@@ -39,12 +39,14 @@ FreqInOut is a desktop operations console for amateur radio. It helps an operato
 - Use the Map to see known stations, recent links, report icons, weather/alert/infrastructure evidence, and schedule-aware context without treating the map as a guarantee of radio reachability.
 - Use Managed BBS when one live VarAC BBS folder is not enough: FIO can publish clean menu-style file sets into the live BBS folder, archive old BBS files, and help protect inbound VarAC files from unknown senders.
 
-## What's New in v1.2.6.1
+## What's New in v1.2.8
 
-- CommStat items deleted from Messages are now hidden from FIO with a durable local record, so they stay hidden after refresh or restart without deleting anything from CommStat itself.
-- Resume Schedule now forces the active operating plan back into FLDigi mode/offset enforcement, so a wrong FLDigi offset is corrected instead of treated as notify-only drift.
-- Station Health now includes recent scheduler decisions, showing whether FIO applied the schedule, held for traffic, skipped because automation was disabled/manual, hit control backoff, found bad schedule data, or stopped for multi-rig coordination protection.
-- FLDigi RX-busy schedule holds still protect live receive activity, but after 3 minutes FIO performs a fresh recheck and records the authoritative break-away before applying the schedule.
+- Station Health now shows one latest scheduler success plus an issue log, so routine already-applied schedule checks do not crowd out useful information.
+- Informational scheduler holds and old transient FLDigi busy-check diagnostics no longer appear as active station responsiveness issues.
+- FIO now shares companion-app process/status checks across consumers, reducing repeated Linux `/proc` reads and idle CPU activity.
+- JS8Call scheduler and status checks share one process-global JS8Net connection, preventing RX/TX/heartbeat thread counts from climbing over time.
+- VarAC Managed BBS Vault reconciliation now adapts its cadence during idle periods while still waking promptly when files, logs, or settings change.
+- ControlFreq now colors the `FLMsg / FLAmp` message-summary row consistently with the other message-summary rows.
 
 ## What's New in v1.2.6
 

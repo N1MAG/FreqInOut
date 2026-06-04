@@ -1,0 +1,13 @@
+//fldigi macro definition file extended
+// Edge-case parser sample for manual fallback tests
+
+// Macro # 1
+/$ 0 Manual Lookup
+Please inspect /opt/fldigi/macros/notes/custom_checkin.txt and /opt/fldigi/macros/notes/relay_summary.txt\n
+<RX>
+
+// Macro # 2
+/$ 1 Pathless Placeholder
+<UNKNOWN:widget>\n
+No recognizable file reference here.\n
+<RX>
