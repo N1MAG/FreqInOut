@@ -2708,7 +2708,7 @@ def ensure_multi_rig_migration(
             )
 
         if operating:
-            plan_name = _coerce_text(operating_plan_name, "") or "Migrated Single-Rig Plan"
+            plan_name = _coerce_text(operating_plan_name, "") or "Daily HF Schedule"
             conn.execute(
                 "UPDATE operating_profiles SET name=?, updated_utc=? WHERE id=?",
                 (plan_name, _utc_now_iso(), int(operating["id"])),
@@ -3609,7 +3609,7 @@ class MultiRadioStore:
             if int(target_row.get("enabled", 1) or 0) != 1:
                 raise ValueError("The selected temporary swap target is disabled.")
             if int(target_row.get("runtime_active", 0) or 0) != 1:
-                raise ValueError("The selected temporary swap target must already be runtime-active.")
+                raise ValueError("The selected temporary swap target must already be active.")
             if _coerce_text(target_row.get("device_class", "tx_rx"), "tx_rx").lower() == "observer":
                 raise ValueError("Observer / SDR device profiles cannot be used as temporary-swap targets.")
 
@@ -4115,7 +4115,7 @@ class MultiRadioStore:
             if not device:
                 raise KeyError(f"Unknown device profile id: {device_profile_id}")
             if int(device.get("runtime_active", 0) or 0) == 1:
-                raise ValueError("Cannot delete a runtime-active device profile. Deactivate it first.")
+                raise ValueError("Cannot delete an active radio. Stop using it first.")
             conn.execute(
                 "UPDATE varac_clusters SET gateway_handler_device_id=NULL WHERE gateway_handler_device_id=?",
                 (int(device_profile_id),),
@@ -4212,7 +4212,7 @@ class MultiRadioStore:
 
             active_profiles = _runtime_active_device_profiles(conn)
             if len(active_profiles) <= 1:
-                raise ValueError("At least one runtime-active device profile must remain enabled.")
+                raise ValueError("At least one active radio must remain enabled.")
 
             conn.execute("UPDATE device_profiles SET runtime_active=0, runtime_primary=0 WHERE id=?", (int(device_profile_id),))
             conn.commit()

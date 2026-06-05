@@ -105,11 +105,15 @@ def process_message(msg):
     global mycall
     global error
     global messages
+    params=msg.get('params')
+    if(not(isinstance(params,dict))):
+        params={}
+    msg_type=msg.get('type')
     # Process INBOX messages.
-    if('MESSAGES' in msg['params']):
-        messages=msg['params']['MESSAGES']
+    if('MESSAGES' in params):
+        messages=params['MESSAGES']
     # If it's a SPOT message, we get everything but speed.
-    if(msg['type']=="RX.SPOT"):
+    if(msg_type=="RX.SPOT"):
         with spots_lock:
             band=calc_band(msg['params']['FREQ'])
             if(mycall not in spots):
@@ -126,7 +130,7 @@ def process_message(msg):
                                                          'snr':msg['params']['SNR']})
     # If it's a DIRECTED message, we should get everything we hope
     # for, plus maybe some extras, depending on what the CMD is.
-    if(msg['type']=="RX.DIRECTED"):
+    if(msg_type=="RX.DIRECTED"):
         with spots_lock:
             band=calc_band(msg['params']['FREQ'])
             if(mycall not in spots):
@@ -339,59 +343,65 @@ def rx_thread(name):
                     except Exception:
                         print("Message: ",message)
                         traceback.print_exc()
-                    if(message['type']=="RIG.FREQ"):
+                    msg_type=message.get('type')
+                    params=message.get('params')
+                    if(not(isinstance(params,dict))):
+                        params={}
+                    if(not(msg_type)):
+                        continue
+                    if(msg_type=="RIG.FREQ"):
                         processed=True
-                        dial=message['params']['DIAL']
-                        freq=message['params']['FREQ']
-                        offset=message['params']['OFFSET']
-                    elif(message['type']=="STATION.CALLSIGN"):
+                        dial=params['DIAL']
+                        freq=params['FREQ']
+                        offset=params['OFFSET']
+                    elif(msg_type=="STATION.CALLSIGN"):
                         processed=True
                         call=message['value']
-                    elif(message['type']=="STATION.GRID"):
+                    elif(msg_type=="STATION.GRID"):
                         processed=True
                         grid=message['value']
-                    elif(message['type']=="STATION.INFO"):
+                    elif(msg_type=="STATION.INFO"):
                         processed=True
                         info=message['value']
-                    elif(message['type']=="MODE.SPEED"):
+                    elif(msg_type=="MODE.SPEED"):
                         processed=True
-                        speed=str(message['params']['SPEED'])
-                    elif(message['type']=="RIG.PTT"):
+                        speed=str(params['SPEED'])
+                    elif(msg_type=="RIG.PTT"):
                         processed=True
                         if(message['value'])=="on":
                            ptt=True
                         else:
                            ptt=False
-                    elif(message['type']=="RX.CALL_SELECTED"):
+                    elif(msg_type=="RX.CALL_SELECTED"):
                         #RSJC
                         call_selected=message['value']
                         processed=True
-                    elif(message['type']=="TX.FRAME"):
+                    elif(msg_type=="TX.FRAME"):
                         processed=True
-                    elif(message['type']=="TX.TEXT"):
+                    elif(msg_type=="TX.TEXT"):
                         processed=True
                         tx_text=message['value']
-                    elif(message['type']=="RX.TEXT"):
+                    elif(msg_type=="RX.TEXT"):
                         # Note that we don't mark this as 'processed'
                         # (even though it is), as the user may want to
                         # watch for incoming text to take his own
                         # action.
                         rx_text=message['value']
-                    elif(message['type']=="RX.CALL_ACTIVITY"):
+                    elif(msg_type=="RX.CALL_ACTIVITY"):
                         processed=True
-                        tmp=message['params']
+                        tmp=params
                         if('_ID' in tmp):
                             del(tmp['_ID'])
                         stations=list(map(lambda c: Callstation(c,tmp[c]),list(tmp.keys())))
                         call_activity=stations
-                    elif(message['type']=="RX.BAND_ACTIVITY"):
+                    elif(msg_type=="RX.BAND_ACTIVITY"):
                         processed=True
-                        tmp=message['params']
+                        tmp=params
                         if('_ID' in tmp):
                             del(tmp['_ID'])
                         stations=list(map(lambda c: Bandstation(tmp[c]),list(tmp.keys())))
                         band_activity=stations
-                    elif(message['type']=="RX.SPOT"):
+                    elif(msg_type=="RX.SPOT"):
                         processed=True
                     # The following message types are delivered to the
                     # rx_queue for user processing (though some of
