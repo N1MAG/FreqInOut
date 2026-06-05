@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+import json
+import socket
+import threading
+import time
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+import pytest
+
+from freqinout.radio_interface.js8_api_client import (
+    JS8ApiClient,
+    JS8ApiClientRegistry,
+    JS8ApiEndpoint,
+    JS8ApiError,
+    JS8ApiMessage,
+    classify_js8_capability_mode,
+)
+
+
+class _FakeJs8Server:
+    def __init__(self, responses: Mapping[str, Any], *, greeting: Optional[Mapping[str, Any]] = None) -> None:
+        self.responses = dict(responses)
+        self.greeting = dict(greeting) if greeting else None
+        self.received: List[Dict[str, Any]] = []
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self.host, self.port = self._sock.getsockname()
+        self._sock.listen(1)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    @property
+    def endpoint(self) -> JS8ApiEndpoint:
+        return JS8ApiEndpoint(self.host, int(self.port))
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            with socket.create_connection((self.host, self.port), timeout=0.2):
+                pass
+        except Exception:
+            pass
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+        self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        try:
+            conn, _addr = self._sock.accept()
+        except Exception:
+            return
+        with conn:
+            conn.settimeout(0.2)
+            if self.greeting:
+                self._send(conn, self.greeting)
+            buffer = b""
+            while not self._stop.is_set():
+                try:
+                    chunk = conn.recv(65536)
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    raw, buffer = buffer.split(b"\n", 1)
+                    if not raw.strip():
+                        continue
+                    try:
+                        message = json.loads(raw.decode("utf-8"))
+                    except Exception:
+                        continue
+                    self.received.append(message)
+                    command = str(message.get("type") or "")
+                    response = self.responses.get(command)
+                    if response is None:
+                        continue
+                    if callable(response):
+                        response = response(message)
+                    self._send(conn, response)
+
+    def _send(self, conn: socket.socket, payload: Mapping[str, Any]) -> None:
+        conn.sendall(json.dumps(dict(payload), separators=(",", ":")).encode("utf-8") + b"\n")
+
+
+def _response(response_type: str, request: Mapping[str, Any], params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    out_params = dict(params or {})
+    req_params = request.get("params") if isinstance(request.get("params"), dict) else {}
+    if "_ID" in req_params:
+        out_params["_ID"] = req_params["_ID"]
+    return {"type": response_type, "value": "", "params": out_params}
+
+
+def test_message_parser_tolerates_missing_type_and_params() -> None:
+    message = JS8ApiMessage.from_raw('{"time":1780681053.019983}')
+
+    assert message.type == ""
+    assert message.value == ""
+    assert message.params == {}
+    assert message.malformed is False
+
+
+def test_message_parser_quarantines_bad_json() -> None:
+    message = JS8ApiMessage.from_raw("{not-json")
+
+    assert message.malformed is True
+    assert message.quarantine_reason.startswith("json_parse_error")
+
+
+def test_registry_returns_one_client_per_endpoint() -> None:
+    JS8ApiClientRegistry.shutdown_all()
+    endpoint = JS8ApiEndpoint("127.0.0.1", 2442)
+
+    first = JS8ApiClientRegistry.get(endpoint, auto_reconnect=False)
+    second = JS8ApiClientRegistry.get(endpoint, auto_reconnect=False)
+
+    try:
+        assert first is second
+    finally:
+        JS8ApiClientRegistry.shutdown_all()
+
+
+def test_native_client_request_matches_response_by_id() -> None:
+    server = _FakeJs8Server(
+        {
+            "RIG.GET_FREQ": lambda request: _response(
+                "RIG.FREQ",
+                request,
+                {"DIAL": 7078000, "FREQ": 7079950, "OFFSET": 1950},
+            )
+        }
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    try:
+        assert client.start() is True
+        response = client.request("RIG.GET_FREQ", expect_types=("RIG.FREQ",))
+
+        assert response.type == "RIG.FREQ"
+        assert response.params["DIAL"] == 7078000
+        assert server.received[0]["type"] == "RIG.GET_FREQ"
+        assert "_ID" in server.received[0]["params"]
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_native_client_surfaces_api_error() -> None:
+    server = _FakeJs8Server(
+        {
+            "STATION.VERSION": lambda request: _response(
+                "API.ERROR",
+                request,
+                {},
+            )
+            | {"value": "Connections Full"}
+        }
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    try:
+        assert client.start() is True
+        with pytest.raises(JS8ApiError, match="Connections Full"):
+            client.request("STATION.VERSION", expect_types=("STATION.VERSION",))
+        assert "Connections Full" in client.last_error
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_native_client_collects_station_closing_event() -> None:
+    server = _FakeJs8Server(
+        {},
+        greeting={
+            "type": "STATION.CLOSING",
+            "value": "",
+            "params": {"_ID": -1, "REASON": "User closed application"},
+        },
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    try:
+        client.start()
+        deadline = time.time() + 1.0
+        event = None
+        while time.time() < deadline:
+            event = client.get_event_nowait()
+            if event is not None:
+                break
+            time.sleep(0.02)
+
+        assert event is not None
+        assert event.type == "STATION.CLOSING"
+        assert client.last_closing_reason == "User closed application"
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_probe_capabilities_classifies_full_api() -> None:
+    def version_response(request: Mapping[str, Any]) -> Dict[str, Any]:
+        return _response("STATION.VERSION", request, {"VERSION": "3.0.2"})
+
+    server = _FakeJs8Server(
+        {
+            "RIG.GET_FREQ": lambda request: _response("RIG.FREQ", request, {"DIAL": 7078000, "FREQ": 7079950, "OFFSET": 1950}),
+            "RIG.GET_PTT": lambda request: _response("RIG.PTT_STATUS", request, {"PTT": False, "MESSAGE": ""}),
+            "TX.GET_QUEUE_DEPTH": lambda request: _response("TX.QUEUE_DEPTH", request, {"DEPTH": 0}),
+            "STATION.VERSION": version_response,
+            "STATION.GET_CONFIG": lambda request: _response("STATION.CONFIG", request, {"TX_ENABLED": True}),
+            "RX.GET_CALL_ACTIVITY": lambda request: _response("RX.CALL_ACTIVITY", request, {}),
+            "RX.GET_BAND_ACTIVITY": lambda request: _response("RX.BAND_ACTIVITY", request, {}),
+            "MODE.GET_SPEED": lambda request: _response("MODE.SPEED", request, {"SPEED": 0}),
+            "RX.GET_FREE_OFFSETS": lambda request: _response("RX.FREE_OFFSETS", request, {"FREE": [], "LOW": 500, "HIGH": 2500}),
+        }
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    try:
+        assert client.start() is True
+        snapshot = client.probe_capabilities(timeout_s=0.5)
+
+        assert snapshot.mode == "api_full"
+        assert snapshot.version == "3.0.2"
+        assert snapshot.supports("RIG.GET_PTT") is True
+        assert snapshot.supports("TX.GET_QUEUE_DEPTH") is True
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_capability_classifier_supports_basic_and_fallback_modes() -> None:
+    assert (
+        classify_js8_capability_mode(
+            {"RIG.GET_FREQ": True, "RX.GET_CALL_ACTIVITY": True, "MODE.GET_SPEED": True},
+            connected=True,
+        )
+        == "api_basic"
+    )
+    assert classify_js8_capability_mode({"RIG.GET_FREQ": True}, connected=True) == "file_fallback"
+    assert classify_js8_capability_mode({}, connected=False) == "offline"
+

@@ -1,0 +1,522 @@
+from __future__ import annotations
+
+import json
+import queue
+import socket
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+
+
+JS8_TCP_API_DEFAULT_PORT = 2442
+JS8_UDP_WSJT_X_DEFAULT_PORT = 2242
+
+_FIELD_LIMIT = 256
+_VALUE_LIMIT = 65536
+_DEFAULT_TIMEOUT_S = 1.5
+_RECONNECT_BACKOFF_STEPS_S = (1.0, 2.0, 5.0, 10.0)
+
+
+def _safe_text(value: object, *, limit: int = _VALUE_LIMIT) -> str:
+    try:
+        if value is None:
+            text = ""
+        elif isinstance(value, bytes):
+            text = value.decode("utf-8", errors="replace")
+        elif isinstance(value, bytearray):
+            text = bytes(value).decode("utf-8", errors="replace")
+        else:
+            text = str(value)
+    except Exception:
+        text = ""
+    if "\x00" in text:
+        text = text.replace("\x00", "")
+    text = "".join(ch if ch in "\t\n\r" or ord(ch) >= 32 else " " for ch in text)
+    if limit > 0 and len(text) > limit:
+        return text[:limit]
+    return text
+
+
+def _safe_params(value: object) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    out: Dict[str, Any] = {}
+    for raw_key, raw_value in list(value.items())[:256]:
+        key = _safe_text(raw_key, limit=_FIELD_LIMIT).strip()
+        if not key:
+            continue
+        out[key] = raw_value
+    return out
+
+
+def _message_id_from_params(params: Mapping[str, Any]) -> Optional[str]:
+    if "_ID" not in params:
+        return None
+    try:
+        return str(params.get("_ID"))
+    except Exception:
+        return None
+
+
+@dataclass(frozen=True)
+class JS8ApiEndpoint:
+    host: str = "127.0.0.1"
+    port: int = JS8_TCP_API_DEFAULT_PORT
+
+    def normalized(self) -> "JS8ApiEndpoint":
+        host = str(self.host or "127.0.0.1").strip() or "127.0.0.1"
+        return JS8ApiEndpoint(host=host, port=int(self.port or JS8_TCP_API_DEFAULT_PORT))
+
+    @property
+    def key(self) -> Tuple[str, int]:
+        n = self.normalized()
+        return (n.host, int(n.port))
+
+
+@dataclass
+class JS8ApiMessage:
+    type: str = ""
+    value: str = ""
+    params: Dict[str, Any] = field(default_factory=dict)
+    raw_json: str = ""
+    received_ts: float = 0.0
+    malformed: bool = False
+    quarantine_reason: str = ""
+
+    @property
+    def id(self) -> Optional[str]:
+        return _message_id_from_params(self.params)
+
+    @classmethod
+    def from_raw(cls, raw: object) -> "JS8ApiMessage":
+        received_ts = time.time()
+        raw_text = _safe_text(raw).strip()
+        if not raw_text:
+            return cls(received_ts=received_ts, malformed=True, quarantine_reason="empty_frame")
+        try:
+            parsed = json.loads(raw_text)
+        except Exception as exc:
+            return cls(
+                raw_json=raw_text,
+                received_ts=received_ts,
+                malformed=True,
+                quarantine_reason=f"json_parse_error:{exc.__class__.__name__}",
+            )
+        if not isinstance(parsed, Mapping):
+            return cls(
+                raw_json=raw_text,
+                received_ts=received_ts,
+                malformed=True,
+                quarantine_reason="json_not_object",
+            )
+        return cls(
+            type=_safe_text(parsed.get("type"), limit=_FIELD_LIMIT).strip(),
+            value=_safe_text(parsed.get("value")),
+            params=_safe_params(parsed.get("params")),
+            raw_json=raw_text,
+            received_ts=received_ts,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "value": self.value,
+            "params": dict(self.params),
+            "raw_json": self.raw_json,
+            "received_ts": self.received_ts,
+            "malformed": self.malformed,
+            "quarantine_reason": self.quarantine_reason,
+        }
+
+
+@dataclass
+class JS8CapabilitySnapshot:
+    endpoint: JS8ApiEndpoint
+    connected: bool
+    mode: str
+    version: str = ""
+    supported: Dict[str, bool] = field(default_factory=dict)
+    errors: Dict[str, str] = field(default_factory=dict)
+    checked_ts: float = 0.0
+
+    def supports(self, command: str) -> bool:
+        return bool(self.supported.get(str(command or "").strip().upper(), False))
+
+
+class JS8ApiError(RuntimeError):
+    pass
+
+
+class JS8ApiTimeout(JS8ApiError):
+    pass
+
+
+class JS8ApiConnectionError(JS8ApiError):
+    pass
+
+
+class JS8ApiClient:
+    """
+    Native JS8Call TCP API client.
+
+    This client is intentionally independent from the vendored js8net module.
+    It is safe to create one instance per JS8Call endpoint, which is required
+    for multi-rig operation.
+    """
+
+    def __init__(
+        self,
+        endpoint: JS8ApiEndpoint,
+        *,
+        timeout_s: float = _DEFAULT_TIMEOUT_S,
+        auto_reconnect: bool = True,
+        name: str = "",
+    ) -> None:
+        self.endpoint = endpoint.normalized()
+        self.timeout_s = float(timeout_s or _DEFAULT_TIMEOUT_S)
+        self.auto_reconnect = bool(auto_reconnect)
+        self.name = name or f"{self.endpoint.host}:{self.endpoint.port}"
+        self._socket: Optional[socket.socket] = None
+        self._running = threading.Event()
+        self._connected = threading.Event()
+        self._send_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._reader_thread: Optional[threading.Thread] = None
+        self._pending: Dict[str, "queue.Queue[JS8ApiMessage]"] = {}
+        self._listeners: List[Callable[[JS8ApiMessage], None]] = []
+        self._events: "queue.Queue[JS8ApiMessage]" = queue.Queue()
+        self._next_id = int(time.time() * 1000) % 1_000_000_000
+        self.last_error: str = ""
+        self.last_error_ts: float = 0.0
+        self.last_connected_ts: float = 0.0
+        self.last_message_ts: float = 0.0
+        self.last_closing_reason: str = ""
+
+    @property
+    def is_running(self) -> bool:
+        return self._running.is_set()
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected.is_set()
+
+    def start(self) -> bool:
+        if self._running.is_set():
+            return self.is_connected
+        self._running.set()
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop,
+            name=f"JS8ApiClient-{self.endpoint.host}:{self.endpoint.port}",
+            daemon=True,
+        )
+        self._reader_thread.start()
+        deadline = time.time() + min(self.timeout_s, 2.0)
+        while time.time() < deadline:
+            if self.is_connected:
+                return True
+            time.sleep(0.02)
+        return self.is_connected
+
+    def stop(self) -> None:
+        self._running.clear()
+        self._connected.clear()
+        self._close_socket()
+        with self._state_lock:
+            pending = list(self._pending.values())
+            self._pending.clear()
+        for waiter in pending:
+            waiter.put(
+                JS8ApiMessage(
+                    type="API.ERROR",
+                    value="Client stopped",
+                    params={},
+                    received_ts=time.time(),
+                )
+            )
+        thread = self._reader_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=1.0)
+        self._reader_thread = None
+
+    def add_listener(self, listener: Callable[[JS8ApiMessage], None]) -> None:
+        with self._state_lock:
+            if listener not in self._listeners:
+                self._listeners.append(listener)
+
+    def remove_listener(self, listener: Callable[[JS8ApiMessage], None]) -> None:
+        with self._state_lock:
+            if listener in self._listeners:
+                self._listeners.remove(listener)
+
+    def get_event_nowait(self) -> Optional[JS8ApiMessage]:
+        try:
+            return self._events.get_nowait()
+        except queue.Empty:
+            return None
+
+    def drain_events(self, limit: int = 100) -> List[JS8ApiMessage]:
+        out: List[JS8ApiMessage] = []
+        for _ in range(max(0, int(limit))):
+            msg = self.get_event_nowait()
+            if msg is None:
+                break
+            out.append(msg)
+        return out
+
+    def request(
+        self,
+        command: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        value: object = "",
+        expect_types: Optional[Iterable[str]] = None,
+        timeout_s: Optional[float] = None,
+    ) -> JS8ApiMessage:
+        command_text = _safe_text(command, limit=_FIELD_LIMIT).strip().upper()
+        if not command_text:
+            raise ValueError("JS8 API command is required")
+        if not self.is_connected:
+            raise JS8ApiConnectionError(f"JS8Call API is not connected at {self.endpoint.host}:{self.endpoint.port}")
+        msg_id = self._allocate_id()
+        request_params = dict(params or {})
+        request_params["_ID"] = msg_id
+        waiter: "queue.Queue[JS8ApiMessage]" = queue.Queue(maxsize=1)
+        with self._state_lock:
+            self._pending[str(msg_id)] = waiter
+        try:
+            self._send({"type": command_text, "value": _safe_text(value), "params": request_params})
+            timeout = float(timeout_s if timeout_s is not None else self.timeout_s)
+            response = waiter.get(timeout=max(0.05, timeout))
+        except queue.Empty as exc:
+            raise JS8ApiTimeout(f"Timed out waiting for JS8Call response to {command_text}") from exc
+        finally:
+            with self._state_lock:
+                self._pending.pop(str(msg_id), None)
+        if response.type == "API.ERROR":
+            self._record_error(response.value or "JS8Call API returned API.ERROR")
+            raise JS8ApiError(response.value or "JS8Call API returned API.ERROR")
+        if expect_types:
+            expected = {str(item or "").strip().upper() for item in expect_types if str(item or "").strip()}
+            if expected and response.type.upper() not in expected:
+                raise JS8ApiError(
+                    f"Unexpected JS8Call response to {command_text}: {response.type or '<empty>'}"
+                )
+        return response
+
+    def probe_capabilities(self, *, timeout_s: float = 0.75) -> JS8CapabilitySnapshot:
+        if not self.is_running:
+            self.start()
+        supported: Dict[str, bool] = {}
+        errors: Dict[str, str] = {}
+        version = ""
+
+        probes: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+            ("RIG.GET_FREQ", ("RIG.FREQ", "STATION.STATUS")),
+            ("RIG.GET_PTT", ("RIG.PTT_STATUS",)),
+            ("TX.GET_QUEUE_DEPTH", ("TX.QUEUE_DEPTH",)),
+            ("STATION.VERSION", ("STATION.VERSION",)),
+            ("STATION.GET_CONFIG", ("STATION.CONFIG",)),
+            ("RX.GET_CALL_ACTIVITY", ("RX.CALL_ACTIVITY",)),
+            ("RX.GET_BAND_ACTIVITY", ("RX.BAND_ACTIVITY",)),
+            ("MODE.GET_SPEED", ("MODE.SPEED",)),
+            ("RX.GET_FREE_OFFSETS", ("RX.FREE_OFFSETS",)),
+        )
+
+        for command, expect in probes:
+            try:
+                response = self.request(command, expect_types=expect, timeout_s=timeout_s)
+                supported[command] = True
+                if command == "STATION.VERSION":
+                    version = _safe_text(response.params.get("VERSION") or response.value, limit=128).strip()
+            except Exception as exc:
+                supported[command] = False
+                errors[command] = _safe_text(exc, limit=512)
+
+        mode = classify_js8_capability_mode(supported, connected=self.is_connected)
+        return JS8CapabilitySnapshot(
+            endpoint=self.endpoint,
+            connected=self.is_connected,
+            mode=mode,
+            version=version,
+            supported=supported,
+            errors=errors,
+            checked_ts=time.time(),
+        )
+
+    def _allocate_id(self) -> int:
+        with self._state_lock:
+            self._next_id += 1
+            if self._next_id > 9_000_000_000:
+                self._next_id = int(time.time() * 1000) % 1_000_000_000
+            return self._next_id
+
+    def _send(self, payload: Mapping[str, Any]) -> None:
+        data = json.dumps(dict(payload), separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+        with self._send_lock:
+            sock = self._socket
+            if sock is None:
+                raise JS8ApiConnectionError("JS8Call API socket is not connected")
+            try:
+                sock.sendall(data)
+            except Exception as exc:
+                self._connected.clear()
+                self._close_socket()
+                raise JS8ApiConnectionError(f"Failed to write JS8Call API request: {exc}") from exc
+
+    def _reader_loop(self) -> None:
+        backoff_index = 0
+        while self._running.is_set():
+            if not self._connect_socket():
+                delay = _RECONNECT_BACKOFF_STEPS_S[min(backoff_index, len(_RECONNECT_BACKOFF_STEPS_S) - 1)]
+                backoff_index += 1
+                time.sleep(delay if self.auto_reconnect else min(delay, 0.25))
+                if not self.auto_reconnect:
+                    break
+                continue
+            backoff_index = 0
+            self._read_socket_until_closed()
+            if not self.auto_reconnect:
+                break
+        self._connected.clear()
+
+    def _connect_socket(self) -> bool:
+        self._close_socket()
+        try:
+            sock = socket.create_connection(self.endpoint.key, timeout=self.timeout_s)
+            sock.settimeout(0.5)
+        except Exception as exc:
+            self._record_error(f"connect_failed:{exc}")
+            return False
+        self._socket = sock
+        self._connected.set()
+        self.last_connected_ts = time.time()
+        self.last_error = ""
+        return True
+
+    def _read_socket_until_closed(self) -> None:
+        buffer = b""
+        while self._running.is_set() and self._socket is not None:
+            try:
+                chunk = self._socket.recv(65536)
+            except socket.timeout:
+                continue
+            except Exception as exc:
+                self._record_error(f"read_failed:{exc}")
+                break
+            if not chunk:
+                self._record_error("connection_closed")
+                break
+            buffer += chunk
+            while b"\n" in buffer:
+                raw, buffer = buffer.split(b"\n", 1)
+                self._handle_raw_frame(raw)
+            if len(buffer) > _VALUE_LIMIT * 2:
+                self._handle_message(
+                    JS8ApiMessage(
+                        raw_json=_safe_text(buffer),
+                        received_ts=time.time(),
+                        malformed=True,
+                        quarantine_reason="frame_too_large",
+                    )
+                )
+                buffer = b""
+        self._connected.clear()
+        self._close_socket()
+
+    def _handle_raw_frame(self, raw: bytes) -> None:
+        message = JS8ApiMessage.from_raw(raw)
+        self._handle_message(message)
+
+    def _handle_message(self, message: JS8ApiMessage) -> None:
+        self.last_message_ts = message.received_ts or time.time()
+        if message.type == "STATION.CLOSING":
+            self.last_closing_reason = _safe_text(message.params.get("REASON") or message.value, limit=512)
+            self._connected.clear()
+        if message.type == "API.ERROR":
+            self._record_error(message.value or "API.ERROR")
+        msg_id = message.id
+        if msg_id:
+            with self._state_lock:
+                waiter = self._pending.get(str(msg_id))
+            if waiter is not None:
+                try:
+                    waiter.put_nowait(message)
+                except queue.Full:
+                    pass
+                return
+        self._events.put(message)
+        with self._state_lock:
+            listeners = list(self._listeners)
+        for listener in listeners:
+            try:
+                listener(message)
+            except Exception:
+                continue
+
+    def _record_error(self, error: object) -> None:
+        self.last_error = _safe_text(error, limit=1024)
+        self.last_error_ts = time.time()
+
+    def _close_socket(self) -> None:
+        sock = self._socket
+        self._socket = None
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+class JS8ApiClientRegistry:
+    """Process-local registry that prevents duplicate FIO sockets per endpoint."""
+
+    _lock = threading.Lock()
+    _clients: Dict[Tuple[str, int], JS8ApiClient] = {}
+
+    @classmethod
+    def get(
+        cls,
+        endpoint: JS8ApiEndpoint,
+        *,
+        timeout_s: float = _DEFAULT_TIMEOUT_S,
+        auto_reconnect: bool = True,
+    ) -> JS8ApiClient:
+        normalized = endpoint.normalized()
+        with cls._lock:
+            client = cls._clients.get(normalized.key)
+            if client is None:
+                client = JS8ApiClient(
+                    normalized,
+                    timeout_s=timeout_s,
+                    auto_reconnect=auto_reconnect,
+                )
+                cls._clients[normalized.key] = client
+            return client
+
+    @classmethod
+    def shutdown_all(cls) -> None:
+        with cls._lock:
+            clients = list(cls._clients.values())
+            cls._clients.clear()
+        for client in clients:
+            client.stop()
+
+
+def classify_js8_capability_mode(supported: Mapping[str, bool], *, connected: bool) -> str:
+    if not connected:
+        return "offline"
+    normalized = {str(key or "").strip().upper(): bool(value) for key, value in supported.items()}
+    api_full_required = {"RIG.GET_FREQ", "RIG.GET_PTT", "TX.GET_QUEUE_DEPTH", "STATION.VERSION"}
+    api_basic_required = {"RIG.GET_FREQ", "RX.GET_CALL_ACTIVITY", "MODE.GET_SPEED"}
+    if all(normalized.get(cmd, False) for cmd in api_full_required):
+        return "api_full"
+    if all(normalized.get(cmd, False) for cmd in api_basic_required):
+        return "api_basic"
+    return "file_fallback"
+
