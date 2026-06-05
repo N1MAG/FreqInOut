@@ -13,8 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-JS8_TCP_API_DEFAULT_PORT = 2442
-JS8_UDP_WSJT_X_DEFAULT_PORT = 2242
+os.environ.setdefault("FREQINOUT_LOG_LEVEL", "DISABLED")
+
+from freqinout.radio_interface.js8_api_client import (  # noqa: E402
+    JS8_TCP_API_DEFAULT_PORT,
+    JS8_UDP_WSJT_X_DEFAULT_PORT,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -28,15 +32,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=JS8_TCP_API_DEFAULT_PORT,
         help="JS8Call TCP API port. Default is 2442. Port 2242 is the UDP/WSJT-X interface, not this TCP API.",
     )
-    parser.add_argument("--timeout", type=float, default=1.0, help="Per-command timeout in seconds")
+    parser.add_argument("--timeout", type=float, default=0.4, help="Per-command timeout in seconds")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-
-    os.environ.setdefault("FREQINOUT_LOG_LEVEL", "DISABLED")
 
     from freqinout.radio_interface.js8_api_client import JS8ApiClient, JS8ApiEndpoint
 

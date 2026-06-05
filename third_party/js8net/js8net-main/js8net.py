@@ -351,9 +351,9 @@ def rx_thread(name):
                         continue
                     if(msg_type=="RIG.FREQ"):
                         processed=True
-                        dial=params['DIAL']
-                        freq=params['FREQ']
-                        offset=params['OFFSET']
+                        dial=params.get('DIAL',False)
+                        freq=params.get('FREQ',False)
+                        offset=params.get('OFFSET',False)
                     elif(msg_type=="STATION.CALLSIGN"):
                         processed=True
                         call=message['value']

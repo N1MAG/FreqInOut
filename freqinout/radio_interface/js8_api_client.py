@@ -222,18 +222,7 @@ class JS8ApiClient:
         self._running.clear()
         self._connected.clear()
         self._close_socket()
-        with self._state_lock:
-            pending = list(self._pending.values())
-            self._pending.clear()
-        for waiter in pending:
-            waiter.put(
-                JS8ApiMessage(
-                    type="API.ERROR",
-                    value="Client stopped",
-                    params={},
-                    received_ts=time.time(),
-                )
-            )
+        self._drain_pending("Client stopped")
         thread = self._reader_thread
         if thread and thread.is_alive():
             thread.join(timeout=1.0)
@@ -295,6 +284,8 @@ class JS8ApiClient:
                 self._pending.pop(str(msg_id), None)
         if response.type == "API.ERROR":
             self._record_error(response.value or "JS8Call API returned API.ERROR")
+            if _safe_text(response.params.get("ERROR_CLASS"), limit=64) == "connection":
+                raise JS8ApiConnectionError(response.value or "JS8Call API connection closed")
             raise JS8ApiError(response.value or "JS8Call API returned API.ERROR")
         if expect_types:
             expected = {str(item or "").strip().upper() for item in expect_types if str(item or "").strip()}
@@ -304,7 +295,16 @@ class JS8ApiClient:
                 )
         return response
 
-    def probe_capabilities(self, *, timeout_s: float = 0.75) -> JS8CapabilitySnapshot:
+    def probe_capabilities(self, *, timeout_s: float = 0.4) -> JS8CapabilitySnapshot:
+        """
+        Probe common JS8Call TCP API commands and classify endpoint capability.
+
+        This method calls ``start()`` automatically if the client is not
+        already running. Phase 1 probes are intentionally sequential so the
+        probe remains simple and easy to reason about; keep the per-command
+        timeout short because a slow or partially-started JS8Call can otherwise
+        turn nine probe commands into several seconds of waiting.
+        """
         if not self.is_running:
             self.start()
         supported: Dict[str, bool] = {}
@@ -417,7 +417,7 @@ class JS8ApiClient:
                         raw_json=_safe_text(buffer),
                         received_ts=time.time(),
                         malformed=True,
-                        quarantine_reason="frame_too_large",
+                        quarantine_reason=f"frame_too_large:bytes={len(buffer)}",
                     )
                 )
                 buffer = b""
@@ -433,6 +433,10 @@ class JS8ApiClient:
         if message.type == "STATION.CLOSING":
             self.last_closing_reason = _safe_text(message.params.get("REASON") or message.value, limit=512)
             self._connected.clear()
+            self._drain_pending(
+                "JS8Call closed",
+                detail=f"STATION.CLOSING: {self.last_closing_reason or 'JS8Call closed'}",
+            )
         if message.type == "API.ERROR":
             self._record_error(message.value or "API.ERROR")
         msg_id = message.id
@@ -457,6 +461,23 @@ class JS8ApiClient:
     def _record_error(self, error: object) -> None:
         self.last_error = _safe_text(error, limit=1024)
         self.last_error_ts = time.time()
+
+    def _drain_pending(self, value: str, *, detail: str = "") -> None:
+        with self._state_lock:
+            pending = list(self._pending.values())
+            self._pending.clear()
+        for waiter in pending:
+            try:
+                waiter.put_nowait(
+                    JS8ApiMessage(
+                        type="API.ERROR",
+                        value=_safe_text(detail or value, limit=1024),
+                        params={"ERROR_CLASS": "connection"},
+                        received_ts=time.time(),
+                    )
+                )
+            except queue.Full:
+                pass
 
     def _close_socket(self) -> None:
         sock = self._socket
@@ -500,6 +521,14 @@ class JS8ApiClientRegistry:
             return client
 
     @classmethod
+    def remove(cls, endpoint: JS8ApiEndpoint) -> None:
+        normalized = endpoint.normalized()
+        with cls._lock:
+            client = cls._clients.pop(normalized.key, None)
+        if client is not None:
+            client.stop()
+
+    @classmethod
     def shutdown_all(cls) -> None:
         with cls._lock:
             clients = list(cls._clients.values())
@@ -519,4 +548,3 @@ def classify_js8_capability_mode(supported: Mapping[str, bool], *, connected: bo
     if all(normalized.get(cmd, False) for cmd in api_basic_required):
         return "api_basic"
     return "file_fallback"
-

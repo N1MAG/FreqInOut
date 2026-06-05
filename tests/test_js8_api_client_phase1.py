@@ -11,6 +11,7 @@ import pytest
 from freqinout.radio_interface.js8_api_client import (
     JS8ApiClient,
     JS8ApiClientRegistry,
+    JS8ApiConnectionError,
     JS8ApiEndpoint,
     JS8ApiError,
     JS8ApiMessage,
@@ -127,6 +128,20 @@ def test_registry_returns_one_client_per_endpoint() -> None:
         JS8ApiClientRegistry.shutdown_all()
 
 
+def test_registry_can_remove_one_endpoint() -> None:
+    JS8ApiClientRegistry.shutdown_all()
+    endpoint = JS8ApiEndpoint("127.0.0.1", 2442)
+
+    first = JS8ApiClientRegistry.get(endpoint, auto_reconnect=False)
+    JS8ApiClientRegistry.remove(endpoint)
+    second = JS8ApiClientRegistry.get(endpoint, auto_reconnect=False)
+
+    try:
+        assert first is not second
+    finally:
+        JS8ApiClientRegistry.shutdown_all()
+
+
 def test_native_client_request_matches_response_by_id() -> None:
     server = _FakeJs8Server(
         {
@@ -196,9 +211,44 @@ def test_native_client_collects_station_closing_event() -> None:
         assert event is not None
         assert event.type == "STATION.CLOSING"
         assert client.last_closing_reason == "User closed application"
+        deadline = time.time() + 1.0
+        while client.is_connected and time.time() < deadline:
+            time.sleep(0.02)
+        assert client.is_connected is False
     finally:
         client.stop()
         server.stop()
+
+
+def test_native_client_station_closing_drains_pending_request() -> None:
+    server = _FakeJs8Server(
+        {
+            "RIG.GET_FREQ": {
+                "type": "STATION.CLOSING",
+                "value": "",
+                "params": {"REASON": "User closed application"},
+            }
+        }
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=2.0)
+    try:
+        assert client.start() is True
+        started = time.time()
+        with pytest.raises(JS8ApiConnectionError, match="STATION.CLOSING"):
+            client.request("RIG.GET_FREQ", expect_types=("RIG.FREQ",), timeout_s=2.0)
+
+        assert time.time() - started < 1.0
+        assert client.is_connected is False
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_native_client_request_fails_fast_when_not_connected() -> None:
+    client = JS8ApiClient(JS8ApiEndpoint("127.0.0.1", 9), auto_reconnect=False, timeout_s=0.1)
+
+    with pytest.raises(JS8ApiConnectionError, match="not connected"):
+        client.request("RIG.GET_FREQ", expect_types=("RIG.FREQ",))
 
 
 def test_probe_capabilities_classifies_full_api() -> None:
@@ -232,6 +282,28 @@ def test_probe_capabilities_classifies_full_api() -> None:
         server.stop()
 
 
+def test_probe_capabilities_classifies_missing_full_command_as_basic() -> None:
+    server = _FakeJs8Server(
+        {
+            "RIG.GET_FREQ": lambda request: _response("RIG.FREQ", request, {"DIAL": 7078000, "FREQ": 7079950, "OFFSET": 1950}),
+            "STATION.VERSION": lambda request: _response("STATION.VERSION", request, {"VERSION": "2.2.0"}),
+            "RX.GET_CALL_ACTIVITY": lambda request: _response("RX.CALL_ACTIVITY", request, {}),
+            "MODE.GET_SPEED": lambda request: _response("MODE.SPEED", request, {"SPEED": 0}),
+        }
+    )
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=1.0)
+    try:
+        assert client.start() is True
+        snapshot = client.probe_capabilities(timeout_s=0.2)
+
+        assert snapshot.mode == "api_basic"
+        assert snapshot.supports("RIG.GET_PTT") is False
+        assert snapshot.supports("RIG.GET_FREQ") is True
+    finally:
+        client.stop()
+        server.stop()
+
+
 def test_capability_classifier_supports_basic_and_fallback_modes() -> None:
     assert (
         classify_js8_capability_mode(
@@ -242,4 +314,3 @@ def test_capability_classifier_supports_basic_and_fallback_modes() -> None:
     )
     assert classify_js8_capability_mode({"RIG.GET_FREQ": True}, connected=True) == "file_fallback"
     assert classify_js8_capability_mode({}, connected=False) == "offline"
-
