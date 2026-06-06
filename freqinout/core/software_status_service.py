@@ -404,8 +404,16 @@ class SoftwareStatusService:
         endpoint = JS8ApiEndpoint(host, port).normalized()
         cache_key = endpoint.key
         health_key = self._health_key(("JS8CALL", endpoint.host.lower(), int(endpoint.port), "capability"))
+        running = bool(process_running) if process_running is not None else self.program_is_running("JS8Call")
         now = time.monotonic()
         cached = type(self)._shared_js8_capability_cache.get(cache_key)
+        if not running and self._is_loopback_host(endpoint.host):
+            status = self._js8_capability_offline_status(
+                endpoint,
+                last_error="JS8Call is not running",
+            )
+            type(self)._shared_js8_capability_cache[cache_key] = (now, dict(status))
+            return status
         if not force and cached:
             cached_ts, cached_status = cached
             connected = bool(cached_status.get("connected"))
@@ -415,17 +423,13 @@ class SoftwareStatusService:
         allowed, _health = self._health.may_run(health_key, owner="SoftwareStatusService", force=force)
         if not allowed and cached:
             return dict(cached[1])
-        running = bool(process_running) if process_running is not None else self.program_is_running("JS8Call")
+        if not allowed:
+            return self._js8_capability_offline_status(
+                endpoint,
+                last_error="JS8Call API capability check is waiting for cooldown",
+            )
         started = time.monotonic()
-        status: Dict[str, object] = {
-            "connected": False,
-            "mode": "offline",
-            "version": "",
-            "endpoint": self._format_endpoint(endpoint.host, endpoint.port),
-            "supported": {},
-            "errors": {},
-            "last_error": "",
-        }
+        status = self._js8_capability_offline_status(endpoint)
         client = JS8ApiClient(endpoint, timeout_s=0.4, auto_reconnect=False)
         try:
             if client.start():
@@ -470,6 +474,23 @@ class SoftwareStatusService:
             )
         type(self)._shared_js8_capability_cache[cache_key] = (time.monotonic(), dict(status))
         return status
+
+    def _js8_capability_offline_status(
+        self,
+        endpoint: JS8ApiEndpoint,
+        *,
+        last_error: str = "",
+    ) -> Dict[str, object]:
+        normalized = endpoint.normalized()
+        return {
+            "connected": False,
+            "mode": "offline",
+            "version": "",
+            "endpoint": self._format_endpoint(normalized.host, normalized.port),
+            "supported": {},
+            "errors": {},
+            "last_error": str(last_error or ""),
+        }
 
     @staticmethod
     def _js8_capability_action(status: Dict[str, object], *, running: bool) -> str:

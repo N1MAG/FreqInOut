@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -286,6 +287,48 @@ def test_js8_api_capability_status_records_health_success(monkeypatch):
     assert health["consecutive_failures"] == 0
     assert health["metadata"]["capability_mode"] == "api_full"
     assert "native FIO diagnostics" in str(health["metadata"]["action"])
+
+
+def test_js8_api_capability_status_returns_dict_when_probe_blocked(monkeypatch):
+    SoftwareStatusService._shared_js8_capability_cache.clear()
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2451}))
+    monkeypatch.setattr(
+        service._health,
+        "may_run",
+        lambda *_args, **_kwargs: (False, {}),
+    )
+
+    status = service.js8_api_capability_status(process_running=True, force=False)
+
+    assert isinstance(status, dict)
+    assert status["connected"] is False
+    assert status["mode"] == "offline"
+    assert status["endpoint"] == "127.0.0.1:2451"
+    assert status["supported"] == {}
+    assert "cooldown" in str(status["last_error"]).lower()
+
+
+def test_js8_api_capability_status_does_not_use_positive_cache_when_local_process_stops():
+    SoftwareStatusService._shared_js8_capability_cache.clear()
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2452}))
+    SoftwareStatusService._shared_js8_capability_cache[("127.0.0.1", 2452)] = (
+        time.monotonic(),
+        {
+            "connected": True,
+            "mode": "api_full",
+            "version": "3.0.2",
+            "endpoint": "127.0.0.1:2452",
+            "supported": {"RIG.GET_FREQ": True},
+            "errors": {},
+            "last_error": "",
+        },
+    )
+
+    status = service.js8_api_capability_status(process_running=False, force=False)
+
+    assert status["connected"] is False
+    assert status["mode"] == "offline"
+    assert status["last_error"] == "JS8Call is not running"
 
 
 def test_dependency_status_snapshot_includes_js8_capability(monkeypatch):
