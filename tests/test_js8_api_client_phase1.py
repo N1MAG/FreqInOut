@@ -244,6 +244,40 @@ def test_native_client_station_closing_drains_pending_request() -> None:
         server.stop()
 
 
+def test_native_client_stop_drains_pending_request_as_connection_error() -> None:
+    def slow_response(request: Mapping[str, Any]) -> Dict[str, Any]:
+        time.sleep(2.0)
+        return _response("RIG.FREQ", request, {"DIAL": 7078000, "FREQ": 7079950, "OFFSET": 1950})
+
+    server = _FakeJs8Server({"RIG.GET_FREQ": slow_response})
+    client = JS8ApiClient(server.endpoint, auto_reconnect=False, timeout_s=2.0)
+    errors: List[BaseException] = []
+
+    def run_request() -> None:
+        try:
+            client.request("RIG.GET_FREQ", expect_types=("RIG.FREQ",), timeout_s=2.0)
+        except BaseException as exc:
+            errors.append(exc)
+
+    try:
+        assert client.start() is True
+        thread = threading.Thread(target=run_request, daemon=True)
+        thread.start()
+        deadline = time.time() + 1.0
+        while not server.received and time.time() < deadline:
+            time.sleep(0.02)
+
+        client.stop()
+        thread.join(timeout=1.0)
+
+        assert errors
+        assert isinstance(errors[0], JS8ApiConnectionError)
+        assert "client stopped" in str(errors[0])
+    finally:
+        client.stop()
+        server.stop()
+
+
 def test_native_client_request_fails_fast_when_not_connected() -> None:
     client = JS8ApiClient(JS8ApiEndpoint("127.0.0.1", 9), auto_reconnect=False, timeout_s=0.1)
 

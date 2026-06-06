@@ -222,7 +222,7 @@ class JS8ApiClient:
         self._running.clear()
         self._connected.clear()
         self._close_socket()
-        self._drain_pending("Client stopped")
+        self._drain_pending("Client stopped", detail="JS8Call client stopped")
         thread = self._reader_thread
         if thread and thread.is_alive():
             thread.join(timeout=1.0)
