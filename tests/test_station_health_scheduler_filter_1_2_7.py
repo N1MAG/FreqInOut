@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 
 def test_station_health_shows_latest_success_and_issue_log(monkeypatch):
     import freqinout.core.station_health_summary as summary_module
@@ -80,6 +82,38 @@ def test_fldigi_busy_check_history_is_not_a_station_issue():
     assert item["is_issue"] is False
     assert item["last_issue"] == ""
     assert "SettingsManager" not in item["action"]
+
+
+def test_js8_capability_success_surfaces_operator_action_text():
+    import freqinout.core.station_health_summary as summary_module
+
+    now = time.monotonic()
+    result = summary_module.summarize_station_health(
+        registry_snapshot={
+            "js8call:127.0.0.1:2442:capability": {
+                "owner": "SoftwareStatusService",
+                "consecutive_failures": 0,
+                "consecutive_slow": 0,
+                "last_checked_ts": now,
+                "last_success_ts": now,
+                "last_error": "",
+                "metadata": {
+                    "capability_mode": "api_full",
+                    "version": "3.0.2",
+                    "endpoint": "127.0.0.1:2442",
+                    "action": "JS8Call API is ready for native FIO diagnostics at 127.0.0.1:2442. Version: 3.0.2.",
+                },
+            }
+        },
+        include_scheduler_events=False,
+    )
+
+    assert result["severity"] == "ok"
+    assert result["issue_count"] == 0
+    item = result["items"][0]
+    assert item["dependency"] == "JS8Call API (127.0.0.1:2442)"
+    assert item["state"] == "OK"
+    assert "native FIO diagnostics" in item["action"]
 
 
 def test_fldigi_busy_check_internal_events_do_not_fill_issue_log(monkeypatch):

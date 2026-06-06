@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from freqinout.core.dependency_health import get_dependency_health_registry
+from freqinout.core.dependency_status_service import DependencyStatusService
 from freqinout.core.software_status_service import SoftwareStatusService
 
 
@@ -245,6 +248,75 @@ def test_status_snapshot_marks_fldigi_ok_when_configured_endpoint_is_reachable(m
     assert info["running"] is True
     assert str(info["endpoint"]) == "10.0.0.9:7365"
     assert "reachable" in str(info["tooltip"]).lower()
+
+
+def test_js8_api_capability_status_records_health_success(monkeypatch):
+    import freqinout.core.software_status_service as status_module
+
+    class FakeJS8Client:
+        last_error = ""
+
+        def __init__(self, endpoint, **_kwargs):
+            self.endpoint = endpoint
+
+        def start(self):
+            return True
+
+        def probe_capabilities(self, **_kwargs):
+            return SimpleNamespace(
+                connected=True,
+                mode="api_full",
+                version="3.0.2",
+                supported={"RIG.GET_FREQ": True, "RIG.GET_PTT": True},
+                errors={},
+            )
+
+        def stop(self):
+            pass
+
+    SoftwareStatusService._shared_js8_capability_cache.clear()
+    monkeypatch.setattr(status_module, "JS8ApiClient", FakeJS8Client)
+
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2449}))
+    status = service.js8_api_capability_status(process_running=True, force=True)
+
+    assert status["mode"] == "api_full"
+    assert status["version"] == "3.0.2"
+    health = get_dependency_health_registry().snapshot("js8call:127.0.0.1:2449:capability")
+    assert health["consecutive_failures"] == 0
+    assert health["metadata"]["capability_mode"] == "api_full"
+    assert "native FIO diagnostics" in str(health["metadata"]["action"])
+
+
+def test_dependency_status_snapshot_includes_js8_capability(monkeypatch):
+    def fake_running(self, name):
+        return name == "JS8Call"
+
+    def fake_capability(self, **_kwargs):
+        return {
+            "connected": True,
+            "mode": "api_basic",
+            "version": "2.2.0",
+            "endpoint": "127.0.0.1:2450",
+            "supported": {"RIG.GET_FREQ": True},
+            "errors": {},
+            "last_error": "",
+        }
+
+    monkeypatch.setattr(SoftwareStatusService, "program_is_running", fake_running)
+    monkeypatch.setattr(SoftwareStatusService, "js8_api_capability_status", fake_capability)
+
+    service = DependencyStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2450}))
+    try:
+        snapshot = service._build_process_snapshot(1, "test")
+    finally:
+        service.stop()
+
+    js8_status = snapshot.process["JS8Call_API"]
+    assert js8_status.state == "ok"
+    assert js8_status.value == "api_basic"
+    assert js8_status.meta["version"] == "2.2.0"
+    assert "compatibility fallbacks" in js8_status.tooltip
 
 
 def test_settings_tab_refresh_running_status_uses_unsaved_flrig_port(monkeypatch, tmp_path):

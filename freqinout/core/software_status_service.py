@@ -12,6 +12,7 @@ import psutil
 
 from freqinout.core.dependency_health import get_dependency_health_registry
 from freqinout.core.logger import log
+from freqinout.radio_interface.js8_api_client import JS8ApiClient, JS8ApiEndpoint
 
 
 PROGRAM_TOKENS: Dict[str, Sequence[str]] = {
@@ -72,6 +73,7 @@ class SoftwareStatusService:
     _shared_proc_snapshot_ts: float = 0.0
     _shared_proc_lock = threading.Lock()
     _shared_js8_api_cache: Dict[tuple[str, int, bool], tuple[float, bool]] = {}
+    _shared_js8_capability_cache: Dict[tuple[str, int], tuple[float, Dict[str, object]]] = {}
     _shared_service_probe_cache: Dict[tuple[str, ...], tuple[float, bool]] = {}
 
     def __init__(self, settings: Any) -> None:
@@ -85,6 +87,8 @@ class SoftwareStatusService:
         self._js8_api_cache_ts: float = 0.0
         self._api_success_ttl_sec: float = 15.0
         self._api_failure_ttl_sec: float = 30.0
+        self._js8_capability_success_ttl_sec: float = 60.0
+        self._js8_capability_failure_ttl_sec: float = 120.0
         self._service_probe_success_ttl_sec: float = 15.0
         self._service_probe_failure_ttl_sec: float = 30.0
         self._health = get_dependency_health_registry()
@@ -386,6 +390,102 @@ class SoftwareStatusService:
                 duration_ms=elapsed_ms,
             )
         return bool(reachable)
+
+    def js8_api_capability_status(
+        self,
+        *,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        process_running: Optional[bool] = None,
+        force: bool = False,
+    ) -> Dict[str, object]:
+        host = (host_override or "").strip() or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST
+        port = int(port_override) if port_override is not None else self._settings_int("js8_port", JS8_DEFAULT_PORT)
+        endpoint = JS8ApiEndpoint(host, port).normalized()
+        cache_key = endpoint.key
+        health_key = self._health_key(("JS8CALL", endpoint.host.lower(), int(endpoint.port), "capability"))
+        now = time.monotonic()
+        cached = type(self)._shared_js8_capability_cache.get(cache_key)
+        if not force and cached:
+            cached_ts, cached_status = cached
+            connected = bool(cached_status.get("connected"))
+            ttl = self._js8_capability_success_ttl_sec if connected else self._js8_capability_failure_ttl_sec
+            if (now - float(cached_ts or 0.0)) < ttl:
+                return dict(cached_status)
+        allowed, _health = self._health.may_run(health_key, owner="SoftwareStatusService", force=force)
+        if not allowed and cached:
+            return dict(cached[1])
+        running = bool(process_running) if process_running is not None else self.program_is_running("JS8Call")
+        started = time.monotonic()
+        status: Dict[str, object] = {
+            "connected": False,
+            "mode": "offline",
+            "version": "",
+            "endpoint": self._format_endpoint(endpoint.host, endpoint.port),
+            "supported": {},
+            "errors": {},
+            "last_error": "",
+        }
+        client = JS8ApiClient(endpoint, timeout_s=0.4, auto_reconnect=False)
+        try:
+            if client.start():
+                snapshot = client.probe_capabilities(timeout_s=0.4)
+                status.update(
+                    {
+                        "connected": bool(snapshot.connected),
+                        "mode": str(snapshot.mode or "offline"),
+                        "version": str(snapshot.version or ""),
+                        "supported": dict(snapshot.supported),
+                        "errors": dict(snapshot.errors),
+                        "last_error": client.last_error,
+                    }
+                )
+            else:
+                status["last_error"] = client.last_error or "JS8Call TCP API not reachable"
+        except Exception as exc:
+            status["last_error"] = str(exc or "JS8Call capability probe failed")
+        finally:
+            client.stop()
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        metadata = {
+            "capability_mode": status.get("mode", "offline"),
+            "version": status.get("version", ""),
+            "endpoint": status.get("endpoint", ""),
+            "action": self._js8_capability_action(status, running=running),
+        }
+        if bool(status.get("connected")):
+            self._health.record_success(
+                health_key,
+                owner="SoftwareStatusService",
+                duration_ms=elapsed_ms,
+                metadata=metadata,
+            )
+        elif running:
+            self._health.record_failure(
+                health_key,
+                owner="SoftwareStatusService",
+                error=str(status.get("last_error") or "JS8Call TCP API not reachable"),
+                duration_ms=elapsed_ms,
+                metadata=metadata,
+            )
+        type(self)._shared_js8_capability_cache[cache_key] = (time.monotonic(), dict(status))
+        return status
+
+    @staticmethod
+    def _js8_capability_action(status: Dict[str, object], *, running: bool) -> str:
+        endpoint = str(status.get("endpoint", "") or "").strip()
+        version = str(status.get("version", "") or "").strip()
+        mode = str(status.get("mode", "offline") or "offline").strip()
+        version_part = f" Version: {version}." if version else ""
+        if mode == "api_full":
+            return f"JS8Call API is ready for native FIO diagnostics at {endpoint}.{version_part}"
+        if mode == "api_basic":
+            return f"JS8Call API is reachable at {endpoint}; FIO will use basic API features and keep fallbacks available.{version_part}"
+        if mode == "file_fallback":
+            return f"JS8Call is reachable at {endpoint}, but native API support is limited; FIO will keep using log/database fallbacks.{version_part}"
+        if running:
+            return f"JS8Call appears to be running, but FIO could not verify the TCP API at {endpoint}."
+        return "JS8Call is not running; no JS8 API check is needed right now."
 
     def flrig_api_reachable(
         self,

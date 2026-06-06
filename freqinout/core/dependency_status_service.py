@@ -234,9 +234,12 @@ class DependencyStatusService(QObject):
             item_started = time.perf_counter()
             try:
                 running = bool(probe.program_is_running(program_name))
-                value = "running" if running else "not_running"
-                state = "ok" if running else "idle"
-                tooltip = self._process_tooltip(status_key, program_name, running, probe)
+                capability: Dict[str, object] = {}
+                if status_key == "JS8Call_API":
+                    capability = probe.js8_api_capability_status(process_running=running)
+                value = self._status_value(status_key, running, capability)
+                state = self._status_state(status_key, running, capability)
+                tooltip = self._process_tooltip(status_key, program_name, running, probe, capability)
                 duration_ms = (time.perf_counter() - item_started) * 1000.0
                 statuses[status_key] = DependencyStatus(
                     key=status_key,
@@ -252,7 +255,7 @@ class DependencyStatusService(QObject):
                     last_success_at=checked_at,
                     duration_ms=duration_ms,
                     slow=duration_ms > 250.0,
-                    meta={"program": program_name},
+                    meta=self._status_meta(status_key, program_name, capability),
                 )
             except Exception as exc:
                 duration_ms = (time.perf_counter() - item_started) * 1000.0
@@ -297,13 +300,10 @@ class DependencyStatusService(QObject):
         program_name: str,
         running: bool,
         probe: SoftwareStatusService,
+        capability: Optional[Mapping[str, object]] = None,
     ) -> str:
         if status_key == "JS8Call_API":
-            return (
-                "JS8Call process is running. Routine UI status avoids repeated API probes."
-                if running
-                else "JS8Call is not running."
-            )
+            return self._js8_capability_tooltip(capability or {}, running=running)
         if status_key in {"FLRig", "FLDigi"}:
             return (
                 f"{program_name} process is running. Routine UI status avoids repeated XML-RPC probes."
@@ -315,6 +315,51 @@ class DependencyStatusService(QObject):
             if exe:
                 return f"Running: {exe}"
         return "Running" if running else "Not running"
+
+    @staticmethod
+    def _status_value(status_key: str, running: bool, capability: Mapping[str, object]) -> str:
+        if status_key == "JS8Call_API":
+            return str(capability.get("mode", "offline") or "offline")
+        return "running" if running else "not_running"
+
+    @staticmethod
+    def _status_state(status_key: str, running: bool, capability: Mapping[str, object]) -> str:
+        if status_key == "JS8Call_API":
+            mode = str(capability.get("mode", "offline") or "offline")
+            if mode in {"api_full", "api_basic", "file_fallback"}:
+                return "ok"
+            return "warn" if running else "idle"
+        return "ok" if running else "idle"
+
+    @staticmethod
+    def _status_meta(status_key: str, program_name: str, capability: Mapping[str, object]) -> Dict[str, object]:
+        meta: Dict[str, object] = {"program": program_name}
+        if status_key == "JS8Call_API" and capability:
+            meta.update(
+                {
+                    "capability_mode": str(capability.get("mode", "") or ""),
+                    "version": str(capability.get("version", "") or ""),
+                    "endpoint": str(capability.get("endpoint", "") or ""),
+                    "supported": dict(capability.get("supported", {}) or {}),
+                }
+            )
+        return meta
+
+    @staticmethod
+    def _js8_capability_tooltip(capability: Mapping[str, object], *, running: bool) -> str:
+        endpoint = str(capability.get("endpoint", "") or "").strip()
+        version = str(capability.get("version", "") or "").strip()
+        mode = str(capability.get("mode", "offline") or "offline")
+        version_part = f" Version: {version}." if version else ""
+        if mode == "api_full":
+            return f"JS8Call API is ready at {endpoint}.{version_part}"
+        if mode == "api_basic":
+            return f"JS8Call API is reachable at {endpoint}; FIO will keep compatibility fallbacks available.{version_part}"
+        if mode == "file_fallback":
+            return f"JS8Call API support is limited at {endpoint}; FIO will use log/database fallbacks.{version_part}"
+        if running:
+            return f"JS8Call is running, but FIO could not verify the TCP API at {endpoint}."
+        return "JS8Call is not running."
 
 
 _SERVICE_LOCK = threading.Lock()
