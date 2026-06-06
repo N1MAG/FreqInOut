@@ -331,6 +331,460 @@ def test_js8_api_capability_status_does_not_use_positive_cache_when_local_proces
     assert status["last_error"] == "JS8Call is not running"
 
 
+def test_js8_api_capability_status_does_not_cache_local_not_running_status():
+    SoftwareStatusService._shared_js8_capability_cache.clear()
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2453}))
+
+    status = service.js8_api_capability_status(process_running=False, force=False)
+
+    assert isinstance(status, dict)
+    assert status["connected"] is False
+    assert status["mode"] == "offline"
+    assert status["endpoint"] == "127.0.0.1:2453"
+    assert status["last_error"] == "JS8Call is not running"
+    assert ("127.0.0.1", 2453) not in SoftwareStatusService._shared_js8_capability_cache
+
+
+def test_js8_api_capability_status_probes_immediately_after_local_process_starts(monkeypatch):
+    import freqinout.core.software_status_service as status_module
+
+    class FakeJS8Client:
+        last_error = ""
+
+        def __init__(self, endpoint, **_kwargs):
+            self.endpoint = endpoint
+
+        def start(self):
+            return True
+
+        def probe_capabilities(self, **_kwargs):
+            return SimpleNamespace(
+                connected=True,
+                mode="api_full",
+                version="3.0.2",
+                supported={"RIG.GET_FREQ": True, "RIG.GET_PTT": True, "TX.GET_QUEUE_DEPTH": True},
+                errors={},
+            )
+
+        def stop(self):
+            pass
+
+    SoftwareStatusService._shared_js8_capability_cache.clear()
+    monkeypatch.setattr(status_module, "JS8ApiClient", FakeJS8Client)
+
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2454}))
+
+    first = service.js8_api_capability_status(process_running=False, force=False)
+    second = service.js8_api_capability_status(process_running=True, force=False)
+
+    assert first["mode"] == "offline"
+    assert first["last_error"] == "JS8Call is not running"
+    assert second["connected"] is True
+    assert second["mode"] == "api_full"
+    assert second["version"] == "3.0.2"
+
+
+def test_js8_shadow_comparison_status_reports_native_state(monkeypatch):
+    import freqinout.core.software_status_service as status_module
+
+    class FakeCapabilitySnapshot:
+        connected = True
+        mode = "api_basic"
+        version = "3.0.2"
+        supported = {
+            "RIG.GET_FREQ": True,
+            "RIG.GET_PTT": True,
+            "TX.GET_QUEUE_DEPTH": True,
+            "RX.GET_CALL_ACTIVITY": True,
+            "MODE.GET_SPEED": True,
+        }
+        errors = {}
+
+        def supports(self, command: str) -> bool:
+            return bool(self.supported.get(str(command or "").strip().upper(), False))
+
+    class FakeJS8Client:
+        request_count = 0
+
+        def __init__(self, endpoint, **_kwargs):
+            self.endpoint = endpoint
+            self.last_error = ""
+
+        def start(self):
+            return True
+
+        def probe_capabilities(self, **_kwargs):
+            return FakeCapabilitySnapshot()
+
+        def request(self, command, **_kwargs):
+            type(self).request_count += 1
+            if command == "RIG.GET_FREQ":
+                return SimpleNamespace(params={"DIAL": 7078000, "OFFSET": 1950}, value="")
+            if command == "RIG.GET_PTT":
+                return SimpleNamespace(params={"PTT": True}, value="")
+            if command == "TX.GET_QUEUE_DEPTH":
+                return SimpleNamespace(params={"DEPTH": 0}, value="")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        def stop(self):
+            pass
+
+    SoftwareStatusService._shared_js8_capability_cache.clear()
+    SoftwareStatusService._shared_js8_shadow_cache.clear()
+    monkeypatch.setattr(status_module, "JS8ApiClient", FakeJS8Client)
+    monkeypatch.setattr(SoftwareStatusService, "program_is_running", lambda self, name: True)
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2455}))
+
+    result = service.js8_shadow_comparison_status(
+        legacy_readings={"busy": True, "frequency_hz": 7078000, "offset_hz": 1950},
+        force=True,
+    )
+
+    assert result["connected"] is True
+    assert result["mode"] == "api_basic"
+    assert result["version"] == "3.0.2"
+    assert result["legacy"] == {"busy": True, "frequency_hz": 7078000, "offset_hz": 1950}
+    assert result["native"]["busy"] is True
+    assert result["native"]["frequency_hz"] == 7078000
+    assert result["native"]["offset_hz"] == 1950
+    assert result["native"]["ptt_active"] is True
+    assert result["native"]["queue_depth"] == 0
+    assert result["differences"] == {}
+    assert result["comparisons"]["busy"]["match"] is True
+    assert result["comparisons"]["frequency_hz"]["match"] is True
+    assert result["comparisons"]["offset_hz"]["match"] is True
+
+
+def test_js8_shadow_comparison_status_reports_busy_mismatch(monkeypatch):
+    import freqinout.core.software_status_service as status_module
+
+    class FakeCapabilitySnapshot:
+        connected = True
+        mode = "api_basic"
+        version = "3.0.2"
+        supported = {"RIG.GET_FREQ": True, "RIG.GET_PTT": True, "TX.GET_QUEUE_DEPTH": True}
+        errors = {}
+
+        def supports(self, command: str) -> bool:
+            return bool(self.supported.get(str(command or "").strip().upper(), False))
+
+    class FakeJS8Client:
+        def __init__(self, endpoint, **_kwargs):
+            self.endpoint = endpoint
+            self.last_error = ""
+
+        def start(self):
+            return True
+
+        def probe_capabilities(self, **_kwargs):
+            return FakeCapabilitySnapshot()
+
+        def request(self, command, **_kwargs):
+            if command == "RIG.GET_FREQ":
+                return SimpleNamespace(params={"DIAL": 7078000, "OFFSET": 1950}, value="")
+            if command == "RIG.GET_PTT":
+                return SimpleNamespace(params={"PTT": False}, value="")
+            if command == "TX.GET_QUEUE_DEPTH":
+                return SimpleNamespace(params={"DEPTH": 0}, value="")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        def stop(self):
+            pass
+
+    SoftwareStatusService._shared_js8_capability_cache.clear()
+    SoftwareStatusService._shared_js8_shadow_cache.clear()
+    monkeypatch.setattr(status_module, "JS8ApiClient", FakeJS8Client)
+    monkeypatch.setattr(SoftwareStatusService, "program_is_running", lambda self, name: True)
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2456}))
+
+    result = service.js8_shadow_comparison_status(
+        legacy_readings={"busy": True, "frequency_hz": 7078000, "offset_hz": 1950},
+        force=True,
+    )
+
+    assert result["native"]["busy"] is False
+    assert result["comparisons"]["busy"]["match"] is False
+    assert result["differences"]["busy"] == {"legacy": True, "native": False}
+
+
+def test_js8_shadow_comparison_status_captures_native_request_error(monkeypatch):
+    import freqinout.core.software_status_service as status_module
+
+    class FakeCapabilitySnapshot:
+        connected = True
+        mode = "api_basic"
+        version = "3.0.2"
+        supported = {"RIG.GET_FREQ": True, "RIG.GET_PTT": True, "TX.GET_QUEUE_DEPTH": True}
+        errors = {}
+
+        def supports(self, command: str) -> bool:
+            return bool(self.supported.get(str(command or "").strip().upper(), False))
+
+    class FakeJS8Client:
+        def __init__(self, endpoint, **_kwargs):
+            self.endpoint = endpoint
+            self.last_error = ""
+
+        def start(self):
+            return True
+
+        def probe_capabilities(self, **_kwargs):
+            return FakeCapabilitySnapshot()
+
+        def request(self, command, **_kwargs):
+            if command == "RIG.GET_FREQ":
+                raise RuntimeError("freq read failed")
+            if command == "RIG.GET_PTT":
+                return SimpleNamespace(params={"PTT": True}, value="")
+            if command == "TX.GET_QUEUE_DEPTH":
+                return SimpleNamespace(params={"DEPTH": 0}, value="")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        def stop(self):
+            pass
+
+    SoftwareStatusService._shared_js8_capability_cache.clear()
+    SoftwareStatusService._shared_js8_shadow_cache.clear()
+    monkeypatch.setattr(status_module, "JS8ApiClient", FakeJS8Client)
+    monkeypatch.setattr(SoftwareStatusService, "program_is_running", lambda self, name: True)
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2458}))
+
+    result = service.js8_shadow_comparison_status(legacy_readings={"frequency_hz": 7078000}, force=True)
+
+    assert result["connected"] is True
+    assert result["errors"]["RIG.GET_FREQ"] == "freq read failed"
+    assert result["native"]["frequency_hz"] is None
+    assert result["native"]["busy"] is True
+    assert result["comparisons"]["frequency_hz"]["match"] is None
+
+
+def test_js8_shadow_comparison_status_reuses_native_shadow_cache(monkeypatch):
+    import freqinout.core.software_status_service as status_module
+
+    class FakeCapabilitySnapshot:
+        connected = True
+        mode = "api_basic"
+        version = "3.0.2"
+        supported = {"RIG.GET_FREQ": True, "RIG.GET_PTT": True, "TX.GET_QUEUE_DEPTH": True}
+        errors = {}
+
+        def supports(self, command: str) -> bool:
+            return bool(self.supported.get(str(command or "").strip().upper(), False))
+
+    class FakeJS8Client:
+        probe_count = 0
+        request_count = 0
+
+        def __init__(self, endpoint, **_kwargs):
+            self.endpoint = endpoint
+            self.last_error = ""
+
+        def start(self):
+            return True
+
+        def probe_capabilities(self, **_kwargs):
+            type(self).probe_count += 1
+            return FakeCapabilitySnapshot()
+
+        def request(self, command, **_kwargs):
+            type(self).request_count += 1
+            if command == "RIG.GET_FREQ":
+                return SimpleNamespace(params={"DIAL": 7078000, "OFFSET": 1950}, value="")
+            if command == "RIG.GET_PTT":
+                return SimpleNamespace(params={"PTT": True}, value="")
+            if command == "TX.GET_QUEUE_DEPTH":
+                return SimpleNamespace(params={"DEPTH": 0}, value="")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        def stop(self):
+            pass
+
+    SoftwareStatusService._shared_js8_capability_cache.clear()
+    SoftwareStatusService._shared_js8_shadow_cache.clear()
+    monkeypatch.setattr(status_module, "JS8ApiClient", FakeJS8Client)
+    monkeypatch.setattr(SoftwareStatusService, "program_is_running", lambda self, name: True)
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2457}))
+
+    first = service.js8_shadow_comparison_status(
+        legacy_readings={"busy": True, "frequency_hz": 7078000, "offset_hz": 1950},
+        force=False,
+    )
+    second = service.js8_shadow_comparison_status(
+        legacy_readings={"busy": False, "frequency_hz": 7078000, "offset_hz": 1700},
+        force=False,
+    )
+
+    assert FakeJS8Client.probe_count == 1
+    assert first["native"]["busy"] is True
+    assert second["native"]["busy"] is True
+    assert second["comparisons"]["busy"]["legacy"] is False
+    assert second["comparisons"]["busy"]["match"] is False
+
+
+def test_js8_shadow_comparison_status_clears_stale_native_cache_when_local_js8_stops(monkeypatch):
+    import freqinout.core.software_status_service as status_module
+
+    class FakeCapabilitySnapshot:
+        connected = True
+        mode = "api_basic"
+        version = "3.0.2"
+        supported = {"RIG.GET_FREQ": True, "RIG.GET_PTT": True, "TX.GET_QUEUE_DEPTH": True}
+        errors = {}
+
+        def supports(self, command: str) -> bool:
+            return bool(self.supported.get(str(command or "").strip().upper(), False))
+
+    class FakeJS8Client:
+        probe_count = 0
+        request_count = 0
+
+        def __init__(self, endpoint, **_kwargs):
+            self.endpoint = endpoint
+            self.last_error = ""
+
+        def start(self):
+            return True
+
+        def probe_capabilities(self, **_kwargs):
+            type(self).probe_count += 1
+            return FakeCapabilitySnapshot()
+
+        def request(self, command, **_kwargs):
+            type(self).request_count += 1
+            if command == "RIG.GET_FREQ":
+                return SimpleNamespace(params={"DIAL": 7078000, "OFFSET": 1950}, value="")
+            if command == "RIG.GET_PTT":
+                return SimpleNamespace(params={"PTT": True}, value="")
+            if command == "TX.GET_QUEUE_DEPTH":
+                return SimpleNamespace(params={"DEPTH": 0}, value="")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        def stop(self):
+            pass
+
+    SoftwareStatusService._shared_js8_capability_cache.clear()
+    SoftwareStatusService._shared_js8_shadow_cache.clear()
+    monkeypatch.setattr(status_module, "JS8ApiClient", FakeJS8Client)
+    monkeypatch.setattr(SoftwareStatusService, "program_is_running", lambda self, name: True)
+    service = SoftwareStatusService(DummySettings({"js8_host": "127.0.0.1", "js8_port": 2459}))
+
+    first = service.js8_shadow_comparison_status(
+        legacy_readings={"busy": True, "frequency_hz": 7078000, "offset_hz": 1950},
+        force=True,
+    )
+    cache_key = ("127.0.0.1", 2459)
+
+    assert first["connected"] is True
+    assert cache_key in SoftwareStatusService._shared_js8_shadow_cache
+
+    monkeypatch.setattr(SoftwareStatusService, "program_is_running", lambda self, name: False)
+    offline = service._js8_shadow_native_status(force=False)
+
+    assert offline["connected"] is False
+    assert offline["last_error"] == "JS8Call is not running"
+    assert cache_key not in SoftwareStatusService._shared_js8_shadow_cache
+
+    monkeypatch.setattr(SoftwareStatusService, "program_is_running", lambda self, name: True)
+    second = service.js8_shadow_comparison_status(
+        legacy_readings={"busy": True, "frequency_hz": 7078000, "offset_hz": 1950},
+        force=False,
+    )
+
+    assert FakeJS8Client.probe_count == 1
+    assert FakeJS8Client.request_count == 6
+    assert second["connected"] is True
+    assert second["native"]["busy"] is True
+
+
+def test_status_refresh_applies_js8_shadow_comparison_on_scheduler_thread(monkeypatch):
+    import freqinout.core.scheduler_engine as scheduler_module
+
+    shadow_calls: list[dict[str, object]] = []
+    queued_callbacks: list[object] = []
+
+    class _ImmediateFuture:
+        def __init__(self, value):
+            self._value = value
+
+        def done(self) -> bool:
+            return True
+
+        def add_done_callback(self, callback):
+            callback(self)
+
+        def result(self):
+            return self._value
+
+    class _ImmediateExecutor:
+        def __init__(self, *args, **kwargs) -> None:
+            self.shutdown_calls: list[tuple[bool, bool]] = []
+
+        def submit(self, fn, *args, **kwargs):
+            return _ImmediateFuture(fn(*args, **kwargs))
+
+        def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    class DummySettings:
+        def __init__(self, values=None):
+            self._values = dict(values or {})
+
+        def get(self, key, default=None):
+            return self._values.get(key, default)
+
+        def close(self):
+            pass
+
+    class _FakeVarACStatusClient:
+        def get_status(self, include_db_transfer: bool = True):
+            return {"busy": False, "waiting_for_frequency": False, "reason": None}
+
+    class _FakeShadowService:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def js8_shadow_comparison_status(self, *, legacy_readings, **_kwargs):
+            shadow_calls.append(dict(legacy_readings))
+            return {"connected": True, "mode": "api_basic", "version": "3.0.2"}
+
+    class _FakeJS8Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def is_busy(self) -> bool:
+            return True
+
+        def get_frequency(self):
+            return 7078000
+
+        def get_offset(self):
+            return 1950
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(scheduler_module, "ThreadPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(scheduler_module, "SettingsManager", lambda: DummySettings({"control_via": "JS8Call"}))
+    monkeypatch.setattr(scheduler_module, "VarACStatusClient", _FakeVarACStatusClient)
+    monkeypatch.setattr(scheduler_module, "SoftwareStatusService", _FakeShadowService)
+    monkeypatch.setattr(scheduler_module, "JS8ControlClient", _FakeJS8Client)
+
+    engine = scheduler_module.SchedulerEngine(js8=_FakeJS8Client())
+    try:
+        monkeypatch.setattr(engine, "_queue_scheduler_thread_call", lambda callback: queued_callbacks.append(callback), raising=False)
+        engine._maybe_refresh_external_status_snapshot(force=True)
+
+        assert shadow_calls == [{"busy": True, "frequency_hz": 7078000, "offset_hz": 1950}]
+        assert engine._last_js8_shadow_comparison == {}
+        assert len(queued_callbacks) == 1
+
+        queued_callbacks[0]()
+
+        assert engine._last_js8_shadow_comparison == {"connected": True, "mode": "api_basic", "version": "3.0.2"}
+    finally:
+        engine.stop()
+
+
 def test_dependency_status_snapshot_includes_js8_capability(monkeypatch):
     def fake_running(self, name):
         return name == "JS8Call"

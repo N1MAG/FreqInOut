@@ -335,6 +335,7 @@ class SchedulerEngine(QObject):
         self._status_snapshot_started_at: Optional[float] = None
         self._status_snapshot_timeout_s: float = 15.0
         self._status_snapshot_timeout_reported: bool = False
+        self._last_js8_shadow_comparison: Dict[str, object] = {}
         self._last_varac_status: Dict[str, object] = {"busy": False, "waiting_for_frequency": False, "reason": None}
         self._last_js8_busy: bool = False
         self._last_ptt_active: bool = False
@@ -1106,10 +1107,24 @@ class SchedulerEngine(QObject):
                 if control_mode == "JS8CALL" or js8_offset_check_active:
                     try:
                         js8 = JS8ControlClient()
+                        legacy_readings: Dict[str, object] = {}
                         if control_mode == "JS8CALL":
                             out["js8_busy"] = bool(js8.is_busy())
                             out["js8_freq_hz"] = js8.get_frequency()
-                        out["js8_offset_hz"] = js8.get_offset()
+                            out["js8_offset_hz"] = js8.get_offset()
+                        elif js8_offset_check_active:
+                            out["js8_offset_hz"] = js8.get_offset()
+                        if control_mode == "JS8CALL":
+                            legacy_readings = {
+                                "busy": out.get("js8_busy"),
+                                "frequency_hz": out.get("js8_freq_hz"),
+                                "offset_hz": out.get("js8_offset_hz"),
+                            }
+                        elif js8_offset_check_active:
+                            legacy_readings = {"offset_hz": out.get("js8_offset_hz")}
+                        if legacy_readings:
+                            shadow = self._software_status.js8_shadow_comparison_status(legacy_readings=legacy_readings)
+                            out["js8_shadow_comparison"] = dict(shadow)
                     except Exception as e:
                         log.debug("SchedulerEngine: background JS8Call status failed: %s", e)
                 return out
@@ -1158,6 +1173,9 @@ class SchedulerEngine(QObject):
                     self._status_js8_offset_hz = int(js8_offset)
                     self._status_js8_offset_ts = time.time()
                 self._last_js8_busy = bool(data.get("js8_busy", self._last_js8_busy))
+                shadow = data.get("js8_shadow_comparison")
+                if isinstance(shadow, dict):
+                    self._last_js8_shadow_comparison = dict(shadow)
                 self._status_summary_external_ts = float(data.get("checked_ts") or time.time())
                 self._status_summary_cache = None
                 self._status_snapshot_started_at = None

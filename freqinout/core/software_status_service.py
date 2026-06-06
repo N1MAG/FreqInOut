@@ -6,7 +6,7 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 import psutil
 
@@ -74,6 +74,7 @@ class SoftwareStatusService:
     _shared_proc_lock = threading.Lock()
     _shared_js8_api_cache: Dict[tuple[str, int, bool], tuple[float, bool]] = {}
     _shared_js8_capability_cache: Dict[tuple[str, int], tuple[float, Dict[str, object]]] = {}
+    _shared_js8_shadow_cache: Dict[tuple[str, int], tuple[float, Dict[str, object]]] = {}
     _shared_service_probe_cache: Dict[tuple[str, ...], tuple[float, bool]] = {}
 
     def __init__(self, settings: Any) -> None:
@@ -89,6 +90,7 @@ class SoftwareStatusService:
         self._api_failure_ttl_sec: float = 30.0
         self._js8_capability_success_ttl_sec: float = 60.0
         self._js8_capability_failure_ttl_sec: float = 120.0
+        self._js8_shadow_cache_ttl_sec: float = 60.0
         self._service_probe_success_ttl_sec: float = 15.0
         self._service_probe_failure_ttl_sec: float = 30.0
         self._health = get_dependency_health_registry()
@@ -412,7 +414,7 @@ class SoftwareStatusService:
                 endpoint,
                 last_error="JS8Call is not running",
             )
-            type(self)._shared_js8_capability_cache[cache_key] = (now, dict(status))
+            type(self)._shared_js8_capability_cache.pop(cache_key, None)
             return status
         if not force and cached:
             cached_ts, cached_status = cached
@@ -474,6 +476,271 @@ class SoftwareStatusService:
             )
         type(self)._shared_js8_capability_cache[cache_key] = (time.monotonic(), dict(status))
         return status
+
+    def _js8_shadow_busy_state(self, ptt_active: Optional[bool], queue_depth: Optional[int]) -> Optional[bool]:
+        if ptt_active is True:
+            return True
+        if isinstance(queue_depth, int) and queue_depth > 0:
+            return True
+        if ptt_active is False and queue_depth == 0:
+            return False
+        if ptt_active is None and queue_depth is None:
+            return None
+        return None
+
+    @staticmethod
+    def _js8_shadow_to_int(value: object) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except Exception:
+            try:
+                return int(str(value).strip())
+            except Exception:
+                return None
+
+    @staticmethod
+    def _js8_shadow_to_bool(value: object) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if value in (None, ""):
+            return None
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on", "active", "ptt"}:
+            return True
+        if text in {"0", "false", "no", "off", "inactive", "idle"}:
+            return False
+        return None
+
+    @staticmethod
+    def _js8_shadow_error_text(value: object, *, limit: int = 512) -> str:
+        try:
+            return str(value or "")[: max(0, int(limit))]
+        except Exception:
+            return ""
+
+    def _js8_shadow_native_status(
+        self,
+        *,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        force: bool = False,
+        timeout_s: float = 0.4,
+    ) -> Dict[str, object]:
+        host = (host_override or "").strip() or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST
+        port = int(port_override) if port_override is not None else self._settings_int("js8_port", JS8_DEFAULT_PORT)
+        endpoint = JS8ApiEndpoint(host, port).normalized()
+        cache_key = endpoint.key
+        if self._is_loopback_host(endpoint.host) and not self.program_is_running("JS8Call"):
+            type(self)._shared_js8_shadow_cache.pop(cache_key, None)
+            offline = self._js8_capability_offline_status(endpoint, last_error="JS8Call is not running")
+            offline.update(
+                {
+                    "busy": None,
+                    "frequency_hz": None,
+                    "offset_hz": None,
+                    "ptt_active": None,
+                    "queue_depth": None,
+                    "checked_ts": time.time(),
+                    "elapsed_ms": 0.0,
+                }
+            )
+            return offline
+
+        now = time.monotonic()
+        cached = type(self)._shared_js8_shadow_cache.get(cache_key)
+        if not force and cached:
+            cached_ts, cached_status = cached
+            if (now - float(cached_ts or 0.0)) < self._js8_shadow_cache_ttl_sec:
+                return dict(cached_status)
+
+        started_at = time.monotonic()
+        capability = self.js8_api_capability_status(
+            port_override=port,
+            host_override=host,
+            force=force,
+        )
+        supported = dict(capability.get("supported") or {})
+        errors: Dict[str, str] = dict(capability.get("errors") or {})
+        native: Dict[str, object] = {
+            "connected": bool(capability.get("connected")),
+            "mode": str(capability.get("mode") or "offline"),
+            "version": str(capability.get("version") or ""),
+            "endpoint": self._format_endpoint(endpoint.host, endpoint.port),
+            "supported": supported,
+            "errors": errors,
+            "last_error": str(capability.get("last_error") or ""),
+            "frequency_hz": None,
+            "offset_hz": None,
+            "ptt_active": None,
+            "queue_depth": None,
+            "busy": None,
+            "checked_ts": time.time(),
+            "elapsed_ms": 0.0,
+        }
+
+        if native["connected"]:
+            client = JS8ApiClient(endpoint, timeout_s=float(timeout_s), auto_reconnect=False)
+            try:
+                if client.start():
+                    if supported.get("RIG.GET_FREQ"):
+                        try:
+                            response = client.request("RIG.GET_FREQ", expect_types=("RIG.FREQ", "STATION.STATUS"), timeout_s=timeout_s)
+                            freq_value = response.params.get("DIAL")
+                            if freq_value in (None, ""):
+                                freq_value = response.params.get("FREQ")
+                            offset_value = response.params.get("OFFSET")
+                            if offset_value in (None, ""):
+                                offset_value = response.params.get("OFFSET_HZ")
+                            native["frequency_hz"] = self._js8_shadow_to_int(freq_value)
+                            native["offset_hz"] = self._js8_shadow_to_int(offset_value)
+                        except Exception as exc:
+                            errors["RIG.GET_FREQ"] = self._js8_shadow_error_text(exc, limit=512)
+                    if supported.get("RIG.GET_PTT"):
+                        try:
+                            response = client.request("RIG.GET_PTT", expect_types=("RIG.PTT_STATUS",), timeout_s=timeout_s)
+                            ptt_value = response.params.get("PTT")
+                            if ptt_value in (None, ""):
+                                ptt_value = response.params.get("PTT_ACTIVE")
+                            if ptt_value in (None, ""):
+                                ptt_value = response.value
+                            native["ptt_active"] = self._js8_shadow_to_bool(ptt_value)
+                        except Exception as exc:
+                            errors["RIG.GET_PTT"] = self._js8_shadow_error_text(exc, limit=512)
+                    if supported.get("TX.GET_QUEUE_DEPTH"):
+                        try:
+                            response = client.request("TX.GET_QUEUE_DEPTH", expect_types=("TX.QUEUE_DEPTH",), timeout_s=timeout_s)
+                            depth_value = response.params.get("DEPTH")
+                            if depth_value in (None, ""):
+                                depth_value = response.params.get("QUEUE_DEPTH")
+                            if depth_value in (None, ""):
+                                depth_value = response.value
+                            native["queue_depth"] = self._js8_shadow_to_int(depth_value)
+                        except Exception as exc:
+                            errors["TX.GET_QUEUE_DEPTH"] = self._js8_shadow_error_text(exc, limit=512)
+            finally:
+                client.stop()
+
+        native["busy"] = self._js8_shadow_busy_state(native.get("ptt_active"), native.get("queue_depth"))
+        native["elapsed_ms"] = round((time.monotonic() - started_at) * 1000.0, 1)
+        if not (self._is_loopback_host(endpoint.host) and not bool(native.get("connected"))):
+            type(self)._shared_js8_shadow_cache[cache_key] = (now, dict(native))
+        return native
+
+    def js8_shadow_comparison_status(
+        self,
+        *,
+        legacy_readings: Optional[Mapping[str, object]] = None,
+        port_override: Optional[int] = None,
+        host_override: Optional[str] = None,
+        force: bool = False,
+        timeout_s: float = 0.4,
+    ) -> Dict[str, object]:
+        native = self._js8_shadow_native_status(
+            port_override=port_override,
+            host_override=host_override,
+            force=force,
+            timeout_s=timeout_s,
+        )
+
+        def _coerce_int(value: object) -> Optional[int]:
+            return self._js8_shadow_to_int(value)
+
+        def _coerce_bool(value: object) -> Optional[bool]:
+            return self._js8_shadow_to_bool(value)
+
+        legacy: Dict[str, object] = {
+            "busy": None,
+            "frequency_hz": None,
+            "offset_hz": None,
+        }
+        if isinstance(legacy_readings, Mapping):
+            legacy["busy"] = _coerce_bool(legacy_readings.get("busy"))
+            legacy["frequency_hz"] = _coerce_int(legacy_readings.get("frequency_hz"))
+            legacy["offset_hz"] = _coerce_int(legacy_readings.get("offset_hz"))
+
+        comparisons: Dict[str, Dict[str, object]] = {}
+        differences: Dict[str, Dict[str, object]] = {}
+
+        legacy_busy = legacy.get("busy")
+        native_busy = native.get("busy")
+        if legacy_busy is not None or native_busy is not None:
+            match = None
+            if legacy_busy is not None and native_busy is not None:
+                match = bool(bool(legacy_busy) == bool(native_busy))
+            comparisons["busy"] = {"legacy": legacy_busy, "native": native_busy, "match": match}
+            if legacy_busy is not None and native_busy is not None and bool(legacy_busy) != bool(native_busy):
+                differences["busy"] = {"legacy": legacy_busy, "native": native_busy}
+
+        legacy_freq = legacy.get("frequency_hz")
+        native_freq = native.get("frequency_hz")
+        if legacy_freq is not None or native_freq is not None:
+            match = None
+            if legacy_freq is not None and native_freq is not None:
+                match = bool(int(legacy_freq) == int(native_freq))
+            comparisons["frequency_hz"] = {"legacy": legacy_freq, "native": native_freq, "match": match}
+            if legacy_freq is not None and native_freq is not None and int(legacy_freq) != int(native_freq):
+                differences["frequency_hz"] = {"legacy": legacy_freq, "native": native_freq}
+
+        legacy_offset = legacy.get("offset_hz")
+        native_offset = native.get("offset_hz")
+        if legacy_offset is not None or native_offset is not None:
+            match = None
+            if legacy_offset is not None and native_offset is not None:
+                match = bool(int(legacy_offset) == int(native_offset))
+            comparisons["offset_hz"] = {"legacy": legacy_offset, "native": native_offset, "match": match}
+            if legacy_offset is not None and native_offset is not None and int(legacy_offset) != int(native_offset):
+                differences["offset_hz"] = {"legacy": legacy_offset, "native": native_offset}
+
+        result: Dict[str, object] = {
+            "connected": bool(native.get("connected")),
+            "mode": str(native.get("mode", "offline") or "offline"),
+            "version": str(native.get("version", "") or ""),
+            "endpoint": str(native.get("endpoint") or self._format_endpoint(host_override or self._settings_text("js8_host", JS8_DEFAULT_HOST) or JS8_DEFAULT_HOST, int(port_override) if port_override is not None else self._settings_int("js8_port", JS8_DEFAULT_PORT))),
+            "legacy": legacy,
+            "native": native,
+            "comparisons": comparisons,
+            "differences": differences,
+            "errors": dict(native.get("errors") or {}),
+            "last_error": str(native.get("last_error") or ""),
+            "checked_ts": float(native.get("checked_ts") or time.time()),
+            "elapsed_ms": float(native.get("elapsed_ms") or 0.0),
+        }
+
+        if differences:
+            log.info(
+                "JS8_SHADOW|endpoint=%s|mode=%s|version=%s|legacy_busy=%s|native_busy=%s|legacy_freq=%s|native_freq=%s|legacy_offset=%s|native_offset=%s|native_ptt=%s|native_queue_depth=%s|diffs=%s",
+                result["endpoint"],
+                result["mode"],
+                result["version"],
+                legacy.get("busy"),
+                native.get("busy"),
+                legacy.get("frequency_hz"),
+                native.get("frequency_hz"),
+                legacy.get("offset_hz"),
+                native.get("offset_hz"),
+                native.get("ptt_active"),
+                native.get("queue_depth"),
+                ",".join(f"{key}:{value['legacy']}->{value['native']}" for key, value in differences.items()),
+            )
+        else:
+            log.debug(
+                "JS8_SHADOW|endpoint=%s|mode=%s|version=%s|legacy_busy=%s|native_busy=%s|legacy_freq=%s|native_freq=%s|legacy_offset=%s|native_offset=%s|native_ptt=%s|native_queue_depth=%s|elapsed_ms=%.1f",
+                result["endpoint"],
+                result["mode"],
+                result["version"],
+                legacy.get("busy"),
+                native.get("busy"),
+                legacy.get("frequency_hz"),
+                native.get("frequency_hz"),
+                legacy.get("offset_hz"),
+                native.get("offset_hz"),
+                native.get("ptt_active"),
+                native.get("queue_depth"),
+                float(result["elapsed_ms"]),
+            )
+        return result
 
     def _js8_capability_offline_status(
         self,
