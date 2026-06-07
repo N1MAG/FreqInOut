@@ -116,6 +116,45 @@ def test_js8_capability_success_surfaces_operator_action_text():
     assert "native FIO diagnostics" in item["action"]
 
 
+def test_js8_shadow_mismatch_surfaces_as_native_diagnostic():
+    import freqinout.core.station_health_summary as summary_module
+
+    now = time.monotonic()
+    result = summary_module.summarize_station_health(
+        registry_snapshot={
+            "scheduler:js8-shadow": {
+                "owner": "SchedulerEngine",
+                "consecutive_failures": 1,
+                "consecutive_slow": 0,
+                "last_checked_ts": now,
+                "last_failure_ts": now,
+                "issue_started_ts": now,
+                "last_error": (
+                    "Native JS8Call diagnostic disagrees with the existing JS8 status for frequency. "
+                    "FIO is still using the existing JS8 path; native JS8 remains diagnostic only."
+                ),
+                "metadata": {
+                    "action": (
+                        "Native JS8Call diagnostic disagrees with the existing JS8 status for frequency. "
+                        "FIO is still using the existing JS8 path; native JS8 remains diagnostic only."
+                    ),
+                    "diagnostic_only": True,
+                    "endpoint": "127.0.0.1:2443",
+                    "mode": "api_basic",
+                },
+            }
+        },
+        include_scheduler_events=False,
+    )
+
+    assert result["severity"] == "warning"
+    assert result["issue_count"] == 1
+    item = result["items"][0]
+    assert item["dependency"] == "JS8Call native diagnostic"
+    assert item["state"] == "Warning"
+    assert "native JS8 remains diagnostic only" in item["action"]
+
+
 def test_fldigi_busy_check_internal_events_do_not_fill_issue_log(monkeypatch):
     import freqinout.core.station_health_summary as summary_module
 

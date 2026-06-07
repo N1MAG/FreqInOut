@@ -785,6 +785,92 @@ def test_status_refresh_applies_js8_shadow_comparison_on_scheduler_thread(monkey
         engine.stop()
 
 
+def test_js8_shadow_health_warns_only_for_real_mismatches():
+    import freqinout.core.scheduler_engine as scheduler_module
+
+    registry = get_dependency_health_registry()
+    registry.record_success(
+        "scheduler:js8-shadow",
+        owner="SchedulerEngine",
+        metadata={"action": "reset"},
+    )
+    engine = scheduler_module.SchedulerEngine()
+    try:
+        engine._update_js8_shadow_health(
+            {
+                "endpoint": "127.0.0.1:2443",
+                "mode": "api_basic",
+                "version": "3.0.2",
+                "differences": {
+                    "frequency_hz": {"legacy": 7078000, "native": 7079000},
+                    "offset_hz": {"legacy": 1950, "native": 2500},
+                },
+            }
+        )
+        warning = registry.snapshot("scheduler:js8-shadow")
+        assert warning["consecutive_failures"] == 1
+        assert "diagnostic disagrees" in warning["last_error"]
+        assert warning["metadata"]["diagnostic_only"] is True
+        assert warning["metadata"]["endpoint"] == "127.0.0.1:2443"
+
+        engine._update_js8_shadow_health(
+            {
+                "endpoint": "127.0.0.1:2443",
+                "mode": "api_basic",
+                "version": "3.0.2",
+                "differences": {},
+            }
+        )
+        cleared = registry.snapshot("scheduler:js8-shadow")
+        assert cleared["consecutive_failures"] == 0
+        assert cleared["last_error"] == ""
+        assert "not reporting a mismatch" in str(cleared["metadata"]["action"])
+    finally:
+        engine.stop()
+
+
+def test_js8_shadow_health_stays_clear_when_api_basic_lacks_busy_fields():
+    import freqinout.core.scheduler_engine as scheduler_module
+
+    registry = get_dependency_health_registry()
+    registry.record_success(
+        "scheduler:js8-shadow",
+        owner="SchedulerEngine",
+        metadata={"action": "reset"},
+    )
+    engine = scheduler_module.SchedulerEngine()
+    try:
+        engine._update_js8_shadow_health(
+            {
+                "endpoint": "127.0.0.1:2443",
+                "mode": "api_basic",
+                "version": "",
+                "legacy": {"busy": True, "frequency_hz": 7078000, "offset_hz": 1950},
+                "native": {
+                    "busy": None,
+                    "frequency_hz": 7078000,
+                    "offset_hz": 1950,
+                    "ptt_active": None,
+                    "queue_depth": None,
+                },
+                "comparisons": {
+                    "busy": {"legacy": True, "native": None, "match": None},
+                    "frequency_hz": {"legacy": 7078000, "native": 7078000, "match": True},
+                    "offset_hz": {"legacy": 1950, "native": 1950, "match": True},
+                },
+                "differences": {},
+            }
+        )
+
+        cleared = registry.snapshot("scheduler:js8-shadow")
+        assert cleared["consecutive_failures"] == 0
+        assert cleared["last_error"] == ""
+        assert cleared["metadata"]["diagnostic_only"] is True
+        assert "not reporting a mismatch" in str(cleared["metadata"]["action"])
+    finally:
+        engine.stop()
+
+
 def test_dependency_status_snapshot_includes_js8_capability(monkeypatch):
     def fake_running(self, name):
         return name == "JS8Call"

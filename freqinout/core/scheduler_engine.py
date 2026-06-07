@@ -839,6 +839,41 @@ class SchedulerEngine(QObject):
         except Exception:
             pass
 
+    def _update_js8_shadow_health(self, shadow: object) -> None:
+        if not isinstance(shadow, dict):
+            return
+        differences = shadow.get("differences")
+        if isinstance(differences, dict) and differences:
+            labels = {
+                "busy": "busy state",
+                "frequency_hz": "frequency",
+                "offset_hz": "offset",
+            }
+            names = [labels.get(str(key), str(key).replace("_", " ")) for key in differences.keys()]
+            joined = ", ".join(names)
+            message = (
+                f"Native JS8Call diagnostic disagrees with the existing JS8 status for {joined}. "
+                "FIO is still using the existing JS8 path; native JS8 remains diagnostic only."
+            )
+            self._record_scheduler_health_issue(
+                "js8-shadow",
+                message,
+                action=message,
+                endpoint=str(shadow.get("endpoint", "") or ""),
+                mode=str(shadow.get("mode", "") or ""),
+                version=str(shadow.get("version", "") or ""),
+                diagnostic_only=True,
+            )
+            return
+        self._clear_scheduler_health_issue(
+            "js8-shadow",
+            action="Native JS8Call diagnostic check is not reporting a mismatch.",
+            endpoint=str(shadow.get("endpoint", "") or ""),
+            mode=str(shadow.get("mode", "") or ""),
+            version=str(shadow.get("version", "") or ""),
+            diagnostic_only=True,
+        )
+
     def _schedule_event_key(self, source: str, entry_key: object = None) -> str:
         if entry_key is not None:
             return "|".join(str(part) for part in (entry_key if isinstance(entry_key, tuple) else (entry_key,)))
@@ -1176,6 +1211,7 @@ class SchedulerEngine(QObject):
                 shadow = data.get("js8_shadow_comparison")
                 if isinstance(shadow, dict):
                     self._last_js8_shadow_comparison = dict(shadow)
+                    self._update_js8_shadow_health(shadow)
                 self._status_summary_external_ts = float(data.get("checked_ts") or time.time())
                 self._status_summary_cache = None
                 self._status_snapshot_started_at = None

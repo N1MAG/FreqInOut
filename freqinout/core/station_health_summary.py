@@ -139,6 +139,7 @@ def _scheduler_health_label(value: object) -> str:
     labels = {
         "fldigi_busy": "Scheduler hold: FLDigi RX activity",
         "js8_busy": "Scheduler hold: JS8Call busy",
+        "js8_shadow": "JS8Call native diagnostic",
         "varac_busy": "Scheduler hold: VarAC busy",
         "flrig_ptt": "Scheduler hold: FLRig PTT",
         "status_snapshot": "Scheduler status snapshot",
