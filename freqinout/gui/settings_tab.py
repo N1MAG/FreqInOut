@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Tuple, Mapping
+from typing import Any, Dict, Optional, List, Tuple, Mapping, Sequence
 
 from PySide6.QtCore import Qt, QTimer, Signal, QSize
 from PySide6.QtGui import QAction, QIcon, QIntValidator, QColor, QBrush, QPainter, QPainterPath, QPen, QPixmap
@@ -106,6 +106,7 @@ from freqinout.core.multi_radio_store import (
     MultiRadioStore,
     SUPPORTED_RUNTIME_CONTROL_BACKENDS,
     ensure_multi_rig_migration,
+    multi_rig_guardrail_warnings,
 )
 from freqinout.core.multi_rig_runtime_status import (
     STARTUP_DEFERRED,
@@ -130,6 +131,7 @@ from freqinout.core.station_readiness import (
     readiness_summary_status_text,
     visible_status_programs,
 )
+from freqinout.core.shared_state import ActionFeedbackService
 from freqinout.core.varac_bbs_config import (
     bbs_summary_text,
     format_callsign_list,
@@ -514,9 +516,11 @@ class SettingsTab(QWidget):
     SECTION_STACK_INDEX_ROLE = int(Qt.UserRole) + 3
     SECTION_SCOPE_ROLE = int(Qt.UserRole) + 4
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, action_feedback_service: ActionFeedbackService | None = None):
         super().__init__(parent)
         self.settings = SettingsManager()
+        self.action_feedback_service = action_feedback_service or ActionFeedbackService()
+        self._last_action_feedback_event = None
         self.software_path_detector = SoftwarePathDetector(self.settings)
         self._settings_dirty = False
         self._loading_settings = False
@@ -546,6 +550,14 @@ class SettingsTab(QWidget):
         self._status_text_labels: Dict[str, QLabel] = {}
         self.path_edits: Dict[str, QLineEdit] = {}
         self._autofill_status_labels: Dict[str, QLabel] = {}
+        self._autofill_status_buttons: Dict[str, QPushButton] = {}
+        self._autofill_preserved_buttons: Dict[str, QPushButton] = {}
+        self._autofill_replace_buttons: Dict[str, QPushButton] = {}
+        self._autofill_dismiss_buttons: Dict[str, QPushButton] = {}
+        self._autofill_compact_status_texts: Dict[str, str] = {}
+        self._autofill_full_status_texts: Dict[str, str] = {}
+        self._autofill_status_expanded: Dict[str, bool] = {}
+        self._autofill_preserved_suggestions: Dict[str, List[Dict[str, str]]] = {}
         self._contextual_autofill_buttons: Dict[str, QPushButton] = {}
         self._contextual_autofill_rules: Dict[str, Dict[str, object]] = {}
         self.js8_groups_edits: List[QLineEdit] = []
@@ -2451,11 +2463,21 @@ class SettingsTab(QWidget):
         )
         self.device_profile_readiness_status_label.setWordWrap(True)
         readiness_layout.addWidget(self.device_profile_readiness_status_label)
+        self.device_profile_guardrail_status_label = QLabel("")
+        self.device_profile_guardrail_status_label.setObjectName("deviceProfileGuardrailStatus")
+        self.device_profile_guardrail_status_label.setWordWrap(True)
+        self.device_profile_guardrail_status_label.setVisible(False)
+        readiness_layout.addWidget(self.device_profile_guardrail_status_label)
+        self.copy_guardrail_summary_btn = QPushButton("Copy Guardrails")
+        self.copy_guardrail_summary_btn.setToolTip("Copy the current multi-rig guardrail warnings for review.")
+        self.copy_guardrail_summary_btn.setVisible(False)
+        self.copy_guardrail_summary_btn.clicked.connect(self._copy_device_profile_guardrail_warnings)
         self.copy_readiness_summary_btn = QPushButton("Copy Readiness Summary")
         self.copy_readiness_summary_btn.clicked.connect(self._copy_readiness_summary)
         readiness_actions = QHBoxLayout()
         readiness_actions.setContentsMargins(0, 0, 0, 0)
         readiness_actions.addStretch()
+        readiness_actions.addWidget(self.copy_guardrail_summary_btn)
         readiness_actions.addWidget(self.copy_readiness_summary_btn)
         readiness_layout.addLayout(readiness_actions)
 
@@ -2655,6 +2677,10 @@ class SettingsTab(QWidget):
         assignments_layout = QVBoxLayout()
         assignments_layout.setSpacing(6)
         assignments_group.setLayout(assignments_layout)
+
+        self.device_assignments_scope_label = QLabel("Editing Radio: --")
+        self.device_assignments_scope_label.setWordWrap(True)
+        assignments_layout.addWidget(self.device_assignments_scope_label)
 
         self.device_assignments_hint_label = QLabel()
         self.device_assignments_hint_label.setWordWrap(True)
@@ -3063,7 +3089,7 @@ class SettingsTab(QWidget):
         js8_group.setLayout(js8_v)
         js8_label_width = 170
 
-        self.js8_scope_label = QLabel("Editing radio: --")
+        self.js8_scope_label = QLabel("Editing Radio: --")
         self.js8_scope_label.setWordWrap(True)
         js8_v.addWidget(self.js8_scope_label)
 
@@ -3265,8 +3291,35 @@ class SettingsTab(QWidget):
         js8_autofill_status_row.addSpacing(js8_label_width)
         self.js8_autofill_status_label = QLabel("No auto-fill attempt yet.")
         self.js8_autofill_status_label.setWordWrap(True)
+        self.js8_autofill_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._autofill_status_labels["js8"] = self.js8_autofill_status_label
         js8_autofill_status_row.addWidget(self.js8_autofill_status_label, 1)
+        self.js8_autofill_review_toggle_btn = QPushButton("Show Full Review")
+        self.js8_autofill_review_toggle_btn.setVisible(False)
+        self.js8_autofill_review_toggle_btn.clicked.connect(lambda _checked=False: self._toggle_autofill_review("js8"))
+        self._autofill_status_buttons["js8"] = self.js8_autofill_review_toggle_btn
+        js8_autofill_status_row.addWidget(self.js8_autofill_review_toggle_btn)
+        self.js8_autofill_preserved_btn = QPushButton("Copy Suggestions")
+        self.js8_autofill_preserved_btn.setVisible(False)
+        self.js8_autofill_preserved_btn.clicked.connect(
+            lambda _checked=False: self._copy_autofill_preserved_suggestions("js8")
+        )
+        self._autofill_preserved_buttons["js8"] = self.js8_autofill_preserved_btn
+        js8_autofill_status_row.addWidget(self.js8_autofill_preserved_btn)
+        self.js8_autofill_replace_btn = QPushButton("Replace Suggested")
+        self.js8_autofill_replace_btn.setVisible(False)
+        self.js8_autofill_replace_btn.clicked.connect(
+            lambda _checked=False: self._replace_autofill_preserved_suggestions("js8")
+        )
+        self._autofill_replace_buttons["js8"] = self.js8_autofill_replace_btn
+        js8_autofill_status_row.addWidget(self.js8_autofill_replace_btn)
+        self.js8_autofill_dismiss_btn = QPushButton("Dismiss Suggestions")
+        self.js8_autofill_dismiss_btn.setVisible(False)
+        self.js8_autofill_dismiss_btn.clicked.connect(
+            lambda _checked=False: self._dismiss_autofill_preserved_suggestions("js8")
+        )
+        self._autofill_dismiss_buttons["js8"] = self.js8_autofill_dismiss_btn
+        js8_autofill_status_row.addWidget(self.js8_autofill_dismiss_btn)
         js8_v.addLayout(js8_autofill_status_row)
 
         js8_container = QWidget()
@@ -3357,7 +3410,7 @@ class SettingsTab(QWidget):
         fast_light_v.setSpacing(6)
         fast_light_v.setAlignment(Qt.AlignTop)
         fast_light_group.setLayout(fast_light_v)
-        self.fast_light_scope_label = QLabel("Editing radio: --")
+        self.fast_light_scope_label = QLabel("Editing Radio: --")
         self.fast_light_scope_label.setWordWrap(True)
         fast_light_v.addWidget(self.fast_light_scope_label)
         fast_light_v.addWidget(build_prog_row("FLRig", "FLRig", ("flrig_launch", "Find", "fast_light", ["path_flrig"])))
@@ -3461,8 +3514,37 @@ class SettingsTab(QWidget):
         fast_light_autofill_status_row.addSpacing(msg_label_width)
         self.fast_light_autofill_status_label = QLabel("No auto-fill attempt yet.")
         self.fast_light_autofill_status_label.setWordWrap(True)
+        self.fast_light_autofill_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._autofill_status_labels["fast_light"] = self.fast_light_autofill_status_label
         fast_light_autofill_status_row.addWidget(self.fast_light_autofill_status_label, 1)
+        self.fast_light_autofill_review_toggle_btn = QPushButton("Show Full Review")
+        self.fast_light_autofill_review_toggle_btn.setVisible(False)
+        self.fast_light_autofill_review_toggle_btn.clicked.connect(
+            lambda _checked=False: self._toggle_autofill_review("fast_light")
+        )
+        self._autofill_status_buttons["fast_light"] = self.fast_light_autofill_review_toggle_btn
+        fast_light_autofill_status_row.addWidget(self.fast_light_autofill_review_toggle_btn)
+        self.fast_light_autofill_preserved_btn = QPushButton("Copy Suggestions")
+        self.fast_light_autofill_preserved_btn.setVisible(False)
+        self.fast_light_autofill_preserved_btn.clicked.connect(
+            lambda _checked=False: self._copy_autofill_preserved_suggestions("fast_light")
+        )
+        self._autofill_preserved_buttons["fast_light"] = self.fast_light_autofill_preserved_btn
+        fast_light_autofill_status_row.addWidget(self.fast_light_autofill_preserved_btn)
+        self.fast_light_autofill_replace_btn = QPushButton("Replace Suggested")
+        self.fast_light_autofill_replace_btn.setVisible(False)
+        self.fast_light_autofill_replace_btn.clicked.connect(
+            lambda _checked=False: self._replace_autofill_preserved_suggestions("fast_light")
+        )
+        self._autofill_replace_buttons["fast_light"] = self.fast_light_autofill_replace_btn
+        fast_light_autofill_status_row.addWidget(self.fast_light_autofill_replace_btn)
+        self.fast_light_autofill_dismiss_btn = QPushButton("Dismiss Suggestions")
+        self.fast_light_autofill_dismiss_btn.setVisible(False)
+        self.fast_light_autofill_dismiss_btn.clicked.connect(
+            lambda _checked=False: self._dismiss_autofill_preserved_suggestions("fast_light")
+        )
+        self._autofill_dismiss_buttons["fast_light"] = self.fast_light_autofill_dismiss_btn
+        fast_light_autofill_status_row.addWidget(self.fast_light_autofill_dismiss_btn)
         fast_light_v.addLayout(fast_light_autofill_status_row)
 
         # Check-in log file copy helpers
@@ -3802,7 +3884,7 @@ class SettingsTab(QWidget):
         varac_v.setSpacing(6)
         varac_v.setAlignment(Qt.AlignTop)
         varac_group.setLayout(varac_v)
-        self.varac_scope_label = QLabel("Editing radio: --")
+        self.varac_scope_label = QLabel("Editing Radio: --")
         self.varac_scope_label.setWordWrap(True)
         varac_v.addWidget(self.varac_scope_label)
 
@@ -4490,8 +4572,37 @@ class SettingsTab(QWidget):
         varac_autofill_status_row.addSpacing(msg_label_width)
         self.varac_autofill_status_label = QLabel("No auto-fill attempt yet.")
         self.varac_autofill_status_label.setWordWrap(True)
+        self.varac_autofill_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._autofill_status_labels["varac"] = self.varac_autofill_status_label
         varac_autofill_status_row.addWidget(self.varac_autofill_status_label, 1)
+        self.varac_autofill_review_toggle_btn = QPushButton("Show Full Review")
+        self.varac_autofill_review_toggle_btn.setVisible(False)
+        self.varac_autofill_review_toggle_btn.clicked.connect(
+            lambda _checked=False: self._toggle_autofill_review("varac")
+        )
+        self._autofill_status_buttons["varac"] = self.varac_autofill_review_toggle_btn
+        varac_autofill_status_row.addWidget(self.varac_autofill_review_toggle_btn)
+        self.varac_autofill_preserved_btn = QPushButton("Copy Suggestions")
+        self.varac_autofill_preserved_btn.setVisible(False)
+        self.varac_autofill_preserved_btn.clicked.connect(
+            lambda _checked=False: self._copy_autofill_preserved_suggestions("varac")
+        )
+        self._autofill_preserved_buttons["varac"] = self.varac_autofill_preserved_btn
+        varac_autofill_status_row.addWidget(self.varac_autofill_preserved_btn)
+        self.varac_autofill_replace_btn = QPushButton("Replace Suggested")
+        self.varac_autofill_replace_btn.setVisible(False)
+        self.varac_autofill_replace_btn.clicked.connect(
+            lambda _checked=False: self._replace_autofill_preserved_suggestions("varac")
+        )
+        self._autofill_replace_buttons["varac"] = self.varac_autofill_replace_btn
+        varac_autofill_status_row.addWidget(self.varac_autofill_replace_btn)
+        self.varac_autofill_dismiss_btn = QPushButton("Dismiss Suggestions")
+        self.varac_autofill_dismiss_btn.setVisible(False)
+        self.varac_autofill_dismiss_btn.clicked.connect(
+            lambda _checked=False: self._dismiss_autofill_preserved_suggestions("varac")
+        )
+        self._autofill_dismiss_buttons["varac"] = self.varac_autofill_dismiss_btn
+        varac_autofill_status_row.addWidget(self.varac_autofill_dismiss_btn)
         varac_v.addLayout(varac_autofill_status_row)
 
         varac_cluster_mode_row = QHBoxLayout()
@@ -4546,7 +4657,7 @@ class SettingsTab(QWidget):
         )
         custom_tools_hint.setWordWrap(True)
         custom_tools_v.addWidget(custom_tools_hint)
-        self.custom_tools_scope_label = QLabel("Editing radio: --")
+        self.custom_tools_scope_label = QLabel("Editing Radio: --")
         self.custom_tools_scope_label.setWordWrap(True)
         custom_tools_v.addWidget(self.custom_tools_scope_label)
 
@@ -4606,7 +4717,7 @@ class SettingsTab(QWidget):
         launch_v.setSpacing(8)
         launch_group.setLayout(launch_v)
 
-        self.launch_control_scope_label = QLabel("Editing radio: --")
+        self.launch_control_scope_label = QLabel("Editing Radio: --")
         self.launch_control_scope_label.setWordWrap(True)
         launch_v.addWidget(self.launch_control_scope_label)
 
@@ -4745,7 +4856,9 @@ class SettingsTab(QWidget):
 
         # bottom save
         bottom_row = QHBoxLayout()
-        bottom_row.addStretch()
+        self.settings_action_feedback_label = QLabel("Settings ready.")
+        self.settings_action_feedback_label.setWordWrap(True)
+        bottom_row.addWidget(self.settings_action_feedback_label, 1)
         self.save_btn = QPushButton("Save Settings")
         self.save_btn.clicked.connect(self._save_settings_button)
         bottom_row.addWidget(self.save_btn)
@@ -5973,6 +6086,12 @@ class SettingsTab(QWidget):
         return {}
 
     def _attempt_scoped_autofill(self, section: str, keys: List[str]) -> None:
+        section_label = self._autofill_section_label(section)
+        self._publish_autofill_feedback(
+            status="in_progress",
+            summary=f"Auto-fill scanning {section_label}.",
+            detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
+        )
         all_results = self._detect_autofill_results(section)
         wanted = set(keys)
         scoped = {key: result for key, result in all_results.items() if key in wanted}
@@ -6014,12 +6133,27 @@ class SettingsTab(QWidget):
                 btn.setToolTip(base_tip)
 
     def _attempt_fast_light_autofill(self) -> None:
+        self._publish_autofill_feedback(
+            status="in_progress",
+            summary=f"Auto-fill scanning {self._autofill_section_label('fast_light')}.",
+            detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
+        )
         self._apply_autofill_results("fast_light", self.software_path_detector.detect_fast_light())
 
     def _attempt_js8_autofill(self) -> None:
+        self._publish_autofill_feedback(
+            status="in_progress",
+            summary=f"Auto-fill scanning {self._autofill_section_label('js8')}.",
+            detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
+        )
         self._apply_autofill_results("js8", self.software_path_detector.detect_js8())
 
     def _attempt_varac_autofill(self) -> None:
+        self._publish_autofill_feedback(
+            status="in_progress",
+            summary=f"Auto-fill scanning {self._autofill_section_label('varac')}.",
+            detail="FreqInOut is looking for blank fields it can fill for the selected radio.",
+        )
         self._apply_autofill_results("varac", self.software_path_detector.detect_varac())
 
     def _apply_autofill_results(self, section: str, results: Dict[str, PathDetectionResult]) -> None:
@@ -6027,6 +6161,7 @@ class SettingsTab(QWidget):
         preserved: List[str] = []
         missing: List[str] = []
         detail_lines: List[str] = []
+        preserved_suggestions: List[Dict[str, str]] = []
         for result in results.values():
             edit = self._autofill_target_edit(result.key)
             if edit is None:
@@ -6044,6 +6179,16 @@ class SettingsTab(QWidget):
                     )
                 else:
                     preserved.append(result.label)
+                    preserved_suggestions.append(
+                        {
+                            "key": str(result.key or ""),
+                            "label": str(result.label or ""),
+                            "current": current,
+                            "suggested": str(result.path or ""),
+                            "confidence": str(result.confidence or ""),
+                            "reason": str(result.reason or ""),
+                        }
+                    )
                     detail_lines.append(
                         f"{result.label}: kept existing value; suggested {result.path} ({result.confidence}) — {result.reason}"
                     )
@@ -6060,17 +6205,236 @@ class SettingsTab(QWidget):
             summary_parts.append(f"Not found: {len(missing)}.")
         if not summary_parts:
             summary_parts.append("No auto-fill changes were available.")
-        self._set_autofill_status(section, " ".join(summary_parts), "\n".join(detail_lines))
+        summary = " ".join(summary_parts)
+        detail = "\n".join(detail_lines)
+        self._set_autofill_preserved_suggestions(section, preserved_suggestions)
+        compact_status = self._autofill_visible_review_text(summary, detail_lines)
+        full_status = self._autofill_visible_review_text(summary, detail_lines, max_lines=len(detail_lines))
+        self._set_autofill_status(section, compact_status, detail, full_text=full_status)
+        self._publish_autofill_feedback(
+            status=self._autofill_feedback_status(
+                filled_count=len(filled),
+                preserved_count=len(preserved),
+                missing_count=len(missing),
+            ),
+            summary=f"Auto-fill updated {self._autofill_section_label(section)}: {summary}",
+            detail=detail or summary,
+        )
         self._refresh_section_titles()
         self._refresh_section_nav_health()
         self._refresh_contextual_autofill_buttons()
+        self._publish_autofill_readiness_feedback(section)
 
-    def _set_autofill_status(self, section: str, text: str, tooltip: str) -> None:
+    @staticmethod
+    def _autofill_visible_review_text(summary: str, detail_lines: Sequence[str], *, max_lines: int = 4) -> str:
+        summary_text = str(summary or "").strip() or "No auto-fill changes were available."
+        cleaned = [str(line or "").strip() for line in detail_lines if str(line or "").strip()]
+        if not cleaned:
+            return summary_text
+        visible_count = max(0, int(max_lines or 0))
+        visible = cleaned[:visible_count] if visible_count else []
+        review_lines = [summary_text, "Review suggestions:"]
+        review_lines.extend(f"- {line}" for line in visible)
+        remaining = len(cleaned) - len(visible)
+        if remaining > 0:
+            noun = "item" if remaining == 1 else "items"
+            review_lines.append(f"- {remaining} more {noun}")
+        return "\n".join(review_lines)
+
+    def _set_autofill_status(self, section: str, text: str, tooltip: str, *, full_text: str = "") -> None:
         label = self._autofill_status_labels.get(section)
         if label is None:
             return
+        compact_text = str(text or "").strip()
+        expanded_text = str(full_text or compact_text).strip()
+        self._autofill_compact_status_texts[section] = compact_text
+        self._autofill_full_status_texts[section] = expanded_text
+        self._autofill_status_expanded[section] = False
         label.setText(text)
         label.setToolTip(tooltip or text)
+        button = self._autofill_status_buttons.get(section)
+        if button is not None:
+            can_expand = bool(expanded_text and expanded_text != compact_text)
+            button.setVisible(can_expand)
+            button.setEnabled(can_expand)
+            button.setText("Show Full Review")
+            button.setToolTip("Show the full Auto-Fill review in this Settings section.")
+
+    def _toggle_autofill_review(self, section: str) -> None:
+        label = self._autofill_status_labels.get(section)
+        button = self._autofill_status_buttons.get(section)
+        if label is None or button is None:
+            return
+        expanded = not bool(self._autofill_status_expanded.get(section, False))
+        compact_text = self._autofill_compact_status_texts.get(section, label.text())
+        full_text = self._autofill_full_status_texts.get(section, compact_text)
+        self._autofill_status_expanded[section] = expanded
+        label.setText(full_text if expanded else compact_text)
+        button.setText("Show Less" if expanded else "Show Full Review")
+        button.setToolTip(
+            "Collapse the Auto-Fill review."
+            if expanded
+            else "Show the full Auto-Fill review in this Settings section."
+        )
+
+    @staticmethod
+    def _autofill_preserved_suggestions_text(section_label: str, suggestions: Sequence[Mapping[str, str]]) -> str:
+        cleaned: List[str] = []
+        for suggestion in suggestions:
+            label = str(suggestion.get("label", "") or "").strip() or "Field"
+            current = str(suggestion.get("current", "") or "").strip()
+            suggested = str(suggestion.get("suggested", "") or "").strip()
+            confidence = str(suggestion.get("confidence", "") or "").strip()
+            reason = str(suggestion.get("reason", "") or "").strip()
+            if not suggested:
+                continue
+            line = f"{label}: keep {current or '(blank)'}; suggested {suggested}"
+            if confidence:
+                line = f"{line} ({confidence})"
+            if reason:
+                line = f"{line} - {reason}"
+            cleaned.append(line)
+        if not cleaned:
+            return ""
+        section = str(section_label or "Auto-Fill").strip() or "Auto-Fill"
+        header = f"{section} preserved {len(cleaned)} existing field(s) with suggested replacement value(s):"
+        return "\n".join([header, *(f"- {line}" for line in cleaned)])
+
+    def _set_autofill_preserved_suggestions(
+        self,
+        section: str,
+        suggestions: Sequence[Mapping[str, str]],
+    ) -> None:
+        cleaned = [dict(item) for item in suggestions if str(item.get("suggested", "") or "").strip()]
+        self._autofill_preserved_suggestions[section] = cleaned
+        button = self._autofill_preserved_buttons.get(section)
+        if button is not None:
+            has_suggestions = bool(cleaned)
+            button.setVisible(has_suggestions)
+            button.setEnabled(has_suggestions)
+            button.setToolTip(
+                "Copy Auto-Fill suggestions for preserved existing values."
+                if has_suggestions
+                else "No preserved Auto-Fill suggestions to copy."
+            )
+        replace_button = self._autofill_replace_buttons.get(section)
+        if replace_button is not None:
+            has_suggestions = bool(cleaned)
+            replace_button.setVisible(has_suggestions)
+            replace_button.setEnabled(has_suggestions)
+            replace_button.setToolTip(
+                "Replace preserved existing values with the cached Auto-Fill suggestions."
+                if has_suggestions
+                else "No preserved Auto-Fill suggestions to replace."
+            )
+        dismiss_button = getattr(self, "_autofill_dismiss_buttons", {}).get(section)
+        if dismiss_button is not None:
+            has_suggestions = bool(cleaned)
+            dismiss_button.setVisible(has_suggestions)
+            dismiss_button.setEnabled(has_suggestions)
+            dismiss_button.setToolTip(
+                "Dismiss cached Auto-Fill suggestions for this section."
+                if has_suggestions
+                else "No preserved Auto-Fill suggestions to dismiss."
+            )
+
+    @staticmethod
+    def _autofill_preserved_copy_summary(section_label: str, suggestion_count: int) -> str:
+        count = max(0, int(suggestion_count or 0))
+        noun = "suggestion" if count == 1 else "suggestions"
+        section = str(section_label or "Auto-Fill").strip() or "Auto-Fill"
+        return f"Copied {count} preserved {section} Auto-Fill {noun}."
+
+    def _copy_autofill_preserved_suggestions(self, section: str) -> None:
+        suggestions = self._autofill_preserved_suggestions.get(section, [])
+        if not suggestions:
+            self._set_autofill_preserved_suggestions(section, ())
+            return
+        section_label = self._autofill_section_label(section)
+        text = self._autofill_preserved_suggestions_text(section_label, suggestions)
+        if not text:
+            self._set_autofill_preserved_suggestions(section, ())
+            return
+        QApplication.clipboard().setText(text)
+        self._publish_settings_action_feedback(
+            status="succeeded",
+            summary=self._autofill_preserved_copy_summary(section_label, len(suggestions)),
+            detail=text,
+            action_type="copy_autofill_suggestions",
+        )
+
+    @staticmethod
+    def _autofill_dismiss_summary(section_label: str, suggestion_count: int) -> str:
+        count = max(0, int(suggestion_count or 0))
+        noun = "suggestion" if count == 1 else "suggestions"
+        section = str(section_label or "Auto-Fill").strip() or "Auto-Fill"
+        return f"Dismissed {count} preserved {section} Auto-Fill {noun}."
+
+    def _dismiss_autofill_preserved_suggestions(self, section: str) -> None:
+        suggestions = list(self._autofill_preserved_suggestions.get(section, []) or [])
+        if not suggestions:
+            self._set_autofill_preserved_suggestions(section, ())
+            return
+        section_label = self._autofill_section_label(section)
+        detail = self._autofill_preserved_suggestions_text(section_label, suggestions)
+        self._set_autofill_preserved_suggestions(section, ())
+        self._publish_settings_action_feedback(
+            status="succeeded",
+            summary=self._autofill_dismiss_summary(section_label, len(suggestions)),
+            detail=detail,
+            action_type="dismiss_autofill_suggestions",
+        )
+
+    @staticmethod
+    def _autofill_replace_summary(section_label: str, replaced_count: int, skipped_count: int) -> str:
+        replaced = max(0, int(replaced_count or 0))
+        skipped = max(0, int(skipped_count or 0))
+        section = str(section_label or "Auto-Fill").strip() or "Auto-Fill"
+        noun = "suggestion" if replaced == 1 else "suggestions"
+        if skipped:
+            skipped_noun = "suggestion" if skipped == 1 else "suggestions"
+            return f"Replaced {replaced} {section} Auto-Fill {noun}; skipped {skipped} {skipped_noun}."
+        return f"Replaced {replaced} {section} Auto-Fill {noun}."
+
+    def _replace_autofill_preserved_suggestions(self, section: str) -> None:
+        suggestions = list(self._autofill_preserved_suggestions.get(section, []) or [])
+        if not suggestions:
+            self._set_autofill_preserved_suggestions(section, ())
+            return
+        replaced_lines: List[str] = []
+        unchanged_lines: List[str] = []
+        skipped_lines: List[str] = []
+        remaining: List[Dict[str, str]] = []
+        for suggestion in suggestions:
+            key = str(suggestion.get("key", "") or "").strip()
+            label = str(suggestion.get("label", "") or "").strip() or key or "Field"
+            suggested = str(suggestion.get("suggested", "") or "").strip()
+            edit = self._autofill_target_edit(key)
+            if edit is None or not suggested:
+                skipped_lines.append(f"{label}: no editable target found")
+                remaining.append(dict(suggestion))
+                continue
+            previous = edit.text().strip()
+            if self._normalized_path_text(previous) == self._normalized_path_text(suggested):
+                unchanged_lines.append(f"{label}: already matched {suggested}")
+                continue
+            edit.setText(suggested)
+            replaced_lines.append(f"{label}: replaced {previous or '(blank)'} with {suggested}")
+        if replaced_lines:
+            self._mark_settings_dirty()
+            self._refresh_section_titles()
+            self._refresh_section_nav_health()
+            self._refresh_contextual_autofill_buttons()
+            self._publish_autofill_readiness_feedback(section)
+        self._set_autofill_preserved_suggestions(section, remaining)
+        detail_lines = [*replaced_lines, *unchanged_lines, *skipped_lines]
+        section_label = self._autofill_section_label(section)
+        self._publish_settings_action_feedback(
+            status="partial" if skipped_lines else "succeeded",
+            summary=self._autofill_replace_summary(section_label, len(replaced_lines), len(skipped_lines)),
+            detail="\n".join(detail_lines),
+            action_type="replace_autofill_suggestions",
+        )
 
     def _autofill_target_edit(self, key: str) -> Optional[QLineEdit]:
         if key.startswith("message_paths."):
@@ -6451,6 +6815,7 @@ class SettingsTab(QWidget):
         self._loading_settings = False
         self._settings_dirty = False
         self._set_save_button_state("success")
+        self._refresh_radio_context_labels()
         self._refresh_section_titles()
         self._refresh_contextual_autofill_buttons()
         emit_span(
@@ -6573,7 +6938,11 @@ class SettingsTab(QWidget):
                         js8_prompt = "Hourly"
                 log.info("SettingsTab: defaulted missing prompt interval(s) during quiet shutdown save: %s", ", ".join(missing))
             else:
-                QMessageBox.warning(self, "Settings", f"Please select: {', '.join(missing)}.")
+                missing_text = self._human_join(missing)
+                self._block_settings_action(
+                    f"Save blocked: select {missing_text}.",
+                    "Choose a prompt interval for each Prompt enforcement mode before saving.",
+                )
                 return
         data["freq_enforcement_mode"] = freq_mode
         data["freq_prompt_interval"] = freq_prompt
@@ -7037,7 +7406,15 @@ class SettingsTab(QWidget):
         self._refresh_runtime_projection_ui(refresh_multi_radio=True, emit_saved=False)
         self._ensure_fldigi_checkin_files()
         if show_message:
-            QMessageBox.information(self, "Settings", "Settings saved.")
+            radio_id, target = self._selected_settings_feedback_target()
+            summary = f"Saved settings for {target}." if target and target != "Settings" else "Settings saved."
+            self._publish_settings_action_feedback(
+                status="succeeded",
+                summary=summary,
+                radio_profile_id=radio_id,
+                target_label=target,
+            )
+            self._publish_save_guardrail_feedback()
 
         # Persist operator grid into operator_checkins for map usage
         self._persist_operator_grid_to_db(
@@ -7623,6 +8000,7 @@ class SettingsTab(QWidget):
         if not self._settings_dirty:
             self._settings_dirty = True
             self._set_save_button_state("info")
+            self._set_settings_action_feedback_status("in_progress", "Unsaved settings changes.")
         self._refresh_section_nav_health()
 
     def _on_sop_export_text_changed(self) -> None:
@@ -7634,6 +8012,301 @@ class SettingsTab(QWidget):
     def _set_save_button_state(self, role: str) -> None:
         theme = resolve_theme(self.settings)
         self.save_btn.setStyleSheet(button_style(role, theme))
+
+    @staticmethod
+    def _human_join(values: List[str]) -> str:
+        cleaned = [str(value or "").strip() for value in values if str(value or "").strip()]
+        if not cleaned:
+            return ""
+        if len(cleaned) == 1:
+            return cleaned[0]
+        if len(cleaned) == 2:
+            return f"{cleaned[0]} and {cleaned[1]}"
+        return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+    @staticmethod
+    def _settings_feedback_label_style(status: str, theme: Dict[str, str]) -> str:
+        normalized = str(status or "").strip().lower()
+        if normalized == "succeeded":
+            color = theme.get("success", "#2E7D32")
+        elif normalized in {"failed", "blocked"}:
+            color = theme.get("danger", "#B3261E")
+        elif normalized == "partial":
+            color = theme.get("warning", "#C99700")
+        elif normalized in {"requested", "in_progress"}:
+            color = theme.get("accent", "#2a6fd3")
+        else:
+            color = theme.get("muted", "#666666")
+        return f"color: {color}; font-weight: 600;"
+
+    def _selected_settings_feedback_target(self) -> Tuple[Optional[str], str]:
+        profile = self._selected_settings_radio_profile()
+        if isinstance(profile, dict):
+            radio_id = int(profile.get("id", 0) or 0)
+            radio_id_txt = str(radio_id) if radio_id > 0 else None
+            return radio_id_txt, self._profile_display_name(profile)
+        return None, "Settings"
+
+    def _set_settings_action_feedback_status(self, status: str, text: str, detail: str = "") -> None:
+        if not hasattr(self, "settings_action_feedback_label"):
+            return
+        display = str(text or "").strip() or "Settings ready."
+        detail_txt = str(detail or "").strip()
+        self.settings_action_feedback_label.setText(display)
+        self.settings_action_feedback_label.setToolTip(detail_txt or display)
+        self.settings_action_feedback_label.setStyleSheet(
+            self._settings_feedback_label_style(status, resolve_theme(self.settings))
+        )
+
+    def _publish_settings_action_feedback(
+        self,
+        *,
+        status: str,
+        summary: str,
+        detail: str = "",
+        action_type: str = "save",
+        radio_profile_id: Optional[str] = None,
+        target_label: str = "",
+    ) -> None:
+        radio_id = radio_profile_id
+        target = str(target_label or "").strip()
+        if not radio_id and not target:
+            radio_id, target = self._selected_settings_feedback_target()
+        try:
+            event = self.action_feedback_service.publish(
+                scope="settings",
+                action_type=action_type,
+                status=status,
+                summary=summary,
+                radio_profile_id=radio_id,
+                target_label=target,
+                detail=detail,
+                source_surface="settings",
+            )
+            self._last_action_feedback_event = event
+            self._set_settings_action_feedback_status(event.status, event.summary, event.detail)
+        except Exception:
+            log.exception("SettingsTab: failed to publish settings action feedback.")
+            self._set_settings_action_feedback_status(status, summary, detail)
+
+    def _block_settings_action(self, summary: str, detail: str = "", *, action_type: str = "save") -> None:
+        self._publish_settings_action_feedback(
+            status="blocked",
+            summary=summary,
+            detail=detail,
+            action_type=action_type,
+        )
+
+    def _publish_launch_control_feedback(self, *, status: str, summary: str, detail: str = "") -> None:
+        self._publish_settings_action_feedback(
+            status=status,
+            summary=summary,
+            detail=detail,
+            action_type="launch_control",
+        )
+
+    @staticmethod
+    def _autofill_section_label(section: str) -> str:
+        normalized = str(section or "").strip().lower()
+        if normalized == "fast_light":
+            return "Fast Light"
+        if normalized == "js8":
+            return "JS8Call"
+        if normalized == "varac":
+            return "VarAC"
+        return "Settings"
+
+    @staticmethod
+    def _autofill_feedback_status(*, filled_count: int, preserved_count: int, missing_count: int) -> str:
+        if missing_count > 0:
+            return "partial" if filled_count or preserved_count else "blocked"
+        if filled_count or preserved_count:
+            return "succeeded"
+        return "blocked"
+
+    def _publish_autofill_feedback(self, *, status: str, summary: str, detail: str = "") -> None:
+        self._publish_settings_action_feedback(
+            status=status,
+            summary=summary,
+            detail=detail,
+            action_type="configure_automatically",
+        )
+
+    @staticmethod
+    def _autofill_health_key(section: str) -> str:
+        normalized = str(section or "").strip().lower()
+        if normalized == "js8":
+            return "js8call"
+        if normalized in {"fast_light", "varac"}:
+            return normalized
+        return normalized
+
+    @staticmethod
+    def _autofill_readiness_summary(section_label: str, detail: str) -> str:
+        first_issue = str(detail or "").split(";", 1)[0].strip()
+        if first_issue:
+            return f"Auto-fill needs review in {section_label}: {first_issue}."
+        return f"Auto-fill needs review in {section_label}."
+
+    def _publish_autofill_readiness_feedback(self, section: str) -> None:
+        try:
+            health_key = self._autofill_health_key(section)
+            entry = self._build_section_health_snapshot().get(health_key, {})
+            detail = str(entry.get("detail", "") or "").strip()
+            if str(entry.get("state", "") or "").strip().lower() != "warn" or not detail:
+                return
+            section_label = self._autofill_section_label(section)
+            self._publish_autofill_feedback(
+                status="partial",
+                summary=self._autofill_readiness_summary(section_label, detail),
+                detail=detail,
+            )
+        except Exception:
+            log.exception("SettingsTab: failed to publish auto-fill readiness feedback.")
+
+    @staticmethod
+    def _save_guardrail_feedback_summary(warning_count: int) -> str:
+        count = max(0, int(warning_count or 0))
+        if count == 1:
+            return "Settings saved, but 1 multi-rig guardrail warning needs review."
+        return f"Settings saved, but {count} multi-rig guardrail warnings need review."
+
+    def _current_multi_rig_guardrail_messages(self) -> Tuple[str, ...]:
+        try:
+            db_path = Path(getattr(self.multi_radio_store, "db_path", ""))
+            if not db_path:
+                return ()
+            with sqlite3.connect(db_path) as conn:
+                return tuple(multi_rig_guardrail_warnings(conn))
+        except Exception:
+            log.exception("SettingsTab: failed to collect multi-rig guardrail warnings.")
+            return ()
+
+    def _publish_save_guardrail_feedback(self) -> None:
+        warnings = self._current_multi_rig_guardrail_messages()
+        if not warnings:
+            return
+        self._publish_settings_action_feedback(
+            status="partial",
+            summary=self._save_guardrail_feedback_summary(len(warnings)),
+            detail="\n".join(warnings),
+            action_type="save_guardrails",
+        )
+
+    @staticmethod
+    def _guardrail_readiness_status_text(warnings: Sequence[str]) -> str:
+        warning_lines = [str(item or "").strip() for item in warnings if str(item or "").strip()]
+        if not warning_lines:
+            return ""
+        count = len(warning_lines)
+        noun = "warning" if count == 1 else "warnings"
+        verb = "needs" if count == 1 else "need"
+        detail = "\n".join(f"- {item}" for item in warning_lines[:3])
+        if count > 3:
+            detail = f"{detail}\n- {count - 3} more warning(s)"
+        return f"Multi-rig guardrails: {count} persisted {noun} {verb} review.\n{detail}"
+
+    def _set_device_profile_guardrail_status(self, warnings: Sequence[str]) -> bool:
+        warning_lines = tuple(str(item or "").strip() for item in warnings if str(item or "").strip())
+        text = self._guardrail_readiness_status_text(warning_lines)
+        self._last_device_profile_guardrail_warnings = warning_lines
+        label = getattr(self, "device_profile_guardrail_status_label", None)
+        if label is not None:
+            label.setText(text)
+            label.setToolTip("\n".join(warning_lines))
+            label.setVisible(bool(text))
+        button = getattr(self, "copy_guardrail_summary_btn", None)
+        if button is not None:
+            button.setVisible(bool(text))
+            button.setEnabled(bool(text))
+            button.setToolTip(
+                "Copy the current multi-rig guardrail warnings for review."
+                if text
+                else "No multi-rig guardrail warnings to copy."
+            )
+        return bool(text)
+
+    @staticmethod
+    def _guardrail_copy_summary(warning_count: int) -> str:
+        count = max(0, int(warning_count or 0))
+        noun = "warning" if count == 1 else "warnings"
+        return f"Copied {count} multi-rig guardrail {noun}."
+
+    def _copy_device_profile_guardrail_warnings(self) -> None:
+        warnings = tuple(getattr(self, "_last_device_profile_guardrail_warnings", ()) or ())
+        if not warnings:
+            warnings = self._current_multi_rig_guardrail_messages()
+            self._set_device_profile_guardrail_status(warnings)
+        if not warnings:
+            return
+        text = "\n".join(str(item or "").strip() for item in warnings if str(item or "").strip())
+        QApplication.clipboard().setText(text)
+        self._publish_settings_action_feedback(
+            status="succeeded",
+            summary=self._guardrail_copy_summary(len(warnings)),
+            detail=text,
+            action_type="copy_guardrails",
+        )
+
+    @staticmethod
+    def _launch_sequence_feedback_status(
+        *,
+        launched: int,
+        already_running: int,
+        failed: int,
+        timeout: int,
+        blocked_self: int,
+        cancelled: bool,
+    ) -> str:
+        if cancelled:
+            return "partial" if launched or already_running else "blocked"
+        if failed or timeout or blocked_self:
+            return "partial" if launched or already_running else "failed"
+        if launched or already_running:
+            return "succeeded"
+        return "blocked"
+
+    @staticmethod
+    def _launch_sequence_feedback_summary(
+        *,
+        launched: int,
+        already_running: int,
+        failed: int,
+        timeout: int,
+        blocked_self: int,
+        cancelled: bool,
+    ) -> str:
+        if cancelled:
+            prefix = "Launch cancelled"
+        elif failed or timeout or blocked_self:
+            prefix = "Launch completed with issues"
+        elif launched or already_running:
+            prefix = "Launch complete"
+        else:
+            prefix = "Launch complete: no applications started"
+        return (
+            f"{prefix}: launched {launched}, already running {already_running}, "
+            f"failed {failed}, timeout {timeout}, blocked {blocked_self}."
+        )
+
+    @staticmethod
+    def _launch_sequence_feedback_detail(
+        *,
+        launched: int,
+        already_running: int,
+        failed: int,
+        timeout: int,
+        blocked_self: int,
+        cancelled: bool,
+    ) -> str:
+        return (
+            f"Launched: {launched}\n"
+            f"Already running: {already_running}\n"
+            f"Failed: {failed}\n"
+            f"Timeout: {timeout}\n"
+            f"Blocked (self-target): {blocked_self}\n"
+            f"Cancelled: {'Yes' if cancelled else 'No'}"
+        )
 
     # ---------- Radio Profiles ---------- #
 
@@ -7811,6 +8484,7 @@ class SettingsTab(QWidget):
         self._rebuild_status_indicators()
         self._refresh_radio_specific_section_visibility()
         self._refresh_radio_settings_nav_label()
+        self._refresh_radio_context_labels()
 
     def _refresh_radio_settings_nav_label(self) -> None:
         if not hasattr(self, "radio_settings_toggle_btn"):
@@ -7891,6 +8565,8 @@ class SettingsTab(QWidget):
             return "primary"
         if not int(profile.get("enabled", 1) or 0):
             return "muted"
+        if self._profile_needs_operator_name(profile):
+            return "warning"
         status = self._device_readiness_summary(profile, readiness_report).strip().lower()
         if any(token in status for token in ("offline", "unreachable", "not responding", "failed")):
             return "danger"
@@ -7912,6 +8588,8 @@ class SettingsTab(QWidget):
             status_bits.append("Inactive")
         if int(profile.get("runtime_primary", 0) or 0) == 1:
             status_bits.append("Default")
+        if self._profile_needs_operator_name(profile):
+            status_bits.append("Name Needed")
         device_class = self._device_class_label(str(profile.get("device_class", "") or ""))
         if device_class and device_class.lower() != "transceiver":
             status_bits.append(device_class)
@@ -7962,6 +8640,10 @@ class SettingsTab(QWidget):
         layout.addStretch()
         self._refresh_radio_settings_nav_label()
 
+    @staticmethod
+    def _profile_needs_operator_name(profile: Optional[Dict[str, Any]]) -> bool:
+        return bool(isinstance(profile, dict) and int(profile.get("needs_operator_name", 0) or 0) == 1)
+
     def _selected_radio_detail_text(
         self,
         profile: Optional[Dict[str, Any]],
@@ -7974,6 +8656,8 @@ class SettingsTab(QWidget):
         assignment_name = str(assignment.get("operating_profile_name", "") or "").strip() or "Unassigned"
         assignment_state = str(assignment.get("assignment_state", "") or "").strip().lower()
         flags = []
+        if self._profile_needs_operator_name(profile):
+            flags.append("Name Needed")
         if int(profile.get("runtime_primary", 0) or 0) == 1:
             flags.append("Station Default")
         if int(profile.get("runtime_active", 0) or 0) == 1:
@@ -8462,7 +9146,7 @@ class SettingsTab(QWidget):
 
     def _radio_software_scope_text(self, profile: Optional[Dict[str, Any]]) -> str:
         if not isinstance(profile, dict):
-            return "Editing radio: --"
+            return "Editing Radio: --"
         radio_name = self._profile_display_name(profile)
         suffix = []
         if int(profile.get("runtime_primary", 0) or 0) == 1:
@@ -8470,7 +9154,25 @@ class SettingsTab(QWidget):
         elif int(profile.get("runtime_active", 0) or 0) == 1:
             suffix.append("Active")
         suffix_txt = f" ({', '.join(suffix)})" if suffix else ""
-        return f"Editing radio: {radio_name}{suffix_txt}. Save Settings applies these software values to this radio bundle."
+        return f"Editing Radio: {radio_name}{suffix_txt}. Save Settings applies these software values to this radio bundle."
+
+    def _radio_assignment_scope_text(self, profile: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(profile, dict):
+            return "Editing Radio: --. Select a radio to review or change that radio's schedule assignment."
+        radio_id = int(profile.get("id", 0) or 0)
+        assignment = self._effective_assignment_map().get(radio_id, {})
+        operating_name = str(assignment.get("operating_profile_name", "") or "").strip() or "Unassigned"
+        state = self._assignment_state_label(str(assignment.get("assignment_state", "") or ""))
+        return (
+            f"Editing Radio: {self._profile_display_name(profile)}. "
+            f"Schedule actions apply to this radio's assignment row. Effective schedule: {operating_name} ({state})."
+        )
+
+    def _refresh_device_assignment_scope_label(self) -> None:
+        if not hasattr(self, "device_assignments_scope_label"):
+            return
+        profile = self._selected_settings_radio_profile()
+        self.device_assignments_scope_label.setText(self._radio_assignment_scope_text(profile))
 
     def _refresh_software_scope_labels(self) -> None:
         profile = self._selected_software_radio_profile()
@@ -8505,6 +9207,10 @@ class SettingsTab(QWidget):
             self.launch_control_scope_label.setText(
                 f"{scope_text} Launch Control currently follows the Station Default projection while selected-radio launch binding is reviewed."
             )
+
+    def _refresh_radio_context_labels(self) -> None:
+        self._refresh_software_scope_labels()
+        self._refresh_device_assignment_scope_label()
 
     def _radio_software_state_from_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         message_paths = {
@@ -9582,6 +10288,8 @@ class SettingsTab(QWidget):
 
         if hasattr(self, "device_profile_readiness_status_label"):
             self.device_profile_readiness_status_label.setObjectName("deviceProfileReadinessStatus")
+        if hasattr(self, "device_profile_guardrail_status_label"):
+            self.device_profile_guardrail_status_label.setObjectName("deviceProfileGuardrailStatus")
         if readiness_report is None:
             readiness_report = self._current_station_readiness_report()
         if focused_radio_id is None:
@@ -9596,6 +10304,7 @@ class SettingsTab(QWidget):
                 self.device_profile_readiness_title_label.setText("Focused Radio Readiness")
             if hasattr(self, "device_profile_readiness_status_label"):
                 self.device_profile_readiness_status_label.setText(message)
+            self._set_device_profile_guardrail_status(())
             self.device_profile_detail_label.setText("Select a radio to edit that radio's settings.")
             _set_readiness_card_style("info")
             return
@@ -9608,10 +10317,13 @@ class SettingsTab(QWidget):
                 self.device_profile_readiness_title_label.setText("Focused Radio Readiness")
             if hasattr(self, "device_profile_readiness_status_label"):
                 self.device_profile_readiness_status_label.setText(message)
+            self._set_device_profile_guardrail_status(())
             self.device_profile_detail_label.setText("Select a radio to edit that radio's settings.")
             _set_readiness_card_style("info")
             return
         summary = readiness_report.summary_for_radio(int(focused_radio_id))
+        guardrail_warnings = self._current_multi_rig_guardrail_messages()
+        has_guardrail_warnings = self._set_device_profile_guardrail_status(guardrail_warnings)
         assignment = self._effective_assignment_map().get(int(focused_radio_id), {})
         name = str(profile.get("name", "") or "Radio").strip() or "Radio"
         assignment_name = str(assignment.get("operating_profile_name", "") or "").strip() or "Unassigned"
@@ -9624,8 +10336,16 @@ class SettingsTab(QWidget):
         if summary is None or (
             summary.required_count <= 0 and summary.recommended_count <= 0 and summary.informational_count <= 0
         ):
+            if self._profile_needs_operator_name(profile):
+                if hasattr(self, "device_profile_readiness_card"):
+                    self.device_profile_readiness_card.setVisible(True)
+                message = f"{name} is using a fallback name. Rename it so radio-specific settings are easy to recognize."
+                if hasattr(self, "device_profile_readiness_status_label"):
+                    self.device_profile_readiness_status_label.setText(message)
+                _set_readiness_card_style("warning")
+                return
             if hasattr(self, "device_profile_readiness_card"):
-                self.device_profile_readiness_card.setVisible(False)
+                self.device_profile_readiness_card.setVisible(bool(has_guardrail_warnings))
             schedule_text = (
                 f" Assigned schedule: {assignment_name} ({self._assignment_state_label(assignment_state)})."
                 if assignment_name != "Unassigned"
@@ -9634,7 +10354,7 @@ class SettingsTab(QWidget):
             message = f"{name} is ready.{schedule_text}"
             if hasattr(self, "device_profile_readiness_status_label"):
                 self.device_profile_readiness_status_label.setText(message)
-            _set_readiness_card_style("success")
+            _set_readiness_card_style("warning" if has_guardrail_warnings else "success")
             return
         if hasattr(self, "device_profile_readiness_card"):
             self.device_profile_readiness_card.setVisible(True)
@@ -9656,6 +10376,10 @@ class SettingsTab(QWidget):
         if detail_text:
             detail_message = f"{detail_message} Guidance: {detail_text}"
         if hasattr(self, "device_profile_readiness_status_label"):
+            if self._profile_needs_operator_name(profile):
+                detail_message = (
+                    f"Rename this radio so radio-specific settings are easy to recognize. {detail_message}"
+                )
             self.device_profile_readiness_status_label.setText(f"{message}\n{detail_message}")
         self.device_profile_detail_label.setText(self._selected_radio_detail_text(profile, readiness_report))
         _set_readiness_card_style(readiness_state_card_level(summary.overall_state))
@@ -10912,6 +11636,7 @@ class SettingsTab(QWidget):
         if table.rowCount() > 0 and table.currentRow() < 0:
             table.selectRow(0)
         self._update_device_assignments_hint()
+        self._refresh_radio_context_labels()
         self._update_device_assignment_action_buttons()
         self._update_device_assignments_guidance_detail()
         if refresh_section_titles:
@@ -13624,18 +14349,27 @@ class SettingsTab(QWidget):
                     reason = ""
                     if hasattr(self.launch_orchestrator, "launch_block_reason"):
                         reason = str(self.launch_orchestrator.launch_block_reason() or "").strip()
-                    QMessageBox.information(
-                        self,
-                        "Launch Control",
-                        reason or "Launch Control is disabled by the primary schedule profile.",
+                    self._publish_launch_control_feedback(
+                        status="blocked",
+                        summary="Launch blocked: Launch Control is disabled.",
+                        detail=reason or "Launch Control is disabled by the primary schedule profile.",
                     )
                     return
             except Exception:
                 pass
         started = self.launch_orchestrator.start_manual_sequence(self._launch_items_cache)
         if not started:
-            QMessageBox.information(self, "Launch Control", "No enabled configured applications to launch.")
+            self._publish_launch_control_feedback(
+                status="blocked",
+                summary="Launch blocked: no enabled configured applications.",
+                detail="Enable at least one configured application in Launch Control before launching.",
+            )
             return
+        self._publish_launch_control_feedback(
+            status="in_progress",
+            summary="Launch sequence started.",
+            detail="FreqInOut is starting the selected configured applications.",
+        )
         self._update_launch_control_buttons()
 
     def _stop_launch_sequence(self) -> None:
@@ -13682,16 +14416,30 @@ class SettingsTab(QWidget):
             )
         self.launch_summary_label.setText(status_txt)
         if trigger == "manual":
-            QMessageBox.information(
-                self,
-                "Launch Summary",
-                (
-                    f"Launched: {launched}\n"
-                    f"Already running: {already_running}\n"
-                    f"Failed: {failed}\n"
-                    f"Timeout: {timeout}\n"
-                    f"Blocked (self-target): {blocked_self}\n"
-                    f"Cancelled: {'Yes' if cancelled else 'No'}"
+            self._publish_launch_control_feedback(
+                status=self._launch_sequence_feedback_status(
+                    launched=launched,
+                    already_running=already_running,
+                    failed=failed,
+                    timeout=timeout,
+                    blocked_self=blocked_self,
+                    cancelled=cancelled,
+                ),
+                summary=self._launch_sequence_feedback_summary(
+                    launched=launched,
+                    already_running=already_running,
+                    failed=failed,
+                    timeout=timeout,
+                    blocked_self=blocked_self,
+                    cancelled=cancelled,
+                ),
+                detail=self._launch_sequence_feedback_detail(
+                    launched=launched,
+                    already_running=already_running,
+                    failed=failed,
+                    timeout=timeout,
+                    blocked_self=blocked_self,
+                    cancelled=cancelled,
                 ),
             )
         self._update_launch_control_buttons()

@@ -77,7 +77,62 @@ def test_snapshot_projects_store_rows_into_shared_state(tmp_path):
     assert (f"radio_{observer['id']}", f"plan_{observer_plan['id']}") in assigned
 
 
-def test_runtime_policy_keeps_operator_intent_separate_from_temporary_state(tmp_path):
+def test_radio_profile_projection_populates_canonical_software_flags(tmp_path):
+    store = _store(tmp_path)
+    with store._connect() as conn:
+        set_multi_rig_migration_version(conn)
+    radio = store.save_device_profile(
+        {
+            "system_key": "software_radio",
+            "name": "Software Radio",
+            "control_backend": "js8call",
+            "use_flrig": 1,
+            "use_fldigi": 1,
+            "use_flmsg": 1,
+            "use_flamp": 1,
+            "use_js8call": 1,
+            "use_js8spotter": 1,
+            "use_commstat": 1,
+            "use_varac": 1,
+            "runtime_active": 1,
+        }
+    )
+
+    snapshot = build_shared_state_snapshot(store)
+    profile = next(item for item in snapshot.radio_profiles if item.id == f"radio_{radio['id']}")
+
+    assert profile.control_backend == "js8call"
+    assert profile.needs_operator_name is False
+    assert profile.uses_flrig is True
+    assert profile.uses_fldigi is True
+    assert profile.uses_flmsg is True
+    assert profile.uses_flamp is True
+    assert profile.uses_js8call is True
+    assert profile.uses_js8spotter is True
+    assert profile.uses_commstat is True
+    assert profile.uses_varac is True
+
+
+def test_radio_profile_projection_marks_fallback_radio_name(tmp_path):
+    store = _store(tmp_path)
+    with store._connect() as conn:
+        set_multi_rig_migration_version(conn)
+    radio = store.save_device_profile(
+        {
+            "system_key": "fallback_radio",
+            "name": "Default Radio",
+            "needs_operator_name": 1,
+        }
+    )
+
+    snapshot = build_shared_state_snapshot(store)
+    profile = next(item for item in snapshot.radio_profiles if item.id == f"radio_{radio['id']}")
+
+    assert profile.name == "Default Radio"
+    assert profile.needs_operator_name is True
+
+
+def test_runtime_policy_snapshot_contains_stable_operator_intent_only(tmp_path):
     store = _store(tmp_path)
     with store._connect() as conn:
         set_multi_rig_migration_version(conn)
@@ -114,9 +169,10 @@ def test_runtime_policy_keeps_operator_intent_separate_from_temporary_state(tmp_
     assert policy.launch_enabled is False
     assert policy.net_control_enabled is False
     assert policy.operator_suppressed is False
-    assert policy.restart_clean().temporary_paused is False
-    assert policy.restart_clean().manual_hold is False
-    assert policy.restart_clean().transient_error == ""
+    assert hasattr(policy, "temporary_paused") is False
+    assert hasattr(policy, "manual_hold") is False
+    assert hasattr(policy, "transient_error") is False
+    assert policy.restart_clean() == policy
 
 
 def test_disabled_or_inactive_radio_projects_as_operator_suppressed(tmp_path):
@@ -137,3 +193,22 @@ def test_disabled_or_inactive_radio_projects_as_operator_suppressed(tmp_path):
     policy = next(item for item in snapshot.runtime_policies if item.radio_profile_id == f"radio_{disabled['id']}")
 
     assert policy.operator_suppressed is True
+
+
+def test_operating_profile_projection_keeps_description_out_of_notes(tmp_path):
+    store = _store(tmp_path)
+    with store._connect() as conn:
+        set_multi_rig_migration_version(conn)
+    plan = store.save_operating_profile(
+        {
+            "system_key": "described_plan",
+            "name": "Described Plan",
+            "description": "Operator-facing description",
+        }
+    )
+
+    snapshot = build_shared_state_snapshot(store)
+    projected = next(item for item in snapshot.frequency_plans if item.id == f"plan_{plan['id']}")
+
+    assert projected.description == "Operator-facing description"
+    assert projected.notes == ""

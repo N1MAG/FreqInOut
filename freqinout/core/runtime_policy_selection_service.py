@@ -83,15 +83,18 @@ def _runtime_ready(status: MultiRigRuntimeStatus) -> bool:
 
 
 def _policy_from_row(row: Mapping[str, Any]) -> RuntimePolicy:
+    launch_enabled = _bool(row.get("launch_enabled"), False)
     return RuntimePolicy(
         radio_profile_id=radio_shared_state_id(row.get("radio_profile_id")),
         scheduler_enabled=_bool(row.get("scheduler_enabled"), True),
         background_ingest_enabled=_bool(row.get("background_ingest_enabled"), True),
         messages_enabled=_bool(row.get("messages_enabled"), True),
         map_enabled=_bool(row.get("map_enabled"), True),
-        launch_enabled=_bool(row.get("launch_enabled"), True),
+        launch_enabled=launch_enabled,
+        launch_control_participation=launch_enabled,
         net_control_enabled=_bool(row.get("net_control_enabled"), True),
         operator_suppressed=_bool(row.get("operator_suppressed"), False),
+        updated_at_utc=str(row.get("updated_utc") or _utc_now_iso()),
     )
 
 
@@ -131,7 +134,7 @@ class DurableRuntimePolicyStore:
 
     def _seed_policy_values(self, conn, device_row: Mapping[str, Any]) -> Dict[str, int]:
         operating = self._effective_operating_row(conn, int(device_row.get("id", 0) or 0))
-        launch_enabled = _bool(operating.get("use_launch_control"), True) and _bool(device_row.get("launch_enabled"), True)
+        launch_enabled = _bool(operating.get("use_launch_control"), False) and _bool(device_row.get("launch_enabled"), False)
         return {
             "scheduler_enabled": 1 if _bool(operating.get("scheduler_enabled"), True) else 0,
             "background_ingest_enabled": 1 if _bool(operating.get("use_background_ingest"), True) else 0,

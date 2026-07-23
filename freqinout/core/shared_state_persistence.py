@@ -13,13 +13,7 @@ from freqinout.core.runtime_policy_selection_service import (
     DurableRuntimePolicyStore,
     DurableRuntimeSelectionService,
 )
-from freqinout.core.shared_state import (
-    AssignedPlan,
-    FrequencyPlan,
-    RadioProfile,
-    RuntimePolicy,
-    RuntimeSelectionState,
-)
+from freqinout.core.shared_state import AssignedPlan, FrequencyPlan, RadioProfile, RuntimePolicy, RuntimeSelectionState
 
 
 SHARED_STATE_SCHEMA_MARKER_KEY = "multi_rig_shared_state_schema_version"
@@ -67,14 +61,27 @@ def _id(prefix: str, value: object) -> str:
 
 def radio_profile_from_device_row(row: Mapping[str, Any]) -> RadioProfile:
     device_class = _text(row.get("device_class"), "tx_rx").lower() or "tx_rx"
-    control_backend = _text(row.get("control_backend"), "flrig").lower() or "flrig"
+    control_backend = _text(row.get("control_backend"), "manual").lower() or "manual"
     return RadioProfile(
         id=_id("radio", row.get("id")),
         name=_text(row.get("name"), "Radio") or "Radio",
         radio_class=device_class,
+        deployment_mode=_text(row.get("deployment_mode"), "fixed") or "fixed",
         control_backend=control_backend,
+        needs_operator_name=_boolish(row.get("needs_operator_name"), False),
         transmit_capable=device_class != "observer",
         ptt_group=_text(row.get("ptt_group")),
+        assigned_plan_id=_id("plan", row.get("assigned_plan_id")) or None,
+        uses_flrig=_boolish(row.get("use_flrig"), control_backend == "flrig"),
+        uses_fldigi=_boolish(row.get("use_fldigi"), False),
+        uses_flmsg=_boolish(row.get("use_flmsg"), False),
+        uses_flamp=_boolish(row.get("use_flamp"), False),
+        uses_js8call=_boolish(row.get("use_js8call"), control_backend == "js8call"),
+        uses_js8spotter=_boolish(row.get("use_js8spotter"), False),
+        uses_commstat=_boolish(row.get("use_commstat"), False),
+        uses_varac=_boolish(row.get("use_varac"), False),
+        uses_wsjtx=_boolish(row.get("use_wsjtx"), False),
+        uses_mesh=_boolish(row.get("use_mesh"), False),
         flrig_connected=control_backend == "flrig" and _boolish(row.get("runtime_active"), False),
         enabled=_boolish(row.get("enabled"), True),
         notes=_text(row.get("notes")),
@@ -85,10 +92,12 @@ def frequency_plan_from_operating_row(row: Mapping[str, Any]) -> FrequencyPlan:
     return FrequencyPlan(
         id=_id("plan", row.get("id")),
         name=_text(row.get("name"), "Operating Plan") or "Operating Plan",
+        description=_text(row.get("description")),
         category="normal",
+        status="saved",
         draft=False,
         saved=True,
-        notes=_text(row.get("description")),
+        notes=_text(row.get("notes")),
         created_utc=_text(row.get("created_utc")) or _utc_now_iso(),
         updated_utc=_text(row.get("updated_utc")) or _utc_now_iso(),
     )
@@ -104,29 +113,12 @@ def assigned_plan_from_assignment_row(row: Mapping[str, Any]) -> AssignedPlan:
         active=state in {"active", "temporary_override"},
         default=False,
         temporary_override=state == "temporary_override",
+        temporary_override_until_utc=_text(row.get("temporary_override_until_utc")) or None,
         receive_only=False,
         scheduler_enforcement="enabled",
+        scheduler_mode=_text(row.get("scheduler_mode"), "full_fio_workflow") or "full_fio_workflow",
         created_utc=_text(row.get("created_utc")) or _utc_now_iso(),
-    )
-
-
-def runtime_policy_from_rows(
-    device_row: Mapping[str, Any],
-    assigned_operating_row: Optional[Mapping[str, Any]] = None,
-) -> RuntimePolicy:
-    operating = dict(assigned_operating_row or {})
-    enabled = _boolish(device_row.get("enabled"), True)
-    runtime_active = _boolish(device_row.get("runtime_active"), False)
-    return RuntimePolicy(
-        radio_profile_id=_id("radio", device_row.get("id")),
-        scheduler_enabled=_boolish(operating.get("scheduler_enabled"), True),
-        background_ingest_enabled=_boolish(operating.get("use_background_ingest"), True),
-        messages_enabled=_boolish(operating.get("use_messages"), True),
-        map_enabled=_boolish(operating.get("use_map"), True),
-        launch_enabled=_boolish(operating.get("use_launch_control"), True)
-        and _boolish(device_row.get("launch_enabled"), True),
-        net_control_enabled=_boolish(operating.get("use_net_control_tabs"), True),
-        operator_suppressed=not enabled or not runtime_active,
+        updated_utc=_text(row.get("updated_utc")) or _utc_now_iso(),
     )
 
 

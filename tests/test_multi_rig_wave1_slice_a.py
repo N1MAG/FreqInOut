@@ -10,13 +10,21 @@ import pytest
 
 from freqinout.core.multi_radio_store import (
     CURRENT_MULTI_RIG_MIGRATION_VERSION,
+    FALLBACK_RADIO_NAMES,
+    MULTI_RIG_MIGRATION_COMPLETED_AT_KEY,
+    MULTI_RIG_MIGRATION_SUMMARY_PREFIX,
     MULTI_RIG_MIGRATION_VERSION_KEY,
     MultiRadioStore,
     SETTINGS_TABLE_SPECS,
     ensure_multi_rig_migration,
     ensure_default_multi_radio_records,
+    mirror_legacy_settings_into_runtime_active_device,
+    multi_rig_guardrail_warnings,
     settings_db_path,
 )
+from freqinout.core.multi_rig_guardrails import collect_multi_rig_guardrail_warnings
+from freqinout.core.runtime_policy_selection_service import DurableRuntimePolicyStore
+from freqinout.core.multi_rig_runtime_status import radio_shared_state_id
 from freqinout.core.settings_manager import SettingsManager
 
 
@@ -57,14 +65,17 @@ def test_settings_manager_seeds_default_multi_rig_records(monkeypatch, tmp_path)
     assert len(devices) == 1
     assert devices[0]["system_key"] == "default_device"
     assert devices[0]["name"] == "Default Radio"
+    assert devices[0]["needs_operator_name"] == 1
     assert devices[0]["control_backend"] == "flrig"
     assert devices[0]["runtime_active"] == 1
     assert devices[0]["runtime_primary"] == 1
+    assert devices[0]["launch_enabled"] == 0
     assert devices[0]["flrig_port"] == 12345
     assert devices[0]["js8_port"] == 2442
     assert len(operating) == 1
     assert operating[0]["system_key"] == "default_operating"
     assert operating[0]["scheduler_enabled"] == 1
+    assert operating[0]["use_launch_control"] == 0
     assert len(assignments) == 1
     assert assignments[0]["assignment_state"] == "active"
     assert assignments[0]["device_profile_id"] == devices[0]["id"]
@@ -113,6 +124,10 @@ def test_existing_legacy_settings_wait_for_explicit_migration(monkeypatch, tmp_p
 
     assert result.applied is True
     assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
+    assert settings.get(MULTI_RIG_MIGRATION_COMPLETED_AT_KEY)
+    assert settings.get(f"{MULTI_RIG_MIGRATION_SUMMARY_PREFIX}{CURRENT_MULTI_RIG_MIGRATION_VERSION}")[
+        "created_device_profile_id"
+    ]
 
     devices = store.list_device_profiles()
     operating = store.list_operating_profiles()
@@ -299,15 +314,227 @@ def test_explicit_migration_writes_key_map_columns(monkeypatch, tmp_path):
     assert varac["launch_cmd"] == "varac --portable"
     assert varac["incoming_path"] == "/messages/varac"
 
-    assert operating["name"] == "Migrated Single-Rig Plan"
+    assert operating["name"] == "Daily HF Schedule"
     assert operating["scheduler_enabled"] == 0
     assert operating["use_launch_control"] == 0
+
+
+def test_migration_summary_records_unknown_role_warning(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    db_path = cfg_root / "config" / "freqinout.db"
+    _insert_kv(db_path, {"control_via": "FLRig"})
+
+    settings = SettingsManager()
+    result = ensure_multi_rig_migration(
+        settings._conn,  # type: ignore[arg-type]
+        settings.all(),
+        enabled_software_roles={"js8call", "unknown_radio_tool"},
+    )
+    settings.reload()
+    summary = settings.get(f"{MULTI_RIG_MIGRATION_SUMMARY_PREFIX}{CURRENT_MULTI_RIG_MIGRATION_VERSION}")
+
+    assert result.applied is True
+    assert "Unknown software role ignored: unknown_radio_tool" in result.warnings
+    assert summary["warnings"] == list(result.warnings)
+
+
+def test_operating_profile_save_defaults_launch_control_off(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    profile = store.save_operating_profile({"name": "Operator Plan"})
+
+    assert profile["use_launch_control"] == 0
+
+
+def test_mirror_legacy_settings_without_launch_key_keeps_launch_control_off(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    active = store.get_runtime_active_device_profile()
+    assert active is not None
+    assignment = store.list_effective_assignments()[0]
+
+    mirror_legacy_settings_into_runtime_active_device(
+        settings._conn,  # type: ignore[arg-type]
+        {
+            "control_via": "FLRig",
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12345,
+            "use_scheduler": True,
+        },
+    )
+
+    device = store.get_device_profile(int(active["id"]))
+    operating = store.get_operating_profile(int(assignment["operating_profile_id"]))
+    assert device is not None
+    assert operating is not None
+    assert device["launch_enabled"] == 0
+    assert operating["use_launch_control"] == 0
+
+
+def test_v2_migration_disables_existing_launch_enabled_rows(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    device = store.list_device_profiles()[0]
+    operating = store.list_operating_profiles()[0]
+    with settings._conn:  # type: ignore[attr-defined]
+        settings._conn.execute("UPDATE kv SET value=? WHERE key=?", (json.dumps(1), MULTI_RIG_MIGRATION_VERSION_KEY))  # type: ignore[attr-defined]
+        settings._conn.execute("UPDATE device_profiles SET launch_enabled=1 WHERE id=?", (int(device["id"]),))  # type: ignore[attr-defined]
+        settings._conn.execute("UPDATE device_profiles SET name='Default Radio', needs_operator_name=0 WHERE id=?", (int(device["id"]),))  # type: ignore[attr-defined]
+        settings._conn.execute("UPDATE operating_profiles SET use_launch_control=1 WHERE id=?", (int(operating["id"]),))  # type: ignore[attr-defined]
+        settings._conn.execute(  # type: ignore[attr-defined]
+            """
+            INSERT OR REPLACE INTO runtime_policies (
+                radio_profile_id, scheduler_enabled, background_ingest_enabled, messages_enabled,
+                map_enabled, launch_enabled, net_control_enabled, operator_suppressed,
+                created_utc, updated_utc
+            ) VALUES (?, 1, 1, 1, 1, 1, 1, 0, '2026-07-22T00:00:00Z', '2026-07-22T00:00:00Z')
+            """,
+            (int(device["id"]),),
+        )
+
+    result = ensure_multi_rig_migration(settings._conn, settings.all())  # type: ignore[arg-type]
+    settings.reload()
+
+    device = store.get_device_profile(int(device["id"]))
+    operating = store.get_operating_profile(int(operating["id"]))
+    policy = DurableRuntimePolicyStore(store).get_policy(radio_shared_state_id(device["id"]))
+    assert result.applied is True
+    assert settings.get(MULTI_RIG_MIGRATION_VERSION_KEY) == CURRENT_MULTI_RIG_MIGRATION_VERSION
+    assert device is not None and device["launch_enabled"] == 0
+    assert device is not None and device["needs_operator_name"] == 1
+    assert operating is not None and operating["use_launch_control"] == 0
+    assert policy.launch_control_enabled is False
+
+
+def test_radio_rename_clears_needs_operator_name(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    device = store.list_device_profiles()[0]
+
+    renamed = store.save_device_profile({"id": int(device["id"]), "name": "IC-7300 Desk"})
+
+    assert renamed["name"] == "IC-7300 Desk"
+    assert renamed["needs_operator_name"] == 0
+
+
+def test_fallback_radio_name_set_drives_name_readiness() -> None:
+    assert {"", "radio", "my radio", "default radio", "device profile"} <= set(FALLBACK_RADIO_NAMES)
+
+
+def test_rerunning_migration_does_not_overwrite_custom_operating_plan_name(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    operating = store.list_operating_profiles()[0]
+    store.save_operating_profile({"id": int(operating["id"]), "name": "My Custom Plan", "use_launch_control": 0})
+    with settings._conn:  # type: ignore[attr-defined]
+        settings._conn.execute("UPDATE kv SET value=? WHERE key=?", (json.dumps(1), MULTI_RIG_MIGRATION_VERSION_KEY))  # type: ignore[attr-defined]
+
+    ensure_multi_rig_migration(settings._conn, settings.all())  # type: ignore[arg-type]
+
+    refreshed = store.get_operating_profile(int(operating["id"]))
+    assert refreshed is not None
+    assert refreshed["name"] == "My Custom Plan"
+
+
+def test_multi_rig_guardrail_warnings_surface_duplicate_active_endpoints_and_paths(monkeypatch, tmp_path):
+    cfg_root = tmp_path / "profile"
+    monkeypatch.setenv("FREQINOUT_CONFIG_DIR", str(cfg_root))
+
+    settings = SettingsManager()
+    store = MultiRadioStore(settings_db_path())
+    first = store.save_device_profile(
+        {
+            "name": "Desk Radio",
+            "runtime_active": 1,
+            "control_backend": "flrig",
+            "use_flrig": 1,
+            "use_fldigi": 1,
+            "use_js8call": 1,
+            "use_varac": 1,
+            "use_flamp": 1,
+            "use_flmsg": 1,
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12345,
+            "fldigi_host": "127.0.0.1",
+            "fldigi_port": 7362,
+            "js8_host": "127.0.0.1",
+            "js8_port": 2442,
+            "varac_db_path": "/varac/shared/VarAC.db",
+            "varac_bbs_dir": "/varac/shared/bbs",
+            "flamp_message_path": "/messages/shared/flamp",
+            "flmsg_message_path": "/messages/shared/flmsg",
+        }
+    )
+    second = store.save_device_profile(
+        {
+            "name": "Field Radio",
+            "runtime_active": 1,
+            "control_backend": "flrig",
+            "use_flrig": 1,
+            "use_fldigi": 1,
+            "use_js8call": 1,
+            "use_varac": 1,
+            "use_flamp": 1,
+            "use_flmsg": 1,
+            "flrig_host": "127.0.0.1",
+            "flrig_port": 12345,
+            "fldigi_host": "127.0.0.1",
+            "fldigi_port": 7362,
+            "js8_host": "127.0.0.1",
+            "js8_port": 2442,
+            "varac_db_path": "/varac/shared/VarAC.db",
+            "varac_bbs_dir": "/varac/shared/bbs",
+            "flamp_message_path": "/messages/shared/flamp",
+            "flmsg_message_path": "/messages/shared/flmsg",
+        }
+    )
+
+    assert first["launch_enabled"] == 0
+    assert second["launch_enabled"] == 0
+
+    with settings._conn:  # type: ignore[attr-defined]
+        settings._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE device_profiles SET runtime_active=1 WHERE id IN (?, ?)",
+            (int(first["id"]), int(second["id"])),
+        )
+
+    structured = collect_multi_rig_guardrail_warnings(settings._conn)  # type: ignore[arg-type]
+    warnings = multi_rig_guardrail_warnings(settings._conn)  # type: ignore[arg-type]
+
+    js8_warning = next(warning for warning in structured if warning.warning_type == "duplicate_js8_endpoint")
+    assert set(js8_warning.affected_radio_names) == {"Desk Radio", "Field Radio"}
+    assert js8_warning.resource_value == "127.0.0.1:2442"
+    assert any("Duplicate JS8Call API endpoint" in warning for warning in warnings)
+    assert any("Duplicate FLDigi XML-RPC endpoint" in warning for warning in warnings)
+    assert any("Duplicate FLRig control endpoint" in warning for warning in warnings)
+    assert any("Duplicate VarAC live BBS directory" in warning for warning in warnings)
+    assert any("Duplicate VarAC database path" in warning for warning in warnings)
+    assert any("Duplicate FLAMP message path" in warning for warning in warnings)
+    assert any("Duplicate FLMSG message path" in warning for warning in warnings)
 
 
 def test_migration_key_map_targets_exist_in_schema():
     expected_columns = {
         "device_profiles": {
             "control_backend",
+            "needs_operator_name",
             "rig_host",
             "rig_port",
             "launch_path",

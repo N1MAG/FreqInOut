@@ -41,6 +41,7 @@ from freqinout.core.config_paths import get_config_dir
 from freqinout.core.multi_radio_store import MultiRadioStore
 from freqinout.core.perf_metrics import span as perf_span
 from freqinout.core.settings_manager import SettingsManager
+from freqinout.core.shared_state import ActionFeedbackEvent, ActionFeedbackService
 from freqinout.core.station_runtime_manager import StationRuntimeManager
 from freqinout.core.scheduler_engine import SchedulerEngine
 from freqinout.core.background_ingest import BackgroundIngestController
@@ -125,6 +126,8 @@ class MainWindow(QMainWindow):
         self._ui_resume_settle_timer.timeout.connect(self._on_ui_resume_settled)
 
         self.settings = SettingsManager()
+        self.action_feedback_service = ActionFeedbackService()
+        self._action_feedback_unsubscribe = None
         self._notify_startup_status("Loading application settings...")
         self.dependency_status_service = get_dependency_status_service(self.settings)
         self.multi_radio_store = MultiRadioStore()
@@ -145,7 +148,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         # Instantiate screens (lazy-load heavy tabs to improve perceived performance)
-        self.settings_tab = SettingsTab(self)
+        self.settings_tab = SettingsTab(self, action_feedback_service=self.action_feedback_service)
         self._sync_settings_runtime_status()
         self.launch_orchestrator = self.settings_tab.launch_orchestrator
         self._launch_progress_dialog: QProgressDialog | None = None
@@ -443,6 +446,34 @@ class MainWindow(QMainWindow):
         banner_layout.addWidget(self.runtime_mode_label)
         right_layout.addWidget(self.runtime_mode_banner, 0)
 
+        self.action_feedback_banner = QFrame(right_container)
+        self.action_feedback_banner.setVisible(False)
+        self.action_feedback_banner.setAccessibleName("Action feedback")
+        feedback_layout = QHBoxLayout(self.action_feedback_banner)
+        feedback_layout.setContentsMargins(10, 6, 8, 6)
+        feedback_layout.setSpacing(8)
+        self.action_feedback_label = QLabel("")
+        self.action_feedback_label.setWordWrap(True)
+        self.action_feedback_label.setAccessibleName("Action feedback message")
+        feedback_layout.addWidget(self.action_feedback_label, 1)
+        self.action_feedback_dismiss_btn = QToolButton()
+        self.action_feedback_dismiss_btn.setText("x")
+        self.action_feedback_dismiss_btn.setToolTip("Dismiss status")
+        self.action_feedback_dismiss_btn.clicked.connect(self._hide_action_feedback_banner)
+        self.action_feedback_history_btn = QToolButton()
+        self.action_feedback_history_btn.setText("History")
+        self.action_feedback_history_btn.setToolTip("Show recent Settings actions")
+        self.action_feedback_history_btn.setAccessibleName("Recent Settings actions")
+        self.action_feedback_history_btn.clicked.connect(self._show_recent_actions_dialog)
+        feedback_layout.addWidget(self.action_feedback_history_btn, 0)
+        feedback_layout.addWidget(self.action_feedback_dismiss_btn, 0)
+        right_layout.addWidget(self.action_feedback_banner, 0)
+        self._action_feedback_clear_timer = QTimer(self)
+        self._action_feedback_clear_timer.setSingleShot(True)
+        self._action_feedback_clear_timer.timeout.connect(self._hide_action_feedback_banner)
+        self._action_feedback_unsubscribe = self.action_feedback_service.subscribe(self._on_action_feedback_event)
+        self._recent_actions_dialog: QDialog | None = None
+
         right_layout.addWidget(self.stack, stretch=1)
 
         # Layout composition
@@ -701,6 +732,149 @@ class MainWindow(QMainWindow):
             callback(message)
         except Exception as e:
             log.debug("MainWindow startup status update failed: %s", e)
+
+    @staticmethod
+    def _action_feedback_banner_role(status: str) -> str:
+        normalized = str(status or "").strip().lower()
+        if normalized == "succeeded":
+            return "success"
+        if normalized in {"blocked", "failed", "partial"}:
+            return "warning"
+        if normalized in {"requested", "in_progress"}:
+            return "info"
+        return "secondary"
+
+    def _action_feedback_banner_style(self, status: str) -> str:
+        theme = resolve_theme(self.settings)
+        role = self._action_feedback_banner_role(status)
+        if role == "success":
+            border = theme.get("success", "#2E7D32")
+        elif role == "warning":
+            border = theme.get("warning", "#C99700")
+        elif role == "info":
+            border = theme.get("accent", "#2a6fd3")
+        else:
+            border = theme.get("border", "#cccccc")
+        bg = theme.get("surface", "#ffffff")
+        text = theme.get("text", "#222222")
+        return (
+            "QFrame {"
+            f" background: {bg};"
+            f" color: {text};"
+            f" border: 1px solid {border};"
+            " border-radius: 6px;"
+            "}"
+            " QLabel { border: none; background: transparent; }"
+            " QToolButton { border: none; background: transparent; padding: 2px 6px; }"
+        )
+
+    @staticmethod
+    def _action_feedback_display_ms(status: str) -> int:
+        normalized = str(status or "").strip().lower()
+        if normalized in {"blocked", "failed", "partial"}:
+            return 12000
+        if normalized in {"requested", "in_progress"}:
+            return 7000
+        return 6000
+
+    def _hide_action_feedback_banner(self) -> None:
+        if hasattr(self, "_action_feedback_clear_timer"):
+            self._action_feedback_clear_timer.stop()
+        if hasattr(self, "action_feedback_banner"):
+            self.action_feedback_banner.setVisible(False)
+
+    def _on_action_feedback_event(self, event: ActionFeedbackEvent) -> None:
+        if str(event.scope or "").strip().lower() != "settings":
+            return
+        if not hasattr(self, "action_feedback_banner"):
+            return
+        summary = str(event.summary or "").strip()
+        if not summary:
+            return
+        detail = str(event.detail or "").strip()
+        status = str(event.status or "").strip().lower()
+        self.action_feedback_label.setText(summary)
+        self.action_feedback_label.setToolTip(detail or summary)
+        self.action_feedback_banner.setStyleSheet(self._action_feedback_banner_style(status))
+        self.action_feedback_banner.setVisible(True)
+        timeout_ms = self._action_feedback_display_ms(status)
+        if timeout_ms > 0:
+            self._action_feedback_clear_timer.start(timeout_ms)
+
+    @staticmethod
+    def _recent_action_line(event: ActionFeedbackEvent) -> str:
+        status = str(event.status or "").strip().upper() or "STATUS"
+        summary = str(event.summary or "").strip() or str(event.action_type or "Action").strip() or "Action"
+        target = str(event.target_label or "").strip()
+        time_txt = str(event.timestamp_utc or "").strip()
+        if "T" in time_txt:
+            time_txt = time_txt.split("T", 1)[1].replace("Z", "")
+            time_txt = time_txt[:8]
+        bits = [status]
+        if time_txt:
+            bits.append(time_txt)
+        if target:
+            bits.append(target)
+        return f"{' | '.join(bits)}: {summary}"
+
+    def _show_recent_actions_dialog(self) -> None:
+        existing = getattr(self, "_recent_actions_dialog", None)
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Recent Actions")
+        dialog.setAccessibleName("Recent Settings actions")
+        dialog.setModal(False)
+        dialog.setMinimumWidth(520)
+        dialog.setMinimumHeight(260)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._recent_actions_dialog = dialog
+
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+        title = QLabel("Recent Settings Actions")
+        title.setStyleSheet("font-weight: 700;")
+        root.addWidget(title)
+
+        events = self.action_feedback_service.recent(scope="settings")[:20]
+        if not events:
+            empty = QLabel("No recent Settings actions.")
+            empty.setWordWrap(True)
+            root.addWidget(empty)
+        else:
+            scroll = QScrollArea(dialog)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setAccessibleName("Recent Settings actions list")
+            rows_widget = QWidget()
+            rows_widget.setAccessibleName("Recent Settings actions")
+            rows_layout = QVBoxLayout(rows_widget)
+            rows_layout.setContentsMargins(0, 0, 0, 0)
+            rows_layout.setSpacing(6)
+            for event in events:
+                line = QLabel(self._recent_action_line(event))
+                line.setWordWrap(True)
+                line.setAccessibleName(line.text())
+                detail = str(event.detail or "").strip()
+                line.setToolTip(detail or str(event.summary or ""))
+                rows_layout.addWidget(line)
+            rows_layout.addStretch(1)
+            scroll.setWidget(rows_widget)
+            root.addWidget(scroll, 1)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.close)
+        close_row.addWidget(close_btn)
+        root.addLayout(close_row)
+        dialog.destroyed.connect(lambda *_args: setattr(self, "_recent_actions_dialog", None))
+        dialog.show()
 
     def _sync_settings_runtime_status(self) -> None:
         try:
@@ -2053,6 +2227,13 @@ class MainWindow(QMainWindow):
             log.debug("MainWindow shutdown: transient widget close failed: %s", e)
 
     def closeEvent(self, event):
+        unsubscribe = getattr(self, "_action_feedback_unsubscribe", None)
+        if callable(unsubscribe):
+            try:
+                unsubscribe()
+            except Exception:
+                pass
+            self._action_feedback_unsubscribe = None
         self._on_app_about_to_quit()
         super().closeEvent(event)
 

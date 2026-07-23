@@ -10,6 +10,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from freqinout.core.config_paths import get_config_dir
 from freqinout.core.logger import log
+from freqinout.core.multi_rig_guardrails import (
+    collect_multi_rig_guardrail_warnings,
+    format_multi_rig_guardrail_warnings,
+)
 
 
 DEFAULT_DEVICE_SYSTEM_KEY = "default_device"
@@ -24,7 +28,9 @@ DEFAULT_VARAC_NODE_SYSTEM_KEY = "default_varac_node"
 DEFAULT_VARAC_NODE_NAME = "Primary VarAC"
 MULTI_RIG_MIGRATION_VERSION_KEY = "multi_rig_migration_version"
 MULTI_RIG_MIGRATION_DEFERRED_KEY = "multi_rig_migration_deferred"
-CURRENT_MULTI_RIG_MIGRATION_VERSION = 1
+MULTI_RIG_MIGRATION_COMPLETED_AT_KEY = "multi_rig_migration_completed_at_utc"
+MULTI_RIG_MIGRATION_SUMMARY_PREFIX = "multi_rig_migration_summary_v"
+CURRENT_MULTI_RIG_MIGRATION_VERSION = 2
 
 SUPPORTED_DEVICE_CONTROL_BACKENDS = frozenset({"flrig", "js8call", "manual", "rigctld"})
 # Keep the runtime compatibility projection aligned with 1.2.2.
@@ -114,6 +120,15 @@ FIO_EXISTING_USE_IGNORED_KEYS = frozenset(
     }
 )
 
+FALLBACK_RADIO_NAMES = frozenset({"", "radio", "my radio", "default radio", "device profile"})
+
+
+def _needs_operator_radio_name(name: Any, explicit_value: Any = None) -> int:
+    if explicit_value not in (None, ""):
+        return _coerce_bool_int(explicit_value, False)
+    normalized = _coerce_text(name, "").strip().lower()
+    return 1 if normalized in FALLBACK_RADIO_NAMES else 0
+
 
 @dataclass(frozen=True)
 class MigrationResult:
@@ -141,6 +156,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             radio_manufacturer TEXT,
             radio_model TEXT,
             enabled INTEGER NOT NULL DEFAULT 1,
+            needs_operator_name INTEGER NOT NULL DEFAULT 0,
             runtime_active INTEGER NOT NULL DEFAULT 0,
             runtime_primary INTEGER NOT NULL DEFAULT 0,
             display_order INTEGER NOT NULL DEFAULT 0,
@@ -204,7 +220,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             varac_bbs_vault_runtime_state_v1 TEXT,
             varac_bbs_vault_last_summary TEXT,
             varac_cluster_member_enabled INTEGER DEFAULT 0,
-            launch_enabled INTEGER NOT NULL DEFAULT 1,
+            launch_enabled INTEGER NOT NULL DEFAULT 0,
             launch_path TEXT,
             launch_cmd TEXT,
             ptt_group TEXT,
@@ -225,6 +241,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "radio_manufacturer": "TEXT",
             "radio_model": "TEXT",
             "enabled": "INTEGER NOT NULL DEFAULT 1",
+            "needs_operator_name": "INTEGER NOT NULL DEFAULT 0",
             "runtime_active": "INTEGER NOT NULL DEFAULT 0",
             "runtime_primary": "INTEGER NOT NULL DEFAULT 0",
             "display_order": "INTEGER NOT NULL DEFAULT 0",
@@ -288,7 +305,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "varac_bbs_vault_runtime_state_v1": "TEXT",
             "varac_bbs_vault_last_summary": "TEXT",
             "varac_cluster_member_enabled": "INTEGER DEFAULT 0",
-            "launch_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "launch_enabled": "INTEGER NOT NULL DEFAULT 0",
             "launch_path": "TEXT",
             "launch_cmd": "TEXT",
             "ptt_group": "TEXT",
@@ -317,7 +334,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             background_ingest_enabled INTEGER NOT NULL DEFAULT 1,
             messages_enabled INTEGER NOT NULL DEFAULT 1,
             map_enabled INTEGER NOT NULL DEFAULT 1,
-            launch_enabled INTEGER NOT NULL DEFAULT 1,
+            launch_enabled INTEGER NOT NULL DEFAULT 0,
             net_control_enabled INTEGER NOT NULL DEFAULT 1,
             operator_suppressed INTEGER NOT NULL DEFAULT 0,
             created_utc TEXT NOT NULL,
@@ -331,7 +348,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "background_ingest_enabled": "INTEGER NOT NULL DEFAULT 1",
             "messages_enabled": "INTEGER NOT NULL DEFAULT 1",
             "map_enabled": "INTEGER NOT NULL DEFAULT 1",
-            "launch_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "launch_enabled": "INTEGER NOT NULL DEFAULT 0",
             "net_control_enabled": "INTEGER NOT NULL DEFAULT 1",
             "operator_suppressed": "INTEGER NOT NULL DEFAULT 0",
             "created_utc": "TEXT NOT NULL DEFAULT ''",
@@ -468,7 +485,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             use_messages INTEGER NOT NULL DEFAULT 1,
             use_map INTEGER NOT NULL DEFAULT 1,
             use_background_ingest INTEGER NOT NULL DEFAULT 1,
-            use_launch_control INTEGER NOT NULL DEFAULT 1,
+            use_launch_control INTEGER NOT NULL DEFAULT 0,
             use_net_control_tabs INTEGER NOT NULL DEFAULT 1,
             allow_profile_swap INTEGER NOT NULL DEFAULT 0,
             created_utc TEXT NOT NULL,
@@ -486,7 +503,7 @@ SETTINGS_TABLE_SPECS: Dict[str, Dict[str, object]] = {
             "use_messages": "INTEGER NOT NULL DEFAULT 1",
             "use_map": "INTEGER NOT NULL DEFAULT 1",
             "use_background_ingest": "INTEGER NOT NULL DEFAULT 1",
-            "use_launch_control": "INTEGER NOT NULL DEFAULT 1",
+            "use_launch_control": "INTEGER NOT NULL DEFAULT 0",
             "use_net_control_tabs": "INTEGER NOT NULL DEFAULT 1",
             "allow_profile_swap": "INTEGER NOT NULL DEFAULT 0",
             "created_utc": "TEXT NOT NULL",
@@ -1556,9 +1573,17 @@ def is_multi_rig_migration_current(conn: sqlite3.Connection) -> bool:
 def set_multi_rig_migration_version(
     conn: sqlite3.Connection,
     version: int = CURRENT_MULTI_RIG_MIGRATION_VERSION,
+    *,
+    summary: Optional[Mapping[str, Any]] = None,
 ) -> None:
     ensure_multi_radio_settings_schema(conn)
-    _write_kv_settings(conn, {MULTI_RIG_MIGRATION_VERSION_KEY: int(version)})
+    updates: Dict[str, Any] = {
+        MULTI_RIG_MIGRATION_VERSION_KEY: int(version),
+        MULTI_RIG_MIGRATION_COMPLETED_AT_KEY: _utc_now_iso(),
+    }
+    if summary is not None:
+        updates[f"{MULTI_RIG_MIGRATION_SUMMARY_PREFIX}{int(version)}"] = dict(summary)
+    _write_kv_settings(conn, updates)
     conn.commit()
 
 
@@ -1754,7 +1779,7 @@ def _save_operating_profile_conn(conn: sqlite3.Connection, values: Mapping[str, 
         "use_messages": _coerce_bool_int(payload.get("use_messages", (existing or {}).get("use_messages", 1)), True),
         "use_map": _coerce_bool_int(payload.get("use_map", (existing or {}).get("use_map", 1)), True),
         "use_background_ingest": _coerce_bool_int(payload.get("use_background_ingest", (existing or {}).get("use_background_ingest", 1)), True),
-        "use_launch_control": _coerce_bool_int(payload.get("use_launch_control", (existing or {}).get("use_launch_control", 1)), True),
+        "use_launch_control": _coerce_bool_int(payload.get("use_launch_control", (existing or {}).get("use_launch_control", 0)), False),
         "use_net_control_tabs": _coerce_bool_int(payload.get("use_net_control_tabs", (existing or {}).get("use_net_control_tabs", 1)), True),
         "allow_profile_swap": _coerce_bool_int(
             payload.get("allow_profile_swap", (existing or {}).get("allow_profile_swap", 0)),
@@ -2090,7 +2115,7 @@ def _resolve_device_profile_links_conn(conn: sqlite3.Connection, profile: Mappin
         if operating:
             data["operating_profile_id"] = operating["id"]
             data["scheduler_enabled"] = _coerce_bool_int(operating.get("scheduler_enabled", 1), True)
-            data["use_launch_control"] = _coerce_bool_int(operating.get("use_launch_control", 1), True)
+            data["use_launch_control"] = _coerce_bool_int(operating.get("use_launch_control", 0), False)
     return data
 
 
@@ -2248,7 +2273,7 @@ def _legacy_settings_projection_from_device(
         "varac_ini_path": _coerce_text(device_profile.get("varac_ini_path", ""), "") if use_varac else "",
         "varac_launch_cmd": _coerce_text(device_profile.get("launch_cmd", ""), "") if use_varac else "",
         "message_paths": message_paths,
-        "launch_control_enabled": bool(_coerce_bool_int(device_profile.get("launch_enabled", 1), True)),
+        "launch_control_enabled": bool(_coerce_bool_int(device_profile.get("launch_enabled", 0), False)),
     }
     flrig_path = _coerce_text(device_profile.get("flrig_path", ""), "")
     if use_flrig and flrig_path:
@@ -2390,7 +2415,7 @@ def _seed_operating_defaults(settings_values: Mapping[str, Any]) -> Dict[str, An
         "use_messages": 1,
         "use_map": 1,
         "use_background_ingest": 1,
-        "use_launch_control": _settings_bool(settings_values, "launch_control_enabled", True),
+        "use_launch_control": _settings_bool(settings_values, "launch_control_enabled", False),
         "use_net_control_tabs": 1,
         "allow_profile_swap": 0,
     }
@@ -2416,6 +2441,7 @@ def _seed_device_defaults(
     return {
         "system_key": DEFAULT_DEVICE_SYSTEM_KEY,
         "name": DEFAULT_DEVICE_NAME,
+        "needs_operator_name": _needs_operator_radio_name(DEFAULT_DEVICE_NAME),
         "enabled": 1,
         "runtime_active": 1,
         "runtime_primary": 1,
@@ -2539,7 +2565,7 @@ def _seed_device_defaults(
             settings_values.get("varac_bbs_vault_runtime_state_v1", {})
         ),
         "varac_bbs_vault_last_summary": _settings_text(settings_values, "varac_bbs_vault_last_summary", ""),
-        "launch_enabled": _coerce_bool_int(settings_values.get("launch_control_enabled"), True),
+        "launch_enabled": _coerce_bool_int(settings_values.get("launch_control_enabled"), False),
         "launch_path": launch_path,
         "launch_cmd": _settings_text(settings_values, "varac_launch_cmd", ""),
         "sdr_host": _settings_text(settings_values, "sdr_host", ""),
@@ -2615,6 +2641,41 @@ def _normalize_software_roles(value: Optional[Iterable[str]]) -> tuple[tuple[str
     return tuple(sorted(set(valid))), tuple(sorted(set(unknown)))
 
 
+def multi_rig_guardrail_warnings(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """Return text-formatted non-fatal warnings for compatibility callers."""
+    ensure_multi_radio_settings_schema(conn)
+    return format_multi_rig_guardrail_warnings(collect_multi_rig_guardrail_warnings(conn))
+
+
+def _apply_launch_safety_migration_v2(conn: sqlite3.Connection) -> None:
+    ensure_multi_radio_settings_schema(conn)
+    now_iso = _utc_now_iso()
+    fallback_names = tuple(sorted(FALLBACK_RADIO_NAMES))
+    fallback_placeholders = ", ".join("?" for _ in fallback_names)
+    conn.execute("UPDATE device_profiles SET launch_enabled=0, updated_utc=?", (now_iso,))
+    conn.execute(
+        f"""
+        UPDATE device_profiles
+           SET needs_operator_name=1,
+               updated_utc=?
+         WHERE LOWER(TRIM(COALESCE(name, ''))) IN ({fallback_placeholders})
+        """,
+        (now_iso, *fallback_names),
+    )
+    conn.execute(
+        f"""
+        UPDATE device_profiles
+           SET needs_operator_name=0,
+               updated_utc=?
+         WHERE LOWER(TRIM(COALESCE(name, ''))) NOT IN ({fallback_placeholders})
+        """,
+        (now_iso, *fallback_names),
+    )
+    conn.execute("UPDATE operating_profiles SET use_launch_control=0, updated_utc=?", (now_iso,))
+    conn.execute("UPDATE runtime_policies SET launch_enabled=0, updated_utc=?", (now_iso,))
+    conn.commit()
+
+
 def ensure_multi_rig_migration(
     conn: sqlite3.Connection,
     settings_values: Mapping[str, Any],
@@ -2682,6 +2743,9 @@ def ensure_multi_rig_migration(
             display_name = _coerce_text(radio_name, "")
             if display_name:
                 updates["name"] = display_name
+                updates["needs_operator_name"] = 0
+            else:
+                updates["needs_operator_name"] = _needs_operator_radio_name(device.get("name", DEFAULT_DEVICE_NAME), device.get("needs_operator_name"))
             manufacturer = _coerce_text(radio_manufacturer, "")
             if manufacturer:
                 updates["radio_manufacturer"] = manufacturer
@@ -2708,14 +2772,34 @@ def ensure_multi_rig_migration(
             )
 
         if operating:
-            plan_name = _coerce_text(operating_plan_name, "") or "Daily HF Schedule"
-            conn.execute(
-                "UPDATE operating_profiles SET name=?, updated_utc=? WHERE id=?",
-                (plan_name, _utc_now_iso(), int(operating["id"])),
-            )
+            explicit_plan_name = _coerce_text(operating_plan_name, "")
+            existing_plan_name = _coerce_text(operating.get("name", ""), "")
+            fallback_names = {DEFAULT_OPERATING_NAME, "Migrated Single-Rig Plan", ""}
+            if explicit_plan_name or existing_plan_name in fallback_names:
+                plan_name = explicit_plan_name or "Daily HF Schedule"
+                conn.execute(
+                    "UPDATE operating_profiles SET name=?, updated_utc=? WHERE id=?",
+                    (plan_name, _utc_now_iso(), int(operating["id"])),
+                )
 
+        if from_version < 2 <= to_version:
+            _apply_launch_safety_migration_v2(conn)
+
+        guardrail_warnings = multi_rig_guardrail_warnings(conn)
+        all_warnings = warnings + tuple(warn for warn in guardrail_warnings if warn not in warnings)
         set_multi_rig_migration_deferred(conn, False)
-        set_multi_rig_migration_version(conn, to_version)
+        set_multi_rig_migration_version(
+            conn,
+            to_version,
+            summary={
+                "from_version": from_version,
+                "to_version": to_version,
+                "created_device_profile_id": int(device["id"]) if device else None,
+                "created_operating_profile_id": int(operating["id"]) if operating else None,
+                "enabled_software_roles": list(roles),
+                "warnings": list(all_warnings),
+            },
+        )
         conn.commit()
         return MigrationResult(
             already_current=False,
@@ -2729,7 +2813,7 @@ def ensure_multi_rig_migration(
             created_fast_light_config_id=int(fast_light["id"]) if fast_light else None,
             created_varac_node_id=int(varac["id"]) if varac else None,
             enabled_software_roles=roles,
-            warnings=warnings,
+            warnings=all_warnings,
         )
     except Exception as exc:
         log.error("MultiRadioStore: multi-rig migration failed: %s", exc)
@@ -2888,7 +2972,7 @@ def mirror_legacy_settings_into_runtime_active_device(
             settings_values.get("varac_bbs_vault_runtime_state_v1", {})
         ),
         "varac_bbs_vault_last_summary": _settings_text(settings_values, "varac_bbs_vault_last_summary", ""),
-        "launch_enabled": _coerce_bool_int(settings_values.get("launch_control_enabled"), True),
+        "launch_enabled": _coerce_bool_int(settings_values.get("launch_control_enabled"), False),
         "launch_path": launch_path,
         "launch_cmd": _settings_text(settings_values, "varac_launch_cmd", ""),
         "updated_utc": _utc_now_iso(),
@@ -2977,7 +3061,7 @@ def mirror_legacy_settings_into_runtime_active_device(
                 "use_messages": operating.get("use_messages", 1),
                 "use_map": operating.get("use_map", 1),
                 "use_background_ingest": operating.get("use_background_ingest", 1),
-                "use_launch_control": _settings_bool(settings_values, "launch_control_enabled", True),
+                "use_launch_control": _settings_bool(settings_values, "launch_control_enabled", False),
                 "use_net_control_tabs": operating.get("use_net_control_tabs", 1),
             },
         )
@@ -3128,9 +3212,14 @@ class MultiRadioStore:
         default_use_varac = (existing or {}).get("use_varac")
         if default_use_varac is None:
             default_use_varac = varac_node_id is not None
+        existing_name = _coerce_text((existing or {}).get("name", ""), "")
+        display_name = _coerce_text(payload.get("name", existing_name or "Device Profile"), "Device Profile") or "Device Profile"
+        needs_operator_name_value = payload.get("needs_operator_name")
+        if needs_operator_name_value in (None, "") and display_name == existing_name:
+            needs_operator_name_value = (existing or {}).get("needs_operator_name")
         record = {
             "system_key": system_key,
-            "name": _coerce_text(payload.get("name", (existing or {}).get("name", "Device Profile")), "Device Profile") or "Device Profile",
+            "name": display_name,
             "radio_catalog_id": _coerce_text(payload.get("radio_catalog_id", (existing or {}).get("radio_catalog_id", "")), ""),
             "radio_manufacturer": _coerce_text(
                 payload.get("radio_manufacturer", (existing or {}).get("radio_manufacturer", "")),
@@ -3138,6 +3227,10 @@ class MultiRadioStore:
             ),
             "radio_model": _coerce_text(payload.get("radio_model", (existing or {}).get("radio_model", "")), ""),
             "enabled": _coerce_bool_int(payload.get("enabled", (existing or {}).get("enabled", 1)), True),
+            "needs_operator_name": _needs_operator_radio_name(
+                display_name,
+                needs_operator_name_value,
+            ),
             "runtime_active": _coerce_bool_int(payload.get("runtime_active", (existing or {}).get("runtime_active", 0)), False),
             "runtime_primary": _coerce_bool_int(payload.get("runtime_primary", (existing or {}).get("runtime_primary", 0)), False),
             "display_order": _coerce_int(payload.get("display_order", (existing or {}).get("display_order", 0)), 0),
@@ -3324,7 +3417,7 @@ class MultiRadioStore:
                 payload.get("varac_bbs_vault_last_summary", (existing or {}).get("varac_bbs_vault_last_summary", "")),
                 "",
             ),
-            "launch_enabled": _coerce_bool_int(payload.get("launch_enabled", (existing or {}).get("launch_enabled", 1)), True),
+            "launch_enabled": _coerce_bool_int(payload.get("launch_enabled", (existing or {}).get("launch_enabled", 0)), False),
             "launch_path": _coerce_text(payload.get("launch_path", (existing or {}).get("launch_path", "")), ""),
             "launch_cmd": _coerce_text(payload.get("launch_cmd", (existing or {}).get("launch_cmd", "")), ""),
             "ptt_group": normalize_ptt_group(payload.get("ptt_group", (existing or {}).get("ptt_group", ""))),
